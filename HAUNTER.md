@@ -153,7 +153,7 @@ This keeps the orchestrator's context window clean and cheap across a run with m
 | Secrets | **GCP Secret Manager** | `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `BETTER_AUTH_SECRET`, LLM provider API key(s), GitHub App/token — mounted as env vars at deploy, never committed |
 | CI/CD for Haunter itself | **Cloud Build** (triggered on push to Haunter's own repo) | 2,500 free build-min/day covers this too |
 | Frontend / dashboard | **Cloudflare Pages/Workers** (Node-compatible) | Free tier, no domain required, calls Cloud Run backend URL directly via env var |
-| LLM provider | **OpenCode Zen** (OpenAI-compatible endpoint) | Base URL: `https://opencode.ai/zen/v1`; default model: **Nemotron 3.5 Lightning (free tier)** — see §7 |
+| LLM provider | **OpenCode Zen** (OpenAI-compatible endpoint) | Base URL: `https://opencode.ai/zen/v1`; default model: **Nemotron 3.5 Lightning Free (`nemotron-3.5-lightning-free`)** — see §7 |
 
 **No custom domain required anywhere.** Cloud Run's `*.run.app` and Cloudflare's `*.pages.dev` URLs are sufficient for the full MVP and for demoing in interviews. A domain is a purely cosmetic, optional later addition (~$10/yr).
 
@@ -165,7 +165,7 @@ This keeps the orchestrator's context window clean and cheap across a run with m
 
 - **Default provider:** OpenCode Zen, OpenAI-compatible API.
   - Base URL: `https://opencode.ai/zen/v1`
-- **Default model (dev + v1):** `nemotron-3.5-lightning` (free tier via OpenCode Zen / NVIDIA free endpoints).
+- **Default model (dev + v1):** `nemotron-3.5-lightning-free` (free tier via OpenCode Zen / NVIDIA free endpoints).
   - Note: NVIDIA's free endpoint logs requests for trial/improvement purposes — **do not send real user data, credentials, or private repo contents through it while on the free tier.** Fine for Haunter's own dev/testing and for public-repo CI logs, but worth stating explicitly in the docs/README for transparency.
   - Context window: 1M tokens; supports tool calling — fits the subagent tool-use pattern directly.
 - **Model/provider must be swappable at runtime, not hardcoded.** Build a thin provider abstraction (single interface, e.g. `LLMClient.complete(...)`) so orchestrator and every subagent call through one client, and the client reads active model/provider config from Neon (or env fallback), not from code.

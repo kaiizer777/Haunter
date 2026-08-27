@@ -42,7 +42,7 @@ Excludes deployment (separate later phase). Project init assumed done. Each phas
 
 ## Phase 4 — LLM Provider Abstraction
 - [ ] Build `LLMClient` interface: single `.complete(messages, tools=None, ...)` method, provider-agnostic
-- [ ] Implement OpenCode Zen adapter (OpenAI-compatible, base URL `https://opencode.ai/zen/v1`, default model `nemotron-3.5-lightning`)
+- [ ] Implement OpenCode Zen adapter (OpenAI-compatible, base URL `https://opencode.ai/zen/v1`, default model `nemotron-3.5-lightning-free`)
 - [ ] Read active provider/model from `model_configs` table (DB-driven, not hardcoded), fall back to env var if DB empty
 - [ ] Support tool-calling passthrough (needed for subagents that call tools, e.g. sandbox trigger)
 - [ ] Add simple retry/error handling wrapper (timeouts, rate limit backoff)
