@@ -1,9 +1,8 @@
-# Better Auth tables (user/session/account/verification) are owned by Next.js/Better Auth, not Alembic — see WORK.md:8
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, Float
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, Float
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -12,10 +11,47 @@ class Base(DeclarativeBase):
     pass
 
 
+class User(Base):
+    """
+    FastAPI-owned user table — populated/upserted by the GitHub OAuth callback.
+
+    Design note: we use a SEPARATE GitHub OAuth App (read:user scope only) for login.
+    The GitHub App used for repo installation and webhooks (Phase 3+) is a distinct
+    credential with repo/admin scope so that login never requests destructive permissions.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    github_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    avatar_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Stores the GitHub OAuth access token (read:user scope only).
+    # TODO(security): encrypt access_token at rest with Fernet before prod.
+    # Encryption helpers live in app/auth.py (_encrypt_token / _decrypt_token).
+    # TOKEN_ENCRYPTION_KEY env var must be set — see config.py for startup warning.
+    access_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    repos: Mapped[list["Repo"]] = relationship("Repo", back_populates="user", cascade="all, delete-orphan")
+
+
 class Repo(Base):
     __tablename__ = "repos"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Multi-tenant ownership: every repo is scoped to a user.
+    # Two users can independently track the same public repo — unique constraint is (user_id, owner, name).
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     owner: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     default_branch: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -28,10 +64,11 @@ class Repo(Base):
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    runs = relationship("Run", back_populates="repo", cascade="all, delete-orphan")
+    user: Mapped["User"] = relationship("User", back_populates="repos")
+    runs: Mapped[list["Run"]] = relationship("Run", back_populates="repo", cascade="all, delete-orphan")
 
     __table_args__ = (
-        UniqueConstraint("owner", "name", name="uq_repo_owner_name"),
+        UniqueConstraint("user_id", "owner", "name", name="uq_repo_user_owner_name"),
     )
 
 
@@ -52,10 +89,10 @@ class Run(Base):
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
 
-    repo = relationship("Repo", back_populates="runs")
-    run_steps = relationship("RunStep", back_populates="run", cascade="all, delete-orphan")
-    attempts = relationship("Attempt", back_populates="run", cascade="all, delete-orphan")
-    eval_result = relationship("EvalResult", back_populates="run", uselist=False, cascade="all, delete-orphan")
+    repo: Mapped["Repo"] = relationship("Repo", back_populates="runs")
+    run_steps: Mapped[list["RunStep"]] = relationship("RunStep", back_populates="run", cascade="all, delete-orphan")
+    attempts: Mapped[list["Attempt"]] = relationship("Attempt", back_populates="run", cascade="all, delete-orphan")
+    eval_result: Mapped[Optional["EvalResult"]] = relationship("EvalResult", back_populates="run", uselist=False, cascade="all, delete-orphan")
 
 
 class RunStep(Base):
@@ -72,7 +109,7 @@ class RunStep(Base):
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    run = relationship("Run", back_populates="run_steps")
+    run: Mapped["Run"] = relationship("Run", back_populates="run_steps")
 
 
 class Attempt(Base):
@@ -91,7 +128,7 @@ class Attempt(Base):
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    run = relationship("Run", back_populates="attempts")
+    run: Mapped["Run"] = relationship("Run", back_populates="attempts")
 
 
 class ModelConfig(Base):
@@ -119,4 +156,4 @@ class EvalResult(Base):
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    run = relationship("Run", back_populates="eval_result")
+    run: Mapped[Optional["Run"]] = relationship("Run", back_populates="eval_result")
