@@ -55,7 +55,7 @@ Haunter is intentionally **not** "autonomous merge to prod." The human stays the
 - Eval score display (e.g. "73% fix success rate on golden set").
 - Confidence-vs-actual-outcome chart (sanity check: does high confidence actually predict success?).
 - Model/provider switcher (per §7).
-- Auth via Better Auth — dashboard is private, not public.
+- Auth via GitHub OAuth (FastAPI + authlib, httpOnly session cookie) — dashboard is private, not public. Frontend is pure client.
 
 ---
 
@@ -148,9 +148,9 @@ This keeps the orchestrator's context window clean and cheap across a run with m
 | Agent backend / orchestrator | **FastAPI** on **Cloud Run** | Scales to zero, free `*.run.app` URL, no domain required |
 | Sandbox execution | **Cloud Build** | Free 2,500 build-min/day; avoids Docker-in-Docker issue on Cloud Run |
 | Database | **Neon (Postgres)** | Use **pooled connection string** (`-pooler` host) for app queries via SQLAlchemy with `NullPool` (don't double-pool — Neon's PgBouncer already handles it); use the **direct/unpooled** connection string only for schema migrations |
-| Auth | **Better Auth** | Session/user tables live in Neon itself; run Better Auth's migration against the direct connection string before first deploy |
+| Auth | **GitHub OAuth via FastAPI (authlib + itsdangerous)** | FastAPI owns OAuth flow (`/auth/login`, `/auth/callback`, `/auth/logout`, `/auth/me`), `users` table in Neon via Alembic, signed httpOnly SameSite=Lax cookie (14d, `itsdangerous` TimestampSigner), `get_current_user` dependency; separate OAuth App for login (`read:user`) vs GitHub App for repo/webhooks (Phase 3) |
 | Repo integration | **GitHub REST API + Webhooks + Actions** | Use a **public repo** → unlimited free Actions minutes; webhooks are free/unlimited; REST API gives 5,000 req/hour authenticated |
-| Secrets | **GCP Secret Manager** | `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `BETTER_AUTH_SECRET`, LLM provider API key(s), GitHub App/token — mounted as env vars at deploy, never committed |
+| Secrets | **GCP Secret Manager** | `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SESSION_SECRET_KEY`, `FRONTEND_URL`, LLM provider API key(s), GitHub App token — mounted as env vars at deploy, never committed |
 | CI/CD for Haunter itself | **Cloud Build** (triggered on push to Haunter's own repo) | 2,500 free build-min/day covers this too |
 | Frontend / dashboard | **Cloudflare Pages/Workers** (Node-compatible) | Free tier, no domain required, calls Cloud Run backend URL directly via env var |
 | LLM provider | **OpenCode Zen** (OpenAI-compatible endpoint) | Base URL: `https://opencode.ai/zen/v1`; default model: **Nemotron 3.5 Lightning Free (`nemotron-3.5-lightning-free`)** — see §7 |
@@ -189,5 +189,5 @@ This keeps the orchestrator's context window clean and cheap across a run with m
 - Orchestrator/subagent architecture demonstrates real context-engineering and token-cost awareness, not just "call an LLM."
 - Mandatory sandbox verification loop is the difference between a real agent and a shallow "AI suggests a fix" demo — this alone is a strong technical story.
 - Golden eval set + per-subagent accuracy tracking + regression detection is rare at any experience level, let alone intern-level — this is the single highest-signal part of the project.
-- Full production stack (FastAPI, Postgres via Neon, Better Auth, GCP Cloud Run + Cloud Build, GitHub API/webhooks, Cloudflare frontend) proves Python backend competence and cloud-native deployment — directly closing the two gaps identified before this project was scoped.
+- Full production stack (FastAPI, Postgres via Neon, GitHub OAuth (authlib + itsdangerous), GCP Cloud Run + Cloud Build, GitHub API/webhooks, Cloudflare frontend) proves Python backend competence and cloud-native deployment — directly closing the two gaps identified before this project was scoped.
 - Multi-provider LLM abstraction with a live-swappable model/provider config shows awareness of vendor lock-in and production resilience, not just "wire up one API key and ship."
