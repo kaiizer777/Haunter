@@ -1,3 +1,4 @@
+# Better Auth tables (user/session/account/verification) are owned by Next.js/Better Auth, not Alembic — see WORK.md:8
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -119,56 +120,3 @@ class EvalResult(Base):
     )
 
     run = relationship("Run", back_populates="eval_result")
-
-
-# Better Auth Stubs
-class User(Base):
-    __tablename__ = "user"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
-    emailVerified: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    image: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    createdAt: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updatedAt: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class Session(Base):
-    __tablename__ = "session"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    userId: Mapped[str] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
-    token: Mapped[str] = mapped_column(String, nullable=False)
-    expiresAt: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
-    ipAddress: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    userAgent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    createdAt: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updatedAt: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class Account(Base):
-    __tablename__ = "account"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    accountId: Mapped[str] = mapped_column(String, nullable=False)
-    providerId: Mapped[str] = mapped_column(String, nullable=False)
-    userId: Mapped[str] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
-    accessToken: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    refreshToken: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    idToken: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    expiresAt: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    password: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    createdAt: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updatedAt: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class Verification(Base):
-    __tablename__ = "verification"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    identifier: Mapped[str] = mapped_column(Text, nullable=False)
-    value: Mapped[str] = mapped_column(Text, nullable=False)
-    expiresAt: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
-    createdAt: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updatedAt: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))

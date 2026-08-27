@@ -5,20 +5,20 @@ Excludes deployment (separate later phase). Project init assumed done. Each phas
 ---
 
 ## Phase 1 — Database Schema & Models
-- [ ] Design Postgres schema in SQLAlchemy (async, SQLAlchemy 2.0 style): `repos`, `runs`, `run_steps` (subagent trace log), `attempts` (fix attempts within a run), `eval_results`, `model_configs` (provider/model switcher), `users`/`sessions` (Better Auth tables, if not auto-managed)
-- [ ] Define relationships: repo → runs → attempts/steps, run → eval_result
-- [ ] Set up Alembic for migrations
-- [ ] Configure two DB connections: pooled (app runtime, `NullPool` on SQLAlchemy side since Neon PgBouncer pools already) and direct/unpooled (migrations only)
-- [ ] Write initial migration and verify it applies cleanly against a fresh Neon DB
-- [ ] Add simple DB session dependency (`get_db`) for FastAPI routes
+- [x] Design Postgres schema in SQLAlchemy (async, SQLAlchemy 2.0 style): `repos`, `runs`, `run_steps` (subagent trace log), `attempts` (fix attempts within a run), `eval_results`, `model_configs` (provider/model switcher) — app-owned tables only (Alembic-managed). Better Auth's own tables (`user`/`session`/`account`/`verification`) are created/migrated from the Next.js/Better Auth side, not via Alembic
+- [x] Define relationships: repo → runs → attempts/steps, run → eval_result
+- [x] Set up Alembic for migrations
+- [x] Configure two DB connections: pooled (app runtime, `NullPool` on SQLAlchemy side since Neon PgBouncer pools already) and direct/unpooled (migrations only)
+- [x] Write initial migration and verify it applies cleanly against a fresh Neon DB
+- [x] Add simple DB session dependency (`get_db`) for FastAPI routes
 
 **Exit criteria:** tables exist in Neon, migrations run cleanly, can insert/query a dummy row via a scratch script.
 
 ---
 
 ## Phase 2 — Auth (Better Auth) & Repo Management API
-- [ ] Wire up Better Auth against Neon (its own tables), session cookie handling
-- [ ] Auth-protected FastAPI routes (session validation dependency)
+- [ ] Better Auth runs natively on the Next.js frontend (Vercel) via Next.js API routes — it owns its own auth tables in Neon and issues JWTs (via Better Auth `jwt` plugin)
+- [ ] FastAPI auth via JWT verification dependency: fetch/cache JWKS from Better Auth JWKS endpoint, verify JWT signature (RS256/EdDSA), validate `iss`/`aud`/`exp` claims, extract user identity — protect routes via this dependency (no session cookie check in FastAPI)
 - [ ] CRUD endpoints: add repo (owner/name, GitHub install info), list connected repos, remove repo
 - [ ] Store per-repo config: default branch, language hint (optional), active model/provider override
 - [ ] Basic request/response Pydantic schemas for repo + run objects (used by both this phase and later ones)
