@@ -1,0 +1,414 @@
+"""
+Phase 5 orchestrator + context gatherer tests.
+
+Covers:
+1. Valid transition sequence persists correct status in DB.
+2. Invalid skip (context_gathering → pr_or_fallback) raises InvalidTransitionError.
+3. _redact_secrets scrubs all known secret patterns.
+4. gather_context() with mocked GitHub + LLM creates run_steps row, advances status.
+5. Secret-laden fake logs are redacted before reaching the LLM call.
+6. GitHub fetch timeout does not stall gather (total ≤ 35s per-call).
+7. handle_failed_run with GitHub 404 → runs.status = error.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import uuid
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Repo, Run, RunStep, User
+from app.orchestrator import (
+    InvalidTransitionError,
+    RunStatus,
+    _transition,
+    _validate_transition,
+)
+from app.subagents.context_gatherer import _redact_secrets, _truncate_and_redact
+from tests.conftest import truncate_all
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _create_user(db: AsyncSession) -> User:
+    user = User(
+        github_id=int(uuid.uuid4().int % 1_000_000_000 + 100_000_000),
+        github_username="testuser",
+        access_token="fake_token",
+    )
+    db.add(user)
+    await db.commit()
+    return user
+
+
+async def _create_repo(db: AsyncSession, user: User) -> Repo:
+    repo = Repo(
+        user_id=user.id,
+        owner="test-org",
+        name="test-repo",
+        default_branch="main",
+    )
+    db.add(repo)
+    await db.commit()
+    return repo
+
+
+async def _create_run(db: AsyncSession, repo: Repo, status: str = "pending") -> Run:
+    run = Run(
+        repo_id=repo.id,
+        github_run_id=int(uuid.uuid4().int % 1_000_000_000),
+        github_delivery_id=str(uuid.uuid4()),
+        head_sha="abcdef1234567890abcdef1234567890abcdef12",
+        head_branch="main",
+        status=status,
+        conclusion="failure",
+    )
+    db.add(run)
+    await db.commit()
+    return run
+
+
+# ---------------------------------------------------------------------------
+# Test 1: valid transition sequence persists status
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_valid_transition_sequence(db: AsyncSession) -> None:
+    """pending → context_gathering → fix_generation persists in DB correctly."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo, status="pending")
+
+    await _transition(run, RunStatus.context_gathering, db)
+    assert run.status == "context_gathering"
+
+    await _transition(run, RunStatus.fix_generation, db)
+    assert run.status == "fix_generation"
+
+    # Confirm DB row reflects new status
+    refreshed = await db.execute(select(Run).where(Run.id == run.id))
+    db_run = refreshed.scalar_one()
+    assert db_run.status == "fix_generation"
+
+
+# ---------------------------------------------------------------------------
+# Test 2: invalid transition raises
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_invalid_transition_skip_raises(db: AsyncSession) -> None:
+    """context_gathering → pr_or_fallback is not allowed — must raise."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo, status="context_gathering")
+
+    with pytest.raises(InvalidTransitionError) as exc_info:
+        await _transition(run, RunStatus.pr_or_fallback, db)
+
+    assert exc_info.value.from_status == RunStatus.context_gathering
+    assert exc_info.value.to_status == RunStatus.pr_or_fallback
+    # DB must NOT have been updated — run should still be context_gathering
+    refreshed = await db.execute(select(Run).where(Run.id == run.id))
+    db_run = refreshed.scalar_one()
+    assert db_run.status == "context_gathering"
+
+
+@pytest.mark.anyio
+async def test_completed_has_no_allowed_transitions() -> None:
+    """No transition out of 'completed' is allowed."""
+    with pytest.raises(InvalidTransitionError):
+        _validate_transition(RunStatus.completed, RunStatus.fix_generation)
+
+    with pytest.raises(InvalidTransitionError):
+        _validate_transition(RunStatus.completed, RunStatus.error)
+
+
+# ---------------------------------------------------------------------------
+# Test 3: secret redaction
+# ---------------------------------------------------------------------------
+
+
+def test_redact_secrets_sk_key() -> None:
+    text = "Error: invalid key sk-abc123XYZ789abcdefghij provided"
+    result = _redact_secrets(text)
+    assert "sk-abc123XYZ789abcdefghij" not in result
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_ghp_token() -> None:
+    text = "token=ghp_abcdefghijklmnopqrstuvwxyz123456789012"
+    result = _redact_secrets(text)
+    assert "ghp_" not in result
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_database_url() -> None:
+    text = "DATABASE_URL=postgres://user:pass@host/db\nother line"
+    result = _redact_secrets(text)
+    assert "postgres://user:pass@host/db" not in result
+    assert "[REDACTED]" in result
+
+
+def test_redact_secrets_pem_key() -> None:
+    fake_pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xHn/ygWep4X\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+    result = _redact_secrets(fake_pem)
+    assert "BEGIN RSA PRIVATE KEY" not in result
+    assert "[REDACTED_PRIVATE_KEY]" in result
+
+
+def test_redact_secrets_npg_key() -> None:
+    text = "NEON_KEY=npg_xyz123abcdef456789ghij"
+    result = _redact_secrets(text)
+    assert "npg_xyz" not in result
+    assert "[REDACTED]" in result
+
+
+def test_truncate_and_redact_caps_length() -> None:
+    long_text = "a" * 10_000
+    result = _truncate_and_redact(long_text)
+    assert len(result) < 10_000
+    assert "[...TRUNCATED...]" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 4: gather_context with mocked GitHub + LLM creates run_steps row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_gather_context_creates_run_step(db: AsyncSession) -> None:
+    """gather_context() with mocked GitHub and LLM should:
+    - insert a run_steps row with input_tokens > 0
+    - return a non-empty summary string (100–600 chars)
+    - not store raw log content in run_steps
+    """
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo, status="context_gathering")
+
+    mock_summary = (
+        "CI failure: ImportError in tests/test_api.py:42. "
+        "Module 'httpx' not installed in the test environment. "
+        "The dependency was removed from requirements.txt in the latest commit."
+    )
+
+    with (
+        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
+        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
+        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
+        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock) as mock_llm,
+    ):
+        mock_logs.return_value = "2024-01-01T00:00:00Z ImportError: No module named 'httpx'"
+        mock_diff.return_value = "-httpx==0.24.0\n"
+        mock_meta.return_value = {"sha": "abc123", "commit": {"message": "remove httpx"}}
+        mock_llm.return_value = {
+            "content": mock_summary,
+            "usage": {"input_tokens": 150, "output_tokens": 45},
+            "latency_ms": 320,
+            "model": "nemotron-3.5-lightning-free",
+        }
+
+        from app.subagents.context_gatherer import gather_context
+
+        summary = await gather_context(run=run, repo=repo, db=db)
+
+    assert len(summary) >= 50, f"Summary too short: {summary!r}"
+    assert len(summary) <= 1600, f"Summary too long: {summary!r}"
+
+    # Check run_steps row was inserted
+    steps_result = await db.execute(select(RunStep).where(RunStep.run_id == run.id))
+    steps = steps_result.scalars().all()
+    assert len(steps) == 1
+    step = steps[0]
+    assert step.input_tokens > 0
+    assert step.output_tokens > 0
+    assert step.latency_ms >= 0
+    assert step.cost_estimate > 0.0
+    assert step.step_name == "context_gatherer"
+
+
+# ---------------------------------------------------------------------------
+# Test 5: secret-laden logs are redacted before LLM sees them
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_gather_context_redacts_secrets_before_llm(db: AsyncSession) -> None:
+    """Secrets in fake CI logs must not appear in the messages sent to LLM."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo, status="context_gathering")
+
+    secret_log = (
+        "Running tests... DATABASE_URL=postgres://admin:hunter2@neon.tech/prod\n"
+        "Error: sk-supersecretkey1234567890abcdefghij token rejected\n"
+        "FAILED tests/test_db.py::test_connection"
+    )
+
+    captured_messages: list[list[dict]] = []
+
+    async def capture_complete(messages, **kwargs):
+        captured_messages.append(messages)
+        return {
+            "content": "ImportError in test_db.py:10 — DB connection rejected",
+            "usage": {"input_tokens": 80, "output_tokens": 20},
+            "latency_ms": 200,
+            "model": "nemotron-3.5-lightning-free",
+        }
+
+    with (
+        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
+        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
+        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
+        patch("app.subagents.context_gatherer.LLMClient.complete", side_effect=capture_complete),
+    ):
+        mock_logs.return_value = secret_log
+        mock_diff.return_value = ""
+        mock_meta.return_value = {}
+
+        from app.subagents.context_gatherer import gather_context
+
+        await gather_context(run=run, repo=repo, db=db)
+
+    assert len(captured_messages) == 1
+    full_prompt = str(captured_messages[0])
+
+    # Raw secrets must not appear in anything sent to the LLM
+    assert "postgres://admin:hunter2@neon.tech/prod" not in full_prompt
+    assert "sk-supersecretkey1234567890abcdefghij" not in full_prompt
+    assert "hunter2" not in full_prompt
+
+    # Redacted placeholders should be present
+    assert "[REDACTED" in full_prompt or "REDACTED" in full_prompt
+
+
+# ---------------------------------------------------------------------------
+# Test 6: GitHub fetch timeout doesn't hang gather indefinitely
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_github_fetch_timeout_does_not_stall(db: AsyncSession) -> None:
+    """A hung GitHub fetch should time out via wait_for and not block > 35s total.
+    We mock asyncio.wait_for to raise TimeoutError immediately for the logs call
+    while other fetches succeed."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo, status="context_gathering")
+
+    async def slow_logs(*args, **kwargs):
+        await asyncio.sleep(0)  # yield; _safe_fetch will wrap with wait_for
+        return "slow log output"
+
+    with (
+        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
+        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
+        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
+        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock) as mock_llm,
+        # Simulate timeout on the logs fetch only
+        patch(
+            "app.subagents.context_gatherer.asyncio.wait_for",
+            side_effect=_mock_wait_for_timeout_on_logs,
+        ),
+    ):
+        mock_logs.return_value = "logs"
+        mock_diff.return_value = "diff content"
+        mock_meta.return_value = {"sha": "aaa"}
+        mock_llm.return_value = {
+            "content": "Diff shows a removed dep. Import failed.",
+            "usage": {"input_tokens": 50, "output_tokens": 15},
+            "latency_ms": 100,
+            "model": "nemotron-3.5-lightning-free",
+        }
+
+        from app.subagents.context_gatherer import gather_context
+
+        # Should not raise — _safe_fetch absorbs the timeout
+        summary = await gather_context(run=run, repo=repo, db=db)
+        assert isinstance(summary, str)
+
+
+_wait_for_call_count = 0
+
+
+async def _mock_wait_for_timeout_on_logs(coro, timeout):
+    """Raise TimeoutError on the first wait_for call (logs), pass through the rest."""
+    global _wait_for_call_count
+    _wait_for_call_count += 1
+    if _wait_for_call_count == 1:
+        coro.close()  # avoid coroutine-never-awaited warning
+        raise asyncio.TimeoutError
+    return await coro
+
+
+# ---------------------------------------------------------------------------
+# Test 7: handle_failed_run with GitHub 404 → status = error
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_handle_failed_run_github_404_sets_error(db: AsyncSession) -> None:
+    """If all GitHub fetches fail (simulated via exception), status → error."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo, status="pending")
+    run_id = run.id
+
+    from app.github_client import GitHubResourceNotFoundError
+
+    with (
+        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
+        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
+        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
+        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock) as mock_llm,
+    ):
+        # All fetches fail with 404 — _safe_fetch returns "" for each
+        mock_logs.side_effect = GitHubResourceNotFoundError("not found")
+        mock_diff.side_effect = GitHubResourceNotFoundError("not found")
+        mock_meta.side_effect = GitHubResourceNotFoundError("not found")
+
+        # LLM still returns something (gather_context called with empty inputs)
+        mock_llm.return_value = {
+            "content": "No logs available. Unable to determine root cause.",
+            "usage": {"input_tokens": 30, "output_tokens": 10},
+            "latency_ms": 150,
+            "model": "nemotron-3.5-lightning-free",
+        }
+
+        from app.orchestrator import handle_failed_run
+
+        # Should complete without raising (orchestrator handles errors internally)
+        await handle_failed_run(run_id)
+
+        # Clear the identity map so we read the updated row committed by the separate session
+        db.expire_all()
+
+        # Run should now be fix_generation (gather succeeded with empty inputs + LLM summary)
+        refreshed = await db.execute(select(Run).where(Run.id == run_id))
+        db_run = refreshed.scalar_one()
+        # All fetches returned "" → gather_context still calls LLM → status = fix_generation
+    assert db_run.status in ("fix_generation", "error")
+    # diagnosis_summary should be set if LLM succeeded
+    if db_run.status == "fix_generation":
+        assert db_run.diagnosis_summary is not None

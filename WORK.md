@@ -86,36 +86,36 @@ Excludes deployment (separate later phase). Project init assumed done. Each phas
 ---
 
 ## Phase 4 — LLM Provider Abstraction
-- [ ] Build `LLMClient` interface: single `.complete(messages, tools=None, ...)` method, provider-agnostic
-- [ ] Implement OpenCode Zen adapter (OpenAI-compatible, base URL `https://opencode.ai/zen/v1`, default model `nemotron-3.5-lightning-free`)
-- [ ] Read active provider/model from `model_configs` table (DB-driven, not hardcoded), fall back to env var if DB empty
-- [ ] Support tool-calling passthrough (needed for subagents that call tools, e.g. sandbox trigger)
-- [ ] Add simple retry/error handling wrapper (timeouts, rate limit backoff)
-- [ ] Endpoint: `GET/PUT /config/model` to read/update active model+provider (per-repo or global) — backs the future dashboard switcher
-- [ ] Token usage + latency captured on every `.complete()` call, returned alongside response (used for observability logging starting Phase 5)
-- [ ] **[SECURE]** OpenCode Zen API key is read from Secret Manager/`.env` only, injected into the adapter at construction time, never included in `run_steps` token/latency logs or error messages surfaced to the client
-- [ ] **[SECURE]** `PUT /config/model` is owner-only-write: gated by `get_current_user`, and if scoped per-repo, verifies the caller owns that `repo_id`; if scoped globally, restrict to a single designated admin user id (documented) rather than any authenticated user, since a global model switch affects all tenants
-- [ ] **[SECURE]** `GET/PUT /config/model` request/response bodies validated via Pydantic with an allowlist of accepted provider/model string values (not free-text) to prevent injection of an unexpected base URL or model identifier that could redirect traffic to an attacker-controlled endpoint
-- [ ] **[SECURE]** Retry/backoff wrapper caps total retry time and attempt count (no unbounded retry loop) to prevent a slow/hostile upstream from exhausting `BackgroundTasks` worker capacity (a lightweight denial-of-service vector)
-- [ ] **[SECURE]** LLM responses are never `eval`'d or executed directly — all structured output (patches, JSON) is treated as untrusted text and parsed via explicit schema validation (ties into Phase 6's strict output schema)
+- [x] Build `LLMClient` interface: single `.complete(messages, tools=None, ...)` method, provider-agnostic
+- [x] Implement OpenCode Zen adapter (OpenAI-compatible, base URL `https://opencode.ai/zen/v1`, default model `nemotron-3.5-lightning-free`)
+- [x] Read active provider/model from `model_configs` table (DB-driven, not hardcoded), fall back to env var if DB empty
+- [x] Support tool-calling passthrough (needed for subagents that call tools, e.g. sandbox trigger)
+- [x] Add simple retry/error handling wrapper (timeouts, rate limit backoff)
+- [x] Endpoint: `GET/PUT /config/model` to read/update active model+provider (per-repo or global) — backs the future dashboard switcher
+- [x] Token usage + latency captured on every `.complete()` call, returned alongside response (used for observability logging starting Phase 5)
+- [x] **[SECURE]** OpenCode Zen API key is read from Secret Manager/`.env` only, injected into the adapter at construction time, never included in `run_steps` token/latency logs or error messages surfaced to the client
+- [x] **[SECURE]** `PUT /config/model` is owner-only-write: gated by `get_current_user`, and if scoped per-repo, verifies the caller owns that `repo_id`; if scoped globally, restrict to a single designated admin user id (documented) rather than any authenticated user, since a global model switch affects all tenants
+- [x] **[SECURE]** `GET/PUT /config/model` request/response bodies validated via Pydantic with an allowlist of accepted provider/model string values (not free-text) to prevent injection of an unexpected base URL or model identifier that could redirect traffic to an attacker-controlled endpoint
+- [x] **[SECURE]** Retry/backoff wrapper caps total retry time and attempt count (no unbounded retry loop) to prevent a slow/hostile upstream from exhausting `BackgroundTasks` worker capacity (a lightweight denial-of-service vector)
+- [x] **[SECURE]** LLM responses are never `eval`'d or executed directly — all structured output (patches, JSON) is treated as untrusted text and parsed via explicit schema validation (ties into Phase 6's strict output schema)
 
-**Exit criteria:** a scratch script can call `LLMClient.complete()`, get a real response from Nemotron via OpenCode Zen, and switching the DB config to a different model string changes which model answers — no code redeploy needed. **[SECURE]** a non-owner cannot change another tenant's model config via `PUT /config/model`, an invalid/unlisted model string is rejected by Pydantic validation, and the OpenCode Zen API key never appears in any log line or client-facing error.
+**Exit criteria:** a scratch script can call `LLMClient.complete()`, get a real response from Nemotron via OpenCode Zen, and switching the DB config to a different model string changes which model answers — no code redeploy needed. **[SECURE]** a non-owner cannot change another tenant's model config via `PUT /config/model`, an invalid/unlisted model string is rejected by Pydantic validation, and the OpenCode Zen API key never appears in any log line or client-facing error — Phase 4 DONE (12/12).
 
 ---
 
 ## Phase 5 — Orchestrator Skeleton + Context Gatherer Subagent
-- [ ] Orchestrator class/function: holds only compact run state (run id, repo id, step, decisions, confidence) — never raw logs
-- [ ] Orchestrator drives a simple state machine: `context_gathering → fix_generation → verification → pr_or_fallback`
-- [ ] Implement Context Gatherer subagent: takes raw logs + diff + commit history (from Phase 3's GitHub client) as narrow input, returns distilled root-cause summary (few hundred tokens) via `LLMClient`
-- [ ] Concurrency: if dispatching log analysis + diff analysis + commit history as separate sub-calls, run them concurrently (asyncio.gather, capped ~3), merge into one summary
-- [ ] Persist each subagent call as a `run_steps` row: input tokens, output tokens, latency, cost estimate (from Phase 4 usage data)
-- [ ] Wire into Phase 3's pipeline stub: webhook → orchestrator → context gatherer → summary logged to DB, run status updated
-- [ ] **[SECURE]** Raw CI logs/diffs passed into the Context Gatherer are scanned/truncated for obvious secret patterns (tokens, private keys, connection strings accidentally printed in CI output) before being sent to the third-party LLM provider, and never persisted verbatim in `run_steps` (only the distilled summary + token counts are stored)
-- [ ] **[SECURE]** Orchestrator state transitions are validated (no skipping from `context_gathering` directly to `pr_or_fallback`) so a malformed or replayed background task can't push a run into an inconsistent/privileged state
-- [ ] **[SECURE]** `run_steps` writes are scoped to the `run_id`'s owning repo/user at the DB layer (FK constraint + ownership check on any read endpoint), preventing cross-tenant trace data leakage
-- [ ] **[SECURE]** Concurrent sub-calls (asyncio.gather, capped ~3) have a per-call timeout so one hung upstream request can't stall the whole orchestrator step indefinitely
+- [x] Orchestrator class/function: holds only compact run state (run id, repo id, step, decisions, confidence) — never raw logs
+- [x] Orchestrator drives a simple state machine: `context_gathering → fix_generation → verification → pr_or_fallback`
+- [x] Implement Context Gatherer subagent: takes raw logs + diff + commit history (from Phase 3's GitHub client) as narrow input, returns distilled root-cause summary (few hundred tokens) via `LLMClient`
+- [x] Concurrency: if dispatching log analysis + diff analysis + commit history as separate sub-calls, run them concurrently (asyncio.gather, capped ~3), merge into one summary
+- [x] Persist each subagent call as a `run_steps` row: input tokens, output tokens, latency, cost estimate (from Phase 4 usage data)
+- [x] Wire into Phase 3's pipeline stub: webhook → orchestrator → context gatherer → summary logged to DB, run status updated
+- [x] **[SECURE]** Raw CI logs/diffs passed into the Context Gatherer are scanned/truncated for obvious secret patterns (tokens, private keys, connection strings accidentally printed in CI output) before being sent to the third-party LLM provider, and never persisted verbatim in `run_steps` (only the distilled summary + token counts are stored)
+- [x] **[SECURE]** Orchestrator state transitions are validated (no skipping from `context_gathering` directly to `pr_or_fallback`) so a malformed or replayed background task can't push a run into an inconsistent/privileged state
+- [x] **[SECURE]** `run_steps` writes are scoped to the `run_id`'s owning repo/user at the DB layer (FK constraint + ownership check on any read endpoint), preventing cross-tenant trace data leakage
+- [x] **[SECURE]** Concurrent sub-calls (asyncio.gather, capped ~3) have a per-call timeout so one hung upstream request can't stall the whole orchestrator step indefinitely
 
-**Exit criteria:** a real (or simulated) CI failure payload flows through webhook → orchestrator → Context Gatherer → a root-cause summary is persisted and visible via a DB query, with full token/latency trace in `run_steps`. **[SECURE]** a deliberately secret-laden fake log line is confirmed redacted/truncated before leaving the service boundary, and querying `run_steps` for a run you don't own (via a second test user) returns nothing.
+**Exit criteria:** a real (or simulated) CI failure payload flows through webhook → orchestrator → Context Gatherer → a root-cause summary is persisted and visible via a DB query, with full token/latency trace in `run_steps`. **[SECURE]** a deliberately secret-laden fake log line is confirmed redacted/truncated before leaving the service boundary, and querying `run_steps` for a run you don't own (via a second test user) returns nothing. — Phase 5 DONE (10/10).
 
 ---
 

@@ -89,6 +89,9 @@ class Run(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
+    # Distilled root-cause summary written by the Context Gatherer subagent (Phase 5).
+    # Only the redacted, token-bounded summary is stored — never raw CI logs or diffs.
+    diagnosis_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     repo: Mapped["Repo"] = relationship("Repo", back_populates="runs")
     run_steps: Mapped[list["RunStep"]] = relationship("RunStep", back_populates="run", cascade="all, delete-orphan")
