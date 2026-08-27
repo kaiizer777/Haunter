@@ -61,6 +61,20 @@ class Settings(BaseSettings):
     # Per-IP rate limit for auth endpoints (requests per minute).
     rate_limit_per_minute: int = 20
 
+    # LLM Provider Configuration (Phase 4)
+    # OpenCode Zen API key (Secret Manager / .env only). Injected at request time, never logged.
+    opencode_zen_api_key: Optional[str] = None
+    opencode_zen_base_url: str = "https://opencode.ai/zen/v1"
+    default_provider: str = "opencode_zen"
+    default_model: str = "nemotron-3.5-lightning-free"
+
+    # Optional admin user UUID string for global model config switcher authorization
+    admin_user_id: Optional[str] = None
+
+    # GCP project ID for Cloud Build sandbox (Phase 7).
+    # Required when Cloud Build verification is enabled.
+    gcp_project_id: Optional[str] = None
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

@@ -171,3 +171,36 @@ async def fetch_commit_metadata(
         raise GitHubClientError(f"GitHub API returned error {response.status_code}")
 
     return response.json()
+
+
+async def post_commit_comment(
+    owner: str,
+    repo: str,
+    sha: str,
+    body: str,
+    token: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Post a comment on a specific commit.
+    Used for fallback notifications when all fix attempts fail.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{sha}/comments"
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+    
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.post(url, headers=headers, json={"body": body})
+        except httpx.RequestError as exc:
+            logger.error("Network error posting commit comment for %s/%s @ %s", owner, repo, sha)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"Commit not found for {owner}/{repo} @ {sha} to post comment")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    return response.json()

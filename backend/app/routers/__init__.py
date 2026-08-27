@@ -1,0 +1,3 @@
+"""
+Haunter API Routers.
+"""

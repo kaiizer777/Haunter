@@ -1,5 +1,5 @@
 """
-Repo CRUD + model config stub endpoints for Haunter.
+Repo CRUD endpoints for Haunter.
 
 All endpoints are gated by get_current_user. Every query and mutation is scoped
 to the authenticated user's user.id — no endpoint trusts a client-supplied repo_id
@@ -22,20 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.db import get_db
-from app.models import ModelConfig, Repo, User
-from app.schemas import ModelConfigOut, ModelConfigUpdate, RepoCreate, RepoOut
+from app.models import Repo, User
+from app.schemas import RepoCreate, RepoOut
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["repos"])
-
-# Provider → base_url allowlist — derived server-side, never accepted from client.
-# Extend only after vetting the provider.
-_PROVIDER_BASE_URLS: dict[str, str] = {
-    "opencode_zen": "https://opencode.ai/zen/v1",
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com/v1",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +57,8 @@ async def add_repo(
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail="Repo already connected")
 
+    from sqlalchemy.exc import IntegrityError
+
     repo = Repo(
         user_id=current_user.id,
         owner=body.owner,
@@ -74,8 +68,12 @@ async def add_repo(
         active_model_config_id=body.active_model_config_id,
     )
     db.add(repo)
-    await db.commit()
-    await db.refresh(repo)
+    try:
+        await db.commit()
+        await db.refresh(repo)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Repo already connected")
 
     logger.info("Repo added: user=%s repo=%s/%s", current_user.id, body.owner, body.name)
     return RepoOut.model_validate(repo)
@@ -117,98 +115,3 @@ async def remove_repo(
     await db.delete(repo)
     await db.commit()
     logger.info("Repo removed: user=%s repo_id=%s", current_user.id, repo_id)
-
-
-# ---------------------------------------------------------------------------
-# Model config stub (Phase 4 will fill in the full LLM switcher logic)
-# ---------------------------------------------------------------------------
-
-
-@router.get("/config/model/{repo_id}", response_model=ModelConfigOut | None)
-async def get_model_config(
-    repo_id: uuid.UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> ModelConfigOut | None:
-    """
-    Return the active model config for a repo.
-    Returns 404 if the repo doesn't exist or isn't owned by the caller.
-    Returns null body (200) if no model config is set.
-    """
-    repo_result = await db.execute(
-        select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
-    )
-    repo = repo_result.scalar_one_or_none()
-    if repo is None:
-        raise HTTPException(status_code=404, detail="Repo not found")
-
-    if repo.active_model_config_id is None:
-        return None
-
-    config_result = await db.execute(
-        select(ModelConfig).where(ModelConfig.id == repo.active_model_config_id)
-    )
-    config = config_result.scalar_one_or_none()
-    if config is None:
-        return None
-
-    return ModelConfigOut.model_validate(config)
-
-
-@router.put("/config/model/{repo_id}", response_model=ModelConfigOut)
-async def update_model_config(
-    repo_id: uuid.UUID,
-    body: ModelConfigUpdate,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> ModelConfigOut:
-    """
-    Update or create the model config for a repo.
-
-    Security invariants:
-    - Caller must own the repo (404 otherwise — existence oracle prevention).
-    - provider and model_name are Pydantic Literal allowlists — no free-text injection.
-    - base_url is derived server-side from the provider allowlist — never accepted
-      from the client. This prevents base_url injection to an attacker-controlled endpoint.
-    """
-    repo_result = await db.execute(
-        select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
-    )
-    repo = repo_result.scalar_one_or_none()
-    if repo is None:
-        raise HTTPException(status_code=404, detail="Repo not found")
-
-    # base_url is derived server-side — never from client input.
-    base_url = _PROVIDER_BASE_URLS[body.provider]
-
-    if repo.active_model_config_id is not None:
-        config_result = await db.execute(
-            select(ModelConfig).where(ModelConfig.id == repo.active_model_config_id)
-        )
-        existing_config = config_result.scalar_one_or_none()
-    else:
-        existing_config = None
-
-    if existing_config is not None:
-        existing_config.provider = body.provider
-        existing_config.model_name = body.model_name
-        existing_config.base_url = base_url
-        config = existing_config
-    else:
-        config = ModelConfig(
-            provider=body.provider,
-            model_name=body.model_name,
-            base_url=base_url,
-        )
-        db.add(config)
-        await db.flush()  # get the id before updating repo FK
-        repo.active_model_config_id = config.id
-
-    await db.commit()
-    await db.refresh(config)
-
-    logger.info(
-        "Model config updated: user=%s repo=%s provider=%s model=%s",
-        current_user.id, repo_id, body.provider, body.model_name,
-    )
-    return ModelConfigOut.model_validate(config)

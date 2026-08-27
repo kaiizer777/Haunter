@@ -120,17 +120,17 @@ Excludes deployment (separate later phase). Project init assumed done. Each phas
 ---
 
 ## Phase 6 — Fix Generator Subagent + Confidence Scoring
-- [ ] Implement Fix Generator subagent: takes root-cause summary (+ prior failed attempt on retry) as input, returns unified diff/patch + confidence score (0–100) via `LLMClient`
-- [ ] Define strict output schema (JSON mode or structured prompt) so patch + confidence are reliably parseable
-- [ ] Persist each generation as an `attempts` row: attempt number, strategy notes, patch text, confidence score, timestamp
-- [ ] Orchestrator step: after Context Gatherer, call Fix Generator, log attempt, advance state to `pending_verification`
-- [ ] Basic patch sanity validation (valid diff format, non-empty) before handing to sandbox step
-- [ ] **[SECURE]** Strict output schema is enforced via Pydantic parsing of the LLM's JSON response (reject and retry-with-error-context, don't best-effort-regex-extract) — confidence score is bounds-checked to the documented 0–100 range before storage
-- [ ] **[SECURE]** Patch sanity validation includes a path-traversal/scope check: reject any diff hunk touching paths outside the target repo's checkout (e.g. `../`, absolute paths, `.git/` internals, CI config files like `.github/workflows/*` unless explicitly allowed) before it ever reaches the sandbox in Phase 7
-- [ ] **[SECURE]** Patch text stored in `attempts.patch_text` is treated as untrusted content when later rendered anywhere (dashboard, PR body) — no raw HTML/markdown injection risk carried forward (escaping handled at render time in Phase 11/8)
-- [ ] **[SECURE]** Attempt cap (2–3, enforced in Phase 7's retry logic) is also checked here defensively — Fix Generator refuses to run for a `run_id` that has already exhausted its attempt budget, preventing a race/replay from generating unbounded attempts
+- [x] Implement Fix Generator subagent: takes root-cause summary (+ prior failed attempt on retry) as input, returns unified diff/patch + confidence score (0–100) via `LLMClient`
+- [x] Define strict output schema (JSON mode or structured prompt) so patch + confidence are reliably parseable
+- [x] Persist each generation as an `attempts` row: attempt number, strategy notes, patch text, confidence score, timestamp
+- [x] Orchestrator step: after Context Gatherer, call Fix Generator, log attempt, advance state to `pending_verification`
+- [x] Basic patch sanity validation (valid diff format, non-empty) before handing to sandbox step
+- [x] **[SECURE]** Strict output schema is enforced via Pydantic parsing of the LLM's JSON response (reject and retry-with-error-context, don't best-effort-regex-extract) — confidence score is bounds-checked to the documented 0–100 range before storage
+- [x] **[SECURE]** Patch sanity validation includes a path-traversal/scope check: reject any diff hunk touching paths outside the target repo's checkout (e.g. `../`, absolute paths, `.git/` internals, CI config files like `.github/workflows/*` unless explicitly allowed) before it ever reaches the sandbox in Phase 7
+- [x] **[SECURE]** Patch text stored in `attempts.patch_text` is treated as untrusted content when later rendered anywhere (dashboard, PR body) — no raw HTML/markdown injection risk carried forward (escaping handled at render time in Phase 11/8)
+- [x] **[SECURE]** Attempt cap (2–3, enforced in Phase 7's retry logic) is also checked here defensively — Fix Generator refuses to run for a `run_id` that has already exhausted its attempt budget, preventing a race/replay from generating unbounded attempts
 
-**Exit criteria:** given a logged root-cause summary, Fix Generator produces a parseable patch + confidence score, stored as an `attempts` row, orchestrator state advances correctly. **[SECURE]** a crafted patch attempting to modify a path outside the repo checkout or a CI workflow file is rejected before sandbox handoff, and a malformed/out-of-range LLM JSON response is rejected rather than silently coerced.
+**Exit criteria:** given a logged root-cause summary, Fix Generator produces a parseable patch + confidence score, stored as an `attempts` row, orchestrator state advances correctly. **[SECURE]** a crafted patch attempting to modify a path outside the repo checkout or a CI workflow file is rejected before sandbox handoff, and a malformed/out-of-range LLM JSON response is rejected rather than silently coerced. — Phase 6 DONE (9/9).
 
 ---
 

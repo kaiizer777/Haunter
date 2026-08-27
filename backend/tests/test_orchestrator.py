@@ -3,7 +3,7 @@ Phase 5 orchestrator + context gatherer tests.
 
 Covers:
 1. Valid transition sequence persists correct status in DB.
-2. Invalid skip (context_gathering → pr_or_fallback) raises InvalidTransitionError.
+2. Invalid skip (context_gathering → pending_pr) raises InvalidTransitionError.
 3. _redact_secrets scrubs all known secret patterns.
 4. gather_context() with mocked GitHub + LLM creates run_steps row, advances status.
 5. Secret-laden fake logs are redacted before reaching the LLM call.
@@ -109,17 +109,17 @@ async def test_valid_transition_sequence(db: AsyncSession) -> None:
 
 @pytest.mark.anyio
 async def test_invalid_transition_skip_raises(db: AsyncSession) -> None:
-    """context_gathering → pr_or_fallback is not allowed — must raise."""
+    """context_gathering → pending_pr is not allowed — must raise."""
     await truncate_all(db)
     user = await _create_user(db)
     repo = await _create_repo(db, user)
     run = await _create_run(db, repo, status="context_gathering")
 
     with pytest.raises(InvalidTransitionError) as exc_info:
-        await _transition(run, RunStatus.pr_or_fallback, db)
+        await _transition(run, RunStatus.pending_pr, db)
 
     assert exc_info.value.from_status == RunStatus.context_gathering
-    assert exc_info.value.to_status == RunStatus.pr_or_fallback
+    assert exc_info.value.to_status == RunStatus.pending_pr
     # DB must NOT have been updated — run should still be context_gathering
     refreshed = await db.execute(select(Run).where(Run.id == run.id))
     db_run = refreshed.scalar_one()
@@ -412,3 +412,100 @@ async def test_handle_failed_run_github_404_sets_error(db: AsyncSession) -> None
     # diagnosis_summary should be set if LLM succeeded
     if db_run.status == "fix_generation":
         assert db_run.diagnosis_summary is not None
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Phase 8 Fallback logic
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSession) -> None:
+    """If 3 attempts all fail verification, orchestrator transitions to fallback and posts a comment."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo, status="pending")
+    run.diagnosis_summary = "test diagnosis"
+    await db.commit()
+    run_id = run.id
+    # Capture before session expires
+    repo_owner = repo.owner
+    repo_name = repo.name
+    head_sha = run.head_sha
+    user_token = user.access_token
+
+    with (
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+            return_value="ImportError in app/models.py:10",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="-import foo\n",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value={"sha": "abc"},
+        ),
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete",
+            new_callable=AsyncMock,
+            side_effect=[
+                {
+                    "content": "test diagnosis",
+                    "usage": {"input_tokens": 10, "output_tokens": 10},
+                    "latency_ms": 100,
+                    "model": "test",
+                },
+                {
+                    "content": '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-x\\n+y\\n", "confidence": 90, "strategy_notes": "test"}',
+                    "usage": {"input_tokens": 10, "output_tokens": 10},
+                    "latency_ms": 100,
+                    "model": "test",
+                },
+                {
+                    "content": '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-x\\n+y\\n", "confidence": 90, "strategy_notes": "test"}',
+                    "usage": {"input_tokens": 10, "output_tokens": 10},
+                    "latency_ms": 100,
+                    "model": "test",
+                },
+                {
+                    "content": '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-x\\n+y\\n", "confidence": 90, "strategy_notes": "test"}',
+                    "usage": {"input_tokens": 10, "output_tokens": 10},
+                    "latency_ms": 100,
+                    "model": "test",
+                },
+            ],
+        ),
+        patch(
+            "app.sandbox.verifier.verify_patch",
+            new_callable=AsyncMock,
+            return_value={"status": "fail", "failure_reason": "failed tests", "build_duration_ms": 500},
+        ),
+        patch(
+            "app.github_client.post_commit_comment",
+            new_callable=AsyncMock
+        ) as mock_post_comment,
+    ):
+        from app.orchestrator import handle_failed_run
+        await handle_failed_run(run_id)
+
+    db.expire_all()
+    refreshed = await db.execute(select(Run).where(Run.id == run_id))
+    db_run = refreshed.scalar_one()
+
+    # Should have advanced to fallback
+    assert db_run.status == "fallback"
+
+    # Verify that post_commit_comment was called
+    mock_post_comment.assert_called_once()
+    kwargs = mock_post_comment.call_args.kwargs
+    assert kwargs["owner"] == repo_owner
+    assert kwargs["repo"] == repo_name
+    assert kwargs["sha"] == head_sha
+    assert "Haunter AI Diagnosis:" in kwargs["body"]
+    assert "test diagnosis" in kwargs["body"]
+    assert kwargs["token"] == user_token

@@ -8,6 +8,7 @@ authlib==1.6.0
 itsdangerous==2.2.0
 httpx==0.28.1
 slowapi==0.1.9
+google-cloud-build==3.*
 
 respx==0.*
 freezegun==1.*

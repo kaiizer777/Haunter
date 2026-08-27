@@ -7,7 +7,7 @@ No free-text injection vectors — provider and model_name use Literal allowlist
 
 import uuid
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -48,6 +48,8 @@ AllowedProvider = Literal["opencode_zen", "openai", "anthropic"]
 # Allowlisted model names — must match a provider's supported models.
 AllowedModelName = Literal[
     "nemotron-3.5-lightning-free",
+    "nemotron-3-ultra-free",
+    "hy3-free",
     "gpt-4o",
     "gpt-4o-mini",
     "claude-sonnet-4-5",
@@ -57,13 +59,15 @@ AllowedModelName = Literal[
 
 class ModelConfigUpdate(BaseModel):
     """
-    Used by PUT /config/model/{repo_id} to update a repo's active model config.
+    Used by PUT /config/model (global) or PUT /config/model/{repo_id} (per-repo)
+    to update active model config.
     Provider and model_name are allowlisted — no free-text base_url injection.
     base_url is derived server-side from the provider allowlist, never from the client.
     """
 
     provider: AllowedProvider
     model_name: AllowedModelName
+    repo_id: Optional[uuid.UUID] = None
 
 
 class ModelConfigOut(BaseModel):
@@ -74,6 +78,19 @@ class ModelConfigOut(BaseModel):
     is_active: bool
 
     model_config = {"from_attributes": True}
+
+
+class LLMUsageOut(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+class LLMResponseOut(BaseModel):
+    content: Optional[str] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
+    usage: LLMUsageOut
+    latency_ms: int
+    model: str
 
 
 # ---------------------------------------------------------------------------

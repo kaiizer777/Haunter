@@ -134,6 +134,11 @@ class Attempt(Base):
 
     run: Mapped["Run"] = relationship("Run", back_populates="attempts")
 
+    __table_args__ = (
+        UniqueConstraint("run_id", "attempt_number", name="uq_attempt_run_number"),
+    )
+
+
 
 class ModelConfig(Base):
     __tablename__ = "model_configs"
