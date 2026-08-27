@@ -77,7 +77,8 @@ class Run(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), index=True)
-    github_run_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    github_run_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    github_delivery_id: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True, index=True)
     head_sha: Mapped[str] = mapped_column(String(40), nullable=False)
     head_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False)

@@ -85,6 +85,7 @@ class RunOut(BaseModel):
     id: uuid.UUID
     repo_id: uuid.UUID
     github_run_id: int
+    github_delivery_id: Optional[str] = None
     head_sha: str
     head_branch: str
     status: str
@@ -93,3 +94,41 @@ class RunOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Webhook schemas (GitHub workflow_run event)
+# ---------------------------------------------------------------------------
+
+
+class WorkflowRunRepoOwner(BaseModel):
+    login: str = Field(..., min_length=1, max_length=255)
+
+    model_config = {"extra": "ignore"}
+
+
+class WorkflowRunRepo(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    full_name: str = Field(..., min_length=1, max_length=255)
+    owner: WorkflowRunRepoOwner
+
+    model_config = {"extra": "ignore"}
+
+
+class WorkflowRunObj(BaseModel):
+    id: int
+    head_sha: str = Field(..., pattern=r"^[0-9a-fA-F]{40}$")
+    head_branch: Optional[str] = Field(default="main", max_length=255)
+    conclusion: Optional[str] = None
+    html_url: Optional[str] = None
+
+    model_config = {"extra": "ignore"}
+
+
+class WorkflowRunWebhookPayload(BaseModel):
+    action: str
+    workflow_run: WorkflowRunObj
+    repository: WorkflowRunRepo
+
+    model_config = {"extra": "ignore"}
+

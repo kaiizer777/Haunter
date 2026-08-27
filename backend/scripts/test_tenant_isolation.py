@@ -106,7 +106,7 @@ async def main() -> None:
 
         # --- Cleanup ---
         await cleanup(db)
-        print("\nAll tenant isolation tests PASSED ✓")
+        print("\nAll tenant isolation tests PASSED [OK]")
 
 
 asyncio.run(main())

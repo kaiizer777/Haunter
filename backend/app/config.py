@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     # If not set, access_token is stored plaintext — pre-prod security blocker.
     token_encryption_key: Optional[str] = None
 
+    # GitHub Webhook secret for HMAC-SHA256 signature verification (X-Hub-Signature-256).
+    # Separate from OAuth App credentials — least privilege.
+    github_webhook_secret: Optional[str] = None
+
+    # GitHub Personal Access Token or App Installation Token for REST client calls (Phase 3+).
+    # Used by backend/app/github_client.py. Never logged or stored in run rows.
+    github_token: Optional[str] = None
+
     # Where to redirect after a successful OAuth callback.
     frontend_url: str
 

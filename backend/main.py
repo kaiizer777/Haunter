@@ -10,6 +10,7 @@ from app.auth import router as auth_router
 from app.config import settings
 from app.limiter import limiter
 from app.repos import router as repos_router
+from app.webhooks import router as webhooks_router
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,8 @@ app.add_middleware(
 
 app.include_router(auth_router, prefix="/auth")
 app.include_router(repos_router)
+app.include_router(webhooks_router)
+
 
 
 @app.get("/health")

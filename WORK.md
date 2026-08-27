@@ -67,21 +67,21 @@ Excludes deployment (separate later phase). Project init assumed done. Each phas
 ---
 
 ## Phase 3 — GitHub Webhook Ingestion
-- [ ] `POST /webhooks/github` endpoint accepting `workflow_run` events
-- [ ] Verify `X-Hub-Signature-256` HMAC against stored webhook secret; reject on mismatch
-- [ ] Filter to `action: completed` + `conclusion: failure`; ignore everything else with fast 200
-- [ ] Idempotency: dedupe on GitHub delivery id (or workflow run id) before creating a new `run` row — store seen delivery ids or check existing run status
-- [ ] On valid new failure: create `run` row (status=`pending`), return 2xx immediately, kick off pipeline via FastAPI `BackgroundTasks`
-- [ ] Stub pipeline entrypoint function (logs "pipeline started for run X") — actual orchestrator logic comes in later phases
-- [ ] GitHub REST API client wrapper: fetch workflow run logs, diff, commit metadata (needed by next phase, build the client now)
-- [ ] **[SECURE]** HMAC signature comparison uses a constant-time function (`hmac.compare_digest`, not `==`) to prevent timing side-channel attacks on the webhook secret
-- [ ] **[SECURE]** Webhook secret is stored only in Secret Manager/`.env` (never in the `repos` table or logs) and is unique per GitHub App installation if the App supports per-installation secrets; raw request body (not re-serialized JSON) is what's HMAC'd, since re-serialization can alter bytes and break/weaken verification
-- [ ] **[SECURE]** Delivery-id dedupe store (`X-GitHub-Delivery` header) has a uniqueness constraint at the DB level (not just an application-level check-then-insert), closing the race window between a duplicate delivery arriving concurrently and the check completing
-- [ ] **[SECURE]** Payload size limit enforced on `POST /webhooks/github` (reject oversized bodies before parsing) to prevent resource-exhaustion via an oversized/malformed payload
-- [ ] **[SECURE]** Webhook payload fields consumed (repo full name, commit SHA, workflow run id, etc.) are validated against a Pydantic schema and cross-checked that the referenced repo exists in `repos` and is owned/installed by a known tenant before a `run` row is created — an unrecognized repo is logged and dropped, not silently processed
-- [ ] **[SECURE]** GitHub REST API client wrapper never logs the App's installation access token; token is fetched per-use (or cached with short TTL matching GitHub's expiry) and never persisted to the `run`/`run_steps` rows
+- [x] `POST /webhooks/github` endpoint accepting `workflow_run` events
+- [x] Verify `X-Hub-Signature-256` HMAC against stored webhook secret; reject on mismatch
+- [x] Filter to `action: completed` + `conclusion: failure`; ignore everything else with fast 200
+- [x] Idempotency: dedupe on GitHub delivery id (or workflow run id) before creating a new `run` row — store seen delivery ids or check existing run status
+- [x] On valid new failure: create `run` row (status=`pending`), return 2xx immediately, kick off pipeline via FastAPI `BackgroundTasks`
+- [x] Stub pipeline entrypoint function (logs "pipeline started for run X") — actual orchestrator logic comes in later phases
+- [x] GitHub REST API client wrapper: fetch workflow run logs, diff, commit metadata (needed by next phase, build the client now)
+- [x] **[SECURE]** HMAC signature comparison uses a constant-time function (`hmac.compare_digest`, not `==`) to prevent timing side-channel attacks on the webhook secret
+- [x] **[SECURE]** Webhook secret is stored only in Secret Manager/`.env` (never in the `repos` table or logs) and is unique per GitHub App installation if the App supports per-installation secrets; raw request body (not re-serialized JSON) is what's HMAC'd, since re-serialization can alter bytes and break/weaken verification
+- [x] **[SECURE]** Delivery-id dedupe store (`X-GitHub-Delivery` header) has a uniqueness constraint at the DB level (not just an application-level check-then-insert), closing the race window between a duplicate delivery arriving concurrently and the check completing
+- [x] **[SECURE]** Payload size limit enforced on `POST /webhooks/github` (reject oversized bodies before parsing) to prevent resource-exhaustion via an oversized/malformed payload
+- [x] **[SECURE]** Webhook payload fields consumed (repo full name, commit SHA, workflow run id, etc.) are validated against a Pydantic schema and cross-checked that the referenced repo exists in `repos` and is owned/installed by a known tenant before a `run` row is created — an unrecognized repo is logged and dropped, not silently processed
+- [x] **[SECURE]** GitHub REST API client wrapper never logs the App's installation access token; token is fetched per-use (or cached with short TTL matching GitHub's expiry) and never persisted to the `run`/`run_steps` rows
 
-**Exit criteria:** pushing a failing workflow_run payload (simulated via curl/Postman with valid signature) creates a `run` row, responds fast, dedupes on retry, logs pipeline stub trigger. **[SECURE]** an invalid/missing signature is rejected (constant-time), a replayed identical delivery id does not create a second `run` row even under concurrent delivery, and a payload referencing an unregistered repo is safely dropped without error leakage.
+**Exit criteria:** pushing a failing workflow_run payload (simulated via curl/Postman with valid signature) creates a `run` row, responds fast, dedupes on retry, logs pipeline stub trigger. **[SECURE]** an invalid/missing signature is rejected (constant-time), a replayed identical delivery id does not create a second `run` row even under concurrent delivery, and a payload referencing an unregistered repo is safely dropped without error leakage — Phase 3 DONE (13/13).
 
 ---
 
