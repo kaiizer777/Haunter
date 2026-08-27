@@ -208,16 +208,21 @@ def _sign_state(raw_state: str) -> str:
 def _verify_state_cookie(signed_cookie: str, request_state: str) -> None:
     """
     Validates the OAuth state parameter against the signed cookie.
+    Tries the full _signers() pool (current + previous key) so state cookies
+    issued before a key rotation remain valid for their 10min TTL.
     Performs constant-time comparison after signature verification.
     Raises HTTPException(400) generic on ANY failure — before code exchange.
     Never logs signed_cookie or request_state values.
     """
-    try:
-        # Unsign verifies signature + max_age in one step.
-        recovered_state = TimestampSigner(settings.session_secret_key).unsign(
-            signed_cookie, max_age=_STATE_MAX_AGE
-        ).decode()
-    except (SignatureExpired, BadSignature, ValueError):
+    recovered_state: str | None = None
+    for signer in _signers():
+        try:
+            recovered_state = signer.unsign(signed_cookie, max_age=_STATE_MAX_AGE).decode()
+            break  # verified with this key — stop trying
+        except (SignatureExpired, BadSignature, ValueError):
+            continue
+
+    if recovered_state is None:
         logger.warning("OAuth state cookie signature verification failed")
         raise HTTPException(status_code=400, detail="Authentication failed")
 
@@ -361,39 +366,53 @@ async def callback(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
     haunter_oauth_state: Annotated[str | None, Cookie()] = None,
-) -> RedirectResponse:
+) -> Response:
     """
     GitHub redirects here with ?code=&state=.
 
     Security order is strict:
     1. Validate state (signature + max_age + constant-time compare) — BEFORE code exchange.
-    2. Clear state cookie immediately (single-use).
+    2. Clear state cookie immediately on ALL paths (single-use — no 10-min replay window).
     3. Exchange code for token using hardcoded redirect_uri from settings.callback_url.
     4. Fetch GitHub user profile.
     5. Upsert user, encrypt access_token, set session cookie.
     6. Redirect to FRONTEND_URL.
 
-    All error paths return generic 400/401 to client. Detail goes to server logs only.
+    All error paths return Response objects (not HTTPException) so that _clear_state_cookie
+    can be attached to the actual HTTP response the browser receives — not just the success path.
     code and access_token values are NEVER logged.
     """
     request_state = request.query_params.get("state")
     request_code = request.query_params.get("code")
 
+    def _error(msg: str, status: int = 400) -> Response:
+        """
+        Build an error response with the state cookie cleared.
+        Returning a Response (not raising HTTPException) is the only way to attach
+        Set-Cookie headers to error responses from inside a FastAPI route handler.
+        """
+        logger.warning("OAuth callback error: %s", msg)
+        resp = Response(
+            content='{"detail":"Authentication failed"}',
+            status_code=status,
+            media_type="application/json",
+        )
+        _clear_state_cookie(resp)
+        return resp
+
     # --- Step 1: Validate state BEFORE touching the code ---
     if haunter_oauth_state is None or request_state is None:
-        logger.warning("OAuth callback: missing state cookie or state param")
-        raise HTTPException(status_code=400, detail="Authentication failed")
+        return _error("missing state cookie or state param")
 
-    _verify_state_cookie(haunter_oauth_state, request_state)
+    # _verify_state_cookie raises HTTPException on failure. Catch and convert to
+    # a Response so the state cookie clear is included in the error response.
+    try:
+        _verify_state_cookie(haunter_oauth_state, request_state)
+    except HTTPException:
+        return _error("state verification failed")
 
     if not request_code:
-        logger.warning("OAuth callback: missing code param")
-        raise HTTPException(status_code=400, detail="Authentication failed")
-
-    # --- Step 2: Build response early so we can clear state cookie on ALL paths ---
-    # We'll set the real redirect after the exchange succeeds.
-    # For now: build a mutable response object; state cookie cleared regardless of outcome.
-    # Note: we clear state on the final RedirectResponse below.
+        return _error("missing code param")
 
     # --- Step 3: Exchange code for access token ---
     try:
@@ -410,8 +429,7 @@ async def callback(
             access_token: str = token_response["access_token"]
             # access_token is NEVER logged — only used for GitHub API call below.
     except Exception:
-        logger.warning("OAuth callback: code exchange failed (detail redacted)")
-        raise HTTPException(status_code=400, detail="Authentication failed")
+        return _error("code exchange failed (detail redacted)")
 
     # --- Step 4: Fetch GitHub user profile ---
     try:
@@ -423,8 +441,7 @@ async def callback(
             gh_resp.raise_for_status()
             gh_user = gh_resp.json()
     except Exception:
-        logger.warning("OAuth callback: GitHub user fetch failed (detail redacted)")
-        raise HTTPException(status_code=400, detail="Authentication failed")
+        return _error("GitHub user fetch failed (detail redacted)")
 
     github_id: int = gh_user["id"]
     github_username: str = gh_user["login"]
@@ -454,9 +471,9 @@ async def callback(
         await db.refresh(user)
     except Exception:
         logger.exception("OAuth callback: DB upsert failed")
-        raise HTTPException(status_code=400, detail="Authentication failed")
+        return _error("DB upsert failed")
 
-    # --- Step 6: Set session cookie, clear state cookie, redirect to frontend ---
+    # --- Step 6: Set session cookie, clear state cookie (single-use), redirect ---
     redirect = RedirectResponse(settings.frontend_url, status_code=302)
     _set_session_cookie(redirect, user.id)
     _clear_state_cookie(redirect)
