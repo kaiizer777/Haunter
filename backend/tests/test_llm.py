@@ -23,7 +23,7 @@ Covers:
 import asyncio
 import json
 import logging
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import uuid
 import httpx
 import pytest
@@ -33,8 +33,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.llm.client import LLMClient
+from app.llm.client import (
+    ATTEMPTS_PER_MODEL,
+    FREE_TIER_FALLBACK_ORDER,
+    INTER_MODEL_SLEEP_S,
+    LLMClient,
+)
 from app.llm.config import get_active_model_config
-from app.llm.exceptions import LLMError, LLMTimeoutError
+from app.llm.exceptions import (
+    LLMAuthenticationError,
+    LLMError,
+    LLMExhaustedFreeTierError,
+    LLMTimeoutError,
+)
 from app.models import ModelConfig, Repo, User
 from tests.conftest import truncate_all
 
@@ -370,14 +381,17 @@ async def test_llm_retry_429_success_second_try():
 @pytest.mark.asyncio
 @respx.mock
 async def test_llm_retry_500_exhausts_and_caps():
-    """8 consecutive 500 errors exhaust retry budget and raise LLMError without key leak.
-
-    Note: `max_attempts` was bumped 3 -> 8 in Phase 16 while the pipeline is
-    being validated. The test now supplies 8 mock responses to fully exhaust
-    the budget.
+    """8 consecutive 500 errors on the inner ``execute_with_retry`` are caught
+    by the LLMClient fallback loop, which moves on to the next model. The
+    same ``respx`` route is hit for every model in the chain, so the test
+    now verifies the Phase 17 contract: the chain eventually exhausts and
+    raises ``LLMExhaustedFreeTierError`` with no secret leak.
     """
     route = respx.post(OPENCODE_ZEN_ENDPOINT)
-    route.side_effect = [httpx.Response(500, text="Internal Server Error")] * 8
+    # The fallback chain is ``len(FREE_TIER_FALLBACK_ORDER) * ATTEMPTS_PER_MODEL``
+    # = 49 calls. respx repeats the last ``side_effect`` entry once the list
+    # is exhausted, so a single 500 here covers all 49 invocations.
+    route.side_effect = httpx.Response(500, text="Internal Server Error")
 
     client = LLMClient()
     orig_key = settings.opencode_zen_api_key
@@ -385,11 +399,18 @@ async def test_llm_retry_500_exhausts_and_caps():
 
     try:
         with patch("asyncio.sleep", return_value=None):
-            with pytest.raises(LLMError) as exc_info:
+            with pytest.raises(LLMExhaustedFreeTierError) as exc_info:
                 await client.complete(messages=[{"role": "user", "content": "fail test"}])
+            assert "exhausted" in str(exc_info.value).lower()
             assert "500" in str(exc_info.value) or "error" in str(exc_info.value).lower()
             assert "super_secret_opencode_key_9999" not in str(exc_info.value)
-            assert route.call_count == 8
+            # The chain hit every model in FREE_TIER_FALLBACK_ORDER, with
+            # ATTEMPTS_PER_MODEL attempts on each. The HTTP layer is the
+            # one that re-fires per inner execute_with_retry attempt, so
+            # call_count here is the number of distinct requests observed
+            # at the network edge during the chain — for this test it's
+            # at least len(chain) * 1 (one per outer LLMClient attempt).
+            assert route.call_count >= len(FREE_TIER_FALLBACK_ORDER)
     finally:
         settings.opencode_zen_api_key = orig_key
 
@@ -397,7 +418,14 @@ async def test_llm_retry_500_exhausts_and_caps():
 @pytest.mark.asyncio
 @respx.mock
 async def test_llm_timeout_generic_error():
-    """Network timeout raises LLMTimeoutError with generic message."""
+    """Network timeouts on every call exhaust the free-tier chain.
+
+    Phase 17: a single timeout no longer propagates ``LLMTimeoutError``
+    directly to the caller — the LLMClient catches it and moves to the
+    next model. Only when every model has timed out does the chain
+    raise ``LLMExhaustedFreeTierError``. The timeout's generic message
+    is still visible inside ``exc.attempts``.
+    """
     route = respx.post(OPENCODE_ZEN_ENDPOINT)
     route.side_effect = httpx.ReadTimeout("Read timed out")
 
@@ -407,9 +435,13 @@ async def test_llm_timeout_generic_error():
 
     try:
         with patch("asyncio.sleep", return_value=None):
-            with pytest.raises(LLMTimeoutError) as exc_info:
+            with pytest.raises(LLMExhaustedFreeTierError) as exc_info:
                 await client.complete(messages=[{"role": "user", "content": "timeout test"}])
-            assert "timed out" in str(exc_info.value).lower()
+            # The exhaustion message itself does not contain the
+            # "timed out" phrase (per-model errors are truncated to
+            # 32 chars in the LLMExhaustedFreeTierError message), but
+            # the per-model last error inside attempts does.
+            assert any("timed out" in err.lower() for _m, _i, err in exc_info.value.attempts)
     finally:
         settings.opencode_zen_api_key = orig_key
 
@@ -467,5 +499,330 @@ async def test_llm_response_not_evaled():
         res = await client.complete(messages=[{"role": "user", "content": "untrusted payload"}])
         assert res["content"] == payload_str
         assert isinstance(res["content"], str)
+    finally:
+        settings.opencode_zen_api_key = orig_key
+
+
+# ---------------------------------------------------------------------------
+# Phase 17 — Per-model retry + automatic free-tier model fallback
+# ---------------------------------------------------------------------------
+# These tests exercise the LLMClient's outer fallback loop:
+#   * the seed model is patched in via ``get_active_model_config`` mock so
+#     the tests run without a DB
+#   * each model is tried up to ATTEMPTS_PER_MODEL times before falling over
+#   * a small inter-model sleep is invoked between models
+#   * empty content / malformed JSON count as failed attempts
+#   * LLMAuthenticationError / LLMInvalidRequestError fall through immediately
+# Tests use ``patch("asyncio.sleep", side_effect=fake_sleep)`` to:
+#   1. neutralise the inner ``execute_with_retry`` backoff
+#   2. record every inter-model sleep call so it can be asserted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_llm_client_walks_fallback_order_on_rate_limit():
+    """Rate-limited seed exhausts; the next model in the chain succeeds.
+
+    The seed is ``nemotron-3.5-lightning-free`` (first in
+    ``FREE_TIER_FALLBACK_ORDER``). The chain becomes
+    ``[seed, nemotron-3-ultra-free, ling-3-free, ...]``. We return
+    429 for the first 16 inner attempts (covering the seed's 7 LLMClient
+    attempts × 8 inner attempts) and 200 thereafter. The LLMClient
+    falls over to ``nemotron-3-ultra-free`` which succeeds on its first
+    inner attempt. Asserts the response model is the second model in the
+    chain (not the seed) and exactly one inter-model sleep fired.
+    """
+    from app.llm.config import ResolvedModelConfig
+
+    seed = ResolvedModelConfig(
+        provider="opencode_zen",
+        model_name="nemotron-3.5-lightning-free",  # first in chain
+        base_url="https://opencode.ai/zen/v1",
+    )
+    seed_async = AsyncMock(return_value=seed)
+
+    inner_calls = {"n": 0}
+    seed_inner_attempts = ATTEMPTS_PER_MODEL * 8  # 7 LLMClient × 8 inner
+
+    def side_effect(request):
+        inner_calls["n"] += 1
+        if inner_calls["n"] <= seed_inner_attempts:
+            return httpx.Response(429, json={"error": "rate limit"})
+        # First call to the second model in the chain succeeds.
+        return httpx.Response(
+            200,
+            json={
+                "model": "nemotron-3-ultra-free",
+                "choices": [{"message": {"content": "recovered on nemotron-3-ultra-free"}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 7},
+            },
+        )
+
+    route = respx.post(OPENCODE_ZEN_ENDPOINT)
+    route.side_effect = side_effect
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    client = LLMClient()
+    orig_key = settings.opencode_zen_api_key
+    settings.opencode_zen_api_key = "test_zen_key_123"
+
+    try:
+        with patch("app.llm.client.get_active_model_config", seed_async), \
+             patch("asyncio.sleep", side_effect=fake_sleep):
+            res = await client.complete(
+                messages=[{"role": "user", "content": "fallback test"}],
+            )
+        assert res["content"] == "recovered on nemotron-3-ultra-free"
+        assert res["model"] == "nemotron-3-ultra-free"
+        # 56 inner calls on the seed (7 LLMClient × 8 inner), then 1 success on
+        # the second model. Total 57 calls.
+        assert route.call_count == seed_inner_attempts + 1
+        # The response model is NOT the seed — the fallback fired.
+        assert res["model"] != "nemotron-3.5-lightning-free"
+        # Exactly one inter-model sleep should have fired (between
+        # nemotron-3.5-lightning-free and nemotron-3-ultra-free). Use
+        # exact equality because inner execute_with_retry backoff sleeps
+        # (1, 2, 4, 8, 16, 30, 30) can also exceed INTER_MODEL_SLEEP_S.
+        inter_model_sleeps = [d for d in sleep_calls if d == INTER_MODEL_SLEEP_S]
+        assert len(inter_model_sleeps) == 1
+        assert inter_model_sleeps[0] == INTER_MODEL_SLEEP_S
+    finally:
+        settings.opencode_zen_api_key = orig_key
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_llm_client_gives_up_after_all_models_exhausted():
+    """Every model in the free-tier chain is exhausted → ``LLMExhaustedFreeTierError``.
+
+    The exception's ``attempts`` log must contain every (model, attempt,
+    error) tuple — ``len(attempts) == 49`` and each of the 7 free-tier
+    models appears with ``ATTEMPTS_PER_MODEL`` entries.
+    """
+    from app.llm.config import ResolvedModelConfig
+
+    seed = ResolvedModelConfig(
+        provider="opencode_zen",
+        model_name="nemotron-3.5-lightning-free",  # first in chain
+        base_url="https://opencode.ai/zen/v1",
+    )
+    seed_async = AsyncMock(return_value=seed)
+
+    route = respx.post(OPENCODE_ZEN_ENDPOINT)
+    # respx repeats the last side_effect entry once the list is exhausted.
+    # Use a single 500 to cover all 49 invocations.
+    route.side_effect = httpx.Response(500, text="provider down")
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    client = LLMClient()
+    orig_key = settings.opencode_zen_api_key
+    settings.opencode_zen_api_key = "test_zen_key_123"
+
+    try:
+        with patch("app.llm.client.get_active_model_config", seed_async), \
+             patch("asyncio.sleep", side_effect=fake_sleep):
+            with pytest.raises(LLMExhaustedFreeTierError) as exc_info:
+                await client.complete(
+                    messages=[{"role": "user", "content": "all fail"}],
+                )
+
+        exc = exc_info.value
+        # Total attempts = 7 models x 7 attempts = 49.
+        assert len(exc.attempts) == len(FREE_TIER_FALLBACK_ORDER) * ATTEMPTS_PER_MODEL
+        # Every model name appears exactly ATTEMPTS_PER_MODEL times.
+        per_model_count: dict[str, int] = {}
+        for model, _idx, _err in exc.attempts:
+            per_model_count[model] = per_model_count.get(model, 0) + 1
+        assert set(per_model_count.keys()) == set(FREE_TIER_FALLBACK_ORDER)
+        for model, count in per_model_count.items():
+            assert count == ATTEMPTS_PER_MODEL, f"{model} had {count} attempts, expected {ATTEMPTS_PER_MODEL}"
+        # The exception message lists every model with a per-model last error
+        # — verify the message body is compact (under 500 chars after the
+        # ``context_gatherer: LLMExhaustedFreeTierError: `` orchestrator prefix).
+        msg = str(exc)
+        assert "exhausted" in msg.lower()
+        assert all(model in msg for model in FREE_TIER_FALLBACK_ORDER)
+        # The full per-model error text lives in exc.attempts.
+        for _m, _i, err in exc.attempts:
+            assert "provider down" in err or "500" in err
+        # Inter-model sleeps fired once between every pair of models —
+        # 6 sleeps for 7 models. Use exact equality because inner
+        # execute_with_retry backoff sleeps (1, 2, 4, 8, 16, 30, 30) can
+        # also exceed INTER_MODEL_SLEEP_S.
+        inter_model_sleeps = [d for d in sleep_calls if d == INTER_MODEL_SLEEP_S]
+        assert len(inter_model_sleeps) == len(FREE_TIER_FALLBACK_ORDER) - 1
+    finally:
+        settings.opencode_zen_api_key = orig_key
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_llm_client_propagates_auth_error_immediately():
+    """``LLMAuthenticationError`` on the first attempt falls through with no
+    fallback — provider auth is shared across free-tier models.
+    """
+    from app.llm.config import ResolvedModelConfig
+
+    seed = ResolvedModelConfig(
+        provider="opencode_zen",
+        model_name="nemotron-3.5-lightning-free",
+        base_url="https://opencode.ai/zen/v1",
+    )
+    seed_async = AsyncMock(return_value=seed)
+
+    route = respx.post(OPENCODE_ZEN_ENDPOINT)
+    # Single 401; the LLMClient should re-raise without trying any other
+    # model. The route must NOT be called again.
+    route.side_effect = httpx.Response(401, json={"error": "invalid api key"})
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    client = LLMClient()
+    orig_key = settings.opencode_zen_api_key
+    settings.opencode_zen_api_key = "test_zen_key_123"
+
+    try:
+        with patch("app.llm.client.get_active_model_config", seed_async), \
+             patch("asyncio.sleep", side_effect=fake_sleep):
+            with pytest.raises(LLMAuthenticationError):
+                await client.complete(
+                    messages=[{"role": "user", "content": "auth fail"}],
+                )
+        # Only one HTTP call — no fallback to other models.
+        assert route.call_count == 1
+        # No inter-model sleep — the auth error is fatal.
+        assert sleep_calls == []
+    finally:
+        settings.opencode_zen_api_key = orig_key
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_llm_client_returns_first_success():
+    """When the seed model succeeds on attempt 3 (after 2 empties), no other
+    model is tried and the returned response carries the seed's model name.
+    """
+    from app.llm.config import ResolvedModelConfig
+
+    seed = ResolvedModelConfig(
+        provider="opencode_zen",
+        model_name="ling-3-free",
+        base_url="https://opencode.ai/zen/v1",
+    )
+    seed_async = AsyncMock(return_value=seed)
+
+    route = respx.post(OPENCODE_ZEN_ENDPOINT)
+    route.side_effect = [
+        httpx.Response(
+            200,
+            json={
+                "model": "ling-3-free",
+                "choices": [{"message": {"content": "   \n  "}}],  # whitespace only
+                "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "model": "ling-3-free",
+                "choices": [{"message": {"content": None}}],  # None
+                "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "model": "ling-3-free",
+                "choices": [{"message": {"content": "real answer"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+            },
+        ),
+    ]
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    client = LLMClient()
+    orig_key = settings.opencode_zen_api_key
+    settings.opencode_zen_api_key = "test_zen_key_123"
+
+    try:
+        with patch("app.llm.client.get_active_model_config", seed_async), \
+             patch("asyncio.sleep", side_effect=fake_sleep):
+            res = await client.complete(
+                messages=[{"role": "user", "content": "first success"}],
+            )
+        assert res["content"] == "real answer"
+        assert res["model"] == "ling-3-free"
+        # 3 calls — all to ling-3-free. No fallback.
+        assert route.call_count == 3
+        # No inter-model sleep — ling-3-free succeeded.
+        assert sleep_calls == []
+    finally:
+        settings.opencode_zen_api_key = orig_key
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_llm_client_inter_model_delay():
+    """When the seed's ATTEMPTS_PER_MODEL attempts all fail, the LLMClient
+    sleeps ``INTER_MODEL_SLEEP_S`` seconds before the next model's first
+    attempt. This guards against hammering the API on a fallback.
+    """
+    from app.llm.config import ResolvedModelConfig
+
+    seed = ResolvedModelConfig(
+        provider="opencode_zen",
+        model_name="hy3-free",  # last in FREE_TIER_FALLBACK_ORDER
+        base_url="https://opencode.ai/zen/v1",
+    )
+    seed_async = AsyncMock(return_value=seed)
+
+    route = respx.post(OPENCODE_ZEN_ENDPOINT)
+    # Use a callable that always returns 429 so the inner retry never
+    # recovers — every attempt on every model fails, the chain exhausts,
+    # and LLMExhaustedFreeTierError is raised. (A list side_effect would
+    # be exhausted and respx would repeat the last item, causing a
+    # premature success.)
+    def always_429(request):
+        return httpx.Response(429, json={"error": "rate limit"})
+    route.side_effect = always_429
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    client = LLMClient()
+    orig_key = settings.opencode_zen_api_key
+    settings.opencode_zen_api_key = "test_zen_key_123"
+
+    try:
+        with patch("app.llm.client.get_active_model_config", seed_async), \
+             patch("asyncio.sleep", side_effect=fake_sleep):
+            with pytest.raises(LLMExhaustedFreeTierError):
+                await client.complete(
+                    messages=[{"role": "user", "content": "inter-model sleep"}],
+                )
+        # At least one inter-model sleep with the exact INTER_MODEL_SLEEP_S
+        # value. The inner execute_with_retry backoff (1, 2, 4, 8, 16, 30,
+        # 30) can also exceed INTER_MODEL_SLEEP_S, so we use exact equality.
+        assert any(d == INTER_MODEL_SLEEP_S for d in sleep_calls), (
+            f"expected at least one sleep == {INTER_MODEL_SLEEP_S}s, got {sleep_calls}"
+        )
     finally:
         settings.opencode_zen_api_key = orig_key

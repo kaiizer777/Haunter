@@ -42,3 +42,64 @@ class LLMInvalidRequestError(LLMError):
 
     def __init__(self, message: str = "Invalid LLM request payload") -> None:
         super().__init__(message=message, status_code=400)
+
+
+def _truncate_for_failure_reason(s: str, n: int) -> str:
+    """Truncate a string to at most n characters, appending an ellipsis when cut.
+
+    The orchestrator's ``_format_failure_reason`` truncates the final stored
+    value to 500 chars; this helper trims individual error tokens so the
+    composed multi-model message still fits with room for the stage prefix.
+    """
+    if len(s) <= n:
+        return s
+    return s[: max(0, n - 1)] + "\u2026"
+
+
+class LLMExhaustedFreeTierError(LLMError):
+    """
+    All free-tier models on the configured provider were retried per
+    ``ATTEMPTS_PER_MODEL`` and every one failed. Carries the full attempt log
+    so the orchestrator's ``_format_failure_reason`` can surface per-model
+    last-error info on the dashboard.
+
+    Attributes:
+        attempts: Ordered list of ``(model_name, attempt_index, error_message)``
+            tuples — one per HTTP call that failed across the whole chain.
+    """
+
+    # Per-model last-error truncation budget. Keeps the composed message under
+    # the orchestrator's 500-char ``failure_reason`` cap even when 7 models
+    # are listed: 7 * (~32 + 4) ~ 252 chars body + ~80 header = ~332 chars,
+    # well below the 500-char limit.
+    _PER_MODEL_ERR_MAX_CHARS = 32
+
+    def __init__(
+        self,
+        attempts: list[tuple[str, int, str]],
+        message: str | None = None,
+    ) -> None:
+        self.attempts: list[tuple[str, int, str]] = list(attempts)
+        if message is None:
+            message = self._build_message(self.attempts)
+        super().__init__(message=message, status_code=502)
+        self.message = message
+
+    @classmethod
+    def _build_message(cls, attempts: list[tuple[str, int, str]]) -> str:
+        # Surface the LAST error per model (not every attempt) so the
+        # message stays compact. Later attempts overwrite earlier ones
+        # because we walk the chain model-by-model, attempt-by-attempt.
+        per_model_last_err: dict[str, str] = {}
+        for model, _idx, err in attempts:
+            per_model_last_err[model] = err
+
+        parts = [
+            f"{model}: {_truncate_for_failure_reason(err, cls._PER_MODEL_ERR_MAX_CHARS)}"
+            for model, err in per_model_last_err.items()
+        ]
+        body = ", ".join(parts)
+        return (
+            f"All {len(per_model_last_err)} free-tier models exhausted "
+            f"({len(attempts)} attempts). Last errors: {body}"
+        )
