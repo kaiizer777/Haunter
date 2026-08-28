@@ -152,7 +152,7 @@ resource "aws_lambda_function" "haunter" {
   package_type  = "Zip"
   filename      = var.lambda_zip_path
   handler       = "lambda_handler.handler"
-  runtime       = "python3.12"
+  runtime       = "python3.11"
   architectures = ["x86_64"]
 
   timeout     = 900   # 15 minutes — covers CodeBuild poll loop
@@ -222,14 +222,9 @@ resource "aws_lambda_function" "haunter" {
 resource "aws_lambda_function_url" "haunter" {
   function_name      = aws_lambda_function.haunter.function_name
   authorization_type = "NONE"  # Secured via HMAC-SHA256 in webhooks.py
-
-  cors {
-    allow_credentials = true
-    allow_origins     = ["https://haunter-dfg.pages.dev"]
-    allow_methods     = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-    allow_headers     = ["Content-Type", "Cookie", "Authorization"]
-    max_age           = 3600
-  }
+  # CORS disabled at Function URL layer — FastAPI CORSMiddleware (backend/main.py:38) owns CORS.
+  # Duplicate headers (Lambda + FastAPI both add Access-Control-Allow-Origin) caused
+  # "contains multiple values 'https://haunter-dfg.pages.dev, https://haunter-dfg.pages.dev'" error.
 }
 
 # Fix for AWS accounts created after ~2024: "Block public access" for Function URLs
