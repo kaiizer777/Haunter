@@ -45,6 +45,12 @@ class RepoOut(BaseModel):
 # Extend this list when a new provider is vetted and approved.
 AllowedProvider = Literal["opencode_zen", "openai", "anthropic"]
 
+# Allowlisted hosting/sandbox providers — gcp|aws only, never free-text.
+# Used by PUT /config/hosting and validated in the hosting adapter.
+# Extending this requires both code review and policy justification.
+AllowedHostingProvider = Literal["gcp", "aws"]
+AllowedSandboxProvider = Literal["gcp", "aws"]
+
 # Allowlisted model names — must match a provider's supported models.
 AllowedModelName = Literal[
     "nemotron-3.5-lightning-free",
@@ -149,3 +155,32 @@ class WorkflowRunWebhookPayload(BaseModel):
 
     model_config = {"extra": "ignore"}
 
+
+# ---------------------------------------------------------------------------
+# Hosting/Sandbox provider config schemas (Phase 14)
+# ---------------------------------------------------------------------------
+
+
+class HostingConfigUpdate(BaseModel):
+    """
+    Used by PUT /config/hosting to switch HOSTING_PROVIDER and/or SANDBOX_PROVIDER.
+
+    Both values are strict Literal allowlists — no free-text, no base_url injection,
+    no provider values derived from request headers.
+    Admin-gated endpoint: requires ADMIN_USER_ID match (same as PUT /config/model).
+    """
+
+    hosting_provider: AllowedHostingProvider
+    sandbox_provider: AllowedSandboxProvider
+
+
+class HostingConfigOut(BaseModel):
+    """
+    Current active hosting and sandbox provider configuration.
+    Values are read from DB (system_configs) with 60s TTL cache, falling
+    back to env var defaults (HOSTING_PROVIDER, SANDBOX_PROVIDER).
+    """
+
+    hosting_provider: str
+    sandbox_provider: str
+    source: str  # "db" | "env" — indicates where the active value came from

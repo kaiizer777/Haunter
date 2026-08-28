@@ -93,6 +93,18 @@ class Settings(BaseSettings):
     aws_codebuild_project_name: Optional[str] = None
     aws_region: str = "us-east-1"
 
+    # Phase 14 — Hosting provider selection.
+    # "gcp" uses Cloud Run (default, HAUNTER.md:147).
+    # "aws" uses Lambda + Function URL (always-free 1M req + 400k GB-s/mo).
+    # Hot-switchable via DB (system_configs key="hosting_provider") with 60s TTL cache.
+    # Allowlisted: "gcp" | "aws" only — never free-text, never from request headers.
+    hosting_provider: str = "gcp"
+
+    # Name/ARN of the Lambda function to self-invoke for async pipeline execution.
+    # Defaults to AWS_LAMBDA_FUNCTION_NAME env var (set automatically by Lambda runtime).
+    # Required when hosting_provider="aws". Never commit a hardcoded ARN.
+    aws_lambda_function_name: Optional[str] = None
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

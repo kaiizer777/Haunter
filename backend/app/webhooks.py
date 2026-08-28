@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_db
 from app.models import Repo, Run
-from app.orchestrator import handle_failed_run
 from app.schemas import WorkflowRunWebhookPayload
 
 logger = logging.getLogger(__name__)
@@ -184,7 +183,13 @@ async def github_webhook(
         }
 
     # 10. Schedule pipeline asynchronously and return fast 2xx
-    background_tasks.add_task(handle_failed_run, new_run.id)
+    # Provider-agnostic: GCPHostingAdapter uses BackgroundTasks (Cloud Run keeps
+    # process alive post-response); AWSHostingAdapter invokes Lambda async
+    # (boto3 InvocationType='Event') because Lambda freezes execution context
+    # after the response is returned — BackgroundTasks would never execute.
+    from app.adapters.hosting import get_hosting_adapter
+    adapter = await get_hosting_adapter()
+    await adapter.schedule_pipeline(new_run.id, background_tasks)
 
     return {
         "status": "queued",

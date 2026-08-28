@@ -10,6 +10,8 @@ httpx==0.28.1
 slowapi==0.1.9
 google-cloud-build==3.*
 boto3==1.*
+mangum==0.19.*  # ASGI adapter for AWS Lambda (Phase 14)
+cryptography==44.*  # Fernet token encryption at rest
 
 respx==0.*
 freezegun==1.*

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, Float
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, Float, Index
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -176,3 +176,31 @@ class EvalResult(Base):
     )
 
     run: Mapped[Optional["Run"]] = relationship("Run", back_populates="eval_result")
+
+
+class SystemConfig(Base):
+    """
+    Key-value store for hot-switchable system configuration.
+
+    Used by the hosting adapter (Phase 14) to allow HOSTING_PROVIDER and
+    SANDBOX_PROVIDER to be switched without redeploy via PUT /config/hosting.
+    Values are read per-request with a 60s in-process TTL cache.
+
+    Security:
+    - Keys are allowlisted at the application layer (router validates against
+      _ALLOWED_SYSTEM_CONFIG_KEYS before writing).
+    - Values are allowlisted via Pydantic (AllowedHostingProvider Literal)
+      before write — no free-text injection.
+    - Table is admin-gated (same get_current_user + ADMIN_USER_ID check as
+      PUT /config/model).
+    """
+
+    __tablename__ = "system_configs"
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    value: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
