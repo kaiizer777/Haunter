@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AppLayout } from "@/components/layout/app-layout";
 import { StatusBadge } from "@/components/runs/status-badge";
@@ -10,47 +11,27 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { api, TraceOut } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
-import { 
-  ArrowLeft, 
-  ExternalLink, 
-  GitPullRequest, 
-  AlertCircle, 
+import {
+  ArrowLeft,
+  ExternalLink,
+  GitPullRequest,
+  AlertCircle,
   FileText,
-  Clock
+  Clock,
 } from "lucide-react";
 
-/**
- * Read the run UUID directly from the browser URL.
- *
- * We cannot trust Next.js's router params here — with `output: "export"` and
- * Cloudflare Pages, the static page is always generated with `id = "placeholder"`
- * so `useParams()` / the params prop will always return "placeholder" at runtime.
- * The actual UUID is always present in `window.location.pathname` after the hard
- * navigation triggered by `window.location.assign()` on the runs list page.
- */
-function getRunIdFromUrl(): string {
-  if (typeof window === "undefined") return "";
-  const match = window.location.pathname.match(/\/runs\/([^/?#]+)/);
-  if (!match || !match[1] || match[1] === "placeholder") return "";
-  return decodeURIComponent(match[1]);
-}
-
 export default function RunDetailClient() {
-  // Always read from URL — never trust Next.js static-export router params.
-  const [runId, setRunId] = useState<string>("");
-
-  useEffect(() => {
-    // On client mount the real URL is available. Grab it once.
-    const id = getRunIdFromUrl();
-    if (id) setRunId(id);
-  }, []);
+  // Run id is carried in the `?id=<uuid>` query string so this can be a
+  // plain static page under `output: "export"`.
+  const searchParams = useSearchParams();
+  const runId = useMemo(() => searchParams.get("id") ?? "", [searchParams]);
 
   const [trace, setTrace] = useState<TraceOut | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchTrace = useCallback(async () => {
-    if (!runId || runId === "placeholder") {
+    if (!runId) {
       setLoading(false);
       return;
     }
@@ -77,7 +58,7 @@ export default function RunDetailClient() {
   return (
     <AppLayout
       title="Run Trace & Observability"
-      subtitle={`Run ID: ${runId}`}
+      subtitle={runId ? `Run ID: ${runId}` : "Run Trace"}
       actions={
         <Link href="/runs">
           <Button variant="outline" size="sm" className="flex items-center gap-1.5 text-xs">
@@ -88,6 +69,12 @@ export default function RunDetailClient() {
       }
     >
       <div className="space-y-6">
+        {!runId && !loading && (
+          <div className="rounded-[6px] border border-amber-900/60 bg-amber-950/30 p-3.5 text-xs text-amber-300">
+            Missing <code className="font-mono">id</code> query parameter. Open this page from a run row.
+          </div>
+        )}
+
         {error && (
           <div className="flex items-center gap-2 rounded-[6px] border border-red-900/60 bg-red-950/30 p-3.5 text-xs text-red-300">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
@@ -173,4 +160,3 @@ export default function RunDetailClient() {
     </AppLayout>
   );
 }
-

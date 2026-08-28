@@ -157,7 +157,7 @@ export default function RunsPage() {
                   return (
                     <TableRow
                       key={run.id}
-                      onClick={() => window.location.assign(`/runs/${run.id}`)}
+                      onClick={() => router.push(`/runs/detail?id=${run.id}`)}
                       className="cursor-pointer group"
                     >
                       {/* Status */}
