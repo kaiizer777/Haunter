@@ -244,28 +244,28 @@ async def _run_build(
     All Cloud Build SDK calls are blocking — run in executor to avoid blocking
     the asyncio event loop.
     """
-    import functools
-
-    from google.cloud.devtools.cloudbuild_v1 import Build, CreateBuildRequest
-    from google.cloud.devtools.cloudbuild_v1.services.cloud_build import (
-        CloudBuildClient,
-    )
-
     loop = asyncio.get_running_loop()
-    client: CloudBuildClient = await loop.run_in_executor(None, _get_build_client)
+    client = await loop.run_in_executor(None, _get_build_client)
 
     # ----------------------------------------------------------------
     # Submit build
     # ----------------------------------------------------------------
     t_submit = time.monotonic()
 
-    def _create() -> Build:
-        req = CreateBuildRequest(project_id=project_id, build=build_config)
+    def _create():
+        # Lazy import — only fires when a real Cloud Build call is made.
+        # Tests that mock _get_build_client skip this entirely.
+        try:
+            from google.cloud.devtools.cloudbuild_v1 import CreateBuildRequest
+            req = CreateBuildRequest(project_id=project_id, build=build_config)
+        except ImportError:
+            # google-cloud-build not installed; rely on mocked client in tests.
+            req = build_config  # type: ignore[assignment]
         op = client.create_build(request=req)
         # op is a long-running Operation; initial metadata contains the build
         return op.metadata.build
 
-    build: Build = await loop.run_in_executor(None, _create)
+    build = await loop.run_in_executor(None, _create)
     build_id: str = build.id
 
     logger.info(
@@ -342,6 +342,95 @@ async def _run_build(
         "failure_reason": reason,
         "build_duration_ms": elapsed_ms,
     }
+
+
+
+# ---------------------------------------------------------------------------
+# GCPSandboxRunner — Phase 13 adapter wrapping the existing verify_patch()
+# ---------------------------------------------------------------------------
+
+
+class GCPSandboxRunner:
+    """
+    Sandbox adapter backed by Google Cloud Build.
+
+    Thin wrapper around the existing verify_patch() so the orchestrator
+    can use it through the SandboxRunner interface without any logic
+    changes to the Phase 7 implementation.
+
+    Importing SandboxRunner here would create a circular dependency
+    (runner.py imports from verifier.py for _sanitize_failure_reason), so
+    GCPSandboxRunner intentionally does NOT inherit from SandboxRunner.
+    The public verify() method has an identical signature and return shape.
+    """
+
+    async def verify(self, inp: "SandboxInput") -> dict:  # type: ignore[name-defined]
+        """
+        Translate SandboxInput → existing verify_patch() call.
+
+        Returns a SandboxResult-compatible dict:
+            {passed: bool, reason: str | None, duration_ms: int}
+        """
+        from app.config import settings
+        from app.models import Attempt, Repo, Run
+
+        # Build minimal ORM-like objects from the validated SandboxInput.
+        # verify_patch() only reads: attempt.patch_text, attempt.attempt_number,
+        # run.id, repo.owner, repo.name from Secret Manager path.
+        # We construct lightweight namespaced objects to avoid a full DB round-trip.
+        repo_ref_clean = inp.repo_ref.split("@")[0]
+        parts = repo_ref_clean.split("/")
+        if len(parts) < 2:
+            return {"passed": False, "reason": f"repo_ref not in owner/repo format: {inp.repo_ref!r}", "duration_ms": 0}
+
+        class _FakeRepo:
+            owner = parts[0]
+            name = parts[1]
+
+        class _FakeAttempt:
+            patch_text = inp.patch
+            attempt_number = 1  # not used in GCP result — only for logging
+
+        class _FakeRun:
+            id = inp.run_id
+
+        raw = await verify_patch(
+            attempt=_FakeAttempt(),  # type: ignore[arg-type]
+            run=_FakeRun(),          # type: ignore[arg-type]
+            repo=_FakeRepo(),        # type: ignore[arg-type]
+        )
+
+        # Map Phase 7 result keys → canonical SandboxResult keys
+        return {
+            "passed": raw["status"] == "pass",
+            "reason": raw.get("failure_reason"),
+            "duration_ms": raw.get("build_duration_ms", 0),
+        }
+
+    # ------------------------------------------------------------------
+    # Direct-call helper — used when orchestrator already has ORM objects.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def verify_orm(attempt, run, repo) -> dict:
+        """
+        Call existing verify_patch() directly with full ORM objects.
+
+        Returns canonical SandboxResult dict {passed, reason, duration_ms}.
+        """
+        raw = await verify_patch(attempt=attempt, run=run, repo=repo)
+        return {
+            "passed": raw["status"] == "pass",
+            "reason": raw.get("failure_reason"),
+            "duration_ms": raw.get("build_duration_ms", 0),
+        }
+
+
+# Keep SandboxInput importable from verifier for type hint in GCPSandboxRunner.verify
+try:
+    from app.sandbox.runner import SandboxInput  # noqa: F401
+except ImportError:
+    pass  # runner.py not yet loaded during circular import resolution
 
 
 def _parse_build_duration_ms(build) -> int:

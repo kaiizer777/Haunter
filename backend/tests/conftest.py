@@ -21,12 +21,18 @@ from main import app
 
 
 async def truncate_all(db: AsyncSession) -> None:
-    """Clean up all tables atomically. CASCADE handles FK ordering automatically."""
-    await db.execute(
-        text(
-            "TRUNCATE TABLE eval_results, attempts, run_steps, runs, repos, model_configs, users RESTART IDENTITY CASCADE"
-        )
-    )
+    """Clean up all tables in FK order. Each statement is a separate execute()
+    because asyncpg's prepared-statement protocol rejects multi-command strings."""
+    for stmt in (
+        "DELETE FROM eval_results",
+        "DELETE FROM attempts",
+        "DELETE FROM run_steps",
+        "DELETE FROM runs",
+        "DELETE FROM repos",
+        "DELETE FROM model_configs",
+        "DELETE FROM users",
+    ):
+        await db.execute(text(stmt))
     await db.commit()
 
 

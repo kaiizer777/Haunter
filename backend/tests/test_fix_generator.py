@@ -210,12 +210,17 @@ async def test_orchestrator_advances_to_pending_pr(db: AsyncSession) -> None:
             new_callable=AsyncMock,
             return_value=_VALID_LLM_RESPONSE,
         ),
-        # Phase 7: mock verify_patch to return pass immediately
         patch(
             "app.sandbox.verifier.verify_patch",
             new_callable=AsyncMock,
             return_value={"status": "pass", "failure_reason": None, "build_duration_ms": 1234},
         ),
+        # Phase 8 additions: mock PR opening flow
+        patch("app.subagents.pr_writer.generate_pr_text", new_callable=AsyncMock, return_value={"title": "t", "body": "b"}),
+        patch("app.github.pr.get_installation_token", new_callable=AsyncMock, return_value="token"),
+        patch("app.github.pr.create_branch", new_callable=AsyncMock),
+        patch("app.github.pr.commit_patch", new_callable=AsyncMock),
+        patch("app.github.pr.open_pr", new_callable=AsyncMock, return_value={"html_url": "url", "number": 1}),
     ):
         from app.orchestrator import handle_failed_run
 
@@ -225,7 +230,8 @@ async def test_orchestrator_advances_to_pending_pr(db: AsyncSession) -> None:
 
     result = await db.execute(select(Run).where(Run.id == run_id))
     updated_run = result.scalar_one()
-    assert updated_run.status == "pending_pr"
+    # Phase 8: advances through pending_pr and creates PR, ending in pr_opened
+    assert updated_run.status == "pr_opened"
 
     attempts_result = await db.execute(select(Attempt).where(Attempt.run_id == run_id))
     attempts = attempts_result.scalars().all()

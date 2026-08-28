@@ -75,7 +75,26 @@ class Settings(BaseSettings):
     # Required when Cloud Build verification is enabled.
     gcp_project_id: Optional[str] = None
 
+    # GitHub App credentials for repo-write operations (Phase 8).
+    # App permissions required: contents:write, pull_requests:write — NO administration.
+    # github_app_private_key is a PEM string — load from GCP Secret Manager in prod.
+    # NEVER commit the PEM or log it. If not set, installation token auth is unavailable
+    # and get_installation_token() falls back to settings.github_token (dev only).
+    github_app_id: Optional[str] = None
+    github_app_private_key: Optional[str] = None  # full PEM, newlines preserved
+
+    # Phase 13 — Sandbox provider selection.
+    # "gcp" uses Cloud Build (default, Phase 7). "aws" uses CodeBuild adapter.
+    sandbox_provider: str = "gcp"
+
+    # AWS CodeBuild adapter (required when sandbox_provider="aws").
+    # aws_codebuild_project_name: pre-provisioned CodeBuild project (see infra/aws/).
+    # aws_region: AWS region the CodeBuild project lives in.
+    aws_codebuild_project_name: Optional[str] = None
+    aws_region: str = "us-east-1"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
 
     @property
     def async_database_url(self) -> str:

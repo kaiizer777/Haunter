@@ -93,6 +93,16 @@ class Run(Base):
     # Only the redacted, token-bounded summary is stored — never raw CI logs or diffs.
     diagnosis_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Phase 8 — PR Writer results.
+    # pr_url/pr_number: set when a PR is opened successfully (pr_opened status).
+    # pr_branch: the haunter/fix-* branch created server-side, never from LLM.
+    # final_summary: first 1000 chars of LLM-generated PR body — plain text only,
+    #   html.escape'd before storage to prevent stored XSS when rendered.
+    pr_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    pr_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    pr_branch: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    final_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     repo: Mapped["Repo"] = relationship("Repo", back_populates="runs")
     run_steps: Mapped[list["RunStep"]] = relationship("RunStep", back_populates="run", cascade="all, delete-orphan")
     attempts: Mapped[list["Attempt"]] = relationship("Attempt", back_populates="run", cascade="all, delete-orphan")

@@ -135,88 +135,147 @@ Excludes deployment (separate later phase). Project init assumed done. Each phas
 ---
 
 ## Phase 7 — Sandbox Verifier (Cloud Build Integration)
-- [ ] Cloud Build job definition (build config): clone repo fresh, detect language/runtime (or use repo's own Dockerfile if present), install deps, apply patch, run test suite
-- [ ] Python `google-cloud-build` client wrapper in orchestrator: trigger build via `cloudbuild_v1.CloudBuildClient` (`create_build` or `run_build_trigger`), pass repo ref + patch as substitution/input
-- [ ] Poll build status (or use build completion callback) until pass/fail; extract short failure reason (not full raw output) on failure
-- [ ] Persist verification result on the `attempts` row: pass/fail, failure reason, build duration
-- [ ] Orchestrator retry logic: on fail, if attempts < cap (2–3), loop back to Fix Generator with failure reason injected into context (alternate strategy); on exhaust, move to fallback state
-- [ ] On pass, advance orchestrator state to `pending_pr`
-- [ ] **[SECURE]** Cloud Build job runs with a dedicated, minimally-privileged service account (no access to the app's Secret Manager secrets, no access to other tenants' repo credentials, no egress beyond what's needed to clone the target repo and fetch deps) — no Docker-in-Docker, consistent with locked stack, and no shared persistent volume between concurrent builds for different tenants
-- [ ] **[SECURE]** Per-build timeout and resource limits (CPU/memory/build minutes) enforced at the Cloud Build config level to prevent a malicious or runaway patch (e.g. fork bomb, infinite loop in a test) from causing resource exhaustion or cost abuse
-- [ ] **[SECURE]** Build substitutions (repo ref, patch content) passed to `create_build`/`run_build_trigger` are validated/escaped for Cloud Build substitution syntax before submission, preventing substitution-injection into the build config
-- [ ] **[SECURE]** Extracted failure reason stored on `attempts` is truncated/sanitized (strip potential secrets accidentally echoed by a test failure, cap length) before persistence and before being fed back into the next Fix Generator call
-- [ ] **[SECURE]** Retry loop's attempt cap is enforced atomically against the DB (e.g. a DB-level check-and-increment or row lock) so concurrent webhook redeliveries for the same run can't bypass the 2–3 attempt ceiling
-- [ ] **[SECURE]** Build status polling authenticates only via the orchestrator's own service account credentials (never accepts an unauthenticated public callback URL for build completion) to prevent spoofed build-result injection
+- [x] Cloud Build job definition (build config): clone repo fresh, detect language/runtime (or use repo's own Dockerfile if present), install deps, apply patch, run test suite
+- [x] Python `google-cloud-build` client wrapper in orchestrator: trigger build via `cloudbuild_v1.CloudBuildClient` (`create_build` or `run_build_trigger`), pass repo ref + patch as substitution/input
+- [x] Poll build status (or use build completion callback) until pass/fail; extract short failure reason (not full raw output) on failure
+- [x] Persist verification result on the `attempts` row: pass/fail, failure reason, build duration
+- [x] Orchestrator retry logic: on fail, if attempts < cap (2–3), loop back to Fix Generator with failure reason injected into context (alternate strategy); on exhaust, move to fallback state
+- [x] On pass, advance orchestrator state to `pending_pr`
+- [x] **[SECURE]** Cloud Build job runs with a dedicated, minimally-privileged service account (no access to the app's Secret Manager secrets, no access to other tenants' repo credentials, no egress beyond what's needed to clone the target repo and fetch deps) — no Docker-in-Docker, consistent with locked stack, and no shared persistent volume between concurrent builds for different tenants
+- [x] **[SECURE]** Per-build timeout and resource limits (CPU/memory/build minutes) enforced at the Cloud Build config level to prevent a malicious or runaway patch (e.g. fork bomb, infinite loop in a test) from causing resource exhaustion or cost abuse
+- [x] **[SECURE]** Build substitutions (repo ref, patch content) passed to `create_build`/`run_build_trigger` are validated/escaped for Cloud Build substitution syntax before submission, preventing substitution-injection into the build config
+- [x] **[SECURE]** Extracted failure reason stored on `attempts` is truncated/sanitized (strip potential secrets accidentally echoed by a test failure, cap length) before persistence and before being fed back into the next Fix Generator call
+- [x] **[SECURE]** Retry loop's attempt cap is enforced atomically against the DB (e.g. a DB-level check-and-increment or row lock) so concurrent webhook redeliveries for the same run can't bypass the 2–3 attempt ceiling
+- [x] **[SECURE]** Build status polling authenticates only via the orchestrator's own service account credentials (never accepts an unauthenticated public callback URL for build completion) to prevent spoofed build-result injection
 
-**Exit criteria:** a generated patch is actually applied and tested in an isolated Cloud Build job against a real public repo, pass/fail correctly recorded, retry loop demonstrably triggers an alternate fix on failure. **[SECURE]** the Cloud Build service account is confirmed to have no access to app secrets or other tenants' data (verified via IAM policy review), a build exceeding its resource/time limit is terminated rather than left running, and concurrent duplicate triggers for the same run are confirmed not to exceed the attempt cap.
+**Exit criteria:** a generated patch is actually applied and tested in an isolated Cloud Build job against a real public repo, pass/fail correctly recorded, retry loop demonstrably triggers an alternate fix on failure. **[SECURE]** the Cloud Build service account is confirmed to have no access to app secrets or other tenants' data (verified via IAM policy review), a build exceeding its resource/time limit is terminated rather than left running, and concurrent duplicate triggers for the same run are confirmed not to exceed the attempt cap — Phase 7 DONE (12/12).
 
 ---
 
 ## Phase 8 — PR Writer Subagent + Fallback Path
-- [ ] Implement PR Writer subagent: takes verified fix + root-cause summary, returns PR title + description text via `LLMClient`
-- [ ] GitHub REST API integration: create branch, commit patch, open PR with generated title/description, link back to run
-- [ ] Fallback path: if all attempts exhausted without a pass, post a diagnosis-only comment on the original commit/PR (root cause + attempted fixes summary, no code pushed)
-- [ ] Orchestrator finalizes run status (`pr_opened` / `fallback_commented` / `error`) and writes final summary to `runs` table
-- [ ] End-to-end smoke test: full pipeline webhook → PR (or fallback comment) on a real test repo with a real failing workflow
-- [ ] **[SECURE]** PR branch creation uses the GitHub App's installation token scoped to only the target repo (never a broad personal access token), and the branch name is generated server-side (not derived from unsanitized LLM output) to prevent branch-name injection or collision with protected branches
-- [ ] **[SECURE]** GitHub App permissions for repo-write are the minimum needed to create branches/commits/PRs and post comments (`contents: write`, `pull_requests: write`) — explicitly no `administration`, no force-push/branch-protection-bypass rights, and the App cannot push directly to the default/protected branch, only open a PR against it
-- [ ] **[SECURE]** LLM-generated PR title/description is treated as untrusted text: length-capped and rendered as plain text/escaped markdown when displayed in the dashboard (Phase 11) to prevent stored injection via a maliciously-crafted commit message or log content that made it into the summary chain
-- [ ] **[SECURE]** Fallback diagnosis comment is similarly sanitized/length-capped before posting, and never includes raw secrets or full raw CI logs (only the distilled, already-redacted summary from Phase 5)
-- [ ] **[SECURE]** Orchestrator verifies the target repo/PR belongs to the run's associated tenant before making any GitHub write call, preventing a manipulated `run_id`/background task from writing to the wrong repository
+- [x] Implement PR Writer subagent: takes verified fix + root-cause summary, returns PR title + description text via `LLMClient`
+- [x] GitHub REST API integration: create branch, commit patch, open PR with generated title/description, link back to run
+- [x] Fallback path: if all attempts exhausted without a pass, post a diagnosis-only comment on the original commit/PR (root cause + attempted fixes summary, no code pushed)
+- [x] Orchestrator finalizes run status (`pr_opened` / `fallback_commented` / `error`) and writes final summary to `runs` table
+- [x] End-to-end smoke test: full pipeline webhook → PR (or fallback comment) on a real test repo with a real failing workflow
+- [x] **[SECURE]** PR branch creation uses the GitHub App's installation token scoped to only the target repo (never a broad personal access token), and the branch name is generated server-side (not derived from unsanitized LLM output) to prevent branch-name injection or collision with protected branches
+- [x] **[SECURE]** GitHub App permissions for repo-write are the minimum needed to create branches/commits/PRs and post comments (`contents: write`, `pull_requests: write`) — explicitly no `administration`, no force-push/branch-protection-bypass rights, and the App cannot push directly to the default/protected branch, only open a PR against it
+- [x] **[SECURE]** LLM-generated PR title/description is treated as untrusted text: length-capped and rendered as plain text/escaped markdown when displayed in the dashboard (Phase 11) to prevent stored injection via a maliciously-crafted commit message or log content that made it into the summary chain
+- [x] **[SECURE]** Fallback diagnosis comment is similarly sanitized/length-capped before posting, and never includes raw secrets or full raw CI logs (only the distilled, already-redacted summary from Phase 5)
+- [x] **[SECURE]** Orchestrator verifies the target repo/PR belongs to the run's associated tenant before making any GitHub write call, preventing a manipulated `run_id`/background task from writing to the wrong repository
 
-**Exit criteria:** a real failing CI run on a connected test repo results in either an actual opened PR with working fix, or a clear diagnosis comment — full pipeline works end-to-end at least once, unassisted. **[SECURE]** the GitHub App installation token used is confirmed scoped to only the intended repo with no direct-push-to-protected-branch capability, and a test with a deliberately adversarial PR-Writer prompt injection attempt (e.g. instructions embedded in log content) is confirmed not to alter orchestrator behavior or produce unescaped output in the PR/comment.
+**Exit criteria:** a real failing CI run on a connected test repo results in either an actual opened PR with working fix, or a clear diagnosis comment — full pipeline works end-to-end at least once, unassisted. **[SECURE]** the GitHub App installation token used is confirmed scoped to only the intended repo with no direct-push-to-protected-branch capability, and a test with a deliberately adversarial PR-Writer prompt injection attempt (e.g. instructions embedded in log content) is confirmed not to alter orchestrator behavior or produce unescaped output in the PR/comment — Phase 8 DONE (10/10).
 
 ---
 
 ## Phase 9 — Observability: Full Trace & Failure Classification
-- [ ] Structured trace query/endpoint: given a run id, return full step-by-step timeline (orchestrator decision → each subagent call → tokens/latency/cost per step) in chronological order
-- [ ] Failure classification logic: tag each failed/fallback run with a reason category (wrong diagnosis / wrong fix / tests still failing / sandbox error) — either LLM-assisted classification or rule-based on where in the pipeline it stopped
-- [ ] Aggregate endpoints: run list with filters (status, repo, date range), per-repo stats (success rate, avg attempts, avg cost)
-- [ ] Ensure every LLM call and Cloud Build call already logged (from earlier phases) is queryable in this unified trace view — backfill any gaps found
-- [ ] **[SECURE]** Trace endpoint (`GET /runs/{run_id}/trace`) and aggregate endpoints all enforce ownership via `get_current_user` — a `run_id`/`repo_id` filter belonging to another tenant returns 404, and list/aggregate queries are implicitly scoped to `WHERE repo.user_id = current_user.id` at the query level, never filtered client-side after an unscoped fetch
-- [ ] **[SECURE]** Date-range and filter query params are validated via Pydantic (bounded ranges, allowlisted status enum values) to prevent malformed input from causing expensive unbounded queries
-- [ ] **[SECURE]** Trace view confirms no raw secrets or full raw logs leaked into `run_steps`/`attempts` content during backfill (spot-check the redaction from Phase 5 held up across all historical rows before exposing this view)
+- [x] Structured trace query/endpoint: given a run id, return full step-by-step timeline (orchestrator decision → each subagent call → tokens/latency/cost per step) in chronological order
+- [x] Failure classification logic: tag each failed/fallback run with a reason category (wrong diagnosis / wrong fix / tests still failing / sandbox error) — either LLM-assisted classification or rule-based on where in the pipeline it stopped
+- [x] Aggregate endpoints: run list with filters (status, repo, date range), per-repo stats (success rate, avg attempts, avg cost)
+- [x] Ensure every LLM call and Cloud Build call already logged (from earlier phases) is queryable in this unified trace view — backfill any gaps found
+- [x] **[SECURE]** Trace endpoint (`GET /runs/{run_id}/trace`) and aggregate endpoints all enforce ownership via `get_current_user` — a `run_id`/`repo_id` filter belonging to another tenant returns 404, and list/aggregate queries are implicitly scoped to `WHERE repo.user_id = current_user.id` at the query level, never filtered client-side after an unscoped fetch
+- [x] **[SECURE]** Date-range and filter query params are validated via Pydantic (bounded ranges, allowlisted status enum values) to prevent malformed input from causing expensive unbounded queries
+- [x] **[SECURE]** Trace view confirms no raw secrets or full raw logs leaked into `run_steps`/`attempts` content during backfill (spot-check the redaction from Phase 5 held up across all historical rows before exposing this view)
 
-**Exit criteria:** given any run id, a single API call returns the complete step-by-step trace with costs and a failure classification if applicable; list/filter endpoints return correct aggregated stats. **[SECURE]** a second test user's authenticated request for the first user's `run_id` trace returns 404, and per-repo aggregate stats never include another tenant's runs.
+**Exit criteria:** given any run id, a single API call returns the complete step-by-step trace with costs and a failure classification if applicable; list/filter endpoints return correct aggregated stats. **[SECURE]** a second test user's authenticated request for the first user's `run_id` trace returns 404, and per-repo aggregate stats never include another tenant's runs. — Phase 9 DONE (7/7).
 
 ---
 
 ## Phase 10 — Eval Harness
-- [ ] Curate 15–20 golden test cases: real CI failures (import errors, type errors, failed assertions, dependency issues) with known-correct fixes, stored as fixtures (repo ref + commit + expected fix characteristics)
-- [ ] Eval runner script/endpoint: runs each golden case through the full pipeline (or targeted subagent), records pass/fail against expected outcome
-- [ ] Per-subagent eval: does Context Gatherer's summary match the actual root cause (LLM-graded or manual-labeled comparison)? Does Fix Generator's confidence score correlate with actual sandbox pass rate (compute correlation across attempts)?
-- [ ] Store eval run results in `eval_results` table: overall accuracy %, per-subagent scores, timestamp, linked to the model/provider config used
-- [ ] Regression comparison: given two eval runs (before/after a prompt or strategy change), diff the scores and flag regressions
-- [ ] Expose eval summary via API endpoint (feeds dashboard eval display later)
-- [ ] **[SECURE]** Eval runner endpoint (if exposed over HTTP rather than run only as an offline script) is restricted to the designated admin user (same pattern as the global model-config write in Phase 4), since it triggers real pipeline runs and Cloud Build jobs at will
-- [ ] **[SECURE]** Golden test fixtures use dedicated, non-production, non-sensitive public test repos (no fixtures pointing at a tenant's real connected repo) to avoid the eval harness ever writing a PR/comment against a real user's project
-- [ ] **[SECURE]** `GET /eval-results` endpoint scopes access consistently with the admin-only write above; eval data (which can reveal prompt/strategy details) is not exposed to arbitrary authenticated tenants by default
+- [x] Curate 15–20 golden test cases: real CI failures (import errors, type errors, failed assertions, dependency issues) with known-correct fixes, stored as fixtures (repo ref + commit + expected fix characteristics)
+- [x] Eval runner script/endpoint: runs each golden case through the full pipeline (or targeted subagent), records pass/fail against expected outcome
+- [x] Per-subagent eval: does Context Gatherer's summary match the actual root cause (LLM-graded or manual-labeled comparison)? Does Fix Generator's confidence score correlate with actual sandbox pass rate (compute correlation across attempts)?
+- [x] Store eval run results in `eval_results` table: overall accuracy %, per-subagent scores, timestamp, linked to the model/provider config used
+- [x] Regression comparison: given two eval runs (before/after a prompt or strategy change), diff the scores and flag regressions
+- [x] Expose eval summary via API endpoint (feeds dashboard eval display later)
+- [x] **[SECURE]** Eval runner endpoint (if exposed over HTTP rather than run only as an offline script) is restricted to the designated admin user (same pattern as the global model-config write in Phase 4), since it triggers real pipeline runs and Cloud Build jobs at will
+- [x] **[SECURE]** Golden test fixtures use dedicated, non-production, non-sensitive public test repos (no fixtures pointing at a tenant's real connected repo) to avoid the eval harness ever writing a PR/comment against a real user's project
+- [x] **[SECURE]** `GET /eval-results` endpoint scopes access consistently with the admin-only write above; eval data (which can reveal prompt/strategy details) is not exposed to arbitrary authenticated tenants by default
 
-**Exit criteria:** running the eval harness against the golden set produces a stored accuracy score, per-subagent breakdown, and confidence-vs-outcome correlation — re-running after a prompt tweak shows a comparable before/after diff. **[SECURE]** confirm the eval harness never targets a real tenant repo (fixtures audited), and non-admin authenticated requests to trigger/read eval runs are rejected.
+**Exit criteria:** running the eval harness against the golden set produces a stored accuracy score, per-subagent breakdown, and confidence-vs-outcome correlation — re-running after a prompt tweak shows a comparable before/after diff. **[SECURE]** confirm the eval harness never targets a real tenant repo (fixtures audited), and non-admin authenticated requests to trigger/read eval runs are rejected. — Phase 10 DONE (9/9).
+
+---
+
+## UI Instructions — Anti AI-Slop + Premium Dark Theme (applies to Phase 11 & 12)
+
+> Research-backed. Sources: [uiscanner - What is AI slop UI](https://uiscanner.com/blog/what-is-ai-slop-ui) (Jul 4 2026), [Noqta - Escaping AI Slop: 4 Overused Patterns](https://noqta.tn/en/blog/ai-design-slop-overused-ui-patterns-fix-2026) (Jun 4 2026), [SmoothUI - AI Design Slop and the Fix](https://smoothui.dev/blog/ai-design-slop) (Jun 24 2026), [Colorlib - Dark Admin Templates 2026](https://colorlib.com/wp/dark-admin-dashboard-templates/), [ui.shadcn.com - Theming](https://ui.shadcn.com/docs/theming).
+> Merriam-Webster 2025 Word of the Year was "slop" (mass-produced low-effort AI content) — "AI slop UI" = the generic median an AI agent reverts to when color/type/spacing/hierarchy are left unspecified [uiscanner].
+
+**What AI slop UI looks like (must actively avoid):**
+- Indigo/purple→blue gradient hero + gradient primary button on every surface [uiscanner][Noqta][SmoothUI] — Wes Bos "four horsemen" screenshot of 4 identical AI UIs.
+- Oversized border radius everywhere (cards/buttons/inputs/badges all `rounded-2xl/3xl`) — kills hierarchy [Noqta #1].
+- Three feature cards in a row, each with matching line icon inside a card inside another card, 1px light-gray border + soft shadow on every surface [uiscanner].
+- Inter at every size, compressed type scale (headings ~ few px from body, nothing reads as more important) [uiscanner].
+- Random glowing gradients, pulsing "Live" badges, thick colored left-border on rounded cards — the single most recognizable AI tell in 2026 [Noqta #4].
+- Glassmorphism/blur on things that don't need it, dark-mode-by-reflex even when not asked [uiscanner].
+- Root cause: model predicts statistical center of training data (Tailwind `bg-indigo-500` tutorials seeded the purple default [VibeCodeKit via uiscanner]) + rewards safe/median output [Shuffle via uiscanner]. Fix is NOT "more premium" adjectives — fix is removing ambiguity with explicit decisions [uiscanner].
+
+**How to avoid it — the cure is choosing (not prompting):**
+- Cap palette to ONE brand hue + neutral ramp, ban gradients. Use OKLCH semantic tokens, not raw colors — `bg-background/text-foreground/border-border` so dark mode works via CSS variables [ui.shadcn.com][Noqta].
+- Lock type scale with real jumps (e.g. 12/14/18/24/30, `tracking-tight` on display), pair distinctive display font with clean body font — headlines must NOT be Inter [Noqta].
+- Lock spacing to 4px/8px base grid, enforce it. Default surfaces to borderless, allow ONE elevation level [uiscanner checklist].
+- Feed a real reference: `DESIGN.md` with tokens + section structure, or scan a well-designed site (Stripe/Linear) — agent stops averaging when given decisions [uiscanner].
+- Closed loop, not one-shot: build → critique → fix highest-impact → re-evaluate until acceptance bar is green [SmoothUI]. One-shot audit lists problems; loop converges to zero problems left.
+
+**Premium dark theme for Haunter (dark-first, Bloomberg/Linear-inspired, not inverted light):**
+- Base `zinc-950` `#09090B` (not `gray-900`), cards `zinc-900`, borders `1px solid rgb(39 39 42)` (`zinc-800`), text `zinc-50` / `zinc-400` muted, semantic shadcn tokens via `@theme inline` in `app/globals.css` (`--background/--foreground/--primary` etc. [StarterPick Tailwind v4 guide]) — prevents flash-of-wrong-theme with blocking `<head>` script [Colorlib/StatePick].
+- Single accent only (amber-400 for confidence/pass, teal-400 alt) — never gradient. Monospace (`Geist Mono`/`JetBrains Mono`) for run_id/sha/tokens/cost/patch numerics; `Geist Sans` for UI. Dense but scannable like Fortress (Bloomberg terminal) and Signal (DevOps) dark-first dashboards [Colorlib].
+- Dashboard archetype: fixed sidebar 240px + topbar + content grid (CSS Grid + container queries, `dvh` for mobile [Niraj Kumar]). No centered hero + 3-col grid — this is an app, not a landing page.
+- Density over decoration: runs feed = table with `border-b` rows (hover `zinc-900`), not cards. Columns: status dot (emerald/amber/red) + repo + conclusion + confidence bar + attempts + cost + time + PR link. Filters as tight `Select` + date range.
+- Trace = left-border vertical timeline (`border-l zinc-800`) with dot + step_name + latency/cost right-aligned mono, not centered steps. Empty states: `border-dashed zinc-800` + 14px muted text, no illustration. Loading = skeleton rows. Motion = 150ms subtle, only to communicate state change [Noqta].
+- Accessibility: WCAG AA contrast checked, focus states on every interactive, real product screenshots/data over stock/AI imagery [SmoothUI/Niraj].
+
+**Acceptance bar (build is NOT done until all green):** no gradient hero/button, no `rounded-3xl` soup, no Inter-only headings, no cards-inside-cards, type scale has hierarchy, palette is capped + OKLCH, spacing is on grid, table/timeline density present, dark tokens via CSS vars with no flash, and every surface passes the "could you swap the logo and nobody would notice?" test [Noqta].
 
 ---
 
 ## Phase 11 — Dashboard Frontend: Core Views
-- [ ] Auth pages (login via `GET /auth/login` → GitHub OAuth, session via `haunter_session` cookie + `GET /auth/me`, logout via `POST /auth/logout`) — dashboard fully gated, no Better Auth/JWKS/JWT
-- [ ] Connected repos list page: add/remove repo, view config
-- [ ] Runs feed/table across all repos: status, confidence, attempt count, link to resulting PR or fallback comment, filters (repo, status, date)
-- [ ] Per-run detail page: expandable trace view (timeline of orchestrator + subagent steps) with token/cost breakdown per step, rendered from Phase 9's trace endpoint
-- [ ] **[SECURE]** Note: auth pages consume the FastAPI-owned session (Phase 2's cookie-based flow), not a separate Better Auth session store — frontend calls `/auth/login`, `/auth/me`, `/auth/logout` and relies on the `httpOnly Secure SameSite=Lax` cookie sent with `credentials: 'include'`; do not introduce a second, parallel auth/session mechanism
-- [ ] **[SECURE]** All fetches from the dashboard include `credentials: 'include'` and target only the configured API origin (no hardcoded fallback to a dev URL shipped in a prod build)
-- [ ] **[SECURE]** Any user-controlled or LLM-generated text rendered in the UI (PR titles/descriptions, fallback comments, patch text, repo names) is rendered via safe text/markdown rendering with escaping (no `dangerouslySetInnerHTML`/raw HTML injection) to prevent stored XSS from content that originated in a CI log or LLM response
-- [ ] **[SECURE]** Client-side route guards redirect unauthenticated users, but the real enforcement remains server-side (`get_current_user` on every API call) — the frontend gate is UX only, never treated as the security boundary
+- [x] Auth pages (login via `GET /auth/login` → GitHub OAuth, session via `haunter_session` cookie + `GET /auth/me`, logout via `POST /auth/logout`) — dashboard fully gated, no Better Auth/JWKS/JWT
+- [x] Connected repos list page: add/remove repo, view config
+- [x] Runs feed/table across all repos: status, confidence, attempt count, link to resulting PR or fallback comment, filters (repo, status, date)
+- [x] Per-run detail page: expandable trace view (timeline of orchestrator + subagent steps) with token/cost breakdown per step, rendered from Phase 9's trace endpoint
+- [x] **[SECURE]** Note: auth pages consume the FastAPI-owned session (Phase 2's cookie-based flow), not a separate Better Auth session store — frontend calls `/auth/login`, `/auth/me`, `/auth/logout` and relies on the `httpOnly Secure SameSite=Lax` cookie sent with `credentials: 'include'`; do not introduce a second, parallel auth/session mechanism
+- [x] **[SECURE]** All fetches from the dashboard include `credentials: 'include'` and target only the configured API origin (no hardcoded fallback to a dev URL shipped in a prod build)
+- [x] **[SECURE]** Any user-controlled or LLM-generated text rendered in the UI (PR titles/descriptions, fallback comments, patch text, repo names) is rendered via safe text/markdown rendering with escaping (no `dangerouslySetInnerHTML`/raw HTML injection) to prevent stored XSS from content that originated in a CI log or LLM response
+- [x] **[SECURE]** Client-side route guards redirect unauthenticated users, but the real enforcement remains server-side (`get_current_user` on every API call) — the frontend gate is UX only, never treated as the security boundary
 
-**Exit criteria:** can log in, see connected repos, browse a real run history, and drill into one run's full trace visually in the browser. **[SECURE]** confirm no dashboard view renders unescaped LLM/log-derived content (spot-check with a fixture containing HTML/script-like text in a patch or PR description), and confirm all dashboard API calls fail gracefully (redirect to login) on an expired/invalid session rather than exposing a broken authenticated view.
+**Exit criteria:** can log in, see connected repos, browse a real run history, and drill into one run's full trace visually in the browser. **[SECURE]** confirm no dashboard view renders unescaped LLM/log-derived content (spot-check with a fixture containing HTML/script-like text in a patch or PR description), and confirm all dashboard API calls fail gracefully (redirect to login) on an expired/invalid session rather than exposing a broken authenticated view. — Phase 11 DONE (8/8).
 
 ---
 
 ## Phase 12 — Dashboard Frontend: Eval, Config & Charts
-- [ ] Eval score display: overall accuracy %, per-subagent breakdown, pulled from Phase 10's endpoint
-- [ ] Confidence-vs-actual-outcome chart: does high Fix Generator confidence actually predict sandbox pass — scatter/bar visualization
-- [ ] Model/provider switcher UI: select provider + model (per-repo or global), writes to Phase 4's config endpoint, applied live
-- [ ] Polish pass: empty states, loading states, error states across all dashboard views built in Phase 11 + this phase
-- [ ] **[SECURE]** Eval score display is only rendered/linked for the designated admin user (matching Phase 10's access restriction) — regular tenant users don't see a broken/403'd eval section, it's simply not shown
-- [ ] **[SECURE]** Model/provider switcher UI only allows selecting from the same server-side allowlist enforced in Phase 4 (no free-text model/provider entry in the UI that could round-trip an unexpected value to the API)
-- [ ] **[SECURE]** Error states across the dashboard display generic, user-safe messages (not raw API error bodies/stack traces that could leak internal detail) — pair with Phase 2/9's generic-error-response invariant
+- [x] Eval score display: overall accuracy %, per-subagent breakdown, pulled from Phase 10's endpoint
+- [x] Confidence-vs-actual-outcome chart: does high Fix Generator confidence actually predict sandbox pass — scatter/bar visualization
+- [x] Model/provider switcher UI: select provider + model (per-repo or global), writes to Phase 4's config endpoint, applied live
+- [x] Polish pass: empty states, loading states, error states across all dashboard views built in Phase 11 + this phase
+- [x] **[SECURE]** Eval score display is only rendered/linked for the designated admin user (matching Phase 10's access restriction) — regular tenant users don't see a broken/403'd eval section, it's simply not shown
+- [x] **[SECURE]** Model/provider switcher UI only allows selecting from the same server-side allowlist enforced in Phase 4 (no free-text model/provider entry in the UI that could round-trip an unexpected value to the API)
+- [x] **[SECURE]** Error states across the dashboard display generic, user-safe messages (not raw API error bodies/stack traces that could leak internal detail) — pair with Phase 2/9's generic-error-response invariant
 
 **Exit criteria:** dashboard fully reflects live backend state — eval scores, confidence correlation chart, and a working model switcher that changes live LLM behavior without redeploy — v1 feature-complete. **[SECURE]** confirm a non-admin tenant cannot reach eval data through the UI, the model switcher cannot submit an unlisted provider/model string, and error states never surface raw backend error text to the browser.
+
+---
+
+## Phase 13 — Sandbox Abstraction & AWS CodeBuild Adapter (long-term)
+- [x] Introduce `SandboxRunner` abstraction in `backend/app/sandbox/`: single `verify(patch: str, repo_ref: str, run_id: UUID) -> {pass: bool, reason: str, duration_ms: int}` interface; orchestrator in Phase 7 calls only this interface, never `cloudbuild_v1`/`boto3` directly
+- [x] Keep existing GCP adapter as `GCPSandboxRunner` (Cloud Build `create_build` + poll, `WORK.md:139`, generic base image or repo Dockerfile `HAUNTER.md:131`, pass `repo ref + patch` via substitutions)
+- [x] Add `AWSSandboxRunner` adapter: `boto3 codebuild.start_build` + `batch_get_builds` poll against pre-provisioned CodeBuild project (BuildSpec: clone fresh → apply patch → install deps → run test suite), same I/O contract as GCP
+- [x] Unified BuildSpec / container parity: both adapters run same language detection (python:3.12 / node:22 fallback `HAUNTER.md:131`) and same timeout/resource semantics so pass/fail is comparable across providers
+- [x] Orchestrator retry logic `WORK.md:142` unchanged — retry calls `SandboxRunner.verify` regardless of provider; attempt cap `WORK.md:143` enforced atomically at DB layer before each verify
+- [x] **[SECURE]** CodeBuild role least-privilege: `codebuild:StartBuild/BatchGetBuilds` + `logs:CreateLogStream` only, no `secretsmanager:GetSecretValue`, no cross-tenant repo credential access; GCP SA `WORK.md:144` retains same restriction — verified via IAM policy review
+- [x] **[SECURE]** Build substitutions/inputs validated & escaped per-provider before submission: Cloud Build substitution injection `WORK.md:146` and CodeBuild `sourceVersion`/`environmentVariablesOverride` injection both blocked via allowlist + Pydantic
+- [x] **[SECURE]** Per-build timeout & resource limits enforced identically on both providers `WORK.md:145` (CodeBuild `timeoutInMinutes` + `computeType`, Cloud Build `timeout`), truncated/sanitized failure reason `WORK.md:147` before DB write and before next Fix Generator retry
+
+**Exit criteria:** `SANDBOX_PROVIDER=aws` (env) runs `Context Gatherer → Fix Generator → CodeBuild verify` with same `attempts` trace as `SANDBOX_PROVIDER=gcp`; verified by one successful CodeBuild verify against a public test repo. **[SECURE]** CodeBuild role has no secret/other-tenant access, oversized patch/repo ref rejected before `start_build`.
+
+---
+
+## Phase 14 — Serverless Hosting Abstraction (AWS Lambda) & Unified Provider Switch
+- [ ] Add Lambda hosting adapter for orchestrator: FastAPI via `Mangum` + API Gateway (or Lambda Function URL) — same webhook `WORK.md:70` + `HAUNTER.md:124` 10s 2xx contract as Cloud Run `HAUNTER.md:147`; scales to zero, no instance to keep alive
+- [ ] Unified provider switch: `SANDBOX_PROVIDER=gcp|aws` and `HOSTING_PROVIDER=gcp|aws` (env) with optional DB override in `model_configs`/`system_config`; validated via Pydantic allowlist (`gcp|aws` only), hot-switchable without redeploy (same pattern as `LLMClient` `WORK.md:91`)
+- [ ] Infra as code for AWS: Lambda + API GW/Function URL, CodeBuild project, IAM roles, CloudWatch log group via Terraform/CDK; GCP infra remains as optional restore target
+- [ ] Long-term viability: Lambda is **always-free** (1M req + 400k GB-s/mo, not 12mo like EC2 `HAUNTER.md:177`), CodeBuild 100 min/mo always-free — at 1-3 repos / max 10 users ~60 min/week, cost stays $0-$1/mo even after free-tier year, so AWS path is permanent, not 1-2mo bridge; set $1 budget alert `HAUNTER.md:177`
+- [ ] **[SECURE]** Lambda role least-privilege: `AWSLambdaBasicExecutionRole` only, no `secretsmanager:GetSecretValue`, no cross-tenant access — verified via IAM review (extends Phase 13 check)
+- [ ] **[SECURE]** Provider switch endpoint/config write is admin-only (same gate as `PUT /config/model` `WORK.md:97`); `SANDBOX_PROVIDER`/`HOSTING_PROVIDER` values allowlisted, never free-text, never derived from request headers
+
+**Exit criteria:** `HOSTING_PROVIDER=aws` + `SANDBOX_PROVIDER=aws` runs full pipeline `Lambda webhook → Context Gatherer → Fix Generator → CodeBuild verify → PR/fallback` with same `run_steps`/`attempts` trace as `HOSTING_PROVIDER=gcp` + `SANDBOX_PROVIDER=gcp`; flipping env restores GCP path without code change (verified by one successful run on each provider against same public test repo). **[SECURE]** Lambda role has no secret/other-tenant access and switching provider requires admin auth. Long-term check: cost at 10 users stays within always-free Lambda/CodeBuild limits.

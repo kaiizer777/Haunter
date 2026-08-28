@@ -420,7 +420,7 @@ async def test_handle_failed_run_github_404_sets_error(db: AsyncSession) -> None
 
 @pytest.mark.anyio
 async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSession) -> None:
-    """If 3 attempts all fail verification, orchestrator transitions to fallback and posts a comment."""
+    """If 3 attempts all fail verification, orchestrator transitions to fallback_commented and posts a comment."""
     await truncate_all(db)
     user = await _create_user(db)
     repo = await _create_repo(db, user)
@@ -432,7 +432,15 @@ async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSessi
     repo_owner = repo.owner
     repo_name = repo.name
     head_sha = run.head_sha
-    user_token = user.access_token
+
+    FAKE_INSTALL_TOKEN = "ghs_fakeinstallationtoken123"
+
+    _FIX_RESPONSE = {
+        "content": '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-x\\n+y\\n", "confidence": 90, "strategy_notes": "test"}',
+        "usage": {"input_tokens": 10, "output_tokens": 10},
+        "latency_ms": 100,
+        "model": "test",
+    }
 
     with (
         patch(
@@ -460,24 +468,9 @@ async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSessi
                     "latency_ms": 100,
                     "model": "test",
                 },
-                {
-                    "content": '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-x\\n+y\\n", "confidence": 90, "strategy_notes": "test"}',
-                    "usage": {"input_tokens": 10, "output_tokens": 10},
-                    "latency_ms": 100,
-                    "model": "test",
-                },
-                {
-                    "content": '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-x\\n+y\\n", "confidence": 90, "strategy_notes": "test"}',
-                    "usage": {"input_tokens": 10, "output_tokens": 10},
-                    "latency_ms": 100,
-                    "model": "test",
-                },
-                {
-                    "content": '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-x\\n+y\\n", "confidence": 90, "strategy_notes": "test"}',
-                    "usage": {"input_tokens": 10, "output_tokens": 10},
-                    "latency_ms": 100,
-                    "model": "test",
-                },
+                _FIX_RESPONSE,
+                _FIX_RESPONSE,
+                _FIX_RESPONSE,
             ],
         ),
         patch(
@@ -485,9 +478,15 @@ async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSessi
             new_callable=AsyncMock,
             return_value={"status": "fail", "failure_reason": "failed tests", "build_duration_ms": 500},
         ),
+        # Phase 8: get_installation_token now fetches the write token
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value=FAKE_INSTALL_TOKEN,
+        ),
         patch(
             "app.github_client.post_commit_comment",
-            new_callable=AsyncMock
+            new_callable=AsyncMock,
         ) as mock_post_comment,
     ):
         from app.orchestrator import handle_failed_run
@@ -497,10 +496,10 @@ async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSessi
     refreshed = await db.execute(select(Run).where(Run.id == run_id))
     db_run = refreshed.scalar_one()
 
-    # Should have advanced to fallback
-    assert db_run.status == "fallback"
+    # Phase 8: terminal status is fallback_commented (not the intermediate 'fallback')
+    assert db_run.status == "fallback_commented"
 
-    # Verify that post_commit_comment was called
+    # Verify that post_commit_comment was called with sanitised body + installation token
     mock_post_comment.assert_called_once()
     kwargs = mock_post_comment.call_args.kwargs
     assert kwargs["owner"] == repo_owner
@@ -508,4 +507,5 @@ async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSessi
     assert kwargs["sha"] == head_sha
     assert "Haunter AI Diagnosis:" in kwargs["body"]
     assert "test diagnosis" in kwargs["body"]
-    assert kwargs["token"] == user_token
+    # Must use installation token, not broad PAT
+    assert kwargs["token"] == FAKE_INSTALL_TOKEN

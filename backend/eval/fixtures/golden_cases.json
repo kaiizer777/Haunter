@@ -1,0 +1,282 @@
+[
+  {
+    "id": "fixture-001",
+    "repo_ref": "psf/requests",
+    "commit_sha": "a67e7a74e0b4e2be1f5cc2c84d80b0f5c8e15d1a",
+    "failure_type": "import_error",
+    "description": "Missing dependency causes ImportError on test collection",
+    "simulated_log_snippet": "ERROR collecting tests/test_utils.py\nImportError: cannot import name 'chardet' from 'chardet' (unknown location)\nFailed: import file mismatch:\nimported module 'tests.test_utils' has this __file__ attribute",
+    "expected_root_cause_keywords": ["ImportError", "chardet", "dependency", "missing"],
+    "expected_fix_characteristics": {
+      "touches_files": ["requirements.txt", "setup.py", "pyproject.toml"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 60
+    }
+  },
+  {
+    "id": "fixture-002",
+    "repo_ref": "pallets/flask",
+    "commit_sha": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1",
+    "failure_type": "type_error",
+    "description": "TypeError: argument of type NoneType is not iterable in route handling",
+    "simulated_log_snippet": "FAILED tests/test_routing.py::test_url_for - TypeError: argument of type 'NoneType' is not iterable\nraise TypeError(f\"argument of type {type(obj)!r} is not iterable\")",
+    "expected_root_cause_keywords": ["TypeError", "NoneType", "iterable", "None check"],
+    "expected_fix_characteristics": {
+      "touches_files": ["src/flask/routing.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 55
+    }
+  },
+  {
+    "id": "fixture-003",
+    "repo_ref": "numpy/numpy",
+    "commit_sha": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+    "failure_type": "assertion",
+    "description": "Assertion error in array shape validation test",
+    "simulated_log_snippet": "FAILED numpy/tests/test_multiarray.py::TestDot::test_dot_2d - AssertionError: Arrays are not equal\nMismatch (mismatch 100.0%)\nx: array([[1., 2.],\ny: array([[2., 4.],",
+    "expected_root_cause_keywords": ["AssertionError", "shape", "array", "mismatch"],
+    "expected_fix_characteristics": {
+      "touches_files": ["numpy/core/multiarray.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 50
+    }
+  },
+  {
+    "id": "fixture-004",
+    "repo_ref": "encode/httpx",
+    "commit_sha": "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3",
+    "failure_type": "import_error",
+    "description": "Circular import between transport and client modules",
+    "simulated_log_snippet": "ImportError: cannot import name 'AsyncTransport' from partially initialized module 'httpx._transports.base' (most likely due to a circular import)\nTraceback (most recent call last):\n  File \"httpx/_client.py\", line 3, in <module>\n    from ._transports.base import AsyncTransport",
+    "expected_root_cause_keywords": ["ImportError", "circular import", "partially initialized"],
+    "expected_fix_characteristics": {
+      "touches_files": ["httpx/_client.py", "httpx/_transports/base.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 60
+    }
+  },
+  {
+    "id": "fixture-005",
+    "repo_ref": "tiangolo/fastapi",
+    "commit_sha": "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4",
+    "failure_type": "type_error",
+    "description": "Pydantic v2 ValidationError due to deprecated field validator usage",
+    "simulated_log_snippet": "pydantic.errors.PydanticUserError: `@validator` decorator is deprecated in V2. Use `@field_validator` instead.\nRaised at fastapi/param_functions.py:42",
+    "expected_root_cause_keywords": ["validator", "deprecated", "pydantic", "field_validator"],
+    "expected_fix_characteristics": {
+      "touches_files": ["fastapi/param_functions.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 70
+    }
+  },
+  {
+    "id": "fixture-006",
+    "repo_ref": "aio-libs/aiohttp",
+    "commit_sha": "f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5",
+    "failure_type": "dependency",
+    "description": "Incompatible version of yarl causes attribute error at runtime",
+    "simulated_log_snippet": "AttributeError: 'URL' object has no attribute 'encoded'\nTraceback (most recent call last):\n  File \"aiohttp/client.py\", line 287, in _request\n    url = url.encoded",
+    "expected_root_cause_keywords": ["AttributeError", "yarl", "version", "dependency"],
+    "expected_fix_characteristics": {
+      "touches_files": ["requirements.txt", "setup.cfg"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 55
+    }
+  },
+  {
+    "id": "fixture-007",
+    "repo_ref": "sqlalchemy/sqlalchemy",
+    "commit_sha": "a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6",
+    "failure_type": "assertion",
+    "description": "ORM relationship cascade assertion fails after 2.0 migration",
+    "simulated_log_snippet": "FAILED test/orm/test_relationships.py::test_cascade_delete - AssertionError: Expected 0 rows in child_table, got 2\nassert 0 == 2\n  where 0 = count(child_table)",
+    "expected_root_cause_keywords": ["cascade", "delete", "ORM", "relationship"],
+    "expected_fix_characteristics": {
+      "touches_files": ["lib/sqlalchemy/orm/relationships.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 55
+    }
+  },
+  {
+    "id": "fixture-008",
+    "repo_ref": "psf/black",
+    "commit_sha": "b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7",
+    "failure_type": "import_error",
+    "description": "Missing optional dependency click causes CLI entry point failure",
+    "simulated_log_snippet": "ModuleNotFoundError: No module named 'click'\nTraceback (most recent call last):\n  File \"src/black/__init__.py\", line 5, in <module>\n    import click",
+    "expected_root_cause_keywords": ["ModuleNotFoundError", "click", "missing", "module"],
+    "expected_fix_characteristics": {
+      "touches_files": ["pyproject.toml", "setup.cfg"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 65
+    }
+  },
+  {
+    "id": "fixture-009",
+    "repo_ref": "pytest-dev/pytest",
+    "commit_sha": "c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8",
+    "failure_type": "type_error",
+    "description": "TypeError: unsupported operand type(s) for +: NoneType and int in fixture teardown",
+    "simulated_log_snippet": "ERRORS\nERROR at teardown of test_something - TypeError: unsupported operand type(s) for +: 'NoneType' and 'int'\n  File \"src/_pytest/fixtures.py\", line 891, in teardown\n    self._fixturedef_finished(fixturedef)",
+    "expected_root_cause_keywords": ["TypeError", "NoneType", "teardown", "fixture"],
+    "expected_fix_characteristics": {
+      "touches_files": ["src/_pytest/fixtures.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 55
+    }
+  },
+  {
+    "id": "fixture-010",
+    "repo_ref": "encode/starlette",
+    "commit_sha": "d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9",
+    "failure_type": "assertion",
+    "description": "Response status code assertion fails in middleware test",
+    "simulated_log_snippet": "FAILED tests/test_middleware.py::test_https_redirect - AssertionError: 301 != 307\nassert response.status_code == 307\nwhere response.status_code = 301",
+    "expected_root_cause_keywords": ["status_code", "redirect", "middleware", "assertion"],
+    "expected_fix_characteristics": {
+      "touches_files": ["starlette/middleware/httpsredirect.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 65
+    }
+  },
+  {
+    "id": "fixture-011",
+    "repo_ref": "python-poetry/poetry",
+    "commit_sha": "e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0",
+    "failure_type": "dependency",
+    "description": "Incompatible cachecontrol version breaks lockfile parsing",
+    "simulated_log_snippet": "ImportError: cannot import name 'FileCache' from 'cachecontrol.caches' (site-packages/cachecontrol/caches/__init__.py)\nTraceback (most recent call last):\n  File \"poetry/puzzle/solver.py\", line 12, in <module>\n    from cachecontrol.caches import FileCache",
+    "expected_root_cause_keywords": ["ImportError", "cachecontrol", "FileCache", "dependency"],
+    "expected_fix_characteristics": {
+      "touches_files": ["pyproject.toml"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 60
+    }
+  },
+  {
+    "id": "fixture-012",
+    "repo_ref": "celery/celery",
+    "commit_sha": "f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
+    "failure_type": "type_error",
+    "description": "TypeError in task result backend serialization",
+    "simulated_log_snippet": "FAILED t/unit/backends/test_redis.py::test_get_result - TypeError: Object of type bytes is not JSON serializable\n  File \"celery/backends/base.py\", line 452, in encode_result\n    return self.encode(result)",
+    "expected_root_cause_keywords": ["TypeError", "JSON serializable", "bytes", "encode"],
+    "expected_fix_characteristics": {
+      "touches_files": ["celery/backends/base.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 60
+    }
+  },
+  {
+    "id": "fixture-013",
+    "repo_ref": "pallets/werkzeug",
+    "commit_sha": "a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+    "failure_type": "import_error",
+    "description": "Removed internal symbol causes AttributeError on import",
+    "simulated_log_snippet": "AttributeError: module 'werkzeug.utils' has no attribute 'escape'\nTraceback (most recent call last):\n  File \"tests/test_utils.py\", line 2, in <module>\n    from werkzeug.utils import escape",
+    "expected_root_cause_keywords": ["AttributeError", "werkzeug", "escape", "removed"],
+    "expected_fix_characteristics": {
+      "touches_files": ["tests/test_utils.py", "src/werkzeug/utils.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 65
+    }
+  },
+  {
+    "id": "fixture-014",
+    "repo_ref": "boto/boto3",
+    "commit_sha": "b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
+    "failure_type": "assertion",
+    "description": "Mocked S3 response shape mismatch causes assertion failure",
+    "simulated_log_snippet": "FAILED tests/functional/test_s3.py::test_list_buckets - AssertionError\nassert response['ResponseMetadata']['HTTPStatusCode'] == 200\nAssertionError: assert None == 200",
+    "expected_root_cause_keywords": ["AssertionError", "ResponseMetadata", "HTTPStatusCode", "mock"],
+    "expected_fix_characteristics": {
+      "touches_files": ["tests/functional/test_s3.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 55
+    }
+  },
+  {
+    "id": "fixture-015",
+    "repo_ref": "pypa/pip",
+    "commit_sha": "c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
+    "failure_type": "dependency",
+    "description": "Vendored urllib3 version incompatible with requests",
+    "simulated_log_snippet": "ImportError: urllib3 v2.0 only supports OpenSSL 1.1.1+, currently the ssl module is compiled with LibreSSL 2.8.3\n  File \"pip/_vendor/urllib3/util/ssl_.py\", line 99, in _is_has_never_check_common_name_reliable",
+    "expected_root_cause_keywords": ["urllib3", "OpenSSL", "LibreSSL", "ssl", "vendor"],
+    "expected_fix_characteristics": {
+      "touches_files": ["pip/_vendor/", "setup.cfg"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 55
+    }
+  },
+  {
+    "id": "fixture-016",
+    "repo_ref": "mkdocs/mkdocs",
+    "commit_sha": "d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
+    "failure_type": "type_error",
+    "description": "TypeError in config validation due to deprecated YAML loader",
+    "simulated_log_snippet": "FAILED tests/test_config.py::TestMkDocsConfig - TypeError: load() missing 1 required positional argument: 'Loader'\n  File \"mkdocs/config/base.py\", line 58, in _load_config_file\n    return yaml.load(config_file)",
+    "expected_root_cause_keywords": ["TypeError", "yaml.load", "Loader", "deprecated"],
+    "expected_fix_characteristics": {
+      "touches_files": ["mkdocs/config/base.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 70
+    }
+  },
+  {
+    "id": "fixture-017",
+    "repo_ref": "pydantic/pydantic",
+    "commit_sha": "e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6",
+    "failure_type": "assertion",
+    "description": "Model serialization assertion fails after v2 schema changes",
+    "simulated_log_snippet": "FAILED tests/test_generics.py::test_generic_model_serialization - AssertionError\nassert model.model_dump() == {'x': 1}\nAssertionError: assert {'x': 1, '__pydantic_root__': True} == {'x': 1}",
+    "expected_root_cause_keywords": ["model_dump", "serialization", "pydantic", "schema"],
+    "expected_fix_characteristics": {
+      "touches_files": ["pydantic/main.py", "pydantic/generics.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 55
+    }
+  },
+  {
+    "id": "fixture-018",
+    "repo_ref": "tortoise/tortoise-orm",
+    "commit_sha": "f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7",
+    "failure_type": "import_error",
+    "description": "asyncpg driver not installed causes ConnectionError on test init",
+    "simulated_log_snippet": "ModuleNotFoundError: No module named 'asyncpg'\nTraceback (most recent call last):\n  File \"tortoise/backends/asyncpg/client.py\", line 1, in <module>\n    import asyncpg",
+    "expected_root_cause_keywords": ["ModuleNotFoundError", "asyncpg", "driver", "missing"],
+    "expected_fix_characteristics": {
+      "touches_files": ["setup.cfg", "requirements-dev.txt"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 70
+    }
+  },
+  {
+    "id": "fixture-019",
+    "repo_ref": "python/cpython",
+    "commit_sha": "a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8",
+    "failure_type": "type_error",
+    "description": "TypeError in datetime strptime due to locale mismatch in CI runner",
+    "simulated_log_snippet": "FAILED Lib/test/test_datetime.py::TestDatetime::test_strptime_format - TypeError: strptime() argument 1 must be str, not bytes\n  File \"Lib/test/test_datetime.py\", line 2051, in test_strptime_format\n    datetime.strptime(b'2020-01-01', '%Y-%m-%d')",
+    "expected_root_cause_keywords": ["TypeError", "strptime", "bytes", "str"],
+    "expected_fix_characteristics": {
+      "touches_files": ["Lib/test/test_datetime.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 70
+    }
+  },
+  {
+    "id": "fixture-020",
+    "repo_ref": "httpie/httpie",
+    "commit_sha": "b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9",
+    "failure_type": "dependency",
+    "description": "Pygments version bump breaks syntax highlighting in output tests",
+    "simulated_log_snippet": "FAILED tests/test_output.py::TestColors::test_json_colors - AssertionError\nPygments 2.15 removed 'friendly' as a valid style name (renamed to 'friendly_grayscale')\nassert 'friendly' in get_all_styles()",
+    "expected_root_cause_keywords": ["Pygments", "style", "friendly", "renamed", "dependency"],
+    "expected_fix_characteristics": {
+      "touches_files": ["httpie/output/formatters/colors.py"],
+      "patch_must_not_touch": [".github/workflows"],
+      "confidence_min": 65
+    }
+  }
+]

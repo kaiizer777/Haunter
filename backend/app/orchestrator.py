@@ -19,7 +19,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,21 +42,27 @@ class RunStatus(str, Enum):
     verification = "verification"
     pending_pr = "pending_pr"
     fallback = "fallback"
-    completed = "completed"
+    # Phase 8 terminal statuses
+    pr_opened = "pr_opened"             # PR successfully created on GitHub
+    fallback_commented = "fallback_commented"  # diagnosis comment posted (all attempts exhausted)
+    completed = "completed"             # legacy — kept for backward compatibility
     error = "error"
 
 
 # Forward-only valid transitions. Any pair not listed here is rejected.
 # error is reachable from every non-terminal state.
 _ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
-    RunStatus.pending:           {RunStatus.context_gathering, RunStatus.error},
-    RunStatus.context_gathering: {RunStatus.fix_generation, RunStatus.error},
-    RunStatus.fix_generation:    {RunStatus.verification, RunStatus.error},
-    RunStatus.verification:      {RunStatus.pending_pr, RunStatus.fallback, RunStatus.fix_generation, RunStatus.error},
-    RunStatus.pending_pr:        {RunStatus.completed, RunStatus.error},
-    RunStatus.fallback:          set(),
-    RunStatus.completed:         set(),
-    RunStatus.error:             set(),
+    RunStatus.pending:              {RunStatus.context_gathering, RunStatus.error},
+    RunStatus.context_gathering:    {RunStatus.fix_generation, RunStatus.error},
+    RunStatus.fix_generation:       {RunStatus.verification, RunStatus.error},
+    RunStatus.verification:         {RunStatus.pending_pr, RunStatus.fallback, RunStatus.fix_generation, RunStatus.error},
+    RunStatus.pending_pr:           {RunStatus.pr_opened, RunStatus.error},
+    RunStatus.fallback:             {RunStatus.fallback_commented, RunStatus.error},
+    # Terminal states — no transitions out
+    RunStatus.pr_opened:            set(),
+    RunStatus.fallback_commented:   set(),
+    RunStatus.completed:            set(),
+    RunStatus.error:                set(),
 }
 
 
@@ -106,6 +112,41 @@ async def _transition(
 
 
 # ---------------------------------------------------------------------------
+# Fallback comment sanitiser
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_fallback(diagnosis_summary: Optional[str], attempts: list) -> str:
+    """
+    Build a sanitised fallback comment body to post on the commit.
+
+    Rules:
+      - Prefix with "**Haunter AI Diagnosis:**\n\n" (safe markdown).
+      - Apply secret redaction from context_gatherer._redact_secrets.
+      - html.escape the summary to prevent stored XSS on dashboard renders.
+      - Hard-cap at 3000 chars AFTER prefix.
+      - NEVER include raw patch text, full CI logs, or stack traces.
+    """
+    import html as html_module
+    from app.subagents.context_gatherer import _redact_secrets
+
+    raw = diagnosis_summary or "(no diagnosis available)"
+    # Step 1: redact secrets from the summary
+    redacted = _redact_secrets(raw)
+    # Step 2: html.escape to neutralise any HTML/JS in the summary text
+    escaped = html_module.escape(redacted, quote=False)
+    # Step 3: cap body content (prefix does not count towards cap)
+    prefix = "**Haunter AI Diagnosis:**\n\n"
+    suffix = (
+        "\n\n*Note: Automated fixes were attempted but none passed the CI sandbox. "
+        "Please review the diagnosis above to manually resolve the issue.*"
+    )
+    max_body = 3000 - len(prefix) - len(suffix)
+    body_content = escaped[:max_body]
+    return f"{prefix}{body_content}{suffix}"
+
+
+# ---------------------------------------------------------------------------
 # Entry point (BackgroundTasks target)
 # ---------------------------------------------------------------------------
 
@@ -117,8 +158,7 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
     Called asynchronously by FastAPI BackgroundTasks — never blocks the HTTP
     handler. Opens its own database session (no request context available).
 
-    Phase 5 scope: context_gathering only.
-      pending → context_gathering → fix_generation (next phase picks up)
+    Phase 8 scope: full pipeline through pr_opened or fallback_commented.
 
     On any unhandled error: transition to error, persist failure indicator.
     """
@@ -136,10 +176,33 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
             return
 
         from sqlalchemy.orm import selectinload
-        repo_result = await db.execute(select(Repo).where(Repo.id == run.repo_id).options(selectinload(Repo.user)))
+        repo_result = await db.execute(
+            select(Repo)
+            .where(Repo.id == run.repo_id)
+            .with_for_update()  # SELECT FOR UPDATE: prevent concurrent tenant cross-write
+            .options(selectinload(Repo.user))
+        )
         repo = repo_result.scalar_one_or_none()
         if repo is None:
             logger.error("orchestrator: repo %s for run %s not found — aborting", run.repo_id, run_id)
+            return
+
+        # ----------------------------------------------------------------
+        # Tenant integrity assertion
+        # Every GitHub write call below must be scoped to this repo/user.
+        # Guard against run_id guessing that could target another tenant's repo.
+        # ----------------------------------------------------------------
+        if repo.user_id is None:
+            logger.error(
+                "orchestrator: repo %s has no user_id — refusing to write (tenant integrity)",
+                repo.id,
+            )
+            return
+        if repo.id != run.repo_id:
+            logger.error(
+                "orchestrator: run.repo_id mismatch (run=%s repo=%s) — aborting",
+                run_id, repo.id,
+            )
             return
 
         # Compact in-memory state — NO raw logs or diffs here
@@ -190,7 +253,7 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
             # Verification retry loop (max MAX_ATTEMPTS = 3)
             # ----------------------------------------------------------------
             from app.subagents.fix_generator import generate_fix, AttemptCapExceeded, PatchRejected, FixGenerationError
-            from app.sandbox.verifier import verify_patch
+            from app.sandbox import verify as sandbox_verify
             from app.models import RunStep, Attempt
             
             prior_attempt: Attempt | None = None
@@ -241,8 +304,8 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                     await _transition(run, RunStatus.verification, db)
                     state["step"] = RunStatus.verification.value
 
-                # ---- Verify in Cloud Build sandbox ----
-                verify_result = await verify_patch(
+                # ---- Verify in sandbox (provider selected via SANDBOX_PROVIDER env) ----
+                verify_result = await sandbox_verify(
                     attempt=attempt,
                     run=run,
                     repo=repo,
@@ -272,10 +335,75 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                     await _transition(run, RunStatus.pending_pr, db)
                     state["step"] = RunStatus.pending_pr.value
                     state["decisions"].append("verification_passed")
-                    logger.info(
-                        "orchestrator: run=%s -> pending_pr (Phase 8 will open PR)",
-                        run_id,
-                    )
+
+                    # ---- Phase 8: generate PR text + open PR ----
+                    try:
+                        from app.subagents.pr_writer import generate_pr_text, pr_branch_name, PRGenerationError
+                        from app.github.pr import get_installation_token, create_branch, commit_patch, open_pr
+
+                        pr_text = await generate_pr_text(
+                            run=run,
+                            verified_attempt=attempt,
+                            diagnosis_summary=run.diagnosis_summary or "",
+                            db=db,
+                        )
+
+                        token = await get_installation_token(repo)
+                        branch = pr_branch_name(
+                            run=run,
+                            attempt=attempt,
+                            default_branch=repo.default_branch,
+                        )
+                        base_branch = repo.default_branch or "main"
+
+                        await create_branch(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            branch=branch,
+                            sha=run.head_sha,
+                            token=token,
+                        )
+                        await commit_patch(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            branch=branch,
+                            patch_text=attempt.patch_text,
+                            commit_msg=pr_text["title"],
+                            token=token,
+                        )
+                        pr = await open_pr(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            head_branch=branch,
+                            base_branch=base_branch,
+                            title=pr_text["title"],
+                            body=pr_text["body"],
+                            token=token,
+                        )
+
+                        import html as html_module
+                        run.pr_url = pr["html_url"]
+                        run.pr_number = pr["number"]
+                        run.pr_branch = branch
+                        run.final_summary = html_module.escape(
+                            pr_text["body"][:1000], quote=False
+                        )
+                        run.updated_at = datetime.now(timezone.utc)
+                        db.add(run)
+                        await db.commit()
+
+                        await _transition(run, RunStatus.pr_opened, db)
+                        state["step"] = RunStatus.pr_opened.value
+                        logger.info(
+                            "orchestrator: run=%s PR #%s opened %s",
+                            run_id, pr["number"], pr["html_url"],
+                        )
+                    except Exception as pr_err:
+                        logger.error(
+                            "orchestrator: run=%s PR creation failed (%s: %s)",
+                            run_id, type(pr_err).__name__, pr_err,
+                        )
+                        await _transition(run, RunStatus.error, db)
                     return
 
                 # ---- Patch failed ----
@@ -284,32 +412,44 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                 )
 
                 if iteration + 1 >= MAX_ATTEMPTS:
-                    # Exhausted all attempts -- fallback (Phase 8: post diagnosis comment)
+                    # Exhausted all attempts -- fallback (post diagnosis-only comment)
                     await _transition(run, RunStatus.fallback, db)
                     state["step"] = RunStatus.fallback.value
-                    
-                    fallback_msg = (
-                        "**Haunter AI Diagnosis:**\n\n"
-                        f"{run.diagnosis_summary}\n\n"
-                        "*Note: Automated fixes were attempted but none passed the CI sandbox. "
-                        "Please review the diagnosis above to manually resolve the issue.*"
+
+                    # Build sanitised comment — html.escape + secret-redact + cap 3000
+                    # Never include raw patch text or full CI logs.
+                    from app.models import Attempt as AttemptModel
+                    from sqlalchemy import select as sa_select
+                    attempts_result = await db.execute(
+                        sa_select(AttemptModel).where(AttemptModel.run_id == run.id)
                     )
-                    
+                    all_attempts = attempts_result.scalars().all()
+                    fallback_body = _sanitize_fallback(run.diagnosis_summary, list(all_attempts))
+
                     try:
+                        from app.github.pr import get_installation_token
                         from app.github_client import post_commit_comment
-                        github_token = repo.user.access_token if repo.user.access_token else None
+                        github_token = await get_installation_token(repo)
                         await post_commit_comment(
                             owner=repo.owner,
                             repo=repo.name,
                             sha=run.head_sha,
-                            body=fallback_msg,
-                            token=github_token
+                            body=fallback_body,
+                            token=github_token,
                         )
+                        await _transition(run, RunStatus.fallback_commented, db)
+                        state["step"] = RunStatus.fallback_commented.value
                     except Exception as e:
-                        logger.error("orchestrator: run=%s failed to post fallback comment: %s", run_id, e)
+                        logger.error(
+                            "orchestrator: run=%s failed to post fallback comment: %s",
+                            run_id, e,
+                        )
+                        # Even if comment posting fails, transition to error rather than
+                        # leaving the run stranded in fallback.
+                        await _transition(run, RunStatus.error, db)
 
                     logger.info(
-                        "orchestrator: run=%s all %d attempts exhausted -> fallback",
+                        "orchestrator: run=%s all %d attempts exhausted -> fallback_commented",
                         run_id,
                         MAX_ATTEMPTS,
                     )

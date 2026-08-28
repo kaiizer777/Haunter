@@ -301,6 +301,7 @@ class UserOut(BaseModel):
     id: uuid.UUID
     github_username: str
     avatar_url: str | None
+    is_admin: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -496,4 +497,10 @@ async def me(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> UserOut:
     """Return the authenticated user's public profile, or 401 if not logged in."""
-    return UserOut.model_validate(current_user)
+    is_admin = bool(settings.admin_user_id and str(current_user.id) == settings.admin_user_id)
+    return UserOut(
+        id=current_user.id,
+        github_username=current_user.github_username,
+        avatar_url=current_user.avatar_url,
+        is_admin=is_admin,
+    )
