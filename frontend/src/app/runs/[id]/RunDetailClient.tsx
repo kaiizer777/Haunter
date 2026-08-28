@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, use } from "react";
-import { useParams } from "next/navigation";
+import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { AppLayout } from "@/components/layout/app-layout";
 import { StatusBadge } from "@/components/runs/status-badge";
@@ -13,8 +12,6 @@ import { api, TraceOut } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
 import { 
   ArrowLeft, 
-  GitBranch, 
-  GitCommit, 
   ExternalLink, 
   GitPullRequest, 
   AlertCircle, 
@@ -22,40 +19,31 @@ import {
   Clock
 } from "lucide-react";
 
-export default function RunDetailClient({
-  params,
-}: {
-  params?: Promise<{ id: string }>;
-}) {
-  const resolvedParams = params ? use(params) : null;
-  const routeParams = useParams();
+/**
+ * Read the run UUID directly from the browser URL.
+ *
+ * We cannot trust Next.js's router params here — with `output: "export"` and
+ * Cloudflare Pages, the static page is always generated with `id = "placeholder"`
+ * so `useParams()` / the params prop will always return "placeholder" at runtime.
+ * The actual UUID is always present in `window.location.pathname` after the hard
+ * navigation triggered by `window.location.assign()` on the runs list page.
+ */
+function getRunIdFromUrl(): string {
+  if (typeof window === "undefined") return "";
+  const match = window.location.pathname.match(/\/runs\/([^/?#]+)/);
+  if (!match || !match[1] || match[1] === "placeholder") return "";
+  return decodeURIComponent(match[1]);
+}
 
-  const getEffectiveRunId = (): string => {
-    const paramId = routeParams?.id;
-    const strParam = typeof paramId === "string" ? paramId : Array.isArray(paramId) ? paramId[0] : "";
-    if (strParam && strParam !== "placeholder") {
-      return strParam;
-    }
-    if (resolvedParams?.id && resolvedParams.id !== "placeholder") {
-      return resolvedParams.id;
-    }
-    if (typeof window !== "undefined") {
-      const match = window.location.pathname.match(/\/runs\/([^\/?#]+)/);
-      if (match && match[1] && match[1] !== "placeholder") {
-        return decodeURIComponent(match[1]);
-      }
-    }
-    return "";
-  };
-
-  const [runId, setRunId] = useState<string>(getEffectiveRunId);
+export default function RunDetailClient() {
+  // Always read from URL — never trust Next.js static-export router params.
+  const [runId, setRunId] = useState<string>("");
 
   useEffect(() => {
-    const effective = getEffectiveRunId();
-    if (effective && effective !== runId) {
-      setRunId(effective);
-    }
-  }, [routeParams, resolvedParams, runId]);
+    // On client mount the real URL is available. Grab it once.
+    const id = getRunIdFromUrl();
+    if (id) setRunId(id);
+  }, []);
 
   const [trace, setTrace] = useState<TraceOut | null>(null);
   const [loading, setLoading] = useState(true);

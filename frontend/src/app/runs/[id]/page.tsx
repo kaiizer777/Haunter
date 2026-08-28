@@ -4,6 +4,6 @@ export function generateStaticParams() {
 
 import RunDetailClient from "./RunDetailClient";
 
-export default function Page({ params }: { params: Promise<{ id: string }> }) {
-  return <RunDetailClient params={params} />;
+export default function Page() {
+  return <RunDetailClient />;
 }
