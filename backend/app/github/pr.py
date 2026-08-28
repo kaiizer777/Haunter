@@ -329,6 +329,147 @@ async def create_branch(
     logger.info("github.pr: created branch %s/%s:%s at sha=%s", owner, repo, branch, sha[:8])
 
 
+def _parse_patch_files(patch_text: str) -> dict[str, str]:
+    """
+    Split a unified diff into per-file patch segments.
+
+    Returns {filepath: file_patch_text} where filepath is the +++ b/ path.
+    Returns {} if parsing fails or no valid hunks found.
+    Validates each path against _REPO_IDENT_RE traversal checks — invalid paths are skipped.
+    """
+    files: dict[str, str] = {}
+    # Split on diff --git markers to isolate per-file sections; fallback to global scan if absent
+    # Use regex to find --- a/... / +++ b/... pairs
+    import re as _re
+
+    # Pattern for file headers: --- a/path  or  --- /dev/null, then +++ b/path  or  +++ /dev/null
+    header_re = _re.compile(r"^---\s+(?:a/)?([^\n]+)\n\+\+\+\s+(?:b/)?([^\n]+)", _re.MULTILINE)
+    # Find all header positions
+    matches = list(header_re.finditer(patch_text))
+    if not matches:
+        return {}
+    for idx, m in enumerate(matches):
+        # Use the +++ path as target (for renames/new files); strip trailing tabs/spaces
+        target = m.group(2).strip().split("\t")[0].strip()
+        if target == "/dev/null" or not target:
+            continue
+        # Validate path chars before accepting
+        try:
+            # Reuse _validate_ident logic for each path component
+            for part in target.split("/"):
+                if part in (".", "..", ""):
+                    raise ValueError(f"invalid path component {part!r}")
+                if part.startswith(".git") or part.startswith(".github"):
+                    # Allow normal files but block .git/ and .github/workflows traversal checked later
+                    pass
+            if ".." in target or target.startswith("/") or "//" in target:
+                continue
+            if target.startswith(".git/") or target.startswith(".github/workflows/"):
+                continue
+        except Exception:
+            continue
+        start = m.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(patch_text)
+        content = patch_text[start:end]
+        # Must contain at least one hunk header @@
+        if "@@" not in content:
+            continue
+        # Store the full per-file patch (header + body) for applier
+        files[target] = (m.group(0) + content).strip()
+    return files
+
+
+def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str | None:
+    """
+    Apply a per-file unified diff segment to original_text.
+
+    Returns new_text on success, None if hunk context does not match (mismatch).
+    Handles multiple hunks per file, context lines, additions, deletions.
+    """
+    orig_lines = original_text.splitlines()
+    # Keep trailing newline info
+    had_trailing_newline = original_text.endswith("\n") if original_text else True
+
+    # Extract hunks: each @@ header + body lines
+    import re as _re
+
+    hunk_header_re = _re.compile(r"^@@\s+-(\d+),?(\d*)\s+\+(\d+),?(\d*)\s+@@")
+    lines = file_patch.splitlines()
+    # Skip file header lines (---/+++) until first @@
+    hunk_start = None
+    for i, ln in enumerate(lines):
+        if ln.startswith("@@"):
+            hunk_start = i
+            break
+    if hunk_start is None:
+        return None
+    # Build new content by walking original lines and hunks
+    new_lines: list[str] = []
+    orig_idx = 0  # 0-based index into orig_lines
+
+    i = hunk_start
+    while i < len(lines):
+        line = lines[i]
+        m = hunk_header_re.match(line)
+        if m:
+            # Parse old start and length
+            old_start = int(m.group(1))
+            old_len = int(m.group(2)) if m.group(2) else 1
+            # new_start = int(m.group(3))  # not needed for apply
+            # Advance orig_idx to hunk start (1-based to 0-based)
+            # old_start is 1-based line number in original
+            target_idx = max(0, old_start - 1)
+            # Copy unchanged lines before hunk
+            while orig_idx < target_idx and orig_idx < len(orig_lines):
+                new_lines.append(orig_lines[orig_idx])
+                orig_idx += 1
+            i += 1
+            # Process hunk body until next @@ or EOF
+            while i < len(lines) and not lines[i].startswith("@@"):
+                hunk_line = lines[i]
+                if hunk_line.startswith(" "):
+                    # Context — must match original
+                    if orig_idx >= len(orig_lines) or orig_lines[orig_idx] != hunk_line[1:]:
+                        return None
+                    new_lines.append(orig_lines[orig_idx])
+                    orig_idx += 1
+                elif hunk_line.startswith("-"):
+                    # Deletion — must match original then skip
+                    if orig_idx >= len(orig_lines) or orig_lines[orig_idx] != hunk_line[1:]:
+                        return None
+                    orig_idx += 1
+                elif hunk_line.startswith("+"):
+                    # Addition — insert
+                    new_lines.append(hunk_line[1:])
+                elif hunk_line.startswith("\\"):
+                    # No newline at end of file marker — ignore
+                    pass
+                elif hunk_line == "":
+                    # Empty line treated as context of empty string (rare)
+                    if orig_idx < len(orig_lines) and orig_lines[orig_idx] == "":
+                        new_lines.append("")
+                        orig_idx += 1
+                    else:
+                        new_lines.append("")
+                else:
+                    # Unknown prefix — bail
+                    return None
+                i += 1
+            continue
+        else:
+            i += 1
+
+    # Copy remaining original lines after last hunk
+    while orig_idx < len(orig_lines):
+        new_lines.append(orig_lines[orig_idx])
+        orig_idx += 1
+
+    result = "\n".join(new_lines)
+    if had_trailing_newline or result:
+        result += "\n"
+    return result
+
+
 async def commit_patch(
     owner: str,
     repo: str,
@@ -340,17 +481,19 @@ async def commit_patch(
     """
     Apply `patch_text` as a single commit on `branch` using the Git Data API.
 
-    Strategy: create blob from patch → create tree with single blob file
-    "haunter.patch" → create commit → update branch ref.
-
-    This is the safe approach for arbitrary patch content — it does not require
-    applying the diff on disk and avoids shell injection risks.
+    Strategy:
+      1. Parse patch into per-file segments via _parse_patch_files.
+      2. For each file, fetch current content via Contents API, apply hunks locally
+         via _apply_unified_diff_to_content, create blob for new content.
+      3. Create tree with updated blobs → create commit → update branch ref.
+      Fallback: if parsing fails or any file apply fails, commits the raw diff as
+      haunter.patch (legacy placeholder) so the PR still contains the diff artifact.
 
     Args:
         owner:      Repository owner.
         repo:       Repository name.
         branch:     Target branch (must already exist).
-        patch_text: Raw unified diff text — stored as haunter.patch in the commit.
+        patch_text: Raw unified diff text.
         commit_msg: Commit message — should be the PR title (already sanitised).
         token:      GitHub installation access token.
 
@@ -379,30 +522,111 @@ async def commit_patch(
             raise GitHubPRError(f"Cannot fetch commit {head_sha[:8]}: HTTP {commit_resp.status_code}")
         base_tree_sha = commit_resp.json()["tree"]["sha"]
 
-        # 3. Create a blob for the patch content
-        blob_resp = await client.post(
-            f"{api}/git/blobs",
-            headers=headers,
-            json={"content": patch_text, "encoding": "utf-8"},
-        )
-        if blob_resp.is_error:
-            raise GitHubPRError(f"Failed to create blob: HTTP {blob_resp.status_code}")
-        blob_sha = blob_resp.json()["sha"]
+        # 3. Try to parse and apply patch per-file
+        tree_entries: list[dict[str, str]] = []
+        per_file_patches = _parse_patch_files(patch_text)
+        use_fallback = False
 
-        # 4. Create a tree containing the patch file
+        if per_file_patches:
+            for file_path, file_patch in per_file_patches.items():
+                # Validate branch-safe file path
+                if len(file_path) > 255 or not _BRANCH_RE.match(file_path.replace("/", "_")):
+                    # Use looser check for file paths: allow slashes, dots, underscores, hyphens
+                    if ".." in file_path or file_path.startswith("/") or "//" in file_path:
+                        logger.warning("github.pr: skipping invalid file path %r from patch", file_path)
+                        use_fallback = True
+                        break
+                # Fetch current file content (may be new file → 404)
+                content_resp = await client.get(
+                    f"{api}/contents/{file_path}",
+                    headers=headers,
+                    params={"ref": head_sha},
+                )
+                if content_resp.status_code == 404:
+                    original_text = ""
+                elif content_resp.is_error:
+                    logger.warning(
+                        "github.pr: failed to fetch %r for branch %s: HTTP %d — fallback to haunter.patch",
+                        file_path, branch, content_resp.status_code,
+                    )
+                    use_fallback = True
+                    break
+                else:
+                    try:
+                        data = content_resp.json()
+                        # Contents API returns base64-encoded content (may be list for dir)
+                        if isinstance(data, list):
+                            logger.warning("github.pr: path %r is a directory — fallback", file_path)
+                            use_fallback = True
+                            break
+                        b64 = data.get("content", "")
+                        # Content may contain newlines; GitHub wraps at 60 chars
+                        b64_clean = "".join(b64.split())
+                        original_text = base64.b64decode(b64_clean).decode("utf-8", errors="replace") if b64_clean else ""
+                    except Exception as exc:
+                        logger.warning("github.pr: decode failed for %r: %s — fallback", file_path, exc)
+                        use_fallback = True
+                        break
+
+                new_text = _apply_unified_diff_to_content(original_text, file_patch)
+                if new_text is None:
+                    logger.warning("github.pr: hunk apply failed for %r — fallback to haunter.patch", file_path)
+                    use_fallback = True
+                    break
+
+                # Create blob for new file content
+                blob_resp = await client.post(
+                    f"{api}/git/blobs",
+                    headers=headers,
+                    json={"content": new_text, "encoding": "utf-8"},
+                )
+                if blob_resp.is_error:
+                    logger.warning("github.pr: blob creation failed for %r: HTTP %d — fallback", file_path, blob_resp.status_code)
+                    use_fallback = True
+                    break
+                blob_sha = blob_resp.json()["sha"]
+                tree_entries.append(
+                    {
+                        "path": file_path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": blob_sha,
+                    }
+                )
+
+            # If per-file parsing succeeded but yielded no entries (e.g., pure deletions), fallback
+            if not use_fallback and not tree_entries:
+                use_fallback = True
+        else:
+            use_fallback = True
+
+        if use_fallback:
+            # Legacy fallback: commit raw diff as haunter.patch artifact
+            logger.info("github.pr: falling back to haunter.patch artifact for %s/%s:%s", owner, repo, branch)
+            blob_resp = await client.post(
+                f"{api}/git/blobs",
+                headers=headers,
+                json={"content": patch_text, "encoding": "utf-8"},
+            )
+            if blob_resp.is_error:
+                raise GitHubPRError(f"Failed to create blob: HTTP {blob_resp.status_code}")
+            blob_sha = blob_resp.json()["sha"]
+            tree_entries = [
+                {
+                    "path": "haunter.patch",
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": blob_sha,
+                }
+            ]
+
+        # 4. Create a tree containing the updated files
         tree_resp = await client.post(
             f"{api}/git/trees",
             headers=headers,
             json={
                 "base_tree": base_tree_sha,
-                "tree": [
-                    {
-                        "path": "haunter.patch",
-                        "mode": "100644",
-                        "type": "blob",
-                        "sha": blob_sha,
-                    }
-                ],
+                "tree": tree_entries,
             },
         )
         if tree_resp.is_error:
@@ -435,8 +659,8 @@ async def commit_patch(
             )
 
     logger.info(
-        "github.pr: committed patch to %s/%s:%s new_sha=%s",
-        owner, repo, branch, new_commit_sha[:8],
+        "github.pr: committed patch to %s/%s:%s new_sha=%s (%d file(s))",
+        owner, repo, branch, new_commit_sha[:8], len(tree_entries),
     )
     return new_commit_sha
 

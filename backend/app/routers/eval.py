@@ -98,6 +98,8 @@ class EvalResultOut(BaseModel):
     provider: Optional[str] = None
     model_name: Optional[str] = None
     fixture_scores: Optional[list[dict[str, Any]]] = None
+    confidence_correlation: Optional[float] = None
+    confidence_correlation_n: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -148,6 +150,8 @@ class EvalResultOut(BaseModel):
             provider=model_config.provider if model_config else None,
             model_name=model_config.model_name if model_config else None,
             fixture_scores=fixture_scores,
+            confidence_correlation=scores.get("confidence_correlation"),
+            confidence_correlation_n=scores.get("confidence_correlation_n"),
         )
 
 
@@ -160,14 +164,23 @@ def _load_fixture_allowlist() -> list[str]:
     """Return all fixture IDs from the server-side allowlist file."""
     from pathlib import Path
     import json
-    fixtures_path = Path(__file__).parent.parent.parent / "eval" / "fixtures" / "golden_cases.json"
-    try:
-        with fixtures_path.open() as f:
-            data = json.load(f)
-        return [item["id"] for item in data if isinstance(item, dict) and "id" in item]
-    except Exception:  # noqa: BLE001
-        logger.exception("Failed to load eval fixture allowlist")
-        return []
+    # Primary path (from routers/eval.py → backend/eval/fixtures)
+    candidates = [
+        Path(__file__).parent.parent.parent / "eval" / "fixtures" / "golden_cases.json",
+        Path(__file__).parent.parent / "eval" / "fixtures" / "golden_cases.json",
+        Path(__file__).parent / "fixtures" / "golden_cases.json",
+    ]
+    for fixtures_path in candidates:
+        try:
+            if fixtures_path.exists():
+                with fixtures_path.open() as f:
+                    data = json.load(f)
+                return [item["id"] for item in data if isinstance(item, dict) and "id" in item]
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to load eval fixture allowlist from %s", fixtures_path)
+            continue
+    logger.error("No golden_cases.json found in any candidate path: %s", candidates)
+    return []
 
 
 _FIXTURE_ALLOWLIST: list[str] = _load_fixture_allowlist()

@@ -12,8 +12,7 @@
 #     CreateLogStream, PutLogEvents, ssm:GetParameters (scoped resource)
 #   - Explicit Deny: secretsmanager:*, iam:*, ec2:*, sts:AssumeRole (any other)
 #   - No cross-tenant resource access — project is scoped to Haunter builds only
-#   - privileged_mode = false  (Dockerfile builds handled inside the build step
-#     via `docker build` which is available on standard Ubuntu without DinD)
+#   - privileged_mode = true  (required for DinD when repo has Dockerfile; HAUNTER.md:131)
 ##############################################################################
 
 terraform {
@@ -178,7 +177,7 @@ resource "aws_codebuild_project" "sandbox" {
     type                        = "LINUX_CONTAINER"
     image                       = "aws/codebuild/standard:7.0"  # Ubuntu 22.04, Python 3.12, Node 20
     compute_type                = "BUILD_GENERAL1_SMALL"         # EC2 — 3 GB RAM, 2 vCPU; free tier eligible
-    privileged_mode             = false                          # no DinD needed; docker build runs without it on standard images
+    privileged_mode             = true                           # required for DinD: docker build/run when repo has Dockerfile (HAUNTER.md:131)
 
     # GITHUB_TOKEN injected from SSM — CodeBuild resolves it at build start.
     # Never passed as a PLAINTEXT environmentVariable.

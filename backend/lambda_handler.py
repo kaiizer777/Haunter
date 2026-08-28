@@ -34,6 +34,8 @@ Security:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import uuid as _uuid
@@ -85,11 +87,40 @@ def handler(event: dict, context) -> dict:
 
     Detects invocation mode and dispatches accordingly:
     - HTTP event (API GW / Function URL): Mangum → FastAPI
-    - Pipeline event ({"run_id": "..."}): asyncio.run(handle_failed_run)
+    - Pipeline event ({"run_id": "...", "token": "..."}): asyncio.run(handle_failed_run)
+
+    Pipeline self-invoke is authenticated via HMAC-SHA256 over run_id using
+    GITHUB_WEBHOOK_SECRET (fallback SESSION_SECRET_KEY) to prevent unauthenticated
+    direct InvokeFunction from triggering arbitrary run_id (S-06). The hosting
+    adapter includes the token; direct Invoke without valid token is rejected.
     """
-    # Pipeline invocation: {"run_id": "...", ...} without HTTP context
+    # Pipeline invocation: {"run_id": "...", "token": "..."} without HTTP context
     if "run_id" in event and "requestContext" not in event:
         run_id_str = event["run_id"]
+        # HMAC verification — fail closed when secret is configured
+        try:
+            # Lazy import settings to avoid import at cold-start when env not set
+            from app.config import settings as _settings
+
+            _hmac_key = getattr(_settings, "github_webhook_secret", None) or getattr(
+                _settings, "session_secret_key", None
+            )
+            if _hmac_key:
+                expected = hmac.new(
+                    _hmac_key.encode(), str(run_id_str).encode(), hashlib.sha256
+                ).hexdigest()
+                provided = event.get("token") or ""
+                # Use constant-time compare to prevent timing side-channel
+                if not provided or not hmac.compare_digest(expected, str(provided)):
+                    logger.warning(
+                        "lambda_handler: rejected unauthenticated pipeline invoke for run_id=%s",
+                        run_id_str,
+                    )
+                    return {"error": "unauthorized pipeline invocation", "run_id": run_id_str}
+        except Exception as exc:  # noqa: BLE001 — never let HMAC check crash handler
+            logger.warning("lambda_handler: HMAC check error for run_id=%s: %s", run_id_str, exc)
+            # If settings cannot be loaded, fall through to allow pipeline (dev mode without secret)
+            pass
         logger.info("lambda_handler: received pipeline invocation for run_id=%s", run_id_str)
         try:
             asyncio.run(_run_pipeline(run_id_str))

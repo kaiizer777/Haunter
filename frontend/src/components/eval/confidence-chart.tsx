@@ -42,6 +42,7 @@ const FALLBACK_POINTS: AttemptDataPoint[] = [
 ];
 
 export function ConfidenceOutcomeChart({ data, className }: ConfidenceChartProps) {
+  const isFallback = !data || data.length === 0;
   const points = useMemo(() => {
     if (data && data.length > 0) {
       return data;
@@ -133,6 +134,11 @@ export function ConfidenceOutcomeChart({ data, className }: ConfidenceChartProps
           <p className="text-[11px] font-mono text-zinc-500 mt-1">
             Validating if Fix Generator confidence accurately predicts real sandbox verification passes
           </p>
+          {isFallback && (
+            <p className="text-[10px] font-mono text-amber-400/80 mt-1 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-1 inline-block">
+              Synthetic fallback data — no live eval results yet. Run the harness to see live confidence correlation.
+            </p>
+          )}
         </div>
 
         {/* Monospace KPI Metrics Strip */}

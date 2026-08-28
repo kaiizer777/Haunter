@@ -152,7 +152,7 @@ resource "aws_lambda_function" "haunter" {
   package_type  = "Zip"
   filename      = var.lambda_zip_path
   handler       = "lambda_handler.handler"
-  runtime       = "python3.11"
+  runtime       = "python3.12"
   architectures = ["x86_64"]
 
   timeout     = 900   # 15 minutes — covers CodeBuild poll loop

@@ -58,11 +58,46 @@ _ALL_FIXTURE_IDS: frozenset[str] = frozenset()  # populated at module load
 
 def _load_fixtures() -> list[dict[str, Any]]:
     """Load and return all golden fixtures from the allowlist file."""
-    with _FIXTURES_PATH.open() as f:
-        data = json.load(f)
+    try:
+        with _FIXTURES_PATH.open() as f:
+            data = json.load(f)
+    except FileNotFoundError as exc:
+        logger.error("golden_cases.json not found at %s", _FIXTURES_PATH)
+        raise FileNotFoundError(
+            f"golden_cases.json not found at {_FIXTURES_PATH} — ensure eval/fixtures is included in deployment artefact"
+        ) from exc
     if not isinstance(data, list):
         raise ValueError("golden_cases.json must contain a JSON array")
     return data
+
+
+def _pearson_correlation(confidences: list[int], passed: list[int]) -> float | None:
+    """
+    Compute Pearson r between confidence (0-100) and binary pass (0/1).
+
+    Returns None when undefined (n < 2 or zero variance).
+    Manual implementation avoids numpy/scipy dependency.
+    """
+    n = len(confidences)
+    if n < 2 or len(passed) != n:
+        return None
+    mean_c = sum(confidences) / n
+    mean_p = sum(passed) / n
+    num = 0.0
+    sum_sq_c = 0.0
+    sum_sq_p = 0.0
+    for c, p in zip(confidences, passed):
+        dc = c - mean_c
+        dp = p - mean_p
+        num += dc * dp
+        sum_sq_c += dc * dc
+        sum_sq_p += dp * dp
+    denom = (sum_sq_c * sum_sq_p) ** 0.5
+    if denom == 0:
+        return 0.0
+    r = num / denom
+    # Clamp to [-1, 1] to handle floating point drift
+    return max(-1.0, min(1.0, round(r, 4)))
 
 
 def _build_fixture_index(fixtures: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -428,6 +463,22 @@ async def run_eval(
 
         passed_count = sum(1 for r in per_fixture_results if r.get("passed"))
 
+        # Pearson correlation between confidence (0-100) and binary pass (0/1)
+        confidences_for_corr: list[int] = []
+        passed_for_corr: list[int] = []
+        for r in per_fixture_results:
+            fg = r.get("fix_generator") or {}
+            conf = fg.get("confidence")
+            # fallback to normalized score*100 when confidence key missing (error path)
+            if conf is None:
+                try:
+                    conf = int(round(float(fg.get("score", 0)) * 100))
+                except Exception:
+                    conf = 0
+            confidences_for_corr.append(int(conf))
+            passed_for_corr.append(1 if r.get("passed") else 0)
+        correlation = _pearson_correlation(confidences_for_corr, passed_for_corr)
+
         per_subagent_scores: dict[str, Any] = {
             "context_gatherer": {
                 "average_score": round(avg_context, 4),
@@ -451,6 +502,8 @@ async def run_eval(
             },
             "mode": mode_label,
             "fixture_results": per_fixture_results,
+            "confidence_correlation": correlation,
+            "confidence_correlation_n": n,
         }
 
         eval_result = EvalResult(

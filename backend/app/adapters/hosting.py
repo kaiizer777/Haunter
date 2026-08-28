@@ -182,6 +182,8 @@ class AWSHostingAdapter(HostingAdapter):
         run_id: UUID,
         background_tasks: "BackgroundTasks",
     ) -> None:
+        import hashlib
+        import hmac
         import json
         from app.config import settings
 
@@ -200,7 +202,20 @@ class AWSHostingAdapter(HostingAdapter):
             background_tasks.add_task(handle_failed_run, run_id)
             return
 
-        payload = json.dumps({"run_id": str(run_id)}).encode()
+        # HMAC for pipeline self-invoke — prevents unauthenticated direct InvokeFunction
+        # from triggering arbitrary run_id (S-06). Key is github_webhook_secret (or session_secret_key fallback).
+        hmac_key = getattr(settings, "github_webhook_secret", None) or getattr(
+            settings, "session_secret_key", ""
+        )
+        token = ""
+        if hmac_key:
+            token = hmac.new(
+                hmac_key.encode(), str(run_id).encode(), hashlib.sha256
+            ).hexdigest()
+        payload_dict: dict[str, str] = {"run_id": str(run_id)}
+        if token:
+            payload_dict["token"] = token
+        payload = json.dumps(payload_dict).encode()
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _invoke_lambda_async, function_name, payload)
