@@ -40,3 +40,6 @@ Thumbs.db
 lambda.zip
 infra/aws/terraform.tf*
 infra/aws/.terraform*
+
+# Agent-generated reports (not tracked)
+AUDIT_REPORT.md

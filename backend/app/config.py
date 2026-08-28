@@ -1,5 +1,4 @@
 import logging
-import warnings
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -119,10 +118,15 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Startup warning if token encryption is not configured — pre-prod blocker.
-if settings.token_encryption_key is None:
-    warnings.warn(
-        "TOKEN_ENCRYPTION_KEY is not set. users.access_token will be stored as plaintext. "
-        "This is a pre-prod security blocker — encrypt before deploying to production.",
-        stacklevel=1,
+# Enforce token encryption at startup — fail closed in non-test environments.
+# Detects pytest by checking sys.modules (pytest is imported before any conftest/module import),
+# which is more reliable than PYTEST_CURRENT_TEST (set after collection starts).
+import sys as _sys
+if settings.token_encryption_key is None and "pytest" not in _sys.modules:
+    raise RuntimeError(
+        "TOKEN_ENCRYPTION_KEY must be set — users.access_token would be stored as "
+        "plaintext at rest in Neon Postgres (backend/app/auth.py:148). "
+        "Generate with: "
+        'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
     )
+del _sys

@@ -37,6 +37,18 @@ class RepoOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AvailableRepoOut(BaseModel):
+    owner: str
+    name: str
+    full_name: str
+    default_branch: Optional[str] = None
+    language: Optional[str] = None
+    private: bool
+    updated_at: Optional[str] = None
+    already_connected: bool
+    permissions_push: bool
+
+
 # ---------------------------------------------------------------------------
 # ModelConfig schemas
 # ---------------------------------------------------------------------------

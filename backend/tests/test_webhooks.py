@@ -29,7 +29,7 @@ import json
 import logging
 import uuid
 from typing import Callable
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from sqlalchemy import select
@@ -349,7 +349,10 @@ async def test_webhook_valid_failure_creates_run(
     raw_body = json.dumps(payload).encode("utf-8")
     sig = sign_payload(TEST_SECRET, raw_body)
 
-    with patch("app.webhooks.handle_failed_run"):
+    with patch("app.adapters.hosting.get_hosting_adapter") as mock_get:
+        mock_adapter = AsyncMock()
+        mock_adapter.schedule_pipeline = AsyncMock()
+        mock_get.return_value = mock_adapter
         resp = await client.post(
             "/webhooks/github",
             headers={

@@ -48,7 +48,7 @@ async def test_login_redirect_and_state_cookie_attrs(client: httpx.AsyncClient):
     location = resp.headers.get("location", "")
     assert location.startswith("https://github.com/login/oauth/authorize")
     assert f"client_id={settings.github_client_id}" in location
-    assert "scope=read%3Auser" in location or "scope=read:user" in location
+    assert "scope=read%3Auser+repo" in location or "scope=read%3Auser%20repo" in location or "scope=read:user repo" in location
     assert "state=" in location
 
     # Verify state cookie attributes
@@ -58,6 +58,15 @@ async def test_login_redirect_and_state_cookie_attrs(client: httpx.AsyncClient):
     assert "Secure" in set_cookie or "secure" in set_cookie
     assert "SameSite=none" in set_cookie.lower() or "samesite=none" in set_cookie.lower()
     assert f"Max-Age={_STATE_MAX_AGE}" in set_cookie or f"max-age={_STATE_MAX_AGE}" in set_cookie
+
+
+@pytest.mark.asyncio
+async def test_login_redirect_includes_repo_scope(client: httpx.AsyncClient):
+    """GET /auth/login returns 302 with read:user repo scope for repo discovery."""
+    resp = await client.get("/auth/login")
+    assert resp.status_code == 302
+    location = resp.headers.get("location", "")
+    assert "scope=read%3Auser+repo" in location or "scope=read%3Auser%20repo" in location or "scope=read:user repo" in location
 
 
 @pytest.mark.asyncio
@@ -373,3 +382,37 @@ def test_pkce_docstring_and_generic_error_policy():
     assert "PKCE DECISION" in doc
     assert "compensating controls" in doc.lower() or "csrf" in doc.lower()
     assert "ERROR POLICY" in doc
+
+
+def test_encryption_required_raises():
+    """
+    config.py must raise RuntimeError when TOKEN_ENCRYPTION_KEY is None and pytest is not
+    in sys.modules (i.e. non-test runtime).
+
+    Simulates this by temporarily removing 'pytest' from sys.modules before re-importing
+    app.config with no TOKEN_ENCRYPTION_KEY env var.
+    """
+    import importlib
+    import os
+    import sys
+
+    # Pop pytest from sys.modules to simulate non-test runtime
+    saved_pytest = sys.modules.pop("pytest", None)
+    # Remove cached app.config so the module-level guard re-executes
+    sys.modules.pop("app.config", None)
+
+    try:
+        # Ensure TOKEN_ENCRYPTION_KEY is absent
+        original_key = os.environ.pop("TOKEN_ENCRYPTION_KEY", None)
+        try:
+            with pytest.raises(RuntimeError, match="TOKEN_ENCRYPTION_KEY must be set"):
+                importlib.import_module("app.config")
+        finally:
+            if original_key is not None:
+                os.environ["TOKEN_ENCRYPTION_KEY"] = original_key
+    finally:
+        # Restore pytest in sys.modules and reset app.config to clean state
+        if saved_pytest is not None:
+            sys.modules["pytest"] = saved_pytest
+        sys.modules.pop("app.config", None)
+        importlib.import_module("app.config")

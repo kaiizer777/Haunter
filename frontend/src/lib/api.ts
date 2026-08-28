@@ -30,6 +30,19 @@ export interface RepoCreate {
   language_hint?: string | null;
 }
 
+/** Shape returned by GET /github/available-repos */
+export interface AvailableRepoOut {
+  owner: string;
+  name: string;
+  full_name: string;
+  default_branch: string | null;
+  language: string | null;
+  private: boolean;
+  updated_at: string | null;
+  already_connected: boolean;
+  permissions_push: boolean;
+}
+
 export interface RunOut {
   id: string;
   repo_id: string;
@@ -244,6 +257,7 @@ export const api = {
   addRepo: (data: RepoCreate) => api.post<RepoOut>("/repos", data),
   removeRepo: (id: string) => api.delete<void>(`/repos/${id}`),
   getRepoStats: (repoId: string) => api.get<RepoStatsOut>(`/repos/${repoId}/stats`),
+  getAvailableRepos: () => api.get<AvailableRepoOut[]>("/github/available-repos"),
 
   // Runs endpoints
   getRuns: (params?: {

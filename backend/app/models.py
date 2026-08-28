@@ -26,10 +26,9 @@ class User(Base):
     github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     github_username: Mapped[str] = mapped_column(String(255), nullable=False)
     avatar_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # Stores the GitHub OAuth access token (read:user scope only).
-    # TODO(security): encrypt access_token at rest with Fernet before prod.
-    # Encryption helpers live in app/auth.py (_encrypt_token / _decrypt_token).
-    # TOKEN_ENCRYPTION_KEY env var must be set — see config.py for startup warning.
+    # Stores the GitHub OAuth access token encrypted at rest with Fernet.
+    # TOKEN_ENCRYPTION_KEY is required at startup (config.py raises RuntimeError if unset).
+    # Encryption helpers: app/auth.py (_encrypt_token / _decrypt_token).
     access_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)

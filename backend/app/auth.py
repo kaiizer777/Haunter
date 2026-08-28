@@ -5,7 +5,7 @@ Design decisions documented here:
 
 AUTH ARCHITECTURE
 -----------------
-- We use a SEPARATE GitHub OAuth App (read:user scope only) purely for login.
+- We use a SEPARATE GitHub OAuth App (read:user repo scope) purely for login.
   The GitHub App used for repo installation / webhook reception (Phase 3+) is a
   distinct credential with repo-admin scope. Login must never request destructive
   scopes — least-privilege principle.
@@ -65,9 +65,9 @@ TOKEN AT REST
 -------------
 - users.access_token is encrypted with Fernet (TOKEN_ENCRYPTION_KEY env var) before
   INSERT/UPDATE and decrypted at point of use.
-  TODO(security): encrypt access_token before prod — pre-prod security blocker.
-  If TOKEN_ENCRYPTION_KEY is not set, the token is stored plaintext and a startup
-  WARNING is emitted by config.py. Never log the token value.
+  Encrypted via Fernet (TOKEN_ENCRYPTION_KEY env var) before INSERT/UPDATE, decrypted
+  at point of use. TOKEN_ENCRYPTION_KEY is required at non-test startup — config.py
+  raises RuntimeError if unset (no longer a WARNING, guard is fail-closed).
 
 ERROR POLICY
 ------------
@@ -121,7 +121,8 @@ _RATE_LIMIT = f"{settings.rate_limit_per_minute}/minute"
 
 # ---------------------------------------------------------------------------
 # Fernet token encryption (at-rest protection for users.access_token)
-# TODO(security): encrypt access_token before prod — pre-prod security blocker.
+# TOKEN_ENCRYPTION_KEY is enforced at startup (config.py) — non-test environments
+# raise RuntimeError if unset, so this path only runs in test mode (key=None) or prod (key set).
 # ---------------------------------------------------------------------------
 
 def _get_fernet():
@@ -138,13 +139,12 @@ def _get_fernet():
 
 def _encrypt_token(token: str) -> str:
     """
-    Encrypt the access token before storing. If TOKEN_ENCRYPTION_KEY is not set,
-    returns plaintext — this is the pre-prod blocker path (warned at startup).
-    NEVER log the token value or the encrypted bytes.
+    Encrypt the access token before storing.
+    If TOKEN_ENCRYPTION_KEY is not set (test mode only — prod raises at startup),
+    returns plaintext. NEVER log the token value or the encrypted bytes.
     """
     fernet = _get_fernet()
     if fernet is None:
-        # TODO(security): encrypt access_token before prod — TOKEN_ENCRYPTION_KEY not set.
         return token
     return fernet.encrypt(token.encode()).decode()
 
@@ -272,7 +272,8 @@ def _clear_session_cookie(response: Response) -> None:
 
 
 def _set_state_cookie(response: Response, signed_state: str) -> None:
-    """Short-lived state cookie — httpOnly, 10min TTL, deleted after use. SameSite=None for cross-site pages.dev -> lambda-url."""
+    """Short-lived state cookie — httpOnly, 10min TTL, deleted after use.
+    SameSite=None for cross-site pages.dev -> lambda-url."""
     response.set_cookie(
         key=_STATE_COOKIE_NAME,
         value=signed_state,
@@ -350,9 +351,14 @@ async def login(request: Request, response: Response) -> RedirectResponse:
     """
     raw_state = secrets.token_urlsafe(32)
 
+    # Scope 'read:user repo' is required to call GET /user/repos for the 1-click repo
+    # picker (lists private repos user has push/admin access to). 'read:user' alone only
+    # permits profile retrieval. Changing this forces existing users to re-login (WORK.md:9).
+    # Destructive scopes (admin:org, delete_repo) are explicitly excluded — least privilege.
+    # The separate GitHub App for webhooks/PR creation remains distinct (HAUNTER.md:151).
     client = AsyncOAuth2Client(
         client_id=settings.github_client_id,
-        scope="read:user",
+        scope="read:user repo",
         redirect_uri=settings.callback_url,  # hardcoded from config — never from Host header
     )
     url, state = client.create_authorization_url(_GITHUB_AUTHORIZE_URL, state=raw_state)
