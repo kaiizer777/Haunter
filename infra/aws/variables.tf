@@ -84,3 +84,9 @@ variable "opencode_zen_api_key" {
   sensitive   = true
   default     = ""
 }
+
+variable "token_encryption_key" {
+  description = "Fernet key for encrypting users.access_token at rest. Generate with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+  type        = string
+  sensitive   = true
+}

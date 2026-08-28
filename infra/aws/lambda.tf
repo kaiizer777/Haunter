@@ -184,6 +184,9 @@ resource "aws_lambda_function" "haunter" {
 
       # LLM
       OPENCODE_ZEN_API_KEY = var.opencode_zen_api_key
+
+      # Token encryption (at-rest protection for users.access_token — required, see config.py:125)
+      TOKEN_ENCRYPTION_KEY = var.token_encryption_key
     }
   }
 
