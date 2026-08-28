@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_ATTEMPTS: int = 3
+MAX_ATTEMPTS: int = 10
 
 # Placeholder pricing — same as context_gatherer; replace with real figures.
 COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
@@ -260,14 +260,14 @@ async def _call_and_parse(
     Returns:
         (FixOutput, raw_response_dict) — response dict needed for token accounting.
     """
-    llm = LLMClient(timeout=60.0)
+    llm = LLMClient(timeout=120.0)
 
     response = await llm.complete(
         messages=messages,
         db=db,
         repo_id=repo_id,
         response_format={"type": "json_object"},
-        max_tokens=1024,
+        max_tokens=4096,
     )
 
     content: str = (response.get("content") or "").strip()
@@ -296,7 +296,7 @@ async def _call_and_parse(
         db=db,
         repo_id=repo_id,
         response_format={"type": "json_object"},
-        max_tokens=1024,
+        max_tokens=4096,
     )
 
     retry_content: str = (retry_response.get("content") or "").strip()

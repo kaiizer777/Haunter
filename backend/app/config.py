@@ -58,7 +58,10 @@ class Settings(BaseSettings):
     frontend_url: str
 
     # Per-IP rate limit for auth endpoints (requests per minute).
-    rate_limit_per_minute: int = 20
+    # Per-IP rate limit for sensitive auth endpoints. Bumped to a near-unlimited
+    # value while the pipeline is being validated end-to-end; tighten to ~30 once
+    # the dashboard is in a steady state.
+    rate_limit_per_minute: int = 1000
 
     # LLM Provider Configuration (Phase 4)
     # OpenCode Zen API key (Secret Manager / .env only). Injected at request time, never logged.

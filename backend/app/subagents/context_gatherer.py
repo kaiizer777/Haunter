@@ -41,8 +41,11 @@ logger = logging.getLogger(__name__)
 # and prevents accidental cost explosions on huge monorepo logs.
 CAP_CHARS: int = 8_000
 
-# Per-fetch timeout. One hung GitHub request must not stall the gather > 30s.
-FETCH_TIMEOUT_S: float = 30.0
+# Per-fetch timeout. One hung GitHub request must not stall the gather.
+# NOTE: Relaxed from 30s -> 120s while the pipeline is being verified. The
+# provider is free-tier and slow responses are common; we don't want to
+# kill the LLM call mid-stream. Tighten once we have a stable success path.
+FETCH_TIMEOUT_S: float = 120.0
 
 # Placeholder pricing: $0.001 / 1k input tokens, $0.002 / 1k output tokens.
 # Replace with real provider pricing once known.
@@ -188,103 +191,17 @@ async def gather_context(
     del logs_raw, diff_raw, meta_raw
 
     # -------------------------------------------------------------------------
-    # 4. Single LLM call — all three inputs fused into one user message
+    # 4. LLM call (with one empty-response retry) — see _call_with_empty_retry
+    #    below. If the model returns whitespace / hits max_tokens, we try
+    #    once more with a tighter, force-prose prompt before declaring failure.
     # -------------------------------------------------------------------------
-    system_prompt = (
-        "You are Context Gatherer, a CI failure diagnosis agent. "
-        "Your sole output is a concise root-cause summary: 3-5 lines maximum. "
-        "Include: error type, the exact file and line number if visible in the logs, "
-        "and one sentence on why CI failed. "
-        "Do NOT output a patch, a fix, or echo back raw log lines. "
-        "If no logs are available, state so explicitly."
+    summary, response, latency_ms, input_tokens, output_tokens = await _call_with_empty_retry(
+        logs_clean=logs_clean,
+        diff_clean=diff_clean,
+        meta_clean=meta_clean,
+        run=run,
+        db=db,
     )
-
-    user_message = (
-        f"## CI Failure Context\n\n"
-        f"### Workflow Logs (truncated)\n```\n{logs_clean or '(unavailable)'}\n```\n\n"
-        f"### Commit Diff (truncated)\n```diff\n{diff_clean or '(unavailable)'}\n```\n\n"
-        f"### Commit Metadata\n```json\n{meta_clean or '(unavailable)'}\n```\n\n"
-        "Provide the root-cause summary now."
-    )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-    ]
-
-    llm = LLMClient(timeout=FETCH_TIMEOUT_S)
-
-    t0 = time.monotonic()
-    try:
-        response = await asyncio.wait_for(
-            llm.complete(messages=messages, db=db, repo_id=repo.id, max_tokens=512),
-            timeout=FETCH_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        logger.error(
-            "context_gatherer: LLM call timed out for run %s after %dms",
-            run.id, elapsed_ms,
-        )
-        await _persist_run_step(
-            db=db,
-            run_id=run.id,
-            step_name="context_gatherer",
-            input_tokens=0,
-            output_tokens=0,
-            latency_ms=elapsed_ms,
-            error=True,
-        )
-        # Re-raise with a descriptive message so the orchestrator's
-        # _format_failure_reason produces a useful dashboard-visible reason
-        # instead of an empty "TimeoutError: " string.
-        raise TimeoutError(
-            f"context_gatherer LLM call timed out after {elapsed_ms}ms "
-            f"(limit {int(FETCH_TIMEOUT_S * 1000)}ms)"
-        ) from None
-    latency_ms = int((time.monotonic() - t0) * 1000)
-
-    summary: str = (response.get("content") or "").strip()
-    usage: dict[str, int] = response.get("usage", {})
-    input_tokens: int = usage.get("input_tokens", 0)
-    output_tokens: int = usage.get("output_tokens", 0)
-
-    # -------------------------------------------------------------------------
-    # 4a. Reject empty summaries — the model produced 0 usable output tokens.
-    #     This is the actual root cause of the screenshot bug: the LLM hits
-    #     the max_tokens cap or returns only whitespace / code fences, the
-    #     summary collapses to "", and the orchestrator silently passes an
-    #     empty string to Fix Generator which then rejects the patch as
-    #     "wrong_diagnosis". Raise here so the outer handler records a real
-    #     failure_reason and the run is not stranded with an empty summary.
-    # -------------------------------------------------------------------------
-    if not summary:
-        # Persist a context_gatherer_error step so the timeline shows the
-        # failure (the success step above would be misleading).
-        await _persist_run_step(
-            db=db,
-            run_id=run.id,
-            step_name="context_gatherer",
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            latency_ms=latency_ms,
-            error=True,
-        )
-        logger.error(
-            "context_gatherer: run=%s returned empty summary "
-            "(output_tokens=%d, latency_ms=%d, model=%s) — treating as failure",
-            run.id,
-            output_tokens,
-            latency_ms,
-            response.get("model", "unknown"),
-        )
-        raise ValueError(
-            f"context_gatherer returned an empty summary from model "
-            f"{response.get('model', 'unknown')!r} "
-            f"(output_tokens={output_tokens}, latency_ms={latency_ms}). "
-            f"The LLM produced no usable diagnosis — likely hit max_tokens or "
-            f"returned only whitespace / markdown code fences."
-        )
 
     # -------------------------------------------------------------------------
     # 5. Persist run_steps trace row — tokens + cost, never raw text
@@ -310,6 +227,167 @@ async def gather_context(
         latency_ms,
     )
     return summary
+
+
+def _build_messages(
+    logs_clean: str,
+    diff_clean: str,
+    meta_clean: str,
+    *,
+    retry: bool = False,
+) -> list[dict[str, str]]:
+    """
+    Build the gatherer prompt. On retry, the system prompt is tightened and
+    the user instruction asks explicitly for short prose — proven to pull
+    models out of the empty-output hole on free-tier endpoints.
+    """
+    if retry:
+        system_prompt = (
+            "You are a CI failure diagnosis expert. Reply with EXACTLY 2-3 short sentences "
+            "of plain prose. No markdown. No code fences. No JSON. No bullet points. "
+            "Just prose describing the root cause."
+        )
+        user_message = (
+            f"Logs:\n{logs_clean or '(unavailable)'}\n\n"
+            f"Diff:\n{diff_clean or '(unavailable)'}\n\n"
+            f"Metadata:\n{meta_clean or '(unavailable)'}\n\n"
+            "Reply with 2-3 short sentences in plain prose only."
+        )
+    else:
+        system_prompt = (
+            "You are Context Gatherer, a CI failure diagnosis agent. "
+            "Your sole output is a concise root-cause summary: 3-5 lines maximum. "
+            "Include: error type, the exact file and line number if visible in the logs, "
+            "and one sentence on why CI failed. "
+            "Do NOT output a patch, a fix, or echo back raw log lines. "
+            "If no logs are available, state so explicitly."
+        )
+        user_message = (
+            f"## CI Failure Context\n\n"
+            f"### Workflow Logs (truncated)\n```\n{logs_clean or '(unavailable)'}\n```\n\n"
+            f"### Commit Diff (truncated)\n```diff\n{diff_clean or '(unavailable)'}\n```\n\n"
+            f"### Commit Metadata\n```json\n{meta_clean or '(unavailable)'}\n```\n\n"
+            "Provide the root-cause summary now."
+        )
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+
+async def _call_with_empty_retry(
+    *,
+    logs_clean: str,
+    diff_clean: str,
+    meta_clean: str,
+    run: Run,
+    db: AsyncSession,
+) -> tuple[str, dict, int, int, int]:
+    """
+    Make the LLM call. If the first response is empty (None / whitespace /
+    only markdown code fences), retry exactly once with a tighter prompt.
+
+    Returns:
+        (summary, response_dict, latency_ms, input_tokens, output_tokens)
+
+    Raises:
+        TimeoutError, ValueError — same contract as the previous single-call
+        path so the orchestrator's outer handler treats it identically.
+    """
+    llm = LLMClient(timeout=FETCH_TIMEOUT_S)
+
+    # ----- Attempt 1: full structured prompt -----
+    messages = _build_messages(logs_clean, diff_clean, meta_clean, retry=False)
+    t0 = time.monotonic()
+    try:
+        response = await asyncio.wait_for(
+            llm.complete(messages=messages, db=db, repo_id=run.repo_id, max_tokens=2048),
+            timeout=FETCH_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        logger.error(
+            "context_gatherer: LLM call (attempt 1) timed out for run %s after %dms",
+            run.id, elapsed_ms,
+        )
+        raise TimeoutError(
+            f"context_gatherer LLM call timed out after {elapsed_ms}ms "
+            f"(limit {int(FETCH_TIMEOUT_S * 1000)}ms)"
+        ) from None
+
+    first_latency_ms = int((time.monotonic() - t0) * 1000)
+    first_content = (response.get("content") or "").strip()
+    first_usage = response.get("usage", {}) or {}
+    first_in = int(first_usage.get("input_tokens", 0))
+    first_out = int(first_usage.get("output_tokens", 0))
+
+    if first_content:
+        return first_content, response, first_latency_ms, first_in, first_out
+
+    # ----- Attempt 2: empty-response retry with sharper prompt -----
+    logger.warning(
+        "context_gatherer: run=%s attempt 1 returned empty (model=%s, "
+        "output_tokens=%d, latency_ms=%d) — retrying with tighter prompt",
+        run.id, response.get("model", "unknown"), first_out, first_latency_ms,
+    )
+
+    retry_messages = _build_messages(logs_clean, diff_clean, meta_clean, retry=True)
+    t1 = time.monotonic()
+    try:
+        retry_response = await asyncio.wait_for(
+            llm.complete(
+                messages=retry_messages,
+                db=db,
+                repo_id=run.repo_id,
+                max_tokens=512,  # shorter retry — we only need a few sentences
+            ),
+            timeout=FETCH_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        elapsed_ms = int((time.monotonic() - t1) * 1000)
+        logger.error(
+            "context_gatherer: LLM call (attempt 2 / retry) timed out for run %s after %dms",
+            run.id, elapsed_ms,
+        )
+        raise TimeoutError(
+            f"context_gatherer LLM call (retry) timed out after {elapsed_ms}ms "
+            f"(limit {int(FETCH_TIMEOUT_S * 1000)}ms)"
+        ) from None
+
+    retry_latency_ms = int((time.monotonic() - t1) * 1000)
+    retry_content = (retry_response.get("content") or "").strip()
+    retry_usage = retry_response.get("usage", {}) or {}
+    retry_in = int(retry_usage.get("input_tokens", 0))
+    retry_out = int(retry_usage.get("output_tokens", 0))
+
+    if retry_content:
+        # Retry succeeded. Aggregate the token counts so the dashboard shows
+        # the true cost of both attempts.
+        return (
+            retry_content,
+            retry_response,
+            first_latency_ms + retry_latency_ms,
+            first_in + retry_in,
+            first_out + retry_out,
+        )
+
+    # Both attempts empty — bail with the same error contract as before.
+    total_latency = first_latency_ms + retry_latency_ms
+    total_in = first_in + retry_in
+    total_out = first_out + retry_out
+    model = retry_response.get("model") or response.get("model", "unknown")
+    logger.error(
+        "context_gatherer: run=%s BOTH attempts returned empty "
+        "(model=%s, total_output_tokens=%d, total_latency_ms=%d) — treating as failure",
+        run.id, model, total_out, total_latency,
+    )
+    raise ValueError(
+        f"context_gatherer returned an empty summary from model {model!r} "
+        f"after 2 attempts (output_tokens={total_out}, latency_ms={total_latency}). "
+        f"The LLM produced no usable diagnosis — likely hit max_tokens or "
+        f"returned only whitespace / markdown code fences on both attempts."
+    )
 
 
 async def _persist_run_step(

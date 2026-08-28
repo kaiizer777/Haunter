@@ -361,7 +361,11 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
             from app.models import RunStep, Attempt
             
             prior_attempt: Attempt | None = None
-            MAX_ATTEMPTS = 3
+            # MAX_ATTEMPTS is the cap on fix-generation iterations per run.
+            # Relaxed from 3 -> 10 while we are validating the pipeline. Tighten
+            # once a clean success path is confirmed. The free-tier LLM is
+            # occasionally flaky; more attempts give it room to self-correct.
+            MAX_ATTEMPTS = 10
 
             for iteration in range(MAX_ATTEMPTS):
                 # ---- Generate fix ----

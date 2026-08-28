@@ -27,7 +27,7 @@ class OpenCodeZenProvider:
         self,
         base_url: str | None = None,
         api_key: str | None = None,
-        timeout: float = 30.0,
+        timeout: float = 120.0,
     ) -> None:
         self.base_url = (base_url or settings.opencode_zen_base_url).rstrip("/") + "/"
         self._api_key = api_key or settings.opencode_zen_api_key

@@ -370,13 +370,14 @@ async def test_llm_retry_429_success_second_try():
 @pytest.mark.asyncio
 @respx.mock
 async def test_llm_retry_500_exhausts_and_caps():
-    """3 consecutive 500 errors exhaust retry budget and raise LLMError without key leak."""
+    """8 consecutive 500 errors exhaust retry budget and raise LLMError without key leak.
+
+    Note: `max_attempts` was bumped 3 -> 8 in Phase 16 while the pipeline is
+    being validated. The test now supplies 8 mock responses to fully exhaust
+    the budget.
+    """
     route = respx.post(OPENCODE_ZEN_ENDPOINT)
-    route.side_effect = [
-        httpx.Response(500, text="Internal Server Error"),
-        httpx.Response(500, text="Internal Server Error"),
-        httpx.Response(500, text="Internal Server Error"),
-    ]
+    route.side_effect = [httpx.Response(500, text="Internal Server Error")] * 8
 
     client = LLMClient()
     orig_key = settings.opencode_zen_api_key
@@ -388,7 +389,7 @@ async def test_llm_retry_500_exhausts_and_caps():
                 await client.complete(messages=[{"role": "user", "content": "fail test"}])
             assert "500" in str(exc_info.value) or "error" in str(exc_info.value).lower()
             assert "super_secret_opencode_key_9999" not in str(exc_info.value)
-            assert route.call_count == 3
+            assert route.call_count == 8
     finally:
         settings.opencode_zen_api_key = orig_key
 

@@ -29,11 +29,11 @@ _FATAL_STATUS_CODES = {400, 401, 403, 404, 422}
 
 async def execute_with_retry(
     func: Callable[[], Awaitable[dict[str, Any]]],
-    max_attempts: int = 3,
-    max_total_time: float = 60.0,
+    max_attempts: int = 8,
+    max_total_time: float = 300.0,
     initial_delay: float = 1.0,
     backoff_factor: float = 2.0,
-    max_delay: float = 8.0,
+    max_delay: float = 30.0,
 ) -> dict[str, Any]:
     """
     Execute an async LLM request callable with bounded retries and exponential backoff.

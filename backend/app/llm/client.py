@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     """Provider-agnostic LLM client for Haunter."""
 
-    def __init__(self, timeout: float = 30.0) -> None:
+    def __init__(self, timeout: float = 120.0) -> None:
         self.timeout = timeout
 
     async def complete(

@@ -26,10 +26,16 @@ const PROVIDER_OPTIONS = [
 ];
 
 const MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string }[]> = {
+  // Source of truth: backend/app/schemas.py AllowedModelName.
+  // When adding a model here, mirror it there (and vice versa).
   opencode_zen: [
-    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning (Free)", tag: "Default" },
-    { id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra (Free)", tag: "High-Capacity" },
-    { id: "hy3-free", name: "HY3 Free", tag: "Reasoning" },
+    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Default · Free" },
+    { id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra", tag: "High-Capacity · Free" },
+    { id: "hy3-free", name: "HY3", tag: "Reasoning · Free" },
+    { id: "ling-3-free", name: "Ling 3", tag: "Multilingual · Free" },
+    { id: "qwen-3-coder-free", name: "Qwen 3 Coder", tag: "Code · Free" },
+    { id: "deepseek-r1-free", name: "DeepSeek R1", tag: "Reasoning · Free" },
+    { id: "kimi-k2-free", name: "Kimi K2", tag: "Long context · Free" },
   ],
   openai: [
     { id: "gpt-4o", name: "GPT-4o", tag: "Flagship" },

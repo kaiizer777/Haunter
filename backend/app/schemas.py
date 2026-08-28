@@ -64,12 +64,27 @@ AllowedHostingProvider = Literal["gcp", "aws"]
 AllowedSandboxProvider = Literal["gcp", "aws"]
 
 # Allowlisted model names — must match a provider's supported models.
+# Free-tier models (suffix `-free`) are listed first so the UI surfaces them
+# at the top of the model selector — these are the only models safe to use
+# while we're validating the pipeline on a budget.
+#
+# When OpenCode Zen (or any other provider) publishes a new free model:
+#   1. Add the exact model id below
+#   2. Mirror it in frontend/src/app/config/page.tsx MODEL_OPTIONS_BY_PROVIDER
+#   3. No other change needed — the allowlist is the single source of truth.
 AllowedModelName = Literal[
+    # OpenCode Zen — free tier
     "nemotron-3.5-lightning-free",
     "nemotron-3-ultra-free",
     "hy3-free",
+    "ling-3-free",
+    "qwen-3-coder-free",
+    "deepseek-r1-free",
+    "kimi-k2-free",
+    # OpenAI — paid
     "gpt-4o",
     "gpt-4o-mini",
+    # Anthropic — paid
     "claude-sonnet-4-5",
     "claude-haiku-3-5",
 ]

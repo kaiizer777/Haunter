@@ -331,17 +331,29 @@ async def test_key_rotation_fallback(db: AsyncSession, user_factory):
 
 @pytest.mark.asyncio
 async def test_rate_limiting_auth_routes(client: httpx.AsyncClient):
-    """Exceeding rate limit of 20 req/min on auth endpoints returns 429."""
+    """Exceeding the configured per-minute rate limit on auth endpoints returns 429.
+
+    The slowapi decorator captures the per-minute value at import time
+    (see `auth.py:119` — `_RATE_LIMIT = f"{settings.rate_limit_per_minute}/minute"`).
+    Since Phase 16 raised `rate_limit_per_minute` to 1000, this test sends
+    1000 allowed requests + 1 over-limit request. ~1000 ASGI round-trips
+    take ~1-2s in-process; the test stays fast and asserts the real wiring.
+    """
+    from app.config import settings
+
     limiter.reset()
+    per_minute = int(settings.rate_limit_per_minute)
 
-    # Hit /auth/logout 20 times (all 200)
-    for _ in range(20):
+    # Hit /auth/logout `per_minute` times — all should succeed.
+    for _ in range(per_minute):
         resp = await client.post("/auth/logout")
-        assert resp.status_code == 200
+        assert resp.status_code == 200, f"unexpected {resp.status_code} mid-loop"
 
-    # 21st request triggers rate limit 429
+    # The (per_minute + 1)th must trip the limit and return 429.
     resp_blocked = await client.post("/auth/logout")
-    assert resp_blocked.status_code == 429
+    assert resp_blocked.status_code == 429, (
+        f"expected 429 after {per_minute + 1} requests, got {resp_blocked.status_code}"
+    )
     limiter.reset()
 
 
