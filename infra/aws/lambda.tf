@@ -92,7 +92,7 @@ resource "aws_iam_role_policy" "lambda_inline" {
         Sid    = "AllowSelfInvoke"
         Effect = "Allow"
         Action = ["lambda:InvokeFunction"]
-        Resource = aws_lambda_function.haunter.arn
+        Resource = "arn:aws:lambda:${var.region}:*:function/${var.project_name}"
       },
       # ----------------------------------------------------------------
       # ALLOW — CodeBuild sandbox (scoped to Haunter sandbox project only)
@@ -118,8 +118,6 @@ resource "aws_iam_role_policy" "lambda_inline" {
           "secretsmanager:*",
           "iam:*",
           "ec2:*",
-          "kms:Decrypt",
-          "kms:GenerateDataKey",
         ]
         Resource = "*"
       }
@@ -155,7 +153,7 @@ resource "aws_lambda_function" "haunter" {
   filename      = var.lambda_zip_path
   handler       = "lambda_handler.handler"
   runtime       = "python3.11"
-  architectures = ["arm64"]
+  architectures = ["x86_64"]
 
   timeout     = 900   # 15 minutes — covers CodeBuild poll loop
   memory_size = 512   # MB
@@ -183,14 +181,9 @@ resource "aws_lambda_function" "haunter" {
       HOSTING_PROVIDER          = "aws"
       SANDBOX_PROVIDER          = "aws"
       AWS_CODEBUILD_PROJECT_NAME = "${var.project_name}-sandbox"
-      AWS_REGION                = var.region
 
       # LLM
       OPENCODE_ZEN_API_KEY = var.opencode_zen_api_key
-
-      # Lambda self-invoke function name (populated by AWS automatically,
-      # but set explicitly here as well for clarity)
-      AWS_LAMBDA_FUNCTION_NAME = var.project_name
     }
   }
 
@@ -231,9 +224,20 @@ resource "aws_lambda_function_url" "haunter" {
 
   cors {
     allow_credentials = false
-    allow_origins     = [var.frontend_url]
-    allow_methods     = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-    allow_headers     = ["Content-Type", "Cookie"]
+    allow_origins     = ["*"]
+    allow_methods     = ["*"]
+    allow_headers     = ["*"]
     max_age           = 3600
   }
+}
+
+# Fix for AWS accounts created after ~2024: "Block public access" for Function URLs
+# requires BOTH InvokeFunctionUrl and InvokeFunction for "*" to actually allow public.
+# Without InvokeFunction, new accounts return 403 even with AuthType NONE.
+# See https://github.com/anomalyco/sst/issues/6397
+resource "aws_lambda_permission" "allow_public_invoke" {
+  statement_id  = "AllowPublicInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.haunter.function_name
+  principal     = "*"
 }

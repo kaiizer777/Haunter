@@ -104,7 +104,7 @@ resource "aws_iam_role_policy" "codebuild_least_privilege" {
           "codebuild:StartBuild",
           "codebuild:BatchGetBuilds",
         ]
-        Resource = aws_codebuild_project.sandbox.arn
+        Resource = "arn:aws:codebuild:${var.region}:*:project/${local.name}-sandbox"
       },
       # ----------------------------------------------------------------
       # ALLOW — CloudWatch Logs (scoped to Haunter log group only)
@@ -145,8 +145,6 @@ resource "aws_iam_role_policy" "codebuild_least_privilege" {
           "iam:*",
           "ec2:*",
           "sts:AssumeRole",
-          "kms:Decrypt",
-          "kms:GenerateDataKey",
         ]
         Resource = "*"
       }
