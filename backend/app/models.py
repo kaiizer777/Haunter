@@ -102,6 +102,13 @@ class Run(Base):
     pr_branch: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     final_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Phase 15 — short, redacted reason a run ended in status=error or fallback.
+    # Written by the orchestrator on every error path (context gatherer timeout,
+    # fix generator rejection, PR writer failure, outer exception). Truncated to
+    # 500 chars before storage. Surfaced on the run detail page so the user can
+    # see *why* a run failed, not just that it did.
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     repo: Mapped["Repo"] = relationship("Repo", back_populates="runs")
     run_steps: Mapped[list["RunStep"]] = relationship("RunStep", back_populates="run", cascade="all, delete-orphan")
     attempts: Mapped[list["Attempt"]] = relationship("Attempt", back_populates="run", cascade="all, delete-orphan")

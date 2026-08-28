@@ -57,9 +57,22 @@ def classify_failure(
     Returns:
         One of: "sandbox_error", "wrong_diagnosis", "wrong_fix",
                 "tests_still_failing", or None.
+
+    Notes:
+        When the orchestrator has written `run.failure_reason` (Phase 15), it
+        carries the specific stage that failed (e.g. "context_gatherer:
+        TimeoutError: ..."). The coarse classifier labels would contradict or
+        be redundant with that, so we return None and let the UI render
+        failure_reason directly.
     """
     # Only classify terminal failure states.
     if run.status not in ("fallback", "error"):
+        return None
+
+    # Phase 15: defer to the orchestrator-written failure_reason when present.
+    # The classifier's coarse label is less informative than a specific
+    # "<stage>: <ExcType>: <message>" string and showing both is noisy.
+    if getattr(run, "failure_reason", None):
         return None
 
     step_names: set[str] = {s.step_name for s in steps}

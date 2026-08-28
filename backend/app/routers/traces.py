@@ -90,6 +90,15 @@ class RunSummaryOut(BaseModel):
     diagnosis_summary: Optional[str]
     created_at: datetime
     updated_at: datetime
+    # Phase 8 — PR Writer results (optional, populated after a PR is opened).
+    # Optional here so older runs that pre-date Phase 8 still serialize cleanly.
+    pr_url: Optional[str] = None
+    pr_number: Optional[int] = None
+    pr_branch: Optional[str] = None
+    final_summary: Optional[str] = None
+    # Phase 15 — short redacted reason a run ended in error/fallback.
+    # None for runs that succeeded or are still in progress.
+    failure_reason: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

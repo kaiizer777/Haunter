@@ -509,3 +509,125 @@ async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSessi
     assert "test diagnosis" in kwargs["body"]
     # Must use installation token, not broad PAT
     assert kwargs["token"] == FAKE_INSTALL_TOKEN
+
+
+# ---------------------------------------------------------------------------
+# Test 11: Phase 15 — _format_failure_reason produces safe, redacted strings
+# ---------------------------------------------------------------------------
+
+
+def test_format_failure_reason_includes_stage_and_type() -> None:
+    """The formatted string must include the stage label, exception type, and message."""
+    from app.orchestrator import _format_failure_reason
+
+    exc = RuntimeError("DB connection refused")
+    out = _format_failure_reason("context_gatherer", exc)
+    assert out == "context_gatherer: RuntimeError: DB connection refused"
+
+
+def test_format_failure_reason_handles_empty_message() -> None:
+    """An exception with no message should still produce a useful string."""
+    from app.orchestrator import _format_failure_reason
+
+    exc = RuntimeError()
+    out = _format_failure_reason("pr_writer", exc)
+    assert "pr_writer" in out
+    assert "RuntimeError" in out
+    assert "(no message)" in out
+
+
+def test_format_failure_reason_truncates_long_messages() -> None:
+    """A very long message must be truncated to the cap to keep payloads tiny."""
+    from app.orchestrator import _format_failure_reason
+
+    huge = "x" * 5_000
+    exc = ValueError(huge)
+    out = _format_failure_reason("fix_generator", exc)
+    assert len(out) <= 500
+    assert "fix_generator" in out
+    assert "ValueError" in out
+
+
+def test_format_failure_reason_html_escapes_message() -> None:
+    """Any HTML/JS that sneaks into an exception message must be neutralised so
+    it cannot land as raw markup on the dashboard."""
+    from app.orchestrator import _format_failure_reason
+
+    exc = RuntimeError("<script>alert('xss')</script>")
+    out = _format_failure_reason("orchestrator", exc)
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_format_failure_reason_collapses_whitespace() -> None:
+    """Newlines / tabs / multiple spaces must collapse to single spaces so the
+    column stores one logical line."""
+    from app.orchestrator import _format_failure_reason
+
+    exc = RuntimeError("line1\nline2\t\twith\ttabs")
+    out = _format_failure_reason("verification", exc)
+    assert "\n" not in out
+    assert "\t" not in out
+    assert "line1 line2 with tabs" in out
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Phase 15 — outer exception handler persists failure_reason + step
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_handle_failed_run_outer_exception_writes_failure_reason(
+    db: AsyncSession,
+) -> None:
+    """If an unhandled exception escapes during the pipeline (simulated by
+    forcing gather_context to raise), the orchestrator must:
+
+      1. transition the run to status=error
+      2. write a synthetic <stage>_error run_steps row (so the timeline isn't empty)
+      3. write a failure_reason onto runs that includes the stage and exception type
+
+    This is the regression that produced the empty dashboard: status flipped to
+    error but nothing else was persisted, so users saw 0 attempts / 0 cost /
+    0 latency and a misleading "wrong_diagnosis" badge.
+    """
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo, status="pending")
+    run_id = run.id
+
+    class _FakePipelineCrash(RuntimeError):
+        """Distinct type so we can assert the exception name is surfaced."""
+
+    with patch(
+        "app.orchestrator.gather_context",
+        new_callable=AsyncMock,
+        side_effect=_FakePipelineCrash("simulated LLM provider outage"),
+    ):
+        from app.orchestrator import handle_failed_run
+
+        # Should NOT raise — the outer handler must swallow and persist.
+        await handle_failed_run(run_id)
+
+    db.expire_all()
+    refreshed = await db.execute(select(Run).where(Run.id == run_id))
+    db_run = refreshed.scalar_one()
+
+    # 1. Status moved to terminal error
+    assert db_run.status == "error"
+
+    # 2. A trace step was written so the timeline is no longer empty
+    steps_result = await db.execute(select(RunStep).where(RunStep.run_id == run_id))
+    steps = steps_result.scalars().all()
+    assert len(steps) >= 1
+    # Stage label is the orchestrator's current step at crash time.
+    # gather_context runs while state["step"] == "context_gathering",
+    # so the synthetic step name is "context_gathering_error".
+    assert any(s.step_name == "context_gathering_error" for s in steps)
+
+    # 3. failure_reason was written and is informative
+    assert db_run.failure_reason is not None
+    assert "context_gathering" in db_run.failure_reason
+    assert "_FakePipelineCrash" in db_run.failure_reason
+    assert "simulated LLM provider outage" in db_run.failure_reason

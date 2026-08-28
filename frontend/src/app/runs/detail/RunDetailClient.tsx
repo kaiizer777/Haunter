@@ -18,7 +18,9 @@ import {
   AlertCircle,
   FileText,
   Clock,
+  AlertTriangle,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 
 export default function RunDetailClient() {
   // Run id is carried in the `?id=<uuid>` query string so this can be a
@@ -103,6 +105,15 @@ export default function RunDetailClient() {
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-4">
                 <div className="flex items-center gap-3">
                   <StatusBadge status={trace.run.status} />
+                  {/* Coarse failure classification (only when orchestrator did NOT
+                      record a specific failure_reason — they carry the same intent
+                      and showing both is redundant). */}
+                  {trace.failure_classification && !trace.run.failure_reason && (
+                    <Badge variant="destructive" className="text-[10px] font-mono">
+                      <AlertTriangle className="h-2.5 w-2.5 mr-1" />
+                      {trace.failure_classification}
+                    </Badge>
+                  )}
                   <span className="font-mono text-xs text-zinc-400 flex items-center gap-1.5">
                     <Clock className="h-3.5 w-3.5 text-zinc-500" />
                     {formatRelativeTime(trace.run.created_at)}
@@ -123,6 +134,22 @@ export default function RunDetailClient() {
                   </a>
                 )}
               </div>
+
+              {/* Failure Reason (Phase 15) — explicit cause written by the
+                  orchestrator on every error path. Rendered above the diagnosis
+                  so the user sees *why* before *what was diagnosed*. Only shown
+                  for runs that ended in error/fallback. */}
+              {trace.run.failure_reason && (
+                <div className="rounded-[5px] border border-red-900/60 bg-red-950/30 p-3.5 space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-red-300">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    <span>Failure Reason</span>
+                  </div>
+                  <p className="text-xs text-red-200/90 leading-relaxed font-mono whitespace-pre-wrap select-text">
+                    {trace.run.failure_reason}
+                  </p>
+                </div>
+              )}
 
               {/* Diagnosis Summary (Plain text safe rendering) */}
               {trace.run.diagnosis_summary && (

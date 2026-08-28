@@ -221,8 +221,10 @@ async def gather_context(
             timeout=FETCH_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
         logger.error(
-            "context_gatherer: LLM call timed out for run %s", run.id
+            "context_gatherer: LLM call timed out for run %s after %dms",
+            run.id, elapsed_ms,
         )
         await _persist_run_step(
             db=db,
@@ -230,10 +232,16 @@ async def gather_context(
             step_name="context_gatherer",
             input_tokens=0,
             output_tokens=0,
-            latency_ms=int((time.monotonic() - t0) * 1000),
+            latency_ms=elapsed_ms,
             error=True,
         )
-        raise
+        # Re-raise with a descriptive message so the orchestrator's
+        # _format_failure_reason produces a useful dashboard-visible reason
+        # instead of an empty "TimeoutError: " string.
+        raise TimeoutError(
+            f"context_gatherer LLM call timed out after {elapsed_ms}ms "
+            f"(limit {int(FETCH_TIMEOUT_S * 1000)}ms)"
+        ) from None
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     summary: str = (response.get("content") or "").strip()

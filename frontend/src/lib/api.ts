@@ -91,6 +91,9 @@ export interface RunSummaryOut {
   pr_number?: number | null;
   pr_branch?: string | null;
   final_summary?: string | null;
+  // Phase 15 — short redacted reason a run ended in error/fallback. Set by the
+  // orchestrator on every error path. Null for successful / in-progress runs.
+  failure_reason?: string | null;
 }
 
 export interface TraceOut {

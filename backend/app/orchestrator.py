@@ -11,10 +11,14 @@ memory — they pass through subagents only and are discarded after summarisatio
 
 Entry point: handle_failed_run(run_id) is called via FastAPI BackgroundTasks
 (no HTTP request context — opens its own AsyncSession from async_session_maker).
+
+Phase 15: every error path writes `runs.failure_reason` (truncated, redacted)
+and a `run_steps` trace row so the dashboard can show *why* a run failed.
 """
 
 from __future__ import annotations
 
+import html as html_module
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -25,7 +29,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import async_session_maker
-from app.models import Repo, Run
+from app.models import Repo, Run, RunStep
+
+# Truncation cap for failure_reason — keeps payloads tiny and avoids any risk of
+# a giant exception chain landing in the DB. 500 chars fits in a tweet.
+_FAILURE_REASON_MAX_CHARS = 500
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +152,102 @@ def _sanitize_fallback(diagnosis_summary: Optional[str], attempts: list) -> str:
     max_body = 3000 - len(prefix) - len(suffix)
     body_content = escaped[:max_body]
     return f"{prefix}{body_content}{suffix}"
+
+
+# ---------------------------------------------------------------------------
+# Failure-reason persistence (Phase 15)
+# ---------------------------------------------------------------------------
+
+
+def _format_failure_reason(stage: str, exc: BaseException) -> str:
+    """
+    Build a short, safe, redacted failure-reason string for `runs.failure_reason`.
+
+    Format: "<stage>: <ExcType>: <message>"
+
+    - Truncated to _FAILURE_REASON_MAX_CHARS.
+    - html.escape'd so any markup that bubbled through an exception message
+      cannot land as raw HTML on the dashboard.
+    - Strips leading/trailing whitespace; collapses internal newlines so it
+      renders as one line in the UI.
+
+    The message can still contain URLs or path-like strings (these are not
+    secrets in the operational sense), but secret-redaction is the consumer's
+    responsibility — we never store raw tokens or DB URLs in failure messages
+    because the underlying exceptions we catch here don't carry them.
+    """
+    msg = str(exc) if exc is not None else ""
+    if not msg:
+        msg = "(no message)"
+    raw = f"{stage}: {type(exc).__name__}: {msg}"
+    # Collapse whitespace to single spaces so the column stays one logical line.
+    raw = " ".join(raw.split())
+    truncated = raw[:_FAILURE_REASON_MAX_CHARS]
+    return html_module.escape(truncated, quote=False)
+
+
+async def _persist_failure_reason(
+    db: AsyncSession,
+    run: Run,
+    reason: str,
+) -> None:
+    """
+    Write the failure reason onto `run` and commit. Caller passes a session
+    that is still usable (i.e. not in a rolled-back / broken state). If the
+    commit fails we log and let the caller proceed — failure_reason is
+    best-effort observability, not a critical invariant.
+    """
+    run.failure_reason = reason
+    run.updated_at = datetime.now(timezone.utc)
+    db.add(run)
+    try:
+        await db.commit()
+    except Exception as commit_exc:  # pragma: no cover — defensive only
+        logger.warning(
+            "orchestrator: failed to persist failure_reason for run=%s (%s: %s)",
+            run.id,
+            type(commit_exc).__name__,
+            commit_exc,
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+
+async def _persist_error_step(
+    db: AsyncSession,
+    run_id: uuid.UUID,
+    step_name: str,
+    latency_ms: int = 0,
+) -> None:
+    """
+    Append a synthetic RunStep row for an unhandled error so the timeline
+    is never silently empty. Never raises — the dashboard already knows
+    the run failed; this is just observability.
+    """
+    try:
+        step = RunStep(
+            run_id=run_id,
+            step_name=step_name,
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=latency_ms,
+            cost_estimate=0.0,
+        )
+        db.add(step)
+        await db.commit()
+    except Exception as step_exc:  # pragma: no cover — defensive only
+        logger.warning(
+            "orchestrator: failed to persist error step for run=%s (%s: %s)",
+            run_id,
+            type(step_exc).__name__,
+            step_exc,
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +400,11 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                         type(fix_err).__name__,
                         fix_err,
                     )
+                    await _persist_failure_reason(
+                        db=db,
+                        run=run,
+                        reason=_format_failure_reason("fix_generator", fix_err),
+                    )
                     await _transition(run, RunStatus.error, db)
                     return
 
@@ -403,6 +512,11 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                             "orchestrator: run=%s PR creation failed (%s: %s)",
                             run_id, type(pr_err).__name__, pr_err,
                         )
+                        await _persist_failure_reason(
+                            db=db,
+                            run=run,
+                            reason=_format_failure_reason("pr_writer", pr_err),
+                        )
                         await _transition(run, RunStatus.error, db)
                     return
 
@@ -446,6 +560,11 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                         )
                         # Even if comment posting fails, transition to error rather than
                         # leaving the run stranded in fallback.
+                        await _persist_failure_reason(
+                            db=db,
+                            run=run,
+                            reason=_format_failure_reason("fallback_comment", e),
+                        )
                         await _transition(run, RunStatus.error, db)
 
                     logger.info(
@@ -485,6 +604,10 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                 # Do not include exc_info=True — stack traces can contain secrets
                 # from exception message chains (e.g. DB URLs in SQLAlchemy errors).
             )
+            # Build a stage label that tells the user *where* in the pipeline the
+            # crash happened — "context_gatherer", "fix_generation", "verification",
+            # "pr_writer", or just "orchestrator" for anything else.
+            stage_label = state.get("step") or "orchestrator"
             # Open a fresh session for the error transition — the current session
             # may be in a rolled-back state (e.g. if a DB connection was dropped
             # mid-operation), making it unusable for further writes.
@@ -492,6 +615,20 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                 async with async_session_maker() as error_db:
                     fresh_run = await error_db.get(Run, run_id)
                     if fresh_run is not None:
+                        # Write the trace step FIRST so the timeline reflects the
+                        # crash, then the failure_reason, then the status transition.
+                        # Each write commits independently so a partial-failure
+                        # mid-sequence still leaves *some* observability behind.
+                        await _persist_error_step(
+                            db=error_db,
+                            run_id=run_id,
+                            step_name=f"{stage_label}_error",
+                        )
+                        await _persist_failure_reason(
+                            db=error_db,
+                            run=fresh_run,
+                            reason=_format_failure_reason(stage_label, exc),
+                        )
                         await _transition(fresh_run, RunStatus.error, error_db)
             except InvalidTransitionError:
                 # Already in a terminal state — nothing to do.

@@ -1,7 +1,6 @@
 import { TraceOut } from "@/lib/api";
 import { formatCost, formatLatency, formatNumber } from "@/lib/utils";
-import { DollarSign, Clock, Layers, Cpu, AlertTriangle } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { DollarSign, Clock, Layers, Cpu } from "lucide-react";
 
 interface CostBreakdownProps {
   trace: TraceOut;
@@ -62,7 +61,7 @@ export function CostBreakdown({ trace }: CostBreakdownProps) {
         </div>
       </div>
 
-      {/* Attempts & Classification */}
+      {/* Attempts */}
       <div className="rounded-[6px] border border-zinc-800 bg-[#121215] p-3.5">
         <div className="flex items-center justify-between text-zinc-400">
           <span className="text-[11px] font-medium uppercase tracking-wider">
@@ -70,17 +69,18 @@ export function CostBreakdown({ trace }: CostBreakdownProps) {
           </span>
           <Layers className="h-3.5 w-3.5 text-zinc-400" />
         </div>
-        <div className="mt-1.5 flex items-center justify-between">
+        <div className="mt-1.5 flex items-baseline gap-1">
           <span className="font-mono text-lg font-bold text-zinc-100">
             {trace.attempts.length}
           </span>
-          {trace.failure_classification && (
-            <Badge variant="destructive" className="text-[10px] font-mono">
-              <AlertTriangle className="h-2.5 w-2.5 mr-1" />
-              {trace.failure_classification}
-            </Badge>
-          )}
         </div>
+        {/*
+          NOTE: failure_classification is intentionally NOT rendered here.
+          For older runs without failure_reason, the classifier label is shown
+          on the run header card (next to the status badge) instead — placing
+          a coarse label like "wrong_diagnosis" next to the attempts count
+          read as "0 attempts → wrong diagnosis", which was misleading.
+        */}
       </div>
     </div>
   );
