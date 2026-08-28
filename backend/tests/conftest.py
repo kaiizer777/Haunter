@@ -1,7 +1,12 @@
 """
 Shared fixtures and test configuration for Haunter backend tests.
+
+⚠️  SAFETY: truncate_all() hard-blocks against the production Neon URL.
+    Set TEST_DATABASE_URL in env to a Neon branch / local Postgres.
+    CI must export TEST_DATABASE_URL — running without it skips all DB-mutating tests.
 """
 
+import os
 import uuid
 from typing import AsyncGenerator, Callable
 
@@ -10,19 +15,52 @@ from httpx import ASGITransport
 import pytest
 import respx
 from freezegun import freeze_time
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import NullPool, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.auth import _sign_state, _sign_user_id
 from app.config import settings
-from app.db import async_session_maker
+from app.db import async_session_maker as _prod_session_maker
 from app.models import Attempt, EvalResult, ModelConfig, Repo, Run, RunStep, User
 from main import app
 
+# ---------------------------------------------------------------------------
+# Test database session — MUST point at a non-prod database.
+# ---------------------------------------------------------------------------
+_PROD_URL_FRAGMENTS = ("neon.tech",)
+_TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "")
+
+
+def _is_prod_url(url: str) -> bool:
+    return any(frag in url for frag in _PROD_URL_FRAGMENTS)
+
+
+if _TEST_DB_URL:
+    _test_url = _TEST_DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+    _test_engine = create_async_engine(
+        _test_url, poolclass=NullPool, echo=False, connect_args={"ssl": True}
+    )
+    async_session_maker = async_sessionmaker(
+        bind=_test_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+else:
+    async_session_maker = _prod_session_maker
+
 
 async def truncate_all(db: AsyncSession) -> None:
-    """Clean up all tables in FK order. Each statement is a separate execute()
-    because asyncpg's prepared-statement protocol rejects multi-command strings."""
+    """Clean up all tables in FK order.
+
+    Safety: raises RuntimeError if called against a production Neon URL.
+    Always set TEST_DATABASE_URL before running pytest.
+    """
+    engine_url = str(db.get_bind().url)  # type: ignore[union-attr]
+    if _is_prod_url(engine_url):
+        raise RuntimeError(
+            f"truncate_all() blocked: session is connected to production database. "
+            "Set TEST_DATABASE_URL to a dedicated test/branch database before running pytest."
+        )
     for stmt in (
         "DELETE FROM eval_results",
         "DELETE FROM attempts",
@@ -38,7 +76,16 @@ async def truncate_all(db: AsyncSession) -> None:
 
 @pytest.fixture
 async def db() -> AsyncGenerator[AsyncSession, None]:
-    """Provide an isolated AsyncSession connected to the database."""
+    """Provide an isolated AsyncSession connected to the test database.
+
+    Skips if TEST_DATABASE_URL is unset and prod URL is detected —
+    never mutates real data.
+    """
+    if not _TEST_DB_URL and _is_prod_url(settings.async_database_url):
+        pytest.skip(
+            "TEST_DATABASE_URL not set. Refusing to run DB-mutating tests against production. "
+            "Export TEST_DATABASE_URL pointing at a Neon branch or local Postgres."
+        )
     async with async_session_maker() as session:
         try:
             yield session
