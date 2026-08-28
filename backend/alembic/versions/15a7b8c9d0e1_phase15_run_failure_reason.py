@@ -1,7 +1,7 @@
 """phase15_run_failure_reason
 
 Revision ID: 15a7b8c9d0e1
-Revises: c9d0e1f2a345
+Revises: a1b2c3d4e5f6
 Create Date: 2026-08-29 02:55:00.000000
 
 Adds one Phase 15 column to the runs table so the orchestrator can record
@@ -24,7 +24,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "15a7b8c9d0e1"
-down_revision = "c9d0e1f2a345"
+down_revision = "a1b2c3d4e5f6"
 branch_labels = None
 depends_on = None
 

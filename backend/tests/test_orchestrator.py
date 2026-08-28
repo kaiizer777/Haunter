@@ -631,3 +631,66 @@ async def test_handle_failed_run_outer_exception_writes_failure_reason(
     assert "context_gathering" in db_run.failure_reason
     assert "_FakePipelineCrash" in db_run.failure_reason
     assert "simulated LLM provider outage" in db_run.failure_reason
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Phase 15 — empty diagnosis summary from the LLM is a hard failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_gather_context_empty_content_raises(db: AsyncSession) -> None:
+    """If the LLM returns empty content (None, '', or whitespace-only), the
+    gatherer must raise so the orchestrator records a real failure_reason
+    instead of silently passing '' to Fix Generator (which then rejects the
+    patch as 'wrong_diagnosis').
+
+    This is the regression behind the screenshot bug: 5188 tokens consumed,
+    8.22s latency, but diagnosis_summary was empty in the DB.
+    """
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo, status="context_gathering")
+
+    with (
+        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
+        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
+        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
+        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock) as mock_llm,
+    ):
+        mock_logs.return_value = "Error: ImportError"
+        mock_diff.return_value = ""
+        mock_meta.return_value = {"sha": "abc"}
+        # The model hit its cap and produced only whitespace / a stray code fence.
+        # Whitespace-only content is the silent killer — it collapses to "" on .strip().
+        mock_llm.return_value = {
+            "content": "   \n\n```\n```\n\n  ",
+            "usage": {"input_tokens": 4676, "output_tokens": 512},
+            "latency_ms": 8220,
+            "model": "hy3-free",
+        }
+
+        from app.subagents.context_gatherer import gather_context
+
+        with pytest.raises(ValueError) as exc_info:
+            await gather_context(run=run, repo=repo, db=db)
+
+    # The error message must name the model + the empty-output condition so the
+    # orchestrator's _format_failure_reason produces a useful dashboard string.
+    msg = str(exc_info.value)
+    assert "empty summary" in msg
+    assert "hy3-free" in msg
+    assert "output_tokens=512" in msg
+
+    # A context_gatherer_error step should have been written (NOT a success step)
+    db.expire_all()
+    steps_result = await db.execute(select(RunStep).where(RunStep.run_id == run.id))
+    steps = steps_result.scalars().all()
+    assert len(steps) == 1
+    assert steps[0].step_name == "context_gatherer_error"
+    # Token counts from the LLM call are preserved on the error step so the
+    # dashboard shows the cost of the wasted call.
+    assert steps[0].input_tokens == 4676
+    assert steps[0].output_tokens == 512
+    assert steps[0].latency_ms == 8220

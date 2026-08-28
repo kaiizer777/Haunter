@@ -250,6 +250,43 @@ async def gather_context(
     output_tokens: int = usage.get("output_tokens", 0)
 
     # -------------------------------------------------------------------------
+    # 4a. Reject empty summaries — the model produced 0 usable output tokens.
+    #     This is the actual root cause of the screenshot bug: the LLM hits
+    #     the max_tokens cap or returns only whitespace / code fences, the
+    #     summary collapses to "", and the orchestrator silently passes an
+    #     empty string to Fix Generator which then rejects the patch as
+    #     "wrong_diagnosis". Raise here so the outer handler records a real
+    #     failure_reason and the run is not stranded with an empty summary.
+    # -------------------------------------------------------------------------
+    if not summary:
+        # Persist a context_gatherer_error step so the timeline shows the
+        # failure (the success step above would be misleading).
+        await _persist_run_step(
+            db=db,
+            run_id=run.id,
+            step_name="context_gatherer",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            error=True,
+        )
+        logger.error(
+            "context_gatherer: run=%s returned empty summary "
+            "(output_tokens=%d, latency_ms=%d, model=%s) — treating as failure",
+            run.id,
+            output_tokens,
+            latency_ms,
+            response.get("model", "unknown"),
+        )
+        raise ValueError(
+            f"context_gatherer returned an empty summary from model "
+            f"{response.get('model', 'unknown')!r} "
+            f"(output_tokens={output_tokens}, latency_ms={latency_ms}). "
+            f"The LLM produced no usable diagnosis — likely hit max_tokens or "
+            f"returned only whitespace / markdown code fences."
+        )
+
+    # -------------------------------------------------------------------------
     # 5. Persist run_steps trace row — tokens + cost, never raw text
     # -------------------------------------------------------------------------
     await _persist_run_step(
