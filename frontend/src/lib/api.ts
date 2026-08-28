@@ -1,4 +1,9 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL as string;
+if (!API_BASE) {
+  throw new Error(
+    "NEXT_PUBLIC_API_URL is not set — must be https://a5fc7vxbwpvggzaossrtzy67ua0yerrb.lambda-url.us-east-1.on.aws for prod"
+  );
+}
 
 export interface AuthUser {
   id: string;

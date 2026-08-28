@@ -56,7 +56,7 @@ async def test_login_redirect_and_state_cookie_attrs(client: httpx.AsyncClient):
     assert "haunter_oauth_state=" in set_cookie
     assert "HttpOnly" in set_cookie or "httponly" in set_cookie
     assert "Secure" in set_cookie or "secure" in set_cookie
-    assert "SameSite=lax" in set_cookie or "samesite=lax" in set_cookie or "SameSite=Lax" in set_cookie
+    assert "SameSite=none" in set_cookie.lower() or "samesite=none" in set_cookie.lower()
     assert f"Max-Age={_STATE_MAX_AGE}" in set_cookie or f"max-age={_STATE_MAX_AGE}" in set_cookie
 
 
@@ -282,7 +282,7 @@ async def test_logout_clears_cookie_and_idempotent(client: httpx.AsyncClient):
     assert "Max-Age=0" in set_cookie or "max-age=0" in set_cookie
     assert "HttpOnly" in set_cookie or "httponly" in set_cookie
     assert "Secure" in set_cookie or "secure" in set_cookie
-    assert "SameSite=lax" in set_cookie or "samesite=lax" in set_cookie or "SameSite=Lax" in set_cookie
+    assert "samesite=none" in set_cookie.lower()
 
     # Second logout without cookie is idempotent 200
     resp2 = await client.post("/auth/logout")

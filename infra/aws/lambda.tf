@@ -215,7 +215,8 @@ resource "aws_lambda_function" "haunter" {
 # auth_type = NONE: Function URL is public.
 # Security via HMAC-SHA256 (X-Hub-Signature-256) in webhooks.py — GitHub
 # cannot sign IAM SigV4, so HMAC is the correct and standard approach.
-# CORS: disabled — GitHub webhook sender is not a browser.
+# CORS: Function URL CORS must align with FastAPI CORSMiddleware (main.py).
+# allow_credentials=true requires specific origins (not "*") per browser spec.
 # ---------------------------------------------------------------------------
 
 resource "aws_lambda_function_url" "haunter" {
@@ -223,21 +224,29 @@ resource "aws_lambda_function_url" "haunter" {
   authorization_type = "NONE"  # Secured via HMAC-SHA256 in webhooks.py
 
   cors {
-    allow_credentials = false
-    allow_origins     = ["*"]
-    allow_methods     = ["*"]
-    allow_headers     = ["*"]
+    allow_credentials = true
+    allow_origins     = ["https://haunter-dfg.pages.dev"]
+    allow_methods     = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allow_headers     = ["Content-Type", "Cookie", "Authorization"]
     max_age           = 3600
   }
 }
 
 # Fix for AWS accounts created after ~2024: "Block public access" for Function URLs
 # requires BOTH InvokeFunctionUrl and InvokeFunction for "*" to actually allow public.
-# Without InvokeFunction, new accounts return 403 even with AuthType NONE.
+# Without both, new accounts return 403 even with AuthType NONE.
 # See https://github.com/anomalyco/sst/issues/6397
 resource "aws_lambda_permission" "allow_public_invoke" {
   statement_id  = "AllowPublicInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.haunter.function_name
   principal     = "*"
+}
+
+resource "aws_lambda_permission" "allow_public_function_url" {
+  statement_id           = "AllowPublicFunctionUrl"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.haunter.function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
 }

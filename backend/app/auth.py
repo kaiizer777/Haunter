@@ -9,8 +9,10 @@ AUTH ARCHITECTURE
   The GitHub App used for repo installation / webhook reception (Phase 3+) is a
   distinct credential with repo-admin scope. Login must never request destructive
   scopes — least-privilege principle.
-- Session is a signed, httpOnly, Secure, SameSite=Lax cookie containing only the
+- Session is a signed, httpOnly, Secure, SameSite=None cookie containing only the
   user UUID (itsdangerous TimestampSigner, 14-day max-age). No JWT, no JWKS.
+  SameSite=None is required for cross-site deployment (frontend on pages.dev,
+  API on lambda-url) with credentials: include.
 - Cookie verification is done entirely inside FastAPI via get_current_user; the
   Next.js frontend never sees or stores auth state beyond calling /auth/me.
 
@@ -47,10 +49,10 @@ COOKIE PREFIX (__Host-)
   attribute, and Path=/. When the API and frontend are on separate origins, the browser
   sends the API cookie to the API origin automatically without a Domain attribute —
   __Host- would be compatible here BUT requires the cookie to only be sent over HTTPS.
-  During local dev (http://localhost) Secure cookies are rejected by browsers, breaking
-  the flow. For the Cloud Run + separate-frontend topology this flag is revisitable post-
-  deploy when both endpoints are on HTTPS. Standard haunter_session (no prefix) with
-  Secure;HttpOnly;SameSite=Lax;Path=/ is correct for this topology.
+   During local dev (http://localhost) Secure cookies are rejected by browsers, breaking
+  the flow. For prod cross-site topology (pages.dev frontend + lambda-url API) the
+  session and state cookies use Secure;HttpOnly;SameSite=None;Path=/ to allow
+  credentialed fetch. Local dev may need SameSite=Lax if not on HTTPS.
 
 KEY ROTATION
 ------------
@@ -239,6 +241,7 @@ def _verify_state_cookie(signed_cookie: str, request_state: str) -> None:
 def _set_session_cookie(response: Response, user_id: uuid.UUID) -> None:
     """
     Set the session cookie with full security attributes.
+    Cross-site deployment (pages.dev -> lambda-url) requires SameSite=None; Secure.
     Attributes must be identical to those used in _clear_session_cookie — browsers
     only remove a cookie when the delete request matches the original attributes exactly.
     """
@@ -248,7 +251,7 @@ def _set_session_cookie(response: Response, user_id: uuid.UUID) -> None:
         max_age=_SESSION_MAX_AGE,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         path="/",
     )
 
@@ -263,20 +266,20 @@ def _clear_session_cookie(response: Response) -> None:
         key=_SESSION_COOKIE_NAME,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         path="/",
     )
 
 
 def _set_state_cookie(response: Response, signed_state: str) -> None:
-    """Short-lived state cookie — httpOnly, 10min TTL, deleted after use."""
+    """Short-lived state cookie — httpOnly, 10min TTL, deleted after use. SameSite=None for cross-site pages.dev -> lambda-url."""
     response.set_cookie(
         key=_STATE_COOKIE_NAME,
         value=signed_state,
         max_age=_STATE_MAX_AGE,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         path="/",
     )
 
@@ -287,7 +290,7 @@ def _clear_state_cookie(response: Response) -> None:
         key=_STATE_COOKIE_NAME,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         path="/",
     )
 
@@ -346,15 +349,15 @@ async def login(request: Request, response: Response) -> RedirectResponse:
     — never derived from request Host or any client-supplied value.
     """
     raw_state = secrets.token_urlsafe(32)
-    signed_state = _sign_state(raw_state)
 
     client = AsyncOAuth2Client(
         client_id=settings.github_client_id,
         scope="read:user",
         redirect_uri=settings.callback_url,  # hardcoded from config — never from Host header
-        state=raw_state,
     )
-    url, _ = client.create_authorization_url(_GITHUB_AUTHORIZE_URL)
+    url, state = client.create_authorization_url(_GITHUB_AUTHORIZE_URL, state=raw_state)
+    # Use the state actually embedded in the URL (authlib may transform it) for the cookie
+    signed_state = _sign_state(state)
 
     redirect = RedirectResponse(url, status_code=302)
     _set_state_cookie(redirect, signed_state)
