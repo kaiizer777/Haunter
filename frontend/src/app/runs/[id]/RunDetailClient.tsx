@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, use } from "react";
+import { useParams } from "next/navigation";
 import Link from "next/link";
 import { AppLayout } from "@/components/layout/app-layout";
 import { StatusBadge } from "@/components/runs/status-badge";
@@ -24,16 +25,47 @@ import {
 export default function RunDetailClient({
   params,
 }: {
-  params: Promise<{ id: string }>;
+  params?: Promise<{ id: string }>;
 }) {
-  const resolvedParams = use(params);
-  const runId = resolvedParams.id;
+  const resolvedParams = params ? use(params) : null;
+  const routeParams = useParams();
+
+  const getEffectiveRunId = (): string => {
+    const paramId = routeParams?.id;
+    const strParam = typeof paramId === "string" ? paramId : Array.isArray(paramId) ? paramId[0] : "";
+    if (strParam && strParam !== "placeholder") {
+      return strParam;
+    }
+    if (resolvedParams?.id && resolvedParams.id !== "placeholder") {
+      return resolvedParams.id;
+    }
+    if (typeof window !== "undefined") {
+      const match = window.location.pathname.match(/\/runs\/([^\/?#]+)/);
+      if (match && match[1] && match[1] !== "placeholder") {
+        return decodeURIComponent(match[1]);
+      }
+    }
+    return "";
+  };
+
+  const [runId, setRunId] = useState<string>(getEffectiveRunId);
+
+  useEffect(() => {
+    const effective = getEffectiveRunId();
+    if (effective && effective !== runId) {
+      setRunId(effective);
+    }
+  }, [routeParams, resolvedParams, runId]);
 
   const [trace, setTrace] = useState<TraceOut | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchTrace = useCallback(async () => {
+    if (!runId || runId === "placeholder") {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {

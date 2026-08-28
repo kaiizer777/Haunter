@@ -390,23 +390,34 @@ def test_encryption_required_raises():
     in sys.modules (i.e. non-test runtime).
 
     Simulates this by temporarily removing 'pytest' from sys.modules before re-importing
-    app.config with no TOKEN_ENCRYPTION_KEY env var.
+    app.config with no TOKEN_ENCRYPTION_KEY in env or dotenv.
     """
     import importlib
     import os
     import sys
+    from unittest.mock import patch
+    from pydantic_settings.sources import DotEnvSettingsSource
 
     # Pop pytest from sys.modules to simulate non-test runtime
     saved_pytest = sys.modules.pop("pytest", None)
     # Remove cached app.config so the module-level guard re-executes
     sys.modules.pop("app.config", None)
 
+    real_dotenv_call = DotEnvSettingsSource.__call__
+
+    def mock_dotenv_call(self):
+        vals = real_dotenv_call(self)
+        if isinstance(vals, dict):
+            vals = {k: v for k, v in vals.items() if k.lower() != "token_encryption_key"}
+        return vals
+
     try:
-        # Ensure TOKEN_ENCRYPTION_KEY is absent
+        # Ensure TOKEN_ENCRYPTION_KEY is absent from environ and dotenv
         original_key = os.environ.pop("TOKEN_ENCRYPTION_KEY", None)
         try:
-            with pytest.raises(RuntimeError, match="TOKEN_ENCRYPTION_KEY must be set"):
-                importlib.import_module("app.config")
+            with patch.object(DotEnvSettingsSource, "__call__", mock_dotenv_call):
+                with pytest.raises(RuntimeError, match="TOKEN_ENCRYPTION_KEY must be set"):
+                    importlib.import_module("app.config")
         finally:
             if original_key is not None:
                 os.environ["TOKEN_ENCRYPTION_KEY"] = original_key
@@ -416,3 +427,5 @@ def test_encryption_required_raises():
             sys.modules["pytest"] = saved_pytest
         sys.modules.pop("app.config", None)
         importlib.import_module("app.config")
+
+
