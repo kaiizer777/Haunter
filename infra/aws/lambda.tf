@@ -151,6 +151,11 @@ resource "aws_lambda_function" "haunter" {
   # For zip deployment (simpler at MVP scale):
   package_type  = "Zip"
   filename      = var.lambda_zip_path
+  # Phase 17 deploy fix: track the zip's content hash so ``terraform plan``
+  # detects a new bundle and ``terraform apply`` actually re-uploads the
+  # function code. Without this, only the filename string is tracked and
+  # a code update is silently ignored by the plan diff.
+  source_code_hash = filebase64sha256(var.lambda_zip_path)
   handler       = "lambda_handler.handler"
   runtime       = "python3.11"
   architectures = ["x86_64"]
