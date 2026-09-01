@@ -11,7 +11,7 @@ variable "project_name" {
 }
 
 variable "github_token" {
-  description = "GitHub Personal Access Token (or App Installation Token) for repo cloning. Stored in SSM SecureString — never in state plaintext."
+  description = "GitHub Personal Access Token (PAT) for context_gatherer's GitHub API calls (logs, diff, commit metadata). Stored as Lambda env var GITHUB_TOKEN. Note: separate from the GitHub App PEM, which lives in SSM at /haunter/GITHUB_TOKEN and is used by the GitHub Actions sandbox runner."
   type        = string
   sensitive   = true
 }
