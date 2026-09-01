@@ -65,10 +65,13 @@ FREE_TIER_FALLBACK_ORDER: list[str] = [
     "hy3-free",
 ]
 
-# Per-model attempt cap. 7 matches the typical 30-60s free-tier rate-limit
-# window — enough attempts to outlast a transient throttle without holding
-# the user hostage to a single model.
-ATTEMPTS_PER_MODEL: int = 7
+# Per-model attempt cap. Lowered from 7 to 3 on 2026-09-01: with the
+# per-attempt timeout at 30s, 3 attempts = 90s ceiling per model. Combined
+# with 3 fallback models and 2.5s inter-model sleep, the absolute worst
+# case for LLMClient.complete() is ~280s, well under the 800s orchestrator
+# wall-clock limit. 7 was right when the per-attempt timeout was 120s, but
+# no longer.
+ATTEMPTS_PER_MODEL: int = 3
 
 # Inter-model sleep. Async so it composes with the event loop. 2.5s gives
 # the previous model's rate-limit window a moment to clear before the
@@ -83,7 +86,13 @@ MAX_TOTAL_ATTEMPTS: int = len(FREE_TIER_FALLBACK_ORDER) * ATTEMPTS_PER_MODEL
 class LLMClient:
     """Provider-agnostic LLM client for Haunter with free-tier fallback."""
 
-    def __init__(self, timeout: float = 120.0) -> None:
+    def __init__(self, timeout: float = 30.0) -> None:
+        # Lowered from 120s on 2026-09-01: free-tier models should respond in <30s
+        # on healthy state. 120s lets a single hanging model burn 2520s in retries
+        # (3 models x 7 attempts x 120s), which exceeds the orchestrator's 800s
+        # wall-clock limit and causes the whole run to time out. 30s is a hard
+        # ceiling — slower responses fail fast and the client falls back to the
+        # next model in FREE_TIER_FALLBACK_ORDER.
         self.timeout = timeout
 
     async def complete(
