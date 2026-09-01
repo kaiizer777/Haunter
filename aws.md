@@ -18,7 +18,7 @@
 | **Region** | `us-east-1` |
 | **Lambda zip** | Built at repo root: `C:\Users\bari2\Desktop\Haunter\lambda.zip` |
 | **Deployment zip builder** | `backend/rebuild_lambda_zip.py` — the ONLY correct way to build the zip. |
-| **Function URL** | `https://a5fc7vxbwpvggzaossrtzy67ua0yerrb.lambda-url.us-east-1.on.aws/` |
+| **Function URL** | `https://gjdbtzw5h36jhniqgdcxvhmjxu0tcjqr.lambda-url.us-east-1.on.aws/` |
 
 ---
 
@@ -209,9 +209,34 @@ Key vars:
 | Variable | Value | Purpose |
 |---|---|---|
 | `HOSTING_PROVIDER` | `aws` | Tells orchestrator to use Lambda async self-invoke |
-| `SANDBOX_PROVIDER` | `aws` | Tells sandbox to use CodeBuild |
-| `AWS_CODEBUILD_PROJECT_NAME` | `haunter-sandbox` | CodeBuild project for patch verification |
+| `SANDBOX_PROVIDER` | `github_actions` | Tells sandbox to use GitHub Actions CI (post-Phase 17 cleanup; CodeBuild is gone) |
 | `DATABASE_URL` | (pooled Neon URL) | App queries — NullPool in app, Neon PgBouncer pools |
 | `DATABASE_URL_UNPOOLED` | (direct Neon URL) | Alembic migrations only |
 
-To switch back to GCP Cloud Run (restore path): set `HOSTING_PROVIDER=gcp` and `SANDBOX_PROVIDER=gcp` — no code changes required, just `terraform apply` with updated tfvars.
+> **Post-cleanup note (Phase 17, 2026-09-01):** CodeBuild and GCP Cloud Build are removed. `AWS_CODEBUILD_PROJECT_NAME` env var is gone. The only sandbox provider is `github_actions`; the only hosting provider is `aws` (Lambda). There is no rollback path to GCP — that stack is dead code.
+
+---
+
+## 9. Post-deploy URL-change checklist
+
+`terraform taint aws_lambda_function.haunter && terraform apply` (the standard redeploy) **assigns a brand-new random URL to the Lambda Function URL** every time. After every deploy, update the URL in **every** place that hardcodes it. Missing one = silent breakage.
+
+| # | Where | What to change |
+|---|---|---|
+| 1 | `aws.md` line 21 | This file's `Function URL` row in the Quick reference table |
+| 2 | `backend/.env` (if using locally) | `CALLBACK_URL` and `FRONTEND_URL` |
+| 3 | Lambda env vars (set by terraform, no manual edit) | `CALLBACK_URL` and `FRONTEND_URL` are injected from `terraform.tfvars` — `terraform apply` updates them automatically |
+| 4 | GitHub Webhook Payload URL | https://github.com/<owner>/<repo>/settings/hooks → click Edit → paste new URL + `/webhooks/github` |
+| 5 | GitHub OAuth App Authorization callback URL | https://github.com/settings/developers → your OAuth App → "Authorization callback URL" → paste new URL + `/auth/callback`. **Must match `CALLBACK_URL` exactly or login breaks** |
+| 6 | Cloudflare Pages env var | `NEXT_PUBLIC_API_URL` in the project's Settings → Environment variables |
+| 7 | Terraform state (`terraform.tfvars`) | `callback_url` and `frontend_url` — committed locally, used by next deploy |
+
+**Verify after deploy:** `curl <new-url>/health` should return `{"status":"ok"}`. If it 404s, the URL is wrong or the Function URL didn't update.
+
+**Symptom → likely cause:**
+- Dashboard says `{"Message":null}` on login → API Gateway "not found" — old URL still cached somewhere
+- `404 on /auth/callback` after successful GitHub OAuth → GitHub OAuth App callback URL or Lambda `CALLBACK_URL` is stale (most common culprit)
+- Lambda `/health` works but dashboard can't login → frontend `NEXT_PUBLIC_API_URL` is stale
+- `error: page not found` from webhook deliveries → GitHub Webhook Payload URL is stale
+
+**Mitigation (parked, Phase 5):** pin a custom domain to the Lambda Function URL so deploys don't change the address. Until then, this checklist is mandatory after every redeploy.
