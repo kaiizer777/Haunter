@@ -10,7 +10,7 @@ GitHub Actions failure → Webhook → Orchestrator → Context Gatherer → Fix
 
 - **Multi-repo webhook** `POST /webhooks/github` — HMAC `X-Hub-Signature-256` (constant-time), payload validation, dedupe on `X-GitHub-Delivery`, 10s async ack via `AWSHostingAdapter` (async self-invoke on Lambda).
 - **Orchestrator/subagent isolation** — orchestrator holds only `{run_id, repo_id, step, confidence}`, never raw logs. Subagents are narrow, ephemeral, return distilled summaries.
-- **Sandbox verification** — GitHub Actions CI via per-user test mirrors (`kaiizer777/haunter-test-{hash}`). Migrated from AWS CodeBuild (account quota blocker) to polled GitHub Actions: pushes test templates (`haunter-test-py.yml` / `haunter-test-ts.yml`) and patch commits, polls Actions check-runs API up to 2m, returns pass/fail with sanitized logs.
+- **Sandbox verification** — GitHub Actions CI via per-user test mirrors (`kaiizer777/haunter-test-{hash}`): pushes test templates (`haunter-test-py.yml` / `haunter-test-ts.yml`) and patch commits, polls Actions check-runs API up to 2m, returns pass/fail with sanitized logs.
 - **Retry with alternate strategy** — failure reason fed back to Fix Generator, capped at 3 attempts (DB-enforced).
 - **Observability** — `run_steps` timeline (tokens/latency/cost per step), failure classification, per-repo stats; all queries tenant-scoped.
 - **Eval harness** — 20 golden cases (import/type/assertion/deps) on public test repos, per-subagent scores + regression diff.
@@ -21,7 +21,7 @@ GitHub Actions failure → Webhook → Orchestrator → Context Gatherer → Fix
 | Layer | Choice |
 |---|---|
 | Orchestrator | FastAPI + `Mangum` on AWS Lambda (Function URL), SQLAlchemy 2.0 async + `asyncpg`, Alembic |
-| Sandbox | GitHub Actions CI (`github_actions_runner`) via per-user test mirrors (AWS CodeBuild & GCP dormant) |
+| Sandbox | GitHub Actions CI (`github_actions_runner`) via per-user test mirrors |
 | DB | Neon Postgres — pooled URL + `NullPool` (app), direct URL (migrations) |
 | Auth | GitHub OAuth (`authlib` + `itsdangerous` signed `httpOnly` cookie), Fernet-encrypted tokens |
 | Frontend | Next.js 16 (App Router), TypeScript 5, Tailwind 4, Cloudflare Pages |
@@ -29,7 +29,7 @@ GitHub Actions failure → Webhook → Orchestrator → Context Gatherer → Fix
 
 ## How the sandbox works
 
-Haunter previously executed sandboxes via AWS CodeBuild (`AWSSandboxRunner`). When the AWS account ran into `AccountLimitExceededException` (concurrent-build quota = 0 in `us-east-1`), the sandbox was migrated to **GitHub Actions CI** (`GitHubActionsSandboxRunner`) using polled test mirrors (documented in `github.md`):
+Haunter executes sandboxes via GitHub Actions CI (GitHubActionsSandboxRunner) using polled test mirrors (documented in github.md):
 
 1. **Mirror lifecycle (`mirror.py`)**: On the first webhook for a user, Haunter creates a private, isolated test mirror under `kaiizer777` (e.g., `kaiizer777/haunter-test-{8-char-hash}`). The repository is cached and reused across future runs.
 2. **Template deployment**: Auto-detects runtime (`py` or `ts`) and pushes the appropriate workflow template (`haunter-test-py.yml` with pytest/ruff/mypy or `haunter-test-ts.yml` with npm test/tsc/eslint) into `.github/workflows/` using a PAT fallback (bypassing GitHub App `workflows:write` permission constraints).
@@ -40,7 +40,6 @@ Haunter previously executed sandboxes via AWS CodeBuild (`AWSSandboxRunner`). Wh
 ## Known limitations & Caveats
 
 - **Sandbox location**: Hosted on the `kaiizer777` personal GitHub namespace rather than the originally-planned `haunter-sandboxes` org, because the GitHub App could not be installed cleanly on the org without granting excessive permissions.
-- **Dormant infra**: AWS Lambda orchestrator infra is fully active. The previously deployed AWS CodeBuild sandbox (`infra/aws/codebuild.tf`) and GCP Cloud Build remain dormant fallbacks in `SANDBOX_PROVIDERS`; GitHub Actions is the active runner (`SANDBOX_PROVIDER=github_actions`).
 - **Secrets**: Requires Lambda env vars for GitHub App ID, Installation ID, and AWS SSM Parameter Store for the GitHub App private key (`/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY`). 
 
 ## Project Structure
@@ -53,7 +52,7 @@ haunter/
 │   ├── alembic/ + app/models.py
 │   └── lambda_handler.py
 ├── frontend/       # Next.js dashboard
-├── infra/aws/      # Terraform: Lambda Function URL + CodeBuild (dormant)
+├── infra/aws/      # Terraform: Lambda Function URL
 └── HAUNTER.md / WORK.md
 ```
 
@@ -79,6 +78,10 @@ npm run dev  # NEXT_PUBLIC_API_URL -> backend URL
 
 - **AWS Lambda**: `infra/aws/lambda.tf` — 512MB/900s ARM64, Function URL `auth_type=NONE` (HMAC-secured), always-free `1M req + 400k GB-s/mo` → `$0` at ~10 users.
 - **Cloudflare Pages**: Next.js 16 frontend dashboard deployed on Cloudflare Pages connected to Lambda Function URL.
+
+## Cleanup history
+
+See cleanup.md for the dead-code removal history (GCP Cloud Build + AWS CodeBuild + GCP hosting adapter, ~1,940 lines across 13 files, plus google-cloud-build dependency dropped).
 
 ## Demoing Haunter in 5 minutes
 
