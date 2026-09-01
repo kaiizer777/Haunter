@@ -326,8 +326,21 @@ async def _orchestrator_pipeline_body(
     # ----------------------------------------------------------------
     # pending → context_gathering
     # ----------------------------------------------------------------
-    await _transition(run, RunStatus.context_gathering, db)
-    state["step"] = RunStatus.context_gathering.value
+    # IDEMPOTENT entry: only transition if the run is still in `pending`.
+    # If a prior invocation already moved it past `pending` (e.g. async
+    # retry, double-webhook, SQS redelivery), skip the transition and
+    # resume from the current status. This prevents `Invalid transition:
+    # fix_generation -> context_gathering` on re-entry.
+    if run.status == RunStatus.pending.value:
+        await _transition(run, RunStatus.context_gathering, db)
+        state["step"] = RunStatus.context_gathering.value
+    else:
+        logger.info(
+            "orchestrator: run=%s already past pending (status=%s) "
+            "— resuming without re-entering context_gathering",
+            run_id, run.status,
+        )
+        state["step"] = run.status
 
     # ----------------------------------------------------------------
     # Invoke Context Gatherer (on the outer `db` — bounded, fast)
@@ -349,8 +362,17 @@ async def _orchestrator_pipeline_body(
     # ----------------------------------------------------------------
     # context_gathering → fix_generation
     # ----------------------------------------------------------------
-    await _transition(run, RunStatus.fix_generation, db)
-    state["step"] = RunStatus.fix_generation.value
+    # IDEMPOTENT: only transition if currently in `context_gathering`.
+    # If a prior invocation already moved past it, skip and resume.
+    if run.status == RunStatus.context_gathering.value:
+        await _transition(run, RunStatus.fix_generation, db)
+        state["step"] = RunStatus.fix_generation.value
+    else:
+        logger.info(
+            "orchestrator: run=%s status=%s (not context_gathering) "
+            "— skipping fix_generation transition",
+            run_id, run.status,
+        )
 
     # ----------------------------------------------------------------
     # Verification retry loop — per-iteration session (BLOCKER-1)
