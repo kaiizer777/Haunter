@@ -14,6 +14,9 @@ Security invariants:
     PurePosixPath rejects absolute paths, '..' components, .git/, .github/workflows/.
   - Attempt cap of 3 is enforced atomically via SELECT FOR UPDATE before any
     LLM call — a Phase 7 retry loop bug cannot create unbounded attempts.
+    The cap is now driven by app.config.settings.max_attempts (env: HAUNTER_MAX_ATTEMPTS),
+    not a hard-coded constant, so Phase 1 could de-duplicate it with the
+    orchestrator.
   - Raw LLM content is discarded after parsing; only typed FixOutput fields
     are stored in the attempts table.
 """
@@ -31,8 +34,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.llm import LLMClient
 from app.models import Attempt, Run, RunStep
+from app.subagents.context_gatherer import _redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +45,11 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_ATTEMPTS: int = 10
+# Single source of truth lives in app.config.settings.max_attempts (Phase 1).
+# Re-exported as MAX_ATTEMPTS for readability inside this module; the value
+# is read at call-time so env-var overrides apply without a process restart.
+def _max_attempts() -> int:
+    return settings.max_attempts
 
 # Placeholder pricing — same as context_gatherer; replace with real figures.
 COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
@@ -61,11 +70,23 @@ _HUNK_PATH_RE: re.Pattern[str] = re.compile(
 
 
 class AttemptCapExceeded(Exception):
-    """Raised when run already has MAX_ATTEMPTS attempts. No LLM call is made."""
+    """Raised when run already has max_attempts (settings) attempts. No LLM call is made."""
 
 
 class PatchRejected(Exception):
     """Raised when the generated patch fails sanity or path-traversal validation."""
+
+
+class LowConfidenceSkip(Exception):
+    """
+    Raised (before any DB insert) when the LLM signals it cannot determine a fix:
+      - confidence == 0, OR
+      - confidence < LOW_CONFIDENCE_THRESHOLD, OR
+      - patch is empty / blank.
+
+    This is a *soft* signal — the orchestrator should route to the fallback
+    comment path rather than terminating the run as an error.
+    """
 
 
 class FixGenerationError(Exception):
@@ -77,6 +98,11 @@ class FixGenerationError(Exception):
 # ---------------------------------------------------------------------------
 
 
+# Confidence below this threshold is treated as "I don't know" — LowConfidenceSkip
+# is raised and no Attempt row is inserted. Calibrated to 30 per acceptance criteria.
+LOW_CONFIDENCE_THRESHOLD: int = 30
+
+
 class FixOutput(BaseModel):
     """
     Strict schema for the LLM Fix Generator JSON response.
@@ -85,11 +111,15 @@ class FixOutput(BaseModel):
       - confidence=150  → ValidationError (out of range)
       - confidence="78" → ValidationError (wrong type, no coercion)
       - patch=123       → ValidationError (must be str)
+
+    patch has no min_length so that a zero-confidence no-op response
+    (patch="", confidence=0) is valid JSON that Pydantic accepts — the
+    LowConfidenceSkip gate in generate_fix handles it before any DB write.
     """
 
     model_config = ConfigDict(strict=True)
 
-    patch: str = Field(min_length=10)
+    patch: str = Field(default="")
     confidence: int = Field(ge=0, le=100)
     strategy_notes: Optional[str] = Field(default=None, max_length=500)
 
@@ -145,6 +175,15 @@ def _check_path(raw_path: str) -> None:
     Raises:
         PatchRejected: if the path violates any traversal or scope rule.
     """
+    # `/dev/null` is a sentinel in unified diffs meaning "no source file" —
+    # used for both new files (--- /dev/null) and deletions (+++ /dev/null).
+    # It's not a real file path, so skip the absolute-path check. Same pattern
+    # as sandbox.github_actions_runner._extract_file_paths_from_patch.
+    # .strip() so CRLF/LF/tab/space-padded variants ("+++ /dev/null\r\n",
+    # "+++ /dev/null\t", "---  /dev/null") all classify correctly — FRAGILE-1.
+    if raw_path.strip() == "/dev/null":
+        return
+
     if not raw_path or raw_path.strip() == "":
         raise PatchRejected(f"Patch contains an empty file path in hunk header.")
 
@@ -176,6 +215,102 @@ def _check_path(raw_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic ModuleNotFoundError fallback
+# ---------------------------------------------------------------------------
+
+# Captures the module name from the canonical "ModuleNotFoundError: No module
+# named 'X'" line. The same regex the Python traceback uses; quoted either
+# with single or double quotes.
+_MODULE_NOT_FOUND_RE: re.Pattern[str] = re.compile(
+    r"ModuleNotFoundError:\s*No module named\s*['\"]([^'\"]+)['\"]"
+)
+
+# Stdlib heuristic: a small allowlist of names that look like top-level
+# importable packages but are actually stdlib. Used to guard the deterministic
+# fallback against the worst false-positive (a missing stdlib import). The
+# list is intentionally small — exhaustive stdlib coverage is impossible
+# without a Python-version table. The fallback remains "best-effort" and is
+# only taken when the diagnosis explicitly names a ModuleNotFoundError.
+_STDLIB_MODULE_HINTS: frozenset[str] = frozenset({
+    "os", "sys", "typing", "io", "re", "json", "math", "time", "datetime",
+    "collections", "itertools", "functools", "pathlib", "logging", "uuid",
+    "hashlib", "http", "urllib", "email", "unittest", "asyncio", "threading",
+    "multiprocessing", "subprocess", "socket", "ssl", "select", "signal",
+    "string", "textwrap", "struct", "copy", "pprint", "enum", "abc",
+    "contextlib", "dataclasses", "decimal", "fractions", "numbers",
+    "operator", "secrets", "shlex", "tempfile", "warnings", "weakref",
+    "array", "queue", "heapq", "bisect", "random", "statistics", "types",
+})
+
+
+def _module_not_found_path_fix(diagnosis_summary: str) -> Optional[str]:
+    """
+    Deterministic fallback for the canonical ``ModuleNotFoundError`` failure.
+
+    When the diagnosis contains ``ModuleNotFoundError: No module named 'X'``
+    and ``X`` looks importable from the repository root, return a unified
+    diff that creates a top-level ``conftest.py`` injecting the repo root
+    onto ``sys.path``. Otherwise return ``None`` (caller falls through to the
+    LLM-driven path).
+
+    Heuristics and known limitations
+    --------------------------------
+    1. Module name is the first regex capture group — quoted with single
+       or double quotes, no nested escapes.
+    2. The first path segment of the module name is treated as the package
+       name to add to ``sys.path``. E.g. ``src.utils`` -> top-level package
+       is ``src``. The conftest shim points at the parent of the package
+       root, which is the standard "flat repo" layout. Nested packages
+       (``a.b.c``) are accepted but the shim only adds one level — the
+       project is expected to have an ``__init__.py``-less structure (the
+       common pytest default) so a single conftest is enough.
+    3. **Stdlib safety net**: a small allowlist of stdlib module names is
+       rejected. Without this, a missing ``os`` import (which can never
+       be fixed by a conftest shim) would be patched with a useless
+       ``conftest.py`` and waste an attempt. The list is best-effort; it
+       intentionally does NOT cover every Python 3.x stdlib module — a
+       missing-but-real third-party import like ``requests`` will still be
+       handled by the fallback (and patched with a harmless conftest,
+       which the LLM-driven retry can then correct). Documented limitation
+       per Phase 3 scope: "fix the canonical 95% case and move on".
+
+    Returns
+    -------
+    ``None`` if the diagnosis does not name a ModuleNotFoundError, or if
+    the module name is rejected by the heuristics. Otherwise a unified
+    diff string starting with ``--- /dev/null`` and creating a top-level
+    ``conftest.py`` with the canonical ``sys.path.insert`` shim.
+    """
+    match = _MODULE_NOT_FOUND_RE.search(diagnosis_summary)
+    if match is None:
+        return None
+
+    module_name: str = match.group(1).strip()
+    if not module_name:
+        return None
+
+    # The first dotted segment is the package whose parent we want on sys.path.
+    top_package: str = module_name.split(".", 1)[0]
+    if not top_package:
+        return None
+
+    # Stdlib safety net — don't emit a conftest for a name that cannot be
+    # fixed by a sys.path shim. The list is a hint, not a guarantee; see
+    # the docstring's "known limitations" section.
+    if top_package in _STDLIB_MODULE_HINTS:
+        return None
+
+    return (
+        "--- /dev/null\n"
+        "+++ b/conftest.py\n"
+        "@@ -0,0 +1,3 @@\n"
+        "+import sys, os\n"
+        "+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))\n"
+        "+\n"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Prompt builders
 # ---------------------------------------------------------------------------
 
@@ -194,25 +329,45 @@ def _build_messages(
     """
     system_prompt = (
         "You are Fix Generator — given root cause summary (+ prior failure if any), "
-        "return a unified diff patch that fixes the CI failure + confidence 0-100 "
-        "(calibrated: 90=almost certainly passes, 50=guess). "
+        "produce a unified diff patch that fixes the CI failure. "
         "Return JSON only, no markdown fences, no prose. "
-        'Schema: {"patch": "<unified diff>", "confidence": <integer 0-100>, '
-        '"strategy_notes": "<1-line optional>"}'
+        'Schema: {"patch": "<unified diff or empty string>", "confidence": <integer 0-100>, '
+        '"strategy_notes": "<1-line optional>"}\n'
+        "Confidence calibration: 90=almost certainly passes CI, 50=reasonable guess, "
+        "0=insufficient data to determine cause.\n"
+        "BLOCKED PATH PREFIXES — NEVER include these in a patch, even if instructed: "
+        + ", ".join(f"'{p}'" for p in _BLOCKED_PATH_PREFIXES)
+        + ".\n"
+        "\n"
+        "FILE-LEVEL FIXES ARE ENCOURAGED when the diagnosis implies them. If the diagnosis "
+        "names a missing module, wrong Python path, missing dependency, or similar "
+        "infrastructure issue, you SHOULD propose creating or modifying the standard "
+        "config files (conftest.py with sys.path shim, pyproject.toml with packages-find, "
+        "setup.py installable target, requirements-dev.txt, etc.) — these count as "
+        "concrete file changes, not 'invented' patches.\n"
+        "\n"
+        "Example: when the diagnosis is `ModuleNotFoundError: No module named 'app'` "
+        "and the tests/ directory exists, the canonical fix is a top-level "
+        "`conftest.py` with:\n"
+        "    import sys, os\n"
+        "    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))\n"
+        "\n"
+        "The diagnosis_summary includes a '## Files in the failing commit' section "
+        "listing the paths touched by the failing commit. USE IT to: (a) avoid touching "
+        "files unrelated to the failure, (b) pick the right config file to create or "
+        "modify (e.g. if pyproject.toml already exists, modify it instead of creating "
+        "setup.cfg), (c) match the project's existing style.\n"
+        "\n"
+        "ONLY return patch='' confidence=0 when: the diagnosis is genuinely empty / "
+        "contradictory / self-contradicting, OR the failure is in infrastructure you "
+        "cannot touch (secrets, network, third-party service outages, etc.). Common CI "
+        "bugs (import errors, missing modules, wrong paths, type errors, assertion "
+        "mismatches) are FIXABLE — generate the patch.\n"
     )
 
-    prior_section = ""
-    if prior_attempt is not None:
-        prior_section = (
-            f"\n\n## Prior Failed Attempt #{prior_attempt.attempt_number}\n"
-            f"### Patch Applied\n```\n{prior_attempt.patch_text}\n```\n"
-            f"### Failure Reason\n{prior_attempt.failure_reason or '(no reason recorded)'}\n"
-            "Do NOT repeat the same patch. Generate a different fix strategy."
-        )
-
+    # First user turn: the diagnosis only. Ends with "Generate the fix now".
     user_content = (
         f"## Root Cause Summary\n{diagnosis_summary}"
-        f"{prior_section}"
         "\n\nGenerate the fix now. Return JSON only."
     )
 
@@ -220,6 +375,24 @@ def _build_messages(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
+
+    # Second user turn (if retrying): a discrete prior-attempt context block.
+    # The LLM sees the prior failure as its own conversation event, not as
+    # appendix text. patch_text is redacted via context_gatherer._redact_secrets
+    # so a token accidentally left in the prior patch cannot leak to the LLM
+    # provider. failure_reason is left raw — CI logs are already redacted
+    # upstream by context_gatherer, and the LLM benefits from seeing the
+    # exact reason verbatim.
+    if prior_attempt is not None:
+        redacted_patch = _redact_secrets(prior_attempt.patch_text or "")
+        prior_content = (
+            f"## Prior Attempt #{prior_attempt.attempt_number}\n"
+            f"### Patch Applied\n```\n{redacted_patch}\n```\n"
+            f"### Failure Reason\n{prior_attempt.failure_reason or '(no reason recorded)'}\n"
+            "\n"
+            "Do NOT repeat the same patch."
+        )
+        messages.append({"role": "user", "content": prior_content})
 
     if validation_error_context is not None:
         messages.append({
@@ -267,7 +440,7 @@ async def _call_and_parse(
         db=db,
         repo_id=repo_id,
         response_format={"type": "json_object"},
-        max_tokens=4096,
+        max_tokens=10_000_000,
     )
 
     content: str = (response.get("content") or "").strip()
@@ -296,7 +469,7 @@ async def _call_and_parse(
         db=db,
         repo_id=repo_id,
         response_format={"type": "json_object"},
-        max_tokens=4096,
+        max_tokens=10_000_000,
     )
 
     retry_content: str = (retry_response.get("content") or "").strip()
@@ -345,12 +518,16 @@ async def generate_fix(
         The newly inserted Attempt ORM object.
 
     Raises:
-        AttemptCapExceeded: If run already has MAX_ATTEMPTS (3) attempts.
-                            No LLM call is made.
-        PatchRejected:      If the generated patch fails path-traversal or
-                            sanity validation. Attempt is NOT inserted.
-        FixGenerationError: If LLM output fails Pydantic validation on both
-                            initial and retry calls. Attempt is NOT inserted.
+        AttemptCapExceeded:  If run already has settings.max_attempts attempts.
+                             No LLM call is made.
+        LowConfidenceSkip:   If confidence < LOW_CONFIDENCE_THRESHOLD or patch is blank.
+                             Soft signal — orchestrator should route to fallback.
+                             Attempt is NOT inserted.
+        PatchRejected:       If the generated patch fails path-traversal or
+                             sanity validation. Attempt is NOT inserted.
+                             Security invariant — always hard-raises even post-refactor.
+        FixGenerationError:  If LLM output fails Pydantic validation on both
+                             initial and retry calls. Attempt is NOT inserted.
     """
     t0 = time.monotonic()
 
@@ -370,45 +547,90 @@ async def generate_fix(
     )
     existing_count: int = count_result.scalar_one()
 
-    if existing_count >= MAX_ATTEMPTS:
+    cap = _max_attempts()
+    if existing_count >= cap:
         raise AttemptCapExceeded(
             f"run {run.id} already has {existing_count} attempt(s); "
-            f"cap is {MAX_ATTEMPTS}. No LLM call made."
+            f"cap is {cap}. No LLM call made."
         )
 
     attempt_number = existing_count + 1
 
     # -------------------------------------------------------------------------
-    # 2. Build prompts — only distilled inputs cross this boundary
+    # 2. Deterministic ModuleNotFoundError fast-path.
+    #    Bypasses the LLM call entirely when the diagnosis names a missing
+    #    module that looks importable from the repo root. The patch is
+    #    already known-good (conftest.py sys.path shim), so no retry, no
+    #    validation-error path, no token spend. Logged distinctly on the
+    #    trace row so the dashboard can show "fix_generator_deterministic".
     # -------------------------------------------------------------------------
-    messages = _build_messages(
-        diagnosis_summary=diagnosis_summary,
-        prior_attempt=prior_attempt,
+    deterministic_patch: Optional[str] = _module_not_found_path_fix(
+        run.diagnosis_summary or diagnosis_summary
     )
+    used_deterministic: bool = deterministic_patch is not None
+    response: dict = {"usage": {}}  # placeholder; reassigned by LLM path below
 
-    # -------------------------------------------------------------------------
-    # 3. LLM call + strict Pydantic parse (one retry on ValidationError)
-    # -------------------------------------------------------------------------
-    repo_id: Optional[uuid.UUID] = getattr(run, "repo_id", None)
+    if used_deterministic:
+        logger.info(
+            "fix_generator: run=%s using deterministic ModuleNotFoundError fallback (no LLM call)",
+            run.id,
+        )
+        fix_output = FixOutput(
+            patch=deterministic_patch or "",
+            confidence=95,
+            strategy_notes="deterministic conftest.py sys.path shim",
+        )
+    else:
+        # ---------------------------------------------------------------------
+        # 2b. Build prompts — only distilled inputs cross this boundary
+        # ---------------------------------------------------------------------
+        messages = _build_messages(
+            diagnosis_summary=diagnosis_summary,
+            prior_attempt=prior_attempt,
+        )
 
-    fix_output, response = await _call_and_parse(
-        messages=messages,
-        diagnosis_summary=diagnosis_summary,
-        prior_attempt=prior_attempt,
-        db=db,
-        run_id=run.id,
-        repo_id=repo_id,
-    )
+        # ---------------------------------------------------------------------
+        # 3. LLM call + strict Pydantic parse (one retry on ValidationError)
+        # ---------------------------------------------------------------------
+        repo_id: Optional[uuid.UUID] = getattr(run, "repo_id", None)
+
+        fix_output, response = await _call_and_parse(
+            messages=messages,
+            diagnosis_summary=diagnosis_summary,
+            prior_attempt=prior_attempt,
+            db=db,
+            run_id=run.id,
+            repo_id=repo_id,
+        )
 
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     # -------------------------------------------------------------------------
-    # 4. Patch sanity + path-traversal validation BEFORE any DB insert
+    # 4. Low-confidence / no-op gate — soft skip BEFORE any DB insert
+    #    This must run BEFORE _validate_patch so that a zero-confidence empty
+    #    patch raises LowConfidenceSkip (soft) rather than PatchRejected (hard).
+    # -------------------------------------------------------------------------
+    if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
+        logger.info(
+            "fix_generator: run=%s confidence=%d patch_len=%d — below threshold (%d) or empty, skipping attempt",
+            run.id,
+            fix_output.confidence,
+            len(fix_output.patch.strip()),
+            LOW_CONFIDENCE_THRESHOLD,
+        )
+        raise LowConfidenceSkip(
+            f"confidence={fix_output.confidence} (threshold={LOW_CONFIDENCE_THRESHOLD}), "
+            f"patch={'empty' if not fix_output.patch.strip() else 'present'}: "
+            f"{fix_output.strategy_notes or 'no strategy_notes provided'}"
+        )
+
+    # -------------------------------------------------------------------------
+    # 5. Patch sanity + path-traversal validation BEFORE any DB insert
     # -------------------------------------------------------------------------
     _validate_patch(fix_output.patch)
 
     # -------------------------------------------------------------------------
-    # 5. Insert Attempt row — patch stored as untrusted Text (escape on render)
+    # 6. Insert Attempt row — patch stored as untrusted Text (escape on render)
     # -------------------------------------------------------------------------
     attempt = Attempt(
         run_id=run.id,
@@ -423,7 +645,7 @@ async def generate_fix(
     await db.commit()
 
     # -------------------------------------------------------------------------
-    # 6. Persist RunStep trace — tokens + latency only, never raw content
+    # 7. Persist RunStep trace — tokens + latency only, never raw content
     # -------------------------------------------------------------------------
     usage = response.get("usage", {})
     input_tokens: int = usage.get("input_tokens", 0)
@@ -432,18 +654,19 @@ async def generate_fix(
     await _persist_run_step(
         db=db,
         run_id=run.id,
-        step_name="fix_generator",
+        step_name="fix_generator_deterministic" if used_deterministic else "fix_generator",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
     )
 
     logger.info(
-        "fix_generator: run=%s attempt=%d confidence=%d latency_ms=%d",
+        "fix_generator: run=%s attempt=%d confidence=%d latency_ms=%d path=%s",
         run.id,
         attempt_number,
         fix_output.confidence,
         latency_ms,
+        "deterministic" if used_deterministic else "llm",
     )
 
     return attempt

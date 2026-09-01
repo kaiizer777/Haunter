@@ -18,6 +18,7 @@ and a `run_steps` trace row so the dashboard can show *why* a run failed.
 
 from __future__ import annotations
 
+import asyncio
 import html as html_module
 import logging
 import uuid
@@ -28,12 +29,40 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db import async_session_maker
 from app.models import Repo, Run, RunStep
+from sqlalchemy.exc import InterfaceError, OperationalError
 
-# Truncation cap for failure_reason — keeps payloads tiny and avoids any risk of
-# a giant exception chain landing in the DB. 500 chars fits in a tweet.
-_FAILURE_REASON_MAX_CHARS = 500
+# Truncation cap for failure_reason — set to 10M for full error trace persistence
+_FAILURE_REASON_MAX_CHARS = 10_000_000
+
+# Hard wall-clock timeout for the whole orchestrator body (Phase 1, O-06).
+# Leaves 100s of headroom under the Lambda 900s limit. Any pipeline still
+# running past this point is forcibly cancelled and the run is transitioned
+# to `error` with failure_reason="orchestrator wall-clock timeout". Without
+# this, a stuck LLM/sandbox loop burns the entire Lambda budget and the
+# state machine never reaches a terminal state.
+ORCHESTRATOR_TIMEOUT_S: float = 800.0
+
+# Tail length for the "is the LLM producing the same broken fix" fast-fail
+# comparison. We compare the trailing N chars of the verification
+# failure_reason to the prior attempt's; a match means the new attempt
+# almost certainly produced the same fix and the LLM is stuck. Smaller
+# values are more aggressive (catch sooner, more false positives);
+# 200 chars is the Phase 1 default and matches the unique suffix of a
+# typical pytest failure line.
+_FAILURE_REASON_TAIL_CHARS: int = 200
+
+# Run statuses considered terminal — no transition allowed out of these.
+# Defined as raw strings (not RunStatus enum members) so the constant
+# block at the top of the file doesn't depend on the class definition below.
+_TERMINAL_STATUSES: frozenset[str] = frozenset({
+    "pr_opened",
+    "fallback_commented",
+    "completed",
+    "error",
+})
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +91,7 @@ class RunStatus(str, Enum):
 _ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
     RunStatus.pending:              {RunStatus.context_gathering, RunStatus.error},
     RunStatus.context_gathering:    {RunStatus.fix_generation, RunStatus.error},
-    RunStatus.fix_generation:       {RunStatus.verification, RunStatus.error},
+    RunStatus.fix_generation:       {RunStatus.verification, RunStatus.fallback, RunStatus.error},
     RunStatus.verification:         {RunStatus.pending_pr, RunStatus.fallback, RunStatus.fix_generation, RunStatus.error},
     RunStatus.pending_pr:           {RunStatus.pr_opened, RunStatus.error},
     RunStatus.fallback:             {RunStatus.fallback_commented, RunStatus.error},
@@ -149,7 +178,7 @@ def _sanitize_fallback(diagnosis_summary: Optional[str], attempts: list) -> str:
         "\n\n*Note: Automated fixes were attempted but none passed the CI sandbox. "
         "Please review the diagnosis above to manually resolve the issue.*"
     )
-    max_body = 3000 - len(prefix) - len(suffix)
+    max_body = 10_000_000 - len(prefix) - len(suffix)
     body_content = escaped[:max_body]
     return f"{prefix}{body_content}{suffix}"
 
@@ -251,6 +280,483 @@ async def _persist_error_step(
 
 
 # ---------------------------------------------------------------------------
+# Pipeline body (Phase 1 — extracted to wrap in asyncio.wait_for)
+# ---------------------------------------------------------------------------
+
+
+async def _orchestrator_pipeline_body(
+    db: AsyncSession,
+    run_id: uuid.UUID,
+    run: Run,
+    repo: Repo,
+    state: dict[str, Any],
+) -> None:
+    """
+    Execute the orchestrator pipeline body:
+
+      pending → context_gathering → fix_generation → (retry loop) →
+      pending_pr → pr_opened
+    or
+      (retry loop) → fallback → fallback_commented
+
+    Called from `handle_failed_run` inside `asyncio.wait_for(...)` so the
+    whole body is bounded by `ORCHESTRATOR_TIMEOUT_S`. The outer `db`
+    session is used only for the context-gathering call and the initial
+    transitions; the retry loop opens a fresh `async_session_maker()`
+    session per attempt (BLOCKER-1) so a stale Neon connection from a
+    previous iteration can never break the current one.
+
+    The post-loop fallback path also opens a fresh session for the same
+    reason. Returning from this function is a normal end-of-pipeline; the
+    caller (`handle_failed_run`) is responsible for catching
+    InvalidTransitionError and Exception from the outer awaits.
+    """
+    from app.subagents.context_gatherer import gather_context
+    from app.subagents.fix_generator import (
+        generate_fix,
+        AttemptCapExceeded,
+        LowConfidenceSkip,
+        PatchRejected,
+        FixGenerationError,
+    )
+    from app.sandbox import verify as sandbox_verify
+    from app.models import RunStep, Attempt
+    from sqlalchemy.orm import selectinload as _selectinload
+
+    # ----------------------------------------------------------------
+    # pending → context_gathering
+    # ----------------------------------------------------------------
+    await _transition(run, RunStatus.context_gathering, db)
+    state["step"] = RunStatus.context_gathering.value
+
+    # ----------------------------------------------------------------
+    # Invoke Context Gatherer (on the outer `db` — bounded, fast)
+    # ----------------------------------------------------------------
+    summary = await gather_context(run=run, repo=repo, db=db)
+
+    run.diagnosis_summary = summary
+    run.updated_at = datetime.now(timezone.utc)
+    db.add(run)
+    await db.commit()
+
+    state["decisions"].append("context_gathered")
+    logger.info(
+        "orchestrator: run=%s diagnosis_summary length=%d",
+        run_id,
+        len(summary),
+    )
+
+    # ----------------------------------------------------------------
+    # context_gathering → fix_generation
+    # ----------------------------------------------------------------
+    await _transition(run, RunStatus.fix_generation, db)
+    state["step"] = RunStatus.fix_generation.value
+
+    # ----------------------------------------------------------------
+    # Verification retry loop — per-iteration session (BLOCKER-1)
+    # ----------------------------------------------------------------
+    max_attempts: int = settings.max_attempts
+    prior_attempt: Optional[Attempt] = None
+    prior_failure_reason_tail: Optional[str] = None
+    skip_to_fallback: bool = False
+
+    for iteration in range(max_attempts):
+        # ---- Per-iteration session (BLOCKER-1 fix) ----
+        # After ~5 min of idle, Neon's pooled connection drops and the
+        # outer session becomes unusable. Opening a fresh session per
+        # attempt means a stale connection from a previous attempt can
+        # never break the current one.
+        #
+        # The per-iteration try/except below catches transient DB errors
+        # (InterfaceError / OperationalError) — e.g. Neon's idle-connection
+        # reaper killed a connection we just opened. Without this, a single
+        # transient error terminates the run as `error`. With it, the
+        # next iteration opens a fresh session and the pipeline continues.
+        try:
+            async with async_session_maker() as attempt_db:
+                # Reload Run with row-lock (mirrors the outer-session lock).
+                run_result = await attempt_db.execute(
+                    select(Run).where(Run.id == run_id).with_for_update()
+                )
+                run = run_result.scalar_one_or_none()
+                if run is None:
+                    logger.error(
+                        "orchestrator: run %s not found in attempt #%d — aborting",
+                        run_id, iteration + 1,
+                    )
+                    return
+    
+                # Reload Repo (selectinload for tenant integrity check).
+                repo_result = await attempt_db.execute(
+                    select(Repo)
+                    .where(Repo.id == run.repo_id)
+                    .options(_selectinload(Repo.user))
+                )
+                repo = repo_result.scalar_one_or_none()
+                if repo is None:
+                    logger.error(
+                        "orchestrator: repo %s not found in attempt #%d — aborting",
+                        run.repo_id, iteration + 1,
+                    )
+                    return
+    
+                # Tenant integrity (re-asserted on each iteration).
+                if repo.user_id is None or repo.id != run.repo_id:
+                    logger.error(
+                        "orchestrator: tenant integrity violation in attempt #%d — aborting",
+                        iteration + 1,
+                    )
+                    return
+    
+                # ---- Generate fix ----
+                try:
+                    attempt = await generate_fix(
+                        run=run,
+                        diagnosis_summary=run.diagnosis_summary or "",
+                        prior_attempt=prior_attempt,
+                        db=attempt_db,
+                    )
+                    state["decisions"].append(
+                        f"fix_generated_attempt_{attempt.attempt_number}"
+                    )
+                    state["confidence"] = attempt.confidence_score
+                    logger.info(
+                        "orchestrator: run=%s fix generated attempt=%d confidence=%d",
+                        run_id,
+                        attempt.attempt_number,
+                        attempt.confidence_score or 0,
+                    )
+                except LowConfidenceSkip as skip_err:
+                    # Soft signal: LLM couldn't determine a fix. Route to
+                    # fallback comment path (no error).
+                    logger.info(
+                        "orchestrator: run=%s low-confidence skip → fallback (%s)",
+                        run_id, skip_err,
+                    )
+                    error_step = RunStep(
+                        run_id=run.id,
+                        step_name="fix_generator_low_confidence",
+                        input_tokens=0,
+                        output_tokens=0,
+                        latency_ms=0,
+                        cost_estimate=0.0,
+                    )
+                    attempt_db.add(error_step)
+                    await attempt_db.commit()
+                    skip_to_fallback = True
+                    break  # closes the async with, exits the for loop
+    
+                except (AttemptCapExceeded, PatchRejected, FixGenerationError) as fix_err:
+                    # R-02: skip the noise RunStep when there's no signal to show.
+                    # The exception did not surface real token/latency data, so a
+                    # 0-token 0-ms row is just clutter on the dashboard. The run
+                    # is still terminated below with a populated failure_reason.
+                    # Forward-compatible: if a future caller plumbs tokens/latency
+                    # through, the gate below re-enables the step automatically.
+                    error_step_tokens_used: int = 0
+                    error_step_latency_ms: int = 0
+                    if error_step_tokens_used > 0 or error_step_latency_ms > 0:
+                        error_step = RunStep(
+                            run_id=run.id,
+                            step_name="fix_generator_error",
+                            input_tokens=0,
+                            output_tokens=0,
+                            latency_ms=error_step_latency_ms,
+                            cost_estimate=0.0,
+                        )
+                        attempt_db.add(error_step)
+                        await attempt_db.commit()
+                    else:
+                        logger.warning(
+                            "orchestrator: run=%s skipping empty fix_generator_error "
+                            "RunStep (0 tokens, 0 ms) on %s — failure_reason is still "
+                            "persisted to runs.failure_reason for the dashboard.",
+                            run_id,
+                            type(fix_err).__name__,
+                        )
+
+                    logger.error(
+                        "orchestrator: run=%s fix_generator failed (%s: %s)",
+                        run_id, type(fix_err).__name__, fix_err,
+                    )
+                    await _persist_failure_reason(
+                        db=attempt_db,
+                        run=run,
+                        reason=_format_failure_reason("fix_generator", fix_err),
+                    )
+                    try:
+                        await _transition(run, RunStatus.error, attempt_db)
+                    except InvalidTransitionError:
+                        pass
+                    return
+    
+                # ---- fix_generation -> verification ----
+                if RunStatus(run.status) == RunStatus.fix_generation:
+                    await _transition(run, RunStatus.verification, attempt_db)
+                    state["step"] = RunStatus.verification.value
+    
+                # ---- Verify in sandbox (provider selected via SANDBOX_PROVIDER env) ----
+                verify_result = await sandbox_verify(
+                    attempt=attempt,
+                    run=run,
+                    repo=repo,
+                )
+    
+                # Persist verification result
+                v_status: str = verify_result["status"]        # "pass" | "fail"
+                failure_reason: Optional[str] = verify_result["failure_reason"]
+                build_duration_ms: int = verify_result["build_duration_ms"]
+    
+                attempt.verification_status = v_status
+                attempt.failure_reason = failure_reason
+                attempt.build_duration_ms = build_duration_ms
+                attempt_db.add(attempt)
+                await attempt_db.commit()
+    
+                logger.info(
+                    "orchestrator: run=%s attempt=%d verification=%s duration_ms=%d",
+                    run_id,
+                    attempt.attempt_number,
+                    v_status,
+                    build_duration_ms,
+                )
+    
+                if v_status == "pass":
+                    # ---- Patch verified -> pending_pr ----
+                    await _transition(run, RunStatus.pending_pr, attempt_db)
+                    state["step"] = RunStatus.pending_pr.value
+                    state["decisions"].append("verification_passed")
+    
+                    # ---- Phase 8: generate PR text + open PR ----
+                    try:
+                        from app.subagents.pr_writer import (
+                            generate_pr_text,
+                            pr_branch_name,
+                            PRGenerationError,
+                        )
+                        from app.github.pr import (
+                            get_installation_token,
+                            create_branch,
+                            commit_patch,
+                            open_pr,
+                        )
+    
+                        pr_text = await generate_pr_text(
+                            run=run,
+                            verified_attempt=attempt,
+                            diagnosis_summary=run.diagnosis_summary or "",
+                            db=attempt_db,
+                        )
+    
+                        token = await get_installation_token(repo)
+                        branch = pr_branch_name(
+                            run=run,
+                            attempt=attempt,
+                            default_branch=repo.default_branch,
+                        )
+                        base_branch = repo.default_branch or "main"
+    
+                        await create_branch(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            branch=branch,
+                            sha=run.head_sha,
+                            token=token,
+                        )
+                        await commit_patch(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            branch=branch,
+                            patch_text=attempt.patch_text,
+                            commit_msg=pr_text["title"],
+                            token=token,
+                        )
+                        pr = await open_pr(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            head_branch=branch,
+                            base_branch=base_branch,
+                            title=pr_text["title"],
+                            body=pr_text["body"],
+                            token=token,
+                        )
+    
+                        run.pr_url = pr["html_url"]
+                        run.pr_number = pr["number"]
+                        run.pr_branch = branch
+                        run.final_summary = html_module.escape(
+                            pr_text["body"][:10_000_000], quote=False
+                        )
+                        run.updated_at = datetime.now(timezone.utc)
+                        attempt_db.add(run)
+                        await attempt_db.commit()
+    
+                        await _transition(run, RunStatus.pr_opened, attempt_db)
+                        state["step"] = RunStatus.pr_opened.value
+                        logger.info(
+                            "orchestrator: run=%s PR #%s opened %s",
+                            run_id, pr["number"], pr["html_url"],
+                        )
+                    except Exception as pr_err:
+                        logger.error(
+                            "orchestrator: run=%s PR creation failed (%s: %s)",
+                            run_id, type(pr_err).__name__, pr_err,
+                        )
+                        await _persist_failure_reason(
+                            db=attempt_db,
+                            run=run,
+                            reason=_format_failure_reason("pr_writer", pr_err),
+                        )
+                        try:
+                            await _transition(run, RunStatus.error, attempt_db)
+                        except InvalidTransitionError:
+                            pass
+                    return
+    
+                # ---- Patch failed ----
+                state["decisions"].append(
+                    f"verification_failed_attempt_{attempt.attempt_number}"
+                )
+    
+                # ---- Fast-fail on repeated failure_reason (Phase 1, BLOCKER-1 / NICE-1) ----
+                # If the trailing N chars of this attempt's failure_reason match
+                # the previous attempt's, the LLM is producing the same broken
+                # fix deterministically. Bail to fallback instead of burning
+                # another attempt that will hit the same wall.
+                current_failure_reason = failure_reason or ""
+                current_tail = (
+                    current_failure_reason[-_FAILURE_REASON_TAIL_CHARS:]
+                    if current_failure_reason
+                    else ""
+                )
+                if (
+                    prior_failure_reason_tail
+                    and current_tail
+                    and current_tail == prior_failure_reason_tail
+                ):
+                    logger.warning(
+                        "orchestrator: run=%s attempt=%d failure_reason tail matches "
+                        "attempt #%d — fast-failing to fallback (deterministic LLM loop)",
+                        run_id,
+                        attempt.attempt_number,
+                        prior_attempt.attempt_number if prior_attempt else 0,
+                    )
+                    skip_to_fallback = True
+                    break  # exit the for loop; async with closes the session
+    
+                if iteration + 1 >= max_attempts:
+                    # Exhausted all attempts -- fallback (post diagnosis-only comment)
+                    skip_to_fallback = True
+                    break
+    
+                # ---- Loop: verification -> fix_generation for retry ----
+                await _transition(run, RunStatus.fix_generation, attempt_db)
+                state["step"] = RunStatus.fix_generation.value
+                prior_attempt = attempt
+                prior_failure_reason_tail = current_tail
+    
+                logger.info(
+                    "orchestrator: run=%s attempt=%d failed -- retrying fix_generation "
+                    "with failure context",
+                    run_id,
+                    attempt.attempt_number,
+                )
+    
+        except (InterfaceError, OperationalError) as db_err:
+            # Transient DB error inside the per-iteration session
+            # (BLOCKER-1 recovery). Don't terminate the run; arm the
+            # fallback so the post-loop block runs if no later attempt
+            # succeeds, then continue to the next iteration with a
+            # fresh session.
+            logger.warning(
+                "orchestrator: run=%s attempt #%d transient DB error (%s: %s) "
+                "— continuing with fresh session",
+                run_id, iteration + 1, type(db_err).__name__, db_err,
+            )
+            skip_to_fallback = True
+            if iteration + 1 >= max_attempts:
+                # Last attempt — no fresh session to try. Let the
+                # post-loop fallback run.
+                break
+            continue
+
+    # ------------------------------------------------------------------
+    # Post-loop fallback block — fresh session (BLOCKER-1 consistency)
+    # ------------------------------------------------------------------
+    if skip_to_fallback:
+        async with async_session_maker() as fb_db:
+            run_result = await fb_db.execute(
+                select(Run).where(Run.id == run_id)
+            )
+            run = run_result.scalar_one_or_none()
+            if run is None:
+                logger.error(
+                    "orchestrator: run %s not found in fallback path — aborting",
+                    run_id,
+                )
+                return
+
+            repo_result = await fb_db.execute(
+                select(Repo)
+                .where(Repo.id == run.repo_id)
+                .options(_selectinload(Repo.user))
+            )
+            repo = repo_result.scalar_one_or_none()
+            if repo is None:
+                logger.error(
+                    "orchestrator: repo %s not found in fallback path — aborting",
+                    run.repo_id,
+                )
+                return
+
+            try:
+                await _transition(run, RunStatus.fallback, fb_db)
+                state["step"] = RunStatus.fallback.value
+
+                from app.models import Attempt as AttemptModel
+                from sqlalchemy import select as sa_select
+                attempts_result = await fb_db.execute(
+                    sa_select(AttemptModel).where(AttemptModel.run_id == run.id)
+                )
+                all_attempts = attempts_result.scalars().all()
+                fallback_body = _sanitize_fallback(
+                    run.diagnosis_summary, list(all_attempts)
+                )
+
+                from app.github.pr import get_installation_token
+                from app.github_client import post_commit_comment
+                github_token = await get_installation_token(repo)
+                await post_commit_comment(
+                    owner=repo.owner,
+                    repo=repo.name,
+                    sha=run.head_sha,
+                    body=fallback_body,
+                    token=github_token,
+                )
+                await _transition(run, RunStatus.fallback_commented, fb_db)
+                state["step"] = RunStatus.fallback_commented.value
+            except Exception as e:
+                logger.error(
+                    "orchestrator: run=%s failed to post fallback comment: %s",
+                    run_id, e,
+                )
+                try:
+                    await _persist_failure_reason(
+                        db=fb_db,
+                        run=run,
+                        reason=_format_failure_reason("fallback_comment", e),
+                    )
+                    await _transition(run, RunStatus.error, fb_db)
+                except InvalidTransitionError:
+                    pass
+
+            logger.info(
+                "orchestrator: run=%s → fallback_commented (skip_to_fallback=%s, attempts=%d)",
+                run_id, skip_to_fallback, len(all_attempts),
+            )
+
+
+# ---------------------------------------------------------------------------
 # Entry point (BackgroundTasks target)
 # ---------------------------------------------------------------------------
 
@@ -273,7 +779,13 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
         # ----------------------------------------------------------------
         # Load Run + Repo
         # ----------------------------------------------------------------
-        run_result = await db.execute(select(Run).where(Run.id == run_id))
+        # Phase 1 O-09: row-lock the Run record. Mirrors the existing Repo
+        # lock below. The outer session commits before the per-iteration
+        # session opens, so the lock is released before any concurrent
+        # re-entrant select-for-update from the retry loop.
+        run_result = await db.execute(
+            select(Run).where(Run.id == run_id).with_for_update()
+        )
         run = run_result.scalar_one_or_none()
         if run is None:
             logger.error("orchestrator: run %s not found — aborting", run_id)
@@ -320,282 +832,125 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
 
         try:
             # ----------------------------------------------------------------
-            # pending → context_gathering
+            # Pipeline body — wrapped in a hard wall-clock timeout (O-06)
             # ----------------------------------------------------------------
-            await _transition(run, RunStatus.context_gathering, db)
-            state["step"] = RunStatus.context_gathering.value
-
-            # ----------------------------------------------------------------
-            # Invoke Context Gatherer
-            # ----------------------------------------------------------------
-            summary = await gather_context(run=run, repo=repo, db=db)
-
-            # Persist distilled summary on runs — raw logs never touch this col
-            run.diagnosis_summary = summary
-            run.updated_at = datetime.now(timezone.utc)
-            db.add(run)
-            await db.commit()
-
-            state["decisions"].append("context_gathered")
-            logger.info(
-                "orchestrator: run=%s diagnosis_summary length=%d",
-                run_id,
-                len(summary),
-            )
-
-            # ----------------------------------------------------------------
-            # context_gathering → fix_generation
-            # (Fix Generator is Phase 6 — transition status now so Phase 6
-            #  can pick up runs WHERE status='fix_generation')
-            # ----------------------------------------------------------------
-            # context_gathering -> fix_generation
-            # ----------------------------------------------------------------
-            await _transition(run, RunStatus.fix_generation, db)
-            state["step"] = RunStatus.fix_generation.value
-
-            # ----------------------------------------------------------------
-            # Verification retry loop (max MAX_ATTEMPTS = 3)
-            # ----------------------------------------------------------------
-            from app.subagents.fix_generator import generate_fix, AttemptCapExceeded, PatchRejected, FixGenerationError
-            from app.sandbox import verify as sandbox_verify
-            from app.models import RunStep, Attempt
-            
-            prior_attempt: Attempt | None = None
-            # MAX_ATTEMPTS is the cap on fix-generation iterations per run.
-            # Relaxed from 3 -> 10 while we are validating the pipeline. Tighten
-            # once a clean success path is confirmed. The free-tier LLM is
-            # occasionally flaky; more attempts give it room to self-correct.
-            MAX_ATTEMPTS = 10
-
-            for iteration in range(MAX_ATTEMPTS):
-                # ---- Generate fix ----
-                try:
-                    attempt = await generate_fix(
-                        run=run,
-                        diagnosis_summary=run.diagnosis_summary or "",
-                        prior_attempt=prior_attempt,
-                        db=db,
-                    )
-                    state["decisions"].append(
-                        f"fix_generated_attempt_{attempt.attempt_number}"
-                    )
-                    state["confidence"] = attempt.confidence_score
-                    logger.info(
-                        "orchestrator: run=%s fix generated attempt=%d confidence=%d",
-                        run_id,
-                        attempt.attempt_number,
-                        attempt.confidence_score or 0,
-                    )
-                except (AttemptCapExceeded, PatchRejected, FixGenerationError) as fix_err:
-                    error_step = RunStep(
-                        run_id=run.id,
-                        step_name="fix_generator_error",
-                        input_tokens=0,
-                        output_tokens=0,
-                        latency_ms=0,
-                        cost_estimate=0.0,
-                    )
-                    db.add(error_step)
-                    await db.commit()
-
-                    logger.error(
-                        "orchestrator: run=%s fix_generator failed (%s: %s)",
-                        run_id,
-                        type(fix_err).__name__,
-                        fix_err,
-                    )
-                    await _persist_failure_reason(
-                        db=db,
-                        run=run,
-                        reason=_format_failure_reason("fix_generator", fix_err),
-                    )
-                    await _transition(run, RunStatus.error, db)
-                    return
-
-                # ---- fix_generation -> verification ----
-                if RunStatus(run.status) == RunStatus.fix_generation:
-                    await _transition(run, RunStatus.verification, db)
-                    state["step"] = RunStatus.verification.value
-
-                # ---- Verify in sandbox (provider selected via SANDBOX_PROVIDER env) ----
-                verify_result = await sandbox_verify(
-                    attempt=attempt,
+            # 800s leaves 100s of headroom under the Lambda 900s limit. A
+            # stuck LLM/sandbox loop is now cancelled here and the run
+            # transitions to `error` with failure_reason="orchestrator
+            # wall-clock timeout" (handled in the asyncio.TimeoutError
+            # except below). Without this, the previous outer-session
+            # BLOCKER-1 fix would still leave a long-running loop able to
+            # burn the full Lambda budget.
+            await asyncio.wait_for(
+                _orchestrator_pipeline_body(
+                    db=db,
+                    run_id=run_id,
                     run=run,
                     repo=repo,
-                )
-
-                # Persist verification result
-                v_status: str = verify_result["status"]        # "pass" | "fail"
-                failure_reason: str | None = verify_result["failure_reason"]
-                build_duration_ms: int = verify_result["build_duration_ms"]
-
-                attempt.verification_status = v_status
-                attempt.failure_reason = failure_reason
-                attempt.build_duration_ms = build_duration_ms
-                db.add(attempt)
-                await db.commit()
-
-                logger.info(
-                    "orchestrator: run=%s attempt=%d verification=%s duration_ms=%d",
-                    run_id,
-                    attempt.attempt_number,
-                    v_status,
-                    build_duration_ms,
-                )
-
-                if v_status == "pass":
-                    # ---- Patch verified -> pending_pr ----
-                    await _transition(run, RunStatus.pending_pr, db)
-                    state["step"] = RunStatus.pending_pr.value
-                    state["decisions"].append("verification_passed")
-
-                    # ---- Phase 8: generate PR text + open PR ----
-                    try:
-                        from app.subagents.pr_writer import generate_pr_text, pr_branch_name, PRGenerationError
-                        from app.github.pr import get_installation_token, create_branch, commit_patch, open_pr
-
-                        pr_text = await generate_pr_text(
-                            run=run,
-                            verified_attempt=attempt,
-                            diagnosis_summary=run.diagnosis_summary or "",
-                            db=db,
-                        )
-
-                        token = await get_installation_token(repo)
-                        branch = pr_branch_name(
-                            run=run,
-                            attempt=attempt,
-                            default_branch=repo.default_branch,
-                        )
-                        base_branch = repo.default_branch or "main"
-
-                        await create_branch(
-                            owner=repo.owner,
-                            repo=repo.name,
-                            branch=branch,
-                            sha=run.head_sha,
-                            token=token,
-                        )
-                        await commit_patch(
-                            owner=repo.owner,
-                            repo=repo.name,
-                            branch=branch,
-                            patch_text=attempt.patch_text,
-                            commit_msg=pr_text["title"],
-                            token=token,
-                        )
-                        pr = await open_pr(
-                            owner=repo.owner,
-                            repo=repo.name,
-                            head_branch=branch,
-                            base_branch=base_branch,
-                            title=pr_text["title"],
-                            body=pr_text["body"],
-                            token=token,
-                        )
-
-                        import html as html_module
-                        run.pr_url = pr["html_url"]
-                        run.pr_number = pr["number"]
-                        run.pr_branch = branch
-                        run.final_summary = html_module.escape(
-                            pr_text["body"][:1000], quote=False
-                        )
-                        run.updated_at = datetime.now(timezone.utc)
-                        db.add(run)
-                        await db.commit()
-
-                        await _transition(run, RunStatus.pr_opened, db)
-                        state["step"] = RunStatus.pr_opened.value
-                        logger.info(
-                            "orchestrator: run=%s PR #%s opened %s",
-                            run_id, pr["number"], pr["html_url"],
-                        )
-                    except Exception as pr_err:
-                        logger.error(
-                            "orchestrator: run=%s PR creation failed (%s: %s)",
-                            run_id, type(pr_err).__name__, pr_err,
-                        )
-                        await _persist_failure_reason(
-                            db=db,
-                            run=run,
-                            reason=_format_failure_reason("pr_writer", pr_err),
-                        )
-                        await _transition(run, RunStatus.error, db)
-                    return
-
-                # ---- Patch failed ----
-                state["decisions"].append(
-                    f"verification_failed_attempt_{attempt.attempt_number}"
-                )
-
-                if iteration + 1 >= MAX_ATTEMPTS:
-                    # Exhausted all attempts -- fallback (post diagnosis-only comment)
-                    await _transition(run, RunStatus.fallback, db)
-                    state["step"] = RunStatus.fallback.value
-
-                    # Build sanitised comment — html.escape + secret-redact + cap 3000
-                    # Never include raw patch text or full CI logs.
-                    from app.models import Attempt as AttemptModel
-                    from sqlalchemy import select as sa_select
-                    attempts_result = await db.execute(
-                        sa_select(AttemptModel).where(AttemptModel.run_id == run.id)
-                    )
-                    all_attempts = attempts_result.scalars().all()
-                    fallback_body = _sanitize_fallback(run.diagnosis_summary, list(all_attempts))
-
-                    try:
-                        from app.github.pr import get_installation_token
-                        from app.github_client import post_commit_comment
-                        github_token = await get_installation_token(repo)
-                        await post_commit_comment(
-                            owner=repo.owner,
-                            repo=repo.name,
-                            sha=run.head_sha,
-                            body=fallback_body,
-                            token=github_token,
-                        )
-                        await _transition(run, RunStatus.fallback_commented, db)
-                        state["step"] = RunStatus.fallback_commented.value
-                    except Exception as e:
-                        logger.error(
-                            "orchestrator: run=%s failed to post fallback comment: %s",
-                            run_id, e,
-                        )
-                        # Even if comment posting fails, transition to error rather than
-                        # leaving the run stranded in fallback.
-                        await _persist_failure_reason(
-                            db=db,
-                            run=run,
-                            reason=_format_failure_reason("fallback_comment", e),
-                        )
-                        await _transition(run, RunStatus.error, db)
-
-                    logger.info(
-                        "orchestrator: run=%s all %d attempts exhausted -> fallback_commented",
-                        run_id,
-                        MAX_ATTEMPTS,
-                    )
-                    return
-
-                # ---- Loop: verification -> fix_generation for retry ----
-                await _transition(run, RunStatus.fix_generation, db)
-                state["step"] = RunStatus.fix_generation.value
-                prior_attempt = attempt  # feed failure_reason into next generate_fix call
-
-                logger.info(
-                    "orchestrator: run=%s attempt=%d failed -- retrying fix_generation with failure context",
-                    run_id,
-                    attempt.attempt_number,
-                )
-
-        except InvalidTransitionError:
-            # Already logged in _transition; do not re-transition to error
-            # since the run may be in a terminal state already.
-            logger.error(
-                "orchestrator: invalid transition for run %s — check concurrent task delivery",
-                run_id,
+                    state=state,
+                ),
+                timeout=ORCHESTRATOR_TIMEOUT_S,
             )
+
+        except asyncio.TimeoutError:
+            logger.error(
+                "orchestrator: run=%s wall-clock timeout after %.0fs — forcing error state",
+                run_id, ORCHESTRATOR_TIMEOUT_S,
+            )
+            # Open a fresh session for the error path because the outer
+            # `db` may be in a state the cancellation broke (e.g. mid-commit,
+            # mid-transaction). Mirrors the InvalidTransitionError handler's
+            # pattern below.
+            try:
+                async with async_session_maker() as error_db:
+                    fresh_run = await error_db.get(Run, run_id)
+                    if (
+                        fresh_run is not None
+                        and fresh_run.status not in _TERMINAL_STATUSES
+                    ):
+                        await _persist_error_step(
+                            db=error_db,
+                            run_id=run_id,
+                            step_name="orchestrator_timeout",
+                        )
+                        await _persist_failure_reason(
+                            db=error_db,
+                            run=fresh_run,
+                            reason="orchestrator wall-clock timeout",
+                        )
+                        try:
+                            await _transition(fresh_run, RunStatus.error, error_db)
+                        except InvalidTransitionError:
+                            # Already in a terminal state — nothing to do.
+                            pass
+            except Exception as inner_exc:
+                logger.error(
+                    "orchestrator: failed to persist timeout state for run=%s (%s: %s)",
+                    run_id, type(inner_exc).__name__, inner_exc,
+                )
+            return
+
+        except InvalidTransitionError as ite:
+            # State machine rejected a transition. Two cases:
+            #   (1) The run is already in a terminal state (e.g. concurrent
+            #       webhook redelivery hit a stuck run). Nothing to do —
+            #       the previous error path marked it terminal.
+            #   (2) The run is stuck in a non-terminal state because the
+            #       transition table has a missing edge (e.g. the
+            #       fix_generation → fallback gap fixed in commit X).
+            #       Without this catch, the run stays stuck and every
+            #       webhook redelivery hits the same dead end. Force the
+            #       run into `error` via a fresh session so the dashboard
+            #       reflects reality and the run doesn't keep generating
+            #       identical alerts.
+            logger.error(
+                "orchestrator: invalid transition for run %s (%s → %s) — "
+                "forcing terminal error state to prevent stuck run",
+                run_id,
+                ite.from_status.value,
+                ite.to_status.value,
+            )
+            try:
+                async with async_session_maker() as error_db:
+                    fresh_run = await error_db.get(Run, run_id)
+                    if fresh_run is not None and fresh_run.status not in {
+                        RunStatus.pr_opened.value,
+                        RunStatus.fallback_commented.value,
+                        RunStatus.completed.value,
+                        RunStatus.error.value,
+                    }:
+                        # Persist a trace step so the timeline shows why we gave up,
+                        # then write the failure_reason, then transition to error.
+                        # Each commits independently so a partial-failure still
+                        # leaves *some* observability behind.
+                        await _persist_error_step(
+                            db=error_db,
+                            run_id=run_id,
+                            step_name="state_machine_error",
+                        )
+                        await _persist_failure_reason(
+                            db=error_db,
+                            run=fresh_run,
+                            reason=_format_failure_reason(
+                                "orchestrator",
+                                f"Invalid transition: {ite.from_status.value} -> {ite.to_status.value}",
+                            ),
+                        )
+                        await _transition(fresh_run, RunStatus.error, error_db)
+            except InvalidTransitionError:
+                # Already in a terminal state — nothing to do.
+                pass
+            except Exception as inner_exc:
+                logger.error(
+                    "orchestrator: failed to force error state for run=%s (%s: %s)",
+                    run_id,
+                    type(inner_exc).__name__,
+                    inner_exc,
+                )
+            # Re-raise so the lambda returns non-2xx to the caller (helps
+            # GitHub webhook redelivery back off). The run is now terminal
+            # in the DB, so the redelivered request will hit the existing
+            # idempotency guard and exit cleanly.
             raise
 
         except Exception as exc:

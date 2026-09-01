@@ -2,6 +2,7 @@ import logging
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,19 @@ class Settings(BaseSettings):
     default_provider: str = "opencode_zen"
     default_model: str = "nemotron-3.5-lightning-free"
 
+    # Hard ceiling for `max_tokens` on any outgoing OpenCode Zen request.
+    # Subagents currently pass `max_tokens=10_000_000` for "test mode" with the
+    # free API, but the free endpoints treat `max_tokens` as part of the model's
+    # context budget and reject requests that exceed it (HTTP 400). The provider
+    # adapter clamps whatever the subagent passes down to this value before
+    # serialising the payload, so the test-mode source stays intact while
+    # outgoing requests stay inside the model's accepted range.
+    # 250k leaves room for ~750k input tokens on the 1M-context free-tier
+    # endpoints while giving the model enough output budget for long responses
+    # (full diffs, full PR bodies). Bump this when moving to a paid tier with
+    # a larger context window.
+    opencode_zen_max_output_tokens: int = 250_000
+
     # Optional admin user UUID string for global model config switcher authorization
     admin_user_id: Optional[str] = None
 
@@ -87,6 +101,9 @@ class Settings(BaseSettings):
 
     # Phase 13 — Sandbox provider selection.
     # "gcp" uses Cloud Build (default, Phase 7). "aws" uses CodeBuild adapter.
+    # "github_actions" uses a Haunter-org test mirror + GitHub Actions polling
+    # (see github.md). "github_actions" is the active provider while the
+    # CodeBuild account-level concurrent-build quota is 0 in us-east-1.
     sandbox_provider: str = "gcp"
 
     # AWS CodeBuild adapter (required when sandbox_provider="aws").
@@ -94,6 +111,20 @@ class Settings(BaseSettings):
     # aws_region: AWS region the CodeBuild project lives in.
     aws_codebuild_project_name: Optional[str] = None
     aws_region: str = "us-east-1"
+
+    # GitHub Actions sandbox adapter (required when sandbox_provider="github_actions").
+    # The App lives in a Haunter-owned org and writes to per-user test-mirror
+    # repos there. Polling, not webhook — the test repo has no inbound webhook.
+    # PEM is loaded at runtime from SSM SecureString (see github.md Phase 1.3)
+    # so the private key never enters Terraform state, .env, or lambda.zip.
+    github_sandbox_org: str = "haunter-sandboxes"
+    github_sandbox_app_id: Optional[str] = None
+    github_sandbox_installation_id: Optional[str] = None
+    github_sandbox_app_private_key_ssm_path: str = "/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY"
+    github_sandbox_poll_interval_seconds: float = 10.0
+    github_sandbox_poll_timeout_seconds: float = 120.0
+    github_sandbox_workflow_filename_py: str = "haunter-test-py.yml"
+    github_sandbox_workflow_filename_ts: str = "haunter-test-ts.yml"
 
     # Phase 14 — Hosting provider selection.
     # "gcp" uses Cloud Run (default, HAUNTER.md:147).
@@ -106,6 +137,26 @@ class Settings(BaseSettings):
     # Defaults to AWS_LAMBDA_FUNCTION_NAME env var (set automatically by Lambda runtime).
     # Required when hosting_provider="aws". Never commit a hardcoded ARN.
     aws_lambda_function_name: Optional[str] = None
+
+    # Maximum number of fix-generation attempts per Run before falling back to
+    # a diagnosis-only comment. Phase 1 (BLOCKER-1 / NICE-1 / O-07): single
+    # source of truth, default lowered from 10 to 3. Tighter cap means a stuck
+    # LLM loop cannot burn the full Lambda 900s budget before the orchestrator
+    # wall-clock timeout fires. Override per environment via HAUNTER_MAX_ATTEMPTS
+    # (e.g. HAUNTER_MAX_ATTEMPTS=2 for very strict demo runs).
+    max_attempts: int = Field(
+        default=3,
+        validation_alias=AliasChoices("max_attempts", "HAUNTER_MAX_ATTEMPTS"),
+    )
+
+    # NICE-3: cap on the number of files Haunter seeds from the user's failing
+    # commit into the test mirror. Larger values cover more of the user's
+    # tree but blow up CodeBuild build time. Trade-off: values >200 may
+    # exceed CodeBuild build time; values <20 may under-seed large repos.
+    seed_max_files: int = Field(
+        default=50,
+        validation_alias=AliasChoices("seed_max_files", "HAUNTER_SEED_MAX_FILES"),
+    )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
