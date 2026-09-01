@@ -301,12 +301,12 @@ def test_pr_output_title_min_length_enforced() -> None:
 # ---------------------------------------------------------------------------
 
 def test_pr_output_body_max_length_enforced() -> None:
-    """body > 3000 chars → ValidationError."""
+    """body > 10_000_000 chars → ValidationError."""
     with pytest.raises(ValidationError):
-        PROutput(title="valid title here", body="y" * 3001)
+        PROutput(title="valid title here", body="y" * 10_000_001)
 
 
-def test_pr_output_body_exactly_3000_accepted() -> None:
+def test_pr_output_body_large_accepted() -> None:
     """body exactly 3000 chars → valid."""
     pr = PROutput(title="valid title here", body="y" * 3000)
     assert len(pr.body) == 3000
@@ -430,11 +430,11 @@ def test_sanitize_fallback_redacts_secrets() -> None:
     assert "[REDACTED]" in result
 
 
-def test_sanitize_fallback_caps_at_3000() -> None:
-    """Total result length must not exceed 3000 chars."""
-    long_diagnosis = "a" * 5000
+def test_sanitize_fallback_caps_at_10m() -> None:
+    """Total result length must not exceed 10M chars."""
+    long_diagnosis = "a" * 10_000_005
     result = _sanitize_fallback(long_diagnosis, [])
-    assert len(result) <= 3000
+    assert len(result) <= 10_000_000
 
 
 # ---------------------------------------------------------------------------

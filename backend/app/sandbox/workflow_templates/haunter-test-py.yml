@@ -1,0 +1,63 @@
+name: haunter-test-py
+on:
+  push:
+    branches: [haunter-attempt-*]
+  workflow_dispatch:
+
+# No secrets. No env. No deploy. By design.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
+            python -m pip install -q -r requirements.txt
+          fi
+
+      - name: Lint (ruff, best-effort)
+        run: |
+          if command -v ruff >/dev/null 2>&1 || python -m pip install -q ruff; then
+            python -m ruff check . || echo "::warning::ruff found issues"
+          else
+            echo "ruff not available — skipping"
+          fi
+        continue-on-error: true
+
+      - name: Type check (mypy, best-effort)
+        run: |
+          if grep -q "mypy" requirements.txt dev-requirements.txt 2>/dev/null; then
+            python -m mypy . || echo "::warning::mypy found issues"
+          else
+            echo "mypy not configured — skipping"
+          fi
+        continue-on-error: true
+
+      - name: Run tests
+        run: |
+          if [ -f pytest.ini ] || [ -f pyproject.toml ] || [ -f setup.cfg ]; then
+            python -m pytest -q --tb=short --maxfail=10
+          else
+            echo "No pytest config found — nothing to run"
+            exit 1
+          fi
+
+      - name: Build (best-effort)
+        run: |
+          if [ -f pyproject.toml ] && grep -q "build-system" pyproject.toml; then
+            python -m pip install -q build && python -m build
+          else
+            echo "No build config — skipping"
+          fi
+        continue-on-error: true

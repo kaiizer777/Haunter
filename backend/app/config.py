@@ -151,8 +151,9 @@ class Settings(BaseSettings):
 
     # NICE-3: cap on the number of files Haunter seeds from the user's failing
     # commit into the test mirror. Larger values cover more of the user's
-    # tree but blow up CodeBuild build time. Trade-off: values >200 may
-    # exceed CodeBuild build time; values <20 may under-seed large repos.
+    # tree but blow up GitHub Actions runner time. Trade-off: values >200
+    # may exceed GitHub Actions runner time; values <20 may under-seed
+    # large repos.
     seed_max_files: int = Field(
         default=50,
         validation_alias=AliasChoices("seed_max_files", "HAUNTER_SEED_MAX_FILES"),

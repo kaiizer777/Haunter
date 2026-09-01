@@ -1,0 +1,62 @@
+name: haunter-test-ts
+on:
+  push:
+    branches: [haunter-attempt-*]
+  workflow_dispatch:
+
+# No secrets. No env. No deploy. By design.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then
+            npm ci --ignore-scripts
+          fi
+
+      - name: Type check
+        run: |
+          if [ -f tsconfig.json ]; then
+            npx --no-install tsc --noEmit || echo "::warning::tsc found issues"
+          else
+            echo "No tsconfig.json — skipping"
+          fi
+        continue-on-error: true
+
+      - name: Lint (eslint, best-effort)
+        run: |
+          if grep -q "eslint" package.json 2>/dev/null; then
+            npx --no-install eslint . --ext .ts,.tsx || echo "::warning::eslint found issues"
+          else
+            echo "eslint not configured — skipping"
+          fi
+        continue-on-error: true
+
+      - name: Run tests
+        run: |
+          if grep -q '"test"' package.json 2>/dev/null; then
+            npm test --silent
+          else
+            echo "No test script in package.json"
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          if grep -q '"build"' package.json 2>/dev/null; then
+            npm run build --silent
+          else
+            echo "No build script — skipping"
+          fi
+        continue-on-error: true

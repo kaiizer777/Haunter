@@ -29,6 +29,8 @@ from app.subagents.fix_generator import (
     AttemptCapExceeded,
     FixGenerationError,
     FixOutput,
+    LowConfidenceSkip,
+    LOW_CONFIDENCE_THRESHOLD,
     PatchRejected,
     _validate_patch,
     generate_fix,
@@ -467,3 +469,165 @@ async def test_attempt_number_increments(db: AsyncSession) -> None:
     assert len(all_attempts) == 3
     numbers = sorted(a.attempt_number for a in all_attempts)
     assert numbers == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Test 9: .github/workflows/ patch STILL raises PatchRejected after refactor
+#         (security invariant must survive the LowConfidenceSkip addition)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_workflow_patch_still_hard_rejected(db: AsyncSession) -> None:
+    """
+    Security invariant: even after the LowConfidenceSkip refactor, a patch that
+    targets .github/workflows/ with confidence >= LOW_CONFIDENCE_THRESHOLD must
+    still raise PatchRejected (not LowConfidenceSkip).  No Attempt inserted.
+    """
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    workflow_patch = (
+        "--- a/.github/workflows/ci.yml\n"
+        "+++ b/.github/workflows/ci.yml\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-python-version: '3.11'\n"
+        "+python-version: '2.7'\n"
+    )
+    # confidence=55 is above LOW_CONFIDENCE_THRESHOLD (30), so LowConfidenceSkip
+    # must NOT fire — PatchRejected must be raised by _validate_patch instead.
+    bad_response = {
+        **_VALID_LLM_RESPONSE,
+        "content": json.dumps(
+            {"patch": workflow_patch, "confidence": 55, "strategy_notes": None}
+        ),
+    }
+
+    with (
+        patch(
+            "app.subagents.fix_generator.LLMClient.complete",
+            new_callable=AsyncMock,
+            return_value=bad_response,
+        ),
+        pytest.raises(PatchRejected) as exc_info,
+    ):
+        await generate_fix(
+            run=run,
+            diagnosis_summary="test",
+            prior_attempt=None,
+            db=db,
+        )
+
+    # Confirm the message identifies the blocked prefix, not a confidence issue.
+    assert "blocked prefix" in str(exc_info.value).lower()
+
+    # No Attempt row inserted.
+    result = await db.execute(select(Attempt).where(Attempt.run_id == run.id))
+    assert result.scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Zero-confidence empty patch → LowConfidenceSkip, no Attempt inserted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_zero_confidence_noop_triggers_low_confidence_skip(db: AsyncSession) -> None:
+    """
+    LLM returns {"patch": "", "confidence": 0, "strategy_notes": "insufficient data"}
+    → LowConfidenceSkip raised (not PatchRejected, not FixGenerationError).
+    No Attempt row inserted.
+    """
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    noop_response = {
+        **_VALID_LLM_RESPONSE,
+        "content": json.dumps(
+            {
+                "patch": "",
+                "confidence": 0,
+                "strategy_notes": "insufficient data to determine cause",
+            }
+        ),
+    }
+
+    with (
+        patch(
+            "app.subagents.fix_generator.LLMClient.complete",
+            new_callable=AsyncMock,
+            return_value=noop_response,
+        ),
+        pytest.raises(LowConfidenceSkip) as exc_info,
+    ):
+        await generate_fix(
+            run=run,
+            diagnosis_summary="Error type: Not discernible; logs terminate after checkout.",
+            prior_attempt=None,
+            db=db,
+        )
+
+    # strategy_notes should be surfaced in the exception message.
+    assert "insufficient data" in str(exc_info.value)
+
+    # No Attempt row inserted — this is the key invariant.
+    result = await db.execute(select(Attempt).where(Attempt.run_id == run.id))
+    assert result.scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Test 11: confidence < LOW_CONFIDENCE_THRESHOLD → LowConfidenceSkip, no Attempt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_low_confidence_patch_triggers_low_confidence_skip(db: AsyncSession) -> None:
+    """
+    LLM returns a syntactically valid patch with confidence < LOW_CONFIDENCE_THRESHOLD.
+    → LowConfidenceSkip raised. No Attempt row inserted.
+    The patch itself is valid (passes _validate_patch) — the gate fires purely
+    on confidence, not on patch content.
+    """
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    # Confidence is below threshold; patch is otherwise valid.
+    low_conf_confidence = LOW_CONFIDENCE_THRESHOLD - 1  # e.g. 29
+    low_conf_response = {
+        **_VALID_LLM_RESPONSE,
+        "content": json.dumps(
+            {
+                "patch": _VALID_PATCH,
+                "confidence": low_conf_confidence,
+                "strategy_notes": "guessing based on no evidence",
+            }
+        ),
+    }
+
+    with (
+        patch(
+            "app.subagents.fix_generator.LLMClient.complete",
+            new_callable=AsyncMock,
+            return_value=low_conf_response,
+        ),
+        pytest.raises(LowConfidenceSkip) as exc_info,
+    ):
+        await generate_fix(
+            run=run,
+            diagnosis_summary="Some vague diagnosis with no file/line info.",
+            prior_attempt=None,
+            db=db,
+        )
+
+    # Exception message should mention the confidence value.
+    assert str(low_conf_confidence) in str(exc_info.value)
+
+    # No Attempt row inserted.
+    result = await db.execute(select(Attempt).where(Attempt.run_id == run.id))
+    assert result.scalars().all() == []

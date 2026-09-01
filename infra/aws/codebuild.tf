@@ -179,6 +179,20 @@ resource "aws_codebuild_project" "sandbox" {
     compute_type                = "BUILD_GENERAL1_SMALL"         # EC2 — 3 GB RAM, 2 vCPU; free tier eligible
     privileged_mode             = true                           # required for DinD: docker build/run when repo has Dockerfile (HAUNTER.md:131)
 
+    # Project-level runtime-versions. The standard:7.0 image already ships
+    # Node 20, but declaring it here makes the pin explicit and survives
+    # any future bump of the default image. Mirrors the install-phase
+    # runtime-versions in backend/app/sandbox/aws_runner.py:_BUILDSPEC
+    # (NICE-3 / Phase 4).
+    runtime_version {
+      name    = "nodejs"
+      version = "20"
+    }
+    runtime_version {
+      name    = "python"
+      version = "3.12"
+    }
+
     # GITHUB_TOKEN injected from SSM — CodeBuild resolves it at build start.
     # Never passed as a PLAINTEXT environmentVariable.
     environment_variable {

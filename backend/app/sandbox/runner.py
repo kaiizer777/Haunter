@@ -60,11 +60,36 @@ class SandboxInput(BaseModel):
 
     Fields are validated before any provider-specific code runs so that
     the adapters can trust that patch and repo_ref are safe to use.
+
+    Optional context fields (user_github_id, file_paths, attempt_number,
+    base_sha) are populated by the dispatcher's github_actions branch
+    (Phase 2) and ignored by AWSSandboxRunner / GCPSandboxRunner. They
+    are optional so the existing dispatch paths keep working unchanged.
     """
 
     patch: str
     repo_ref: str  # "owner/repo" or "owner/repo@sha"
     run_id: UUID
+
+    # --- Optional context fields (Phase 2: GitHub Actions sandbox) -------
+    # user_github_id: needed by GitHubActionsSandboxRunner to derive a
+    #   stable, per-user test-mirror repo name (test_repo_name).
+    # file_paths: list of file paths from the user's failing run, used by
+    #   detect_language() to pick the py / ts workflow template.
+    # attempt_number: 1-based attempt index from the Attempt row, used to
+    #   name the per-attempt branch (haunter-attempt-{N}).
+    # base_sha: commit SHA the new branch should fork from. For the first
+    #   attempt on a freshly-created test mirror this is the auto_init
+    #   commit; for subsequent attempts it is the prior attempt's HEAD.
+    user_github_id: Optional[int] = None
+    file_paths: Optional[list[str]] = None
+    attempt_number: Optional[int] = None
+    base_sha: Optional[str] = None
+    # head_sha: the failing commit SHA on the user's repo. Used by the
+    #   GitHub Actions runner to seed the test mirror's main branch with the
+    #   user's code at this SHA so verification can actually exercise the
+    #   failing test (not just the patch in isolation).
+    head_sha: Optional[str] = None
 
     @field_validator("patch")
     @classmethod

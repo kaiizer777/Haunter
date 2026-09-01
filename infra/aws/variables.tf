@@ -90,3 +90,61 @@ variable "token_encryption_key" {
   type        = string
   sensitive   = true
 }
+
+# ---------------------------------------------------------------------------
+# GitHub Actions sandbox variables (Phase 1.6 of github.md)
+# Used when SANDBOX_PROVIDER=github_actions. The private key itself lives
+# in SSM Parameter Store as a SecureString — only the path is here.
+# ---------------------------------------------------------------------------
+
+variable "github_sandbox_app_id" {
+  description = "GitHub App ID for the Haunter sandbox runner. Non-secret (visible in App's public metadata)."
+  type        = string
+  default     = ""
+}
+
+variable "github_sandbox_installation_id" {
+  description = "GitHub App installation ID on the Haunter org. Non-secret (visible in the install URL)."
+  type        = string
+  default     = ""
+}
+
+variable "github_sandbox_app_private_key_ssm_path" {
+  description = "SSM Parameter Store path (SecureString) holding the GitHub App PEM. Lambda reads it at cold start via boto3 — the PEM never enters Terraform state, .env, or lambda.zip."
+  type        = string
+  default     = "/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY"
+}
+
+variable "github_sandbox_org" {
+  description = "GitHub org that owns the test-mirror repos for the GitHub Actions sandbox."
+  type        = string
+  default     = "haunter-sandboxes"
+}
+
+variable "github_sandbox_poll_interval_seconds" {
+  description = "How often the runner polls the check-runs API while waiting for the test workflow to finish."
+  type        = number
+  default     = 10
+}
+
+variable "github_sandbox_poll_timeout_seconds" {
+  description = "Max wall-clock seconds the runner will wait for the test workflow before giving up and treating the attempt as failed."
+  type        = number
+  default     = 120
+}
+
+# ---------------------------------------------------------------------------
+# Sandbox provider selector (Phase 14 + GitHub Actions activation)
+# Selects which SandboxRunner implementation the Lambda uses:
+#   "gcp"             → app.sandbox.gcp_runner.GCPSandboxRunner (Cloud Build)
+#   "aws"             → app.sandbox.aws_runner.AWSSandboxRunner (CodeBuild)
+#   "github_actions"  → app.sandbox.github_actions_runner.GitHubActionsSandboxRunner
+# Flipping this is the single switch that activates the GitHub Actions
+# sandbox (see github.md §6.2). Default is "aws" to match pre-Phase-2 state.
+# ---------------------------------------------------------------------------
+
+variable "sandbox_provider" {
+  description = "Sandbox backend to use for patch verification. One of: gcp, aws, github_actions."
+  type        = string
+  default     = "aws"
+}

@@ -26,6 +26,31 @@ logger = logging.getLogger(__name__)
 # Non-retryable HTTP status codes
 _FATAL_STATUS_CODES = {400, 401, 403, 404, 422}
 
+# Phrases that indicate a 401/403 is a *per-model* "not supported" rejection
+# rather than a key-level auth failure. OpenCode Zen returns 401 with a
+# `ModelError` body when a specific model id is not on the account's tier —
+# the key is fine, that model just isn't available. Treating those as fatal
+# would abort the entire fallback chain (client.complete() also re-raises
+# LLMAuthenticationError), so we downgrade them to a plain LLMError which
+# the client will skip and move on to the next model.
+_PER_MODEL_REJECTION_PHRASES: tuple[str, ...] = (
+    "is not supported",
+    "model not supported",
+    "modelerror",
+    "unknown model",
+    "invalid model",
+    "model does not exist",
+)
+
+
+def _is_per_model_rejection(status_code: int, body: str) -> bool:
+    """True when a 401/403/404 response body indicates a per-model rejection
+    rather than a key-level auth failure or genuine auth problem."""
+    if status_code not in (401, 403, 404):
+        return False
+    body_lc = body.lower()
+    return any(phrase in body_lc for phrase in _PER_MODEL_REJECTION_PHRASES)
+
 
 async def execute_with_retry(
     func: Callable[[], Awaitable[dict[str, Any]]],
@@ -40,6 +65,9 @@ async def execute_with_retry(
 
     - Retries on HTTP 429 (Rate Limit), 5xx (Server Error), and network/timeout exceptions.
     - Fails immediately on 400, 401, 403, 422 (client/auth/validation errors).
+      EXCEPTION: 401/403/404 whose body contains a per-model rejection phrase
+      (e.g. "Model ling-3-free is not supported") is downgraded to a plain
+      ``LLMError`` so the outer fallback chain can move on to the next model.
     - Capped at max_attempts AND max_total_time.
     """
     start_time = time.monotonic()
@@ -59,6 +87,24 @@ async def execute_with_retry(
         except httpx.HTTPStatusError as exc:
             last_status = exc.response.status_code
             last_exception = exc
+            response_body = exc.response.text or ""
+
+            # Per-model rejection (e.g. "Model ling-3-free is not supported") is
+            # not an auth failure — the key is fine, that model just isn't on
+            # this tier. Surface as a plain LLMError so the client walks the
+            # fallback chain instead of aborting.
+            if last_status in (401, 403, 404) and _is_per_model_rejection(last_status, response_body):
+                logger.warning(
+                    "LLM model rejected by provider (status=%d, body=%s) — "
+                    "downgrading to LLMError so fallback chain can try next model",
+                    last_status,
+                    response_body[:200],
+                )
+                raise LLMError(
+                    f"Model rejected by provider (HTTP {last_status}): "
+                    f"{response_body[:200]!r}",
+                    status_code=last_status,
+                ) from None
 
             if last_status in (401, 403):
                 logger.error("LLM authentication failed with status %d", last_status)

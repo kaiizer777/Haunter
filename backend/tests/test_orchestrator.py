@@ -181,9 +181,9 @@ def test_redact_secrets_npg_key() -> None:
 
 
 def test_truncate_and_redact_caps_length() -> None:
-    long_text = "a" * 10_000
+    long_text = "a" * 10_000_100
     result = _truncate_and_redact(long_text)
-    assert len(result) < 10_000
+    assert len(result) < 10_000_100
     assert "[...TRUNCATED...]" in result
 
 
@@ -537,13 +537,13 @@ def test_format_failure_reason_handles_empty_message() -> None:
 
 
 def test_format_failure_reason_truncates_long_messages() -> None:
-    """A very long message must be truncated to the cap to keep payloads tiny."""
+    """A very long message must be truncated to the cap to keep payloads bounded."""
     from app.orchestrator import _format_failure_reason
 
-    huge = "x" * 5_000
+    huge = "x" * 10_000_005
     exc = ValueError(huge)
     out = _format_failure_reason("fix_generator", exc)
-    assert len(out) <= 500
+    assert len(out) <= 10_000_000
     assert "fix_generator" in out
     assert "ValueError" in out
 

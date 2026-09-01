@@ -57,11 +57,15 @@ class AvailableRepoOut(BaseModel):
 # Extend this list when a new provider is vetted and approved.
 AllowedProvider = Literal["opencode_zen", "openai", "anthropic"]
 
-# Allowlisted hosting/sandbox providers — gcp|aws only, never free-text.
-# Used by PUT /config/hosting and validated in the hosting adapter.
-# Extending this requires both code review and policy justification.
+# Allowlisted hosting/sandbox providers — never free-text, never derived
+# from request headers. Used by PUT /config/hosting and validated in the
+# hosting / sandbox adapter. Extending this requires both code review and
+# policy justification.
+#   "gcp"             — Cloud Run hosting / Cloud Build sandbox
+#   "aws"             — Lambda hosting / CodeBuild sandbox
+#   "github_actions"  — Lambda hosting / GitHub Actions sandbox (per github.md)
 AllowedHostingProvider = Literal["gcp", "aws"]
-AllowedSandboxProvider = Literal["gcp", "aws"]
+AllowedSandboxProvider = Literal["gcp", "aws", "github_actions"]
 
 # Allowlisted model names — must match a provider's supported models.
 # Free-tier models (suffix `-free`) are listed first so the UI surfaces them

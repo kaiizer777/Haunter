@@ -44,17 +44,24 @@ logger = logging.getLogger(__name__)
 # Phase 17 constants — free-tier fallback chain
 # ---------------------------------------------------------------------------
 # Order matters: the active/seed model is prepended at runtime, then this
-# list (minus the seed) is appended. ``hy3-free`` is at the end because it
-# was the most unreliable in Phase 15 tests — re-tune empirically once the
-# eval harness has live data. The set is the free-tier subset of
-# ``AllowedModelName`` in ``app/schemas.py``; do not add paid models here.
+# list (minus the seed) is appended.
+#
+# Only models that actually respond to this project's OPENCODE_ZEN_API_KEY
+# belong here. As of the last probe (see backend/scratch/probe_free_models.py):
+#   * nemotron-3.5-lightning-free — OK
+#   * nemotron-3-ultra-free       — OK (occasional upstream 502, retry succeeds)
+#   * hy3-free                    — OK
+#   * ling-3-free / qwen-3-coder-free / deepseek-r1-free / kimi-k2-free
+#     all return 401 "Model is not supported" for this key — they're listed in
+#     ``AllowedModelName`` for the UI but MUST NOT appear in the fallback chain
+#     because they waste 7 attempts × INTER_MODEL_SLEEP_S on a guaranteed 401.
+#
+# Re-run the probe after rotating the API key or upgrading the OpenCode Zen
+# tier, and prune/extend this list to match. The set is the free-tier subset
+# of ``AllowedModelName`` in ``app/schemas.py``; do not add paid models here.
 FREE_TIER_FALLBACK_ORDER: list[str] = [
     "nemotron-3.5-lightning-free",
     "nemotron-3-ultra-free",
-    "ling-3-free",
-    "qwen-3-coder-free",
-    "deepseek-r1-free",
-    "kimi-k2-free",
     "hy3-free",
 ]
 

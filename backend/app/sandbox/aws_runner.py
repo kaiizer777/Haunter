@@ -15,8 +15,17 @@ Security invariants:
   - All boto3 calls run in asyncio.run_in_executor (never blocks event loop).
   - Poll-only (no callback URL) — batch_get_builds uses AWS SigV4.
   - failure reason sanitized via shared _sanitize_failure_reason before return.
-  - Per-build timeoutInMinutes=10, queuedTimeoutInMinutes=5 enforced.
+  - Per-build timeouts (build_timeout=10, queued_timeout=5) are configured at
+    the CodeBuild PROJECT level in infra/aws/codebuild.tf — they are NOT
+    overridable per StartBuild call. The StartBuild API only accepts the
+    "Override" suffix variants (timeoutInMinutesOverride,
+    queuedTimeoutInMinutesOverride); passing the bare names was triggering
+    ParamValidationError and aborting every build before it could start.
   - Lazy boto3 import — zero overhead when SANDBOX_PROVIDER=gcp.
+  - Non-retryable AWS errors (AccountLimitExceededException, etc.) are
+    flagged in the failure_reason so the orchestrator's existing fallback
+    path produces a clear diagnosis-only comment instead of burning fix
+    attempts on a quota issue that only AWS Support can resolve.
 """
 
 from __future__ import annotations
@@ -48,9 +57,8 @@ _CODEBUILD_TERMINAL: frozenset[str] = frozenset(
 # Only alphanumeric, dash, underscore, dot, slash, @ — no shell metacharacters.
 _ENV_VAR_VALUE_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_.\-/@=+]+$")
 
-# Maximum length for individual env var values (defence-in-depth; patch is
-# passed as base64 so this is effectively unlimited for reasonable patches).
-_MAX_ENV_VAR_VALUE_LEN: int = 100_000
+# Maximum length for individual env var values (set to 10M for testing / large patches).
+_MAX_ENV_VAR_VALUE_LEN: int = 10_000_000
 
 # ---------------------------------------------------------------------------
 # BuildSpec — embedded as a Python constant to avoid deploy-time file lookup.
@@ -61,6 +69,11 @@ _BUILDSPEC = """version: 0.2
 phases:
   install:
     runtime-versions:
+      # Node 20 is the highest LTS available on aws/codebuild/standard:7.0
+      # (Ubuntu 22.04). Pinned here so the image's pre-installed Node cannot
+      # silently regress between builds. Mirrors the project-level
+      # runtime-versions in infra/aws/codebuild.tf (NICE-3 / Phase 4).
+      nodejs: 20
       python: 3.12
   build:
     commands:
@@ -112,19 +125,55 @@ def _validate_env_var_value(value: str, field: str) -> None:
         )
 
 
+# Substrings in boto3 ClientError that indicate a deterministic,
+# non-retryable AWS-side failure. When we see these we should fail
+# fast instead of letting the orchestrator burn fix_generator
+# attempts on something only an AWS Support case (or quota raise)
+# can resolve.
+#
+# AccountLimitExceededException is the production case from the
+# account-level concurrent-build quota = 0 in us-east-1. The other
+# entries are defensive for sibling errors a new account might
+# surface.
+_NON_RETRYABLE_AWS_ERROR_PHRASES: tuple[str, ...] = (
+    "accountlimitexceededexception",
+    "cannot have more than 0 builds",
+    "cannot have more than 0 active builds",
+    "requestlimitexceeded",
+    "unauthorizedoperation",
+    "accessdenied",
+)
+
+
 def _extract_failure_reason_aws(build: dict) -> str:
     """
     Extract a short failure summary from a CodeBuild build dict.
 
     Tries (in order):
-      1. phases[last].contexts[last].message
-      2. buildStatus string
+      1. Phase-level quota / limit message in any phase
+      2. phases[last].contexts[last].message
+      3. buildStatus string
 
     Always sanitizes via _sanitize_failure_reason before returning.
     """
     raw: Optional[str] = None
 
+    # Check all phases for a quota / limit message first — this is rare
+    # but happens when the build starts and is reaped for over-quota.
     phases = build.get("phases") or []
+    for phase in phases:
+        contexts = phase.get("contexts") or []
+        for ctx in contexts:
+            msg = (ctx.get("message") or "").strip()
+            msg_lc = msg.lower()
+            if msg and any(
+                phrase in msg_lc
+                for phrase in _NON_RETRYABLE_AWS_ERROR_PHRASES
+            ):
+                return _sanitize_failure_reason(
+                    f"[quota/limit] [{phase.get('phaseType', '?')}] {msg}"
+                )
+
     for phase in reversed(phases):
         contexts = phase.get("contexts") or []
         for ctx in reversed(contexts):
@@ -236,15 +285,35 @@ class AWSSandboxRunner(SandboxRunner):
                 duration_ms=int(_OVERALL_TIMEOUT_SECONDS * 1000),
             )
         except Exception as exc:
-            logger.error(
-                "aws_runner: CodeBuild API error for run=%s: %s",
+            # Detect non-retryable AWS-side errors (quota, limit, auth)
+            # BEFORE the generic handler swallows them. The orchestrator
+            # already routes to the fallback comment on a non-retryable
+            # sandbox result; we just need to mark it clearly so the
+            # dashboard shows the real cause instead of 10 identical
+            # "Sandbox fail" rows.
+            exc_text = (str(exc) or "").lower()
+            is_non_retryable = any(
+                phrase in exc_text
+                for phrase in _NON_RETRYABLE_AWS_ERROR_PHRASES
+            )
+            log_level = logger.error if is_non_retryable else logger.warning
+            log_level(
+                "aws_runner: CodeBuild API error for run=%s (non_retryable=%s): %s: %s",
                 inp.run_id,
+                is_non_retryable,
                 type(exc).__name__,
+                str(exc)[:300],
+            )
+            prefix = (
+                "CodeBuild quota/limit exceeded (non-retryable; "
+                "AWS Support case required to raise account quota): "
+                if is_non_retryable
+                else "CodeBuild API error: "
             )
             return make_result(
                 passed=False,
                 reason=_sanitize_failure_reason(
-                    f"CodeBuild API error: {type(exc).__name__}: {str(exc)[:500]}"
+                    f"{prefix}{type(exc).__name__}: {str(exc)[:500]}"
                 ),
                 duration_ms=0,
             )
@@ -275,12 +344,16 @@ class AWSSandboxRunner(SandboxRunner):
         t_submit = time.monotonic()
 
         def _start() -> str:
+            # Per-build timeouts are NOT passed here — they are configured at
+            # the CodeBuild project level in infra/aws/codebuild.tf
+            # (build_timeout=10, queued_timeout=5). The StartBuild API only
+            # accepts the *Override variants (timeoutInMinutesOverride,
+            # queuedTimeoutInMinutesOverride); the bare names are project-level
+            # only and were causing ParamValidationError on every build.
             resp = client.start_build(
                 projectName=project_name,
                 buildspecOverride=_BUILDSPEC,
                 environmentVariablesOverride=env_overrides,
-                timeoutInMinutes=10,       # hard build timeout (matches GCP 600s)
-                queuedTimeoutInMinutes=5,  # cap queue wait — cost guard
             )
             return resp["build"]["id"]
 

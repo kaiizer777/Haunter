@@ -8,20 +8,44 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Modal } from "@/components/ui/modal";
+import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/lib/auth-context";
 import { api, EvalResultOut, ApiError } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
-import { 
-  Sparkles, 
-  Play, 
-  CheckCircle2, 
-  XCircle, 
-  Clock, 
-  Cpu, 
-  AlertCircle, 
+import {
+  Sparkles,
+  Play,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  Cpu,
+  AlertCircle,
   History,
-  TerminalSquare
+  TerminalSquare,
+  FlaskConical
 } from "lucide-react";
+
+// localStorage key for the demo-mode toggle. Persists across page reloads
+// so the operator doesn't have to re-enable it every time.
+const DEMO_MODE_STORAGE_KEY = "haunter.eval.demoMode";
+
+function readDemoModeFromStorage(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(DEMO_MODE_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeDemoModeToStorage(value: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(DEMO_MODE_STORAGE_KEY, value ? "true" : "false");
+  } catch {
+    // localStorage may be unavailable (private mode, quota). Swallow.
+  }
+}
 
 export default function EvalPage() {
   const router = useRouter();
@@ -35,8 +59,24 @@ export default function EvalPage() {
   // Trigger modal state
   const [isRunModalOpen, setIsRunModalOpen] = useState(false);
   const [isDryRun, setIsDryRun] = useState(true);
+  // Demo mode: pinned to a known-fixable canonical fixture + default model.
+  // Persisted to localStorage so it survives page reloads.
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
   const [isPending, startTransition] = useTransition();
   const [runError, setRunError] = useState<string | null>(null);
+
+  // Hydrate demo-mode toggle from localStorage after mount.
+  useEffect(() => {
+    setIsDemoMode(readDemoModeFromStorage());
+  }, []);
+
+  const handleDemoModeChange = useCallback((next: boolean) => {
+    setIsDemoMode(next);
+    writeDemoModeToStorage(next);
+    // Demo mode forces live LLM execution — keep the dry-run checkbox in sync
+    // so the operator sees the effective mode in the modal.
+    if (next) setIsDryRun(false);
+  }, []);
 
   // Security gate: non-admin users must NEVER see this view (WORK.md:251)
   useEffect(() => {
@@ -77,6 +117,7 @@ export default function EvalPage() {
       try {
         const newResult = await api.runEval({
           dry_run: isDryRun,
+          demo_mode: isDemoMode,
         });
         setEvalResults((prev) => [newResult, ...prev]);
         setSelectedEval(newResult);
@@ -118,14 +159,28 @@ export default function EvalPage() {
       title="Golden Eval Harness"
       subtitle="Benchmark autonomous failure diagnosis & fix accuracy against golden test cases"
       actions={
-        <Button
-          onClick={() => setIsRunModalOpen(true)}
-          className="flex items-center gap-1.5 bg-amber-400 text-zinc-950 hover:bg-amber-300 font-semibold text-xs"
-          size="sm"
-        >
-          <Play className="h-3.5 w-3.5 fill-current" />
-          Run Eval Harness
-        </Button>
+        <div className="flex items-center gap-4">
+          <Switch
+            checked={isDemoMode}
+            onCheckedChange={handleDemoModeChange}
+            label={
+              <span className="inline-flex items-center gap-1">
+                <FlaskConical className="h-3 w-3 text-amber-400" />
+                Demo mode
+              </span>
+            }
+            description={isDemoMode ? "Pinned" : "Off"}
+            tooltip="Pins the eval to a known-fixable canonical failure. Use for demos and CI."
+          />
+          <Button
+            onClick={() => setIsRunModalOpen(true)}
+            className="flex items-center gap-1.5 bg-amber-400 text-zinc-950 hover:bg-amber-300 font-semibold text-xs"
+            size="sm"
+          >
+            <Play className="h-3.5 w-3.5 fill-current" />
+            Run Eval Harness
+          </Button>
+        </div>
       }
     >
       <div className="space-y-6">
@@ -402,6 +457,19 @@ export default function EvalPage() {
             </div>
           )}
 
+          {isDemoMode && (
+            <div className="rounded-[5px] border border-amber-500/30 bg-amber-950/20 p-2.5 text-[11px] font-mono text-amber-200">
+              <div className="flex items-center gap-1.5 text-amber-300 font-semibold">
+                <FlaskConical className="h-3 w-3" />
+                Demo mode active
+              </div>
+              <p className="mt-1 leading-relaxed text-amber-200/80">
+                Pinned to <span className="text-amber-100">fixture-001</span> and the
+                default model. Dry Run is disabled so the LLM is exercised.
+              </p>
+            </div>
+          )}
+
           <div className="space-y-3 rounded-[5px] border border-zinc-800 bg-[#09090b] p-3 font-mono">
             <div className="flex items-center justify-between">
               <div>
@@ -413,8 +481,9 @@ export default function EvalPage() {
               <input
                 type="checkbox"
                 checked={isDryRun}
+                disabled={isDemoMode}
                 onChange={(e) => setIsDryRun(e.target.checked)}
-                className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 focus:ring-0 cursor-pointer"
+                className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 focus:ring-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               />
             </div>
           </div>

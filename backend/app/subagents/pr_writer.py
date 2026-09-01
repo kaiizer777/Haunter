@@ -61,7 +61,7 @@ class PROutput(BaseModel):
     """
 
     title: str = Field(min_length=5, max_length=72)
-    body: str = Field(min_length=20, max_length=3000)
+    body: str = Field(min_length=20, max_length=10_000_000)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ def _build_pr_messages(
 
     user_content = (
         f"## Root Cause Diagnosis\n{diagnosis_summary}\n\n"
-        f"## Verified Patch\n```diff\n{patch_text[:3000]}\n```\n\n"
+        f"## Verified Patch\n```diff\n{patch_text[:10_000_000]}\n```\n\n"
         "Write the PR title and body now. Return JSON only."
     )
 
@@ -156,7 +156,7 @@ def _build_pr_messages(
             "role": "user",
             "content": (
                 f"Your previous response failed validation: {validation_error_context}\n"
-                "Fix the issues. title must be 5–72 chars, body must be 20–3000 chars. "
+                "Fix the issues. title must be 5–72 chars, body must be at least 20 chars. "
                 "Return valid JSON only."
             ),
         })
@@ -197,7 +197,7 @@ async def _call_and_parse_pr(
         db=db,
         repo_id=repo_id,
         response_format={"type": "json_object"},
-        max_tokens=512,
+        max_tokens=10_000_000,
     )
     content: str = (response.get("content") or "").strip()
 
@@ -221,7 +221,7 @@ async def _call_and_parse_pr(
         db=db,
         repo_id=repo_id,
         response_format={"type": "json_object"},
-        max_tokens=512,
+        max_tokens=10_000_000,
     )
     retry_content: str = (retry_response.get("content") or "").strip()
 

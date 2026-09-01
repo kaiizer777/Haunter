@@ -62,6 +62,25 @@ class OpenCodeZenProvider:
             "Content-Type": "application/json",
         }
 
+        # Clamp `max_tokens` to the configured ceiling. Subagents currently pass
+        # max_tokens=10_000_000 for test mode, but the free-tier endpoints
+        # reject the request with HTTP 400 when max_tokens is counted as part of
+        # the model's context budget (Nemotron-3.5-Lightning: 1M total, and
+        # max_tokens is reserved against it). The cap here is the last line of
+        # defence so the high test value doesn't break the workflow. Subagents
+        # still see their requested value in the trace — only the wire payload
+        # is clamped.
+        if "max_tokens" in kwargs:
+            ceiling = settings.opencode_zen_max_output_tokens
+            requested = kwargs["max_tokens"]
+            if requested > ceiling:
+                logger.debug(
+                    "opencode_zen: clamping max_tokens %d -> %d (configured ceiling)",
+                    requested,
+                    ceiling,
+                )
+                kwargs["max_tokens"] = ceiling
+
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,

@@ -37,9 +37,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Hard cap per GitHub input (chars). Keeps prompt within model context window
-# and prevents accidental cost explosions on huge monorepo logs.
-CAP_CHARS: int = 8_000
+# Set to 10M (10_000_000) for testing / full context passing without truncation
+CAP_CHARS: int = 10_000_000
 
 # Per-fetch timeout. One hung GitHub request must not stall the gather.
 # NOTE: Relaxed from 30s -> 120s while the pipeline is being verified. The
@@ -106,6 +105,36 @@ def _truncate_and_redact(text: str) -> str:
     if len(text) > CAP_CHARS:
         text = text[:CAP_CHARS] + "\n[...TRUNCATED...]"
     return _redact_secrets(text)
+
+
+# Regex to extract file paths from unified-diff headers (--- a/... / +++ b/...).
+# Used to build the "## Files in the failing commit" section that fix_generator
+# uses to pick the right config file to modify (e.g. pyproject.toml vs conftest.py).
+_DIFF_PATH_RE: re.Pattern[str] = re.compile(
+    r"^(?:---|\+\+\+)\s+(?:[ab]/)?(\S+)", re.MULTILINE
+)
+
+# Cap on file-list size in the appended section — keeps the diagnosis_summary
+# within the LLM's input window for fix_generator. 50 files is generous for
+# real CI failures; anything more is noise.
+_MAX_FILE_PATHS_IN_SUMMARY: int = 50
+
+
+def _extract_file_paths_from_diff(diff_text: str) -> list[str]:
+    """
+    Extract touched file paths from a unified diff (de-duplicated, /dev/null
+    skipped). Used to enrich the diagnosis_summary so the fix_generator LLM
+    has repo context to pick the right file to modify.
+    """
+    paths: list[str] = []
+    for raw in _DIFF_PATH_RE.findall(diff_text or ""):
+        if raw == "/dev/null":
+            continue
+        if raw not in paths:
+            paths.append(raw)
+        if len(paths) >= _MAX_FILE_PATHS_IN_SUMMARY:
+            break
+    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +246,26 @@ async def gather_context(
     )
 
     # -------------------------------------------------------------------------
-    # 6. Return distilled summary only
+    # 6. Enrich summary with the file list from the failing diff
+    #    so the downstream fix_generator LLM has repo context to pick the
+    #    right file to modify (pyproject.toml vs conftest.py vs src/foo.py).
+    #    Bounded to _MAX_FILE_PATHS_IN_SUMMARY to stay in the input window.
+    # -------------------------------------------------------------------------
+    file_paths = _extract_file_paths_from_diff(diff_clean)
+    if file_paths:
+        file_section = (
+            "\n\n## Files in the failing commit\n"
+            + "\n".join(f"- {p}" for p in file_paths)
+        )
+        summary = (summary or "").rstrip() + file_section
+        logger.info(
+            "context_gatherer: run=%s appended %d file path(s) to summary",
+            run.id,
+            len(file_paths),
+        )
+
+    # -------------------------------------------------------------------------
+    # 7. Return distilled summary (with file list appended)
     # -------------------------------------------------------------------------
     logger.info(
         "context_gatherer: run=%s input_tokens=%d output_tokens=%d latency_ms=%d",
@@ -302,7 +350,7 @@ async def _call_with_empty_retry(
     t0 = time.monotonic()
     try:
         response = await asyncio.wait_for(
-            llm.complete(messages=messages, db=db, repo_id=run.repo_id, max_tokens=2048),
+            llm.complete(messages=messages, db=db, repo_id=run.repo_id, max_tokens=10_000_000),
             timeout=FETCH_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
@@ -340,7 +388,7 @@ async def _call_with_empty_retry(
                 messages=retry_messages,
                 db=db,
                 repo_id=run.repo_id,
-                max_tokens=512,  # shorter retry — we only need a few sentences
+                max_tokens=10_000_000,
             ),
             timeout=FETCH_TIMEOUT_S,
         )

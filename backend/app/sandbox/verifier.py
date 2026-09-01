@@ -61,7 +61,7 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)(?:bearer|authorization:?\s*bearer)\s+[A-Za-z0-9._\-/+]{20,}"), "[REDACTED_TOKEN]"),
 ]
 
-_MAX_FAILURE_REASON_CHARS: int = 2000
+_MAX_FAILURE_REASON_CHARS: int = 10_000_000
 
 
 def _sanitize_failure_reason(raw: str) -> str:

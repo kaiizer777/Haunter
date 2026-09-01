@@ -16,6 +16,14 @@ Security invariants:
     passed as a substitution value.
   - No Docker-in-Docker, no privileged mode, no shared persistent volumes.
   - Build timeout capped at 600s; queueTtl at 120s to bound cost.
+
+Image supply-chain pinning (NICE-3 / Phase 4):
+  - All ``gcr.io/cloud-builders/git`` references are pinned to a SHA digest
+    (@sha256:...) so a future upstream re-tag of ``latest`` cannot silently
+    change what code runs in the sandbox. Digest verified against the
+    registry's ``Docker-Content-Digest`` header on the ``latest`` manifest
+    at the time of the Phase 4 change; bump explicitly when the base image
+    needs to advance.
 """
 
 from __future__ import annotations
@@ -32,6 +40,16 @@ _REPO_IDENT_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 # The Cloud Build SA must have `secretmanager.secretAccessor` on this secret only.
 _GITHUB_TOKEN_SECRET = (
     "projects/{project_id}/secrets/GITHUB_TOKEN/versions/latest"
+)
+
+# Pinned digest of gcr.io/cloud-builders/git (verified against gcr.io's
+# Docker-Content-Digest header on the ``latest`` manifest at the time of
+# the Phase 4 change). Pinning to a digest (not a tag) prevents silent
+# upstream re-tags from changing what runs in the sandbox. See module
+# docstring, "Image supply-chain pinning".
+_GIT_IMAGE: str = (
+    "gcr.io/cloud-builders/git@sha256:"
+    "bfcbd8719280b196bd860e89531c3c9b598daab4a07aef1d17a163c822d569bd"
 )
 
 
@@ -86,13 +104,15 @@ def build_cloud_build_config(
     # Secret Manager binding — SA needs secretAccessor on this secret only.
     secret_resource = _GITHUB_TOKEN_SECRET.format(project_id=project_id)
 
+    # Pinned digest (see _GIT_IMAGE at module level for the source).
+
     steps: list[dict] = [
         # ----------------------------------------------------------------
         # Step 1: clone — authenticated shallow clone via Secret Manager token
         # ----------------------------------------------------------------
         {
             "id": "clone",
-            "name": "gcr.io/cloud-builders/git",
+            "name": _GIT_IMAGE,
             "entrypoint": "sh",
             "args": [
                 "-c",
@@ -108,7 +128,7 @@ def build_cloud_build_config(
         # ----------------------------------------------------------------
         {
             "id": "apply",
-            "name": "gcr.io/cloud-builders/git",
+            "name": _GIT_IMAGE,
             "entrypoint": "sh",
             "args": [
                 "-c",

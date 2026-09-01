@@ -108,6 +108,20 @@ resource "aws_iam_role_policy" "lambda_inline" {
         Resource = "arn:aws:codebuild:${var.region}:*:project/${var.project_name}-sandbox"
       },
       # ----------------------------------------------------------------
+      # ALLOW — Read GitHub App private key from SSM (Phase 1.6 of github.md)
+      # Scoped to the specific parameter path. WithDecryption is enabled
+      # by default for SecureString, so the PEM is decrypted in-flight.
+      # ----------------------------------------------------------------
+      {
+        Sid    = "AllowSSMReadGitHubAppKey"
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter",
+          "ssm:GetParameters",
+        ]
+        Resource = "arn:aws:ssm:${var.region}:*:parameter${var.github_sandbox_app_private_key_ssm_path}"
+      },
+      # ----------------------------------------------------------------
       # EXPLICIT DENY — Secrets Manager, IAM, EC2, cross-role assumption
       # Must be denied even if a broader Allow is accidentally added.
       # ----------------------------------------------------------------
@@ -184,8 +198,18 @@ resource "aws_lambda_function" "haunter" {
 
       # Hosting + Sandbox provider (Phase 13/14)
       HOSTING_PROVIDER          = "aws"
-      SANDBOX_PROVIDER          = "aws"
+      SANDBOX_PROVIDER          = var.sandbox_provider
       AWS_CODEBUILD_PROJECT_NAME = "${var.project_name}-sandbox"
+
+      # GitHub Actions sandbox (Phase 1.6 of github.md) — used when
+      # SANDBOX_PROVIDER is switched to "github_actions". The PEM is read
+      # from SSM at cold start, not stored in this env var block.
+      GITHUB_SANDBOX_ORG                       = var.github_sandbox_org
+      GITHUB_SANDBOX_APP_ID                    = var.github_sandbox_app_id
+      GITHUB_SANDBOX_INSTALLATION_ID           = var.github_sandbox_installation_id
+      GITHUB_SANDBOX_APP_PRIVATE_KEY_SSM_PATH  = var.github_sandbox_app_private_key_ssm_path
+      GITHUB_SANDBOX_POLL_INTERVAL_SECONDS     = tostring(var.github_sandbox_poll_interval_seconds)
+      GITHUB_SANDBOX_POLL_TIMEOUT_SECONDS      = tostring(var.github_sandbox_poll_timeout_seconds)
 
       # LLM
       OPENCODE_ZEN_API_KEY = var.opencode_zen_api_key

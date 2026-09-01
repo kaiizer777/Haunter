@@ -194,6 +194,9 @@ class EvalRunRequest(BaseModel):
                  Empty list / None → evaluate all fixtures.
     model_config_id: optional FK to model_configs row for provenance.
     dry_run: if True, no LLM calls are made (stubs used). Default True.
+    demo_mode: if True, pin the eval to a known-fixable canonical fixture
+               and the default model (settings.default_model). Use for demos
+               and CI smoke. Forces dry_run=False so the LLM is exercised.
     """
 
     fixture_ids: Optional[list[str]] = Field(
@@ -208,6 +211,13 @@ class EvalRunRequest(BaseModel):
     dry_run: bool = Field(
         default=True,
         description="If true, use stubs (no LLM). If false, real LLM calls.",
+    )
+    demo_mode: bool = Field(
+        default=False,
+        description=(
+            "Pin the eval to a known-fixable canonical failure and the "
+            "default model. Use for demos and CI smoke."
+        ),
     )
 
     def validate_fixture_ids(self) -> None:
@@ -298,6 +308,11 @@ async def trigger_eval_run(
     references are accepted from the client. fixture_ids must exist in the
     allowlist or the request is rejected with 422.
 
+    When demo_mode=True, the runner is pinned to a single known-fixable
+    canonical fixture (fixture-001) and the default model
+    (settings.default_model — see app/config.py:71). dry_run is forced to
+    False so the LLM is exercised end-to-end.
+
     Returns the persisted EvalResult row (aggregate scores only).
     """
     _require_admin(current_user)
@@ -313,11 +328,43 @@ async def trigger_eval_run(
 
     from eval.runner import run_eval  # local import — avoids heavy startup at module load
 
+    # Demo mode pins: removes fixture-set and model-flicker as variables so a
+    # demo shows a single-shot pass on a known-good case. The canonical fixture
+    # is fixture-001 (psf/requests ImportError) — an import_error case that
+    # the deterministic ModuleNotFoundError fast-path (Phase 3) handles.
+    effective_golden_ids: list[str] | None = body.fixture_ids or None
+    effective_model_config_id: uuid.UUID | None = body.model_config_id
+    effective_dry_run: bool = body.dry_run
+
+    if body.demo_mode:
+        effective_golden_ids = ["fixture-001"]
+        effective_dry_run = False  # exercise the LLM for the demo
+        # Pin model_config_id to the row matching settings.default_model if the
+        # caller didn't supply one. Never hardcode the model string — always
+        # reference it via settings.default_model (app/config.py:71).
+        if effective_model_config_id is None:
+            pinned = await db.execute(
+                select(ModelConfig).where(
+                    ModelConfig.model_name == settings.default_model
+                )
+            )
+            pinned_row = pinned.scalars().first()
+            if pinned_row is not None:
+                effective_model_config_id = pinned_row.id
+            else:
+                # No model_configs row for the default model — let run_eval
+                # validate; it'll either find one or raise a clear ValueError.
+                logger.info(
+                    "demo_mode: no model_configs row for default_model=%r; "
+                    "proceeding without model_config_id pin",
+                    settings.default_model,
+                )
+
     try:
         eval_result = await run_eval(
-            golden_ids=body.fixture_ids or None,
-            model_config_id=body.model_config_id,
-            dry_run=body.dry_run,
+            golden_ids=effective_golden_ids,
+            model_config_id=effective_model_config_id,
+            dry_run=effective_dry_run,
         )
     except ValueError as exc:
         raise HTTPException(

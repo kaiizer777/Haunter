@@ -57,3 +57,36 @@ app.include_router(eval_router)
 @app.get("/health")
 async def health_check() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/health/sandbox")
+async def sandbox_health() -> dict:
+    """
+    Return the active sandbox provider configuration.
+
+    Read-only, no auth required. Used by the dashboard's model/provider
+    switcher to surface the current sandbox backend and — for the
+    github_actions provider — the configured org and App ID.
+
+    Response shape:
+        {
+          "provider": "github_actions" | "aws" | "gcp",
+          "ok": true,
+          "detail": {
+            "org": "kaiizer777",          # github_actions only
+            "app_id": "4772354",          # github_actions only
+            "installation_id": "157771121"  # github_actions only
+          }
+        }
+    """
+    provider: str = getattr(settings, "sandbox_provider", "gcp").lower().strip()
+    detail: dict = {}
+
+    if provider == "github_actions":
+        detail["org"] = getattr(settings, "github_sandbox_org", None)
+        detail["app_id"] = getattr(settings, "github_sandbox_app_id", None)
+        detail["installation_id"] = getattr(
+            settings, "github_sandbox_installation_id", None
+        )
+
+    return {"provider": provider, "ok": True, "detail": detail}

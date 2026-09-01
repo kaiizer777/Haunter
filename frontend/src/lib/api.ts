@@ -141,6 +141,12 @@ export interface EvalRunRequest {
   fixture_ids?: string[];
   model_config_id?: string;
   dry_run?: boolean;
+  /**
+   * Phase 6 — pin the eval to a known-fixable canonical fixture and the
+   * default model. Use for demos and CI smoke. When true, dry_run is
+   * forced to false server-side so the LLM is exercised end-to-end.
+   */
+  demo_mode?: boolean;
 }
 
 export interface ModelConfigOut {

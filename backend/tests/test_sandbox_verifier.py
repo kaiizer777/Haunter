@@ -230,11 +230,11 @@ def test_sanitize_failure_reason_strips_npg_token() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sanitize_failure_reason_capped_at_2000_chars() -> None:
-    """failure_reason must be capped at 2000 characters."""
-    long_reason = "x" * 5000
+def test_sanitize_failure_reason_capped_at_10m_chars() -> None:
+    """failure_reason must be capped at 10M characters."""
+    long_reason = "x" * 10_000_005
     result = _sanitize_failure_reason(long_reason)
-    assert len(result) <= 2000
+    assert len(result) <= 10_000_000
 
 
 @pytest.mark.anyio
