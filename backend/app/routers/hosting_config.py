@@ -5,7 +5,7 @@ GET  /config/hosting  — read current active provider config (any authenticated
 PUT  /config/hosting  — update provider config (admin-only, same gate as PUT /config/model)
 
 Security invariants:
-- Provider values validated by Pydantic Literal allowlist (gcp|aws only).
+- Provider values validated by server allowlist (aws only).
   Values are NEVER derived from request headers, path params, or free-text.
 - Write endpoint is admin-gated: ADMIN_USER_ID env var must match current user.
   Returns 403 (not 401) to indicate authenticated-but-not-authorized.
@@ -93,15 +93,15 @@ async def update_hosting_config(
     Uses Postgres UPSERT (INSERT ... ON CONFLICT DO UPDATE) for atomicity.
     Invalidates the hosting adapter in-process cache after write.
 
-    Security: body.hosting_provider and body.sandbox_provider are Pydantic
-    Literal fields — only "gcp" or "aws" pass validation. Any other value
+    Security: body.hosting_provider and body.sandbox_provider are validated
+    against allowlist — only "aws" passes validation. Any other value
     returns 422 before reaching this handler.
     """
     await _require_admin(current_user)
 
     # Pydantic already validated values — but assert against server-side allowlist
     # as defence-in-depth (protects against schema bypass via direct ORM call in tests).
-    allowed_values = {"gcp", "aws"}
+    allowed_values = {"aws"}
     assert body.hosting_provider in allowed_values, "hosting_provider out of allowlist"
     assert body.sandbox_provider in allowed_values, "sandbox_provider out of allowlist"
 

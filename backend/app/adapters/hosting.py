@@ -4,13 +4,10 @@ Hosting adapter — Phase 14.
 Abstracts the mechanism for scheduling the async pipeline after the webhook
 handler returns 2xx.
 
-Problem: FastAPI BackgroundTasks work on Cloud Run (process stays alive), but
-on AWS Lambda the execution context is frozen the moment the HTTP response is
+Problem: on AWS Lambda the execution context is frozen the moment the HTTP response is
 sent — BackgroundTasks tasks never execute.
 
-Solution: two adapters, same interface.
-  GCPHostingAdapter  → background_tasks.add_task(handle_failed_run, run_id)
-  AWSHostingAdapter  → boto3.lambda_client.invoke(InvocationType='Event', ...)
+Solution: AWSHostingAdapter → boto3.lambda_client.invoke(InvocationType='Event', ...)
 
 The lambda_handler.py entry point detects a "direct invocation" payload
 ({"run_id": "..."}) and calls handle_failed_run() directly, completing the loop.
@@ -18,10 +15,10 @@ The lambda_handler.py entry point detects a "direct invocation" payload
 Provider selection:
   1. DB key "hosting_provider" (system_configs table, TTL-cached 60s)
   2. HOSTING_PROVIDER env var (settings.hosting_provider)
-  Default: "gcp"
+  Default: "aws"
 
 Security:
-  - Provider values are allowlisted ("gcp" | "aws") before use.
+  - Provider values are allowlisted ("aws") before use.
   - Lambda role has AWSLambdaBasicExecutionRole + lambda:InvokeFunction on self only.
     No secretsmanager:GetSecretValue, no cross-tenant resource access.
 """
@@ -47,7 +44,7 @@ logger = logging.getLogger(__name__)
 _cfg_cache: dict[str, tuple[str, float]] = {}
 _CACHE_TTL: float = 60.0
 
-_ALLOWED_PROVIDERS: frozenset[str] = frozenset({"gcp", "aws"})
+_ALLOWED_PROVIDERS: frozenset[str] = frozenset({"aws"})
 
 
 async def _get_provider_config(key: str, env_default: str) -> str:
@@ -96,13 +93,13 @@ async def _get_provider_config(key: str, env_default: str) -> str:
 
 
 async def get_active_hosting_provider() -> str:
-    """Return the active HOSTING_PROVIDER (gcp|aws), hot-switchable via DB."""
+    """Return the active HOSTING_PROVIDER (aws), hot-switchable via DB."""
     from app.config import settings
     return await _get_provider_config("hosting_provider", settings.hosting_provider)
 
 
 async def get_active_sandbox_provider() -> str:
-    """Return the active SANDBOX_PROVIDER (gcp|aws), hot-switchable via DB."""
+    """Return the active SANDBOX_PROVIDER (aws), hot-switchable via DB."""
     from app.config import settings
     return await _get_provider_config("sandbox_provider", settings.sandbox_provider)
 
@@ -133,30 +130,6 @@ class HostingAdapter(ABC):
 
 
 # ---------------------------------------------------------------------------
-# GCP adapter (Cloud Run) — standard BackgroundTasks
-# ---------------------------------------------------------------------------
-
-
-class GCPHostingAdapter(HostingAdapter):
-    """
-    Cloud Run adapter: uses FastAPI BackgroundTasks.
-
-    Cloud Run keeps the process alive after the response is sent, so
-    background tasks execute normally. Zero extra infrastructure needed.
-    """
-
-    async def schedule_pipeline(
-        self,
-        run_id: UUID,
-        background_tasks: "BackgroundTasks",
-    ) -> None:
-        from app.orchestrator import handle_failed_run
-
-        background_tasks.add_task(handle_failed_run, run_id)
-        logger.info("hosting(gcp): queued handle_failed_run for run=%s", run_id)
-
-
-# ---------------------------------------------------------------------------
 # AWS adapter (Lambda) — async self-invoke via boto3
 # ---------------------------------------------------------------------------
 
@@ -177,6 +150,13 @@ class AWSHostingAdapter(HostingAdapter):
       lambda:InvokeFunction on arn:aws:lambda:<region>:<account>:function:<self>
     """
 
+    def __await__(self):
+        async def _resolve():
+            await get_active_hosting_provider()
+            return self
+
+        return _resolve().__await__()
+
     async def schedule_pipeline(
         self,
         run_id: UUID,
@@ -196,7 +176,7 @@ class AWSHostingAdapter(HostingAdapter):
         if not function_name:
             logger.error(
                 "hosting(aws): AWS_LAMBDA_FUNCTION_NAME not set; "
-                "falling back to GCP BackgroundTasks — pipeline may not execute on Lambda"
+                "falling back to in-process BackgroundTasks — pipeline may not execute on Lambda"
             )
             from app.orchestrator import handle_failed_run
             background_tasks.add_task(handle_failed_run, run_id)
@@ -255,12 +235,10 @@ def _invoke_lambda_async(function_name: str, payload: bytes) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def get_hosting_adapter() -> HostingAdapter:
+def get_hosting_adapter(provider: str | None = None) -> AWSHostingAdapter:
     """
     Return the appropriate HostingAdapter for the current HOSTING_PROVIDER.
     Provider value is hot-switchable via DB (60s TTL cache).
     """
-    provider = await get_active_hosting_provider()
-    if provider == "aws":
-        return AWSHostingAdapter()
-    return GCPHostingAdapter()
+    return AWSHostingAdapter()
+

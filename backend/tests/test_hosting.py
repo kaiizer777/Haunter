@@ -2,21 +2,18 @@
 Phase 14 — Hosting adapter and /config/hosting endpoint tests.
 
 Covers:
- 1. GCPHostingAdapter.schedule_pipeline -> adds to BackgroundTasks.
- 2. AWSHostingAdapter.schedule_pipeline -> invokes Lambda async (boto3 mocked).
- 3. AWSHostingAdapter falls back to BackgroundTasks when function name not set.
- 4. get_hosting_adapter() returns GCPHostingAdapter when HOSTING_PROVIDER=gcp.
- 5. get_hosting_adapter() returns AWSHostingAdapter when HOSTING_PROVIDER=aws.
- 6. GET /config/hosting -> 200 with env defaults (unauthenticated -> 401).
- 7. GET /config/hosting authenticated -> 200 with correct shape.
- 8. PUT /config/hosting valid -> 200 updates both providers (admin user).
- 9. PUT /config/hosting non-admin -> 403 Forbidden.
-10. PUT /config/hosting evil hosting_provider -> 422 Unprocessable Entity.
-11. PUT /config/hosting evil sandbox_provider -> 422 Unprocessable Entity.
-12. Webhook with GCP hosting -> BackgroundTasks.add_task called (no boto3).
-13. Webhook with AWS hosting -> Lambda invoke called (BackgroundTasks not used for pipeline).
-14. invalidate_provider_cache() clears the TTL cache.
-15. _get_provider_config returns env default on DB error (resilience).
+ 1. AWSHostingAdapter.schedule_pipeline -> invokes Lambda async (boto3 mocked).
+ 2. AWSHostingAdapter falls back to BackgroundTasks when function name not set.
+ 3. get_hosting_adapter() returns AWSHostingAdapter when HOSTING_PROVIDER=aws.
+ 4. GET /config/hosting -> 200 with env defaults (unauthenticated -> 401).
+ 5. GET /config/hosting authenticated -> 200 with correct shape.
+ 6. PUT /config/hosting valid -> 200 updates both providers (admin user).
+ 7. PUT /config/hosting non-admin -> 403 Forbidden.
+ 8. PUT /config/hosting evil hosting_provider -> 422 Unprocessable Entity.
+ 9. PUT /config/hosting evil sandbox_provider -> 422 Unprocessable Entity.
+10. Webhook with AWS hosting -> Lambda invoke called (BackgroundTasks not used for pipeline).
+11. invalidate_provider_cache() clears the TTL cache.
+12. _get_provider_config returns env default on DB error (resilience).
 """
 
 from __future__ import annotations
@@ -29,7 +26,6 @@ import pytest
 
 from app.adapters.hosting import (
     AWSHostingAdapter,
-    GCPHostingAdapter,
     _ALLOWED_PROVIDERS,
     _cfg_cache,
     get_hosting_adapter,
@@ -54,32 +50,6 @@ def _make_user(admin: bool = False) -> User:
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
-
-
-# ---------------------------------------------------------------------------
-# Test 1: GCPHostingAdapter.schedule_pipeline uses BackgroundTasks
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_gcp_adapter_uses_background_tasks():
-    """GCPHostingAdapter.schedule_pipeline should add task to background_tasks."""
-    from fastapi import BackgroundTasks
-
-    adapter = GCPHostingAdapter()
-    bg = BackgroundTasks()
-    run_id = uuid.uuid4()
-
-    with patch("app.adapters.hosting.GCPHostingAdapter") as MockGCP:
-        real_adapter = GCPHostingAdapter()
-
-        with patch("app.orchestrator.handle_failed_run") as mock_hfr:
-            await real_adapter.schedule_pipeline(run_id, bg)
-
-        # The task should be queued in background_tasks
-        assert len(bg.tasks) == 1
-        task = bg.tasks[0]
-        assert task.func.__name__ == "handle_failed_run" or callable(task.func)
 
 
 # ---------------------------------------------------------------------------
@@ -142,21 +112,8 @@ async def test_aws_adapter_fallback_on_missing_function_name():
 
 
 # ---------------------------------------------------------------------------
-# Test 4-5: get_hosting_adapter factory
+# Test 5: get_hosting_adapter factory
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_get_hosting_adapter_gcp():
-    """get_hosting_adapter returns GCPHostingAdapter when provider=gcp."""
-    invalidate_provider_cache()
-    with patch("app.config.settings.hosting_provider", "gcp"):
-        with patch(
-            "app.adapters.hosting._get_provider_config",
-            new=AsyncMock(return_value="gcp"),
-        ):
-            adapter = await get_hosting_adapter()
-    assert isinstance(adapter, GCPHostingAdapter)
 
 
 @pytest.mark.asyncio
@@ -246,7 +203,7 @@ async def test_put_hosting_config_non_admin_forbidden(make_auth_client, db, user
         async with make_auth_client(user.id) as auth_client:
             resp = await auth_client.put(
                 "/config/hosting",
-                json={"hosting_provider": "gcp", "sandbox_provider": "gcp"},
+                json={"hosting_provider": "aws", "sandbox_provider": "aws"},
             )
 
     assert resp.status_code == 403
@@ -267,7 +224,7 @@ async def test_put_hosting_config_evil_hosting_provider(make_auth_client, db, us
         async with make_auth_client(user.id) as auth_client:
             resp = await auth_client.put(
                 "/config/hosting",
-                json={"hosting_provider": "evil_provider", "sandbox_provider": "gcp"},
+                json={"hosting_provider": "evil_provider", "sandbox_provider": "aws"},
             )
 
     assert resp.status_code == 422
@@ -288,7 +245,7 @@ async def test_put_hosting_config_evil_sandbox_provider(make_auth_client, db, us
         async with make_auth_client(user.id) as auth_client:
             resp = await auth_client.put(
                 "/config/hosting",
-                json={"hosting_provider": "gcp", "sandbox_provider": "malicious"},
+                json={"hosting_provider": "aws", "sandbox_provider": "malicious"},
             )
             assert resp.status_code == 422
 
@@ -301,7 +258,7 @@ async def test_put_hosting_config_evil_sandbox_provider(make_auth_client, db, us
 def test_invalidate_provider_cache_clears_all():
     """invalidate_provider_cache should empty the TTL cache dict."""
     _cfg_cache["hosting_provider"] = ("aws", 9999.0)
-    _cfg_cache["sandbox_provider"] = ("gcp", 9999.0)
+    _cfg_cache["sandbox_provider"] = ("aws", 9999.0)
     assert len(_cfg_cache) == 2
 
     invalidate_provider_cache()
@@ -322,16 +279,16 @@ async def test_get_provider_config_db_error_fallback():
     invalidate_provider_cache()
 
     with patch("app.db.async_session_maker", side_effect=Exception("DB down")):
-        result = await _get_provider_config("hosting_provider", "gcp")
+        result = await _get_provider_config("hosting_provider", "aws")
 
-    assert result == "gcp"
+    assert result == "aws"
 
 
 # ---------------------------------------------------------------------------
-# Test: _ALLOWED_PROVIDERS contains exactly gcp and aws
+# Test: _ALLOWED_PROVIDERS contains exactly aws
 # ---------------------------------------------------------------------------
 
 
 def test_allowed_providers_is_strict():
-    """Allowed provider set must be exactly {'gcp', 'aws'}."""
-    assert _ALLOWED_PROVIDERS == frozenset({"gcp", "aws"})
+    """Allowed provider set must be exactly {'aws'}."""
+    assert _ALLOWED_PROVIDERS == frozenset({"aws"})
