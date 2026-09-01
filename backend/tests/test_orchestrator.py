@@ -474,7 +474,7 @@ async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSessi
             ],
         ),
         patch(
-            "app.sandbox.verifier.verify_patch",
+            "app.sandbox.runner.verify_patch",
             new_callable=AsyncMock,
             return_value={"status": "fail", "failure_reason": "failed tests", "build_duration_ms": 500},
         ),

@@ -24,13 +24,29 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable, Optional
 from uuid import UUID
 
-from app.sandbox.runner import SandboxInput, SandboxResult, make_result
+from app.sandbox.runner import (
+    SandboxInput,
+    SandboxResult,
+    _sanitize_failure_reason,
+    make_result,
+    verify_patch,
+)
 
 if TYPE_CHECKING:
     from app.models import Attempt, Repo, Run
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "SandboxInput",
+    "SandboxResult",
+    "SANDBOX_PROVIDERS",
+    "_sanitize_failure_reason",
+    "make_result",
+    "verify",
+    "verify_patch",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -48,9 +64,8 @@ logger = logging.getLogger(__name__)
 #   2. It gives tests / future hot-reload code a single registry to
 #      iterate.
 #   3. The spec's STOP check runs `SANDBOX_PROVIDERS.keys()` to confirm
-#      all three providers are registered.
+#      registered providers.
 SANDBOX_PROVIDERS: dict[str, str] = {
-    "gcp": "app.sandbox.verifier.GCPSandboxRunner",
     "aws": "app.sandbox.aws_runner.AWSSandboxRunner",
     "github_actions": "app.sandbox.github_actions_runner.GitHubActionsSandboxRunner",
 }
@@ -139,10 +154,6 @@ def _get_runner():
         from app.sandbox.aws_runner import AWSSandboxRunner
         return AWSSandboxRunner()
 
-    if provider == "gcp":
-        from app.sandbox.verifier import GCPSandboxRunner
-        return GCPSandboxRunner()
-
     if provider == "github_actions":
         return _load_github_actions_runner()()
 
@@ -170,9 +181,6 @@ async def verify(
             "build_duration_ms": int,               # legacy key — from duration_ms
         }
 
-    Internally, GCPSandboxRunner.verify_orm() bypasses SandboxInput
-    construction and calls verify_patch() with the real ORM objects directly
-    (preserves exact Phase 7 behaviour including attempt_number logging).
     AWSSandboxRunner and GitHubActionsSandboxRunner both receive a
     SandboxInput built from the ORM objects.
 
@@ -183,22 +191,11 @@ async def verify(
     provider: str = getattr(settings, "sandbox_provider", "gcp").lower().strip()
 
     # ----------------------------------------------------------------
-    # GCP fast path — pass real ORM objects through to avoid constructing
-    # a SandboxInput (which would require repo_ref string assembly).
-    # ----------------------------------------------------------------
-    if provider == "gcp":
-        from app.sandbox.verifier import GCPSandboxRunner
-        raw = await GCPSandboxRunner.verify_orm(
-            attempt=attempt, run=run, repo=repo
-        )
-        return _to_legacy(raw)
-
-    # ----------------------------------------------------------------
     # AWS path — construct SandboxInput from ORM objects
     # ----------------------------------------------------------------
     if provider == "aws":
         from app.sandbox.aws_runner import AWSSandboxRunner
-        from app.sandbox.verifier import _sanitize_failure_reason
+        from app.sandbox.runner import _sanitize_failure_reason
 
         repo_ref = f"{repo.owner}/{repo.name}"
         sha = getattr(run, "head_sha", None)
@@ -236,12 +233,12 @@ async def verify(
     # create-or-fetch, workflow + patch push, and check-runs polling.
     #
     # The runner is loaded lazily via _load_github_actions_runner so a
-    # missing pyjwt in the bundle does not break the AWS/GCP paths.
+    # missing pyjwt in the bundle does not break the AWS path.
     # If the lazy load fails, the outer try/except here converts it
     # to a sanitized fail-result (non-retryable).
     # ----------------------------------------------------------------
     if provider == "github_actions":
-        from app.sandbox.verifier import _sanitize_failure_reason
+        from app.sandbox.runner import _sanitize_failure_reason
 
         repo_ref = f"{repo.owner}/{repo.name}"
         sha = getattr(run, "head_sha", None)

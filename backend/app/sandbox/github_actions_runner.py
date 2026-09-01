@@ -66,7 +66,7 @@ from app.sandbox.mirror import (
     test_repo_name,
 )
 from app.sandbox.runner import SandboxInput, SandboxResult, SandboxRunner, make_result
-from app.sandbox.verifier import _sanitize_failure_reason
+from app.sandbox.runner import _sanitize_failure_reason
 
 logger = logging.getLogger(__name__)
 

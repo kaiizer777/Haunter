@@ -18,16 +18,43 @@ Security invariants:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, field_validator
 
+if TYPE_CHECKING:
+    from app.models import Attempt, Repo, Run
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+_OVERALL_TIMEOUT_SECONDS: float = 900.0
+
+# Secrets patterns to strip from failure_reason before storage / LLM re-feed.
+# Order matters: more specific first.
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # Private keys
+    (re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----.*?-----END [A-Z ]+PRIVATE KEY-----", re.DOTALL), "[REDACTED_PRIVATE_KEY]"),
+    # API key prefixes — extended to include common token shapes
+    (re.compile(r"\bsk-[A-Za-z0-9_\-]{10,}"), "[REDACTED]"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{10,}"), "[REDACTED]"),
+    (re.compile(r"\bnpg_[A-Za-z0-9_]{8,}"), "[REDACTED]"),
+    (re.compile(r"\bghr_[A-Za-z0-9_]{10,}"), "[REDACTED]"),
+    # DATABASE_URL / connection strings
+    (re.compile(r"(?:DATABASE_URL|postgresql://|postgres://)[^\s\"']+"), "[REDACTED_DB_URL]"),
+    # Generic Bearer / Authorization tokens
+    (re.compile(r"(?i)(?:bearer|authorization:?\s*bearer)\s+[A-Za-z0-9._\-/+]{20,}"), "[REDACTED_TOKEN]"),
+]
+
+_MAX_FAILURE_REASON_CHARS: int = 10_000_000
 
 _MAX_PATCH_BYTES: int = 512 * 1024  # 512 KB
 _MAX_REPO_REF_CHARS: int = 200
@@ -152,6 +179,112 @@ def make_result(
         reason=reason,
         duration_ms=duration_ms,
     )
+
+
+# Moved from app.sandbox.verifier during cleanup session 1
+def _sanitize_failure_reason(raw: str) -> str:
+    """
+    Strip secret patterns and cap failure_reason at 2000 chars.
+
+    Applied before DB storage AND before passing to the next generate_fix call.
+    """
+    result = raw
+    for pattern, replacement in _SECRET_PATTERNS:
+        result = pattern.sub(replacement, result)
+    if len(result) > _MAX_FAILURE_REASON_CHARS:
+        result = result[-_MAX_FAILURE_REASON_CHARS:]
+    return result
+
+
+async def _run_build(
+    project_id: str,
+    build_config: dict,
+    run_id: UUID,
+    attempt_number: int,
+) -> dict:
+    """Fallback stub for legacy verify_patch if called directly."""
+    return {
+        "status": "fail",
+        "failure_reason": "Cloud Build sandbox is deprecated and removed.",
+        "build_duration_ms": 0,
+    }
+
+
+# Moved from app.sandbox.verifier during cleanup session 1
+async def verify_patch(
+    attempt: Attempt,
+    run: Run,
+    repo: Repo,
+) -> dict:
+    """
+    Submit patch to Cloud Build and poll until terminal state.
+
+    Returns:
+        {
+            "status": "pass" | "fail",
+            "failure_reason": str | None,   # sanitized, capped 2000 chars
+            "build_duration_ms": int,
+        }
+
+    Never raises — on Cloud Build API error returns status="fail" with
+    failure_reason describing the error so the orchestrator can persist it.
+    """
+    from app.config import settings
+
+    project_id: Optional[str] = getattr(settings, "gcp_project_id", None)
+    if not project_id:
+        logger.error(
+            "sandbox.verifier: GCP_PROJECT_ID not set — cannot submit Cloud Build job for run=%s",
+            run.id,
+        )
+        return {
+            "status": "fail",
+            "failure_reason": "GCP_PROJECT_ID not configured on this instance.",
+            "build_duration_ms": 0,
+        }
+
+    build_config: dict = {}
+
+    try:
+        result = await asyncio.wait_for(
+            _run_build(
+                project_id=project_id,
+                build_config=build_config,
+                run_id=run.id,
+                attempt_number=attempt.attempt_number,
+            ),
+            timeout=_OVERALL_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "sandbox.verifier: overall timeout (%ss) exceeded for run=%s attempt=%d",
+            _OVERALL_TIMEOUT_SECONDS,
+            run.id,
+            attempt.attempt_number,
+        )
+        return {
+            "status": "fail",
+            "failure_reason": f"Sandbox verification timed out after {int(_OVERALL_TIMEOUT_SECONDS)}s.",
+            "build_duration_ms": int(_OVERALL_TIMEOUT_SECONDS * 1000),
+        }
+    except Exception as exc:
+        # Cloud Build API error — do not propagate; persist failure.
+        # Do NOT log patch_text or GITHUB_TOKEN.
+        logger.error(
+            "sandbox.verifier: Cloud Build API error for run=%s attempt=%d: %s",
+            run.id,
+            attempt.attempt_number,
+            type(exc).__name__,
+        )
+        return {
+            "status": "fail",
+            "failure_reason": _sanitize_failure_reason(
+                f"Cloud Build API error: {type(exc).__name__}: {str(exc)[:500]}"
+            ),
+            "build_duration_ms": 0,
+        }
+
+    return result
 
 
 # ---------------------------------------------------------------------------

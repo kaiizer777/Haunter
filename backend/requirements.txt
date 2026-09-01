@@ -8,7 +8,6 @@ authlib==1.6.0
 itsdangerous==2.2.0
 httpx==0.28.1
 slowapi==0.1.9
-google-cloud-build==3.*
 boto3==1.*
 mangum==0.20.*  # ASGI adapter for AWS Lambda (Phase 14) — 0.19.x has a deprecated asyncio.get_event_loop() call that crashes in Lambda's MainThread
 cryptography==44.*  # Fernet token encryption at rest

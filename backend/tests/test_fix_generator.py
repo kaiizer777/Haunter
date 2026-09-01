@@ -213,7 +213,7 @@ async def test_orchestrator_advances_to_pending_pr(db: AsyncSession) -> None:
             return_value=_VALID_LLM_RESPONSE,
         ),
         patch(
-            "app.sandbox.verifier.verify_patch",
+            "app.sandbox.runner.verify_patch",
             new_callable=AsyncMock,
             return_value={"status": "pass", "failure_reason": None, "build_duration_ms": 1234},
         ),
