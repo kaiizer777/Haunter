@@ -7,8 +7,7 @@ Public API:
 The orchestrator imports only this function; it never references
 cloudbuild_v1, boto3, pyjwt, or httpx directly.
 
-Provider selection: SANDBOX_PROVIDER env var (default "gcp").
-  "gcp"            → GCPSandboxRunner          (Cloud Build via google-cloud-build)
+Provider selection: SANDBOX_PROVIDER env var (default "github_actions").
   "github_actions" → GitHubActionsSandboxRunner
                      (Haunter-org test mirror + GitHub Actions via httpx + pyjwt)
                      Lazy-loaded — see _load_github_actions_runner below.
@@ -74,9 +73,9 @@ SANDBOX_PROVIDERS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 #
 # The github_actions provider requires optional dependencies (pyjwt, httpx)
-# that are not strictly needed for AWS or GCP. To keep other paths
-# resilient against a broken bundle (e.g. pyjwt missing from a future zip
-# build), the github_actions runner is loaded via a guarded helper that
+# that are not strictly needed elsewhere. To keep paths resilient against
+# a broken bundle (e.g. pyjwt missing from a future zip build), the
+# github_actions runner is loaded via a guarded helper that
 # caches BOTH the class on success AND the import error on failure.
 #
 # Tested via the smoke check at module import time: importing app.sandbox
@@ -144,14 +143,14 @@ def _get_runner():
     """
     from app.config import settings
 
-    provider: str = getattr(settings, "sandbox_provider", "gcp").lower().strip()
+    provider: str = getattr(settings, "sandbox_provider", "github_actions").lower().strip()
 
     if provider == "github_actions":
         return _load_github_actions_runner()()
 
     raise ValueError(
         f"Unknown SANDBOX_PROVIDER={provider!r}. "
-        "Must be 'gcp', 'aws', or 'github_actions'."
+        "Must be 'github_actions'."
     )
 
 
@@ -179,7 +178,7 @@ async def verify(
     """
     from app.config import settings
 
-    provider: str = getattr(settings, "sandbox_provider", "gcp").lower().strip()
+    provider: str = getattr(settings, "sandbox_provider", "github_actions").lower().strip()
 
     # ----------------------------------------------------------------
     # GitHub Actions path — construct SandboxInput with the per-attempt
@@ -280,7 +279,7 @@ async def verify(
         "status": "fail",
         "failure_reason": (
             f"Unknown SANDBOX_PROVIDER={provider!r}. "
-            "Must be 'gcp', 'aws', or 'github_actions'."
+            "Must be 'github_actions'."
         ),
         "build_duration_ms": 0,
     }
