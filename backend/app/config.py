@@ -87,29 +87,20 @@ class Settings(BaseSettings):
     # Optional admin user UUID string for global model config switcher authorization
     admin_user_id: Optional[str] = None
 
-    # GCP project ID for Cloud Build sandbox (Phase 7).
-    # Required when Cloud Build verification is enabled.
-    gcp_project_id: Optional[str] = None
-
     # GitHub App credentials for repo-write operations (Phase 8).
     # App permissions required: contents:write, pull_requests:write — NO administration.
-    # github_app_private_key is a PEM string — load from GCP Secret Manager in prod.
+    # github_app_private_key is a PEM string — load from SSM / Secret Manager in prod.
     # NEVER commit the PEM or log it. If not set, installation token auth is unavailable
     # and get_installation_token() falls back to settings.github_token (dev only).
     github_app_id: Optional[str] = None
     github_app_private_key: Optional[str] = None  # full PEM, newlines preserved
 
     # Phase 13 — Sandbox provider selection.
-    # "gcp" uses Cloud Build (default, Phase 7). "aws" uses CodeBuild adapter.
     # "github_actions" uses a Haunter-org test mirror + GitHub Actions polling
-    # (see github.md). "github_actions" is the active provider while the
-    # CodeBuild account-level concurrent-build quota is 0 in us-east-1.
-    sandbox_provider: str = "gcp"
+    # (see github.md). Active sandbox provider.
+    sandbox_provider: str = "github_actions"
 
-    # AWS CodeBuild adapter (required when sandbox_provider="aws").
-    # aws_codebuild_project_name: pre-provisioned CodeBuild project (see infra/aws/).
-    # aws_region: AWS region the CodeBuild project lives in.
-    aws_codebuild_project_name: Optional[str] = None
+    # AWS region (used by AWSHostingAdapter for Lambda invocations).
     aws_region: str = "us-east-1"
 
     # GitHub Actions sandbox adapter (required when sandbox_provider="github_actions").
@@ -127,11 +118,10 @@ class Settings(BaseSettings):
     github_sandbox_workflow_filename_ts: str = "haunter-test-ts.yml"
 
     # Phase 14 — Hosting provider selection.
-    # "gcp" uses Cloud Run (default, HAUNTER.md:147).
     # "aws" uses Lambda + Function URL (always-free 1M req + 400k GB-s/mo).
     # Hot-switchable via DB (system_configs key="hosting_provider") with 60s TTL cache.
-    # Allowlisted: "gcp" | "aws" only — never free-text, never from request headers.
-    hosting_provider: str = "gcp"
+    # Allowlisted: "aws" only — never free-text, never from request headers.
+    hosting_provider: str = "aws"
 
     # Name/ARN of the Lambda function to self-invoke for async pipeline execution.
     # Defaults to AWS_LAMBDA_FUNCTION_NAME env var (set automatically by Lambda runtime).

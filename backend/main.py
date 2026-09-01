@@ -79,7 +79,7 @@ async def sandbox_health() -> dict:
           }
         }
     """
-    provider: str = getattr(settings, "sandbox_provider", "gcp").lower().strip()
+    provider: str = getattr(settings, "sandbox_provider", "github_actions").lower().strip()
     detail: dict = {}
 
     if provider == "github_actions":

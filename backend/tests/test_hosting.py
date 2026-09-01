@@ -158,8 +158,7 @@ async def test_get_hosting_config_authenticated(make_auth_client, db, user_facto
     assert "hosting_provider" in data
     assert "sandbox_provider" in data
     assert "source" in data
-    assert data["hosting_provider"] in ("gcp", "aws")
-    assert data["sandbox_provider"] in ("gcp", "aws")
+    assert data["hosting_provider"] == "aws"
 
 
 # ---------------------------------------------------------------------------
