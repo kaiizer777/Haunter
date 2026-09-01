@@ -13,14 +13,11 @@
 #     - ~160 invocations/month (80 webhook + 80 pipeline)
 #     - ~80 pipeline runs × 5min avg × 512MB = 12,000 GB-s/mo
 #     - 12,000 / 400,000 = 3% of free tier → $0
-#   CodeBuild sandbox: 100 min/mo always-free; at 80 runs × 10min = 800 min/mo
-#     overrun: 700 min × $0.005 = $3.50/mo (set $1 budget alert as early warning)
 #   → Lambda hosting: $0 permanently.
 #
 # Security posture (WORK.md:278):
 #   - Role: AWSLambdaBasicExecutionRole (CloudWatch Logs only) as base
 #   - + lambda:InvokeFunction on self only (for async pipeline self-invoke)
-#   - + codebuild:StartBuild/BatchGetBuilds scoped to sandbox project
 #   - Explicit Deny: secretsmanager:*, iam:*, sts:AssumeRole (any other)
 #   - No cross-tenant resource access
 #   - Environment secrets injected as Lambda env vars — no Secrets Manager needed
@@ -95,19 +92,6 @@ resource "aws_iam_role_policy" "lambda_inline" {
         Resource = "arn:aws:lambda:${var.region}:*:function/${var.project_name}"
       },
       # ----------------------------------------------------------------
-      # ALLOW — CodeBuild sandbox (scoped to Haunter sandbox project only)
-      # ----------------------------------------------------------------
-      {
-        Sid    = "AllowCodeBuildSandbox"
-        Effect = "Allow"
-        Action = [
-          "codebuild:StartBuild",
-          "codebuild:BatchGetBuilds",
-        ]
-        # Reference the existing CodeBuild project from Phase 13
-        Resource = "arn:aws:codebuild:${var.region}:*:project/${var.project_name}-sandbox"
-      },
-      # ----------------------------------------------------------------
       # ALLOW — Read GitHub App private key from SSM (Phase 1.6 of github.md)
       # Scoped to the specific parameter path. WithDecryption is enabled
       # by default for SecureString, so the PEM is decrypted in-flight.
@@ -142,7 +126,7 @@ resource "aws_iam_role_policy" "lambda_inline" {
 # ---------------------------------------------------------------------------
 # Lambda Function
 #
-# Timeout: 900s (15 min max) to cover full pipeline (CodeBuild poll loop).
+# Timeout: 900s (15 min max) to cover full pipeline (sandbox poll loop).
 # Memory: 512MB — adequate for FastAPI + async DB + boto3.
 # Architecture: arm64 (Graviton2) — ~20% faster/cheaper than x86_64.
 #
@@ -174,7 +158,7 @@ resource "aws_lambda_function" "haunter" {
   runtime       = "python3.11"
   architectures = ["x86_64"]
 
-  timeout     = 900   # 15 minutes — covers CodeBuild poll loop
+  timeout     = 900   # 15 minutes — covers sandbox poll loop
   memory_size = 512   # MB
 
   environment {
@@ -199,7 +183,6 @@ resource "aws_lambda_function" "haunter" {
       # Hosting + Sandbox provider (Phase 13/14)
       HOSTING_PROVIDER          = "aws"
       SANDBOX_PROVIDER          = var.sandbox_provider
-      AWS_CODEBUILD_PROJECT_NAME = "${var.project_name}-sandbox"
 
       # GitHub Actions sandbox (Phase 1.6 of github.md) — used when
       # SANDBOX_PROVIDER is switched to "github_actions". The PEM is read

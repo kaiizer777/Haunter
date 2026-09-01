@@ -9,7 +9,6 @@ cloudbuild_v1, boto3, pyjwt, or httpx directly.
 
 Provider selection: SANDBOX_PROVIDER env var (default "gcp").
   "gcp"            → GCPSandboxRunner          (Cloud Build via google-cloud-build)
-  "aws"            → AWSSandboxRunner          (CodeBuild via boto3)
   "github_actions" → GitHubActionsSandboxRunner
                      (Haunter-org test mirror + GitHub Actions via httpx + pyjwt)
                      Lazy-loaded — see _load_github_actions_runner below.
@@ -66,7 +65,6 @@ __all__ = [
 #   3. The spec's STOP check runs `SANDBOX_PROVIDERS.keys()` to confirm
 #      registered providers.
 SANDBOX_PROVIDERS: dict[str, str] = {
-    "aws": "app.sandbox.aws_runner.AWSSandboxRunner",
     "github_actions": "app.sandbox.github_actions_runner.GitHubActionsSandboxRunner",
 }
 
@@ -76,12 +74,10 @@ SANDBOX_PROVIDERS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 #
 # The github_actions provider requires optional dependencies (pyjwt, httpx)
-# that are not strictly needed for AWS or GCP. To keep the AWS/GCP paths
+# that are not strictly needed for AWS or GCP. To keep other paths
 # resilient against a broken bundle (e.g. pyjwt missing from a future zip
 # build), the github_actions runner is loaded via a guarded helper that
-# caches BOTH the class on success AND the import error on failure. AWS
-# and GCP imports are already lazy and isolated; this brings github_actions
-# to the same level of isolation.
+# caches BOTH the class on success AND the import error on failure.
 #
 # Tested via the smoke check at module import time: importing app.sandbox
 # must NOT pull in pyjwt. The first call to the github_actions branch
@@ -123,7 +119,7 @@ def _load_github_actions_runner() -> type:
         _GITHUB_ACTIONS_IMPORT_ERROR = RuntimeError(
             "GitHub Actions sandbox runner is unavailable — required "
             f"dependency missing ({exc}). Add 'pyjwt' to requirements.txt "
-            "or set SANDBOX_PROVIDER=aws/gcp."
+            "or set SANDBOX_PROVIDER=github_actions."
         )
         raise _GITHUB_ACTIONS_IMPORT_ERROR from exc
     _GITHUB_ACTIONS_RUNNER_CLASS = GitHubActionsSandboxRunner
@@ -144,15 +140,11 @@ def _get_runner():
     Lazy import per provider so unused SDKs are not loaded. The
     github_actions branch delegates to ``_load_github_actions_runner``
     so a missing pyjwt (or any other github_actions dep) does NOT
-    affect the AWS or GCP paths.
+    affect other paths.
     """
     from app.config import settings
 
     provider: str = getattr(settings, "sandbox_provider", "gcp").lower().strip()
-
-    if provider == "aws":
-        from app.sandbox.aws_runner import AWSSandboxRunner
-        return AWSSandboxRunner()
 
     if provider == "github_actions":
         return _load_github_actions_runner()()
@@ -181,8 +173,7 @@ async def verify(
             "build_duration_ms": int,               # legacy key — from duration_ms
         }
 
-    AWSSandboxRunner and GitHubActionsSandboxRunner both receive a
-    SandboxInput built from the ORM objects.
+    GitHubActionsSandboxRunner receives a SandboxInput built from the ORM objects.
 
     Never raises — any error is returned as status="fail" with a sanitized reason.
     """
@@ -191,49 +182,13 @@ async def verify(
     provider: str = getattr(settings, "sandbox_provider", "gcp").lower().strip()
 
     # ----------------------------------------------------------------
-    # AWS path — construct SandboxInput from ORM objects
-    # ----------------------------------------------------------------
-    if provider == "aws":
-        from app.sandbox.aws_runner import AWSSandboxRunner
-        from app.sandbox.runner import _sanitize_failure_reason
-
-        repo_ref = f"{repo.owner}/{repo.name}"
-        sha = getattr(run, "head_sha", None)
-        if sha:
-            repo_ref = f"{repo_ref}@{sha}"
-
-        try:
-            inp = SandboxInput(
-                patch=attempt.patch_text or "",
-                repo_ref=repo_ref,
-                run_id=run.id,
-            )
-        except Exception as exc:
-            logger.error(
-                "sandbox: SandboxInput validation failed for run=%s: %s",
-                run.id,
-                exc,
-            )
-            return {
-                "status": "fail",
-                "failure_reason": _sanitize_failure_reason(
-                    f"Input validation error: {str(exc)[:400]}"
-                ),
-                "build_duration_ms": 0,
-            }
-
-        runner = AWSSandboxRunner()
-        raw = await runner.verify(inp)
-        return _to_legacy(raw)
-
-    # ----------------------------------------------------------------
     # GitHub Actions path — construct SandboxInput with the per-attempt
     # context (attempt_number, base_sha, file_paths, user_github_id).
     # The runner does the GitHub App install-token mint, test-mirror
     # create-or-fetch, workflow + patch push, and check-runs polling.
     #
     # The runner is loaded lazily via _load_github_actions_runner so a
-    # missing pyjwt in the bundle does not break the AWS path.
+    # missing pyjwt in the bundle does not break module loading.
     # If the lazy load fails, the outer try/except here converts it
     # to a sanitized fail-result (non-retryable).
     # ----------------------------------------------------------------
