@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from app.orchestrator import (
     RunStatus,
     _transition,
     _validate_transition,
+    handle_failed_run,
 )
 from app.subagents.context_gatherer import _redact_secrets, _truncate_and_redact
 from tests.conftest import truncate_all
@@ -62,7 +64,12 @@ async def _create_repo(db: AsyncSession, user: User) -> Repo:
     return repo
 
 
-async def _create_run(db: AsyncSession, repo: Repo, status: str = "pending") -> Run:
+async def _create_run(
+    db: AsyncSession,
+    repo: Repo,
+    status: str = "pending",
+    diagnosis_summary: str | None = None,
+) -> Run:
     run = Run(
         repo_id=repo.id,
         github_run_id=int(uuid.uuid4().int % 1_000_000_000),
@@ -71,6 +78,7 @@ async def _create_run(db: AsyncSession, repo: Repo, status: str = "pending") -> 
         head_branch="main",
         status=status,
         conclusion="failure",
+        diagnosis_summary=diagnosis_summary,
     )
     db.add(run)
     await db.commit()
@@ -694,3 +702,141 @@ async def test_gather_context_empty_content_raises(db: AsyncSession) -> None:
     assert steps[0].input_tokens == 4676
     assert steps[0].output_tokens == 512
     assert steps[0].latency_ms == 8220
+
+
+# ---------------------------------------------------------------------------
+# Test 14: PatchFormatRetryExhausted routes to fallback_commented
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_orchestrator_format_exhausted_routes_to_fallback(
+    db: AsyncSession,
+) -> None:
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    # Create the run in fix_generation status with a non-deterministic
+    # diagnosis so the deterministic ModuleNotFoundError fast-path
+    # does NOT short-circuit the LLM path.
+    run = await _create_run(
+        db, repo, status="fix_generation",
+        diagnosis_summary="SyntaxError: invalid syntax (line 42)",
+    )
+
+    # Format-broken response: no diff markers at all
+    broken_response = {
+        "content": json.dumps({
+            "patch": "def fixed():\n    return 42\n",
+            "confidence": 80,
+            "strategy_notes": "no diff markers",
+        }),
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+        "latency_ms": 200,
+        "model": "nemotron-3.5-lightning-free",
+    }
+
+    # Mock the GitHub side so the post-fallback comment POST is fake
+    with (
+        patch(
+            "app.subagents.context_gatherer.gather_context",
+            AsyncMock(return_value="SyntaxError: invalid syntax (line 42)"),
+        ),
+        patch(
+            "app.subagents.fix_generator.LLMClient.complete",
+            AsyncMock(return_value=broken_response),
+        ),
+        patch(
+            "app.github.pr.get_installation_token",
+            AsyncMock(return_value="ghs_fake"),
+        ),
+        patch(
+            "app.github_client.post_commit_comment",
+            AsyncMock(return_value=None),
+        ) as mock_comment,
+    ):
+        await handle_failed_run(run_id=run.id)
+
+    # Refresh run from DB
+    refreshed = await db.execute(select(Run).where(Run.id == run.id))
+    run = refreshed.scalar_one()
+    assert run.status == "fallback_commented", (
+        f"expected fallback_commented, got {run.status}"
+    )
+    # The diagnosis comment was posted
+    assert mock_comment.called, "fallback comment was not posted"
+    # A fix_generator_format_exhausted step was recorded
+    steps = await db.execute(
+        select(RunStep).where(RunStep.run_id == run.id)
+    )
+    step_names = {s.step_name for s in steps.scalars().all()}
+    assert "fix_generator_format_exhausted" in step_names
+
+
+# ---------------------------------------------------------------------------
+# Test 15: Patch traversal raises plain PatchRejected -> status=error
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_orchestrator_path_traversal_still_errors(
+    db: AsyncSession,
+) -> None:
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(
+        db, repo, status="fix_generation",
+        diagnosis_summary="Error in etc/passwd",
+    )
+
+    # Path-traversal patch: not retriable (raises plain PatchRejected)
+    traversal_patch = (
+        "--- a/../../etc/passwd\n"
+        "+++ b/etc/passwd\n"
+        "@@ -0,0 +1 @@\n"
+        "+malicious:root:0:0\n"
+    )
+    traversal_response = {
+        "content": json.dumps({
+            "patch": traversal_patch,
+            "confidence": 90,
+            "strategy_notes": "evil",
+        }),
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+        "latency_ms": 200,
+        "model": "nemotron-3.5-lightning-free",
+    }
+
+    with (
+        patch(
+            "app.subagents.context_gatherer.gather_context",
+            AsyncMock(return_value="Error in etc/passwd"),
+        ),
+        patch(
+            "app.subagents.fix_generator.LLMClient.complete",
+            AsyncMock(return_value=traversal_response),
+        ),
+        patch(
+            "app.github.pr.get_installation_token",
+            AsyncMock(return_value="ghs_fake"),
+        ),
+        patch(
+            "app.github_client.post_commit_comment",
+            AsyncMock(return_value=None),
+        ) as mock_comment,
+    ):
+        await handle_failed_run(run_id=run.id)
+
+    refreshed = await db.execute(select(Run).where(Run.id == run.id))
+    run = refreshed.scalar_one()
+    # Security boundary: NOT fallback_commented
+    assert run.status == "error", (
+        f"expected error, got {run.status}"
+    )
+    # No fallback comment was posted
+    assert not mock_comment.called, (
+        "fallback comment MUST NOT be posted on security violation"
+    )
+    # failure_reason mentions the path traversal
+    assert "path traversal" in (run.failure_reason or "").lower()
