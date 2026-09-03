@@ -37,6 +37,7 @@ from app.subagents.fix_generator import (
     PatchFormatRetryExhausted,
     _build_messages,
     _call_with_format_retry,
+    _strip_markdown_fences,
     _validate_patch,
     generate_fix,
 )
@@ -838,4 +839,127 @@ async def test_path_traversal_still_fatal(db: AsyncSession) -> None:
     # No Attempt row inserted
     result = await db.execute(select(Attempt).where(Attempt.run_id == run.id))
     assert result.scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Tests for Markdown fence stripping before JSON parse
+# ---------------------------------------------------------------------------
+
+
+def test_strip_markdown_fences_helper_unit() -> None:
+    """Pure unit test for _strip_markdown_fences helper without DB."""
+    # Fenced JSON with language tag
+    assert _strip_markdown_fences('```json\n{"a": 1}\n```') == '{"a": 1}'
+    # Fenced JSON without language tag
+    assert _strip_markdown_fences('```\n{"a": 1}\n```') == '{"a": 1}'
+    # Already clean JSON (unchanged)
+    assert _strip_markdown_fences('{"a": 1}') == '{"a": 1}'
+    # Leading/trailing whitespace without fences
+    assert _strip_markdown_fences('  \n  {"a": 1}  \n  ') == '{"a": 1}'
+    # Prose before fence is NOT stripped — helper is conservative and returns as-is
+    prose_input = 'Acknowledged. Here is the fix:\n```json\n{"a": 1}\n```'
+    assert _strip_markdown_fences(prose_input) == prose_input
+    # Empty string
+    assert _strip_markdown_fences("") == ""
+    # Nested fences inside string literals remain untouched
+    nested_input = '```json\n{"patch": "```\\nfoo\\n```"}\n```'
+    assert _strip_markdown_fences(nested_input) == '{"patch": "```\\nfoo\\n```"}'
+
+
+@pytest.mark.anyio
+async def test_generate_fix_strips_markdown_fences_first_attempt(db: AsyncSession) -> None:
+    """LLM wraps JSON in markdown fences on attempt 1. Stripped and accepted without retry."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    fenced_content = (
+        "```json\n"
+        '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 80, "strategy_notes": "ok"}\n'
+        "```"
+    )
+    mock_complete = AsyncMock(
+        return_value={
+            **_VALID_LLM_RESPONSE,
+            "content": fenced_content,
+        }
+    )
+
+    with patch("app.subagents.fix_generator.LLMClient.complete", mock_complete):
+        attempt = await generate_fix(
+            run=run,
+            diagnosis_summary="SyntaxError in app/x.py:1",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert attempt.attempt_number == 1
+    assert attempt.confidence_score == 80
+    assert mock_complete.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_generate_fix_strips_markdown_fences_retry(db: AsyncSession) -> None:
+    """First call returns malformed JSON; retry returns fence-wrapped valid JSON.
+    Retry succeeds with attempt_number=1 and call_count=2."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    first_response = {**_VALID_LLM_RESPONSE, "content": "not valid json"}
+    fenced_content = (
+        "```json\n"
+        '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 80, "strategy_notes": "ok"}\n'
+        "```"
+    )
+    retry_response = {**_VALID_LLM_RESPONSE, "content": fenced_content}
+
+    mock_complete = AsyncMock(side_effect=[first_response, retry_response])
+
+    with patch("app.subagents.fix_generator.LLMClient.complete", mock_complete):
+        attempt = await generate_fix(
+            run=run,
+            diagnosis_summary="SyntaxError in app/x.py:1",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert attempt.attempt_number == 1
+    assert attempt.confidence_score == 80
+    assert mock_complete.call_count == 2
+
+
+@pytest.mark.anyio
+async def test_generate_fix_still_raises_on_unparseable_after_strip(db: AsyncSession) -> None:
+    """Both calls return fence-wrapped but malformed JSON.
+    Assert FixGenerationError is raised and call_count == 2."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    bad_fenced_content = (
+        "```json\n"
+        '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 80,}\n'
+        "```"
+    )
+    bad_response = {**_VALID_LLM_RESPONSE, "content": bad_fenced_content}
+
+    mock_complete = AsyncMock(return_value=bad_response)
+
+    with (
+        patch("app.subagents.fix_generator.LLMClient.complete", mock_complete),
+        pytest.raises(FixGenerationError),
+    ):
+        await generate_fix(
+            run=run,
+            diagnosis_summary="SyntaxError in app/x.py:1",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert mock_complete.call_count == 2
+
 

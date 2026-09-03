@@ -227,6 +227,37 @@ def _check_path(raw_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Markdown fence stripping helper
+# ---------------------------------------------------------------------------
+
+_FENCE_OPEN_RE: re.Pattern[str] = re.compile(
+    r"^\s*```(?:[a-zA-Z0-9_+-]*)\s*$", re.MULTILINE
+)
+_FENCE_CLOSE_RE: re.Pattern[str] = re.compile(r"(?:\r?\n)?\s*```\s*$")
+
+
+def _strip_markdown_fences(content: str) -> str:
+    """Strip leading/trailing markdown ``` fences and an optional language tag.
+
+    LLMs in the free tier routinely wrap JSON in ```json ... ``` even when
+    the system prompt forbids it. Pydantic's model_validate_json rejects
+    any leading non-JSON token with "Invalid JSON: expected value at line 1
+    column 1". This helper makes the parser tolerant without weakening
+    the schema: it only removes the outer wrapper, never alters the JSON
+    itself.
+    """
+    s = content.strip()
+    if not s.startswith("```"):
+        return s
+    # Drop the first ```<tag> line
+    s = _FENCE_OPEN_RE.sub("", s, count=1)
+    # Drop the last ``` line (if present)
+    if s.rstrip().endswith("```"):
+        s = _FENCE_CLOSE_RE.sub("", s.rstrip(), count=1)
+    return s.strip()
+
+
+# ---------------------------------------------------------------------------
 # Deterministic ModuleNotFoundError fallback
 # ---------------------------------------------------------------------------
 
@@ -375,7 +406,9 @@ def _build_messages(
     system_prompt = (
         "You are Fix Generator — given root cause summary (+ prior failure if any), "
         "produce a unified diff patch that fixes the CI failure. "
-        "Return JSON only, no markdown fences, no prose. "
+        "Return JSON only. Do NOT wrap the response in ``` fences. Do NOT include any prose before or after the JSON. "
+        "The first character of your response MUST be '{' and the last character MUST be '}'. "
+        'Example correct response: {"patch": "--- a/foo.py\\n+++ b/foo.py\\n@@ -1 +1 @@\\n-x\\n+x\\n", "confidence": 80, "strategy_notes": "..."}\n'
         'Schema: {"patch": "<unified diff or empty string>", "confidence": <integer 0-100>, '
         '"strategy_notes": "<1-line optional>"}\n'
         "Confidence calibration: 90=almost certainly passes CI, 50=reasonable guess, "
@@ -515,7 +548,15 @@ async def _call_and_parse(
         max_tokens=10_000_000,
     )
 
-    content: str = (response.get("content") or "").strip()
+    raw_content: str = response.get("content") or ""
+    content: str = _strip_markdown_fences(raw_content)
+    if len(raw_content) != len(content):
+        logger.debug(
+            "fix_generator: run=%s stripped markdown fences (raw_len=%d stripped_len=%d)",
+            run_id,
+            len(raw_content),
+            len(content),
+        )
 
     try:
         fix_output = FixOutput.model_validate_json(content)
@@ -543,7 +584,15 @@ async def _call_and_parse(
         max_tokens=10_000_000,
     )
 
-    retry_content: str = (retry_response.get("content") or "").strip()
+    retry_raw_content: str = retry_response.get("content") or ""
+    retry_content: str = _strip_markdown_fences(retry_raw_content)
+    if len(retry_raw_content) != len(retry_content):
+        logger.debug(
+            "fix_generator: run=%s stripped markdown fences (raw_len=%d stripped_len=%d)",
+            run_id,
+            len(retry_raw_content),
+            len(retry_content),
+        )
 
     try:
         fix_output = FixOutput.model_validate_json(retry_content)
