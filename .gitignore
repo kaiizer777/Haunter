@@ -40,14 +40,20 @@ Thumbs.db
 lambda.zip
 infra/aws/terraform.tf*
 infra/aws/.terraform*
+infra/aws/tfplan
+*.tfplan
 # Broader Terraform variable file safety net (catches *.auto.tfvars,
 # *.tfvars.json, and any tfvars in a future sub-path).
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
 
-# Project docs (internal, not for public repo)
-AGENTS.md
-HAUNTER.md
-WORK.md
-AUDIT_REPORT.md
+# Project docs (ignore all markdown files except README.md and HAUNTER.md)
+*.md
+!README.md
+!readme.md
+!HAUNTER.md
+!haunter.md
+!frontend/README.md
+!frontend/readme.md
+
