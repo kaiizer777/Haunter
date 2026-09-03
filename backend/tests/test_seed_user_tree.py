@@ -1,31 +1,31 @@
 """
-Phase 4 unit tests for ``_seed_test_mirror_with_user_tree`` (NICE-3).
+Phase 4 unit tests for ``_seed_test_mirror_with_user_tree`` (NICE-3) and
+Fix 1 (tarball + native blob mirror seeding).
 
 The function seeds the GitHub Actions test mirror with the user's repo
-tree at the failing commit so verification can actually exercise the
-failing test (not just the patch in isolation). These tests verify the
-end-to-end happy path, the App→PAT fallback on 403, the
-best-effort-failure sentinel, and the early-return on an empty tree.
+tree at the failing commit via tarball and native blob creation so
+verification exercises the actual user code without triggering cross-repo
+422 errors.
 
-All HTTP is mocked with respx — zero network. The mocks pin the exact
-endpoint sequence the function calls so a future refactor that changes
-the call order will fail loudly here rather than silently break in
-production.
-
-DB-free and sync-free. No conftest fixtures are used except the
-implicit pytest-asyncio ``async def`` test runner (asyncio_mode = auto).
+All HTTP is mocked with respx — zero network.
+DB-free and sync-free.
 """
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import logging
+import tarfile
+from typing import Optional
 
 import httpx
 import pytest
 import respx
 
+from app.sandbox._seed_tarball import MAX_TARBALL_BYTES, fetch_user_repo_tarball
 from app.sandbox.github_actions_runner import _seed_test_mirror_with_user_tree
-
 
 _GITHUB_API = "https://api.github.com"
 _USER_REPO = "acme/widgets"
@@ -38,31 +38,70 @@ _PAT_TOKEN = "ghp_test_personal_access_token"
 # Fixture payloads
 # ---------------------------------------------------------------------------
 
-_USER_TREE_SHA = "a" * 40  # 40 hex chars; GitHub SHA length
 _PARENT_SHA = "b" * 40
 _PARENT_TREE_SHA = "c" * 40
 _NEW_TREE_SHA = "d" * 40
 _NEW_COMMIT_SHA = "e" * 40
 
 
-def _user_tree_entries() -> list[dict]:
-    # 3 blobs: one regular file, one .github/workflows/ (skipped), one nested.
-    # The function filters out the .github/workflows/ path internally.
-    return [
-        {"path": "src/main.py", "mode": "100644", "type": "blob", "sha": "1" * 40},
-        {"path": ".github/workflows/haunter-test-py.yml", "mode": "100644", "type": "blob", "sha": "2" * 40},
-        {"path": "tests/test_main.py", "mode": "100644", "type": "blob", "sha": "3" * 40},
-    ]
-
-
 def _ok(resp_json: dict, status: int = 200) -> httpx.Response:
     return httpx.Response(status, json=resp_json)
 
 
+def _make_tarball(
+    entries: dict[str, bytes],
+    prefix: str = "repo-sha",
+    symlinks: Optional[list[tuple[str, str]]] = None,
+) -> bytes:
+    """Build an in-memory tarball mimicking GitHub's GET /tarball format."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for path, content in entries.items():
+            name = f"{prefix}/{path}" if prefix else path
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.type = tarfile.REGTYPE
+            tar.addfile(info, io.BytesIO(content))
+        if symlinks:
+            for link_name, target in symlinks:
+                name = f"{prefix}/{link_name}" if prefix else link_name
+                info = tarfile.TarInfo(name=name)
+                info.type = tarfile.SYMTYPE
+                info.linkname = target
+                tar.addfile(info)
+    return buf.getvalue()
+
+
+def _mock_mirror_seed_endpoints(rx: respx.MockRouter) -> None:
+    """Mock the standard mirror endpoints called after tarball parsing."""
+    rx.get(f"/repos/{_MIRROR_REPO}").mock(
+        return_value=_ok({"default_branch": "main"})
+    )
+    rx.get(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(
+        return_value=_ok({"object": {"sha": _PARENT_SHA}})
+    )
+    rx.get(f"/repos/{_MIRROR_REPO}/git/commits/{_PARENT_SHA}").mock(
+        return_value=_ok({"tree": {"sha": _PARENT_TREE_SHA}})
+    )
+    rx.post(f"/repos/{_MIRROR_REPO}/git/blobs").mock(
+        side_effect=lambda req: httpx.Response(
+            201,
+            json={"sha": hashlib.sha1(req.content).hexdigest()},
+        )
+    )
+    rx.post(f"/repos/{_MIRROR_REPO}/git/trees").mock(
+        return_value=_ok({"sha": _NEW_TREE_SHA}, status=201)
+    )
+    rx.post(f"/repos/{_MIRROR_REPO}/git/commits").mock(
+        return_value=_ok({"sha": _NEW_COMMIT_SHA}, status=201)
+    )
+    rx.patch(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(
+        return_value=_ok({})
+    )
+
+
 # ---------------------------------------------------------------------------
-# Test 1 — happy path: 200 on every call; the function returns True and
-# the expected 8-call sequence lands (commit, tree, mirror, ref, parent,
-# new-tree, new-commit, ref-PATCH).
+# Existing Tests (Updated to tarball flow)
 # ---------------------------------------------------------------------------
 
 
@@ -70,40 +109,17 @@ def _ok(resp_json: dict, status: int = 200) -> httpx.Response:
 async def test_seed_success_path(caplog: pytest.LogCaptureFixture) -> None:
     """All GitHub API calls succeed; the function returns True."""
     caplog.set_level(logging.INFO, logger="app.sandbox.github_actions_runner")
+    tar_bytes = _make_tarball({
+        "src/main.py": b"print('main')",
+        ".github/workflows/haunter-test-py.yml": b"name: CI",
+        "tests/test_main.py": b"assert True",
+    })
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
-        # 1. User commit fetch
-        rx.get(f"/repos/{_USER_REPO}/git/commits/{_USER_SHA}").mock(
-            return_value=_ok({"tree": {"sha": _USER_TREE_SHA}})
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(200, content=tar_bytes)
         )
-        # 2. Recursive tree fetch (user repo)
-        rx.get(f"/repos/{_USER_REPO}/git/trees/{_USER_TREE_SHA}").mock(
-            return_value=_ok({"tree": _user_tree_entries()})
-        )
-        # 3. Mirror repo metadata
-        rx.get(f"/repos/{_MIRROR_REPO}").mock(
-            return_value=_ok({"default_branch": "main"})
-        )
-        # 4. Mirror default-branch ref
-        rx.get(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(
-            return_value=_ok({"object": {"sha": _PARENT_SHA}})
-        )
-        # 5. Parent commit (to extract parent tree SHA)
-        rx.get(f"/repos/{_MIRROR_REPO}/git/commits/{_PARENT_SHA}").mock(
-            return_value=_ok({"tree": {"sha": _PARENT_TREE_SHA}})
-        )
-        # 6. POST new tree (cross-repo blob refs)
-        rx.post(f"/repos/{_MIRROR_REPO}/git/trees").mock(
-            return_value=_ok({"sha": _NEW_TREE_SHA}, status=201)
-        )
-        # 7. POST new commit on mirror
-        rx.post(f"/repos/{_MIRROR_REPO}/git/commits").mock(
-            return_value=_ok({"sha": _NEW_COMMIT_SHA}, status=201)
-        )
-        # 8. PATCH mirror default-branch ref (fast-forward)
-        rx.patch(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(
-            return_value=_ok({})
-        )
+        _mock_mirror_seed_endpoints(rx)
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             ok = await _seed_test_mirror_with_user_tree(
@@ -118,61 +134,33 @@ async def test_seed_success_path(caplog: pytest.LogCaptureFixture) -> None:
 
     assert ok is True, "happy path must return True"
 
-    # The function filters out .github/workflows/*, so the seeded log line
-    # should report 2 files (src/main.py + tests/test_main.py).
     seeded_logs = [
         r for r in caplog.records
         if "seeded" in r.getMessage() and _MIRROR_REPO in r.getMessage()
     ]
     assert seeded_logs, "expected a 'seeded' INFO log on the happy path"
     assert "2 file(s)" in seeded_logs[0].getMessage()
-
-
-# ---------------------------------------------------------------------------
-# Test 2 — App token hits 403 on the user-commit fetch; PAT fallback
-# retries and the function still returns True.
-# ---------------------------------------------------------------------------
+    assert "via tarball" in seeded_logs[0].getMessage()
 
 
 @pytest.mark.asyncio
 async def test_seed_pat_fallback_on_403(caplog: pytest.LogCaptureFixture) -> None:
-    """App 403 on step 1 transparently falls back to PAT; function still succeeds."""
-    caplog.set_level(logging.INFO, logger="app.sandbox.github_actions_runner")
+    """App 403 on tarball fetch transparently falls back to PAT; function still succeeds."""
+    caplog.set_level(logging.INFO)
+    tar_bytes = _make_tarball({
+        "src/main.py": b"print('main')",
+        ".github/workflows/haunter-test-py.yml": b"name: CI",
+        "tests/test_main.py": b"assert True",
+    })
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
-        # 1. App token → 403; PAT retry → 200 (use side_effect list)
-        commit_route = rx.get(
-            f"/repos/{_USER_REPO}/git/commits/{_USER_SHA}", name="user_commit"
-        ).mock(
+        tarball_route = rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             side_effect=[
                 httpx.Response(403, json={"message": "Must have admin access"}),
-                _ok({"tree": {"sha": _USER_TREE_SHA}}),
+                httpx.Response(200, content=tar_bytes),
             ]
         )
-        # 2. Recursive tree fetch (now with PAT)
-        rx.get(f"/repos/{_USER_REPO}/git/trees/{_USER_TREE_SHA}").mock(
-            return_value=_ok({"tree": _user_tree_entries()})
-        )
-        # 3-5. Mirror side (now with PAT)
-        rx.get(f"/repos/{_MIRROR_REPO}").mock(
-            return_value=_ok({"default_branch": "main"})
-        )
-        rx.get(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(
-            return_value=_ok({"object": {"sha": _PARENT_SHA}})
-        )
-        rx.get(f"/repos/{_MIRROR_REPO}/git/commits/{_PARENT_SHA}").mock(
-            return_value=_ok({"tree": {"sha": _PARENT_TREE_SHA}})
-        )
-        # 6-8. Mirror writes (now with PAT)
-        rx.post(f"/repos/{_MIRROR_REPO}/git/trees").mock(
-            return_value=_ok({"sha": _NEW_TREE_SHA}, status=201)
-        )
-        rx.post(f"/repos/{_MIRROR_REPO}/git/commits").mock(
-            return_value=_ok({"sha": _NEW_COMMIT_SHA}, status=201)
-        )
-        rx.patch(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(
-            return_value=_ok({})
-        )
+        _mock_mirror_seed_endpoints(rx)
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             ok = await _seed_test_mirror_with_user_tree(
@@ -184,115 +172,82 @@ async def test_seed_pat_fallback_on_403(caplog: pytest.LogCaptureFixture) -> Non
                 fallback_token=_PAT_TOKEN,
                 max_files=50,
             )
+        call_count = tarball_route.call_count
+        first_auth = tarball_route.calls[0].request.headers["Authorization"]
+        second_auth = tarball_route.calls[1].request.headers["Authorization"]
 
     assert ok is True, "PAT fallback must let the function succeed"
+    assert call_count == 2
+    assert first_auth == f"Bearer {_APP_TOKEN}"
+    assert second_auth == f"Bearer {_PAT_TOKEN}"
 
-    # Confirm the retry actually fired (2 calls on the commit endpoint).
-    assert commit_route.call_count == 2, (
-        f"expected 2 calls (App 403 + PAT 200); got {commit_route.call_count}"
-    )
-
-    # And a warning about the PAT fallback must have been logged.
     fallback_logs = [
         r for r in caplog.records
-        if "PAT" in r.getMessage() and "seed step 1" in r.getMessage()
+        if "PAT" in r.getMessage() and "GET /tarball 403" in r.getMessage()
     ]
-    assert fallback_logs, "expected a PAT-fallback WARNING on step 1"
-
-
-# ---------------------------------------------------------------------------
-# Test 3 — best-effort failure: a 422 on the new-tree POST (the closest
-# equivalent to "blob not found" — the function does cross-repo blob
-# references, so a bad blob SHA surfaces as a 422 on the tree POST, not
-# on an individual blob POST). The function must return False and emit
-# a WARNING.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_seed_blob_not_found_returns_false(caplog: pytest.LogCaptureFixture) -> None:
-    """422 on the new-tree POST surfaces as False + WARNING (best-effort)."""
-    caplog.set_level(logging.INFO, logger="app.sandbox.github_actions_runner")
-
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
-        rx.get(f"/repos/{_USER_REPO}/git/commits/{_USER_SHA}").mock(
-            return_value=_ok({"tree": {"sha": _USER_TREE_SHA}})
-        )
-        rx.get(f"/repos/{_USER_REPO}/git/trees/{_USER_TREE_SHA}").mock(
-            return_value=_ok({"tree": _user_tree_entries()})
-        )
-        rx.get(f"/repos/{_MIRROR_REPO}").mock(
-            return_value=_ok({"default_branch": "main"})
-        )
-        rx.get(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(
-            return_value=_ok({"object": {"sha": _PARENT_SHA}})
-        )
-        rx.get(f"/repos/{_MIRROR_REPO}/git/commits/{_PARENT_SHA}").mock(
-            return_value=_ok({"tree": {"sha": _PARENT_TREE_SHA}})
-        )
-        # Cross-repo blob reference is invalid → GitHub returns 422.
-        rx.post(f"/repos/{_MIRROR_REPO}/git/trees").mock(
-            return_value=httpx.Response(
-                422,
-                json={"message": "Invalid blob object: not found in repository"},
-            )
-        )
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            ok = await _seed_test_mirror_with_user_tree(
-                client=client,
-                mirror_full=_MIRROR_REPO,
-                user_repo_full=_USER_REPO,
-                user_sha=_USER_SHA,
-                token=_APP_TOKEN,
-                fallback_token=_PAT_TOKEN,
-                max_files=50,
-            )
-
-    assert ok is False, "422 on the new-tree POST must propagate as False"
-
-    # A WARNING about the failure must have been logged.
-    fail_logs = [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING
-        and "failed to seed" in r.getMessage()
-        and _MIRROR_REPO in r.getMessage()
-    ]
-    assert fail_logs, "expected a 'failed to seed' WARNING log on 422"
-
-
-# ---------------------------------------------------------------------------
-# Test 4 — empty tree (after filter): the function returns True early
-# without making any mirror-side write. This is the function's
-# documented "nothing to seed" branch (line 612 of
-# github_actions_runner.py); the runner continues with the old fresh
-# mirror behaviour.
-#
-# NOTE: the Phase 4 spec asked for "a single README-only commit" in this
-# case. The current implementation does not create a README commit on
-# an empty tree — it returns True after logging "nothing to seed". That
-# behaviour is the function's existing contract (NICE-3 wiring, not
-# behaviour change), so the assertion is "returns True + early return
-# + no commit POST". A future phase that wants a README commit would
-# need to extend the function explicitly.
-# ---------------------------------------------------------------------------
+    assert fallback_logs, "expected a PAT-fallback WARNING on 403"
 
 
 @pytest.mark.asyncio
 async def test_seed_empty_tree_returns_true_no_commit(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Recursive tree response is empty; the function returns True without writing."""
+    """Tarball contains no files or only filtered files; function returns True without writing."""
     caplog.set_level(logging.INFO, logger="app.sandbox.github_actions_runner")
+    tar_bytes = _make_tarball({
+        ".github/workflows/ci.yml": b"name: ci",
+    })
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
-        rx.get(f"/repos/{_USER_REPO}/git/commits/{_USER_SHA}").mock(
-            return_value=_ok({"tree": {"sha": _USER_TREE_SHA}})
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(200, content=tar_bytes)
         )
-        rx.get(f"/repos/{_USER_REPO}/git/trees/{_USER_TREE_SHA}").mock(
-            return_value=_ok({"tree": []})  # truly empty
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            ok = await _seed_test_mirror_with_user_tree(
+                client=client,
+                mirror_full=_MIRROR_REPO,
+                user_repo_full=_USER_REPO,
+                user_sha=_USER_SHA,
+                token=_APP_TOKEN,
+                fallback_token=_PAT_TOKEN,
+                max_files=50,
+            )
+        commit_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/commits"
+        ]
+
+    assert ok is True, "empty tree must return True (early-return branch)"
+    empty_logs = [
+        r for r in caplog.records
+        if "nothing to seed" in r.getMessage() and _MIRROR_REPO in r.getMessage()
+    ]
+    assert empty_logs, "expected a 'nothing to seed' INFO log on empty tree"
+    assert not commit_calls
+
+
+# ---------------------------------------------------------------------------
+# 7 New Tests (Fix 1 verification suite)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_seed_via_tarball_happy_path(caplog: pytest.LogCaptureFixture) -> None:
+    """Mock GET /tarball/{sha} -> real tarball; assert blobs/tree/commit/ref
+    sequence is called with the mirror's local blob SHAs (not user's)."""
+    caplog.set_level(logging.INFO, logger="app.sandbox.github_actions_runner")
+    tar_bytes = _make_tarball({
+        "src/app.py": b"x = 1\n",
+        "tests/test_app.py": b"def test_app(): pass\n",
+    })
+
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(200, content=tar_bytes)
         )
-        # No mirror-side mocks: the function must not reach them.
+        _mock_mirror_seed_endpoints(rx)
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             ok = await _seed_test_mirror_with_user_tree(
@@ -305,24 +260,249 @@ async def test_seed_empty_tree_returns_true_no_commit(
                 max_files=50,
             )
 
-    assert ok is True, "empty tree must return True (early-return branch)"
+        blob_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+        ]
+        tree_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/trees"
+        ]
+        commit_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/commits"
+        ]
+        ref_calls = [
+            c for c in rx.calls
+            if c.request.method == "PATCH" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/refs/heads/main"
+        ]
 
-    # The 'nothing to seed' INFO log must have been emitted.
-    empty_logs = [
+    assert ok is True
+    assert len(blob_calls) == 2
+    assert len(tree_calls) == 1
+    tree_body = json.loads(tree_calls[0].request.content)
+    assert tree_body["base_tree"] == _PARENT_TREE_SHA
+    assert len(tree_body["tree"]) == 2
+    assert len(commit_calls) == 1
+    assert len(ref_calls) == 1
+
+    seeded_logs = [
         r for r in caplog.records
-        if "nothing to seed" in r.getMessage() and _MIRROR_REPO in r.getMessage()
+        if "seeded" in r.getMessage() and "via tarball" in r.getMessage()
     ]
-    assert empty_logs, "expected a 'nothing to seed' INFO log on empty tree"
+    assert seeded_logs, "expected 'via tarball' in seed log line"
 
-    # And the commit endpoint must NOT have been called (early return).
-    # Count respx calls on the mirror commit POST endpoint via the calls
-    # log; no named route was registered for it, so the global calls
-    # counter is the right tool.
-    commit_calls = [
-        c for c in respx.calls
-        if c.request.method == "POST"
-        and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/commits"
-    ]
-    assert not commit_calls, (
-        f"mirror commit endpoint was hit on empty tree: {len(commit_calls)} call(s)"
+
+@pytest.mark.asyncio
+async def test_seed_via_tarball_blocks_dot_git_and_workflows() -> None:
+    """Tarball includes .git/HEAD and .github/workflows/x.yml; assert those
+    are filtered before blob creation."""
+    tar_bytes = _make_tarball({
+        "src/main.py": b"print(1)",
+        ".git/HEAD": b"ref: refs/heads/main",
+        ".github/workflows/x.yml": b"name: x",
+    })
+
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(200, content=tar_bytes)
+        )
+        _mock_mirror_seed_endpoints(rx)
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            ok = await _seed_test_mirror_with_user_tree(
+                client=client,
+                mirror_full=_MIRROR_REPO,
+                user_repo_full=_USER_REPO,
+                user_sha=_USER_SHA,
+                token=_APP_TOKEN,
+                fallback_token=_PAT_TOKEN,
+                max_files=50,
+            )
+
+        blob_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+        ]
+
+    assert ok is True
+    assert len(blob_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_seed_via_tarball_binary_file_filtered() -> None:
+    """Tarball includes an oversized file (> 5 MB); assert it's filtered (not 422'd)."""
+    tar_bytes = _make_tarball({
+        "src/main.py": b"print(1)",
+        "assets/large.png": b"PNG" + b"\x00" * (6 * 1024 * 1024),
+    })
+
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(200, content=tar_bytes)
+        )
+        _mock_mirror_seed_endpoints(rx)
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            ok = await _seed_test_mirror_with_user_tree(
+                client=client,
+                mirror_full=_MIRROR_REPO,
+                user_repo_full=_USER_REPO,
+                user_sha=_USER_SHA,
+                token=_APP_TOKEN,
+                fallback_token=_PAT_TOKEN,
+                max_files=50,
+            )
+
+        blob_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+        ]
+
+    assert ok is True
+    assert len(blob_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_seed_via_tarball_symlink_filtered() -> None:
+    """Tarball includes a symlink; assert it's filtered (security)."""
+    tar_bytes = _make_tarball(
+        entries={"src/main.py": b"print(1)"},
+        symlinks=[("danger_link", "/etc/passwd")],
     )
+
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(200, content=tar_bytes)
+        )
+        _mock_mirror_seed_endpoints(rx)
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            ok = await _seed_test_mirror_with_user_tree(
+                client=client,
+                mirror_full=_MIRROR_REPO,
+                user_repo_full=_USER_REPO,
+                user_sha=_USER_SHA,
+                token=_APP_TOKEN,
+                fallback_token=_PAT_TOKEN,
+                max_files=50,
+            )
+
+        blob_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+        ]
+
+    assert ok is True
+    assert len(blob_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_seed_via_tarball_cap_respected() -> None:
+    """Tarball has 10 files; seed_max_files=5; assert only 5 blobs created."""
+    tar_bytes = _make_tarball({
+        f"file{i}.py": f"print({i})".encode()
+        for i in range(10)
+    })
+
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(200, content=tar_bytes)
+        )
+        _mock_mirror_seed_endpoints(rx)
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            ok = await _seed_test_mirror_with_user_tree(
+                client=client,
+                mirror_full=_MIRROR_REPO,
+                user_repo_full=_USER_REPO,
+                user_sha=_USER_SHA,
+                token=_APP_TOKEN,
+                fallback_token=_PAT_TOKEN,
+                max_files=5,
+            )
+
+        blob_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+        ]
+
+    assert ok is True
+    assert len(blob_calls) == 5
+
+
+@pytest.mark.asyncio
+async def test_seed_via_tarball_size_cap_rejects_oversized(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Tarball response is > 100 MB; assert httpx.HTTPStatusError raised
+    before parse_tar_to_files is called."""
+    caplog.set_level(logging.WARNING, logger="app.sandbox.github_actions_runner")
+    oversized_bytes = b"x" * (MAX_TARBALL_BYTES + 1)
+
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(200, content=oversized_bytes)
+        )
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            with pytest.raises(httpx.HTTPStatusError) as exc_info:
+                await fetch_user_repo_tarball(
+                    client, _USER_REPO, _USER_SHA, _APP_TOKEN, _PAT_TOKEN
+                )
+            assert "tarball too large" in str(exc_info.value)
+
+            ok = await _seed_test_mirror_with_user_tree(
+                client=client,
+                mirror_full=_MIRROR_REPO,
+                user_repo_full=_USER_REPO,
+                user_sha=_USER_SHA,
+                token=_APP_TOKEN,
+                fallback_token=_PAT_TOKEN,
+                max_files=50,
+            )
+
+    assert ok is False
+    fail_logs = [
+        r for r in caplog.records
+        if "failed to seed" in r.getMessage() and "HTTPStatusError" in r.getMessage()
+    ]
+    assert fail_logs, "expected HTTPStatusError in warning log"
+
+
+@pytest.mark.asyncio
+async def test_seed_via_tarball_404_continues_with_fresh_mirror(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GET /tarball/{sha} returns 404 (sha not found); function returns False
+    + WARNING; no commits are written to the mirror."""
+    caplog.set_level(logging.WARNING, logger="app.sandbox.github_actions_runner")
+
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(404, json={"message": "Not Found"})
+        )
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            ok = await _seed_test_mirror_with_user_tree(
+                client=client,
+                mirror_full=_MIRROR_REPO,
+                user_repo_full=_USER_REPO,
+                user_sha=_USER_SHA,
+                token=_APP_TOKEN,
+                fallback_token=_PAT_TOKEN,
+                max_files=50,
+            )
+        commit_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/commits"
+        ]
+
+    assert ok is False, "tarball 404 must return False"
+    fail_logs = [
+        r for r in caplog.records
+        if "failed to seed" in r.getMessage() and _MIRROR_REPO in r.getMessage()
+    ]
+    assert fail_logs, "expected 'failed to seed' WARNING log on 404"
+    assert not commit_calls

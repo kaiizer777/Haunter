@@ -547,160 +547,82 @@ async def _seed_test_mirror_with_user_tree(
     max_files: int,
 ) -> bool:
     """
-    Seed the test mirror's default branch with the user's repo tree at
-    user_sha. This is what makes verification meaningful: the test mirror
-    is otherwise a fresh empty repo (just the auto_init README + the
-    Haunter-pushed workflow), so pytest has no tests to actually run and
-    the fix can never be validated.
+    Seed the test mirror with the user repo's tree at user_sha.
 
-    Best-effort: any failure is logged and the runner continues with the
-    old "fresh mirror" behaviour. Returns True on success, False on any
-    failure. Falls back to the PAT for tree/commit/ref calls if the App
-    token hits 403 (e.g. on a private user-repo the App can't see).
+    Production implementation: tarball + native blob creation. The previous
+    SHA-reference approach was broken because GitHub's Git Data API
+    rejects cross-repo blob references (returns 422) for repos that do
+    not share a fork network. See issues.md Defect 1.
     """
-    # Decide which token to use for the seed ops. The App token is the
-    # default; the PAT is the fallback if the App can't see the user's
-    # private repo (e.g. App not installed on the user's account).
+    from app.sandbox._seed_tarball import (
+        fetch_user_repo_tarball,
+        parse_tar_to_files,
+        seed_mirror_via_content,
+    )
+
     seed_token = token
-    seed_fallback = fallback_token
-
-    def _hdr(tok: str) -> dict[str, str]:
-        return _auth_headers(tok)
-
+    fallback_was_used = False
     try:
-        # 1. Get the user's tree SHA at the failing commit.
-        commit_resp = await client.get(
-            f"{_GITHUB_API_BASE}/repos/{user_repo_full}/git/commits/{user_sha}",
-            headers=_hdr(seed_token),
+        # 1. Fetch the tarball (single round-trip). The helper transparently
+        # retries with fallback_token on a 403 and returns a tuple so we can
+        # track which token is now in use for the rest of the seed flow.
+        tar_bytes, used_token = await fetch_user_repo_tarball(
+            client, user_repo_full, user_sha, seed_token, fallback_token
         )
-        if commit_resp.status_code == 403 and seed_fallback and seed_fallback != seed_token:
-            logger.warning(
-                "github_actions_runner: seed step 1 (user commit) 403 with App token — retrying with PAT"
-            )
-            commit_resp = await client.get(
-                f"{_GITHUB_API_BASE}/repos/{user_repo_full}/git/commits/{user_sha}",
-                headers=_hdr(seed_fallback),
-            )
-            seed_token = seed_fallback
-        commit_resp.raise_for_status()
-        user_tree_sha = commit_resp.json()["tree"]["sha"]
+        seed_token = used_token
+        if used_token == fallback_token:
+            fallback_was_used = True
 
-        # 2. Recursive tree entries from the user repo.
-        tree_resp = await client.get(
-            f"{_GITHUB_API_BASE}/repos/{user_repo_full}/git/trees/{user_tree_sha}?recursive=1",
-            headers=_hdr(seed_token),
-        )
-        tree_resp.raise_for_status()
-        entries = tree_resp.json().get("tree", [])
-
-        # 3. Filter: blobs only, skip blocked prefixes, cap at max_files.
-        files_to_copy: list[dict] = []
-        for e in entries:
-            if e.get("type") != "blob":
-                continue
-            if any(e["path"].startswith(p) for p in _SEED_SKIP_PREFIXES):
-                continue
-            files_to_copy.append(e)
-            if len(files_to_copy) >= max_files:
-                break
-
-        if not files_to_copy:
+        # 2. Parse to {path: content}, filtering by skip prefixes and size.
+        files = parse_tar_to_files(tar_bytes, max_files=max_files)
+        if not files:
             logger.info(
                 "github_actions_runner: nothing to seed into %s (no user files after filter)",
                 mirror_full,
             )
             return True
 
-        # 4. Get the current HEAD on the mirror (its auto_init commit).
+        # 3. Mirror metadata.
         mirror_repo_resp = await client.get(
             f"{_GITHUB_API_BASE}/repos/{mirror_full}",
-            headers=_hdr(seed_token),
+            headers=_auth_headers(seed_token),
         )
         mirror_repo_resp.raise_for_status()
         default_branch: str = mirror_repo_resp.json()["default_branch"]
         ref_resp = await client.get(
             f"{_GITHUB_API_BASE}/repos/{mirror_full}/git/refs/heads/{default_branch}",
-            headers=_hdr(seed_token),
+            headers=_auth_headers(seed_token),
         )
         ref_resp.raise_for_status()
         parent_sha: str = ref_resp.json()["object"]["sha"]
         parent_commit_resp = await client.get(
             f"{_GITHUB_API_BASE}/repos/{mirror_full}/git/commits/{parent_sha}",
-            headers=_hdr(seed_token),
+            headers=_auth_headers(seed_token),
         )
         parent_commit_resp.raise_for_status()
         parent_tree_sha: str = parent_commit_resp.json()["tree"]["sha"]
 
-        # 5. Create a new tree on the mirror: base = parent tree, with
-        #    entries that reference the user's blob SHAs (cross-repo).
-        new_tree_resp = await client.post(
-            f"{_GITHUB_API_BASE}/repos/{mirror_full}/git/trees",
-            headers=_hdr(seed_token),
-            json={
-                "base_tree": parent_tree_sha,
-                "tree": [
-                    {
-                        "path": e["path"],
-                        "mode": e.get("mode", "100644"),
-                        "type": "blob",
-                        "sha": e["sha"],
-                    }
-                    for e in files_to_copy
-                ],
-            },
+        # 4. Write natively to the mirror.
+        new_commit_sha = await seed_mirror_via_content(
+            client=client,
+            mirror=mirror_full,
+            files=files,
+            parent_sha=parent_sha,
+            parent_tree_sha=parent_tree_sha,
+            default_branch=default_branch,
+            token=seed_token,
+            fallback_token=fallback_token,
         )
-        if new_tree_resp.status_code == 403 and seed_fallback and seed_fallback != seed_token:
-            logger.warning(
-                "github_actions_runner: seed step 5 (create tree) 403 with App token — retrying with PAT"
-            )
-            new_tree_resp = await client.post(
-                f"{_GITHUB_API_BASE}/repos/{mirror_full}/git/trees",
-                headers=_hdr(seed_fallback),
-                json={
-                    "base_tree": parent_tree_sha,
-                    "tree": [
-                        {
-                            "path": e["path"],
-                            "mode": e.get("mode", "100644"),
-                            "type": "blob",
-                            "sha": e["sha"],
-                        }
-                        for e in files_to_copy
-                    ],
-                },
-            )
-            seed_token = seed_fallback
-        new_tree_resp.raise_for_status()
-        new_tree_sha: str = new_tree_resp.json()["sha"]
-
-        # 6. Create the commit.
-        new_commit_resp = await client.post(
-            f"{_GITHUB_API_BASE}/repos/{mirror_full}/git/commits",
-            headers=_hdr(seed_token),
-            json={
-                "message": f"haunter: seed test mirror with {len(files_to_copy)} file(s) from {user_repo_full}@{user_sha[:12]}",
-                "tree": new_tree_sha,
-                "parents": [parent_sha],
-            },
-        )
-        new_commit_resp.raise_for_status()
-        new_commit_sha: str = new_commit_resp.json()["sha"]
-
-        # 7. Fast-forward the default branch to the new commit.
-        update_resp = await client.patch(
-            f"{_GITHUB_API_BASE}/repos/{mirror_full}/git/refs/heads/{default_branch}",
-            headers=_hdr(seed_token),
-            json={"sha": new_commit_sha, "force": True},
-        )
-        update_resp.raise_for_status()
 
         logger.info(
-            "github_actions_runner: seeded %s with %d file(s) from %s @ %s (new HEAD: %s)",
+            "github_actions_runner: seeded %s with %d file(s) from %s @ %s via tarball "
+            "(new HEAD: %s, token=%s)",
             mirror_full,
-            len(files_to_copy),
+            len(files),
             user_repo_full,
             user_sha[:12],
             new_commit_sha[:12],
+            "pat" if fallback_was_used else "app",
         )
         return True
     except Exception as exc:
