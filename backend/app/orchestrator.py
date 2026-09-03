@@ -86,6 +86,15 @@ class RunStatus(str, Enum):
     error = "error"
 
 
+# Steps eligible for the fast-fail repeated-failure heuristic.
+# Only LLM-driven steps (producing or sandbox-verifying a fix) are eligible.
+# Deterministic non-LLM steps (like mirror seeding or context gathering) are excluded.
+_FAST_FAIL_ELIGIBLE_STEPS: frozenset[str] = frozenset({
+    RunStatus.fix_generation.value,    # LLM produces the fix
+    RunStatus.verification.value,      # same fix fails the test again
+})
+
+
 # Forward-only valid transitions. Any pair not listed here is rejected.
 # error is reachable from every non-terminal state.
 _ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
@@ -279,6 +288,48 @@ async def _persist_error_step(
             pass
 
 
+def check_fast_fail(
+    prior_tail: Optional[str],
+    current_tail: Optional[str],
+    current_step: Optional[str],
+    run_id: Optional[Any] = None,
+    attempt_number: int = 1,
+    prior_attempt_number: int = 0,
+) -> tuple[bool, Optional[str]]:
+    """Determine whether repeated failure should trigger fast-fail to fallback.
+
+    Returns:
+        (skip_to_fallback, reason)
+        - (True, "llm_loop") if tails match and current_step is in _FAST_FAIL_ELIGIBLE_STEPS.
+        - (False, "non_llm_repeat") if tails match but current_step is not eligible.
+        - (False, None) if tails do not match or either tail is empty.
+    """
+    if not prior_tail or not current_tail:
+        return False, None
+    if current_tail != prior_tail:
+        return False, None
+    if current_step in _FAST_FAIL_ELIGIBLE_STEPS:
+        logger.warning(
+            "orchestrator: run=%s attempt=%d failure_reason tail matches "
+            "attempt #%d — fast-failing (LLM-deterministic, step=%s; deterministic LLM loop)",
+            run_id,
+            attempt_number,
+            prior_attempt_number,
+            current_step,
+        )
+        return True, "llm_loop"
+
+    logger.info(
+        "orchestrator: run=%s attempt=%d failure_reason tail matches "
+        "attempt #%d but step=%s is not in eligible steps — skipping fast-fail",
+        run_id,
+        attempt_number,
+        prior_attempt_number,
+        current_step,
+    )
+    return False, "non_llm_repeat"
+
+
 # ---------------------------------------------------------------------------
 # Pipeline body (Phase 1 — extracted to wrap in asyncio.wait_for)
 # ---------------------------------------------------------------------------
@@ -381,7 +432,7 @@ async def _orchestrator_pipeline_body(
     max_attempts: int = settings.max_attempts
     prior_attempt: Optional[Attempt] = None
     prior_failure_reason_tail: Optional[str] = None
-    skip_to_fallback: bool = False
+    skip_to_fallback_reason: Optional[str] = None
 
     for iteration in range(max_attempts):
         # ---- Per-iteration session (BLOCKER-1 fix) ----
@@ -466,7 +517,7 @@ async def _orchestrator_pipeline_body(
                     )
                     attempt_db.add(error_step)
                     await attempt_db.commit()
-                    skip_to_fallback = True
+                    skip_to_fallback_reason = "low_confidence"
                     break  # closes the async with, exits the for loop
     
                 except PatchFormatRetryExhausted as fmt_err:
@@ -485,7 +536,7 @@ async def _orchestrator_pipeline_body(
                     )
                     attempt_db.add(error_step)
                     await attempt_db.commit()
-                    skip_to_fallback = True
+                    skip_to_fallback_reason = "format_exhausted"
                     break
 
                 except (AttemptCapExceeded, PatchRejected, FixGenerationError) as fix_err:
@@ -662,33 +713,30 @@ async def _orchestrator_pipeline_body(
     
                 # ---- Fast-fail on repeated failure_reason (Phase 1, BLOCKER-1 / NICE-1) ----
                 # If the trailing N chars of this attempt's failure_reason match
-                # the previous attempt's, the LLM is producing the same broken
-                # fix deterministically. Bail to fallback instead of burning
-                # another attempt that will hit the same wall.
+                # the previous attempt's AND the step is in _FAST_FAIL_ELIGIBLE_STEPS,
+                # the LLM is producing the same broken fix deterministically.
+                # Bail to fallback instead of burning another attempt that will hit the same wall.
                 current_failure_reason = failure_reason or ""
                 current_tail = (
                     current_failure_reason[-_FAILURE_REASON_TAIL_CHARS:]
                     if current_failure_reason
                     else ""
                 )
-                if (
-                    prior_failure_reason_tail
-                    and current_tail
-                    and current_tail == prior_failure_reason_tail
-                ):
-                    logger.warning(
-                        "orchestrator: run=%s attempt=%d failure_reason tail matches "
-                        "attempt #%d — fast-failing to fallback (deterministic LLM loop)",
-                        run_id,
-                        attempt.attempt_number,
-                        prior_attempt.attempt_number if prior_attempt else 0,
-                    )
-                    skip_to_fallback = True
+                fast_fail, ff_reason = check_fast_fail(
+                    prior_tail=prior_failure_reason_tail,
+                    current_tail=current_tail,
+                    current_step=state.get("step"),
+                    run_id=run_id,
+                    attempt_number=attempt.attempt_number,
+                    prior_attempt_number=prior_attempt.attempt_number if prior_attempt else 0,
+                )
+                if fast_fail:
+                    skip_to_fallback_reason = ff_reason
                     break  # exit the for loop; async with closes the session
     
                 if iteration + 1 >= max_attempts:
                     # Exhausted all attempts -- fallback (post diagnosis-only comment)
-                    skip_to_fallback = True
+                    skip_to_fallback_reason = "exhausted"
                     break
     
                 # ---- Loop: verification -> fix_generation for retry ----
@@ -715,7 +763,7 @@ async def _orchestrator_pipeline_body(
                 "— continuing with fresh session",
                 run_id, iteration + 1, type(db_err).__name__, db_err,
             )
-            skip_to_fallback = True
+            skip_to_fallback_reason = "db_error"
             if iteration + 1 >= max_attempts:
                 # Last attempt — no fresh session to try. Let the
                 # post-loop fallback run.
@@ -725,7 +773,7 @@ async def _orchestrator_pipeline_body(
     # ------------------------------------------------------------------
     # Post-loop fallback block — fresh session (BLOCKER-1 consistency)
     # ------------------------------------------------------------------
-    if skip_to_fallback:
+    if skip_to_fallback_reason is not None:
         async with async_session_maker() as fb_db:
             run_result = await fb_db.execute(
                 select(Run).where(Run.id == run_id)
@@ -794,7 +842,7 @@ async def _orchestrator_pipeline_body(
 
             logger.info(
                 "orchestrator: run=%s → fallback_commented (skip_to_fallback=%s, attempts=%d)",
-                run_id, skip_to_fallback, len(all_attempts),
+                run_id, skip_to_fallback_reason, len(all_attempts),
             )
 
 

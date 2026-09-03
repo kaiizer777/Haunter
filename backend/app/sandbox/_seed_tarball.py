@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import bz2
+import gzip
 import io
 import logging
 import tarfile
@@ -99,6 +101,22 @@ async def fetch_user_repo_tarball(
     return resp.content, used_token
 
 
+def _is_plain_tar(tar_bytes: bytes) -> bool:
+    """Check if byte sequence represents an uncompressed tar archive.
+
+    A valid uncompressed tarball either has the 'ustar' magic at offset 257,
+    is completely empty (0 bytes), or starts with a 512-byte zero block
+    (empty archive).
+    """
+    if not tar_bytes:
+        return True
+    if len(tar_bytes) >= 262 and tar_bytes[257:262] in (b"ustar", b"\x00\x00\x00\x00\x00"):
+        return True
+    if tar_bytes.startswith(b"\x00" * 512):
+        return True
+    return False
+
+
 def parse_tar_to_files(
     tar_bytes: bytes,
     max_files: int,
@@ -117,7 +135,26 @@ def parse_tar_to_files(
     path is preserved as the file's location in the mirror.
     """
     files: dict[str, bytes] = {}
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tar:
+
+    # GitHub's codeload service (reached after 302 redirect from the tarball API)
+    # returns gzip bodies with Content-Type: application/x-gzip but without
+    # Content-Encoding: gzip. Consequently, httpx does not auto-decompress the body.
+    # When passed directly to tarfile.open(mode="r:"), this caused ReadError: invalid header
+    # (e.g. "github_actions_runner: failed to seed ... (ReadError: invalid header) — continuing with fresh mirror").
+    # Sniff the magic bytes to decompress gzip (or bzip2 defensive) or read plain tar directly.
+    fileobj: io.BufferedIOBase
+    if tar_bytes.startswith(b"\x1f\x8b"):
+        fileobj = gzip.GzipFile(fileobj=io.BytesIO(tar_bytes))
+    elif tar_bytes.startswith(b"BZh"):
+        fileobj = bz2.BZ2File(io.BytesIO(tar_bytes))
+    elif _is_plain_tar(tar_bytes):
+        fileobj = io.BytesIO(tar_bytes)
+    else:
+        raise ValueError(
+            f"parse_tar_to_files: unrecognized compression; first bytes: {tar_bytes[:8]!r}"
+        )
+
+    with tarfile.open(fileobj=fileobj, mode="r:") as tar:
         members = sorted(tar.getmembers(), key=lambda m: m.name)
         for member in members:
             if not member.isfile():

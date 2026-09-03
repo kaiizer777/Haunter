@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from app.orchestrator import (
     RunStatus,
     _transition,
     _validate_transition,
+    check_fast_fail,
     handle_failed_run,
 )
 from app.subagents.context_gatherer import _redact_secrets, _truncate_and_redact
@@ -840,3 +842,76 @@ async def test_orchestrator_path_traversal_still_errors(
     )
     # failure_reason mentions the path traversal
     assert "path traversal" in (run.failure_reason or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Test 16: Fast-fail heuristic gates (Patch B)
+# ---------------------------------------------------------------------------
+
+
+def test_fast_fail_triggers_on_repeated_fix_generation_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two consecutive attempts fail at fix_generation with identical trailing
+    failure_reason: assert skip_to_fallback is True and log contains 'deterministic LLM loop'."""
+    caplog.set_level(logging.WARNING, logger="app.orchestrator")
+    identical_tail = "pytest: 1 failed in tests/test_main.py:42"
+
+    skip_to_fallback, reason = check_fast_fail(
+        prior_tail=identical_tail,
+        current_tail=identical_tail,
+        current_step=RunStatus.fix_generation.value,
+        attempt_number=2,
+        prior_attempt_number=1,
+    )
+
+    assert skip_to_fallback is True
+    assert reason == "llm_loop"
+    log_messages = [r.getMessage() for r in caplog.records]
+    assert any("deterministic LLM loop" in m for m in log_messages)
+    assert any("LLM-deterministic, step=" in m for m in log_messages)
+
+
+def test_fast_fail_does_not_trigger_on_repeated_mirror_seed_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two consecutive attempts fail at mirror_seed step: assert skip_to_fallback
+    is False so loop continues."""
+    caplog.set_level(logging.INFO, logger="app.orchestrator")
+    seed_tail = "github_actions_runner: failed to seed mirror (422 Unprocessable)"
+
+    skip_to_fallback, reason = check_fast_fail(
+        prior_tail=seed_tail,
+        current_tail=seed_tail,
+        current_step="mirror_seed",
+        attempt_number=2,
+        prior_attempt_number=1,
+    )
+
+    assert skip_to_fallback is False
+    assert reason == "non_llm_repeat"
+    log_messages = [r.getMessage() for r in caplog.records]
+    assert not any("fast-failing" in m for m in log_messages)
+
+
+def test_fast_fail_does_not_trigger_on_repeated_context_gatherer_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two consecutive attempts fail at context_gatherer step: assert skip_to_fallback
+    is False so loop continues."""
+    caplog.set_level(logging.INFO, logger="app.orchestrator")
+    gather_tail = "context_gatherer: GitHub API rate limit exceeded"
+
+    skip_to_fallback, reason = check_fast_fail(
+        prior_tail=gather_tail,
+        current_tail=gather_tail,
+        current_step="context_gatherer",
+        attempt_number=2,
+        prior_attempt_number=1,
+    )
+
+    assert skip_to_fallback is False
+    assert reason == "non_llm_repeat"
+    log_messages = [r.getMessage() for r in caplog.records]
+    assert not any("fast-failing" in m for m in log_messages)
+

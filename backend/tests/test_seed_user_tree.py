@@ -13,6 +13,7 @@ DB-free and sync-free.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -70,6 +71,30 @@ def _make_tarball(
                 info.linkname = target
                 tar.addfile(info)
     return buf.getvalue()
+
+
+def _make_gzipped_tarball(
+    entries: dict[str, bytes],
+    prefix: str = "repo-sha",
+    symlinks: Optional[list[tuple[str, str]]] = None,
+) -> bytes:
+    """Build an in-memory gzipped tarball mimicking GitHub codeload's output."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for path, content in entries.items():
+            name = f"{prefix}/{path}" if prefix else path
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.type = tarfile.REGTYPE
+            tar.addfile(info, io.BytesIO(content))
+        if symlinks:
+            for link_name, target in symlinks:
+                name = f"{prefix}/{link_name}" if prefix else link_name
+                info = tarfile.TarInfo(name=name)
+                info.type = tarfile.SYMTYPE
+                info.linkname = target
+                tar.addfile(info)
+    return gzip.compress(buf.getvalue())
 
 
 def _mock_mirror_seed_endpoints(rx: respx.MockRouter) -> None:
@@ -506,3 +531,62 @@ async def test_seed_via_tarball_404_continues_with_fresh_mirror(
     ]
     assert fail_logs, "expected 'failed to seed' WARNING log on 404"
     assert not commit_calls
+
+
+def test_parse_tar_to_files_accepts_gzipped_tarball() -> None:
+    """parse_tar_to_files unpacks gzipped tarballs transparently."""
+    from app.sandbox._seed_tarball import parse_tar_to_files
+
+    entries = {
+        "src/app.py": b"print('app')",
+        "config.json": b'{"key": "val"}',
+    }
+    gzipped_bytes = _make_gzipped_tarball(entries)
+    files = parse_tar_to_files(gzipped_bytes, max_files=10)
+    assert files == entries
+
+
+@pytest.mark.asyncio
+async def test_seed_via_gzipped_tarball_happy_path(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Codeload returns gzip body with Content-Type: application/x-gzip; seeds successfully."""
+    caplog.set_level(logging.INFO, logger="app.sandbox.github_actions_runner")
+    entries = {
+        "src/main.py": b"print('main')",
+        ".github/workflows/haunter-test-py.yml": b"name: CI",
+        "tests/test_main.py": b"assert True",
+    }
+    gzipped_bytes = _make_gzipped_tarball(entries)
+
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"Content-Type": "application/x-gzip"},
+                content=gzipped_bytes,
+            )
+        )
+        _mock_mirror_seed_endpoints(rx)
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            ok = await _seed_test_mirror_with_user_tree(
+                client=client,
+                mirror_full=_MIRROR_REPO,
+                user_repo_full=_USER_REPO,
+                user_sha=_USER_SHA,
+                token=_APP_TOKEN,
+                fallback_token=_PAT_TOKEN,
+                max_files=50,
+            )
+
+    assert ok is True, "gzipped tarball seed must return True"
+
+    seeded_logs = [
+        r for r in caplog.records
+        if "seeded" in r.getMessage() and _MIRROR_REPO in r.getMessage()
+    ]
+    assert seeded_logs, "expected a 'seeded' INFO log on gzipped happy path"
+    assert "2 file(s)" in seeded_logs[0].getMessage()
+    assert "via tarball" in seeded_logs[0].getMessage()
+
