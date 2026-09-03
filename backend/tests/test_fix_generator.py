@@ -33,7 +33,10 @@ from app.subagents.fix_generator import (
     LowConfidenceSkip,
     LOW_CONFIDENCE_THRESHOLD,
     PatchRejected,
+    PatchFormatRejected,
+    PatchFormatRetryExhausted,
     _build_messages,
+    _call_with_format_retry,
     _validate_patch,
     generate_fix,
 )
@@ -689,4 +692,150 @@ def test_build_messages_alternation_invariant_with_both() -> None:
     assert roles == ["system", "user", "assistant", "user", "assistant", "user"]
     for i in range(1, len(messages)):
         assert messages[i]["role"] != messages[i - 1]["role"]
+
+
+# ---------------------------------------------------------------------------
+# Tests for Fix 4: Validation self-correction + soft-signal routing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_generate_fix_format_retry_recovers(db: AsyncSession) -> None:
+    """First LLM returns patch without diff markers; second LLM (with
+    format anchor) returns valid diff. Assert second call lands in DB,
+    no exception raised."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    invalid_format_response = {
+        **_VALID_LLM_RESPONSE,
+        "content": json.dumps(
+            {
+                "patch": "def fixed(): pass\n",
+                "confidence": 80,
+                "strategy_notes": "fixed without diff markers",
+            }
+        ),
+    }
+    valid_format_response = {
+        **_VALID_LLM_RESPONSE,
+        "content": json.dumps(
+            {
+                "patch": _VALID_PATCH,
+                "confidence": 85,
+                "strategy_notes": "fixed with diff markers on retry",
+            }
+        ),
+    }
+
+    mock_complete = AsyncMock(side_effect=[invalid_format_response, valid_format_response])
+
+    with patch("app.subagents.fix_generator.LLMClient.complete", mock_complete):
+        attempt = await generate_fix(
+            run=run,
+            diagnosis_summary="SyntaxError in app/models.py:10",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert mock_complete.call_count == 2
+    assert attempt.patch_text == _VALID_PATCH
+    assert attempt.confidence_score == 85
+    result = await db.execute(select(Attempt).where(Attempt.run_id == run.id))
+    persisted = result.scalars().all()
+    assert len(persisted) == 1
+    assert persisted[0].patch_text == _VALID_PATCH
+
+
+@pytest.mark.anyio
+async def test_generate_fix_format_retry_exhausted_raises_soft(db: AsyncSession) -> None:
+    """Both LLM calls return patch without diff markers. Assert
+    PatchFormatRetryExhausted is raised, NOT PatchRejected."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    invalid_format_response = {
+        **_VALID_LLM_RESPONSE,
+        "content": json.dumps(
+            {
+                "patch": "def fixed(): pass\n",
+                "confidence": 80,
+                "strategy_notes": "fixed without diff markers",
+            }
+        ),
+    }
+
+    mock_complete = AsyncMock(return_value=invalid_format_response)
+
+    with (
+        patch("app.subagents.fix_generator.LLMClient.complete", mock_complete),
+        pytest.raises(PatchFormatRetryExhausted) as exc_info,
+    ):
+        await generate_fix(
+            run=run,
+            diagnosis_summary="SyntaxError in app/models.py:10",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert isinstance(exc_info.value, PatchFormatRejected)
+    assert isinstance(exc_info.value, PatchRejected)
+    assert mock_complete.call_count == 2
+
+    # No Attempt row inserted
+    result = await db.execute(select(Attempt).where(Attempt.run_id == run.id))
+    assert result.scalars().all() == []
+
+
+@pytest.mark.anyio
+async def test_path_traversal_still_fatal(db: AsyncSession) -> None:
+    """LLM returns patch with '../../etc/passwd'. Assert PatchRejected
+    (not PatchFormatRetryExhausted) is raised on the FIRST call. No retry.
+    No Attempt row inserted."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    traversal_patch = (
+        "--- a/../../etc/passwd\n"
+        "+++ b/etc/passwd\n"
+        "@@ -0,0 +1 @@\n"
+        "+malicious:root:0:0\n"
+    )
+    traversal_response = {
+        **_VALID_LLM_RESPONSE,
+        "content": json.dumps(
+            {
+                "patch": traversal_patch,
+                "confidence": 90,
+                "strategy_notes": "evil patch",
+            }
+        ),
+    }
+
+    mock_complete = AsyncMock(return_value=traversal_response)
+
+    with (
+        patch("app.subagents.fix_generator.LLMClient.complete", mock_complete),
+        pytest.raises(PatchRejected) as exc_info,
+    ):
+        await generate_fix(
+            run=run,
+            diagnosis_summary="Error in etc/passwd",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert not isinstance(exc_info.value, PatchFormatRejected)
+    assert type(exc_info.value) is PatchRejected
+    assert mock_complete.call_count == 1
+
+    # No Attempt row inserted
+    result = await db.execute(select(Attempt).where(Attempt.run_id == run.id))
+    assert result.scalars().all() == []
 

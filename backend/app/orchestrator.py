@@ -316,6 +316,7 @@ async def _orchestrator_pipeline_body(
         generate_fix,
         AttemptCapExceeded,
         LowConfidenceSkip,
+        PatchFormatRetryExhausted,
         PatchRejected,
         FixGenerationError,
     )
@@ -468,6 +469,25 @@ async def _orchestrator_pipeline_body(
                     skip_to_fallback = True
                     break  # closes the async with, exits the for loop
     
+                except PatchFormatRetryExhausted as fmt_err:
+                    """Same routing as LowConfidenceSkip — soft signal,
+                    not a hard error. The post-loop fallback block will
+                    post a diagnosis comment so the user still gets
+                    value."""
+                    logger.info(
+                        "orchestrator: run=%s patch format retry exhausted → fallback (%s)",
+                        run_id, fmt_err,
+                    )
+                    error_step = RunStep(
+                        run_id=run.id, step_name="fix_generator_format_exhausted",
+                        input_tokens=0, output_tokens=0, latency_ms=0,
+                        cost_estimate=0.0,
+                    )
+                    attempt_db.add(error_step)
+                    await attempt_db.commit()
+                    skip_to_fallback = True
+                    break
+
                 except (AttemptCapExceeded, PatchRejected, FixGenerationError) as fix_err:
                     # R-02: skip the noise RunStep when there's no signal to show.
                     # The exception did not surface real token/latency data, so a

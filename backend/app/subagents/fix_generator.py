@@ -77,6 +77,16 @@ class PatchRejected(Exception):
     """Raised when the generated patch fails sanity or path-traversal validation."""
 
 
+class PatchFormatRejected(PatchRejected):
+    """Format-only failure. Subclass of PatchRejected so existing
+    `except PatchRejected` clauses still catch it."""
+
+
+class PatchFormatRetryExhausted(PatchFormatRejected):
+    """The format-retry loop hit its cap. Soft signal —
+    orchestrator routes to fallback."""
+
+
 class LowConfidenceSkip(Exception):
     """
     Raised (before any DB insert) when the LLM signals it cannot determine a fix:
@@ -101,6 +111,7 @@ class FixGenerationError(Exception):
 # Confidence below this threshold is treated as "I don't know" — LowConfidenceSkip
 # is raised and no Attempt row is inserted. Calibrated to 30 per acceptance criteria.
 LOW_CONFIDENCE_THRESHOLD: int = 30
+_PATCH_FORMAT_RETRY_CAP: int = 1
 
 
 class FixOutput(BaseModel):
@@ -145,6 +156,7 @@ def _validate_patch(patch: str) -> None:
 
     Raises:
         PatchRejected: with a human-readable reason.
+        PatchFormatRejected: if patch lacks required diff markers (retriable).
     """
     stripped = patch.strip()
     if not stripped:
@@ -155,7 +167,7 @@ def _validate_patch(patch: str) -> None:
     has_unified = "---" in stripped and "+++" in stripped
 
     if not (has_at_hunk or has_git_diff or has_unified):
-        raise PatchRejected(
+        raise PatchFormatRejected(
             "Patch contains none of the required diff markers: '@@', 'diff --git', or '---'/'+++'."
         )
 
@@ -553,6 +565,74 @@ async def _call_and_parse(
         ) from second_err
 
 
+async def _call_with_format_retry(
+    messages: list[dict[str, str]],
+    diagnosis_summary: str,
+    prior_attempt: Optional[Attempt],
+    db: AsyncSession,
+    run_id: uuid.UUID,
+    repo_id: Optional[uuid.UUID],
+) -> tuple[FixOutput, dict]:
+    """Call the LLM, parse, validate patch format. On format failure, retry
+    ONCE with an explicit format-correction prompt. On second failure, raise
+    PatchFormatRetryExhausted (subclass of PatchRejected).
+
+    Path-traversal rejections (PatchRejected but not PatchFormatRejected)
+    are NOT retried — they are security violations and must abort.
+    """
+    fix_output, response = await _call_and_parse(
+        messages=messages,
+        diagnosis_summary=diagnosis_summary,
+        prior_attempt=prior_attempt,
+        db=db,
+        run_id=run_id,
+        repo_id=repo_id,
+    )
+
+    # If low confidence or empty patch, do not format-retry: return as-is
+    # so generate_fix can raise LowConfidenceSkip before any DB insert.
+    if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
+        return fix_output, response
+
+    # Retry loop. _PATCH_FORMAT_RETRY_CAP=1 means: try once, retry once,
+    # then give up. Path-traversal rejections (the base PatchRejected
+    # class) are NOT caught here — they bubble up immediately.
+    for format_attempt in range(_PATCH_FORMAT_RETRY_CAP):
+        try:
+            _validate_patch(fix_output.patch)
+            return fix_output, response
+        except PatchFormatRejected as e:
+            logger.warning(
+                "fix_generator: run=%s patch format rejected (%s) — retrying with format anchor",
+                run_id,
+                e,
+            )
+            messages = _build_messages(
+                diagnosis_summary=diagnosis_summary,
+                prior_attempt=prior_attempt,
+                validation_error_context=f"patch format: {e}",
+            )
+            fix_output, response = await _call_and_parse(
+                messages=messages,
+                diagnosis_summary=diagnosis_summary,
+                prior_attempt=prior_attempt,
+                db=db,
+                run_id=run_id,
+                repo_id=repo_id,
+            )
+            if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
+                return fix_output, response
+
+    # Final attempt: validate and raise exhausted if it still fails.
+    # This is the "give up" branch after the loop above has retried
+    # _PATCH_FORMAT_RETRY_CAP times.
+    try:
+        _validate_patch(fix_output.patch)
+        return fix_output, response
+    except PatchFormatRejected as e:
+        raise PatchFormatRetryExhausted(str(e)) from e
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -655,7 +735,7 @@ async def generate_fix(
         # ---------------------------------------------------------------------
         repo_id: Optional[uuid.UUID] = getattr(run, "repo_id", None)
 
-        fix_output, response = await _call_and_parse(
+        fix_output, response = await _call_with_format_retry(
             messages=messages,
             diagnosis_summary=diagnosis_summary,
             prior_attempt=prior_attempt,
