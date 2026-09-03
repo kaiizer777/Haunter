@@ -218,12 +218,47 @@ def _check_path(raw_path: str) -> None:
 # Deterministic ModuleNotFoundError fallback
 # ---------------------------------------------------------------------------
 
-# Captures the module name from the canonical "ModuleNotFoundError: No module
-# named 'X'" line. The same regex the Python traceback uses; quoted either
-# with single or double quotes.
-_MODULE_NOT_FOUND_RE: re.Pattern[str] = re.compile(
+# Original pattern — kept for the literal Python traceback case (fast path).
+_INLINE_MODULE_NOT_FOUND_RE: re.Pattern[str] = re.compile(
     r"ModuleNotFoundError:\s*No module named\s*['\"]([^'\"]+)['\"]"
 )
+
+# Prose-tolerant pattern — matches across newlines and intermediate prose.
+# Tolerates the structured format produced by context_gatherer:
+#   "Error type: ModuleNotFoundError\nFile: x.py\nReason: No module named 'app'"
+#   "ModuleNotFoundError: ... No module named app"   (no quotes)
+#   "ModuleNotFoundError\nNo module named 'app'"     (newline between)
+_PROSE_MODULE_NOT_FOUND_RE: re.Pattern[str] = re.compile(
+    r"""
+    ModuleNotFoundError       # the type token, always required
+    [\s\S]*?                  # any text including newlines, non-greedy
+    No\s+module\s+named       # canonical phrase
+    \s+['"]?                  # optional opening quote
+    (?P<module>
+        [A-Za-z_][A-Za-z0-9_]*             # top-level package
+        (?:\.[A-Za-z_][A-Za-z0-9_]*)*      # optional sub-packages
+    )
+    ['"]?                     # optional closing quote
+    """,
+    re.VERBOSE,
+)
+
+
+def _extract_module_name(diagnosis_summary: str) -> Optional[str]:
+    """
+    Extract the missing module name from a diagnosis summary.
+
+    Tries the inline pattern first (fast path for literal traceback text),
+    then the prose-tolerant pattern (for the structured format produced
+    by context_gatherer). Returns None if no pattern matches.
+    """
+    for pattern in (_INLINE_MODULE_NOT_FOUND_RE, _PROSE_MODULE_NOT_FOUND_RE):
+        m = pattern.search(diagnosis_summary)
+        if m:
+            # Inline pattern uses group(1); prose pattern uses named group.
+            name = m.group("module") if "module" in m.groupdict() else m.group(1)
+            return name.strip() or None
+    return None
 
 # Stdlib heuristic: a small allowlist of names that look like top-level
 # importable packages but are actually stdlib. Used to guard the deterministic
@@ -281,11 +316,7 @@ def _module_not_found_path_fix(diagnosis_summary: str) -> Optional[str]:
     diff string starting with ``--- /dev/null`` and creating a top-level
     ``conftest.py`` with the canonical ``sys.path.insert`` shim.
     """
-    match = _MODULE_NOT_FOUND_RE.search(diagnosis_summary)
-    if match is None:
-        return None
-
-    module_name: str = match.group(1).strip()
+    module_name = _extract_module_name(diagnosis_summary)
     if not module_name:
         return None
 

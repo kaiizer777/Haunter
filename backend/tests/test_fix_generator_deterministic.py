@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Attempt, Repo, Run, RunStep, User
 from app.subagents.fix_generator import (
+    _extract_module_name,
     _module_not_found_path_fix,
     generate_fix,
 )
@@ -199,3 +200,63 @@ async def test_generate_fix_uses_deterministic_when_match(db: AsyncSession) -> N
     assert any(s.step_name == "fix_generator_deterministic" for s in steps)
     # And the regular "fix_generator" step is NOT present — the LLM path was skipped.
     assert not any(s.step_name == "fix_generator" for s in steps)
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — Prose-tolerant ModuleNotFoundError tests
+# ---------------------------------------------------------------------------
+
+
+def test_module_not_found_prose_format_returns_conftest() -> None:
+    """Prose: 'Error type: ModuleNotFoundError\nFile: x.py\nReason: No module named "app"' → conftest patch."""
+    diagnosis = (
+        "Error type: ModuleNotFoundError\n"
+        "File: x.py\n"
+        'Reason: No module named "app"'
+    )
+    patch_text = _module_not_found_path_fix(diagnosis)
+    assert patch_text is not None
+    assert "conftest.py" in patch_text
+    assert "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))" in patch_text
+
+
+def test_module_not_found_prose_format_unquoted() -> None:
+    """'ModuleNotFoundError: ... No module named app' (no quotes) → patch."""
+    diagnosis = "ModuleNotFoundError: ... No module named app"
+    patch_text = _module_not_found_path_fix(diagnosis)
+    assert patch_text is not None
+    assert "conftest.py" in patch_text
+    assert "sys.path.insert" in patch_text
+
+
+def test_module_not_found_prose_format_with_submodule() -> None:
+    """'No module named "src.utils"' → top-level package 'src' → patch."""
+    diagnosis = (
+        "Error type: ModuleNotFoundError\n"
+        "File: x.py\n"
+        'Reason: No module named "src.utils"'
+    )
+    patch_text = _module_not_found_path_fix(diagnosis)
+    assert patch_text is not None
+    assert "conftest.py" in patch_text
+    assert "sys.path.insert" in patch_text
+
+
+def test_module_not_found_inline_traceback_still_works() -> None:
+    """Sanity: the original 'ModuleNotFoundError: No module named \'app\''
+    inline form still matches and returns the patch."""
+    diagnosis = "ModuleNotFoundError: No module named 'app'"
+    patch_text = _module_not_found_path_fix(diagnosis)
+    assert patch_text is not None
+    assert "conftest.py" in patch_text
+    assert "sys.path.insert" in patch_text
+
+
+def test_module_not_found_extract_helper_returns_none_for_other_errors() -> None:
+    """AssertionError, ImportError (no 'No module named'), KeyError → None."""
+    assert _extract_module_name("AssertionError: 1 != 2") is None
+    assert _extract_module_name("ImportError: cannot import name 'foo'") is None
+    assert _extract_module_name("KeyError: 'bar'") is None
+    assert _module_not_found_path_fix("AssertionError: 1 != 2") is None
+    assert _module_not_found_path_fix("ImportError: cannot import name 'foo'") is None
+    assert _module_not_found_path_fix("KeyError: 'bar'") is None
