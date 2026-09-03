@@ -354,9 +354,11 @@ def _build_messages(
     """
     Build the messages list for the LLM call.
 
-    On retry (validation_error_context is set), append the error as an
-    additional user turn so the model knows exactly why the prior output
-    was rejected — no guesswork.
+    Invariant: messages strictly alternate system → user → assistant → user → ...
+    A stub assistant message is inserted between any two consecutive user
+    turns so the chat protocol is never violated. This is critical for
+    free-tier models like nemotron-3.5-lightning-free that degrade under
+    consecutive same-role turns.
     """
     system_prompt = (
         "You are Fix Generator — given root cause summary (+ prior failure if any), "
@@ -415,6 +417,18 @@ def _build_messages(
     # upstream by context_gatherer, and the LLM benefits from seeing the
     # exact reason verbatim.
     if prior_attempt is not None:
+        # Stub assistant turn — schema anchor for the upcoming user turn.
+        # The model treats the next user message as a refinement request,
+        # not a fresh prompt. Crucial: this is acknowledgement only,
+        # NOT a hallucinated fix (the model would otherwise condition
+        # the next user turn on invented patch content).
+        messages.append({
+            "role": "assistant",
+            "content": (
+                "Acknowledged. I will generate a new patch that addresses the "
+                "prior failure without repeating the same fix."
+            ),
+        })
         redacted_patch = _redact_secrets(prior_attempt.patch_text or "")
         prior_content = (
             f"## Prior Attempt #{prior_attempt.attempt_number}\n"
@@ -426,18 +440,34 @@ def _build_messages(
         messages.append({"role": "user", "content": prior_content})
 
     if validation_error_context is not None:
+        # Stub assistant turn — anchors the format-correction request.
         messages.append({
             "role": "assistant",
-            "content": "(prior response was invalid)",
+            "content": (
+                "Acknowledged. I will return valid JSON this time with the "
+                "patch formatted as a unified diff (must include '---', '+++', "
+                "and '@@' markers) and confidence as an integer 0-100."
+            ),
         })
         messages.append({
             "role": "user",
             "content": (
-                f"Your previous response failed JSON schema validation: {validation_error_context}\n"
+                f"Your previous response failed validation: {validation_error_context}\n"
                 "Fix the issues and return valid JSON only. "
-                "confidence MUST be an integer 0-100. patch MUST be a non-empty string."
+                "patch MUST be a unified diff with '---', '+++', and '@@' markers. "
+                "confidence MUST be an integer 0-100."
             ),
         })
+
+    # Invariant check: no two consecutive same-role messages (after system).
+    # Use RuntimeError (not AssertionError) so the check is NOT disabled
+    # under `python -O`. This is a contract violation, not a debug check.
+    for i in range(1, len(messages)):
+        if messages[i]["role"] == messages[i - 1]["role"]:
+            raise RuntimeError(
+                f"_build_messages: consecutive same-role turns at index {i - 1} "
+                f"and {i} (both {messages[i]['role']!r})"
+            )
 
     return messages
 

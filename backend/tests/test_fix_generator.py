@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
@@ -32,6 +33,7 @@ from app.subagents.fix_generator import (
     LowConfidenceSkip,
     LOW_CONFIDENCE_THRESHOLD,
     PatchRejected,
+    _build_messages,
     _validate_patch,
     generate_fix,
 )
@@ -631,3 +633,60 @@ async def test_low_confidence_patch_triggers_low_confidence_skip(db: AsyncSessio
     # No Attempt row inserted.
     result = await db.execute(select(Attempt).where(Attempt.run_id == run.id))
     assert result.scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Alternation invariant in _build_messages (Fix 3)
+# ---------------------------------------------------------------------------
+
+
+def test_build_messages_alternation_invariant_no_prior() -> None:
+    """No prior_attempt, no validation_error_context → [system, user]."""
+    messages = _build_messages(
+        diagnosis_summary="ImportError: cannot import foo in app/models.py:10",
+        prior_attempt=None,
+    )
+    roles = [m["role"] for m in messages]
+    assert roles == ["system", "user"]
+
+
+def test_build_messages_alternation_invariant_with_prior() -> None:
+    """prior_attempt set → [system, user, assistant, user]; assert no two
+    consecutive same-role entries."""
+    fake = SimpleNamespace(attempt_number=1, patch_text="", failure_reason=None)
+    messages = _build_messages(
+        diagnosis_summary="ImportError: cannot import foo in app/models.py:10",
+        prior_attempt=fake,
+    )
+    roles = [m["role"] for m in messages]
+    assert roles == ["system", "user", "assistant", "user"]
+    for i in range(1, len(messages)):
+        assert messages[i]["role"] != messages[i - 1]["role"]
+
+
+def test_build_messages_alternation_invariant_with_validation() -> None:
+    """validation_error_context set → [system, user, assistant, user]."""
+    messages = _build_messages(
+        diagnosis_summary="ImportError: cannot import foo in app/models.py:10",
+        prior_attempt=None,
+        validation_error_context="patch is not a unified diff",
+    )
+    roles = [m["role"] for m in messages]
+    assert roles == ["system", "user", "assistant", "user"]
+    for i in range(1, len(messages)):
+        assert messages[i]["role"] != messages[i - 1]["role"]
+
+
+def test_build_messages_alternation_invariant_with_both() -> None:
+    """Both set → [system, user, assistant, user, assistant, user]."""
+    fake = SimpleNamespace(attempt_number=1, patch_text="", failure_reason=None)
+    messages = _build_messages(
+        diagnosis_summary="ImportError: cannot import foo in app/models.py:10",
+        prior_attempt=fake,
+        validation_error_context="patch is not a unified diff",
+    )
+    roles = [m["role"] for m in messages]
+    assert roles == ["system", "user", "assistant", "user", "assistant", "user"]
+    for i in range(1, len(messages)):
+        assert messages[i]["role"] != messages[i - 1]["role"]
+
