@@ -81,6 +81,9 @@ class OpenCodeZenProvider:
                 )
                 kwargs["max_tokens"] = ceiling
 
+        # Strip response_format — free-tier models on OpenCode Zen reject it with HTTP 400
+        kwargs.pop("response_format", None)
+
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,

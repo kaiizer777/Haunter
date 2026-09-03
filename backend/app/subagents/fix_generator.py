@@ -512,7 +512,6 @@ async def _call_and_parse(
         messages=messages,
         db=db,
         repo_id=repo_id,
-        response_format={"type": "json_object"},
         max_tokens=10_000_000,
     )
 
@@ -541,7 +540,6 @@ async def _call_and_parse(
         messages=retry_messages,
         db=db,
         repo_id=repo_id,
-        response_format={"type": "json_object"},
         max_tokens=10_000_000,
     )
 

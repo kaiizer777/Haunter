@@ -196,7 +196,6 @@ async def _call_and_parse_pr(
         messages=messages,
         db=db,
         repo_id=repo_id,
-        response_format={"type": "json_object"},
         max_tokens=10_000_000,
     )
     content: str = (response.get("content") or "").strip()
@@ -220,7 +219,6 @@ async def _call_and_parse_pr(
         messages=retry_messages,
         db=db,
         repo_id=repo_id,
-        response_format={"type": "json_object"},
         max_tokens=10_000_000,
     )
     retry_content: str = (retry_response.get("content") or "").strip()

@@ -71,6 +71,7 @@ async def fetch_user_repo_tarball(
     resp = await client.get(
         f"https://api.github.com/repos/{user_repo}/tarball/{sha}",
         headers=headers,
+        follow_redirects=True,
     )
     if resp.status_code == 403 and fallback_token and fallback_token != token:
         logger.warning(
@@ -81,6 +82,7 @@ async def fetch_user_repo_tarball(
         resp = await client.get(
             f"https://api.github.com/repos/{user_repo}/tarball/{sha}",
             headers=headers,
+            follow_redirects=True,
         )
 
     # Enforce a hard size cap. A malicious or pathological tarball could
