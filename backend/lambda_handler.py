@@ -40,6 +40,12 @@ import logging
 import os
 import uuid as _uuid
 
+# Configure root logger to INFO before any module-level code runs.
+# Python's default root level is WARNING — without this, every logger.info()
+# call in orchestrator, subagents, and sandbox is silently dropped in
+# CloudWatch. force=True replaces any handler the Lambda runtime pre-configures.
+logging.basicConfig(level=logging.INFO, force=True)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

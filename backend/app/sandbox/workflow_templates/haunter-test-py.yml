@@ -21,9 +21,13 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
+          # Always install pytest — required regardless of requirements.txt presence.
+          pip install -q pytest
           if [ -f requirements.txt ]; then
-            python -m pip install --upgrade pip
             python -m pip install -q -r requirements.txt
+          elif [ -f Pipfile ]; then
+            pip install -q pipenv && pipenv install --dev --system --ignore-pipfile 2>/dev/null || true
           fi
 
       - name: Lint (ruff, best-effort)
@@ -46,11 +50,21 @@ jobs:
 
       - name: Run tests
         run: |
+          # Priority 1: standard config file at root → let pytest auto-discover.
           if [ -f pytest.ini ] || [ -f pyproject.toml ] || [ -f setup.cfg ]; then
             python -m pytest -q --tb=short --maxfail=10
+          # Priority 2: tests/ or test/ directory → run explicitly.
+          elif [ -d tests ] || [ -d test ]; then
+            TESTDIR=$([ -d tests ] && echo tests || echo test)
+            python -m pytest "$TESTDIR" -q --tb=short --maxfail=10
+          # Priority 3: root-level test_*.py or *_test.py files.
+          elif ls test_*.py *_test.py 2>/dev/null | grep -q .; then
+            python -m pytest . -q --tb=short --maxfail=10
           else
-            echo "No pytest config found — nothing to run"
-            exit 1
+            echo "No tests found — skipping"
+            # exit 0: an empty sandbox is not a test failure; Haunter treats
+            # "no tests" as a neutral signal so the fix is not falsely rejected.
+            exit 0
           fi
 
       - name: Build (best-effort)

@@ -17,6 +17,10 @@ from app.routers.model_config import router as model_config_router
 from app.routers.traces import router as traces_router
 from app.webhooks import router as webhooks_router
 
+# Configure root logger to INFO so all logger.info() calls in submodules
+# (orchestrator, subagents, sandbox) are visible in local dev and CloudWatch.
+logging.basicConfig(level=logging.INFO, force=True)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -25,6 +29,7 @@ logger = logging.getLogger(__name__)
 # The limiter instance lives in app.limiter to avoid circular imports.
 # ---------------------------------------------------------------------------
 app = FastAPI(title="Haunter Backend")
+
 
 # Attach limiter to app state — slowapi reads it from here
 app.state.limiter = limiter

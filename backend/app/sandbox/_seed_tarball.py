@@ -117,6 +117,48 @@ def _is_plain_tar(tar_bytes: bytes) -> bool:
     return False
 
 
+def _file_priority_tier(rel_path: str) -> int:
+    """Return a priority tier for a repo file path (lower = higher priority).
+
+    Tier 0 — project config files that pytest/build tools discover at startup.
+              These MUST be in the sandbox or the test runner fails immediately.
+    Tier 1 — dependency manifest files.  Without these the install step may be
+              incomplete (wrong package versions).
+    Tier 2 — test source files.  The primary artefacts being exercised.
+    Tier 3 — all other source files.
+
+    When the total file count exceeds max_files, files are selected in tier
+    order so that tier-0 files are never crowded out by source code.
+    """
+    name = rel_path.split("/")[-1]  # basename only
+
+    _TIER0_NAMES: frozenset[str] = frozenset({
+        "pytest.ini", "pyproject.toml", "setup.cfg", "setup.py",
+        "tox.ini", "conftest.py", ".python-version",
+    })
+    if name in _TIER0_NAMES:
+        return 0
+
+    _TIER1_GLOBS: tuple[str, ...] = (
+        "requirements", "Pipfile", "poetry.lock",
+    )
+    if any(name.startswith(g) for g in _TIER1_GLOBS) or name in ("Pipfile.lock",):
+        return 1
+
+    # Tier 2: test files anywhere in the tree
+    parts = rel_path.split("/")
+    if (
+        # top-level or nested tests/ / test/ directory
+        any(p in ("tests", "test") for p in parts[:-1])
+        # test_*.py or *_test.py filename pattern
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+    ):
+        return 2
+
+    return 3
+
+
 def parse_tar_to_files(
     tar_bytes: bytes,
     max_files: int,
@@ -128,20 +170,23 @@ def parse_tar_to_files(
       - Symlinks (security: prevents symlink injection into the mirror)
       - Files matching SEED_SKIP_PREFIXES
       - Files larger than MAX_FILE_BYTES
-      - Beyond max_files (deterministic ordering by sorted path)
+      - Beyond max_files (priority-ordered: config → deps → tests → source)
 
     The first path component is stripped because GitHub tarballs are
     prefixed with a directory like "repo-name-sha/". The rest of the
     path is preserved as the file's location in the mirror.
-    """
-    files: dict[str, bytes] = {}
 
-    # GitHub's codeload service (reached after 302 redirect from the tarball API)
-    # returns gzip bodies with Content-Type: application/x-gzip but without
-    # Content-Encoding: gzip. Consequently, httpx does not auto-decompress the body.
-    # When passed directly to tarfile.open(mode="r:"), this caused ReadError: invalid header
-    # (e.g. "github_actions_runner: failed to seed ... (ReadError: invalid header) — continuing with fresh mirror").
-    # Sniff the magic bytes to decompress gzip (or bzip2 defensive) or read plain tar directly.
+    Priority ordering ensures that pytest.ini, pyproject.toml, setup.cfg,
+    requirements*.txt, and test directories are always seeded before general
+    source files when the total file count exceeds max_files. This prevents
+    large repos (>50 files) from having their test infrastructure silently
+    dropped by the cap.
+    """
+    # --- Pass 1: collect all eligible (rel_path, member) pairs ----------
+    # We need two passes: first collect everything that passes the skip/size
+    # filters, then sort by priority and truncate. This avoids breaking out
+    # of the tar iteration early (which would skip priority files that appear
+    # later in the archive).
     fileobj: io.BufferedIOBase
     if tar_bytes.startswith(b"\x1f\x8b"):
         fileobj = gzip.GzipFile(fileobj=io.BytesIO(tar_bytes))
@@ -154,9 +199,10 @@ def parse_tar_to_files(
             f"parse_tar_to_files: unrecognized compression; first bytes: {tar_bytes[:8]!r}"
         )
 
+    eligible: list[tuple[int, str, "tarfile.TarInfo"]] = []  # (tier, rel_path, member)
+
     with tarfile.open(fileobj=fileobj, mode="r:") as tar:
-        members = sorted(tar.getmembers(), key=lambda m: m.name)
-        for member in members:
+        for member in tar.getmembers():
             if not member.isfile():
                 continue
             parts = member.name.split("/", 1)
@@ -171,13 +217,40 @@ def parse_tar_to_files(
                     rel_path, member.size, MAX_FILE_BYTES,
                 )
                 continue
-            f = tar.extractfile(member)
+            tier = _file_priority_tier(rel_path)
+            eligible.append((tier, rel_path, member))
+
+    # --- Pass 2: sort by (tier, name) and apply cap ----------------------
+    eligible.sort(key=lambda t: (t[0], t[1]))
+
+    # Re-open to extract content for the selected members.
+    # tarfile requires a seekable stream for random access; re-decompress.
+    if tar_bytes.startswith(b"\x1f\x8b"):
+        fileobj2: io.BufferedIOBase = gzip.GzipFile(fileobj=io.BytesIO(tar_bytes))
+    elif tar_bytes.startswith(b"BZh"):
+        fileobj2 = bz2.BZ2File(io.BytesIO(tar_bytes))
+    else:
+        fileobj2 = io.BytesIO(tar_bytes)
+
+    # Build a name→member lookup from the full archive for targeted extraction.
+    files: dict[str, bytes] = {}
+    with tarfile.open(fileobj=fileobj2, mode="r:") as tar2:
+        # Index all members by name for O(1) lookup.
+        member_index: dict[str, "tarfile.TarInfo"] = {
+            m.name: m for m in tar2.getmembers() if m.isfile()
+        }
+        for tier, rel_path, member in eligible[:max_files]:
+            m = member_index.get(member.name)
+            if m is None:
+                continue
+            f = tar2.extractfile(m)
             if f is None:
                 continue
             files[rel_path] = f.read()
-            if len(files) >= max_files:
-                break
+
     return files
+
+
 
 
 async def seed_mirror_via_content(

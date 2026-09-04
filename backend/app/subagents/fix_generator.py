@@ -237,24 +237,55 @@ _FENCE_CLOSE_RE: re.Pattern[str] = re.compile(r"(?:\r?\n)?\s*```\s*$")
 
 
 def _strip_markdown_fences(content: str) -> str:
-    """Strip leading/trailing markdown ``` fences and an optional language tag.
+    """Strip leading/trailing markdown ``` fences and surrounding prose.
 
-    LLMs in the free tier routinely wrap JSON in ```json ... ``` even when
-    the system prompt forbids it. Pydantic's model_validate_json rejects
-    any leading non-JSON token with "Invalid JSON: expected value at line 1
-    column 1". This helper makes the parser tolerant without weakening
-    the schema: it only removes the outer wrapper, never alters the JSON
-    itself.
+    Two-stage extraction:
+
+    Stage 1 — Fence stripping:
+      LLMs in the free tier routinely wrap JSON in ```json ... ``` even when
+      the system prompt forbids it. Pydantic's model_validate_json rejects
+      any leading non-JSON token with "Invalid JSON: expected value at line 1
+      column 1". Stripping the outer wrapper makes the parser tolerant without
+      weakening the schema.
+
+    Stage 2 — JSON boundary extraction:
+      Free-tier models (e.g. nemotron-3.5-lightning-free) also prepend
+      conversational reasoning or headings before the JSON object (e.g.
+      "## Root Cause Summary..." or "Acknowledged, I will ensure..."). After
+      fence stripping, if the result still doesn't start with '{', scan for the
+      outermost JSON object boundary (first '{' to last '}') and extract it.
+      Only the JSON payload reaches Pydantic; surrounding prose is discarded.
     """
     s = content.strip()
-    if not s.startswith("```"):
-        return s
-    # Drop the first ```<tag> line
-    s = _FENCE_OPEN_RE.sub("", s, count=1)
-    # Drop the last ``` line (if present)
-    if s.rstrip().endswith("```"):
-        s = _FENCE_CLOSE_RE.sub("", s.rstrip(), count=1)
-    return s.strip()
+
+    # Stage 1: remove ```<tag>...</``` wrapper
+    if s.startswith("```"):
+        # Drop the first ```<tag> line
+        s = _FENCE_OPEN_RE.sub("", s, count=1)
+        # Drop the last ``` line (if present)
+        if s.rstrip().endswith("```"):
+            s = _FENCE_CLOSE_RE.sub("", s.rstrip(), count=1)
+        s = s.strip()
+
+    # Stage 2: JSON boundary extraction — only when prose still precedes the JSON.
+    # A well-formed response starts with '{'; skip the scan in that case to avoid
+    # accidentally clipping a leading field value that contains '{'.
+    if not s.startswith("{"):
+        first_brace = s.find("{")
+        last_brace = s.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            extracted = s[first_brace: last_brace + 1]
+            logger.debug(
+                "fix_generator: JSON boundary extraction applied "
+                "(prose_prefix_len=%d, json_len=%d)",
+                first_brace,
+                len(extracted),
+            )
+            s = extracted
+
+    return s
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -746,22 +777,26 @@ async def generate_fix(
 
     # -------------------------------------------------------------------------
     # 2. Deterministic ModuleNotFoundError fast-path.
-    #    Bypasses the LLM call entirely when the diagnosis names a missing
-    #    module that looks importable from the repo root. The patch is
-    #    already known-good (conftest.py sys.path shim), so no retry, no
-    #    validation-error path, no token spend. Logged distinctly on the
-    #    trace row so the dashboard can show "fix_generator_deterministic".
+    #    Only taken on the FIRST attempt (prior_attempt is None). On retry,
+    #    the deterministic patch already failed verification — re-emitting it
+    #    would produce the exact same failure_reason tail, trigger check_fast_fail,
+    #    and bail to fallback without ever invoking the LLM. Gating on
+    #    `prior_attempt is None` forces Attempt 2+ through _call_with_format_retry
+    #    so the LLM can reason about the prior failure context.
     # -------------------------------------------------------------------------
-    deterministic_patch: Optional[str] = _module_not_found_path_fix(
-        run.diagnosis_summary or diagnosis_summary
+    deterministic_patch: Optional[str] = (
+        _module_not_found_path_fix(run.diagnosis_summary or diagnosis_summary)
+        if prior_attempt is None
+        else None
     )
     used_deterministic: bool = deterministic_patch is not None
     response: dict = {"usage": {}}  # placeholder; reassigned by LLM path below
 
     if used_deterministic:
         logger.info(
-            "fix_generator: run=%s using deterministic ModuleNotFoundError fallback (no LLM call)",
+            "fix_generator: run=%s attempt=%d using deterministic ModuleNotFoundError fallback (no LLM call)",
             run.id,
+            attempt_number,
         )
         fix_output = FixOutput(
             patch=deterministic_patch or "",

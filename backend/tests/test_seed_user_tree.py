@@ -590,3 +590,176 @@ async def test_seed_via_gzipped_tarball_happy_path(
     assert "2 file(s)" in seeded_logs[0].getMessage()
     assert "via tarball" in seeded_logs[0].getMessage()
 
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Priority-based seeding tests (Fix: alphabetical truncation)
+# ---------------------------------------------------------------------------
+
+
+def test_file_priority_tier_config_files() -> None:
+    """Tier-0 config files are always prioritized highest."""
+    from app.sandbox._seed_tarball import _file_priority_tier
+
+    assert _file_priority_tier("pytest.ini") == 0
+    assert _file_priority_tier("pyproject.toml") == 0
+    assert _file_priority_tier("setup.cfg") == 0
+    assert _file_priority_tier("setup.py") == 0
+    assert _file_priority_tier("conftest.py") == 0
+    assert _file_priority_tier("tox.ini") == 0
+    assert _file_priority_tier(".python-version") == 0
+    # Nested conftest is still tier-0 (basename match)
+    assert _file_priority_tier("backend/conftest.py") == 0
+
+
+def test_file_priority_tier_dep_files() -> None:
+    """Tier-1: dependency manifests."""
+    from app.sandbox._seed_tarball import _file_priority_tier
+
+    assert _file_priority_tier("requirements.txt") == 1
+    assert _file_priority_tier("requirements-dev.txt") == 1
+    assert _file_priority_tier("Pipfile") == 1
+    assert _file_priority_tier("Pipfile.lock") == 1
+    assert _file_priority_tier("poetry.lock") == 1
+
+
+def test_file_priority_tier_test_files() -> None:
+    """Tier-2: files under tests/ / test/, and test_*.py / *_test.py filenames."""
+    from app.sandbox._seed_tarball import _file_priority_tier
+
+    assert _file_priority_tier("tests/test_foo.py") == 2
+    assert _file_priority_tier("test/test_bar.py") == 2
+    assert _file_priority_tier("tests/unit/test_baz.py") == 2
+    assert _file_priority_tier("test_models.py") == 2   # root-level test_ prefix
+    assert _file_priority_tier("models_test.py") == 2   # *_test.py suffix
+
+
+def test_file_priority_tier_source_files() -> None:
+    """Tier-3: all other source files."""
+    from app.sandbox._seed_tarball import _file_priority_tier
+
+    assert _file_priority_tier("app/main.py") == 3
+    assert _file_priority_tier("src/utils.py") == 3
+    assert _file_priority_tier("README.md") == 3
+    assert _file_priority_tier("backend/models.py") == 3
+
+
+def test_parse_tar_priority_over_alphabetical() -> None:
+    """When file count > max_files, pytest.ini + test files beat alphabetically-earlier source.
+
+    Without the priority fix, alphabetical order would select 'aaa.py' and 'bbb.py'
+    before 'pytest.ini' (p < z alphabetically is fine but tests/ starts with 't' and
+    would only be selected if the cap allows). This test uses a synthetic tree where
+    source files alphabetically precede the config/test files to explicitly verify
+    the priority ordering.
+    """
+    from app.sandbox._seed_tarball import parse_tar_to_files
+
+    entries = {
+        "aaa_source.py": b"x=1",
+        "bbb_source.py": b"y=2",
+        "ccc_source.py": b"z=3",
+        "pytest.ini": b"[pytest]\n",
+        "requirements.txt": b"pytest\n",
+        "tests/test_foo.py": b"def test_foo(): pass\n",
+    }
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for path, content in entries.items():
+            name = f"repo-abc/{path}"
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.type = tarfile.REGTYPE
+            tar.addfile(info, io.BytesIO(content))
+    tar_bytes = buf.getvalue()
+
+    # max_files=3 forces the priority to decide: only 3 out of 6 files fit.
+    # Must select pytest.ini (tier-0), requirements.txt (tier-1), tests/test_foo.py (tier-2).
+    files = parse_tar_to_files(tar_bytes, max_files=3)
+    assert "pytest.ini" in files, "pytest.ini (tier-0) must be seeded"
+    assert "requirements.txt" in files, "requirements.txt (tier-1) must be seeded"
+    assert "tests/test_foo.py" in files, "tests/test_foo.py (tier-2) must be seeded"
+    # Source files should be crowded out
+    assert "aaa_source.py" not in files
+    assert "bbb_source.py" not in files
+    assert "ccc_source.py" not in files
+
+
+def test_parse_tar_priority_all_fit_when_cap_high() -> None:
+    """When max_files >= total, all files are returned regardless of tier."""
+    from app.sandbox._seed_tarball import parse_tar_to_files
+
+    entries = {
+        "pytest.ini": b"[pytest]\n",
+        "src/app.py": b"pass\n",
+        "tests/test_app.py": b"def test(): pass\n",
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for path, content in entries.items():
+            name = f"repo-abc/{path}"
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    tar_bytes = buf.getvalue()
+
+    files = parse_tar_to_files(tar_bytes, max_files=100)
+    assert set(files.keys()) == set(entries.keys())
+
+
+@pytest.mark.anyio
+async def test_seed_priority_files_seeded_on_large_repo() -> None:
+    """Integration: large repo (>50 files) seeds pytest.ini + tests/ before source files.
+
+    Verifies that the max_files cap still allows exactly 50 blobs, and that the
+    priority-aware selection seeded the repo (ok is True).
+    The actual priority ordering is validated by the unit tests above.
+    """
+    # Build a tarball with 60 alphabetically-early source files + pytest.ini + test file.
+    entries: dict[str, bytes] = {
+        f"a{i:02d}_source.py": f"x={i}\n".encode()
+        for i in range(60)  # 60 source files, alphabetically before p/t
+    }
+    entries["pytest.ini"] = b"[pytest]\ntestpaths = tests\n"
+    entries["tests/test_main.py"] = b"def test_pass(): assert True\n"
+    # Total: 62 files
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for path, content in entries.items():
+            name = f"repo-sha/{path}"
+            info = tarfile.TarInfo(name=name)
+            info.size = len(content)
+            info.type = tarfile.REGTYPE
+            tar.addfile(info, io.BytesIO(content))
+    tar_bytes = gzip.compress(buf.getvalue())
+
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+        rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
+            return_value=httpx.Response(200, content=tar_bytes)
+        )
+        _mock_mirror_seed_endpoints(rx)
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            ok = await _seed_test_mirror_with_user_tree(
+                client=client,
+                mirror_full=_MIRROR_REPO,
+                user_repo_full=_USER_REPO,
+                user_sha=_USER_SHA,
+                token=_APP_TOKEN,
+                fallback_token=_PAT_TOKEN,
+                max_files=50,  # cap at 50, repo has 62 files
+            )
+
+        assert ok is True
+
+        # Verify blob count is exactly 50 (the cap), using rx.calls (scoped to this mock).
+        blob_calls = [
+            c for c in rx.calls
+            if c.request.method == "POST"
+            and f"/repos/{_MIRROR_REPO}/git/blobs" in str(c.request.url)
+        ]
+        assert len(blob_calls) == 50, (
+            f"Expected 50 blob calls (max_files=50), got {len(blob_calls)}"
+        )

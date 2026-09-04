@@ -856,9 +856,9 @@ def test_strip_markdown_fences_helper_unit() -> None:
     assert _strip_markdown_fences('{"a": 1}') == '{"a": 1}'
     # Leading/trailing whitespace without fences
     assert _strip_markdown_fences('  \n  {"a": 1}  \n  ') == '{"a": 1}'
-    # Prose before fence is NOT stripped — helper is conservative and returns as-is
+    # Prose before fence IS now stripped — Stage 1 strips fence, Stage 2 extracts JSON boundary.
     prose_input = 'Acknowledged. Here is the fix:\n```json\n{"a": 1}\n```'
-    assert _strip_markdown_fences(prose_input) == prose_input
+    assert _strip_markdown_fences(prose_input) == '{"a": 1}'
     # Empty string
     assert _strip_markdown_fences("") == ""
     # Nested fences inside string literals remain untouched
@@ -963,3 +963,173 @@ async def test_generate_fix_still_raises_on_unparseable_after_strip(db: AsyncSes
     assert mock_complete.call_count == 2
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 — Deterministic gate: retry must invoke LLM (Fix: prior_attempt guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_deterministic_path_not_used_on_retry(db: AsyncSession) -> None:
+    """When Attempt 1 used the deterministic conftest shim and is passed as
+    prior_attempt, Attempt 2 must call the LLM (not re-emit the same patch).
+
+    Verifies:
+    - LLMClient.complete is called at least once for Attempt 2.
+    - The resulting attempt does NOT have strategy_notes == 'deterministic conftest.py sys.path shim'.
+    - attempt_number == 2.
+    """
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+    run.diagnosis_summary = "ModuleNotFoundError: No module named 'app'"
+    db.add(run)
+    await db.commit()
+
+    # Simulate Attempt 1 (deterministic conftest shim, already failed verification).
+    prior = await _insert_attempt(
+        db, run, number=1,
+        patch_text=(
+            "--- /dev/null\n"
+            "+++ b/conftest.py\n"
+            "@@ -0,0 +1,3 @@\n"
+            "+import sys, os\n"
+            "+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))\n"
+            "+\n"
+        ),
+        verification_status="failed",
+        failure_reason="ModuleNotFoundError: No module named 'app'",
+    )
+
+    llm_mock = AsyncMock(return_value=_VALID_LLM_RESPONSE)
+    with patch("app.subagents.fix_generator.LLMClient.complete", llm_mock):
+        attempt2 = await generate_fix(
+            run=run,
+            diagnosis_summary="ModuleNotFoundError: No module named 'app'",
+            prior_attempt=prior,
+            db=db,
+        )
+
+    # LLM must have been invoked — deterministic path must NOT fire on retry.
+    assert llm_mock.call_count >= 1, (
+        "LLM must be called on Attempt 2 when prior_attempt is not None"
+    )
+    assert attempt2.attempt_number == 2
+    assert attempt2.strategy_notes != "deterministic conftest.py sys.path shim", (
+        "Attempt 2 must not use the deterministic strategy on retry"
+    )
+
+
+@pytest.mark.anyio
+async def test_deterministic_path_used_on_first_attempt(db: AsyncSession) -> None:
+    """When prior_attempt is None and diagnosis is ModuleNotFoundError,
+    the deterministic path IS taken and LLM is NOT called."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+    run.diagnosis_summary = "ModuleNotFoundError: No module named 'mypackage'"
+    db.add(run)
+    await db.commit()
+
+    llm_mock = AsyncMock(return_value=_VALID_LLM_RESPONSE)
+    with patch("app.subagents.fix_generator.LLMClient.complete", llm_mock):
+        attempt1 = await generate_fix(
+            run=run,
+            diagnosis_summary="ModuleNotFoundError: No module named 'mypackage'",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert llm_mock.call_count == 0, "LLM must NOT be called on deterministic first attempt"
+    assert attempt1.strategy_notes == "deterministic conftest.py sys.path shim"
+    assert attempt1.attempt_number == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Prose stripping / JSON boundary (unit tests for _strip_markdown_fences)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_fences_clean_json_unchanged() -> None:
+    """Clean JSON starting with { is returned unchanged."""
+    payload = '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 80, "strategy_notes": "ok"}'
+    assert _strip_markdown_fences(payload) == payload
+
+
+def test_strip_fences_fence_wrapped_json() -> None:
+    """Fence-wrapped JSON is stripped to the JSON object."""
+    payload = '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 80, "strategy_notes": "ok"}'
+    fenced = f"```json\n{payload}\n```"
+    result = _strip_markdown_fences(fenced)
+    assert result == payload
+
+
+def test_strip_fences_prose_prefix_extracted() -> None:
+    """Prose before the JSON object is stripped; JSON boundary is extracted."""
+    payload = '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 80, "strategy_notes": "ok"}'
+    prose_input = f"## Root Cause Summary\nThe issue is an import error.\n\n{payload}"
+    result = _strip_markdown_fences(prose_input)
+    assert result == payload
+
+
+def test_strip_fences_acknowledgement_prefix_extracted() -> None:
+    """Conversational acknowledgement before JSON is stripped."""
+    payload = '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 80, "strategy_notes": "ok"}'
+    prose_input = f"Acknowledged, I will ensure the response is pure JSON.\n{payload}\n// end"
+    result = _strip_markdown_fences(prose_input)
+    assert result == payload
+
+
+def test_strip_fences_no_json_object_returns_full_string() -> None:
+    """When no JSON object is found, the full stripped string is returned (no crash)."""
+    prose_only = "This is a response with no JSON at all. Just text."
+    result = _strip_markdown_fences(prose_only)
+    assert result == prose_only
+
+
+def test_strip_fences_fence_with_prose_prefix() -> None:
+    """Prose before a fenced block: both prose and fence are stripped."""
+    payload = '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 75, "strategy_notes": "fixed"}'
+    fenced = f"Here is my fix:\n```json\n{payload}\n```"
+    result = _strip_markdown_fences(fenced)
+    assert result == payload
+
+
+def test_strip_fences_trailing_comment_stripped() -> None:
+    """JSON followed by trailing comment text is reduced to just the JSON object."""
+    payload = '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 80, "strategy_notes": "ok"}'
+    prose_input = f"Preamble\n{payload}\n// This is a trailing comment."
+    result = _strip_markdown_fences(prose_input)
+    assert result == payload
+
+
+@pytest.mark.anyio
+async def test_generate_fix_recovers_from_prose_prefixed_response(db: AsyncSession) -> None:
+    """End-to-end: LLM returns prose-prefixed JSON; generate_fix parses it successfully."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    json_payload = json.dumps({
+        "patch": _VALID_PATCH,
+        "confidence": 72,
+        "strategy_notes": "fixed import path",
+    })
+    prose_response = {
+        **_VALID_LLM_RESPONSE,
+        "content": f"## Analysis\nThe root cause is a missing import.\n\n{json_payload}",
+    }
+
+    with patch("app.subagents.fix_generator.LLMClient.complete", AsyncMock(return_value=prose_response)):
+        attempt = await generate_fix(
+            run=run,
+            diagnosis_summary="ImportError: cannot import foo in app/models.py:10",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert attempt.confidence_score == 72
+    assert attempt.strategy_notes == "fixed import path"
+    assert attempt.attempt_number == 1

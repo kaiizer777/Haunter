@@ -140,12 +140,15 @@ class Settings(BaseSettings):
     )
 
     # NICE-3: cap on the number of files Haunter seeds from the user's failing
-    # commit into the test mirror. Larger values cover more of the user's
-    # tree but blow up GitHub Actions runner time. Trade-off: values >200
-    # may exceed GitHub Actions runner time; values <20 may under-seed
-    # large repos.
+    # commit into the test mirror. Raised from 50 → 500 so large repos (e.g.
+    # UpGrade at 343 files) don't have their pytest configs and test directories
+    # dropped by the alphabetical-sort truncation (Fix 1). The seeder now uses
+    # priority-based ordering (config/test files first) so the effective number
+    # of *useful* files is much lower than the raw cap.
+    # Values >200 may approach GitHub Actions runner time limits for large suites;
+    # revisit if average run time exceeds 3 min.
     seed_max_files: int = Field(
-        default=50,
+        default=500,
         validation_alias=AliasChoices("seed_max_files", "HAUNTER_SEED_MAX_FILES"),
     )
 
