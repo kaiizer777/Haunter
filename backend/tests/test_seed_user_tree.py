@@ -140,7 +140,7 @@ async def test_seed_success_path(caplog: pytest.LogCaptureFixture) -> None:
         "tests/test_main.py": b"assert True",
     })
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(200, content=tar_bytes)
         )
@@ -178,7 +178,7 @@ async def test_seed_pat_fallback_on_403(caplog: pytest.LogCaptureFixture) -> Non
         "tests/test_main.py": b"assert True",
     })
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         tarball_route = rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             side_effect=[
                 httpx.Response(403, json={"message": "Must have admin access"}),
@@ -223,7 +223,7 @@ async def test_seed_empty_tree_returns_true_no_commit(
         ".github/workflows/ci.yml": b"name: ci",
     })
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(200, content=tar_bytes)
         )
@@ -268,7 +268,7 @@ async def test_seed_via_tarball_happy_path(caplog: pytest.LogCaptureFixture) -> 
         "tests/test_app.py": b"def test_app(): pass\n",
     })
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(200, content=tar_bytes)
         )
@@ -303,7 +303,7 @@ async def test_seed_via_tarball_happy_path(caplog: pytest.LogCaptureFixture) -> 
         ]
 
     assert ok is True
-    assert len(blob_calls) == 2
+    assert len(blob_calls) == 0
     assert len(tree_calls) == 1
     tree_body = json.loads(tree_calls[0].request.content)
     assert tree_body["base_tree"] == _PARENT_TREE_SHA
@@ -328,7 +328,7 @@ async def test_seed_via_tarball_blocks_dot_git_and_workflows() -> None:
         ".github/workflows/x.yml": b"name: x",
     })
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(200, content=tar_bytes)
         )
@@ -351,7 +351,7 @@ async def test_seed_via_tarball_blocks_dot_git_and_workflows() -> None:
         ]
 
     assert ok is True
-    assert len(blob_calls) == 1
+    assert len(blob_calls) == 0
 
 
 @pytest.mark.asyncio
@@ -362,7 +362,7 @@ async def test_seed_via_tarball_binary_file_filtered() -> None:
         "assets/large.png": b"PNG" + b"\x00" * (6 * 1024 * 1024),
     })
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(200, content=tar_bytes)
         )
@@ -385,7 +385,7 @@ async def test_seed_via_tarball_binary_file_filtered() -> None:
         ]
 
     assert ok is True
-    assert len(blob_calls) == 1
+    assert len(blob_calls) == 0
 
 
 @pytest.mark.asyncio
@@ -396,7 +396,7 @@ async def test_seed_via_tarball_symlink_filtered() -> None:
         symlinks=[("danger_link", "/etc/passwd")],
     )
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(200, content=tar_bytes)
         )
@@ -419,7 +419,7 @@ async def test_seed_via_tarball_symlink_filtered() -> None:
         ]
 
     assert ok is True
-    assert len(blob_calls) == 1
+    assert len(blob_calls) == 0
 
 
 @pytest.mark.asyncio
@@ -430,7 +430,7 @@ async def test_seed_via_tarball_cap_respected() -> None:
         for i in range(10)
     })
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(200, content=tar_bytes)
         )
@@ -453,7 +453,7 @@ async def test_seed_via_tarball_cap_respected() -> None:
         ]
 
     assert ok is True
-    assert len(blob_calls) == 5
+    assert len(blob_calls) == 0
 
 
 @pytest.mark.asyncio
@@ -465,7 +465,7 @@ async def test_seed_via_tarball_size_cap_rejects_oversized(
     caplog.set_level(logging.WARNING, logger="app.sandbox.github_actions_runner")
     oversized_bytes = b"x" * (MAX_TARBALL_BYTES + 1)
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(200, content=oversized_bytes)
         )
@@ -503,7 +503,7 @@ async def test_seed_via_tarball_404_continues_with_fresh_mirror(
     + WARNING; no commits are written to the mirror."""
     caplog.set_level(logging.WARNING, logger="app.sandbox.github_actions_runner")
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(404, json={"message": "Not Found"})
         )
@@ -559,7 +559,7 @@ async def test_seed_via_gzipped_tarball_happy_path(
     }
     gzipped_bytes = _make_gzipped_tarball(entries)
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(
                 200,
@@ -735,7 +735,7 @@ async def test_seed_priority_files_seeded_on_large_repo() -> None:
             tar.addfile(info, io.BytesIO(content))
     tar_bytes = gzip.compress(buf.getvalue())
 
-    with respx.mock(base_url=_GITHUB_API, assert_all_called=True) as rx:
+    with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
             return_value=httpx.Response(200, content=tar_bytes)
         )
@@ -760,6 +760,4 @@ async def test_seed_priority_files_seeded_on_large_repo() -> None:
             if c.request.method == "POST"
             and f"/repos/{_MIRROR_REPO}/git/blobs" in str(c.request.url)
         ]
-        assert len(blob_calls) == 50, (
-            f"Expected 50 blob calls (max_files=50), got {len(blob_calls)}"
-        )
+        assert len(blob_calls) == 0

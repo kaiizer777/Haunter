@@ -15,7 +15,7 @@ import gzip
 import io
 import logging
 import tarfile
-from typing import Optional
+from typing import Optional, Any
 
 import httpx
 
@@ -283,23 +283,41 @@ async def seed_mirror_via_content(
         resp.raise_for_status()
         return path, resp.json()["sha"]
 
-    blob_entries: list[tuple[str, str]] = []
-    file_items = list(files.items())
-    for i in range(0, len(file_items), BLOB_BATCH_SIZE):
-        batch = file_items[i:i + BLOB_BATCH_SIZE]
-        results = await asyncio.gather(*(create_blob(p, c) for p, c in batch))
-        blob_entries.extend(results)
+    tree_entries: list[dict[str, Any]] = []
+    blobs_to_create: list[tuple[str, bytes]] = []
 
-    # Tree on the mirror, using mirror-local blob SHAs.
+    for path, content in files.items():
+        # Inline small text files directly into the tree to save API calls
+        # and prevent GitHub secondary rate limits (403 Forbidden on blobs).
+        if len(content) < 50_000:
+            try:
+                text_content = content.decode("utf-8")
+                tree_entries.append({
+                    "path": path,
+                    "mode": "100644",
+                    "type": "blob",
+                    "content": text_content,
+                })
+                continue
+            except UnicodeDecodeError:
+                pass
+        blobs_to_create.append((path, content))
+
+    for i in range(0, len(blobs_to_create), BLOB_BATCH_SIZE):
+        batch = blobs_to_create[i:i + BLOB_BATCH_SIZE]
+        results = await asyncio.gather(*(create_blob(p, c) for p, c in batch))
+        for p, s in results:
+            tree_entries.append({"path": p, "mode": "100644", "type": "blob", "sha": s})
+        if i + BLOB_BATCH_SIZE < len(blobs_to_create):
+            await asyncio.sleep(0.5)  # Throttle to respect secondary rate limits
+
+    # Tree on the mirror
     tree_resp = await client.post(
         f"{_GITHUB_API_BASE}/repos/{mirror}/git/trees",
         headers=headers,
         json={
             "base_tree": parent_tree_sha,
-            "tree": [
-                {"path": p, "mode": "100644", "type": "blob", "sha": s}
-                for p, s in blob_entries
-            ],
+            "tree": tree_entries,
         },
     )
     tree_resp.raise_for_status()
@@ -309,7 +327,7 @@ async def seed_mirror_via_content(
         f"{_GITHUB_API_BASE}/repos/{mirror}/git/commits",
         headers=headers,
         json={
-            "message": f"haunter: seed mirror with {len(blob_entries)} file(s)",
+            "message": f"haunter: seed mirror with {len(tree_entries)} file(s)",
             "tree": new_tree_sha,
             "parents": [parent_sha],
         },
