@@ -24,8 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
+from app.llm.discovery import get_dynamic_free_models
 from app.models import ModelConfig, Repo, User
-from app.schemas import ModelConfigOut, ModelConfigUpdate
+from app.schemas import (
+    AvailableModelItem,
+    AvailableModelsOut,
+    ModelConfigOut,
+    ModelConfigUpdate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +188,54 @@ async def update_model_config_endpoint(
         body.model_name,
     )
     return ModelConfigOut.model_validate(new_config)
+
+
+def _format_model_name(model_id: str) -> str:
+    """Format model ID into human-readable label."""
+    clean = model_id
+    if clean.endswith("-free"):
+        clean = clean[:-5]
+    parts = clean.split("-")
+    return " ".join(part.capitalize() for part in parts)
+
+
+@router.get("/available", response_model=AvailableModelsOut)
+async def get_available_models_endpoint(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AvailableModelsOut:
+    """
+    Get live list of available models per provider.
+    For opencode_zen: dynamically queries /models with TTL caching, filtered to '-free'.
+    For openai and anthropic: returns approved production models.
+    """
+    dynamic_zen_models = await get_dynamic_free_models()
+
+    zen_items: list[AvailableModelItem] = []
+    for mid in dynamic_zen_models:
+        tag = "Default · Free" if mid == settings.default_model else "Free"
+        zen_items.append(
+            AvailableModelItem(
+                id=mid,
+                name=_format_model_name(mid),
+                tag=tag,
+            )
+        )
+
+    openai_items = [
+        AvailableModelItem(id="gpt-4o", name="GPT-4o", tag="Flagship"),
+        AvailableModelItem(id="gpt-4o-mini", name="GPT-4o Mini", tag="Fast"),
+    ]
+
+    anthropic_items = [
+        AvailableModelItem(id="claude-sonnet-4-5", name="Claude Sonnet 4.5", tag="SOTA Fixes"),
+        AvailableModelItem(id="claude-haiku-3-5", name="Claude Haiku 3.5", tag="Low Latency"),
+    ]
+
+    return AvailableModelsOut(
+        opencode_zen=zen_items,
+        openai=openai_items,
+        anthropic=anthropic_items,
+    )
 
 
 @router.get("/{repo_id}", response_model=Optional[ModelConfigOut])

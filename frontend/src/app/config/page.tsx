@@ -25,17 +25,11 @@ const PROVIDER_OPTIONS = [
   { id: "anthropic", name: "Anthropic", defaultModel: "claude-sonnet-4-5" },
 ];
 
-const MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string }[]> = {
-  // Source of truth: backend/app/schemas.py AllowedModelName.
-  // When adding a model here, mirror it there (and vice versa).
+const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string }[]> = {
   opencode_zen: [
     { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Default · Free" },
-    { id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra", tag: "High-Capacity · Free" },
-    { id: "hy3-free", name: "HY3", tag: "Reasoning · Free" },
-    { id: "ling-3-free", name: "Ling 3", tag: "Multilingual · Free" },
-    { id: "qwen-3-coder-free", name: "Qwen 3 Coder", tag: "Code · Free" },
-    { id: "deepseek-r1-free", name: "DeepSeek R1", tag: "Reasoning · Free" },
-    { id: "kimi-k2-free", name: "Kimi K2", tag: "Long context · Free" },
+    { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Fast · Free" },
+    { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "Free" },
   ],
   openai: [
     { id: "gpt-4o", name: "GPT-4o", tag: "Flagship" },
@@ -57,11 +51,29 @@ export default function ModelConfigPage() {
   const [activeConfig, setActiveConfig] = useState<ModelConfigOut | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>("opencode_zen");
   const [selectedModel, setSelectedModel] = useState<string>("nemotron-3.5-lightning-free");
+  const [modelOptionsByProvider, setModelOptionsByProvider] = useState<
+    Record<string, { id: string; name: string; tag: string }[]>
+  >(DEFAULT_MODEL_OPTIONS_BY_PROVIDER);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isPending, startTransition] = useTransition();
+
+  // Load dynamic models from backend
+  useEffect(() => {
+    api.getAvailableModels().then((data) => {
+      if (data) {
+        setModelOptionsByProvider({
+          opencode_zen: data.opencode_zen?.length ? data.opencode_zen : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen,
+          openai: data.openai?.length ? data.openai : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.openai,
+          anthropic: data.anthropic?.length ? data.anthropic : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.anthropic,
+        });
+      }
+    }).catch(() => {
+      // Gracefully retain default options on error
+    });
+  }, []);
 
   // Load repos on mount
   useEffect(() => {
@@ -100,7 +112,7 @@ export default function ModelConfigPage() {
   // Handle provider switch -> update available model selection
   const handleProviderChange = (newProvider: string) => {
     setSelectedProvider(newProvider);
-    const models = MODEL_OPTIONS_BY_PROVIDER[newProvider] || [];
+    const models = modelOptionsByProvider[newProvider] || [];
     if (models.length > 0) {
       setSelectedModel(models[0].id);
     }
@@ -300,11 +312,18 @@ export default function ModelConfigPage() {
                   disabled={isGlobalDisabled || isPending}
                   className="w-full rounded-[4px] border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-mono text-zinc-200 focus:outline-none focus:border-amber-400 disabled:opacity-50 cursor-pointer"
                 >
-                  {(MODEL_OPTIONS_BY_PROVIDER[selectedProvider] || []).map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name} [{m.tag}]
-                    </option>
-                  ))}
+                  {(() => {
+                    const options = modelOptionsByProvider[selectedProvider] || [];
+                    const hasSelected = options.some((m) => m.id === selectedModel);
+                    const allOptions = hasSelected
+                      ? options
+                      : [{ id: selectedModel, name: selectedModel, tag: "Active" }, ...options];
+                    return allOptions.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} [{m.tag}]
+                      </option>
+                    ));
+                  })()}
                 </select>
               </div>
 

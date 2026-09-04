@@ -33,8 +33,13 @@ class LLMAuthenticationError(LLMError):
 class LLMRateLimitError(LLMError):
     """Raised when rate limits (429) persist across all retry attempts."""
 
-    def __init__(self, message: str = "LLM provider rate limit exceeded") -> None:
+    def __init__(
+        self,
+        message: str = "LLM provider rate limit exceeded",
+        attempts: int = 1,
+    ) -> None:
         super().__init__(message=message, status_code=429)
+        self.attempts = attempts
 
 
 class LLMInvalidRequestError(LLMError):

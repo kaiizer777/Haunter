@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -66,44 +66,67 @@ AllowedProvider = Literal["opencode_zen", "openai", "anthropic"]
 AllowedHostingProvider = Literal["aws"]
 AllowedSandboxProvider = Literal["github_actions"]
 
-# Allowlisted model names — must match a provider's supported models.
-# Free-tier models (suffix `-free`) are listed first so the UI surfaces them
-# at the top of the model selector — these are the only models safe to use
-# while we're validating the pipeline on a budget.
-#
-# When OpenCode Zen (or any other provider) publishes a new free model:
-#   1. Add the exact model id below
-#   2. Mirror it in frontend/src/app/config/page.tsx MODEL_OPTIONS_BY_PROVIDER
-#   3. No other change needed — the allowlist is the single source of truth.
-AllowedModelName = Literal[
-    # OpenCode Zen — free tier
-    "nemotron-3.5-lightning-free",
-    "nemotron-3-ultra-free",
-    "hy3-free",
-    "ling-3-free",
-    "qwen-3-coder-free",
-    "deepseek-r1-free",
-    "kimi-k2-free",
-    # OpenAI — paid
-    "gpt-4o",
-    "gpt-4o-mini",
-    # Anthropic — paid
-    "claude-sonnet-4-5",
-    "claude-haiku-3-5",
-]
+OPENAI_MODELS: set[str] = {"gpt-4o", "gpt-4o-mini"}
+ANTHROPIC_MODELS: set[str] = {"claude-sonnet-4-5", "claude-haiku-3-5"}
+
+# Preserved for backward compatibility
+AllowedModelName = str
 
 
 class ModelConfigUpdate(BaseModel):
     """
     Used by PUT /config/model (global) or PUT /config/model/{repo_id} (per-repo)
     to update active model config.
-    Provider and model_name are allowlisted — no free-text base_url injection.
+    Provider and model_name are validated against provider rules.
+    - For 'opencode_zen': allows any model name ending with '-free'.
+    - For 'openai': allows approved OpenAI models (gpt-4o, gpt-4o-mini).
+    - For 'anthropic': allows approved Anthropic models (claude-sonnet-4-5, claude-haiku-3-5).
     base_url is derived server-side from the provider allowlist, never from the client.
     """
 
     provider: AllowedProvider
-    model_name: AllowedModelName
+    model_name: str
     repo_id: Optional[uuid.UUID] = None
+
+    @model_validator(mode="after")
+    def validate_model_name_for_provider(self) -> "ModelConfigUpdate":
+        provider = self.provider
+        model = self.model_name.strip()
+
+        if provider == "opencode_zen":
+            if not model.endswith("-free"):
+                raise ValueError(
+                    f"Invalid model '{model}' for provider 'opencode_zen'. "
+                    "OpenCode Zen models must end with '-free'."
+                )
+        elif provider == "openai":
+            if model not in OPENAI_MODELS:
+                raise ValueError(
+                    f"Invalid model '{model}' for provider 'openai'. "
+                    f"Allowed models: {sorted(OPENAI_MODELS)}"
+                )
+        elif provider == "anthropic":
+            if model not in ANTHROPIC_MODELS:
+                raise ValueError(
+                    f"Invalid model '{model}' for provider 'anthropic'. "
+                    f"Allowed models: {sorted(ANTHROPIC_MODELS)}"
+                )
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
+
+        return self
+
+
+class AvailableModelItem(BaseModel):
+    id: str
+    name: str
+    tag: str
+
+
+class AvailableModelsOut(BaseModel):
+    opencode_zen: list[AvailableModelItem]
+    openai: list[AvailableModelItem]
+    anthropic: list[AvailableModelItem]
 
 
 class ModelConfigOut(BaseModel):

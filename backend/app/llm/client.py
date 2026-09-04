@@ -5,19 +5,12 @@ Provides a provider-agnostic, single ``.complete()`` entrypoint for all downstre
 subagents and orchestrators. Resolves the active provider and model dynamically
 from Postgres with fallback to environment defaults.
 
-Phase 17 — Per-model retry + automatic free-tier model fallback:
-
-The OpenCode Zen free-tier models rotate their rate-limit windows
-independently, so a single-model 429 on one model often resolves within
-seconds on a sibling. ``LLMClient.complete()`` walks ``FREE_TIER_FALLBACK_ORDER``
-when the active model fails (rate-limit / 5xx / timeout / empty content /
-syntactically malformed JSON), retrying each model ``ATTEMPTS_PER_MODEL``
-times before moving on. Fatal errors (``LLMAuthenticationError``,
-``LLMInvalidRequestError``) fall through immediately — the provider auth is
-shared across free-tier models, so failing over wouldn't help.
-
-The public ``complete()`` signature is unchanged; subagents (context_gatherer,
-fix_generator, pr_writer) do not need to be modified.
+Dynamic free-tier model discovery + dual-policy retry architecture:
+- Dynamic Discovery: Discovers available free-tier models via GET /models with 15-min TTL caching.
+- Policy 1 (Rate Limit): HTTP 429 retries 4-5 times per model with exponential backoff and jitter.
+- Policy 2 (Outage / Unsupported): HTTP 5xx, timeouts, drops, per-model rejections, upstream 400s,
+  and empty/malformed outputs execute exactly 1 attempt and immediately switch to the next fallback model.
+- Policy 3 (Global Auth): Global 401/403 fails fast across all models.
 """
 
 import asyncio
@@ -28,74 +21,36 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.llm.config import get_active_model_config
+from app.llm.discovery import BOOTSTRAP_FREE_MODELS, get_dynamic_free_models
 from app.llm.exceptions import (
     LLMAuthenticationError,
     LLMError,
     LLMExhaustedFreeTierError,
     LLMInvalidRequestError,
+    LLMRateLimitError,
+    LLMTimeoutError,
 )
 from app.llm.opencode_zen import OpenCodeZenProvider
 
 logger = logging.getLogger(__name__)
 
+# Minimal bootstrap fallback set for backward compatibility
+FREE_TIER_FALLBACK_ORDER: list[str] = list(BOOTSTRAP_FREE_MODELS)
 
-# ---------------------------------------------------------------------------
-# Phase 17 constants — free-tier fallback chain
-# ---------------------------------------------------------------------------
-# Order matters: the active/seed model is prepended at runtime, then this
-# list (minus the seed) is appended.
-#
-# Only models that actually respond to this project's OPENCODE_ZEN_API_KEY
-# belong here. As of the last probe:
-#   * laguna-s-2.1-free           — OK (healthy, ~2s)
-#   * ling-3.0-flash-fin-free     — OK (healthy, ~1s)
-#   * mimo-v2.5-free              — OK (healthy, ~8s)
-#   * nemotron-3.5-lightning-free — currently degraded upstream (30-120s hangs)
-#   * nemotron-3-ultra-free       — currently degraded upstream (hangs)
-#   * hy3-free / ling-3-free / qwen-3-coder-free / deepseek-r1-free / kimi-k2-free
-#     all return 401 "Model is not supported" for this key.
-#
-# Re-run the probe after rotating the API key or upgrading the OpenCode Zen
-# tier, and prune/extend this list to match. The set is the free-tier subset
-# of ``AllowedModelName`` in ``app/schemas.py``; do not add paid models here.
-FREE_TIER_FALLBACK_ORDER: list[str] = [
-    "laguna-s-2.1-free",          # healthy, ~2s
-    "ling-3.0-flash-fin-free",    # healthy, ~1s
-    "mimo-v2.5-free",             # healthy, ~8s
-    "nemotron-3.5-lightning-free", # last resort, currently degraded
-    "nemotron-3-ultra-free",      # currently degraded
-    "hy3-free",                   # 401
-]
+# Attempt constants for backward compatibility & policy documentation
+ATTEMPTS_PER_MODEL: int = 1
+RATE_LIMIT_ATTEMPTS_PER_MODEL: int = 5
 
-# Per-model attempt cap. Lowered from 7 to 3 on 2026-09-01: with the
-# per-attempt timeout at 30s, 3 attempts = 90s ceiling per model. Combined
-# with 3 fallback models and 2.5s inter-model sleep, the absolute worst
-# case for LLMClient.complete() is ~280s, well under the 800s orchestrator
-# wall-clock limit. 7 was right when the per-attempt timeout was 120s, but
-# no longer.
-ATTEMPTS_PER_MODEL: int = 3
-
-# Inter-model sleep. Async so it composes with the event loop. 2.5s gives
-# the previous model's rate-limit window a moment to clear before the
-# next model fires its first request.
+# Inter-model sleep to allow rate limit windows to clear before trying next model
 INTER_MODEL_SLEEP_S: float = 2.5
-
-# Safety hard cap on (model, attempt) iterations to prevent unbounded loops
-# if a future change accidentally widens the chain.
-MAX_TOTAL_ATTEMPTS: int = len(FREE_TIER_FALLBACK_ORDER) * ATTEMPTS_PER_MODEL
 
 
 class LLMClient:
-    """Provider-agnostic LLM client for Haunter with free-tier fallback."""
+    """Provider-agnostic LLM client for Haunter with dynamic free-tier fallback."""
 
     def __init__(self, timeout: float = 30.0) -> None:
-        # Lowered from 120s on 2026-09-01: free-tier models should respond in <30s
-        # on healthy state. 120s lets a single hanging model burn 2520s in retries
-        # (3 models x 7 attempts x 120s), which exceeds the orchestrator's 800s
-        # wall-clock limit and causes the whole run to time out. 30s is a hard
-        # ceiling — slower responses fail fast and the client falls back to the
-        # next model in FREE_TIER_FALLBACK_ORDER.
         self.timeout = timeout
 
     async def complete(
@@ -109,18 +64,17 @@ class LLMClient:
         """
         Execute a chat completion against the active model provider.
 
-        On retryable failure (rate-limit, 5xx, timeout, empty content,
-        syntactically malformed JSON when the caller requested JSON mode),
-        walks ``FREE_TIER_FALLBACK_ORDER`` — retrying each model
-        ``ATTEMPTS_PER_MODEL`` times before moving to the next — until a
-        non-empty, valid response is produced. If every model is exhausted,
-        raises ``LLMExhaustedFreeTierError`` carrying the full attempt log
-        so the orchestrator can surface per-model last-errors on the
-        dashboard.
+        Constructs a dynamic fallback chain:
+        1. Seed (active model from DB or per-repo config) first.
+        2. All dynamically discovered '-free' models appended (de-duplicated).
 
-        Fatal errors (``LLMAuthenticationError``, ``LLMInvalidRequestError``)
-        propagate immediately — provider auth is shared across free-tier
-        models, so falling over wouldn't help.
+        Decouples retries into two distinct policies:
+        - Policy 1 (Rate Limit): 429 retries 4-5 times with exponential backoff.
+          If 429 persists, switches to the next fallback model.
+        - Policy 2 (Outage / Unsupported): 5xx, timeouts, transport errors, per-model
+          rejections, upstream 400s, or empty text responses execute exactly 1 attempt
+          and switch immediately to the next fallback model.
+        - Policy 3 (Global Auth): Key-level 401 errors fail fast across all models.
 
         Args:
             messages: List of message dicts (e.g. ``[{"role": "user", "content": "..."}]``).
@@ -140,20 +94,25 @@ class LLMClient:
         config = await get_active_model_config(db=db, repo_id=repo_id)
         target_provider = kwargs.pop("provider", config.provider)
         explicit_model = kwargs.pop("model", None)
-        # Peek (do not pop) — the inner provider.complete() still needs it
-        # to set OpenAI-style response_format on the HTTP payload.
         response_format = kwargs.get("response_format")
 
         if target_provider not in ("opencode_zen", "openai", "anthropic"):
             raise LLMError(f"Unsupported LLM provider: {target_provider}")
 
-        # Build the ordered fallback chain. Seed (active model) first; the
-        # rest of FREE_TIER_FALLBACK_ORDER minus the seed follows. Stable,
-        # de-duplicated, env-var default works as a seed.
         seed_model = explicit_model or config.model_name
+
+        # Construct dynamic fallback chain
+        if target_provider == "opencode_zen":
+            dynamic_models = await get_dynamic_free_models(
+                base_url=config.base_url,
+                api_key=settings.opencode_zen_api_key,
+            )
+        else:
+            dynamic_models = []
+
         chain: list[str] = [seed_model]
-        for m in FREE_TIER_FALLBACK_ORDER:
-            if m != seed_model:
+        for m in dynamic_models:
+            if m not in chain:
                 chain.append(m)
 
         base_provider = OpenCodeZenProvider(
@@ -164,113 +123,102 @@ class LLMClient:
         attempts_log: list[tuple[str, int, str]] = []
         cumulative_wasted_in = 0
         cumulative_wasted_out = 0
-        total_attempts = 0
 
         for model_index, model_name in enumerate(chain):
-            for attempt_idx in range(1, ATTEMPTS_PER_MODEL + 1):
-                if total_attempts >= MAX_TOTAL_ATTEMPTS:
-                    # Defensive: should be unreachable given the for-loop bounds.
-                    break
-                total_attempts += 1
-
-                logger.info(
-                    "llm_client: model=%s attempt=%d/%d",
-                    model_name,
-                    attempt_idx,
-                    ATTEMPTS_PER_MODEL,
-                )
-                try:
-                    response = await base_provider.complete(
-                        messages=messages,
-                        model=model_name,
-                        tools=tools,
-                        **kwargs,
-                    )
-                except (LLMAuthenticationError, LLMInvalidRequestError) as fatal:
-                    # Same auth across all free-tier models; falling over
-                    # wouldn't help. Raise immediately so the user sees the
-                    # real error.
-                    logger.error(
-                        "llm_client: model=%s attempt=%d fatal %s — no fallback, re-raising",
-                        model_name,
-                        attempt_idx,
-                        type(fatal).__name__,
-                    )
-                    raise
-                except LLMError as exc:
-                    # Rate-limit / 5xx / timeout / network. Count as a
-                    # failed attempt on this model; the inner execute_with_retry
-                    # already burned its own per-call budget.
-                    attempts_log.append(
-                        (model_name, attempt_idx, f"{type(exc).__name__}: {exc.message}")
-                    )
-                    logger.warning(
-                        "llm_client: model=%s attempt=%d/%d failed: %s",
-                        model_name,
-                        attempt_idx,
-                        ATTEMPTS_PER_MODEL,
-                        exc.message,
-                    )
-                    continue
-
-                # 200 — validate the content.
-                # A response is "usable" if it has non-empty text OR
-                # tool_calls. A tool-call-only response (content=None,
-                # tool_calls=[...]) is the common case for agents like
-                # fix_generator and must NOT be retried.
-                content = response.get("content")
-                tool_calls = response.get("tool_calls")
-                text_empty = (content is None) or (
-                    isinstance(content, str) and not content.strip()
-                )
-                has_tool_calls = bool(tool_calls)
-                is_empty = text_empty and not has_tool_calls
-                json_invalid = self._is_json_invalid(content, response_format)
-
-                if is_empty or json_invalid:
-                    reason = "empty content" if is_empty else "malformed JSON"
-                    attempts_log.append((model_name, attempt_idx, reason))
-                    wasted = response.get("usage") or {}
-                    cumulative_wasted_in += int(wasted.get("input_tokens", 0))
-                    cumulative_wasted_out += int(wasted.get("output_tokens", 0))
-                    logger.warning(
-                        "llm_client: model=%s attempt=%d/%d %s",
-                        model_name,
-                        attempt_idx,
-                        ATTEMPTS_PER_MODEL,
-                        reason,
-                    )
-                    continue
-
-                # Success.
-                if model_index > 0 or attempt_idx > 1:
-                    logger.info(
-                        "llm_client: recovered on model=%s (chain_index=%d, attempt=%d)",
-                        model_name,
-                        model_index,
-                        attempt_idx,
-                    )
-                if cumulative_wasted_in or cumulative_wasted_out:
-                    logger.warning(
-                        "llm_client: free-tier fallback chain wasted tokens — "
-                        "input=%d output=%d across %d failed attempts before success on model=%s",
-                        cumulative_wasted_in,
-                        cumulative_wasted_out,
-                        len(attempts_log),
-                        model_name,
-                    )
-                return response
-
-            # All ATTEMPTS_PER_MODEL attempts on this model failed.
-            logger.warning(
-                "llm_client: model=%s exhausted after %d attempts — moving to next model",
+            logger.info(
+                "llm_client: trying model=%s (chain_index=%d/%d)",
                 model_name,
-                ATTEMPTS_PER_MODEL,
+                model_index + 1,
+                len(chain),
             )
-            if model_index < len(chain) - 1:
-                await asyncio.sleep(INTER_MODEL_SLEEP_S)
+            try:
+                response = await base_provider.complete(
+                    messages=messages,
+                    model=model_name,
+                    tools=tools,
+                    **kwargs,
+                )
+            except (LLMAuthenticationError, LLMInvalidRequestError) as fatal:
+                # Policy 3 (Global Auth) & Client Schema Errors: fail fast across all models
+                logger.error(
+                    "llm_client: model=%s fatal %s — re-raising immediately across all models",
+                    model_name,
+                    type(fatal).__name__,
+                )
+                raise
+            except LLMRateLimitError as exc:
+                # Policy 1 (Rate Limit): 429 retried 4-5 times on this model and exhausted.
+                # Record all attempts in attempts_log and switch to next model.
+                att_count = getattr(exc, "attempts", RATE_LIMIT_ATTEMPTS_PER_MODEL)
+                for att_i in range(1, att_count + 1):
+                    attempts_log.append((model_name, att_i, f"LLMRateLimitError: {exc.message}"))
+                logger.warning(
+                    "llm_client: model=%s rate-limited after %d attempts — switching to next model",
+                    model_name,
+                    att_count,
+                )
+                if model_index < len(chain) - 1:
+                    await asyncio.sleep(INTER_MODEL_SLEEP_S)
+                continue
+            except (LLMError, LLMTimeoutError) as exc:
+                # Policy 2 (Outage / Unsupported): 5xx, timeout, transport drop, per-model rejection, upstream 400.
+                # Attempt count is exactly 1 per model.
+                attempts_log.append((model_name, 1, f"{type(exc).__name__}: {exc.message}"))
+                logger.warning(
+                    "llm_client: model=%s failed on attempt 1: %s — switching to next model",
+                    model_name,
+                    exc.message,
+                )
+                if model_index < len(chain) - 1:
+                    await asyncio.sleep(INTER_MODEL_SLEEP_S)
+                continue
 
-        # Every model exhausted.
+            # 200 OK — validate the content
+            # Usable if non-empty text OR tool_calls present
+            content = response.get("content")
+            tool_calls = response.get("tool_calls")
+            text_empty = (content is None) or (
+                isinstance(content, str) and not content.strip()
+            )
+            has_tool_calls = bool(tool_calls)
+            is_empty = text_empty and not has_tool_calls
+            json_invalid = self._is_json_invalid(content, response_format)
+
+            if is_empty or json_invalid:
+                # Policy 2: Empty text or malformed JSON fails on attempt 1 -> switch to next model
+                reason = "empty content" if is_empty else "malformed JSON"
+                attempts_log.append((model_name, 1, reason))
+                wasted = response.get("usage") or {}
+                cumulative_wasted_in += int(wasted.get("input_tokens", 0))
+                cumulative_wasted_out += int(wasted.get("output_tokens", 0))
+                logger.warning(
+                    "llm_client: model=%s returned %s on attempt 1 — switching to next model",
+                    model_name,
+                    reason,
+                )
+                if model_index < len(chain) - 1:
+                    await asyncio.sleep(INTER_MODEL_SLEEP_S)
+                continue
+
+            # Success
+            if model_index > 0:
+                logger.info(
+                    "llm_client: recovered on fallback model=%s (chain_index=%d)",
+                    model_name,
+                    model_index + 1,
+                )
+            if cumulative_wasted_in or cumulative_wasted_out:
+                logger.warning(
+                    "llm_client: free-tier fallback chain wasted tokens — "
+                    "input=%d output=%d across %d failed attempts before success on model=%s",
+                    cumulative_wasted_in,
+                    cumulative_wasted_out,
+                    len(attempts_log),
+                    model_name,
+                )
+            return response
+
+        # All models exhausted
         logger.error(
             "llm_client: all %d free-tier models exhausted (%d total attempts)",
             len(chain),
@@ -284,16 +232,8 @@ class LLMClient:
         response_format: Any,
     ) -> bool:
         """
-        When the caller asked for JSON-mode output via
-        ``response_format={"type": "json_object"}`` (or ``"json_schema"``),
-        validate that the returned ``content`` parses as JSON. Returns
-        ``False`` for non-JSON-mode calls, empty content (handled
-        separately by the empty-content check), or valid JSON.
-
-        Note: this catches only *syntactic* errors. Schema-level
-        validation (e.g. Pydantic ``confidence=150`` out of range) is
-        the caller's responsibility — ``fix_generator._call_and_parse``
-        handles that with its own one-shot ValidationError retry.
+        When caller requested JSON-mode output, validate that returned content parses as JSON.
+        Returns False for non-JSON calls, empty content, or valid JSON.
         """
         if not isinstance(response_format, dict):
             return False

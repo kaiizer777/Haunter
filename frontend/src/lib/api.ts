@@ -163,6 +163,18 @@ export interface ModelConfigUpdate {
   repo_id?: string;
 }
 
+export interface AvailableModelItem {
+  id: string;
+  name: string;
+  tag: string;
+}
+
+export interface AvailableModelsOut {
+  opencode_zen: AvailableModelItem[];
+  openai: AvailableModelItem[];
+  anthropic: AvailableModelItem[];
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -297,6 +309,8 @@ export const api = {
   runEval: (data?: EvalRunRequest) => api.post<EvalResultOut>("/eval/run", data || {}),
 
   // Model Config endpoints
+  getAvailableModels: () =>
+    api.get<AvailableModelsOut>("/config/model/available"),
   getModelConfig: (repoId?: string) =>
     api.get<ModelConfigOut>(`/config/model${repoId ? `?repo_id=${repoId}` : ""}`),
   updateModelConfig: (data: ModelConfigUpdate) =>
