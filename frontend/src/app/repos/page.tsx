@@ -47,7 +47,7 @@ export default function ReposPage() {
     try {
       await api.removeRepo(id);
       setRepos((prev) => prev.filter((r) => r.id !== id));
-    } catch (err: unknown) {
+    } catch {
       alert("Failed to disconnect repository.");
     } finally {
       setDeletingId(null);

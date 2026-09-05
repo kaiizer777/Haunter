@@ -134,7 +134,7 @@ export default function EvalPage() {
 
   // Convert selected eval fixture scores to attempt data points for chart
   const chartPoints: AttemptDataPoint[] | undefined = selectedEval?.fixture_scores?.map(
-    (fs, idx) => ({
+    (fs) => ({
       confidence: Math.round(fs.fix_score * 100),
       passed: fs.context_score >= 0.5 && fs.fix_score >= 0.7,
       attempt_number: 1,

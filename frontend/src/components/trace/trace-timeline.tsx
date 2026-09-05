@@ -1,9 +1,8 @@
-import { TraceOut, RunStepOut, AttemptOut } from "@/lib/api";
+import { TraceOut } from "@/lib/api";
 import { formatCost, formatLatency, formatRelativeTime } from "@/lib/utils";
 import { 
   Bot, 
   Terminal, 
-  ShieldCheck, 
   GitPullRequest, 
   Code2, 
   AlertCircle, 
@@ -44,7 +43,6 @@ export function TraceTimeline({ trace }: TraceTimelineProps) {
         {/* Step List */}
         {steps.map((step, idx) => {
           const Icon = getStepIcon(step.step_name);
-          const isLast = idx === steps.length - 1 && attempts.length === 0;
 
           return (
             <div key={`${step.step_name}-${idx}`} className="relative group">

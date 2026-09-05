@@ -7,15 +7,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/lib/auth-context";
 import { api, ModelConfigOut, RepoOut, ApiError } from "@/lib/api";
 import { 
-  Sliders, 
   Cpu, 
   CheckCircle2, 
   AlertCircle, 
   ShieldCheck, 
   GitBranch, 
   Globe, 
-  Zap,
-  Server
+  Zap
 } from "lucide-react";
 
 // Strict server-side allowlists (WORK.md:252)

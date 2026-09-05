@@ -252,7 +252,7 @@ export function ConfidenceOutcomeChart({ data, className }: ConfidenceChartProps
               preserveAspectRatio="none"
             >
               {/* Grid Lines at 0%, 25%, 50%, 75%, 100% */}
-              {[0, 125, 250, 375, 500].map((x, idx) => (
+              {[0, 125, 250, 375, 500].map((x) => (
                 <line
                   key={x}
                   x1={x}

@@ -202,7 +202,7 @@ async function request<T>(
       headers,
       credentials: "include",
     });
-  } catch (networkErr: unknown) {
+  } catch {
     throw new ApiError(
       "Network connection failure. Please verify the backend service is running.",
       0
