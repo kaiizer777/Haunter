@@ -137,6 +137,17 @@ async def github_webhook(
             "reason": f"action={payload.action}, conclusion={payload.workflow_run.conclusion}",
         }
 
+    # 7b. Ignore CI failures on Haunter's own fix branches — these branches start from
+    # the broken base SHA before the fix commit lands, so a CI failure is expected and
+    # must never spawn a new pipeline (that's the infinite loop).
+    if payload.workflow_run.head_branch and payload.workflow_run.head_branch.startswith("haunter/"):
+        logger.info(
+            "Ignored workflow_run (delivery_id=%s): branch=%s is a Haunter fix branch — feedback loop guard",
+            x_github_delivery,
+            payload.workflow_run.head_branch,
+        )
+        return {"status": "ignored", "reason": "haunter fix branch — feedback loop guard"}
+
     # 8. Cross-check repository registration in DB
     owner = payload.repository.owner.login
     repo_name = payload.repository.name
