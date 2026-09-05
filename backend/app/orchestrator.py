@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import async_session_maker
 from app.models import Repo, Run, RunStep
+from app.subagents.context_gatherer import gather_context
 from sqlalchemy.exc import InterfaceError, OperationalError
 
 # Truncation cap for failure_reason — set to 10M for full error trace persistence
@@ -362,7 +363,6 @@ async def _orchestrator_pipeline_body(
     caller (`handle_failed_run`) is responsible for catching
     InvalidTransitionError and Exception from the outer awaits.
     """
-    from app.subagents.context_gatherer import gather_context
     from app.subagents.fix_generator import (
         generate_fix,
         AttemptCapExceeded,
@@ -862,9 +862,6 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
 
     On any unhandled error: transition to error, persist failure indicator.
     """
-    # Late import to avoid circular import at module load time.
-    from app.subagents.context_gatherer import gather_context
-
     async with async_session_maker() as db:
         # ----------------------------------------------------------------
         # Load Run + Repo

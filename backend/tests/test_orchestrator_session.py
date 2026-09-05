@@ -280,7 +280,7 @@ async def test_attempt_2_session_failure_recovers_to_terminal_state(
         patch(
             "app.subagents.fix_generator.LLMClient.complete",
             new_callable=AsyncMock,
-            side_effect=[fix_response, fix_response, fix_response],
+            return_value=fix_response,
         ),
         # Mock sandbox verify — always fail.
         patch(

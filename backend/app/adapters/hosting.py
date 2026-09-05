@@ -235,10 +235,12 @@ def _invoke_lambda_async(function_name: str, payload: bytes) -> None:
 # ---------------------------------------------------------------------------
 
 
-def get_hosting_adapter(provider: str | None = None) -> AWSHostingAdapter:
+async def get_hosting_adapter(provider: str | None = None) -> AWSHostingAdapter:
     """
     Return the appropriate HostingAdapter for the current HOSTING_PROVIDER.
     Provider value is hot-switchable via DB (60s TTL cache).
     """
+    if provider is None:
+        await _get_provider_config("HOSTING_PROVIDER", "aws")
     return AWSHostingAdapter()
 

@@ -64,7 +64,7 @@ AllowedProvider = Literal["opencode_zen", "openai", "anthropic"]
 #   "aws"             — Lambda hosting
 #   "github_actions"  — GitHub Actions sandbox (per github.md)
 AllowedHostingProvider = Literal["aws"]
-AllowedSandboxProvider = Literal["github_actions"]
+AllowedSandboxProvider = Literal["github_actions", "aws"]
 
 OPENAI_MODELS: set[str] = {"gpt-4o", "gpt-4o-mini"}
 ANTHROPIC_MODELS: set[str] = {"claude-sonnet-4-5", "claude-haiku-3-5"}

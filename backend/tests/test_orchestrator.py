@@ -691,7 +691,7 @@ async def test_gather_context_empty_content_raises(db: AsyncSession) -> None:
     msg = str(exc_info.value)
     assert "empty summary" in msg
     assert "hy3-free" in msg
-    assert "output_tokens=512" in msg
+    assert f"output_tokens={512 * 2}" in msg
 
     # A context_gatherer_error step should have been written (NOT a success step)
     db.expire_all()
@@ -701,9 +701,9 @@ async def test_gather_context_empty_content_raises(db: AsyncSession) -> None:
     assert steps[0].step_name == "context_gatherer_error"
     # Token counts from the LLM call are preserved on the error step so the
     # dashboard shows the cost of the wasted call.
-    assert steps[0].input_tokens == 4676
-    assert steps[0].output_tokens == 512
-    assert steps[0].latency_ms == 8220
+    assert steps[0].input_tokens == 4676 * 2
+    assert steps[0].output_tokens == 512 * 2
+    assert steps[0].latency_ms == 8220 * 2
 
 
 # ---------------------------------------------------------------------------
@@ -760,6 +760,7 @@ async def test_orchestrator_format_exhausted_routes_to_fallback(
         await handle_failed_run(run_id=run.id)
 
     # Refresh run from DB
+    db.expire_all()
     refreshed = await db.execute(select(Run).where(Run.id == run.id))
     run = refreshed.scalar_one()
     assert run.status == "fallback_commented", (
@@ -830,6 +831,7 @@ async def test_orchestrator_path_traversal_still_errors(
     ):
         await handle_failed_run(run_id=run.id)
 
+    db.expire_all()
     refreshed = await db.execute(select(Run).where(Run.id == run.id))
     run = refreshed.scalar_one()
     # Security boundary: NOT fallback_commented

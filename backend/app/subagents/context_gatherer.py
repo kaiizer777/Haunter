@@ -324,6 +324,14 @@ def _build_messages(
     ]
 
 
+def _is_empty_summary(content: Optional[str]) -> bool:
+    if not content:
+        return True
+    cleaned = re.sub(r"```[a-zA-Z]*\n?```", "", content)
+    cleaned = cleaned.replace("```", "").strip()
+    return not bool(cleaned)
+
+
 async def _call_with_empty_retry(
     *,
     logs_clean: str,
@@ -370,7 +378,7 @@ async def _call_with_empty_retry(
     first_in = int(first_usage.get("input_tokens", 0))
     first_out = int(first_usage.get("output_tokens", 0))
 
-    if first_content:
+    if not _is_empty_summary(first_content):
         return first_content, response, first_latency_ms, first_in, first_out
 
     # ----- Attempt 2: empty-response retry with sharper prompt -----
@@ -409,7 +417,7 @@ async def _call_with_empty_retry(
     retry_in = int(retry_usage.get("input_tokens", 0))
     retry_out = int(retry_usage.get("output_tokens", 0))
 
-    if retry_content:
+    if not _is_empty_summary(retry_content):
         # Retry succeeded. Aggregate the token counts so the dashboard shows
         # the true cost of both attempts.
         return (
@@ -429,6 +437,15 @@ async def _call_with_empty_retry(
         "context_gatherer: run=%s BOTH attempts returned empty "
         "(model=%s, total_output_tokens=%d, total_latency_ms=%d) — treating as failure",
         run.id, model, total_out, total_latency,
+    )
+    await _persist_run_step(
+        db=db,
+        run_id=run.id,
+        step_name="context_gatherer",
+        input_tokens=total_in,
+        output_tokens=total_out,
+        latency_ms=total_latency,
+        error=True,
     )
     raise ValueError(
         f"context_gatherer returned an empty summary from model {model!r} "
