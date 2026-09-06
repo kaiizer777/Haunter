@@ -6,7 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/runs/status-badge";
-import { cn } from "@/lib/utils";
+import { cn, formatRelativeTime } from "@/lib/utils";
 import {
   Activity,
   GitBranch,
@@ -24,8 +24,6 @@ import {
   Trash2,
   User as UserIcon,
   X,
-  PlayCircle,
-  Workflow,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
@@ -39,6 +37,7 @@ export interface MockRun {
   trigger: "workflow_run" | "manual";
   model: string;
   created_at: string;
+  timestamp?: string;
   duration: string;
   tokens: number;
   cost: number;
@@ -224,6 +223,16 @@ const HARDCODED_USER = {
 };
 
 const HARDCODED_MODEL = "nemotron-3.5-lightning-free";
+
+function formatTimeAgo(timeStr?: string): string {
+  if (!timeStr) return "—";
+  if (timeStr.includes("ago") || timeStr === "just now") return timeStr;
+  try {
+    return formatRelativeTime(timeStr);
+  } catch {
+    return timeStr;
+  }
+}
 
 export default function MockRunsPage() {
   const [runs, setRuns] = useState<MockRun[]>(INITIAL_MOCK_RUNS);
@@ -667,7 +676,7 @@ export default function MockRunsPage() {
                     <TableHead className="w-[14%]">Status</TableHead>
                     <TableHead className="w-[22%]">Repository</TableHead>
                     <TableHead className="w-[23%]">Branch / Commit</TableHead>
-                    <TableHead className="w-[13%]">Trigger</TableHead>
+                    <TableHead className="w-[13%]">Triggered</TableHead>
                     <TableHead className="w-[9%]">Duration</TableHead>
                     <TableHead className="w-[9%]">Cost</TableHead>
                     <TableHead className="w-[10%] text-right">Actions</TableHead>
@@ -727,21 +736,9 @@ export default function MockRunsPage() {
                           </div>
                         </TableCell>
 
-                        {/* Trigger */}
-                        <TableCell>
-                          <div className="flex flex-col text-[11px] font-mono">
-                            <span className="inline-flex items-center gap-1 text-zinc-300">
-                              {run.trigger === "workflow_run" ? (
-                                <Workflow className="h-3 w-3 text-blue-400 shrink-0" />
-                              ) : (
-                                <PlayCircle className="h-3 w-3 text-emerald-400 shrink-0" />
-                              )}
-                              {run.trigger}
-                            </span>
-                            <span className="text-zinc-500 text-[10px] mt-0.5">
-                              {run.created_at}
-                            </span>
-                          </div>
+                        {/* Triggered */}
+                        <TableCell className="text-xs font-mono text-zinc-300">
+                          {formatTimeAgo(run.created_at || run.timestamp)}
                         </TableCell>
 
                         {/* Duration */}
