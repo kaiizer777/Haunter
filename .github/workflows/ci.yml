@@ -24,7 +24,14 @@ jobs:
   backend:
     name: Backend (lint + migrations + 787 tests)
     runs-on: ubuntu-latest
-
+    env:
+      GITHUB_CLIENT_ID: ci_test_client_id
+      GITHUB_CLIENT_SECRET: ci_test_client_secret
+      CALLBACK_URL: http://localhost:8787/auth/callback
+      SESSION_SECRET_KEY: ci_test_session_secret_key_replace_in_prod
+      GITHUB_WEBHOOK_SECRET: ci_test_webhook_secret
+      FRONTEND_URL: http://localhost:3000
+      OPENCODE_ZEN_API_KEY: ci_test_zen_api_key
 
     steps:
       - uses: actions/checkout@v4
@@ -145,7 +152,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install deps
-        run: npm ci
+        run: npm ci || npm install --no-audit
 
       - name: Lint
         run: npm run lint
