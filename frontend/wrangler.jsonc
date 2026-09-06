@@ -3,26 +3,12 @@
   "name": "haunter-ci-agent",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
   "assets": {
     "directory": "./out",
-    "binding": "ASSETS",
     "not_found_handling": "404-page"
   },
   "observability": {
     "enabled": true
-  },
-  "env": {
-    "preview": {
-      "name": "haunter-ci-agent-preview",
-      "workers_dev": true
-      // To attach a custom domain once configured on Cloudflare:
-      // "routes": [{ "pattern": "preview-dashboard.yourdomain.com", "custom_domain": true }]
-    },
-    "production": {
-      "name": "haunter-ci-agent",
-      "workers_dev": true
-      // To attach a custom domain once configured on Cloudflare:
-      // "routes": [{ "pattern": "dashboard.yourdomain.com", "custom_domain": true }]
-    }
   }
 }

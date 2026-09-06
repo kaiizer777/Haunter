@@ -14,10 +14,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "deploy:preview": "wrangler deploy --env preview",
-    "deploy:prod": "wrangler deploy --env production",
-    "tail:prod": "wrangler tail --env production",
-    "tail:preview": "wrangler tail --env preview"
+    "deploy": "wrangler deploy",
+    "deploy:preview": "wrangler deploy",
+    "deploy:prod": "wrangler deploy",
+    "tail": "wrangler tail",
+    "tail:prod": "wrangler tail",
+    "tail:preview": "wrangler tail"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
