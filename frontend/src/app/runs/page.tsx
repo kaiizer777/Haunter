@@ -10,9 +10,50 @@ import { RunsFilter } from "@/components/runs/runs-filter";
 import { StatusBadge } from "@/components/runs/status-badge";
 import { api, RepoOut, RunOut } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
-import { Activity, ChevronLeft, ChevronRight, GitCommit, GitBranch, ArrowUpRight, Trash2 } from "lucide-react";
+import {
+  Activity,
+  ChevronLeft,
+  ChevronRight,
+  GitCommit,
+  GitBranch,
+  Clock,
+  ArrowRight,
+  Trash2,
+} from "lucide-react";
 
 const PAGE_SIZE = 20;
+
+/**
+ * Format duration between two ISO timestamps.
+ * Returns formatted string: "< 1s", "48s", "1m 12s", "12m 4s", "1h 5m", etc.
+ * Returns "-" if missing or invalid.
+ */
+function formatDuration(createdAt?: string, updatedAt?: string): string {
+  if (!createdAt || !updatedAt) return "-";
+  const start = new Date(createdAt).getTime();
+  const end = new Date(updatedAt).getTime();
+  if (isNaN(start) || isNaN(end) || end < start) return "-";
+
+  const totalSeconds = Math.floor((end - start) / 1000);
+  if (totalSeconds < 1) return "< 1s";
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+
+  if (totalMinutes < 60) {
+    return remainingSeconds > 0
+      ? `${totalMinutes}m ${remainingSeconds}s`
+      : `${totalMinutes}m`;
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const remainingMinutes = totalMinutes % 60;
+
+  return remainingMinutes > 0
+    ? `${hours}h ${remainingMinutes}m`
+    : `${hours}h`;
+}
 
 export default function RunsPage() {
   const router = useRouter();
@@ -137,17 +178,13 @@ export default function RunsPage() {
     });
   };
 
+  // Reset selection when page or filters change
+  useEffect(() => {
+    setSelectedRunIds(new Set());
+  }, [page, selectedRepoId, selectedStatus, from, to]);
+
   const handleBatchDelete = async () => {
     if (selectedRunIds.size === 0) return;
-
-    const count = selectedRunIds.size;
-    if (
-      !window.confirm(
-        `Are you sure you want to delete ${count} selected run${count > 1 ? "s" : ""}? This action cannot be undone.`
-      )
-    ) {
-      return;
-    }
 
     setIsBatchDeleting(true);
     setError(null);
@@ -163,7 +200,6 @@ export default function RunsPage() {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to delete selected runs.";
       setError(msg);
-      alert(`Failed to delete selected runs: ${msg}`);
     } finally {
       setIsBatchDeleting(false);
     }

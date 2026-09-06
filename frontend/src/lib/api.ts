@@ -52,6 +52,8 @@ export interface RunOut {
   head_branch: string;
   status: string;
   conclusion: string | null;
+  cost?: number;
+  tokens?: number;
   created_at: string;
   updated_at: string;
 }
