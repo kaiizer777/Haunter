@@ -22,7 +22,6 @@ import {
   RotateCcw,
   ArrowUpRight,
   Trash2,
-  Cpu,
   User as UserIcon,
   X,
   PlayCircle,
@@ -311,18 +310,6 @@ export default function MockRunsPage() {
       }
       return next;
     });
-  };
-
-  const handleDeleteSingleRun = (runId: string) => {
-    setRuns((prev) => prev.filter((r) => r.id !== runId));
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      next.delete(runId);
-      return next;
-    });
-    if (activeDetailRun?.id === runId) {
-      setActiveDetailRun(null);
-    }
   };
 
   const handleBatchDelete = () => {
@@ -695,13 +682,12 @@ export default function MockRunsPage() {
                       />
                     </TableHead>
                     <TableHead className="w-[14%]">Status</TableHead>
-                    <TableHead className="w-[20%]">Repository</TableHead>
-                    <TableHead className="w-[20%]">Branch / Commit</TableHead>
-                    <TableHead className="w-[12%]">Trigger</TableHead>
-                    <TableHead className="w-[14%]">Model</TableHead>
+                    <TableHead className="w-[22%]">Repository</TableHead>
+                    <TableHead className="w-[23%]">Branch / Commit</TableHead>
+                    <TableHead className="w-[13%]">Trigger</TableHead>
                     <TableHead className="w-[9%]">Duration</TableHead>
                     <TableHead className="w-[9%]">Cost</TableHead>
-                    <TableHead className="w-[12%] text-right">Actions</TableHead>
+                    <TableHead className="w-[10%] text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -773,14 +759,6 @@ export default function MockRunsPage() {
                           </div>
                         </TableCell>
 
-                        {/* Model */}
-                        <TableCell>
-                          <span className="inline-flex items-center gap-1 font-mono text-[11px] text-zinc-400 bg-zinc-900/80 px-2 py-0.5 rounded border border-zinc-800">
-                            <Cpu className="h-3 w-3 text-zinc-500" />
-                            {run.model.replace("-free", "")}
-                          </span>
-                        </TableCell>
-
                         {/* Duration */}
                         <TableCell>
                           <span className="inline-flex items-center gap-1 font-mono text-xs text-zinc-300">
@@ -803,33 +781,18 @@ export default function MockRunsPage() {
 
                         {/* Actions */}
                         <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                          <div className="inline-flex items-center justify-end gap-1.5">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setActiveDetailRun(run);
-                              }}
-                              className="h-7 px-2 text-xs font-mono text-zinc-400 hover:text-amber-400 hover:bg-zinc-800/80"
-                            >
-                              Trace
-                              <ArrowUpRight className="h-3 w-3 ml-1" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteSingleRun(run.id);
-                              }}
-                              className="h-7 w-7 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded-[5px] transition-colors"
-                              title="Delete mock run"
-                              aria-label={`Delete run ${run.id}`}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveDetailRun(run);
+                            }}
+                            className="h-7 px-2 text-xs font-mono text-zinc-400 hover:text-amber-400 hover:bg-zinc-800/80"
+                          >
+                            Trace
+                            <ArrowUpRight className="h-3 w-3 ml-1" />
+                          </Button>
                         </TableCell>
                       </TableRow>
                     );
