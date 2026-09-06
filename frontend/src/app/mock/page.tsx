@@ -664,8 +664,15 @@ export default function MockRunsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-[14%]">Status</TableHead>
+                    <TableHead className="w-[22%]">Repository</TableHead>
+                    <TableHead className="w-[23%]">Branch / Commit</TableHead>
+                    <TableHead className="w-[13%]">Trigger</TableHead>
+                    <TableHead className="w-[9%]">Duration</TableHead>
+                    <TableHead className="w-[9%]">Cost</TableHead>
+                    <TableHead className="w-[10%] text-right">Actions</TableHead>
                     {/* Checkbox Column */}
-                    <TableHead className="w-10 px-3">
+                    <TableHead className="w-10 px-3 text-center">
                       <input
                         ref={(el) => {
                           headerCheckboxRef.current = el;
@@ -681,13 +688,6 @@ export default function MockRunsPage() {
                         className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 accent-amber-400 focus:ring-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                       />
                     </TableHead>
-                    <TableHead className="w-[14%]">Status</TableHead>
-                    <TableHead className="w-[22%]">Repository</TableHead>
-                    <TableHead className="w-[23%]">Branch / Commit</TableHead>
-                    <TableHead className="w-[13%]">Trigger</TableHead>
-                    <TableHead className="w-[9%]">Duration</TableHead>
-                    <TableHead className="w-[9%]">Cost</TableHead>
-                    <TableHead className="w-[10%] text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -700,21 +700,6 @@ export default function MockRunsPage() {
                         onClick={() => setActiveDetailRun(run)}
                         className={`cursor-pointer group ${isSelected ? "bg-zinc-800/30" : ""}`}
                       >
-                        {/* Checkbox */}
-                        <TableCell className="w-10 px-3" onClick={(e) => e.stopPropagation()}>
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onClick={(e) => e.stopPropagation()}
-                            onChange={(e) => {
-                              e.stopPropagation();
-                              handleToggleRun(run.id);
-                            }}
-                            aria-label={`Select run ${run.id}`}
-                            className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 accent-amber-400 focus:ring-0 cursor-pointer"
-                          />
-                        </TableCell>
-
                         {/* Status */}
                         <TableCell>
                           <StatusBadge status={run.status} />
@@ -793,6 +778,21 @@ export default function MockRunsPage() {
                             Trace
                             <ArrowUpRight className="h-3 w-3 ml-1" />
                           </Button>
+                        </TableCell>
+
+                        {/* Checkbox */}
+                        <TableCell className="w-10 px-3 text-center" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              handleToggleRun(run.id);
+                            }}
+                            aria-label={`Select run ${run.id}`}
+                            className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 accent-amber-400 focus:ring-0 cursor-pointer"
+                          />
                         </TableCell>
                       </TableRow>
                     );

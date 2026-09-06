@@ -317,7 +317,13 @@ export default function RunsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-10 px-3">
+                  <TableHead className="w-[16%]">Status</TableHead>
+                  <TableHead className="w-[26%]">Repository</TableHead>
+                  <TableHead className="w-[22%]">Branch / Commit</TableHead>
+                  <TableHead className="w-[16%]">Triggered</TableHead>
+                  <TableHead className="w-[16%] text-right">Action</TableHead>
+                  {/* Selection Checkbox */}
+                  <TableHead className="w-10 px-3 text-center">
                     <input
                       ref={(el) => {
                         headerCheckboxRef.current = el;
@@ -333,11 +339,6 @@ export default function RunsPage() {
                       className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 accent-amber-400 focus:ring-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                   </TableHead>
-                  <TableHead className="w-[16%]">Status</TableHead>
-                  <TableHead className="w-[26%]">Repository</TableHead>
-                  <TableHead className="w-[22%]">Branch / Commit</TableHead>
-                  <TableHead className="w-[16%]">Triggered</TableHead>
-                  <TableHead className="w-[16%] text-right">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -355,22 +356,6 @@ export default function RunsPage() {
                         isRowDeleting || isBatchDeleting ? "opacity-50 pointer-events-none" : ""
                       }`}
                     >
-                      {/* Selection Checkbox */}
-                      <TableCell className="w-10 px-3" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          disabled={isRowDeleting || isBatchDeleting}
-                          onChange={(e) => {
-                            e.stopPropagation();
-                            handleToggleRun(run.id);
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                          aria-label={`Select run ${run.id}`}
-                          className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 accent-amber-400 focus:ring-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                        />
-                      </TableCell>
-
                       {/* Status */}
                       <TableCell>
                         <StatusBadge status={run.status} />
@@ -425,6 +410,22 @@ export default function RunsPage() {
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </div>
+                      </TableCell>
+
+                      {/* Selection Checkbox */}
+                      <TableCell className="w-10 px-3 text-center" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          disabled={isRowDeleting || isBatchDeleting}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            handleToggleRun(run.id);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label={`Select run ${run.id}`}
+                          className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 accent-amber-400 focus:ring-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        />
                       </TableCell>
                     </TableRow>
                   );
