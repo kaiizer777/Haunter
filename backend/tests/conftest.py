@@ -51,9 +51,19 @@ if _TEST_DB_URL:
     _test_engine = create_async_engine(
         _test_url, poolclass=NullPool, echo=False, connect_args={"ssl": True}
     )
+    class TestAsyncSession(AsyncSession):
+        def expire_all(self) -> None:
+            """Expire non-primary-key attributes so reloads work without MissingGreenlet on PK access."""
+            for state in list(self.sync_session.identity_map.all_states()):
+                obj = state.obj()
+                if obj is not None and getattr(state, "mapper", None) is not None:
+                    pk_keys = {c.key for c in state.mapper.primary_key}
+                    attrs = [k for k in state.mapper.column_attrs.keys() if k not in pk_keys]
+                    self.sync_session.expire(obj, attribute_names=attrs)
+
     async_session_maker = async_sessionmaker(
         bind=_test_engine,
-        class_=AsyncSession,
+        class_=TestAsyncSession,
         expire_on_commit=False,
     )
     from app import db as db_module
@@ -85,6 +95,7 @@ async def truncate_all(db: AsyncSession) -> None:
             "Set TEST_DATABASE_URL to a dedicated test/branch database before running pytest."
         )
     for stmt in (
+        "DELETE FROM system_configs",
         "DELETE FROM eval_results",
         "DELETE FROM attempts",
         "DELETE FROM run_steps",
@@ -95,6 +106,8 @@ async def truncate_all(db: AsyncSession) -> None:
     ):
         await db.execute(text(stmt))
     await db.commit()
+    from app.adapters.hosting import invalidate_provider_cache
+    invalidate_provider_cache()
 
 
 @pytest.fixture
@@ -110,9 +123,14 @@ async def db() -> AsyncGenerator[AsyncSession, None]:
             "Export TEST_DATABASE_URL pointing at a Neon branch or local Postgres."
         )
     async with async_session_maker() as session:
+        await truncate_all(session)
         try:
             yield session
         finally:
+            try:
+                await truncate_all(session)
+            except Exception:
+                pass
             await session.rollback()
             await session.close()
 
@@ -186,3 +204,24 @@ def signed_session_factory():
     def _sign(user_id: uuid.UUID) -> str:
         return _sign_user_id(user_id)
     return _sign
+
+
+_ORIGINAL_SETTINGS = settings
+
+
+@pytest.fixture(autouse=True)
+def _restore_settings_singleton():
+    """Ensure all app and test modules share the original settings singleton even after importlib.reload."""
+    yield
+    import sys
+    import app.config
+    app.config.settings = _ORIGINAL_SETTINGS
+    _ORIGINAL_SETTINGS.admin_user_id = None
+    for name, mod in list(sys.modules.items()):
+        if name.startswith(("app", "tests", "main")):
+            s = getattr(mod, "settings", None)
+            if s is not None and s is not _ORIGINAL_SETTINGS:
+                if s.__class__.__name__ == "Settings" and s.__class__.__module__ == "app.config":
+                    mod.settings = _ORIGINAL_SETTINGS
+
+

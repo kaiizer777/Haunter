@@ -372,7 +372,11 @@ async def _call_with_empty_retry(
             f"(limit {int(FETCH_TIMEOUT_S * 1000)}ms)"
         ) from None
 
-    first_latency_ms = int((time.monotonic() - t0) * 1000)
+    first_latency_ms = int(
+        response.get("latency_ms")
+        if response.get("latency_ms") is not None
+        else (time.monotonic() - t0) * 1000
+    )
     first_content = (response.get("content") or "").strip()
     first_usage = response.get("usage", {}) or {}
     first_in = int(first_usage.get("input_tokens", 0))
@@ -411,7 +415,11 @@ async def _call_with_empty_retry(
             f"(limit {int(FETCH_TIMEOUT_S * 1000)}ms)"
         ) from None
 
-    retry_latency_ms = int((time.monotonic() - t1) * 1000)
+    retry_latency_ms = int(
+        retry_response.get("latency_ms")
+        if retry_response.get("latency_ms") is not None
+        else (time.monotonic() - t1) * 1000
+    )
     retry_content = (retry_response.get("content") or "").strip()
     retry_usage = retry_response.get("usage", {}) or {}
     retry_in = int(retry_usage.get("input_tokens", 0))
