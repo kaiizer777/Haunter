@@ -27,7 +27,6 @@ export default function RunsPage() {
 
   // Selection & Deletion state
   const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(new Set());
-  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   const [isBatchDeleting, setIsBatchDeleting] = useState(false);
 
   const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
@@ -136,39 +135,6 @@ export default function RunsPage() {
       }
       return next;
     });
-  };
-
-  const handleDeleteSingleRun = async (runId: string) => {
-    if (!window.confirm("Are you sure you want to delete this run?")) {
-      return;
-    }
-
-    setDeletingIds((prev) => new Set(prev).add(runId));
-    setError(null);
-    try {
-      await api.deleteRun(runId);
-      setSelectedRunIds((prev) => {
-        if (!prev.has(runId)) return prev;
-        const next = new Set(prev);
-        next.delete(runId);
-        return next;
-      });
-      if (runs.length === 1 && page > 0) {
-        setPage((p) => Math.max(0, p - 1));
-      } else {
-        await fetchRuns();
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to delete run.";
-      setError(msg);
-      alert(`Failed to delete run: ${msg}`);
-    } finally {
-      setDeletingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(runId);
-        return next;
-      });
-    }
   };
 
   const handleBatchDelete = async () => {
@@ -317,11 +283,11 @@ export default function RunsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-[16%]">Status</TableHead>
+                  <TableHead className="w-[16%] pl-4">Status</TableHead>
                   <TableHead className="w-[26%]">Repository</TableHead>
                   <TableHead className="w-[22%]">Branch / Commit</TableHead>
                   <TableHead className="w-[16%]">Triggered</TableHead>
-                  <TableHead className="w-[16%] text-right">Action</TableHead>
+                  <TableHead className="w-[16%] text-right pr-4">Actions</TableHead>
                   {/* Selection Checkbox */}
                   <TableHead className="w-10 px-3 text-center">
                     <input
@@ -346,18 +312,17 @@ export default function RunsPage() {
                   const repo = reposMap[run.repo_id];
                   const repoLabel = repo ? `${repo.owner}/${repo.name}` : `repo-${run.repo_id.slice(0, 8)}`;
                   const isSelected = selectedRunIds.has(run.id);
-                  const isRowDeleting = deletingIds.has(run.id);
 
                   return (
                     <TableRow
                       key={run.id}
                       onClick={() => router.push(`/runs/detail?id=${run.id}`)}
                       className={`cursor-pointer group ${isSelected ? "bg-zinc-800/30" : ""} ${
-                        isRowDeleting || isBatchDeleting ? "opacity-50 pointer-events-none" : ""
+                        isBatchDeleting ? "opacity-50 pointer-events-none" : ""
                       }`}
                     >
                       {/* Status */}
-                      <TableCell>
+                      <TableCell className="pl-4">
                         <StatusBadge status={run.status} />
                       </TableCell>
 
@@ -388,28 +353,20 @@ export default function RunsPage() {
                         {formatRelativeTime(run.created_at)}
                       </TableCell>
 
-                      {/* Action */}
-                      <TableCell className="text-right">
-                        <div className="inline-flex items-center justify-end gap-1.5">
-                          <span className="inline-flex items-center gap-1 font-mono text-xs text-zinc-500 group-hover:text-zinc-200 transition-colors mr-1">
-                            Trace
-                            <ArrowUpRight className="h-3 w-3" />
-                          </span>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteSingleRun(run.id);
-                            }}
-                            disabled={isRowDeleting || isBatchDeleting}
-                            className="h-7 w-7 text-zinc-500 hover:text-red-400 hover:bg-red-950/30"
-                            title="Delete run"
-                            aria-label={`Delete run ${run.id}`}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
+                      {/* Actions */}
+                      <TableCell className="text-right pr-4" onClick={(e) => e.stopPropagation()}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            router.push(`/runs/detail?id=${run.id}`);
+                          }}
+                          className="h-7 px-2 text-xs font-mono text-zinc-400 hover:text-amber-400 hover:bg-zinc-800/80"
+                        >
+                          Trace
+                          <ArrowUpRight className="h-3 w-3 ml-1" />
+                        </Button>
                       </TableCell>
 
                       {/* Selection Checkbox */}
@@ -417,7 +374,7 @@ export default function RunsPage() {
                         <input
                           type="checkbox"
                           checked={isSelected}
-                          disabled={isRowDeleting || isBatchDeleting}
+                          disabled={isBatchDeleting}
                           onChange={(e) => {
                             e.stopPropagation();
                             handleToggleRun(run.id);

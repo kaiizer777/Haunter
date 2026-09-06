@@ -673,13 +673,13 @@ export default function MockRunsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-[14%]">Status</TableHead>
+                    <TableHead className="w-[14%] pl-4">Status</TableHead>
                     <TableHead className="w-[22%]">Repository</TableHead>
                     <TableHead className="w-[23%]">Branch / Commit</TableHead>
                     <TableHead className="w-[13%]">Triggered</TableHead>
                     <TableHead className="w-[9%]">Duration</TableHead>
                     <TableHead className="w-[9%]">Cost</TableHead>
-                    <TableHead className="w-[10%] text-right">Actions</TableHead>
+                    <TableHead className="w-[10%] text-right pr-4">Actions</TableHead>
                     {/* Checkbox Column */}
                     <TableHead className="w-10 px-3 text-center">
                       <input
@@ -710,7 +710,7 @@ export default function MockRunsPage() {
                         className={`cursor-pointer group ${isSelected ? "bg-zinc-800/30" : ""}`}
                       >
                         {/* Status */}
-                        <TableCell>
+                        <TableCell className="pl-4">
                           <StatusBadge status={run.status} />
                         </TableCell>
 
@@ -762,7 +762,7 @@ export default function MockRunsPage() {
                         </TableCell>
 
                         {/* Actions */}
-                        <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                        <TableCell className="text-right pr-4" onClick={(e) => e.stopPropagation()}>
                           <Button
                             variant="ghost"
                             size="sm"
