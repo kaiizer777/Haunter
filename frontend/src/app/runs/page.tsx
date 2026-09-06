@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { AppLayout } from "@/components/layout/app-layout";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { RunsFilter } from "@/components/runs/runs-filter";
 import { StatusBadge } from "@/components/runs/status-badge";
 import { api, RepoOut, RunOut } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
@@ -17,8 +17,11 @@ import {
   GitCommit,
   GitBranch,
   Clock,
-  ArrowRight,
+  ArrowUpRight,
   Trash2,
+  Filter,
+  Search,
+  RotateCcw,
 } from "lucide-react";
 
 const PAGE_SIZE = 20;
@@ -73,10 +76,9 @@ export default function RunsPage() {
   const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
 
   // Filters
+  const [searchQuery, setSearchQuery] = useState("");
   const [selectedRepoId, setSelectedRepoId] = useState("");
   const [selectedStatus, setSelectedStatus] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
   const [page, setPage] = useState(0);
 
   // Fetch Repos list for dropdown and name lookup
@@ -98,8 +100,6 @@ export default function RunsPage() {
       const data = await api.getRuns({
         repo_id: selectedRepoId || undefined,
         status: selectedStatus || undefined,
-        from: from ? new Date(from).toISOString() : undefined,
-        to: to ? new Date(to).toISOString() : undefined,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       });
@@ -114,17 +114,49 @@ export default function RunsPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedRepoId, selectedStatus, from, to, page]);
+  }, [selectedRepoId, selectedStatus, page]);
 
   useEffect(() => {
     fetchRuns();
   }, [fetchRuns]);
 
+  // Client-side filtering
+  const filteredRuns = useMemo(() => {
+    if (!searchQuery.trim()) {
+      return runs;
+    }
+    const q = searchQuery.toLowerCase().trim();
+    return runs.filter((run) => {
+      const repo = reposMap[run.repo_id];
+      const repoLabel = repo ? `${repo.owner}/${repo.name}` : `repo-${run.repo_id.slice(0, 8)}`;
+      const branchName = run.head_branch || (run as any).branch || "";
+      const commitSha = (run as any).commit_sha || run.head_sha || "";
+      const diagnosis = (run as any).diagnosis || (run as any).diagnosis_summary || "";
+
+      const matchRepo = repoLabel.toLowerCase().includes(q);
+      const matchBranch = branchName.toLowerCase().includes(q);
+      const matchSha = commitSha.toLowerCase().includes(q);
+      const matchDiag = diagnosis.toLowerCase().includes(q);
+
+      return matchRepo || matchBranch || matchSha || matchDiag;
+    });
+  }, [runs, reposMap, searchQuery]);
+
+  const hasActiveFilters = Boolean(searchQuery || selectedRepoId || selectedStatus);
+
+  const handleResetFilters = () => {
+    setSearchQuery("");
+    setSelectedRepoId("");
+    setSelectedStatus("");
+    setPage(0);
+    setSelectedRunIds(new Set());
+  };
+
   // Selection helpers
-  const displayedRunIds = runs.map((r) => r.id);
-  const selectedDisplayedCount = runs.filter((r) => selectedRunIds.has(r.id)).length;
-  const isAllSelected = runs.length > 0 && selectedDisplayedCount === runs.length;
-  const isIndeterminate = selectedDisplayedCount > 0 && selectedDisplayedCount < runs.length;
+  const displayedRunIds = filteredRuns.map((r) => r.id);
+  const selectedDisplayedCount = filteredRuns.filter((r) => selectedRunIds.has(r.id)).length;
+  const isAllSelected = filteredRuns.length > 0 && selectedDisplayedCount === filteredRuns.length;
+  const isIndeterminate = selectedDisplayedCount > 0 && selectedDisplayedCount < filteredRuns.length;
 
   useEffect(() => {
     if (headerCheckboxRef.current) {
@@ -181,7 +213,7 @@ export default function RunsPage() {
   // Reset selection when page or filters change
   useEffect(() => {
     setSelectedRunIds(new Set());
-  }, [page, selectedRepoId, selectedStatus, from, to]);
+  }, [page, selectedRepoId, selectedStatus, searchQuery]);
 
   const handleBatchDelete = async () => {
     if (selectedRunIds.size === 0) return;
@@ -205,15 +237,6 @@ export default function RunsPage() {
     }
   };
 
-  const handleResetFilters = () => {
-    setSelectedRepoId("");
-    setSelectedStatus("");
-    setFrom("");
-    setTo("");
-    setPage(0);
-    setSelectedRunIds(new Set());
-  };
-
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
   return (
@@ -235,32 +258,79 @@ export default function RunsPage() {
         ) : undefined
       }
     >
-      <div className="space-y-5">
-        {/* Server-side Filters */}
-        <RunsFilter
-          repos={repos}
-          selectedRepoId={selectedRepoId}
-          selectedStatus={selectedStatus}
-          from={from}
-          to={to}
-          onRepoChange={(id) => {
-            setSelectedRepoId(id);
-            setPage(0);
-          }}
-          onStatusChange={(st) => {
-            setSelectedStatus(st);
-            setPage(0);
-          }}
-          onFromChange={(f) => {
-            setFrom(f);
-            setPage(0);
-          }}
-          onToChange={(t) => {
-            setTo(t);
-            setPage(0);
-          }}
-          onReset={handleResetFilters}
-        />
+      <div className="space-y-6">
+        {/* Modern Filter Bar ported from mock/page.tsx */}
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-[7px] border border-zinc-800 bg-[#121215] p-3.5">
+          <div className="flex flex-wrap items-center gap-3.5 flex-1 min-w-[300px]">
+            <div className="flex items-center gap-2 text-[13px] text-zinc-400 font-medium pl-1">
+              <Filter className="h-4 w-4 text-amber-400" />
+              <span>Filters:</span>
+            </div>
+
+            {/* Search input */}
+            <div className="relative w-64">
+              <Search className="absolute left-3 top-3 h-4 w-4 text-zinc-500" />
+              <Input
+                type="text"
+                placeholder="Search branch, sha, diagnosis..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-10 pl-9.5 pr-3.5 text-xs rounded-[7px]"
+              />
+            </div>
+
+            {/* Repo select */}
+            <select
+              value={selectedRepoId}
+              onChange={(e) => {
+                setSelectedRepoId(e.target.value);
+                setPage(0);
+              }}
+              className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-4 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+            >
+              <option value="">All Repositories ({repos.length})</option>
+              {repos.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.owner}/{r.name}
+                </option>
+              ))}
+            </select>
+
+            {/* Status select */}
+            <select
+              value={selectedStatus}
+              onChange={(e) => {
+                setSelectedStatus(e.target.value);
+                setPage(0);
+              }}
+              className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-4 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+            >
+              <option value="">All Statuses</option>
+              <option value="completed">Completed / PR Opened</option>
+              <option value="fix_generation">Generating Fix</option>
+              <option value="error">Error / Failed</option>
+              <option value="fallback">Fallback Comment</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-3.5">
+            <span className="font-mono text-xs text-zinc-500">
+              Showing {filteredRuns.length} of {total} runs
+            </span>
+
+            {hasActiveFilters && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleResetFilters}
+                className="h-8 px-2.5 text-xs rounded-[7px] text-zinc-400 hover:text-zinc-100 flex items-center gap-1.5"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Clear Filters
+              </Button>
+            )}
+          </div>
+        </div>
 
         {error && (
           <div className="rounded-[7px] border border-red-900/60 bg-red-950/30 p-3.5 text-[13px] text-red-300">
@@ -300,7 +370,7 @@ export default function RunsPage() {
         )}
 
         {/* Dense Table */}
-        <div className="rounded-[6px] border border-zinc-800 bg-[#121215] overflow-hidden">
+        <div className="rounded-[6px] border border-zinc-800 bg-[#121215] overflow-hidden shadow-sm">
           {loading ? (
             <div className="p-4 space-y-3">
               <Skeleton className="h-9 w-full" />
@@ -308,13 +378,28 @@ export default function RunsPage() {
               <Skeleton className="h-9 w-full" />
               <Skeleton className="h-9 w-full" />
             </div>
-          ) : runs.length === 0 ? (
+          ) : filteredRuns.length === 0 ? (
             <div className="p-12 text-center border border-dashed border-zinc-800/80 m-4 rounded-[6px]">
               <Activity className="h-6 w-6 mx-auto text-zinc-600 mb-2" />
-              <h3 className="text-sm font-medium text-zinc-300">No CI runs found</h3>
+              <h3 className="text-sm font-medium text-zinc-300">
+                {runs.length === 0 ? "No CI runs found" : "No matching CI runs"}
+              </h3>
               <p className="text-xs text-zinc-500 mt-1 max-w-sm mx-auto">
-                Trigger a failing GitHub Actions workflow on a connected repo to see autonomous diagnosis.
+                {runs.length === 0
+                  ? "Trigger a failing GitHub Actions workflow on a connected repo to see autonomous diagnosis."
+                  : "Try clearing your search query or adjusting the repository/status filter."}
               </p>
+              {hasActiveFilters && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleResetFilters}
+                  className="mt-4 text-xs font-mono"
+                >
+                  <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+                  Reset Filters
+                </Button>
+              )}
             </div>
           ) : (
             <Table>
@@ -353,7 +438,7 @@ export default function RunsPage() {
                       type="checkbox"
                       checked={isAllSelected}
                       onChange={handleToggleSelectAll}
-                      disabled={loading || runs.length === 0 || isBatchDeleting}
+                      disabled={loading || filteredRuns.length === 0 || isBatchDeleting}
                       aria-label="Select all runs"
                       className="h-4 w-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 accent-amber-400 focus:ring-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                     />
@@ -361,7 +446,7 @@ export default function RunsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {runs.map((run) => {
+                {filteredRuns.map((run) => {
                   const repo = reposMap[run.repo_id];
                   const repoLabel = repo ? `${repo.owner}/${repo.name}` : `repo-${run.repo_id.slice(0, 8)}`;
                   const isSelected = selectedRunIds.has(run.id);
@@ -419,12 +504,18 @@ export default function RunsPage() {
                       {/* Column 6: COST */}
                       <TableCell>
                         <div className="flex flex-col font-mono text-xs">
-                          <span className="text-emerald-400 font-medium">
-                            ${(run.cost || 0).toFixed(4)}
-                          </span>
-                          <span className="text-[11px] text-zinc-500">
-                            {((run.tokens || 0) / 1000).toFixed(1)}k tok
-                          </span>
+                          {run.cost && run.cost > 0 ? (
+                            <span className="text-emerald-400 font-medium">
+                              ${run.cost.toFixed(4)}
+                            </span>
+                          ) : (
+                            <span className="text-zinc-500 font-medium">-</span>
+                          )}
+                          {run.tokens && run.tokens > 0 ? (
+                            <span className="text-[11px] text-zinc-500">
+                              {((run.tokens || 0) / 1000).toFixed(1)}k tok
+                            </span>
+                          ) : null}
                         </div>
                       </TableCell>
 
@@ -437,10 +528,10 @@ export default function RunsPage() {
                             e.stopPropagation();
                             router.push(`/runs/detail?id=${run.id}`);
                           }}
-                          className="h-7 px-2 text-xs font-mono text-zinc-400 hover:text-amber-400 hover:bg-zinc-800/80 inline-flex items-center gap-1"
+                          className="h-7 px-2 text-xs font-mono text-zinc-400 hover:text-amber-400 hover:bg-zinc-800/80"
                         >
                           Trace
-                          <ArrowRight className="h-3 w-3 ml-0.5" />
+                          <ArrowUpRight className="h-3 w-3 ml-1" />
                         </Button>
                       </TableCell>
 
