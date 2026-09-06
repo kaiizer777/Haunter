@@ -166,6 +166,8 @@ class RunOut(BaseModel):
     head_branch: str
     status: str
     conclusion: Optional[str]
+    cost: float = 0.0
+    tokens: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -173,7 +175,7 @@ class RunOut(BaseModel):
 
 
 class BatchDeleteRunsRequest(BaseModel):
-    run_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=50)
+    run_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
 class BatchDeleteRunsResponse(BaseModel):

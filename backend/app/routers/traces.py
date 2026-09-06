@@ -30,7 +30,7 @@ from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
@@ -257,41 +257,56 @@ async def list_runs(
             detail=str(exc),
         ) from exc
 
-    # Base query — always scope to current user's repos.
-    base_stmt = (
-        select(Run)
-        .join(Repo, Run.repo_id == Repo.id)
-        .where(Repo.user_id == current_user.id)
-    )
+    user_repo_ids = select(Repo.id).where(Repo.user_id == current_user.id)
 
+    filters = [Run.repo_id.in_(user_repo_ids)]
     if params.repo_id is not None:
-        base_stmt = base_stmt.where(Run.repo_id == params.repo_id)
+        filters.append(Run.repo_id == params.repo_id)
     if params.status is not None:
-        base_stmt = base_stmt.where(Run.status == params.status)
+        filters.append(Run.status == params.status)
     if params.from_ is not None:
         from_utc = params.from_.replace(tzinfo=timezone.utc) if params.from_.tzinfo is None else params.from_
-        base_stmt = base_stmt.where(Run.created_at >= from_utc)
+        filters.append(Run.created_at >= from_utc)
     if params.to is not None:
         to_utc = params.to.replace(tzinfo=timezone.utc) if params.to.tzinfo is None else params.to
-        base_stmt = base_stmt.where(Run.created_at <= to_utc)
+        filters.append(Run.created_at <= to_utc)
 
     # Count total matching rows (same filters, no limit/offset).
-    count_stmt = select(func.count()).select_from(base_stmt.subquery())
+    count_stmt = select(func.count(Run.id)).where(*filters)
     total_result = await db.execute(count_stmt)
-    total: int = total_result.scalar_one()
+    total: int = total_result.scalar_one() or 0
 
-    # Fetch paginated results.
+    # Fetch paginated results with aggregated cost and tokens.
+    cost_expr = func.coalesce(func.sum(RunStep.cost_estimate), 0.0).label("cost")
+    tokens_expr = func.coalesce(
+        func.sum(RunStep.input_tokens + RunStep.output_tokens), 0
+    ).label("tokens")
+
     paginated_stmt = (
-        base_stmt
+        select(Run, cost_expr, tokens_expr)
+        .outerjoin(RunStep, RunStep.run_id == Run.id)
+        .where(*filters)
+        .group_by(Run.id)
         .order_by(Run.created_at.desc())
         .limit(params.limit)
         .offset(params.offset)
     )
     runs_result = await db.execute(paginated_stmt)
-    runs: list[Run] = list(runs_result.scalars().all())
+    rows = runs_result.all()
+
+    runs: list[RunOut] = []
+    for run, cost, tokens in rows:
+        run_cost = float(cost or 0.0)
+        run_tokens = int(tokens or 0)
+        setattr(run, "cost", run_cost)
+        setattr(run, "tokens", run_tokens)
+        run_out = RunOut.model_validate(run)
+        run_out.cost = run_cost
+        run_out.tokens = run_tokens
+        runs.append(run_out)
 
     return RunListOut(
-        runs=[RunOut.model_validate(r) for r in runs],
+        runs=runs,
         total=total,
     )
 
@@ -425,15 +440,31 @@ async def batch_delete_runs(
     Only runs owned by current_user are deleted; non-owned or non-existent
     run IDs are ignored. Returns the count of deleted runs.
     """
+    if not payload.run_ids:
+        return BatchDeleteRunsResponse(deleted_count=0)
+
+    user_repo_ids = select(Repo.id).where(Repo.user_id == current_user.id)
     result = await db.execute(
-        select(Run)
-        .join(Repo, Run.repo_id == Repo.id)
-        .where(Run.id.in_(payload.run_ids), Repo.user_id == current_user.id)
+        select(Run).where(
+            Run.id.in_(payload.run_ids),
+            Run.repo_id.in_(user_repo_ids),
+        )
     )
     matching_runs = list(result.scalars().all())
 
     if not matching_runs:
         return BatchDeleteRunsResponse(deleted_count=0)
+
+    matching_run_ids = [r.id for r in matching_runs]
+
+    # Explicit cascade cleanup for RunStep and Attempt (RunAttempt) records
+    # in case DB-level foreign key cascade is not handled.
+    await db.execute(
+        delete(RunStep).where(RunStep.run_id.in_(matching_run_ids))
+    )
+    await db.execute(
+        delete(Attempt).where(Attempt.run_id.in_(matching_run_ids))
+    )
 
     for run in matching_runs:
         await db.delete(run)
