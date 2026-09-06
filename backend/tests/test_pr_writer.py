@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.github.pr import _escape_pr_text
 from app.models import Attempt, Repo, Run, RunStep, User
 from app.orchestrator import _sanitize_fallback
 from app.subagents.pr_writer import (
@@ -449,3 +450,99 @@ def test_sanitize_fallback_never_includes_patch() -> None:
     # Patch text must not appear in the output (sanitiser ignores attempt content)
     assert "--- a/secret.py" not in result
     assert "+++ b/secret.py" not in result
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Subagents deep coverage additions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_generate_pr_text_run_steps_usage_tokens(db: AsyncSession) -> None:
+    """RunStep input_tokens and output_tokens come from the LLM response usage field."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+    attempt = await _create_attempt(db, run)
+
+    mock_response = {
+        **_VALID_LLM_RESPONSE,
+        "usage": {"input_tokens": 142, "output_tokens": 77},
+        "latency_ms": 310,
+    }
+
+    with patch("app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = mock_response
+        await generate_pr_text(
+            run=run,
+            verified_attempt=attempt,
+            diagnosis_summary=run.diagnosis_summary or "",
+            db=db,
+        )
+
+    steps = (await db.execute(
+        select(RunStep).where(RunStep.run_id == run.id, RunStep.step_name == "pr_writer")
+    )).scalars().all()
+    assert len(steps) == 1
+    step = steps[0]
+    assert step.input_tokens == 142
+    assert step.output_tokens == 77
+    assert step.latency_ms >= 0
+    expected_cost = round((142 * 0.001 / 1000) + (77 * 0.002 / 1000), 8)
+    assert step.cost_estimate == pytest.approx(expected_cost, abs=1e-8)
+
+
+@pytest.mark.anyio
+async def test_generate_pr_text_does_not_write_run_pr_fields(db: AsyncSession) -> None:
+    """generate_pr_text() must NOT write run.pr_url, run.pr_number, or run.pr_branch.
+
+    Those fields are written downstream by the orchestrator after GitHub PR creation succeeds.
+    """
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+    attempt = await _create_attempt(db, run)
+
+    # Initial state must be None
+    assert run.pr_url is None
+    assert run.pr_number is None
+    assert run.pr_branch is None
+
+    with patch("app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock, return_value=_VALID_LLM_RESPONSE):
+        await generate_pr_text(
+            run=run,
+            verified_attempt=attempt,
+            diagnosis_summary=run.diagnosis_summary or "",
+            db=db,
+        )
+
+    # Check that generate_pr_text() did not mutate or populate PR destination fields
+    db.expire_all()
+    refreshed_run = (await db.execute(select(Run).where(Run.id == run.id))).scalar_one()
+    assert refreshed_run.pr_url is None
+    assert refreshed_run.pr_number is None
+    assert refreshed_run.pr_branch is None
+
+
+def test_pr_text_xss_escaping_in_title_and_body() -> None:
+    """XSS injection '<script>alert(1)</script>' produces '&lt;script&gt;...' in title and body."""
+    raw_xss = "<script>alert(1)</script>"
+
+    # 1. Title escaping
+    title_input = f"fix: {raw_xss} in models.py"
+    escaped_title = _escape_pr_text(title_input, max_len=72)
+    assert "<script>" not in escaped_title
+    assert "</script>" not in escaped_title
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in escaped_title
+    assert len(escaped_title) <= 72
+
+    # 2. Body escaping
+    body_input = f"Root cause analysis: {raw_xss} was injected into commit message.\nFix applied."
+    escaped_body = _escape_pr_text(body_input, max_len=3000)
+    assert "<script>" not in escaped_body
+    assert "</script>" not in escaped_body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in escaped_body
+    assert len(escaped_body) <= 3000
+

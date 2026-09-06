@@ -18,6 +18,7 @@ Covers:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -28,6 +29,9 @@ from app.adapters.hosting import (
     AWSHostingAdapter,
     _ALLOWED_PROVIDERS,
     _cfg_cache,
+    _get_provider_config,
+    get_active_hosting_provider,
+    get_active_sandbox_provider,
     get_hosting_adapter,
     invalidate_provider_cache,
 )
@@ -291,3 +295,129 @@ async def test_get_provider_config_db_error_fallback():
 def test_allowed_providers_is_strict():
     """Allowed provider set must be exactly {'aws'}."""
     assert _ALLOWED_PROVIDERS == frozenset({"aws"})
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Missing branch tests for _get_provider_config and provider getters
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_provider_config_empty_db_returns_env_default():
+    """_get_provider_config with empty DB returns env default."""
+    invalidate_provider_cache()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = None
+
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = mock_result
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__.return_value = mock_session
+    mock_ctx.__aexit__.return_value = None
+
+    with patch("app.db.async_session_maker", return_value=mock_ctx):
+        res = await _get_provider_config("hosting_provider", "aws")
+
+    assert res == "aws"
+    assert mock_session.execute.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_provider_config_invalid_db_value_fallback_and_logs(caplog):
+    """DB has invalid value (e.g. 'gcp') -> falls back to env default and logs error."""
+    invalidate_provider_cache()
+    mock_row = MagicMock()
+    mock_row.value = "gcp"
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_row
+
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = mock_result
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__.return_value = mock_session
+    mock_ctx.__aexit__.return_value = None
+
+    with caplog.at_level(logging.ERROR):
+        with patch("app.db.async_session_maker", return_value=mock_ctx):
+            result = await _get_provider_config("hosting_provider", "aws")
+
+    assert result == "aws"
+    assert "invalid provider 'gcp' for key=hosting_provider, falling back to 'aws'" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_get_provider_config_cache_hit_skips_db():
+    """Cache hit within 60s skips the DB call (assert DB call count == 1)."""
+    invalidate_provider_cache()
+    mock_row = MagicMock()
+    mock_row.value = "aws"
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_row
+
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = mock_result
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__.return_value = mock_session
+    mock_ctx.__aexit__.return_value = None
+
+    with patch("app.db.async_session_maker", return_value=mock_ctx):
+        res1 = await _get_provider_config("hosting_provider", "aws")
+        res2 = await _get_provider_config("hosting_provider", "aws")
+
+    assert res1 == "aws"
+    assert res2 == "aws"
+    # Session execute called exactly once because second call hit 60s TTL cache
+    assert mock_session.execute.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_invalidate_provider_cache_forces_reread():
+    """invalidate_provider_cache() forces next call to query DB again."""
+    invalidate_provider_cache()
+    mock_row = MagicMock()
+    mock_row.value = "aws"
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_row
+
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = mock_result
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__.return_value = mock_session
+    mock_ctx.__aexit__.return_value = None
+
+    with patch("app.db.async_session_maker", return_value=mock_ctx):
+        res1 = await _get_provider_config("hosting_provider", "aws")
+        assert mock_session.execute.call_count == 1
+
+        invalidate_provider_cache()
+
+        res2 = await _get_provider_config("hosting_provider", "aws")
+        assert mock_session.execute.call_count == 2
+
+    assert res1 == "aws"
+    assert res2 == "aws"
+
+
+@pytest.mark.asyncio
+async def test_get_active_hosting_provider_reads_from_settings(monkeypatch):
+    """get_active_hosting_provider reads from settings.hosting_provider."""
+    invalidate_provider_cache()
+    monkeypatch.setattr("app.config.settings.hosting_provider", "aws")
+    with patch("app.adapters.hosting._get_provider_config", new_callable=AsyncMock) as mock_get_cfg:
+        mock_get_cfg.return_value = "aws"
+        res = await get_active_hosting_provider()
+        assert res == "aws"
+        mock_get_cfg.assert_awaited_once_with("hosting_provider", "aws")
+
+
+@pytest.mark.asyncio
+async def test_get_active_sandbox_provider_reads_from_settings(monkeypatch):
+    """get_active_sandbox_provider reads from settings.sandbox_provider."""
+    invalidate_provider_cache()
+    monkeypatch.setattr("app.config.settings.sandbox_provider", "github_actions")
+    with patch("app.adapters.hosting._get_provider_config", new_callable=AsyncMock) as mock_get_cfg:
+        mock_get_cfg.return_value = "github_actions"
+        res = await get_active_sandbox_provider()
+        assert res == "github_actions"
+        mock_get_cfg.assert_awaited_once_with("sandbox_provider", "github_actions")
+

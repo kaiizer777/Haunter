@@ -69,7 +69,7 @@ async def _get_provider_config(key: str, env_default: str) -> str:
                 select(SystemConfig).where(SystemConfig.key == key)
             )
             row = result.scalar_one_or_none()
-            if row and row.value in _ALLOWED_PROVIDERS:
+            if row:
                 value = row.value
     except Exception as exc:
         logger.warning(

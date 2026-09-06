@@ -1,0 +1,6 @@
+# Development dependencies (linters, formatters, type checkers).
+# NOT installed in production / Lambda — keeps lambda.zip small.
+# Install locally: pip install -r requirements-dev.txt
+# CI installs these automatically.
+
+ruff==0.7.4

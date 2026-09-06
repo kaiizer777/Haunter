@@ -506,10 +506,15 @@ def _build_messages(
             ),
         })
         redacted_patch = _redact_secrets(prior_attempt.patch_text or "")
+        strategy_section = ""
+        if getattr(prior_attempt, "strategy_notes", None):
+            redacted_notes = _redact_secrets(str(prior_attempt.strategy_notes))
+            strategy_section = f"### Prior Strategy Notes\n{redacted_notes}\n"
         prior_content = (
             f"## Prior Attempt #{prior_attempt.attempt_number}\n"
             f"### Patch Applied\n```\n{redacted_patch}\n```\n"
             f"### Failure Reason\n{prior_attempt.failure_reason or '(no reason recorded)'}\n"
+            f"{strategy_section}"
             "\n"
             "Do NOT repeat the same patch."
         )

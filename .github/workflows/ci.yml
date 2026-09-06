@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-progress runs on the same branch — saves CI minutes on rapid pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  POSTGRES_VERSION: "16"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Backend: lint (ruff) + migration check + pytest
+  # ---------------------------------------------------------------------------
+  backend:
+    name: Backend (lint + migrations + 787 tests)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:${{ env.POSTGRES_VERSION }}
+        env:
+          POSTGRES_USER: haunter_test
+          POSTGRES_PASSWORD: haunter_test
+          POSTGRES_DB: haunter_test
+        ports:
+          - 5432:5432
+        # Generate self-signed SSL cert inside the container and enable SSL on
+        # startup. The conftest hardcodes `ssl=True` for the test engine, so
+        # the local Postgres must speak SSL — otherwise asyncpg rejects the
+        # connection.
+        command: >
+          bash -c '
+            apt-get update -qq && apt-get install -yqq openssl >/dev/null;
+            mkdir -p /var/lib/postgresql/certs;
+            openssl req -new -x509 -days 1 -nodes
+              -out /var/lib/postgresql/certs/server.crt
+              -keyout /var/lib/postgresql/certs/server.key
+              -subj "/CN=localhost" 2>/dev/null;
+            chmod 600 /var/lib/postgresql/certs/server.key;
+            chown postgres:postgres /var/lib/postgresql/certs/server.key;
+            cat >> /var/lib/postgresql/data/postgresql.conf <<SSL
+          ssl = on
+          ssl_cert_file = "/var/lib/postgresql/certs/server.crt"
+          ssl_key_file = "/var/lib/postgresql/certs/server.key"
+          SSL
+            docker-entrypoint.sh postgres
+          '
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install runtime deps
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Install dev deps (ruff)
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        working-directory: backend
+        run: ruff check app tests
+
+      - name: Verify Python syntax
+        working-directory: backend
+        run: python -m compileall -q app
+
+      - name: Apply Alembic migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
+          DATABASE_URL_UNPOOLED: postgresql://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
+        run: alembic upgrade head
+
+      - name: Verify Alembic downgrades + re-upgrade
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
+          DATABASE_URL_UNPOOLED: postgresql://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Generate test Fernet key
+        id: fernet
+        working-directory: backend
+        run: |
+          python -c "from cryptography.fernet import Fernet; print('key=' + Fernet.generate_key().decode())" >> "$GITHUB_OUTPUT"
+
+      - name: Run backend tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
+          DATABASE_URL: postgresql+asyncpg://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
+          DATABASE_URL_UNPOOLED: postgresql://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
+          GITHUB_CLIENT_ID: ci_test_client_id
+          GITHUB_CLIENT_SECRET: ci_test_client_secret
+          CALLBACK_URL: http://localhost:8787/auth/callback
+          SESSION_SECRET_KEY: ci_test_session_secret_key_replace_in_prod
+          GITHUB_WEBHOOK_SECRET: ci_test_webhook_secret
+          FRONTEND_URL: http://localhost:3000
+          TOKEN_ENCRYPTION_KEY: ${{ steps.fernet.outputs.key }}
+          OPENCODE_ZEN_API_KEY: ""
+        run: |
+          pytest -v --tb=short --maxfail=10
+        timeout-minutes: 30
+
+  # ---------------------------------------------------------------------------
+  # Frontend: lint (eslint) + tsc + vitest + next build
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend (lint + tsc + 219 tests + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        env:
+          # Dummy URL — build only renders, doesn't call the API.
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+        run: npm run build

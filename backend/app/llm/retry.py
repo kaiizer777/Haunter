@@ -193,7 +193,7 @@ async def execute_with_retry(
             # Fallthrough for any unexpected status
             raise LLMError(f"LLM provider error ({last_status})", status_code=last_status) from None
 
-        except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
+        except (httpx.TimeoutException, asyncio.TimeoutError, httpx.ConnectError) as exc:
             # Policy 2: Network timeout -> attempt count = 1, fail immediately for fallback
             logger.warning("LLM call timed out on attempt 1 — failing immediately for model fallback: %s", exc)
             raise LLMTimeoutError(f"LLM request timed out: {exc}") from None

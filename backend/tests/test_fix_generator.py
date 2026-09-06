@@ -41,6 +41,7 @@ from app.subagents.fix_generator import (
     _validate_patch,
     generate_fix,
 )
+from app.sandbox.mirror import _parse_patch_files
 from tests.conftest import truncate_all
 
 
@@ -1133,3 +1134,182 @@ async def test_generate_fix_recovers_from_prose_prefixed_response(db: AsyncSessi
     assert attempt.confidence_score == 72
     assert attempt.strategy_notes == "fixed import path"
     assert attempt.attempt_number == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Subagents deep coverage additions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_generate_fix_creates_run_step_row(db: AsyncSession) -> None:
+    """generate_fix() must create a RunStep row with step_name='fix_generator' and accurate token usage."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    response = {
+        **_VALID_LLM_RESPONSE,
+        "usage": {"input_tokens": 250, "output_tokens": 120},
+        "latency_ms": 450,
+    }
+
+    with patch("app.subagents.fix_generator.LLMClient.complete", AsyncMock(return_value=response)):
+        await generate_fix(
+            run=run,
+            diagnosis_summary="AssertionError in app/test.py:10",
+            prior_attempt=None,
+            db=db,
+        )
+
+    steps = (await db.execute(select(RunStep).where(RunStep.run_id == run.id))).scalars().all()
+    assert len(steps) == 1
+    step = steps[0]
+    assert step.step_name == "fix_generator"
+    assert step.input_tokens == 250
+    assert step.output_tokens == 120
+    assert step.latency_ms >= 0
+    expected_cost = round((250 * 0.001 / 1000) + (120 * 0.002 / 1000), 8)
+    assert step.cost_estimate == pytest.approx(expected_cost, abs=1e-8)
+
+
+@pytest.mark.anyio
+async def test_generate_fix_patch_parsed_by_parse_patch_files(db: AsyncSession) -> None:
+    """The generated patch_text is parsed by _parse_patch_files and matches touched files."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    multi_file_patch = (
+        "--- a/app/models.py\n"
+        "+++ b/app/models.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-a\n+b\n"
+        "--- a/tests/test_models.py\n"
+        "+++ b/tests/test_models.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-x\n+y\n"
+    )
+
+    response = {
+        **_VALID_LLM_RESPONSE,
+        "content": json.dumps({
+            "patch": multi_file_patch,
+            "confidence": 85,
+            "strategy_notes": "multi-file fix",
+        }),
+    }
+
+    with patch("app.subagents.fix_generator.LLMClient.complete", AsyncMock(return_value=response)):
+        attempt = await generate_fix(
+            run=run,
+            diagnosis_summary="AssertionError across two files",
+            prior_attempt=None,
+            db=db,
+        )
+
+    parsed_files = _parse_patch_files(attempt.patch_text)
+    assert set(parsed_files.keys()) == {"app/models.py", "tests/test_models.py"}
+    assert len(parsed_files) == 2
+
+
+@pytest.mark.anyio
+async def test_generate_fix_invalid_json_retries_and_raises_error(db: AsyncSession) -> None:
+    """When LLM returns invalid JSON, retry once. On second invalid JSON, raise FixGenerationError."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    bad_json_1 = {**_VALID_LLM_RESPONSE, "content": "not json at all 1"}
+    bad_json_2 = {**_VALID_LLM_RESPONSE, "content": "not json at all 2"}
+    mock_complete = AsyncMock(side_effect=[bad_json_1, bad_json_2])
+
+    with (
+        patch("app.subagents.fix_generator.LLMClient.complete", mock_complete),
+        pytest.raises(FixGenerationError, match="schema validation on both attempts"),
+    ):
+        await generate_fix(
+            run=run,
+            diagnosis_summary="SyntaxError in app.py",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert mock_complete.call_count == 2
+
+    # Assert no attempt row persisted
+    attempts = (await db.execute(select(Attempt).where(Attempt.run_id == run.id))).scalars().all()
+    assert len(attempts) == 0
+
+
+@pytest.mark.anyio
+async def test_generate_fix_invalid_json_retry_succeeds(db: AsyncSession) -> None:
+    """When LLM returns invalid JSON on attempt 1, retried attempt 2 with valid JSON succeeds."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    bad_json = {**_VALID_LLM_RESPONSE, "content": "invalid json {{{"}
+    mock_complete = AsyncMock(side_effect=[bad_json, _VALID_LLM_RESPONSE])
+
+    with patch("app.subagents.fix_generator.LLMClient.complete", mock_complete):
+        attempt = await generate_fix(
+            run=run,
+            diagnosis_summary="SyntaxError in app.py",
+            prior_attempt=None,
+            db=db,
+        )
+
+    assert mock_complete.call_count == 2
+    assert attempt.attempt_number == 1
+    assert attempt.confidence_score == 78
+
+
+@pytest.mark.anyio
+async def test_generate_fix_includes_prior_strategy_notes_in_prompt(db: AsyncSession) -> None:
+    """strategy_notes from a prior failed attempt is included in the prompt on retry."""
+    await truncate_all(db)
+    user = await _create_user(db)
+    repo = await _create_repo(db, user)
+    run = await _create_run(db, repo)
+
+    prior = await _insert_attempt(
+        db=db,
+        run=run,
+        number=1,
+        patch_text=_VALID_PATCH,
+        verification_status="fail",
+        failure_reason="AssertionError: Expected 42 got 0",
+    )
+    prior.strategy_notes = "repaired import but test assertion failed on return value"
+    db.add(prior)
+    await db.commit()
+
+    captured_messages: list[list[dict[str, str]]] = []
+
+    async def capture_complete(messages: list[dict[str, str]], **kwargs: Any) -> dict:
+        captured_messages.append(messages)
+        return _VALID_LLM_RESPONSE
+
+    with patch("app.subagents.fix_generator.LLMClient.complete", side_effect=capture_complete):
+        attempt = await generate_fix(
+            run=run,
+            diagnosis_summary="AssertionError: Expected 42 got 0",
+            prior_attempt=prior,
+            db=db,
+        )
+
+    assert attempt.attempt_number == 2
+    assert len(captured_messages) == 1
+    prompt_turns = captured_messages[0]
+
+    # Prior attempt turns: system -> user -> assistant -> user
+    assert len(prompt_turns) >= 4
+    prior_turn = prompt_turns[3]["content"]
+    assert "### Prior Strategy Notes" in prior_turn
+    assert "repaired import but test assertion failed on return value" in prior_turn
+    assert "AssertionError: Expected 42 got 0" in prior_turn

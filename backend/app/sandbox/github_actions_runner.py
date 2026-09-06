@@ -166,6 +166,10 @@ async def _load_pem_from_ssm(ssm_path: str) -> str:
             f"SSM get_parameter timed out after {_PEM_LOAD_TIMEOUT_SECONDS}s "
             f"(path={ssm_path})"
         ) from None
+    except Exception as exc:
+        raise RuntimeError(
+            f"SSM get_parameter failed (path={ssm_path}): {exc}"
+        ) from exc
 
     _PEM_CACHE[ssm_path] = pem
     logger.info(
@@ -799,8 +803,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             return make_result(
                 passed=False,
                 reason=_sanitize_failure_reason(
-                    f"Failed to mint installation token: "
-                    f"{type(exc).__name__}: {str(exc)[:300]}"
+                    _non_retryable_reason(exc, prefix="GitHub API")
                 ),
                 duration_ms=int((time.monotonic() - t_start) * 1000),
             )

@@ -138,6 +138,10 @@ class SandboxInput(BaseModel):
             raise ValueError(
                 f"repo_ref too long ({len(v)} chars > {_MAX_REPO_REF_CHARS})"
             )
+        if v.startswith("/"):
+            raise ValueError(
+                f"repo_ref {v!r} must not start with '/'"
+            )
         for banned in _REPO_REF_BANNED:
             if banned in v:
                 raise ValueError(
