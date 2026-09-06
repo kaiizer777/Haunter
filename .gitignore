@@ -48,12 +48,19 @@ infra/aws/tfplan
 *.tfvars.json
 !*.tfvars.example
 
-# Project docs (ignore all markdown files except README.md and HAUNTER.md)
+# Project docs (ignore markdown files except tracked documentation)
 *.md
 !README.md
 !readme.md
 !HAUNTER.md
 !haunter.md
+!AGENTS.md
+!agents.md
 !frontend/README.md
 !frontend/readme.md
+!frontend/AGENTS.md
+!frontend/agents.md
+!aws.md
+!workers.md
+
 

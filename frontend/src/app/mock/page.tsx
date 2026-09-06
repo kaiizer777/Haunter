@@ -110,8 +110,8 @@ const INITIAL_MOCK_RUNS: MockRun[] = [
     duration: "34s",
     tokens: 3100,
     cost: 0.0021,
-    diagnosis: "CodeBuild sandbox runner exceeded execution timeout limit (30s). Verification aborted.",
-    error_message: "Sandbox verification error: CodeBuild runner timed out during pytest collection phase.",
+    diagnosis: "GitHub Actions sandbox runner exceeded execution timeout limit (30s). Verification aborted.",
+    error_message: "Sandbox verification error: GitHub Actions runner timed out during pytest collection phase.",
     sandbox_status: "failed",
   },
   {
@@ -891,7 +891,7 @@ export default function MockRunsPage() {
                 {/* Sandbox Verification Result */}
                 <div className="space-y-1.5">
                   <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wider font-mono">
-                    CodeBuild Sandbox Verification
+                    GitHub Actions Sandbox Verification
                   </span>
                   <div className="rounded-[6px] border border-zinc-800 bg-[#09090b] p-3 text-xs font-mono space-y-1">
                     <div className="flex items-center justify-between">
