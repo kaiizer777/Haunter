@@ -74,12 +74,14 @@ async def test_get_active_model_config_repo_override_wins(
         model_name="global-active-free",
         base_url="https://global.endpoint/v1",
         is_active=True,
+        created_at=datetime(2025, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
     )
     repo_cfg = ModelConfig(
         provider="openai",
         model_name="gpt-4o",
         base_url="https://api.openai.com/v1",
         is_active=True,
+        created_at=datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
     )
     db.add_all([global_cfg, repo_cfg])
     await db.commit()
