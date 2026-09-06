@@ -227,7 +227,7 @@ export default function RunsPage() {
             size="sm"
             onClick={handleBatchDelete}
             disabled={isBatchDeleting}
-            className="h-9 px-3.5 text-[13px] flex items-center gap-2"
+            className="h-10 px-4 text-xs font-medium flex items-center gap-2"
           >
             <Trash2 className="h-4 w-4" />
             {isBatchDeleting ? "Deleting..." : `Delete Selected (${selectedRunIds.size})`}
@@ -270,17 +270,18 @@ export default function RunsPage() {
 
         {/* Selection Toolbar */}
         {selectedRunIds.size > 0 && (
-          <div className="flex items-center justify-between rounded-[7px] border border-red-900/60 bg-red-950/20 px-4 py-2.5 text-[13px]">
+          <div className="flex items-center justify-between rounded-[7px] border border-red-900/60 bg-red-950/20 px-5 py-3 text-sm">
             <span className="font-mono text-zinc-300">
-              <span className="font-semibold text-zinc-100">{selectedRunIds.size}</span> run{selectedRunIds.size > 1 ? "s" : ""} selected
+              <span className="font-semibold text-zinc-100">{selectedRunIds.size}</span> run
+              {selectedRunIds.size > 1 ? "s" : ""} selected
             </span>
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-3">
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setSelectedRunIds(new Set())}
                 disabled={isBatchDeleting}
-                className="h-8 px-3 text-[13px] text-zinc-400 hover:text-zinc-200"
+                className="h-9 px-3.5 text-xs text-zinc-400 hover:text-zinc-200"
               >
                 Clear selection
               </Button>
@@ -289,7 +290,7 @@ export default function RunsPage() {
                 size="sm"
                 onClick={handleBatchDelete}
                 disabled={isBatchDeleting}
-                className="flex items-center gap-2 h-8 px-3 text-[13px]"
+                className="flex items-center gap-2 h-9 px-3.5 text-xs font-medium"
               >
                 <Trash2 className="h-4 w-4" />
                 {isBatchDeleting ? "Deleting..." : `Delete Selected (${selectedRunIds.size})`}
@@ -319,12 +320,28 @@ export default function RunsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-[16%] pl-4">Status</TableHead>
-                  <TableHead className="w-[26%]">Repository</TableHead>
-                  <TableHead className="w-[22%]">Branch / Commit</TableHead>
-                  <TableHead className="w-[16%]">Triggered</TableHead>
-                  <TableHead className="w-[16%] text-right pr-4">Actions</TableHead>
-                  {/* Selection Checkbox */}
+                  {/* Column 1: STATUS */}
+                  <TableHead className="w-[13%] pl-4">Status</TableHead>
+
+                  {/* Column 2: REPOSITORY */}
+                  <TableHead className="w-[22%]">Repository</TableHead>
+
+                  {/* Column 3: BRANCH / COMMIT */}
+                  <TableHead className="w-[21%]">Branch / Commit</TableHead>
+
+                  {/* Column 4: TRIGGERED */}
+                  <TableHead className="w-[12%]">Triggered</TableHead>
+
+                  {/* Column 5: DURATION */}
+                  <TableHead className="w-[10%]">Duration</TableHead>
+
+                  {/* Column 6: COST */}
+                  <TableHead className="w-[10%]">Cost</TableHead>
+
+                  {/* Column 7: ACTIONS */}
+                  <TableHead className="w-[9%] text-right pr-4">Actions</TableHead>
+
+                  {/* Column 8: [CHECKBOX] */}
                   <TableHead className="w-10 px-3 text-center">
                     <input
                       ref={(el) => {
@@ -348,6 +365,8 @@ export default function RunsPage() {
                   const repo = reposMap[run.repo_id];
                   const repoLabel = repo ? `${repo.owner}/${repo.name}` : `repo-${run.repo_id.slice(0, 8)}`;
                   const isSelected = selectedRunIds.has(run.id);
+                  const branchName = run.head_branch || (run as any).branch || "unknown";
+                  const commitSha = ((run as any).commit_sha || run.head_sha || "").slice(0, 7);
 
                   return (
                     <TableRow
@@ -357,39 +376,59 @@ export default function RunsPage() {
                         isBatchDeleting ? "opacity-50 pointer-events-none" : ""
                       }`}
                     >
-                      {/* Status */}
+                      {/* Column 1: STATUS */}
                       <TableCell className="pl-4">
                         <StatusBadge status={run.status} />
                       </TableCell>
 
-                      {/* Repository */}
+                      {/* Column 2: REPOSITORY */}
                       <TableCell>
                         <span className="font-mono text-xs font-semibold text-zinc-200 group-hover:text-amber-400 transition-colors">
                           {repoLabel}
                         </span>
                       </TableCell>
 
-                      {/* Branch & Commit SHA */}
+                      {/* Column 3: BRANCH / COMMIT */}
                       <TableCell>
-                        <div className="flex items-center gap-2 font-mono text-[11px] text-zinc-400">
-                          <span className="inline-flex items-center gap-1">
-                            <GitBranch className="h-3 w-3 text-zinc-500" />
-                            {run.head_branch}
+                        <div className="flex items-center gap-2 font-mono text-xs text-zinc-400">
+                          <span className="inline-flex items-center gap-1 truncate max-w-[130px]" title={branchName}>
+                            <GitBranch className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
+                            <span className="truncate">{branchName}</span>
                           </span>
-                          <span className="text-zinc-600">•</span>
-                          <span className="inline-flex items-center gap-1 text-zinc-400">
-                            <GitCommit className="h-3 w-3 text-zinc-500" />
-                            {run.head_sha.slice(0, 7)}
+                          <span className="text-zinc-600 shrink-0">•</span>
+                          <span className="inline-flex items-center gap-1 text-zinc-400 shrink-0">
+                            <GitCommit className="h-3.5 w-3.5 text-zinc-500" />
+                            {commitSha}
                           </span>
                         </div>
                       </TableCell>
 
-                      {/* Time ago */}
+                      {/* Column 4: TRIGGERED */}
                       <TableCell className="text-zinc-400 font-mono text-xs">
                         {formatRelativeTime(run.created_at)}
                       </TableCell>
 
-                      {/* Actions */}
+                      {/* Column 5: DURATION */}
+                      <TableCell>
+                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-zinc-300">
+                          <Clock className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
+                          {formatDuration(run.created_at, run.updated_at)}
+                        </span>
+                      </TableCell>
+
+                      {/* Column 6: COST */}
+                      <TableCell>
+                        <div className="flex flex-col font-mono text-xs">
+                          <span className="text-emerald-400 font-medium">
+                            ${(run.cost || 0).toFixed(4)}
+                          </span>
+                          <span className="text-[11px] text-zinc-500">
+                            {((run.tokens || 0) / 1000).toFixed(1)}k tok
+                          </span>
+                        </div>
+                      </TableCell>
+
+                      {/* Column 7: ACTIONS */}
                       <TableCell className="text-right pr-4" onClick={(e) => e.stopPropagation()}>
                         <Button
                           variant="ghost"
@@ -398,14 +437,14 @@ export default function RunsPage() {
                             e.stopPropagation();
                             router.push(`/runs/detail?id=${run.id}`);
                           }}
-                          className="h-7 px-2 text-xs font-mono text-zinc-400 hover:text-amber-400 hover:bg-zinc-800/80"
+                          className="h-7 px-2 text-xs font-mono text-zinc-400 hover:text-amber-400 hover:bg-zinc-800/80 inline-flex items-center gap-1"
                         >
                           Trace
-                          <ArrowUpRight className="h-3 w-3 ml-1" />
+                          <ArrowRight className="h-3 w-3 ml-0.5" />
                         </Button>
                       </TableCell>
 
-                      {/* Selection Checkbox */}
+                      {/* Column 8: [CHECKBOX] */}
                       <TableCell className="w-10 px-3 text-center" onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
@@ -429,21 +468,22 @@ export default function RunsPage() {
 
           {/* Pagination Footer */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between border-t border-zinc-800 bg-[#0c0c0e] px-5 py-3 text-[13px] text-zinc-400">
-              <span className="font-mono text-xs">
+            <div className="flex items-center justify-between border-t border-zinc-800 bg-[#0c0c0e] px-6 py-3.5 text-sm text-zinc-400">
+              <span className="font-mono text-xs text-zinc-400">
                 Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total} runs
               </span>
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-3">
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => setPage((p) => Math.max(0, p - 1))}
                   disabled={page === 0 || loading}
-                  className="h-8 px-2.5"
+                  className="h-9 px-3 text-xs"
                 >
-                  <ChevronLeft className="h-4 w-4" />
+                  <ChevronLeft className="h-4 w-4 mr-1" />
+                  Prev
                 </Button>
-                <span className="font-mono text-xs px-1.5 text-zinc-300">
+                <span className="font-mono text-xs px-2 text-zinc-300">
                   {page + 1} / {totalPages}
                 </span>
                 <Button
@@ -451,9 +491,10 @@ export default function RunsPage() {
                   size="sm"
                   onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
                   disabled={page >= totalPages - 1 || loading}
-                  className="h-8 px-2.5"
+                  className="h-9 px-3 text-xs"
                 >
-                  <ChevronRight className="h-4 w-4" />
+                  Next
+                  <ChevronRight className="h-4 w-4 ml-1" />
                 </Button>
               </div>
             </div>
