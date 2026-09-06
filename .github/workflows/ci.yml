@@ -59,6 +59,11 @@ jobs:
         working-directory: backend
         run: python -m compileall -q app
 
+      - name: Generate test Fernet key
+        working-directory: backend
+        run: |
+          echo "TOKEN_ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_ENV"
+
       - name: Start Postgres with SSL
         run: |
           mkdir -p /tmp/pg-certs
@@ -107,26 +112,12 @@ jobs:
           alembic downgrade base
           alembic upgrade head
 
-      - name: Generate test Fernet key
-        id: fernet
-        working-directory: backend
-        run: |
-          python -c "from cryptography.fernet import Fernet; print('key=' + Fernet.generate_key().decode())" >> "$GITHUB_OUTPUT"
-
       - name: Run backend tests
         working-directory: backend
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
           DATABASE_URL: postgresql+asyncpg://haunter_prod:haunter_prod@ep-prod.neon.tech:5432/haunter_prod?sslmode=require
           DATABASE_URL_UNPOOLED: postgresql://haunter_prod:haunter_prod@ep-prod.neon.tech:5432/haunter_prod?sslmode=require
-          GITHUB_CLIENT_ID: ci_test_client_id
-          GITHUB_CLIENT_SECRET: ci_test_client_secret
-          CALLBACK_URL: http://localhost:8787/auth/callback
-          SESSION_SECRET_KEY: ci_test_session_secret_key_replace_in_prod
-          GITHUB_WEBHOOK_SECRET: ci_test_webhook_secret
-          FRONTEND_URL: http://localhost:3000
-          TOKEN_ENCRYPTION_KEY: ${{ steps.fernet.outputs.key }}
-          OPENCODE_ZEN_API_KEY: ci_test_zen_api_key
         run: |
           pytest -v --tb=short --maxfail=10
         timeout-minutes: 30
