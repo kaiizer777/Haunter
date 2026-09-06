@@ -459,7 +459,7 @@ async def _orchestrator_pipeline_body(
                         run_id, iteration + 1,
                     )
                     return
-    
+
                 # Reload Repo (selectinload for tenant integrity check).
                 repo_result = await attempt_db.execute(
                     select(Repo)
@@ -473,7 +473,7 @@ async def _orchestrator_pipeline_body(
                         run.repo_id, iteration + 1,
                     )
                     return
-    
+
                 # Tenant integrity (re-asserted on each iteration).
                 if repo.user_id is None or repo.id != run.repo_id:
                     logger.error(
@@ -481,7 +481,7 @@ async def _orchestrator_pipeline_body(
                         iteration + 1,
                     )
                     return
-    
+
                 # ---- Generate fix ----
                 try:
                     attempt = await generate_fix(
@@ -519,7 +519,7 @@ async def _orchestrator_pipeline_body(
                     await attempt_db.commit()
                     skip_to_fallback_reason = "low_confidence"
                     break  # closes the async with, exits the for loop
-    
+
                 except PatchFormatRetryExhausted as fmt_err:
                     """Same routing as LowConfidenceSkip — soft signal,
                     not a hard error. The post-loop fallback block will
@@ -582,30 +582,30 @@ async def _orchestrator_pipeline_body(
                     except InvalidTransitionError:
                         pass
                     return
-    
+
                 # ---- fix_generation -> verification ----
                 if RunStatus(run.status) == RunStatus.fix_generation:
                     await _transition(run, RunStatus.verification, attempt_db)
                     state["step"] = RunStatus.verification.value
-    
+
                 # ---- Verify in sandbox (provider selected via SANDBOX_PROVIDER env) ----
                 verify_result = await sandbox_verify(
                     attempt=attempt,
                     run=run,
                     repo=repo,
                 )
-    
+
                 # Persist verification result
                 v_status: str = verify_result["status"]        # "pass" | "fail"
                 failure_reason: Optional[str] = verify_result["failure_reason"]
                 build_duration_ms: int = verify_result["build_duration_ms"]
-    
+
                 attempt.verification_status = v_status
                 attempt.failure_reason = failure_reason
                 attempt.build_duration_ms = build_duration_ms
                 attempt_db.add(attempt)
                 await attempt_db.commit()
-    
+
                 logger.info(
                     "orchestrator: run=%s attempt=%d verification=%s duration_ms=%d",
                     run_id,
@@ -613,19 +613,18 @@ async def _orchestrator_pipeline_body(
                     v_status,
                     build_duration_ms,
                 )
-    
+
                 if v_status == "pass":
                     # ---- Patch verified -> pending_pr ----
                     await _transition(run, RunStatus.pending_pr, attempt_db)
                     state["step"] = RunStatus.pending_pr.value
                     state["decisions"].append("verification_passed")
-    
+
                     # ---- Phase 8: generate PR text + open PR ----
                     try:
                         from app.subagents.pr_writer import (
                             generate_pr_text,
                             pr_branch_name,
-                            PRGenerationError,
                         )
                         from app.github.pr import (
                             get_installation_token,
@@ -633,14 +632,14 @@ async def _orchestrator_pipeline_body(
                             commit_patch,
                             open_pr,
                         )
-    
+
                         pr_text = await generate_pr_text(
                             run=run,
                             verified_attempt=attempt,
                             diagnosis_summary=run.diagnosis_summary or "",
                             db=attempt_db,
                         )
-    
+
                         token = await get_installation_token(repo)
                         branch = pr_branch_name(
                             run=run,
@@ -648,7 +647,7 @@ async def _orchestrator_pipeline_body(
                             default_branch=repo.default_branch,
                         )
                         base_branch = repo.default_branch or "main"
-    
+
                         await create_branch(
                             owner=repo.owner,
                             repo=repo.name,
@@ -673,7 +672,7 @@ async def _orchestrator_pipeline_body(
                             body=pr_text["body"],
                             token=token,
                         )
-    
+
                         run.pr_url = pr["html_url"]
                         run.pr_number = pr["number"]
                         run.pr_branch = branch
@@ -683,7 +682,7 @@ async def _orchestrator_pipeline_body(
                         run.updated_at = datetime.now(timezone.utc)
                         attempt_db.add(run)
                         await attempt_db.commit()
-    
+
                         await _transition(run, RunStatus.pr_opened, attempt_db)
                         state["step"] = RunStatus.pr_opened.value
                         logger.info(
@@ -705,12 +704,12 @@ async def _orchestrator_pipeline_body(
                         except InvalidTransitionError:
                             pass
                     return
-    
+
                 # ---- Patch failed ----
                 state["decisions"].append(
                     f"verification_failed_attempt_{attempt.attempt_number}"
                 )
-    
+
                 # ---- Fast-fail on repeated failure_reason (Phase 1, BLOCKER-1 / NICE-1) ----
                 # If the trailing N chars of this attempt's failure_reason match
                 # the previous attempt's AND the step is in _FAST_FAIL_ELIGIBLE_STEPS,
@@ -733,25 +732,25 @@ async def _orchestrator_pipeline_body(
                 if fast_fail:
                     skip_to_fallback_reason = ff_reason
                     break  # exit the for loop; async with closes the session
-    
+
                 if iteration + 1 >= max_attempts:
                     # Exhausted all attempts -- fallback (post diagnosis-only comment)
                     skip_to_fallback_reason = "exhausted"
                     break
-    
+
                 # ---- Loop: verification -> fix_generation for retry ----
                 await _transition(run, RunStatus.fix_generation, attempt_db)
                 state["step"] = RunStatus.fix_generation.value
                 prior_attempt = attempt
                 prior_failure_reason_tail = current_tail
-    
+
                 logger.info(
                     "orchestrator: run=%s attempt=%d failed -- retrying fix_generation "
                     "with failure context",
                     run_id,
                     attempt.attempt_number,
                 )
-    
+
         except (InterfaceError, OperationalError) as db_err:
             # Transient DB error inside the per-iteration session
             # (BLOCKER-1 recovery). Don't terminate the run; arm the

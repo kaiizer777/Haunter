@@ -19,8 +19,7 @@ rejecting oversized patches and repo_ref with disallowed characters.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Optional
-from uuid import UUID
+from typing import TYPE_CHECKING, Optional
 
 from app.sandbox.runner import (
     SandboxInput,

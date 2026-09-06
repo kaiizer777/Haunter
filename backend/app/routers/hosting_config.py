@@ -25,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.hosting import get_active_hosting_provider, get_active_sandbox_provider, invalidate_provider_cache
+from app.adapters.hosting import invalidate_provider_cache
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db

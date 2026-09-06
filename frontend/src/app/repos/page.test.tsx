@@ -50,8 +50,8 @@ describe("ReposPage (app/repos/page.tsx)", () => {
       name: "frontend-app",
       default_branch: "main",
       language_hint: "typescript",
+      active_model_config_id: null,
       created_at: new Date(Date.now() - 3600000).toISOString(),
-      updated_at: new Date().toISOString(),
     },
     {
       id: "repo_222",
@@ -59,8 +59,8 @@ describe("ReposPage (app/repos/page.tsx)", () => {
       name: "backend-service",
       default_branch: "dev",
       language_hint: null,
+      active_model_config_id: null,
       created_at: new Date(Date.now() - 86400000).toISOString(),
-      updated_at: new Date().toISOString(),
     },
   ];
 

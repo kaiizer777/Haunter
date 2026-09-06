@@ -1,4 +1,4 @@
-"""
+r"""
 Phase 2 regression test for ``_parse_patch_files`` (NICE-4).
 
 The mirror parser used to compare the captured file path with ``"/dev/null"``

@@ -239,7 +239,7 @@ def parse_tar_to_files(
         member_index: dict[str, "tarfile.TarInfo"] = {
             m.name: m for m in tar2.getmembers() if m.isfile()
         }
-        for tier, rel_path, member in eligible[:max_files]:
+        for _tier, rel_path, member in eligible[:max_files]:
             m = member_index.get(member.name)
             if m is None:
                 continue

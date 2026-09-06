@@ -186,7 +186,7 @@ async def post_commit_comment(
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{sha}/comments"
     headers = _build_headers(token=token, accept="application/vnd.github+json")
-    
+
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
         try:
             response = await client.post(url, headers=headers, json={"body": body})

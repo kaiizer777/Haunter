@@ -98,7 +98,6 @@ async def execute_with_retry(
     - Client payload errors (400/422 without upstream indicators): raises LLMInvalidRequestError immediately.
     """
     start_time = time.monotonic()
-    last_exception: Exception | None = None
     last_status: int | None = None
 
     for attempt in range(1, max_attempts + 1):
@@ -113,7 +112,6 @@ async def execute_with_retry(
 
         except httpx.HTTPStatusError as exc:
             last_status = exc.response.status_code
-            last_exception = exc
             response_body = exc.response.text or ""
 
             # Per-model rejection (400, 401, 403, 404): Policy 2 -> attempt count = 1, fail immediately for fallback

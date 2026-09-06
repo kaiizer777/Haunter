@@ -41,8 +41,6 @@ describe("RunDetailClient (app/runs/detail/RunDetailClient.tsx)", () => {
       id: "run-uuid-001",
       repo_id: "repo-999",
       status: "pr_opened",
-      head_sha: "abcdef1234567890abcdef1234567890abcdef12",
-      head_branch: "fix/ci-failure",
       failure_reason: null,
       diagnosis_summary: "AssertionError in tests/test_core.py line 42 due to NoneType return.",
       pr_url: "https://github.com/acme/repo/pull/42",

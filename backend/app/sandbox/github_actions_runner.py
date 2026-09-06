@@ -500,7 +500,6 @@ async def _resolve_user_github_id(run_id: Any) -> Optional[int]:
     for the Phase 2 review (which is "do not touch the orchestrator").
     """
     try:
-        from sqlalchemy import select
         from uuid import UUID as _UUID
 
         from app.db import async_session_maker

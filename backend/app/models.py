@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, Float, Index
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, Float
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 

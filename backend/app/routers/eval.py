@@ -124,7 +124,7 @@ class EvalResultOut(BaseModel):
             for item in fg.get("scores_per_fixture", [])
             if isinstance(item, dict) and "fixture_id" in item
         }
-        all_fids = sorted(list(set(list(cg_scores.keys()) + list(fg_scores.keys()))))
+        all_fids = sorted(set(cg_scores.keys()) | set(fg_scores.keys()))
         fixture_scores = [
             {
                 "fixture_id": fid,

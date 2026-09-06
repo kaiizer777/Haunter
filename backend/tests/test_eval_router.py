@@ -35,6 +35,13 @@ from app.models import EvalResult, ModelConfig, User
 from tests.conftest import truncate_all
 
 
+@pytest.fixture(autouse=True)
+def _reset_eval_limiter():
+    limiter.reset()
+    yield
+    limiter.reset()
+
+
 @pytest.mark.asyncio
 async def test_get_eval_results_non_admin_returns_403(
     db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch

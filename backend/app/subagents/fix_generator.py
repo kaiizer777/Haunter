@@ -197,7 +197,7 @@ def _check_path(raw_path: str) -> None:
         return
 
     if not raw_path or raw_path.strip() == "":
-        raise PatchRejected(f"Patch contains an empty file path in hunk header.")
+        raise PatchRejected("Patch contains an empty file path in hunk header.")
 
     if "//" in raw_path:
         raise PatchRejected(
@@ -680,7 +680,7 @@ async def _call_with_format_retry(
     # Retry loop. _PATCH_FORMAT_RETRY_CAP=1 means: try once, retry once,
     # then give up. Path-traversal rejections (the base PatchRejected
     # class) are NOT caught here — they bubble up immediately.
-    for format_attempt in range(_PATCH_FORMAT_RETRY_CAP):
+    for _format_attempt in range(_PATCH_FORMAT_RETRY_CAP):
         try:
             _validate_patch(fix_output.patch)
             return fix_output, response

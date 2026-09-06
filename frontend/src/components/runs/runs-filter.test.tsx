@@ -12,7 +12,7 @@ describe("runs-filter.tsx", () => {
       name: "Haunter",
       default_branch: "main",
       language_hint: "python",
-      is_active: true,
+      active_model_config_id: null,
       created_at: "2026-01-01T00:00:00Z",
     },
     {
@@ -21,7 +21,7 @@ describe("runs-filter.tsx", () => {
       name: "Spoon-Knife",
       default_branch: "master",
       language_hint: "c",
-      is_active: true,
+      active_model_config_id: null,
       created_at: "2026-01-02T00:00:00Z",
     },
   ];

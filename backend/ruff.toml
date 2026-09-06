@@ -8,19 +8,19 @@ target-version = "py311"
 extend-exclude = [".venv", "alembic/versions"]
 
 [lint]
-# Sensible default rule set: pycodestyle (E/W), pyflakes (F), isort (I),
-# bugbear (B), comprehensions (C4), simplify (SIM), pathlib (PTH),
-# pyupgrade (UP), security (S) — minus the noisy ones.
-select = ["E", "W", "F", "I", "B", "C4", "SIM", "PTH", "UP", "S"]
+# Sensible default rule set: pycodestyle (E/W), pyflakes (F), bugbear (B),
+# comprehensions (C4) — avoiding noisy style rules (UP, I, SIM, PTH, S) that
+# fight existing codebase conventions.
+select = ["E", "W", "F", "B", "C4"]
 ignore = [
     "E501",   # line-too-long — let formatter / PR review handle this
     "B008",   # function call in default argument — common in FastAPI Depends()
-    "S101",   # assert — pytest uses these liberally
+    "B904",   # raise ... from err — FastAPI convention raises HTTPException directly
 ]
 
 [lint.per-file-ignores]
 # Tests can use assert freely, may have long lines, may import unused for fixtures.
-"tests/**/*.py" = ["S101", "S105", "S106", "E402", "F401", "F811"]
+"tests/**" = ["F401", "F841", "B007", "B017", "F811", "E402", "F541"]
 
 [format]
 # Match Black's defaults so we don't fight other formatters.

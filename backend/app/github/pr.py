@@ -26,7 +26,6 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -143,7 +142,6 @@ def _build_jwt() -> str:
     try:
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding
-        import struct
     except ImportError as exc:
         raise ImportError(
             "cryptography package is required for GitHub App JWT auth. "
@@ -414,7 +412,7 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
         if m:
             # Parse old start and length
             old_start = int(m.group(1))
-            old_len = int(m.group(2)) if m.group(2) else 1
+            _old_len = int(m.group(2)) if m.group(2) else 1
             # new_start = int(m.group(3))  # not needed for apply
             # Advance orig_idx to hunk start (1-based to 0-based)
             # old_start is 1-based line number in original

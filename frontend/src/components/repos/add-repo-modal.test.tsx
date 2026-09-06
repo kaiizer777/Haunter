@@ -34,6 +34,7 @@ describe("add-repo-modal.tsx", () => {
       language: "TypeScript",
       updated_at: new Date().toISOString(),
       already_connected: false,
+      permissions_push: true,
     },
     {
       owner: "owner1",
@@ -44,6 +45,7 @@ describe("add-repo-modal.tsx", () => {
       language: "Python",
       updated_at: new Date(Date.now() - 86400000).toISOString(),
       already_connected: true,
+      permissions_push: true,
     },
     {
       owner: "owner2",
@@ -54,6 +56,7 @@ describe("add-repo-modal.tsx", () => {
       language: null,
       updated_at: null,
       already_connected: false,
+      permissions_push: true,
     },
   ];
 
@@ -63,8 +66,8 @@ describe("add-repo-modal.tsx", () => {
     name: "haunter-core",
     default_branch: "main",
     language_hint: "typescript",
+    active_model_config_id: null,
     created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
   };
 
   beforeEach(() => {
