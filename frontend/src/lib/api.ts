@@ -307,6 +307,9 @@ export const api = {
   },
 
   getRunTrace: (runId: string) => api.get<TraceOut>(`/runs/${runId}/trace`),
+  deleteRun: (runId: string) => api.delete<void>(`/runs/${runId}`),
+  deleteRuns: (runIds: string[]) =>
+    api.post<{ deleted_count: number }>("/runs/batch-delete", { run_ids: runIds }),
 
   // Eval endpoints (admin-gated on backend)
   getEvalResults: () => api.get<EvalResultOut[]>("/eval-results"),

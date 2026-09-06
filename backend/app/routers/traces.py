@@ -5,6 +5,8 @@ Exposes:
   GET /runs/{run_id}/trace   — Full chronological timeline for a single run.
   GET /runs                  — Filtered, paginated run list (scoped to caller).
   GET /repos/{repo_id}/stats — Aggregate success/cost/latency stats for a repo.
+  DELETE /runs/{run_id}      — Delete a single run (scoped to caller).
+  POST /runs/batch-delete    — Batch delete runs (scoped to caller).
 
 Security invariants (match WORK.md Phase 9 spec):
   - Every endpoint requires get_current_user (signed session cookie).
@@ -26,7 +28,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.db import get_db
 from app.models import Attempt, Repo, Run, RunStep, User
-from app.schemas import RunOut
+from app.schemas import BatchDeleteRunsRequest, BatchDeleteRunsResponse, RunOut
 from app.traces.classify import classify_failure
 
 logger = logging.getLogger(__name__)
@@ -375,3 +377,67 @@ async def get_repo_stats(
         avg_cost=round(avg_cost, 8),
         avg_latency_ms=round(avg_latency_ms, 2),
     )
+
+
+@router.delete("/runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_run(
+    run_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """
+    Delete a single run.
+
+    Ownership enforced at SQL level: JOIN repos WHERE repos.user_id = :uid.
+    Returns 404 (never 403) on non-owned or non-existent run_id to prevent
+    existence oracle leakage to non-owners.
+    """
+    result = await db.execute(
+        select(Run)
+        .join(Repo, Run.repo_id == Repo.id)
+        .where(Run.id == run_id, Repo.user_id == current_user.id)
+    )
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Run not found",
+        )
+
+    await db.delete(run)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/runs/batch-delete",
+    response_model=BatchDeleteRunsResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def batch_delete_runs(
+    payload: BatchDeleteRunsRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> BatchDeleteRunsResponse:
+    """
+    Batch delete runs owned by the current user.
+
+    Only runs owned by current_user are deleted; non-owned or non-existent
+    run IDs are ignored. Returns the count of deleted runs.
+    """
+    result = await db.execute(
+        select(Run)
+        .join(Repo, Run.repo_id == Repo.id)
+        .where(Run.id.in_(payload.run_ids), Repo.user_id == current_user.id)
+    )
+    matching_runs = list(result.scalars().all())
+
+    if not matching_runs:
+        return BatchDeleteRunsResponse(deleted_count=0)
+
+    for run in matching_runs:
+        await db.delete(run)
+    await db.commit()
+
+    return BatchDeleteRunsResponse(deleted_count=len(matching_runs))
+

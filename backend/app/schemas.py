@@ -172,6 +172,14 @@ class RunOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BatchDeleteRunsRequest(BaseModel):
+    run_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=50)
+
+
+class BatchDeleteRunsResponse(BaseModel):
+    deleted_count: int
+
+
 # ---------------------------------------------------------------------------
 # Webhook schemas (GitHub workflow_run event)
 # ---------------------------------------------------------------------------

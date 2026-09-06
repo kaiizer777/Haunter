@@ -43,10 +43,10 @@ export function RunsFilter({
   const hasActiveFilters = Boolean(selectedRepoId || selectedStatus || from || to);
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-[6px] border border-zinc-800 bg-[#121215] p-3">
-      <div className="flex flex-wrap items-center gap-2.5">
-        <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-medium pl-1">
-          <Filter className="h-3.5 w-3.5 text-amber-400" />
+    <div className="flex flex-wrap items-center justify-between gap-3.5 rounded-[7px] border border-zinc-800 bg-[#121215] p-3.5">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2 text-[13px] text-zinc-400 font-medium pl-1">
+          <Filter className="h-4 w-4 text-amber-400" />
           <span>Filters:</span>
         </div>
 
@@ -54,7 +54,7 @@ export function RunsFilter({
         <select
           value={selectedRepoId}
           onChange={(e) => onRepoChange(e.target.value)}
-          className="h-8 rounded-[5px] border border-zinc-800 bg-[#0c0c0e] px-2.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+          className="h-9 rounded-[6px] border border-zinc-800 bg-[#0c0c0e] px-3 text-[13px] text-zinc-200 focus:border-amber-400 focus:outline-none"
         >
           <option value="">All Repositories</option>
           {repos.map((r) => (
@@ -68,7 +68,7 @@ export function RunsFilter({
         <select
           value={selectedStatus}
           onChange={(e) => onStatusChange(e.target.value)}
-          className="h-8 rounded-[5px] border border-zinc-800 bg-[#0c0c0e] px-2.5 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+          className="h-9 rounded-[6px] border border-zinc-800 bg-[#0c0c0e] px-3 text-[13px] text-zinc-200 focus:border-amber-400 focus:outline-none"
         >
           {STATUS_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
@@ -83,7 +83,7 @@ export function RunsFilter({
           value={from}
           onChange={(e) => onFromChange(e.target.value)}
           placeholder="From"
-          className="h-8 rounded-[5px] border border-zinc-800 bg-[#0c0c0e] px-2 text-xs text-zinc-300 focus:border-amber-400 focus:outline-none"
+          className="h-9 rounded-[6px] border border-zinc-800 bg-[#0c0c0e] px-2.5 text-[13px] text-zinc-300 focus:border-amber-400 focus:outline-none"
         />
 
         {/* Date To */}
@@ -92,7 +92,7 @@ export function RunsFilter({
           value={to}
           onChange={(e) => onToChange(e.target.value)}
           placeholder="To"
-          className="h-8 rounded-[5px] border border-zinc-800 bg-[#0c0c0e] px-2 text-xs text-zinc-300 focus:border-amber-400 focus:outline-none"
+          className="h-9 rounded-[6px] border border-zinc-800 bg-[#0c0c0e] px-2.5 text-[13px] text-zinc-300 focus:border-amber-400 focus:outline-none"
         />
       </div>
 
@@ -101,9 +101,9 @@ export function RunsFilter({
           variant="ghost"
           size="sm"
           onClick={onReset}
-          className="h-7 text-xs text-zinc-400 hover:text-zinc-100 flex items-center gap-1.5"
+          className="h-8 px-2.5 text-[13px] text-zinc-400 hover:text-zinc-100 flex items-center gap-1.5"
         >
-          <RotateCcw className="h-3 w-3" />
+          <RotateCcw className="h-3.5 w-3.5" />
           Clear
         </Button>
       )}
