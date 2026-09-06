@@ -258,7 +258,7 @@ export default function RunsPage() {
         ) : undefined
       }
     >
-      <div className="space-y-6">
+      <div className="space-y-6 min-w-0">
         {/* Modern Filter Bar ported from mock/page.tsx */}
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-[7px] border border-zinc-800 bg-[#121215] p-3.5">
           <div className="flex flex-wrap items-center gap-3.5 flex-1 min-w-[300px]">
@@ -275,7 +275,7 @@ export default function RunsPage() {
                 placeholder="Search branch, sha, diagnosis..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="h-10 pl-9.5 pr-3.5 text-xs rounded-[7px]"
+                className="h-10 pl-10 pr-3.5 text-[13px] rounded-[7px]"
               />
             </div>
 
@@ -286,7 +286,7 @@ export default function RunsPage() {
                 setSelectedRepoId(e.target.value);
                 setPage(0);
               }}
-              className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-4 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+              className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-3.5 text-[13px] text-zinc-200 focus:border-amber-400 focus:outline-none"
             >
               <option value="">All Repositories ({repos.length})</option>
               {repos.map((r) => (
@@ -303,7 +303,7 @@ export default function RunsPage() {
                 setSelectedStatus(e.target.value);
                 setPage(0);
               }}
-              className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-4 text-xs text-zinc-200 focus:border-amber-400 focus:outline-none"
+              className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-3.5 text-[13px] text-zinc-200 focus:border-amber-400 focus:outline-none"
             >
               <option value="">All Statuses</option>
               <option value="completed">Completed / PR Opened</option>
