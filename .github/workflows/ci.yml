@@ -14,7 +14,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
-  NODE_VERSION: "20"
+  NODE_VERSION: "22"
   POSTGRES_VERSION: "16"
 
 jobs:
@@ -54,40 +54,33 @@ jobs:
 
       - name: Start Postgres with SSL
         run: |
+          mkdir -p /tmp/pg-certs
+          openssl req -new -x509 -days 365 -nodes \
+            -out /tmp/pg-certs/server.crt \
+            -keyout /tmp/pg-certs/server.key \
+            -subj '/CN=localhost' \
+            -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'
+          chmod 600 /tmp/pg-certs/server.key
+          chmod 644 /tmp/pg-certs/server.crt
+          sudo chown -R 999:999 /tmp/pg-certs
+
           docker run -d --name haunter-pg-ssl \
             -p 5432:5432 \
+            -v /tmp/pg-certs:/var/lib/postgresql/certs:ro \
             -e POSTGRES_USER=haunter_test \
             -e POSTGRES_PASSWORD=haunter_test \
             -e POSTGRES_DB=haunter_test \
-            postgres:16
+            postgres:16 \
+            -c ssl=on \
+            -c ssl_cert_file=/var/lib/postgresql/certs/server.crt \
+            -c ssl_key_file=/var/lib/postgresql/certs/server.key
 
-          until docker exec haunter-pg-ssl pg_isready -U haunter_test; do
+          until docker exec haunter-pg-ssl pg_isready -U haunter_test -d haunter_test; do
             echo "Waiting for postgres..."
             sleep 1
           done
 
-          docker exec haunter-pg-ssl bash -c "
-            apt-get update -qq && apt-get install -yqq openssl >/dev/null
-            mkdir -p /var/lib/postgresql/certs
-            openssl req -new -x509 -days 365 -nodes \
-              -out /var/lib/postgresql/certs/server.crt \
-              -keyout /var/lib/postgresql/certs/server.key \
-              -subj '/CN=localhost' \
-              -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' 2>/dev/null
-            chmod 600 /var/lib/postgresql/certs/server.key
-            chown postgres:postgres /var/lib/postgresql/certs/server.key /var/lib/postgresql/certs/server.crt
-          "
-
-          docker exec haunter-pg-ssl su - postgres -c "
-            psql -U haunter_test -d haunter_test -c \"
-              ALTER SYSTEM SET ssl = 'on';
-              ALTER SYSTEM SET ssl_cert_file = '/var/lib/postgresql/certs/server.crt';
-              ALTER SYSTEM SET ssl_key_file = '/var/lib/postgresql/certs/server.key';
-              SELECT pg_reload_conf();
-            \"
-          "
-
-          docker cp haunter-pg-ssl:/var/lib/postgresql/certs/server.crt /usr/local/share/ca-certificates/haunter.crt
+          sudo cp /tmp/pg-certs/server.crt /usr/local/share/ca-certificates/haunter.crt
           sudo update-ca-certificates
           echo "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" >> "$GITHUB_ENV"
 
