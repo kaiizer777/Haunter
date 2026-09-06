@@ -232,8 +232,13 @@ async function request<T>(
       errorDetail = "Invalid request payload. Please check your inputs.";
     } else {
       try {
-        const errJson = await res.json();
-        if (typeof errJson.detail === "string" && errJson.detail.length < 120 && !errJson.detail.includes("Traceback")) {
+        const errJson = (await res.json()) as { detail?: unknown } | null;
+        if (
+          errJson &&
+          typeof errJson.detail === "string" &&
+          errJson.detail.length < 120 &&
+          !errJson.detail.includes("Traceback")
+        ) {
           errorDetail = errJson.detail;
         } else {
           errorDetail = `Request failed with status ${res.status}`;
