@@ -1,134 +1,268 @@
-# Haunter — Autonomous CI Failure Fix Agent
+# Haunter
 
-On `workflow_run` failure, Haunter wakes via webhook, diagnoses root cause, generates a fix, verifies it in an isolated sandbox, and opens a PR — or posts a diagnosis comment on exhaust. Human stays merge gate. Every step is traced.
+<div align="center">
 
+**Autonomous CI Failure Diagnosis & Fix Agent**
+
+[![Frontend](https://img.shields.io/badge/Frontend-Next.js%2016%20%7C%20React%2019-black?style=flat-square&logo=nextdotjs)](https://nextjs.org/)
+[![Backend](https://img.shields.io/badge/Backend-FastAPI%20%7C%20Python%203.11-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Compute](https://img.shields.io/badge/Compute-AWS%20Lambda%20(x86__64)-FF9900?style=flat-square&logo=amazon-aws)](https://aws.amazon.com/lambda/)
+[![Edge Hosting](https://img.shields.io/badge/Edge-Cloudflare%20Workers-F38020?style=flat-square&logo=cloudflare)](https://workers.cloudflare.com/)
+[![Database](https://img.shields.io/badge/Database-Neon%20Postgres%20(Async)-00E599?style=flat-square&logo=postgresql)](https://neon.tech/)
+[![Sandbox](https://img.shields.io/badge/Sandbox-GitHub%20Actions%20CI-181717?style=flat-square&logo=githubactions)](https://github.com/features/actions)
+[![Default LLM](https://img.shields.io/badge/LLM-OpenCode%20Zen%20(Nemotron%203.5)-7C3AED?style=flat-square)](https://opencode.ai/zen/v1)
+
+</div>
+
+---
+
+Haunter wakes autonomously when a connected repository's GitHub Actions workflow fails. It gathers distilled failure context, determines the root cause, generates targeted candidate patches, verifies fixes inside an isolated GitHub Actions sandbox runner, and opens an auditable Pull Request with complete diagnostic rationale — or posts a comprehensive diagnostic comment if retries are exhausted.
+
+> **Human In The Loop:** Haunter is strictly designed to diagnose, verify, and propose fixes. It **never** auto-merges or commits directly to default branches. Developers remain the final merge gate.
+
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph GitHub ["GitHub Platform"]
+        GHA["GitHub Actions CI Failure"]
+        PR["Target Repo: Pull Request or Comment"]
+        TestMirror["Isolated Sandbox Mirror Repo\n(kaiizer777/haunter-test-{hash})"]
+    end
+
+    subgraph Backend ["AWS Lambda (us-east-1, x86_64) — FastAPI + Mangum"]
+        Webhook["POST /webhooks/github\nHMAC-SHA256 + Deduplication"]
+        AsyncSelf["Async Self-Invocation\n(AWSHostingAdapter)"]
+        
+        subgraph Pipeline ["Multi-Stage Subagent Pipeline"]
+            CG["1. Context Gatherer\n(Distills log trace & failing diff)"]
+            FG["2. Fix Generator\n(Produces patch + confidence score)"]
+            SB["3. Sandbox Verifier\n(GitHubActionsSandboxRunner)"]
+            PW["4. PR Writer / Fallback\n(Creates PR or diagnostic comment)"]
+        end
+    end
+
+    subgraph Storage ["Neon Postgres"]
+        DB[(Neon Serverless DB\nRuns · Steps · Evals · ModelConfigs)]
+    end
+
+    subgraph FrontendApp ["Cloudflare Workers"]
+        Dashboard["Next.js 16 SPA Dashboard\n(Cross-Origin Cookie Session)"]
+    end
+
+    GHA -->|"workflow_run.completed (failure)"| Webhook
+    Webhook -->|"200 Ack (<10s)"| GHA
+    Webhook -.->|"Self-Invoke Async"| AsyncSelf
+    AsyncSelf --> CG
+    CG --> FG
+    FG --> SB
+    SB <-->|"Git Data API Seeding\n& Check-Runs Polling"| TestMirror
+    SB -->|"Pass (Confidence >= 30)"| PW
+    SB -.->|"Fail (Retry <= 3)"| FG
+    PW -->|"Verified Fix PR"| PR
+    PW -.->|"Attempts Exhausted Comment"| PR
+
+    CG & FG & SB & PW -->|"Telemetry (Tokens / Latency / Cost)"| DB
+    Dashboard <-->|"REST API + Signed Session Cookie"| Backend
+    Dashboard -->|"Observability, Traces & Eval Benchmarks"| DB
 ```
-GitHub Actions failure → Webhook → Orchestrator → Context Gatherer → Fix Generator → Sandbox Verifier (retry ≤3) → PR Writer / Fallback comment
-```
 
-## Key Features
+---
 
-- **Multi-repo webhook** `POST /webhooks/github` — HMAC `X-Hub-Signature-256` (constant-time), payload validation, dedupe on `X-GitHub-Delivery`, 10s async ack via `AWSHostingAdapter` (async self-invoke on Lambda).
-- **Orchestrator/subagent isolation** — orchestrator holds only `{run_id, repo_id, step, confidence}`, never raw logs. Subagents are narrow, ephemeral, return distilled summaries.
-- **Sandbox verification** — GitHub Actions CI via per-user test mirrors (`kaiizer777/haunter-test-{hash}`): pushes test templates (`haunter-test-py.yml` / `haunter-test-ts.yml`) and patch commits, polls Actions check-runs API up to 2m, returns pass/fail with sanitized logs.
-- **Retry with alternate strategy** — failure reason fed back to Fix Generator, capped at 3 attempts (DB-enforced).
-- **Observability** — `run_steps` timeline (tokens/latency/cost per step), failure classification, per-repo stats; all queries tenant-scoped.
-- **Eval harness** — 20 golden cases (import/type/assertion/deps) on public test repos, per-subagent scores + regression diff.
-- **Dashboard** — Cloudflare Pages-hosted repos, runs feed, expandable trace, eval scores, confidence-vs-outcome chart, live model/provider switcher. GitHub OAuth gated.
+## Key Capabilities & Differentiators
+
+- **Zero-Trust Isolated Sandbox:** Untrusted code execution is completely barred from the Lambda orchestrator and backend host. All candidate patches run inside isolated, per-user GitHub Actions mirror repositories (`kaiizer777/haunter-test-{hash}`). *(Note: Retired legacy runners such as AWS CodeBuild, GCP Cloud Build, and Local Docker have been fully superseded by this zero-trust architecture).*
+- **Lightweight Git Data API Seeding:** Eliminates heavy `git clone` overhead, container runtimes, and local Git binaries on AWS Lambda. Code snapshots and test harness workflows (`haunter-test-py.yml` / `haunter-test-ts.yml`) are committed directly via GitHub's Git Data API (trees, blobs, and commits).
+- **Narrow Context & Ephemeral Subagents:** The core orchestrator maintains state machine metadata (`run_id`, `step`, `confidence`) without log bloat. Ephemeral subagents (Context Gatherer, Fix Generator, PR Writer) receive strictly distilled inputs and operate within hard token budgets.
+- **Closed-Loop Retry Feedback:** Failed sandbox verification runs feed sanitized compiler/test error logs back to the Fix Generator to adjust strategies across up to 3 bounded attempts.
+- **Live Model & Provider Switcher:** Defaults to OpenCode Zen (`nemotron-3.5-lightning-free` via `https://opencode.ai/zen/v1`), with seamless dynamic runtime switching to OpenAI or Anthropic driven by database configuration (`model_configs`) without redeploying.
+- **Integrated Golden Eval Harness & Demo Mode:** Contains a 20-fixture canonical benchmark suite covering import errors, type errors, assertion failures, and missing dependencies. Includes a one-click dashboard **Demo Mode** pinned to `fixture-001` for instant interview or evaluation demonstrations.
+- **Full Production Telemetry:** Every subagent execution records exact duration in milliseconds, prompt tokens, completion tokens, and cost estimates directly to Neon Postgres.
+
+---
 
 ## Tech Stack
 
-| Layer | Choice |
-|---|---|
-| Orchestrator | FastAPI + `Mangum` on AWS Lambda (Function URL), SQLAlchemy 2.0 async + `asyncpg`, Alembic |
-| Sandbox | GitHub Actions CI (`github_actions_runner`) via per-user test mirrors |
-| DB | Neon Postgres — pooled URL + `NullPool` (app), direct URL (migrations) |
-| Auth | GitHub OAuth (`authlib` + `itsdangerous` signed `httpOnly` cookie), Fernet-encrypted tokens |
-| Frontend | Next.js 16 (App Router), TypeScript 5, Tailwind 4, Cloudflare Pages |
-| LLM | `LLMClient.complete()` → OpenCode Zen `https://opencode.ai/zen/v1` (`nemotron-3.5-lightning-free`), DB-driven `model_configs`, swappable without redeploy |
+| Layer | Technology | Details |
+|---|---|---|
+| **Frontend** | Next.js 16, React 19, Tailwind CSS v4, Lucide Icons | Static SPA export (`output: "export"`) deployed on **Cloudflare Workers** via Wrangler static assets (`frontend/wrangler.jsonc`, worker `haunter-ci-agent`). |
+| **Backend** | FastAPI, Python 3.11, Mangum | Serverless ASGI orchestrator on **AWS Lambda** Function URL in `us-east-1` (`x86_64`, 512 MB, 900s timeout). |
+| **Database** | Neon Serverless Postgres | SQLAlchemy 2.0 Async + `asyncpg` with `NullPool` for pooled connections; unpooled direct connection for Alembic migrations. |
+| **Sandbox CI** | GitHub Actions (`GitHubActionsSandboxRunner`) | Automated test mirror provisioning, tarball-based Git Data API tree injection, and REST check-run polling loop (up to 120s). |
+| **LLM Inference** | OpenCode Zen API | Default `nemotron-3.5-lightning-free` (`https://opencode.ai/zen/v1`). Dynamic model configuration and provider fallback. |
+| **Security & Auth** | GitHub OAuth + Fernet | Cross-origin signed `haunter_session` cookie (`SameSite=None`, `Secure`, `HttpOnly`), Fernet encryption at rest for tokens, HMAC-SHA256 webhook validation. |
 
-## How the sandbox works
+---
 
-Haunter executes sandboxes via GitHub Actions CI (GitHubActionsSandboxRunner) using polled test mirrors (documented in github.md):
-
-1. **Mirror lifecycle (`mirror.py`)**: On the first webhook for a user, Haunter creates a private, isolated test mirror under `kaiizer777` (e.g., `kaiizer777/haunter-test-{8-char-hash}`). The repository is cached and reused across future runs.
-2. **Template deployment**: Auto-detects runtime (`py` or `ts`) and pushes the appropriate workflow template (`haunter-test-py.yml` with pytest/ruff/mypy or `haunter-test-ts.yml` with npm test/tsc/eslint) into `.github/workflows/` using a PAT fallback (bypassing GitHub App `workflows:write` permission constraints).
-3. **Commit per attempt**: For each fix attempt, the patch is applied via the Git Data API as a single commit on branch `haunter-attempt-{N}`, triggering GitHub Actions without requiring local git or Docker.
-4. **Polling & verification**: The runner polls the Actions check-runs API every 10s (up to 2 minutes). If tests pass and confidence is ≥ 30, Haunter opens a PR on the real repo; if tests fail, sanitized logs feed the next retry; non-retryable errors (e.g. auth/quota) immediately trigger the fallback diagnosis comment.
-5. **Health monitoring**: `GET /health/sandbox` exposes active provider, org, and App ID.
-
-## Known limitations & Caveats
-
-- **Sandbox location**: Hosted on the `kaiizer777` personal GitHub namespace rather than the originally-planned `haunter-sandboxes` org, because the GitHub App could not be installed cleanly on the org without granting excessive permissions.
-- **Secrets**: Requires Lambda env vars for GitHub App ID, Installation ID, and AWS SSM Parameter Store for the GitHub App private key (`/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY`). 
-
-## Project Structure
+## Repository Structure
 
 ```
-haunter/
-├── backend/        # FastAPI + orchestrator + subagents + LLM client + sandbox
-│   ├── app/orchestrator.py
-│   ├── app/llm/ + app/subagents/ + app/sandbox/
-│   ├── alembic/ + app/models.py
-│   └── lambda_handler.py
-├── frontend/       # Next.js dashboard
-├── infra/aws/      # Terraform: Lambda Function URL
-└── HAUNTER.md / WORK.md
+Haunter/
+├── backend/
+│   ├── alembic/                       # Database migrations (asyncpg/Postgres)
+│   ├── app/
+│   │   ├── auth.py                    # GitHub OAuth, Fernet encryption, signed sessions
+│   │   ├── config.py                  # Pydantic Settings & environment validation
+│   │   ├── db.py                      # SQLAlchemy async engine & NullPool setup
+│   │   ├── github_client.py           # GitHub REST & Git Data API client
+│   │   ├── models.py                  # Declarative DB models (Runs, Steps, Evals, etc.)
+│   │   ├── orchestrator.py            # Event loop & subagent orchestration state machine
+│   │   ├── llm/                       # LLM client & OpenCode Zen adapter
+│   │   ├── sandbox/                   # GitHub Actions runner, mirror lifecycle, tarball seeder
+│   │   │   ├── github_actions_runner.py
+│   │   │   ├── mirror.py
+│   │   │   ├── _seed_tarball.py
+│   │   │   └── workflow_templates/    # haunter-test-py.yml & haunter-test-ts.yml
+│   │   └── subagents/                 # Context Gatherer, Fix Generator, PR Writer
+│   ├── tests/                         # Comprehensive pytest suite & eval fixtures
+│   ├── lambda_handler.py              # Mangum adapter for AWS Lambda
+│   ├── main.py                        # FastAPI application declaration
+│   └── rebuild_lambda_zip.py          # Linux x86_64 binary wheel packager for Lambda
+├── frontend/                          # Next.js 16 SPA dashboard
+│   ├── src/app/                       # App router pages (Runs, Repos, Eval Harness, Settings)
+│   ├── src/components/                # Trace timelines, diff viewers, charts
+│   ├── next.config.ts                 # Configured with output: "export"
+│   └── wrangler.jsonc                 # Cloudflare Workers static asset configuration
+├── infra/aws/                         # Terraform definitions (Lambda Function URL, IAM)
+├── HAUNTER.md                         # Product specification & architectural design
+├── WORK.md                            # Comprehensive engineering implementation log
+├── aws.md                             # AWS Lambda deployment & packaging runbook
+└── github.md                          # GitHub Actions sandbox runner runbook
 ```
 
-## Quick Start
+---
 
-**Backend** `http://localhost:8000/health`
+## Local Development & Setup
+
+### 1. Prerequisites
+- Python 3.11+
+- Node.js 20+ & npm 11+
+- Neon Postgres database instance (pooled and unpooled connection URLs)
+- GitHub OAuth Application credentials (`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`)
+- GitHub App or Personal Access Token with repo write permissions
+- OpenCode Zen API key (`OPENCODE_ZEN_API_KEY`)
+
+### 2. Environment Variables (`backend/.env`)
+
+```env
+# Database (Neon Postgres)
+DATABASE_URL=postgresql+asyncpg://user:pass@ep-pool.us-east-2.aws.neon.tech/haunter?sslmode=require
+DATABASE_URL_UNPOOLED=postgresql+asyncpg://user:pass@ep-direct.us-east-2.aws.neon.tech/haunter?sslmode=require
+
+# Auth & Secrets
+GITHUB_CLIENT_ID=your_oauth_client_id
+GITHUB_CLIENT_SECRET=your_oauth_client_secret
+CALLBACK_URL=http://localhost:8000/auth/github/callback
+SESSION_SECRET_KEY=generate_with_openssl_rand_hex_32
+TOKEN_ENCRYPTION_KEY=generate_with_fernet_generate_key
+FRONTEND_URL=http://localhost:3000
+
+# Webhook & Sandbox
+GITHUB_WEBHOOK_SECRET=your_webhook_hmac_secret
+SANDBOX_PROVIDER=github_actions
+GITHUB_SANDBOX_ORG=kaiizer777
+GITHUB_SANDBOX_APP_ID=your_sandbox_app_id
+GITHUB_SANDBOX_INSTALLATION_ID=your_sandbox_installation_id
+GITHUB_SANDBOX_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
+
+# LLM Inference
+OPENCODE_ZEN_API_KEY=your_opencode_zen_key
+DEFAULT_PROVIDER=opencode_zen
+DEFAULT_MODEL=nemotron-3.5-lightning-free
+ADMIN_USER_ID=your_user_uuid
+```
+
+### 3. Backend Setup
+
 ```bash
 cd backend
-python -m venv .venv && .\.venv\Scripts\activate  # Windows: .\.venv\Scripts\activate
+python -m venv .venv
+# Activate virtual environment
+source .venv/bin/activate       # Linux/macOS
+# .\.venv\Scripts\activate      # Windows
+
 pip install -r requirements.txt
-# .env: DATABASE_URL, DATABASE_URL_UNPOOLED, GITHUB_CLIENT_ID/SECRET, SESSION_SECRET_KEY, FRONTEND_URL, OPENCODE_ZEN_API_KEY, GITHUB_WEBHOOK_SECRET
-uvicorn main:app --reload
+
+# Run database migrations
+alembic upgrade head
+
+# Start development server
+uvicorn main:app --reload --port 8000
 ```
 
-**Frontend** `http://localhost:3000`
+Verify backend health at `http://localhost:8000/health`.
+
+### 4. Frontend Setup
+
 ```bash
 cd frontend
 npm install
-npm run dev  # NEXT_PUBLIC_API_URL -> backend URL
+
+# Run local development server
+npm run dev
 ```
 
-## Deployment
+Open `http://localhost:3000` to access the dashboard.
 
-- **AWS Lambda**: `infra/aws/lambda.tf` — 512MB/900s ARM64, Function URL `auth_type=NONE` (HMAC-secured), always-free `1M req + 400k GB-s/mo` → `$0` at ~10 users.
-- **Cloudflare Pages**: Next.js 16 frontend dashboard deployed on Cloudflare Pages connected to Lambda Function URL.
+### 5. Running Tests
 
-## Cleanup history
+```bash
+cd backend
+pytest -v
+```
 
-See cleanup.md for the dead-code removal history (GCP Cloud Build + AWS CodeBuild + GCP hosting adapter, ~1,940 lines across 13 files, plus google-cloud-build dependency dropped).
+---
 
-## Demoing Haunter in 5 minutes
+## 5-Minute Demo Walkthrough (Eval Harness)
 
-The dashboard's eval-harness page has a **Demo mode** toggle that pins the
-eval to a known-fixable canonical failure and the default model. This is the
-path to show "Haunter opens a passing PR" in front of a user or interviewer.
+The dashboard includes a built-in benchmark harness with a **Demo Mode** designed to showcase Haunter's diagnostic and fix capabilities deterministically:
 
-The canonical demo test case lives at
-`backend/tests/demo_canonical/test_demo_canonical.py`. It has a deliberate
-one-character typo in an import (`from app.servies.billing import charge` —
-missing `c` in `services`). The orchestrator's deterministic
-`ModuleNotFoundError` fast-path (Phase 3) catches it and applies a
-`conftest.py` fix. The PR then passes.
+1. Launch both Backend and Frontend locally, or navigate to the deployed Cloudflare Worker dashboard.
+2. Sign in via GitHub OAuth.
+3. Open the **Eval Harness** view from the navigation menu.
+4. Switch the **Demo mode** toggle to **ON** (persisted in `localStorage`). This pins the test run to `fixture-001` (`test_demo_canonical.py`, containing a canonical import typo).
+5. Click **Run Eval Harness** → **Start Benchmark**.
+6. Observe the orchestrator invoke the Context Gatherer, identify the missing module, generate the fix, execute verification, and log token usage, cost, and latency in real time.
+7. Click the resulting run to inspect the live execution trace and generated patch diff.
 
-1. `cd backend && pip install -r requirements.txt`
-2. Set the required env vars in `backend/.env`:
-   - `DATABASE_URL`, `DATABASE_URL_UNPOOLED` (Neon)
-   - `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`
-   - `SESSION_SECRET_KEY`, `TOKEN_ENCRYPTION_KEY`
-   - `FRONTEND_URL`, `CALLBACK_URL`
-   - `OPENCODE_ZEN_API_KEY`
-   - `GITHUB_WEBHOOK_SECRET`
-   - `ADMIN_USER_ID` (your user UUID, to unlock the eval page)
-   - `SANDBOX_PROVIDER=github_actions`
-   - `GITHUB_SANDBOX_APP_ID`, `GITHUB_SANDBOX_INSTALLATION_ID`
-   - `GITHUB_SANDBOX_APP_PRIVATE_KEY` (PEM, or via SSM)
-3. `uvicorn main:app --reload --port 8000`
-4. Open the dashboard at `http://localhost:3000` and sign in.
-5. Navigate to the **Eval Harness** page.
-6. Toggle **Demo mode** on (top-right, next to "Run Eval Harness"). The
-   toggle persists across page reloads via `localStorage`.
-7. Click **Run Eval Harness** → **Start Benchmark**.
-8. The runner pins to `fixture-001` and the default model. A live LLM call
-   runs against the canonical import-error fixture.
-9. Open the resulting `EvalResult` row in the dashboard to see scores; the
-   matching `Run` trace shows the pipeline state.
+---
 
-For the end-to-end "open a passing PR" demo, the test mirror in the
-`haunter-sandboxes` org must be configured (see `github.md`). The eval
-harness path above exercises the LLM and the deterministic fast-path; the
-full PR round-trip requires the deployed Lambda + GitHub App + test-mirror
-org, and is out of scope for local CI verification.
+## Deployment Summary
 
-## Docs
+### Backend: AWS Lambda Function URL
+The backend is packaged using native Linux wheels and deployed to AWS Lambda:
 
-- `HAUNTER.md` — product/arch spec
-- `WORK.md` — 14-phase build plan (all DONE)
-- `github.md` — GitHub Actions Sandbox migration runbook & architecture
-- `aws.md` — AWS Lambda deployment runbook
-- `backend/tests/` — `pytest-asyncio` + `respx`
+1. Package the deployment bundle:
+   ```bash
+   cd backend
+   python rebuild_lambda_zip.py
+   ```
+2. Apply infrastructure via Terraform:
+   ```bash
+   cd infra/aws
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+   *For operational details, SSM parameter references, and troubleshooting, consult [aws.md](file:///C:/Users/bari2/Desktop/Haunter/aws.md).*
+
+### Frontend: Cloudflare Workers Static Assets
+The Next.js 16 dashboard compiles to a static SPA export and is served via Cloudflare Workers:
+
+```bash
+cd frontend
+npm run build
+npx wrangler deploy
+```
+*Worker configuration is specified in [wrangler.jsonc](file:///C:/Users/bari2/Desktop/Haunter/frontend/wrangler.jsonc).*
+
+---
+
+## Primary Documentation Links
+
+- [HAUNTER.md](file:///C:/Users/bari2/Desktop/Haunter/HAUNTER.md): System architecture, subagent contracts, and core requirements.
+- [WORK.md](file:///C:/Users/bari2/Desktop/Haunter/WORK.md): Complete chronological record of all implementation phases.
+- [aws.md](file:///C:/Users/bari2/Desktop/Haunter/aws.md): AWS Lambda deployment runbook, Terraform configuration, and gotchas.
+- [github.md](file:///C:/Users/bari2/Desktop/Haunter/github.md): GitHub Actions sandbox runner implementation and mirror lifecycle.
