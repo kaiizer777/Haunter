@@ -149,7 +149,7 @@ export default function ModelConfigPage() {
       title="Model & Provider Configuration"
       subtitle="Manage active LLM inference providers and models globally or per repository"
     >
-      <div className="max-w-4xl space-y-6">
+      <div className="space-y-6 min-w-0">
         {error && (
           <div className="flex items-center gap-2 rounded-[6px] border border-red-900/60 bg-red-950/30 p-3.5 text-xs text-red-300">
             <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
