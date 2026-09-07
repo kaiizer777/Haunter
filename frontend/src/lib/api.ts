@@ -151,6 +151,23 @@ export interface EvalRunRequest {
   demo_mode?: boolean;
 }
 
+export interface ConfidenceBucket {
+  bucket: string;
+  total_attempts: number;
+  passed_attempts: number;
+  accuracy_pct: number;
+}
+
+export interface UserEvalMetricsOut {
+  total_runs: number;
+  healed_runs: number;
+  success_rate_pct: number;
+  avg_duration_seconds: number;
+  total_cost: number;
+  avg_cost_per_run: number;
+  confidence_calibration: ConfidenceBucket[];
+}
+
 export interface ModelConfigOut {
   id: string;
   provider: string;
@@ -317,6 +334,7 @@ export const api = {
   getEvalResults: () => api.get<EvalResultOut[]>("/eval-results"),
   getEvalResult: (evalId: string) => api.get<EvalResultOut>(`/eval-results/${evalId}`),
   runEval: (data?: EvalRunRequest) => api.post<EvalResultOut>("/eval/run", data || {}),
+  getUserEvalMetrics: () => api.get<UserEvalMetricsOut>("/eval/user-metrics"),
 
   // Model Config endpoints
   getAvailableModels: () =>

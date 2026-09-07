@@ -45,17 +45,12 @@ export function Sidebar() {
       href: "/repos",
       icon: GitBranch,
     },
-    // Gated admin-only: hide entirely for non-admin (WORK.md:251)
-    ...(user?.is_admin
-      ? [
-          {
-            name: "Eval Harness",
-            href: "/eval",
-            icon: Sparkles,
-            badge: "Admin",
-          },
-        ]
-      : []),
+    {
+      name: "AI Reliability & Evals",
+      href: "/eval",
+      icon: Sparkles,
+      badge: "Live",
+    },
     {
       name: "Model Config",
       href: "/config",

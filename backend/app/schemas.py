@@ -247,3 +247,50 @@ class HostingConfigOut(BaseModel):
     hosting_provider: str
     sandbox_provider: str
     source: str  # "db" | "env" — indicates where the active value came from
+
+
+# ---------------------------------------------------------------------------
+# User-scoped eval metrics — reliability & evals dashboard
+# ---------------------------------------------------------------------------
+#
+# Aggregates over the caller's repos/runs/attempts. Computed by the
+# /eval/user-metrics endpoint in routers/eval.py. Used by the user-facing
+# reliability dashboard (see WORK.md — Reliability & Evals API).
+# ---------------------------------------------------------------------------
+
+
+class ConfidenceBucket(BaseModel):
+    """
+    One confidence-range bucket for the calibration histogram.
+
+    `bucket` is a human label ("0-50%", "50-75%", "75-90%", "90-100%") and
+    follows the LLM confidence scale (0-100 integer, see
+    subagents/fix_generator.py FixOutput.confidence: int = Field(ge=0, le=100)).
+    """
+
+    bucket: str
+    total_attempts: int
+    passed_attempts: int
+    accuracy_pct: float
+
+    model_config = {"from_attributes": True}
+
+
+class UserEvalMetricsOut(BaseModel):
+    """
+    User-scoped reliability & calibration rollup for the dashboard.
+
+    Every aggregate is scoped to the caller's repos via Repo.user_id == current_user.id.
+    `confidence_calibration` is a fixed 4-element list in bucket order:
+    0-50%, 50-75%, 75-90%, 90-100% — see routers/eval.py get_user_eval_metrics.
+    """
+
+    total_runs: int
+    healed_runs: int
+    success_rate_pct: float
+    avg_duration_seconds: float
+    total_cost: float
+    avg_cost_per_run: float
+    confidence_calibration: list[ConfidenceBucket]
+
+    model_config = {"from_attributes": True}

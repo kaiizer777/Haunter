@@ -28,14 +28,15 @@ from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
 from app.limiter import limiter
-from app.models import EvalResult, ModelConfig, User
+from app.models import Attempt, EvalResult, ModelConfig, Repo, Run, RunStep, User
+from app.schemas import ConfidenceBucket, UserEvalMetricsOut
 
 logger = logging.getLogger(__name__)
 
@@ -379,3 +380,166 @@ async def trigger_eval_run(
         ) from exc
 
     return EvalResultOut.from_orm_safe(eval_result)
+
+
+# ---------------------------------------------------------------------------
+# User-scoped reliability & calibration metrics
+# ---------------------------------------------------------------------------
+#
+# GET /eval/user-metrics — aggregated, caller-scoped rollup for the dashboard.
+#
+# Scoping: EVERY aggregate is gated on Repo.user_id == current_user.id via
+# the join chain Run.repo_id == Repo.id. No global counts leak across tenants.
+#
+# Healed definition: Run.status IN ('pr_opened', 'completed') — both are
+# terminal success-ish statuses in the RunStatus enum
+# (orchestrator.py: RunStatus.pr_opened, RunStatus.completed). Excludes
+# 'fallback_commented' (all attempts exhausted) and 'error' (crash).
+#
+# Duration: Run has no started_at / completed_at columns; the proxy is
+# (Run.updated_at - Run.created_at). For terminal runs updated_at reflects
+# the last (terminal) transition — see orchestrator._transition which sets
+# run.updated_at on every status change. This is the wall-clock duration
+# from webhook receipt to terminal state.
+#
+# Cost: RunStep.cost_estimate (Float) — see models.py RunStep.cost_estimate.
+# Summed across all RunStep rows belonging to the user's runs.
+#
+# Confidence: Attempt.confidence_score is an Integer 0-100
+# (subagents/fix_generator.py FixOutput.confidence: int = Field(ge=0, le=100)).
+# Bucket boundaries are therefore 0/50/75/90/100, NOT 0.0/0.5/0.75/0.9/1.0.
+# "passed" = verification_status == "pass" (sandbox runner contract, see
+# orchestrator.py:617 "if v_status == 'pass':" and sandbox/__init__.py
+# return shape: {"status": "pass" | "fail", ...}).
+# ---------------------------------------------------------------------------
+
+
+@router.get("/eval/user-metrics", response_model=UserEvalMetricsOut)
+async def get_user_eval_metrics(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserEvalMetricsOut:
+    """Aggregate reliability and calibration metrics across the caller's runs."""
+    user_filter = [Repo.user_id == current_user.id]
+    healed_statuses = ["pr_opened", "completed"]
+
+    # --- total_runs (all runs across the user's repos) ---
+    total_runs: int = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(Run)
+                .join(Repo, Run.repo_id == Repo.id)
+                .where(*user_filter)
+            )
+        ).scalar_one()
+        or 0
+    )
+
+    # --- healed_runs (terminal success: pr_opened or completed) ---
+    healed_runs: int = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(Run)
+                .join(Repo, Run.repo_id == Repo.id)
+                .where(*user_filter, Run.status.in_(healed_statuses))
+            )
+        ).scalar_one()
+        or 0
+    )
+
+    success_rate_pct: float = (
+        round((healed_runs / total_runs) * 100, 1) if total_runs > 0 else 0.0
+    )
+
+    # --- avg_duration_seconds (over healed runs only) ---
+    # Skip the query when no healed runs to avoid divide-by-zero / no rows.
+    avg_duration_seconds: float = 0.0
+    if healed_runs > 0:
+        avg_secs = (
+            await db.execute(
+                select(
+                    func.avg(func.extract("epoch", Run.updated_at - Run.created_at))
+                )
+                .select_from(Run)
+                .join(Repo, Run.repo_id == Repo.id)
+                .where(*user_filter, Run.status.in_(healed_statuses))
+            )
+        ).scalar_one()
+        avg_duration_seconds = round(float(avg_secs or 0.0), 1)
+
+    # --- total_cost (sum of RunStep.cost_estimate across the user's runs) ---
+    total_cost_raw = (
+        await db.execute(
+            select(func.coalesce(func.sum(RunStep.cost_estimate), 0.0))
+            .select_from(RunStep)
+            .join(Run, RunStep.run_id == Run.id)
+            .join(Repo, Run.repo_id == Repo.id)
+            .where(*user_filter)
+        )
+    ).scalar_one()
+    total_cost: float = float(total_cost_raw or 0.0)
+
+    avg_cost_per_run: float = (
+        round(total_cost / total_runs, 4) if total_runs > 0 else 0.0
+    )
+
+    # --- confidence_calibration: 4 fixed buckets in the specified order ---
+    # (label, low_inclusive, high_exclusive) — scale is 0-100, so the
+    # last bucket uses 101 as the exclusive upper bound to include score=100.
+    bucket_specs: list[tuple[str, int, int]] = [
+        ("0-50%", 0, 50),
+        ("50-75%", 50, 75),
+        ("75-90%", 75, 90),
+        ("90-100%", 90, 101),
+    ]
+
+    confidence_calibration: list[ConfidenceBucket] = []
+    for label, low, high in bucket_specs:
+        bucket_row = (
+            await db.execute(
+                select(
+                    func.count(Attempt.id).label("total"),
+                    func.coalesce(
+                        func.sum(
+                            case((Attempt.verification_status == "pass", 1), else_=0)
+                        ),
+                        0,
+                    ).label("passed"),
+                )
+                .select_from(Attempt)
+                .join(Run, Attempt.run_id == Run.id)
+                .join(Repo, Run.repo_id == Repo.id)
+                .where(
+                    *user_filter,
+                    Attempt.confidence_score >= low,
+                    Attempt.confidence_score < high,
+                )
+            )
+        ).one()
+        total_attempts = int(bucket_row.total or 0)
+        passed_attempts = int(bucket_row.passed or 0)
+        accuracy_pct = (
+            round((passed_attempts / total_attempts) * 100, 1)
+            if total_attempts > 0
+            else 0.0
+        )
+        confidence_calibration.append(
+            ConfidenceBucket(
+                bucket=label,
+                total_attempts=total_attempts,
+                passed_attempts=passed_attempts,
+                accuracy_pct=accuracy_pct,
+            )
+        )
+
+    return UserEvalMetricsOut(
+        total_runs=total_runs,
+        healed_runs=healed_runs,
+        success_rate_pct=success_rate_pct,
+        avg_duration_seconds=avg_duration_seconds,
+        total_cost=round(total_cost, 4),
+        avg_cost_per_run=avg_cost_per_run,
+        confidence_calibration=confidence_calibration,
+    )
