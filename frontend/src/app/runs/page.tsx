@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/runs/status-badge";
+import { SelectDropdown } from "@/components/ui/select-dropdown";
 import { api, RepoOut, RunOut } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
 import {
@@ -280,37 +281,71 @@ export default function RunsPage() {
             </div>
 
             {/* Repo select */}
-            <select
+            <SelectDropdown
               value={selectedRepoId}
-              onChange={(e) => {
-                setSelectedRepoId(e.target.value);
+              onChange={(val) => {
+                setSelectedRepoId(val);
                 setPage(0);
               }}
-              className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-3.5 text-[13px] text-zinc-200 focus:border-amber-400 focus:outline-none"
-            >
-              <option value="">All Repositories ({repos.length})</option>
-              {repos.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.owner}/{r.name}
-                </option>
-              ))}
-            </select>
+              options={[
+                {
+                  value: "",
+                  label: `All Repositories (${repos.length})`,
+                  icon: <GitBranch className="h-3.5 w-3.5 text-zinc-400" />,
+                },
+                ...repos.map((r) => ({
+                  value: r.id,
+                  label: `${r.owner}/${r.name}`,
+                  icon: <GitBranch className="h-3.5 w-3.5 text-zinc-500" />,
+                })),
+              ]}
+              buttonClassName="min-w-[190px]"
+            />
 
             {/* Status select */}
-            <select
+            <SelectDropdown
               value={selectedStatus}
-              onChange={(e) => {
-                setSelectedStatus(e.target.value);
+              onChange={(val) => {
+                setSelectedStatus(val);
                 setPage(0);
               }}
-              className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-3.5 text-[13px] text-zinc-200 focus:border-amber-400 focus:outline-none"
-            >
-              <option value="">All Statuses</option>
-              <option value="completed">Completed / PR Opened</option>
-              <option value="fix_generation">Generating Fix</option>
-              <option value="error">Error / Failed</option>
-              <option value="fallback">Fallback Comment</option>
-            </select>
+              options={[
+                {
+                  value: "",
+                  label: "All Statuses",
+                  badge: <span className="h-2 w-2 rounded-full bg-zinc-500" />,
+                },
+                {
+                  value: "completed",
+                  label: "Completed / PR Opened",
+                  badge: (
+                    <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+                  ),
+                },
+                {
+                  value: "fix_generation",
+                  label: "Generating Fix",
+                  badge: (
+                    <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
+                  ),
+                },
+                {
+                  value: "error",
+                  label: "Error / Failed",
+                  badge: (
+                    <span className="h-2 w-2 rounded-full bg-rose-400 shadow-[0_0_8px_rgba(251,113,133,0.6)]" />
+                  ),
+                },
+                {
+                  value: "fallback",
+                  label: "Fallback Comment",
+                  badge: (
+                    <span className="h-2 w-2 rounded-full bg-violet-400 shadow-[0_0_8px_rgba(167,139,250,0.6)]" />
+                  ),
+                },
+              ]}
+              buttonClassName="min-w-[160px]"
+            />
           </div>
 
           <div className="flex items-center gap-3.5">

@@ -6,6 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/runs/status-badge";
+import { SelectDropdown } from "@/components/ui/select-dropdown";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import {
   Activity,
@@ -554,31 +555,65 @@ export default function MockRunsPage() {
               </div>
 
               {/* Repo Select */}
-              <select
+              <SelectDropdown
                 value={selectedRepo}
-                onChange={(e) => setSelectedRepo(e.target.value)}
-                className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-3.5 text-[13px] text-zinc-200 focus:border-amber-400 focus:outline-none"
-              >
-                <option value="">All Repositories ({repos.length})</option>
-                {repos.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
+                onChange={(val) => setSelectedRepo(val)}
+                options={[
+                  {
+                    value: "",
+                    label: `All Repositories (${repos.length})`,
+                    icon: <GitBranch className="h-3.5 w-3.5 text-zinc-400" />,
+                  },
+                  ...repos.map((r) => ({
+                    value: r,
+                    label: r,
+                    icon: <GitBranch className="h-3.5 w-3.5 text-zinc-500" />,
+                  })),
+                ]}
+                buttonClassName="min-w-[190px]"
+              />
 
               {/* Status Select */}
-              <select
+              <SelectDropdown
                 value={selectedStatus}
-                onChange={(e) => setSelectedStatus(e.target.value)}
-                className="h-10 rounded-[7px] border border-zinc-800 bg-[#0c0c0e] px-3.5 text-[13px] text-zinc-200 focus:border-amber-400 focus:outline-none"
-              >
-                <option value="">All Statuses</option>
-                <option value="completed">Completed / PR Opened</option>
-                <option value="fix_generation">Generating Fix</option>
-                <option value="error">Error / Failed</option>
-                <option value="fallback">Fallback Comment</option>
-              </select>
+                onChange={(val) => setSelectedStatus(val)}
+                options={[
+                  {
+                    value: "",
+                    label: "All Statuses",
+                    badge: <span className="h-2 w-2 rounded-full bg-zinc-500" />,
+                  },
+                  {
+                    value: "completed",
+                    label: "Completed / PR Opened",
+                    badge: (
+                      <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+                    ),
+                  },
+                  {
+                    value: "fix_generation",
+                    label: "Generating Fix",
+                    badge: (
+                      <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
+                    ),
+                  },
+                  {
+                    value: "error",
+                    label: "Error / Failed",
+                    badge: (
+                      <span className="h-2 w-2 rounded-full bg-rose-400 shadow-[0_0_8px_rgba(251,113,133,0.6)]" />
+                    ),
+                  },
+                  {
+                    value: "fallback",
+                    label: "Fallback Comment",
+                    badge: (
+                      <span className="h-2 w-2 rounded-full bg-violet-400 shadow-[0_0_8px_rgba(167,139,250,0.6)]" />
+                    ),
+                  },
+                ]}
+                buttonClassName="min-w-[160px]"
+              />
             </div>
 
             <div className="flex items-center gap-3.5">
