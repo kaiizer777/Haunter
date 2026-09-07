@@ -223,3 +223,20 @@ async def test_put_hosting_config_invalidates_in_process_cache(
 
     new_sandbox = await get_active_sandbox_provider()
     assert new_sandbox == "aws"
+
+
+@pytest.mark.asyncio
+async def test_put_hosting_config_admin_role_succeeds(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """PUT /config/hosting succeeds for user with role='admin' in DB without admin_user_id env."""
+    await truncate_all(db)
+    admin_user = await user_factory(role="admin")
+    client = make_auth_client(admin_user.id)
+
+    payload = {"hosting_provider": "aws", "sandbox_provider": "aws"}
+    async with client:
+        resp = await client.put("/config/hosting", json=payload)
+
+    assert resp.status_code == 200
+    assert resp.json()["hosting_provider"] == "aws"

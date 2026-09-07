@@ -95,7 +95,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_db
 from app.limiter import limiter
-from app.models import User
+from app.models import User, UserRole
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +305,7 @@ class UserOut(BaseModel):
     id: uuid.UUID
     github_username: str
     avatar_url: str | None
+    role: UserRole = UserRole.USER
     is_admin: bool = False
 
     model_config = {"from_attributes": True}
@@ -501,15 +502,72 @@ async def logout(request: Request, response: Response) -> dict[str, str]:
     return {"detail": "Logged out"}
 
 
+async def require_admin(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """
+    FastAPI dependency. Enforces that the authenticated caller has the 'admin' role
+    (or matches ADMIN_USER_ID fallback).
+    Raises 403 Forbidden otherwise.
+    """
+    is_admin = current_user.is_admin or bool(
+        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
+    )
+    if not is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: admin access required",
+        )
+    return current_user
+
+
+class UserRoleUpdate(BaseModel):
+    role: UserRole
+
+
 @router.get("/me", response_model=UserOut)
 async def me(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> UserOut:
     """Return the authenticated user's public profile, or 401 if not logged in."""
-    is_admin = bool(settings.admin_user_id and str(current_user.id) == settings.admin_user_id)
+    is_admin = current_user.is_admin or bool(
+        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
+    )
     return UserOut(
         id=current_user.id,
         github_username=current_user.github_username,
         avatar_url=current_user.avatar_url,
+        role=UserRole(current_user.role),
+        is_admin=is_admin,
+    )
+
+
+@router.patch("/users/{user_id}/role", response_model=UserOut)
+async def update_user_role(
+    user_id: uuid.UUID,
+    body: UserRoleUpdate,
+    admin_user: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserOut:
+    """
+    Admin-only endpoint to promote/demote a user's role.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    target_user = result.scalar_one_or_none()
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    target_user.role = body.role.value
+    await db.commit()
+    await db.refresh(target_user)
+
+    is_admin = target_user.is_admin or bool(
+        settings.admin_user_id and str(target_user.id) == settings.admin_user_id
+    )
+    return UserOut(
+        id=target_user.id,
+        github_username=target_user.github_username,
+        avatar_url=target_user.avatar_url,
+        role=UserRole(target_user.role),
         is_admin=is_admin,
     )

@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Any, Optional
 
 from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, Float
@@ -9,6 +10,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
+
+
+class UserRole(StrEnum):
+    USER = "user"
+    ADMIN = "admin"
 
 
 class User(Base):
@@ -30,6 +36,9 @@ class User(Base):
     # TOKEN_ENCRYPTION_KEY is required at startup (config.py raises RuntimeError if unset).
     # Encryption helpers: app/auth.py (_encrypt_token / _decrypt_token).
     access_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    role: Mapped[str] = mapped_column(
+        String(32), default=UserRole.USER.value, server_default=UserRole.USER.value, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -40,6 +49,10 @@ class User(Base):
     )
 
     repos: Mapped[list["Repo"]] = relationship("Repo", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == UserRole.ADMIN
 
 
 class Repo(Base):

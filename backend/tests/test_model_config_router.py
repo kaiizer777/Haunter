@@ -332,3 +332,21 @@ async def test_repo_model_config_ownership_enforced(
         )
         assert put_resp.status_code == 404
         assert put_resp.json() == {"detail": "Repo not found"}
+
+
+@pytest.mark.asyncio
+async def test_put_model_config_admin_role_succeeds(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """PUT /config/model succeeds when user has role='admin' in DB without needing admin_user_id env."""
+    await truncate_all(db)
+    admin_user = await user_factory(role="admin")
+    client = make_auth_client(admin_user.id)
+
+    payload = {"provider": "opencode_zen", "model_name": "nemotron-3.5-lightning-free"}
+    async with client:
+        resp = await client.put("/config/model", json=payload)
+
+    assert resp.status_code == 200
+    assert resp.json()["model_name"] == "nemotron-3.5-lightning-free"
+    assert resp.json()["is_active"] is True

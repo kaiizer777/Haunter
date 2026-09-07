@@ -155,7 +155,10 @@ async def update_model_config_endpoint(
         return ModelConfigOut.model_validate(config)
 
     # 2. Global model config update
-    if settings.admin_user_id and str(current_user.id) != settings.admin_user_id:
+    is_admin = current_user.is_admin or bool(
+        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
+    )
+    if not is_admin:
         logger.warning(
             "Non-admin user %s attempted to update global model config", current_user.id
         )

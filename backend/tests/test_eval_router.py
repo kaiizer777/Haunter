@@ -260,3 +260,20 @@ async def test_post_eval_run_rate_limiting(
     finally:
         route_limits[0].limit = orig_limit
         limiter.reset()
+
+
+@pytest.mark.asyncio
+async def test_get_eval_results_admin_role_succeeds(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /eval-results succeeds for user with role='admin' even when admin_user_id is None."""
+    await truncate_all(db)
+    admin_user = await user_factory(role="admin")
+    client = make_auth_client(admin_user.id)
+
+    monkeypatch.setattr(settings, "admin_user_id", None)
+
+    async with client:
+        resp = await client.get("/eval-results")
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)

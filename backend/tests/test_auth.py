@@ -441,3 +441,87 @@ def test_encryption_required_raises():
         importlib.import_module("app.config")
 
 
+@pytest.mark.asyncio
+async def test_me_endpoint_returns_user_role(db: AsyncSession, user_factory, make_auth_client):
+    """GET /auth/me returns role='user' and is_admin=False for standard user."""
+    user = await user_factory(username="standard-user", role="user")
+    client = make_auth_client(user.id)
+
+    resp = await client.get("/auth/me")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["role"] == "user"
+    assert data["is_admin"] is False
+
+
+@pytest.mark.asyncio
+async def test_me_endpoint_returns_admin_role(db: AsyncSession, user_factory, make_auth_client):
+    """GET /auth/me returns role='admin' and is_admin=True for admin user."""
+    admin_user = await user_factory(username="admin-user", role="admin")
+    client = make_auth_client(admin_user.id)
+
+    resp = await client.get("/auth/me")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["role"] == "admin"
+    assert data["is_admin"] is True
+
+
+@pytest.mark.asyncio
+async def test_patch_user_role_by_admin(db: AsyncSession, user_factory, make_auth_client):
+    """Admin can update another user's role via PATCH /auth/users/{user_id}/role."""
+    admin = await user_factory(username="admin-updater", role="admin")
+    target = await user_factory(username="target-member", role="user")
+
+    admin_client = make_auth_client(admin.id)
+    resp = await admin_client.patch(f"/auth/users/{target.id}/role", json={"role": "admin"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["role"] == "admin"
+    assert data["is_admin"] is True
+
+    # Verify target's /auth/me now reflects admin
+    target_client = make_auth_client(target.id)
+    me_resp = await target_client.get("/auth/me")
+    assert me_resp.json()["is_admin"] is True
+
+
+@pytest.mark.asyncio
+async def test_patch_user_role_non_admin_forbidden(db: AsyncSession, user_factory, make_auth_client):
+    """Non-admin user gets 403 when trying to update roles."""
+    regular = await user_factory(username="regular-user", role="user")
+    target = await user_factory(username="target-user", role="user")
+
+    client = make_auth_client(regular.id)
+    resp = await client.patch(f"/auth/users/{target.id}/role", json={"role": "admin"})
+    assert resp.status_code == 403
+    assert "Forbidden" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_patch_user_role_invalid_enum_rejected(db: AsyncSession, user_factory, make_auth_client):
+    """PATCH with an invalid role outside UserRole enum returns 422."""
+    admin = await user_factory(username="admin-validator", role="admin")
+    target = await user_factory(username="target-val", role="user")
+
+    admin_client = make_auth_client(admin.id)
+    resp = await admin_client.patch(f"/auth/users/{target.id}/role", json={"role": "superadmin"})
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_db_check_constraint_rejects_invalid_role(db: AsyncSession):
+    """Database CHECK constraint check_user_role rejects invalid role values at DB level."""
+    from sqlalchemy.exc import IntegrityError
+
+    invalid_user = User(
+        github_id=999888777,
+        github_username="invalid-role-user",
+        role="invalid_role",
+    )
+    db.add(invalid_user)
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
+
+

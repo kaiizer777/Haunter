@@ -165,6 +165,7 @@ def user_factory(db: AsyncSession):
         username: str = "test-user",
         access_token: str | None = "fake_access_token_123",
         avatar_url: str | None = "https://avatars.githubusercontent.com/u/123",
+        role: str = "user",
     ) -> User:
         if github_id is None:
             github_id = int(uuid.uuid4().int % 1_000_000_000 + 100_000_000)
@@ -173,6 +174,7 @@ def user_factory(db: AsyncSession):
             github_username=username,
             access_token=_encrypt_token(access_token) if access_token else None,
             avatar_url=avatar_url,
+            role=role,
         )
         db.add(user)
         await db.commit()

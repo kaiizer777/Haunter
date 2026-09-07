@@ -11,6 +11,12 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.models import UserRole
+
+
+class UserRoleUpdate(BaseModel):
+    role: UserRole
+
 
 # ---------------------------------------------------------------------------
 # Repo schemas

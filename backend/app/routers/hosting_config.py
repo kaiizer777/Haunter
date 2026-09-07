@@ -41,8 +41,11 @@ _ALLOWED_KEYS: frozenset[str] = frozenset({"hosting_provider", "sandbox_provider
 
 
 async def _require_admin(current_user: User) -> None:
-    """Raise 403 if ADMIN_USER_ID is configured and caller is not the admin."""
-    if settings.admin_user_id and str(current_user.id) != settings.admin_user_id:
+    """Raise 403 if caller is not an admin."""
+    is_admin = current_user.is_admin or bool(
+        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
+    )
+    if not is_admin:
         logger.warning(
             "hosting_config: non-admin user %s attempted write", current_user.id
         )

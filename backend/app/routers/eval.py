@@ -50,21 +50,13 @@ router = APIRouter(tags=["eval"])
 
 def _require_admin(current_user: User) -> None:
     """
-    Raise HTTP 403 if the current user is not the configured admin.
-
-    Fail-closed: if ADMIN_USER_ID is not set, nobody gets access.
-    This prevents accidental exposure of eval data in misconfigured envs.
+    Raise HTTP 403 if the current user is not an admin.
+    Checks DB user.is_admin with fallback to settings.admin_user_id.
     """
-    if not settings.admin_user_id:
-        logger.warning(
-            "Eval endpoint accessed but ADMIN_USER_ID not configured — denying user=%s",
-            current_user.id,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
-    if str(current_user.id) != settings.admin_user_id:
+    is_admin = current_user.is_admin or bool(
+        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
+    )
+    if not is_admin:
         logger.warning(
             "Non-admin user %s attempted to access eval endpoint", current_user.id
         )
