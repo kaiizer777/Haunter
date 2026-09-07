@@ -298,8 +298,8 @@ async def list_runs(
     for run, cost, tokens in rows:
         run_cost = float(cost or 0.0)
         run_tokens = int(tokens or 0)
-        setattr(run, "cost", run_cost)
-        setattr(run, "tokens", run_tokens)
+        run.cost = run_cost
+        run.tokens = run_tokens
         run_out = RunOut.model_validate(run)
         run_out.cost = run_cost
         run_out.tokens = run_tokens

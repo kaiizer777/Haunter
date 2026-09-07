@@ -3,21 +3,19 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { 
-  Activity, 
-  GitBranch, 
-  Sparkles, 
-  Sliders, 
-  ShieldCheck, 
-  TerminalSquare 
+import {
+  Activity,
+  GitBranch,
+  Sparkles,
+  Sliders,
+  ShieldCheck,
+  TerminalSquare
 } from "lucide-react";
-import { useAuth } from "@/lib/auth-context";
 import { api, ModelConfigOut } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { user } = useAuth();
   const [activeModel, setActiveModel] = useState<string>("nemotron-3.5-lightning-free");
 
   useEffect(() => {

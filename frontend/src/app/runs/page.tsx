@@ -129,9 +129,9 @@ export default function RunsPage() {
     return runs.filter((run) => {
       const repo = reposMap[run.repo_id];
       const repoLabel = repo ? `${repo.owner}/${repo.name}` : `repo-${run.repo_id.slice(0, 8)}`;
-      const branchName = run.head_branch || (run as any).branch || "";
-      const commitSha = (run as any).commit_sha || run.head_sha || "";
-      const diagnosis = (run as any).diagnosis || (run as any).diagnosis_summary || "";
+      const branchName = run.head_branch;
+      const commitSha = run.head_sha;
+      const diagnosis = "";
 
       const matchRepo = repoLabel.toLowerCase().includes(q);
       const matchBranch = branchName.toLowerCase().includes(q);
@@ -450,8 +450,8 @@ export default function RunsPage() {
                   const repo = reposMap[run.repo_id];
                   const repoLabel = repo ? `${repo.owner}/${repo.name}` : `repo-${run.repo_id.slice(0, 8)}`;
                   const isSelected = selectedRunIds.has(run.id);
-                  const branchName = run.head_branch || (run as any).branch || "unknown";
-                  const commitSha = ((run as any).commit_sha || run.head_sha || "").slice(0, 7);
+                  const branchName = run.head_branch || "unknown";
+                  const commitSha = run.head_sha.slice(0, 7);
 
                   return (
                     <TableRow
