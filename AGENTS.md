@@ -12,6 +12,7 @@ Before starting work, agents **MUST** view the relevant skill file from `c:/User
 - **Frontend**: View `c:/Users/bari2/Desktop/SKILLS/frontend/skills.md`
 - **Backend**: View `c:/Users/bari2/Desktop/SKILLS/backend/skills.md`
 - **Issue fixing & bug diagnosis**: View `c:/Users/bari2/Desktop/SKILLS/issue-fix/skills.md`
+- **Review**: View `c:/Users/bari2/Desktop/SKILLS/review/skills.md`
 
 Strict: Never write, modify, or debug code without viewing the matching skill file first.
 

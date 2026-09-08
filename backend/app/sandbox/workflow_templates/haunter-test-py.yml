@@ -4,6 +4,9 @@ on:
     branches: ["sandbox/**"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 # No secrets. No env. No deploy. By design.
 jobs:
   test:

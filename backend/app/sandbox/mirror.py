@@ -237,6 +237,13 @@ async def get_or_create_test_mirror(
 
     create_resp = await gh.post(create_url, headers=headers, json=repo_payload)
 
+    # If already exists (422 name already exists on this account due to concurrent race)
+    if create_resp.status_code == 422:
+        resp = await gh.get(f"{_GITHUB_API_BASE}/repos/{full}", headers=headers)
+        if resp.status_code == 200:
+            logger.info("mirror: universal sandbox mirror created concurrently: %s", full)
+            return full
+
     # On 403, retry once with fallback PAT.
     if create_resp.status_code == 403 and fallback_token and fallback_token != token:
         logger.warning(
@@ -248,6 +255,11 @@ async def get_or_create_test_mirror(
             headers=_auth_headers(fallback_token),
             json=repo_payload,
         )
+        if create_resp.status_code == 422:
+            resp = await gh.get(f"{_GITHUB_API_BASE}/repos/{full}", headers=headers)
+            if resp.status_code == 200:
+                logger.info("mirror: universal sandbox mirror created concurrently: %s", full)
+                return full
 
     create_resp.raise_for_status()
     logger.info(
@@ -292,32 +304,20 @@ async def get_or_create_test_repo(
 _FILE_HEADER_RE: re.Pattern[str] = re.compile(r"^(?:---|\+\+\+)\s+(?:[ab]/)?(\S+)")
 
 
-def _parse_patch_files(patch_text: str) -> dict[str, str]:
+def _parse_patch(patch_text: str) -> tuple[dict[str, str], list[str]]:
     """
-    Parse a unified diff and reconstruct each touched file's new content.
+    Parse a unified diff into (files_dict, deleted_paths).
 
-    MVP behavior:
-      - Full file replacement diffs (the typical LLM output) round-trip
-        perfectly: the new file is the concatenation of all ``+`` and
-        context lines for that file.
-      - Partial hunk diffs produce a best-effort reconstruction that
-        will likely fail the workflow. The future-work fallback is the
-        Contents API or a Contents-API-per-file commit.
-
-    Returns a dict ``{file_path: new_content}``. A file appearing only
-    in ``--- a/...`` (deletion) is omitted — the MVP does not support
-    explicit deletes; deletions would need the future-work tree-entry
-    with ``sha: null``.
-
-    Raises:
-        ValueError: if the patch is empty or does not contain a single
-            ``+++ b/...`` header (i.e. nothing to commit).
+    files_dict: {path: new_content}
+    deleted_paths: list of paths deleted by the patch (marked with +++ /dev/null)
     """
     if not patch_text or not patch_text.strip():
-        raise ValueError("push_patch_as_commit: patch_text is empty")
+        raise ValueError("push_patch_to_mirror: patch_text is empty")
 
     files: dict[str, list[str]] = {}
+    deleted_paths: list[str] = []
     current_path: Optional[str] = None
+    old_path: Optional[str] = None
 
     for line in patch_text.splitlines():
         # ------------------------------------------------------------
@@ -326,19 +326,16 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
         if (line.startswith("---") or line.startswith("+++")) and _FILE_HEADER_RE.match(line):
             m = _FILE_HEADER_RE.match(line)
             assert m is not None  # narrowed by the match() guard above
-            if line.startswith("+++"):
-                path = m.group(1)
-                # .strip() so CRLF/LF/tab/space-padded markers ("+++ /dev/null\r\n",
-                # "+++ /dev/null\t") all classify as a deletion marker rather than
-                # being mis-read as a file path. NICE-4.
-                if path.strip() == "/dev/null":
-                    # Deletion — leave current_path = None; this file
-                    # contributes no content. Future-work: support
-                    # explicit deletes via tree entry sha=null.
+            raw_path = m.group(1).strip()
+            if line.startswith("---"):
+                old_path = raw_path
+            elif line.startswith("+++"):
+                if raw_path == "/dev/null":
+                    if old_path and old_path != "/dev/null":
+                        deleted_paths.append(old_path)
                     current_path = None
                 else:
-                    current_path = path
-            # Either way, a file-header line is metadata, not content.
+                    current_path = raw_path
             continue
 
         if current_path is None:
@@ -372,13 +369,23 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
         # diff formats omit the "+" prefix on the very first line).
         files.setdefault(current_path, []).append(line)
 
+    files_dict = {path: "\n".join(content_lines) for path, content_lines in files.items()}
+    return files_dict, deleted_paths
+
+
+def _parse_patch_files(patch_text: str) -> dict[str, str]:
+    """
+    Parse a unified diff and reconstruct each touched file's new content.
+
+    Returns a dict ``{file_path: new_content}``.
+    """
+    files, _ = _parse_patch(patch_text)
     if not files:
         raise ValueError(
             "push_patch_as_commit: patch did not parse to any file changes "
             "(no '+++ b/...' header found, or every file was a deletion)"
         )
-
-    return {path: "\n".join(content_lines) for path, content_lines in files.items()}
+    return files
 
 
 async def push_patch_to_mirror(
@@ -397,41 +404,25 @@ async def push_patch_to_mirror(
     Construct an isolated orphan commit on ``refs/heads/{branch}`` containing:
       a) Seeded repository files (from tarball)
       b) .github/workflows/{workflow_filename}
-      c) The patch diff modifications
+      c) The patch diff modifications (with deletions pruned)
 
     Flow (Git Data API: tree -> commit -> ref):
       1. Combines seeded files, workflow file, and patch changes into a file map.
-      2. Creates blobs (or inlines text entries <50KB) for all files.
+      2. Creates blobs (or inlines text entries <10KB) for all files.
       3. POST /git/trees with base_tree: None (fresh root tree).
       4. POST /git/commits with parents: [] (orphan root commit).
       5. POST /git/refs to refs/heads/{branch} (or PATCH force:true on 422).
 
     Never mutates or force-pushes to main or default branch.
-
-    Args:
-        gh: shared httpx.AsyncClient.
-        repo_full: ``org/repo_name`` of the universal mirror.
-        branch: target branch name, e.g. ``sandbox/run-{run_id}-att-{attempt_number}``.
-        patch_text: unified diff, possibly multi-file.
-        commit_message: commit message (e.g. ``f"haunter attempt {n}"``).
-        token: GitHub App installation token (write scope).
-        workflow_filename: e.g. ``haunter-test-py.yml``.
-        workflow_content: raw yaml text of the workflow.
-        seed_files: optional {path: bytes} dict of repository files extracted from tarball.
-
-    Returns:
-        The new head commit SHA.
-
-    Raises:
-        ValueError: patch is empty, too large, or unparseable.
-        httpx.HTTPStatusError: on any GitHub API error.
     """
     if not branch or not branch.strip():
         raise ValueError("push_patch_to_mirror: branch is empty")
     if not patch_text or not patch_text.strip():
         raise ValueError("push_patch_to_mirror: patch_text is empty")
 
-    files = _parse_patch_files(patch_text)
+    files, deleted_paths = _parse_patch(patch_text)
+    if not files and not deleted_paths:
+        raise ValueError("push_patch_to_mirror: patch did not parse to any file changes")
 
     # MVP guardrail — surface large patches as a clear ValueError so the
     # runner can mark the attempt as a config issue rather than burning
@@ -454,6 +445,10 @@ async def push_patch_to_mirror(
     # a) Seeded repository files (from tarball)
     all_files: dict[str, bytes] = dict(seed_files) if seed_files else {}
 
+    # Prune files explicitly deleted by the patch
+    for del_p in deleted_paths:
+        all_files.pop(del_p, None)
+
     # b) .github/workflows/{workflow_filename}
     if workflow_filename and workflow_content:
         wf_path = f".github/workflows/{workflow_filename}"
@@ -466,12 +461,12 @@ async def push_patch_to_mirror(
     if not all_files:
         raise ValueError("push_patch_to_mirror: no files to commit")
 
-    # 2. Build tree entries & blobs
+    # 2. Build tree entries & blobs (inline small text < 10KB to avoid huge payloads)
     tree_entries: list[dict[str, Any]] = []
     blobs_to_create: list[tuple[str, bytes]] = []
 
     for path, content_bytes in all_files.items():
-        if len(content_bytes) < 50_000:
+        if len(content_bytes) < 10_000:
             try:
                 text_content = content_bytes.decode("utf-8")
                 tree_entries.append({

@@ -419,3 +419,207 @@ async def test_verify_branch_cleanup_on_failure_in_finally(
         assert "failure" in result["reason"]
         # Assert cleanup still happened in finally
         assert del_route.called
+
+
+@pytest.mark.asyncio
+async def test_push_patch_to_mirror_prunes_deletions() -> None:
+    """push_patch_to_mirror removes files marked as deleted in the unified diff from the seed tree."""
+    patch_with_delete = (
+        "--- a/deleted.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,1 +0,0 @@\n"
+        "-remove this\n"
+        "--- a/kept.py\n"
+        "+++ b/kept.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    seed_files = {
+        "deleted.py": b"remove this\n",
+        "untouched.py": b"untouched content\n",
+    }
+
+    recorded_tree_entries: list[dict] = []
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        def tree_side_effect(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content.decode("utf-8"))
+            recorded_tree_entries.extend(payload.get("tree", []))
+            return httpx.Response(201, json={"sha": "tree_pruned_sha"})
+
+        rx.post("/repos/org/haunter-sandbox-runner/git/trees").mock(
+            side_effect=tree_side_effect
+        )
+        rx.post("/repos/org/haunter-sandbox-runner/git/commits").respond(
+            201, json={"sha": "commit_pruned_sha"}
+        )
+        rx.post("/repos/org/haunter-sandbox-runner/git/refs").respond(
+            201, json={"ref": "refs/heads/sandbox/test", "sha": "commit_pruned_sha"}
+        )
+
+        async with httpx.AsyncClient() as client:
+            sha = await push_patch_to_mirror(
+                client,
+                "org/haunter-sandbox-runner",
+                branch="sandbox/test",
+                patch_text=patch_with_delete,
+                commit_message="test deletion pruning",
+                token="test_tok",
+                workflow_filename="wf.yml",
+                workflow_content="name: test",
+                seed_files=seed_files,
+            )
+
+        assert sha == "commit_pruned_sha"
+        tree_paths = [e["path"] for e in recorded_tree_entries]
+        assert "deleted.py" not in tree_paths, "deleted.py was not pruned from tree"
+        assert "kept.py" in tree_paths
+        assert "untouched.py" in tree_paths
+        assert ".github/workflows/wf.yml" in tree_paths
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_test_mirror_concurrent_422_recovery() -> None:
+    """get_or_create_test_mirror recovers if another worker created the repo concurrently (HTTP 422)."""
+    with respx.mock(base_url="https://api.github.com") as rx:
+        # Sequential GET: first 404 (doesn't exist), then 200 (created by other worker)
+        rx.get("/repos/org/haunter-sandbox-runner").mock(
+            side_effect=[
+                httpx.Response(404),
+                httpx.Response(200, json={"full_name": "org/haunter-sandbox-runner"}),
+            ]
+        )
+        # Org probe
+        rx.get("/orgs/org").respond(200, json={"login": "org"})
+        # POST repo -> 422 (race condition: another worker created it)
+        rx.post("/orgs/org/repos").respond(422, json={"message": "Repository creation failed."})
+
+        async with httpx.AsyncClient() as client:
+            repo = await get_or_create_test_mirror(client, "org", token="tok")
+            assert repo == "org/haunter-sandbox-runner"
+
+
+@pytest.mark.asyncio
+async def test_verify_multi_run_evaluation_fails_if_any_run_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """verify() correctly fails when one run succeeds but another fails, pulling logs from the failed run."""
+    monkeypatch.setattr(settings, "github_sandbox_app_id", "app_123")
+    monkeypatch.setattr(settings, "github_sandbox_installation_id", "inst_123")
+    monkeypatch.setattr(settings, "github_sandbox_org", "test-org")
+    monkeypatch.setattr(settings, "github_sandbox_repo", "haunter-sandbox-runner")
+    monkeypatch.setattr(settings, "github_sandbox_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(settings, "github_sandbox_poll_timeout_seconds", 1.0)
+
+    run_id = uuid.uuid4()
+    branch = f"sandbox/run-{run_id}-att-1"
+    repo_full = "test-org/haunter-sandbox-runner"
+
+    monkeypatch.setattr(
+        "app.sandbox.github_actions_runner.mint_installation_token",
+        AsyncMock(return_value="mock_inst_token"),
+    )
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.get(f"/repos/{repo_full}").respond(200, json={"full_name": repo_full})
+        rx.post(f"/repos/{repo_full}/git/trees").respond(201, json={"sha": "tree_multi"})
+        rx.post(f"/repos/{repo_full}/git/commits").respond(201, json={"sha": "commit_multi"})
+        rx.post(f"/repos/{repo_full}/git/refs").respond(201, json={"ref": f"refs/heads/{branch}", "sha": "commit_multi"})
+
+        # Return 2 completed runs: first is success, second is failure
+        rx.get(f"/repos/{repo_full}/actions/runs").respond(
+            200,
+            json={
+                "workflow_runs": [
+                    {"id": 101, "status": "completed", "conclusion": "success"},
+                    {"id": 102, "status": "completed", "conclusion": "failure"},
+                ]
+            },
+        )
+        # Log tail should be requested for failed run #102, NOT #101
+        rx.get(f"/repos/{repo_full}/actions/runs/102/jobs").respond(
+            200,
+            json={
+                "jobs": [
+                    {
+                        "id": 2,
+                        "name": "lint",
+                        "conclusion": "failure",
+                        "steps": [{"name": "flake8", "conclusion": "failure"}],
+                    }
+                ]
+            },
+        )
+        rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(204)
+
+        runner = GitHubActionsSandboxRunner()
+        inp = SandboxInput(
+            run_id=run_id,
+            repo_ref="owner/repo",
+            patch="--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-a\n+b\n",
+            attempt_number=1,
+            user_github_id=123,
+        )
+        result = await runner.verify(inp)
+
+        assert result["passed"] is False
+        assert "Workflow run concluded 'failure'" in result["reason"]
+        assert "flake8" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_verify_optional_user_github_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """verify() succeeds when user_github_id is None and DB fallback is None."""
+    monkeypatch.setattr(settings, "github_sandbox_app_id", "app_123")
+    monkeypatch.setattr(settings, "github_sandbox_installation_id", "inst_123")
+    monkeypatch.setattr(settings, "github_sandbox_org", "test-org")
+    monkeypatch.setattr(settings, "github_sandbox_repo", "haunter-sandbox-runner")
+    monkeypatch.setattr(settings, "github_sandbox_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(settings, "github_sandbox_poll_timeout_seconds", 1.0)
+
+    run_id = uuid.uuid4()
+    branch = f"sandbox/run-{run_id}-att-1"
+    repo_full = "test-org/haunter-sandbox-runner"
+
+    monkeypatch.setattr(
+        "app.sandbox.github_actions_runner.mint_installation_token",
+        AsyncMock(return_value="mock_inst_token"),
+    )
+    # Mock _resolve_user_github_id to return None
+    monkeypatch.setattr(
+        "app.sandbox.github_actions_runner._resolve_user_github_id",
+        AsyncMock(return_value=None),
+    )
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.get(f"/repos/{repo_full}").respond(200, json={"full_name": repo_full})
+        rx.post(f"/repos/{repo_full}/git/trees").respond(201, json={"sha": "tree_none_id"})
+        rx.post(f"/repos/{repo_full}/git/commits").respond(201, json={"sha": "commit_none_id"})
+        rx.post(f"/repos/{repo_full}/git/refs").respond(201, json={"ref": f"refs/heads/{branch}", "sha": "commit_none_id"})
+        rx.get(f"/repos/{repo_full}/actions/runs").respond(
+            200,
+            json={
+                "workflow_runs": [
+                    {"id": 301, "status": "completed", "conclusion": "success"}
+                ]
+            },
+        )
+        rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(204)
+
+        runner = GitHubActionsSandboxRunner()
+        # user_github_id is None
+        inp = SandboxInput(
+            run_id=run_id,
+            repo_ref="owner/repo",
+            patch="--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-a\n+b\n",
+            attempt_number=1,
+            user_github_id=None,
+        )
+        result = await runner.verify(inp)
+
+        assert result["passed"] is True
+        assert result["reason"] is None
+

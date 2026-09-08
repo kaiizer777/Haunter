@@ -62,11 +62,8 @@ import httpx
 from app.sandbox.mirror import (
     detect_language,
     get_or_create_test_mirror,
-    get_or_create_test_repo,
     get_universal_sandbox_repo,
-    push_patch_as_commit,
     push_patch_to_mirror,
-    test_repo_name,
 )
 from app.sandbox.runner import SandboxInput, SandboxResult, SandboxRunner, make_result
 from app.sandbox.runner import _sanitize_failure_reason
@@ -822,26 +819,14 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             )
 
         # ----------------------------------------------------------------
-        # 3. Resolve user_github_id (required).
-        # MVP fallback: walk Run -> Repo -> User via the DB if the
-        # orchestrator didn't populate it on SandboxInput. See
-        # _resolve_user_github_id docstring.
+        # 3. Resolve user_github_id (optional telemetry).
+        # With the universal sandbox runner repo, user_github_id is no longer
+        # used for repo partitioning or branch naming. We attempt resolution
+        # solely for audit logging if not already provided.
         # ----------------------------------------------------------------
         user_github_id: Optional[int] = inp.user_github_id
-        if user_github_id is None:
+        if user_github_id is None and inp.run_id is not None:
             user_github_id = await _resolve_user_github_id(inp.run_id)
-            if user_github_id is None:
-                return make_result(
-                    passed=False,
-                    reason=(
-                        "[non-retryable] GitHub Actions sandbox: "
-                        "user_github_id is not set on SandboxInput and the "
-                        "DB fallback lookup failed. The orchestrator must "
-                        "populate SandboxInput.user_github_id (or pass db "
-                        "to sandbox.verify())."
-                    ),
-                    duration_ms=int((time.monotonic() - t_start) * 1000),
-                )
 
         # ----------------------------------------------------------------
         # 4. Mint installation token (cached after first call)
@@ -975,9 +960,11 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                             # triggered the Actions workflow yet. Keep polling.
                             continue
                         if all(r.get("status") == "completed" for r in runs):
-                            first = runs[0]
-                            conclusion = (first.get("conclusion") or "").lower()
-                            if conclusion == "success":
+                            all_passed = all(
+                                (r.get("conclusion") or "").lower() == "success"
+                                for r in runs
+                            )
+                            if all_passed:
                                 return make_result(
                                     passed=True,
                                     reason=None,
@@ -985,9 +972,18 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                                         (time.monotonic() - t_start) * 1000
                                     ),
                                 )
-                            # Failure / cancelled / timed_out — pull job summary.
+                            # Failure / cancelled / timed_out — pull job summary from first failed run.
+                            failed_run = next(
+                                (
+                                    r
+                                    for r in runs
+                                    if (r.get("conclusion") or "").lower() != "success"
+                                ),
+                                runs[0],
+                            )
+                            conclusion = (failed_run.get("conclusion") or "unknown").lower()
                             log_tail = await _get_workflow_run_log_tail(
-                                client, repo_full, first["id"], token=token
+                                client, repo_full, failed_run["id"], token=token
                             )
                             return make_result(
                                 passed=False,
@@ -1004,7 +1000,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         passed=False,
                         reason=_sanitize_failure_reason(
                             f"Sandbox verification timed out after "
-                            f"{int(poll_timeout)}s (no terminal check-run)."
+                            f"{int(poll_timeout)}s (no terminal workflow run)."
                         ),
                         duration_ms=int(poll_timeout * 1000),
                     )
