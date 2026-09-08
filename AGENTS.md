@@ -7,6 +7,14 @@ Haunter is an autonomous CI failure diagnosis and fix agent. On `workflow_run` f
 
 This is a **production-grade, user-facing system** — not a side project, demo, or prototype. Real repos, real CI, real PRs. Code quality must be shippable. Treat every change as if it will run in production tomorrow.
 
+### Mandatory Pre-Task Skills Review (Strict)
+Before starting work, agents **MUST** view the relevant skill file from `c:/Users/bari2/Desktop/SKILLS/` once:
+- **Frontend**: View `c:/Users/bari2/Desktop/SKILLS/frontend/skills.md`
+- **Backend**: View `c:/Users/bari2/Desktop/SKILLS/backend/skills.md`
+- **Issue fixing & bug diagnosis**: View `c:/Users/bari2/Desktop/SKILLS/issue-fix/skills.md`
+
+Strict: Never write, modify, or debug code without viewing the matching skill file first.
+
 ### 1. Quality Bar — Non-Negotiable
 - Write production-level code: typed, async-correct (SQLAlchemy 2.0 async, FastAPI), tested, and documented where it matters. No placeholders, no `TODO` left behind, no stub that pretends to work.
 - Follow existing patterns and stack exactly: FastAPI, SQLAlchemy async + `NullPool` for Neon pooled URL, Alembic with direct URL for migrations, `asyncpg`, `pydantic-settings`. Do not introduce new deps without justification.
