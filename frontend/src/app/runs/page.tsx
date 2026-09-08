@@ -328,12 +328,12 @@ export default function RunsPage() {
                 {
                   value: "",
                   label: `All Repositories (${repos.length})`,
-                  icon: <GitBranch className="h-3.5 w-3.5 text-zinc-400" />,
+                  icon: <GitBranch className="h-3.5 w-3.5 text-violet-400" />,
                 },
                 ...repos.map((r) => ({
                   value: r.id,
                   label: `${r.owner}/${r.name}`,
-                  icon: <GitBranch className="h-3.5 w-3.5 text-zinc-500" />,
+                  icon: <GitBranch className="h-3.5 w-3.5 text-violet-400" />,
                 })),
               ]}
               buttonClassName="min-w-[190px]"
@@ -350,7 +350,9 @@ export default function RunsPage() {
                 {
                   value: "",
                   label: "All Statuses",
-                  badge: <span className="h-2 w-2 rounded-full bg-zinc-500" />,
+                  badge: (
+                    <span className="h-2 w-2 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]" />
+                  ),
                 },
                 {
                   value: "completed",
