@@ -264,7 +264,7 @@ async def test_put_model_config_switches_model_for_next_complete(
 ):
     """PUT /config/model switches active model, which is immediately used in subsequent complete() calls."""
     await truncate_all(db)
-    user = await user_factory(github_id=881, username="switch_user")
+    user = await user_factory(github_id=881, username="switch_user", role="admin")
     user_id = user.id
     client = make_auth_client(user_id)
 
@@ -313,7 +313,7 @@ async def test_put_model_config_validation_errors(
 ):
     """PUT /config/model validates against strict allowlists for provider and model_name."""
     await truncate_all(db)
-    user = await user_factory(github_id=882, username="val_user")
+    user = await user_factory(github_id=882, username="val_user", role="admin")
     user_id = user.id
     client = make_auth_client(user_id)
 
@@ -1220,7 +1220,7 @@ async def test_put_model_config_allows_dynamic_free_models(
 ):
     """PUT /config/model allows any model ending with '-free' for opencode_zen without 422."""
     await truncate_all(db)
-    user = await user_factory(github_id=999, username="dyn_user")
+    user = await user_factory(github_id=999, username="dyn_user", role="admin")
     client = make_auth_client(user.id)
 
     async with client:

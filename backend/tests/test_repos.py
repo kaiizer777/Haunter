@@ -284,7 +284,7 @@ async def test_model_config_get_global_and_repo(db: AsyncSession, user_factory, 
 async def test_put_model_config_valid_and_validation(db: AsyncSession, user_factory, make_auth_client):
     """PUT /config/model validates provider/model allowlist, derives base_url server-side, ignores client base_url."""
     await truncate_all(db)
-    user = await user_factory(github_id=715, username="put_cfg_user")
+    user = await user_factory(github_id=715, username="put_cfg_user", role="admin")
     user_id = user.id
     client = make_auth_client(user_id)
 
