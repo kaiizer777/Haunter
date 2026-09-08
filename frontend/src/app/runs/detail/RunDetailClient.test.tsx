@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import RunDetailClient from "./RunDetailClient";
 import { api, TraceOut } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";

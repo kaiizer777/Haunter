@@ -230,6 +230,7 @@ async function request<T>(
 
   if (res.status === 401) {
     if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.href = "/login";
     }
     throw new ApiError("Session expired or unauthorized", 401);

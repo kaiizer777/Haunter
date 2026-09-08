@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { Sidebar } from "./sidebar";
 import { useAuth } from "@/lib/auth-context";
 import { api, AuthUser, ModelConfigOut } from "@/lib/api";

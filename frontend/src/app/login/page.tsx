@@ -31,6 +31,7 @@ export default function LoginPage() {
   }, [user, loading, router]);
 
   const handleGitHubLogin = () => {
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
     window.location.href = `${API_BASE}/auth/login`;
   };
 
