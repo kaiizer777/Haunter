@@ -61,8 +61,11 @@ import httpx
 
 from app.sandbox.mirror import (
     detect_language,
+    get_or_create_test_mirror,
     get_or_create_test_repo,
+    get_universal_sandbox_repo,
     push_patch_as_commit,
+    push_patch_to_mirror,
     test_repo_name,
 )
 from app.sandbox.runner import SandboxInput, SandboxResult, SandboxRunner, make_result
@@ -481,6 +484,57 @@ async def _get_workflow_run_log_tail(
 
 
 # ---------------------------------------------------------------------------
+# Ephemeral branch cleanup
+# ---------------------------------------------------------------------------
+
+
+async def _delete_branch_ref(
+    client: httpx.AsyncClient,
+    repo_full: str,
+    branch: str,
+    token: str,
+    fallback_token: Optional[str] = None,
+) -> None:
+    """
+    Delete an ephemeral sandbox branch ref from the universal mirror repo.
+
+    Uses ``DELETE /repos/{repo_full}/git/refs/heads/{branch}``.
+    Gracefully handles 204 (deleted) and 404 (already gone).
+    """
+    clean_branch = (
+        branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
+    )
+    url = f"{_GITHUB_API_BASE}/repos/{repo_full}/git/refs/heads/{clean_branch}"
+    headers = _auth_headers(token)
+    try:
+        resp = await client.delete(url, headers=headers)
+        if resp.status_code == 403 and fallback_token and fallback_token != token:
+            resp = await client.delete(url, headers=_auth_headers(fallback_token))
+        if resp.status_code in (204, 404):
+            logger.info(
+                "mirror: deleted ephemeral branch ref %s on %s (status %d)",
+                clean_branch,
+                repo_full,
+                resp.status_code,
+            )
+            return
+        logger.warning(
+            "mirror: unexpected status %d when deleting branch %s on %s: %s",
+            resp.status_code,
+            clean_branch,
+            repo_full,
+            resp.text[:200],
+        )
+    except Exception as exc:
+        logger.warning(
+            "mirror: failed to delete branch %s on %s: %s",
+            clean_branch,
+            repo_full,
+            exc,
+        )
+
+
+# ---------------------------------------------------------------------------
 # user_github_id fallback lookup
 # ---------------------------------------------------------------------------
 
@@ -808,191 +862,163 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             )
 
         # ----------------------------------------------------------------
-        # 5. Get or create the test mirror
-        # fallback_token (settings.github_token PAT) handles the case where
-        # the App installation lacks ``administration: write`` (403 on
-        # POST /user/repos or POST /orgs/{org}/repos). The permanent fix
-        # is to add ``Administration: write`` to the App at
-        # github.com/settings/apps.
+        # 5. Get or create the universal test mirror
         # ----------------------------------------------------------------
-        repo_name = test_repo_name(user_github_id)
+        fallback_token: Optional[str] = getattr(settings, "github_token", None)
+        repo_full = get_universal_sandbox_repo(org)
+        branch = f"sandbox/run-{inp.run_id}-att-{inp.attempt_number}"
+
         try:
             async with httpx.AsyncClient(timeout=_API_TIMEOUT_SECONDS) as client:
-                repo_full = await get_or_create_test_repo(
+                repo_full = await get_or_create_test_mirror(
                     client,
                     org,
-                    repo_name,
-                    token=token,
-                    fallback_token=getattr(settings, "github_token", None),
-                )
-
-                # --------------------------------------------------------
-                # 5b. Seed the test mirror with the user's repo tree at
-                #     the failing commit, so verification can actually
-                #     exercise the failing test (not just the patch in
-                #     isolation). Best-effort: failures are logged and
-                #     the runner continues with the old "fresh mirror"
-                #     behaviour. This is what makes "does the LLM's fix
-                #     actually work?" a meaningful question.
-                # --------------------------------------------------------
-                if inp.repo_ref and inp.head_sha:
-                    # repo_ref may be "owner/repo@sha" — strip the @sha
-                    user_repo_full = inp.repo_ref.split("@", 1)[0]
-                    # NICE-3: cap mirrors via settings.seed_max_files so a
-                    # large user repo doesn't blow up the CodeBuild build time.
-                    await _seed_test_mirror_with_user_tree(
-                        client=client,
-                        mirror_full=repo_full,
-                        user_repo_full=user_repo_full,
-                        user_sha=inp.head_sha,
-                        token=token,
-                        fallback_token=getattr(settings, "github_token", None),
-                        max_files=settings.seed_max_files,
-                    )
-
-                # --------------------------------------------------------
-                # 6. Determine language and load workflow template
-                # --------------------------------------------------------
-                file_paths = inp.file_paths or _extract_file_paths_from_patch(
-                    inp.patch
-                )
-                language = detect_language(file_paths)
-                workflow_filename = (
-                    workflow_filename_py if language == "py" else workflow_filename_ts
-                )
-                try:
-                    workflow_content = _load_workflow_template(workflow_filename)
-                except FileNotFoundError as exc:
-                    return make_result(
-                        passed=False,
-                        reason=_sanitize_failure_reason(
-                            f"Workflow template not found on disk: "
-                            f"{workflow_filename} ({exc})"
-                        ),
-                        duration_ms=int((time.monotonic() - t_start) * 1000),
-                    )
-
-                # --------------------------------------------------------
-                # 7. Resolve base_sha (caller-supplied or default branch HEAD)
-                # --------------------------------------------------------
-                base_sha = inp.base_sha
-                if not base_sha:
-                    repo_resp = await client.get(
-                        f"{_GITHUB_API_BASE}/repos/{repo_full}",
-                        headers=_auth_headers(token),
-                    )
-                    repo_resp.raise_for_status()
-                    default_branch: str = repo_resp.json()["default_branch"]
-                    ref_resp = await client.get(
-                        f"{_GITHUB_API_BASE}/repos/{repo_full}/git/refs/heads/{default_branch}",
-                        headers=_auth_headers(token),
-                    )
-                    ref_resp.raise_for_status()
-                    base_sha = ref_resp.json()["object"]["sha"]
-
-                # --------------------------------------------------------
-                # 8. Push the workflow file to the test mirror.
-                # fallback_token (settings.github_token PAT) handles the
-                # case where the App lacks ``workflows: write`` permission
-                # (403 on .github/workflows/ tree creation). The permanent
-                # fix is to add ``workflows: write`` to the App at
-                # github.com/settings/apps.
-                # --------------------------------------------------------
-                fallback_token: Optional[str] = getattr(
-                    settings, "github_token", None
-                )
-                # workflow_base_sha is the new HEAD after the workflow file
-                # is committed to the default branch. The patch commit must
-                # branch off this SHA, not the pre-workflow SHA, so the
-                # check-run applies to a consistent history.
-                workflow_base_sha = await _push_workflow_file(
-                    client,
-                    repo_full,
-                    base_sha=base_sha,
-                    workflow_filename=workflow_filename,
-                    workflow_content=workflow_content,
                     token=token,
                     fallback_token=fallback_token,
                 )
-                # Use the post-workflow HEAD as the base for the patch branch.
-                base_sha = workflow_base_sha
 
-                # --------------------------------------------------------
-                # 9. Push the patch on a per-attempt branch
-                # --------------------------------------------------------
-                branch = f"haunter-attempt-{inp.attempt_number}"
-                commit_message = f"haunter attempt {inp.attempt_number}"
                 try:
-                    head_sha = await push_patch_as_commit(
-                        client,
-                        repo_full,
-                        branch=branch,
-                        base_sha=base_sha,
-                        patch_text=inp.patch,
-                        commit_message=commit_message,
-                        token=token,
-                    )
-                except ValueError as exc:
-                    # Mirror module raises ValueError on bad patches (too
-                    # large, no file changes, etc.) — these are
-                    # config-style failures, not transient.
-                    return make_result(
-                        passed=False,
-                        reason=_sanitize_failure_reason(
-                            f"[non-retryable] {str(exc)[:500]}"
-                        ),
-                        duration_ms=int((time.monotonic() - t_start) * 1000),
-                    )
+                    # --------------------------------------------------------
+                    # 5b. Fetch user repo tree from tarball at failing commit
+                    #     (seed files for orphan branch tree builder).
+                    # --------------------------------------------------------
+                    seed_files: dict[str, bytes] = {}
+                    if inp.repo_ref and inp.head_sha:
+                        from app.sandbox._seed_tarball import (
+                            fetch_user_repo_tarball,
+                            parse_tar_to_files,
+                        )
 
-                # --------------------------------------------------------
-                # 10. Poll Actions workflow runs (requires actions:read, which
-                #     the App already has). Previously polled check-runs
-                #     which required checks:read (not granted on the App).
-                # --------------------------------------------------------
-                deadline = time.monotonic() + poll_timeout
-                while time.monotonic() < deadline:
-                    await asyncio.sleep(poll_interval)
-                    runs = await _list_workflow_runs(
-                        client, repo_full, head_sha, token=token
+                        user_repo_full = inp.repo_ref.split("@", 1)[0]
+                        try:
+                            tar_bytes, used_token = await fetch_user_repo_tarball(
+                                client, user_repo_full, inp.head_sha, token, fallback_token
+                            )
+                            seed_files = parse_tar_to_files(
+                                tar_bytes, max_files=settings.seed_max_files
+                            )
+                            logger.info(
+                                "github_actions_runner: fetched %d seed file(s) from %s @ %s",
+                                len(seed_files),
+                                user_repo_full,
+                                inp.head_sha[:12],
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "github_actions_runner: failed to fetch seed tarball from %s @ %s (%s: %s) — continuing with fresh mirror",
+                                user_repo_full,
+                                inp.head_sha[:12],
+                                type(exc).__name__,
+                                exc,
+                            )
+
+                    # --------------------------------------------------------
+                    # 6. Determine language and load workflow template
+                    # --------------------------------------------------------
+                    file_paths = inp.file_paths or _extract_file_paths_from_patch(
+                        inp.patch
                     )
-                    if not runs:
-                        # No workflow run yet — the push may not have
-                        # triggered the Actions workflow yet. Keep polling.
-                        continue
-                    if all(r.get("status") == "completed" for r in runs):
-                        first = runs[0]
-                        conclusion = (first.get("conclusion") or "").lower()
-                        if conclusion == "success":
+                    if not file_paths and seed_files:
+                        file_paths = list(seed_files.keys())
+                    language = detect_language(file_paths)
+                    workflow_filename = (
+                        workflow_filename_py if language == "py" else workflow_filename_ts
+                    )
+                    try:
+                        workflow_content = _load_workflow_template(workflow_filename)
+                    except FileNotFoundError as exc:
+                        return make_result(
+                            passed=False,
+                            reason=_sanitize_failure_reason(
+                                f"Workflow template not found on disk: "
+                                f"{workflow_filename} ({exc})"
+                            ),
+                            duration_ms=int((time.monotonic() - t_start) * 1000),
+                        )
+
+                    # --------------------------------------------------------
+                    # 7. Push patch to mirror on ephemeral orphan branch
+                    # --------------------------------------------------------
+                    commit_message = f"haunter attempt {inp.attempt_number}"
+                    try:
+                        head_sha = await push_patch_to_mirror(
+                            client,
+                            repo_full,
+                            branch=branch,
+                            patch_text=inp.patch,
+                            workflow_filename=workflow_filename,
+                            workflow_content=workflow_content,
+                            commit_message=commit_message,
+                            token=token,
+                            seed_files=seed_files,
+                        )
+                    except ValueError as exc:
+                        return make_result(
+                            passed=False,
+                            reason=_sanitize_failure_reason(
+                                f"[non-retryable] {str(exc)[:500]}"
+                            ),
+                            duration_ms=int((time.monotonic() - t_start) * 1000),
+                        )
+
+                    # --------------------------------------------------------
+                    # 8. Poll Actions workflow runs
+                    # --------------------------------------------------------
+                    deadline = time.monotonic() + poll_timeout
+                    while time.monotonic() < deadline:
+                        await asyncio.sleep(poll_interval)
+                        runs = await _list_workflow_runs(
+                            client, repo_full, head_sha, token=token
+                        )
+                        if not runs:
+                            # No workflow run yet — the push may not have
+                            # triggered the Actions workflow yet. Keep polling.
+                            continue
+                        if all(r.get("status") == "completed" for r in runs):
+                            first = runs[0]
+                            conclusion = (first.get("conclusion") or "").lower()
+                            if conclusion == "success":
+                                return make_result(
+                                    passed=True,
+                                    reason=None,
+                                    duration_ms=int(
+                                        (time.monotonic() - t_start) * 1000
+                                    ),
+                                )
+                            # Failure / cancelled / timed_out — pull job summary.
+                            log_tail = await _get_workflow_run_log_tail(
+                                client, repo_full, first["id"], token=token
+                            )
                             return make_result(
-                                passed=True,
-                                reason=None,
+                                passed=False,
+                                reason=_sanitize_failure_reason(
+                                    f"Workflow run concluded '{conclusion}': {log_tail}"
+                                ),
                                 duration_ms=int(
                                     (time.monotonic() - t_start) * 1000
                                 ),
                             )
-                        # Failure / cancelled / timed_out — pull job summary.
-                        log_tail = await _get_workflow_run_log_tail(
-                            client, repo_full, first["id"], token=token
-                        )
-                        return make_result(
-                            passed=False,
-                            reason=_sanitize_failure_reason(
-                                f"Workflow run concluded '{conclusion}': {log_tail}"
-                            ),
-                            duration_ms=int(
-                                (time.monotonic() - t_start) * 1000
-                            ),
-                        )
 
-                # Deadline reached without a terminal status.
-                return make_result(
-                    passed=False,
-                    reason=_sanitize_failure_reason(
-                        f"Sandbox verification timed out after "
-                        f"{int(poll_timeout)}s (no terminal check-run)."
-                    ),
-                    duration_ms=int(poll_timeout * 1000),
-                )
+                    # Deadline reached without a terminal status.
+                    return make_result(
+                        passed=False,
+                        reason=_sanitize_failure_reason(
+                            f"Sandbox verification timed out after "
+                            f"{int(poll_timeout)}s (no terminal check-run)."
+                        ),
+                        duration_ms=int(poll_timeout * 1000),
+                    )
+                finally:
+                    # --------------------------------------------------------
+                    # 9. Guaranteed post-verification branch cleanup
+                    # --------------------------------------------------------
+                    await _delete_branch_ref(
+                        client,
+                        repo_full,
+                        branch,
+                        token=token,
+                        fallback_token=fallback_token,
+                    )
 
         except httpx.HTTPStatusError as exc:
             return make_result(

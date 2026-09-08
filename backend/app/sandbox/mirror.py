@@ -17,11 +17,14 @@ under our control. It is:
     flow unidirectional.
 
 Public API:
-    test_repo_name(user_github_id)             -> str
+    get_universal_sandbox_repo(org)            -> str  (org/repo)
+    get_or_create_test_mirror(gh, org, [name], *, token) -> str  (org/name)
+    push_patch_to_mirror(gh, repo_full, *, branch, patch_text, workflow_filename,
+                         workflow_content, commit_message, token, [seed_files]) -> str
     detect_language(file_paths)                -> str  ("py" | "ts")
-    get_or_create_test_repo(gh, org, name, *, token) -> str  (org/name)
-    push_patch_as_commit(gh, repo_full, *, branch, base_sha, patch_text,
-                         commit_message, token) -> str  (new head SHA)
+    test_repo_name(user_github_id)             -> str  (deprecated)
+    get_or_create_test_repo(...)               -> str  (deprecated alias)
+    push_patch_as_commit(...)                  -> str  (deprecated wrapper)
 
 Security invariants:
   - Tokens are passed in, never logged. Errors from the GitHub API are
@@ -47,10 +50,12 @@ MVP scope (per github.md §3.3 + the task brief):
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -105,24 +110,21 @@ def _auth_headers(token: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Public: test_repo_name
+# Public: get_universal_sandbox_repo & test_repo_name
 # ---------------------------------------------------------------------------
+
+
+def get_universal_sandbox_repo(org: str) -> str:
+    """Return the full name '{org}/{github_sandbox_repo}' of the universal sandbox mirror."""
+    from app.config import settings
+
+    return f"{org}/{settings.github_sandbox_repo}"
 
 
 def test_repo_name(user_github_id: int) -> str:
     """
-    Return a stable, non-guessable test-mirror repo name for a given user.
-
-    Format: ``haunter-test-{8 hex chars}`` where the suffix is the first
-    8 chars of ``sha256(f"{user_github_id}:haunter-sandbox-v1")``.
-
-    Properties:
-      - Stable: same user → same name across all runs (so the cached
-        mirror persists).
-      - Non-enumerable: an attacker cannot iterate the user-id space
-        from the repo name because the salt is fixed but private.
-      - Non-colliding with user repos: a user is extremely unlikely to
-        have a ``haunter-test-xxxxxxxx`` repo of their own.
+    Deprecated: Haunter uses a single universal sandbox mirror repository
+    (settings.github_sandbox_repo). Retained for backward compatibility.
     """
     h = hashlib.sha256(
         f"{user_github_id}:{_TEST_REPO_NAME_SALT}".encode("utf-8")
@@ -167,24 +169,23 @@ def detect_language(file_paths: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Public: get_or_create_test_repo
+# Public: get_or_create_test_mirror (and deprecated get_or_create_test_repo)
 # ---------------------------------------------------------------------------
 
 
-async def get_or_create_test_repo(
+async def get_or_create_test_mirror(
     gh: httpx.AsyncClient,
     org: str,
-    repo_name: str,
+    repo_name: Optional[str] = None,
     *,
     token: str,
     fallback_token: Optional[str] = None,
 ) -> str:
     """
-    Return the test mirror's ``org/repo_name`` full name, creating it if missing.
+    Verify existence of the universal sandbox mirror repository, creating it once if missing.
 
-    Idempotent. The first call for a new user creates a private repo with
-    ``auto_init: true`` (so a HEAD commit exists for the runner to branch
-    from); subsequent calls short-circuit on the GET 200.
+    Idempotent. Only verifies existence of ``{org}/{github_sandbox_repo}`` (via ``GET /repos/{org}/{repo}``).
+    If missing (404), creates it once with ``private: true``, ``auto_init: true``.
 
     Handles both GitHub orgs and personal user accounts transparently:
       - Probes ``GET /orgs/{owner}`` to determine account type.
@@ -194,20 +195,12 @@ async def get_or_create_test_repo(
         installation covers the target user's repos; no extra org permission needed).
 
     Falls back to ``fallback_token`` (typically ``settings.github_token``, a
-    PAT) on a 403 from the create call. The App's installation token does not
-    have ``administration: write`` and cannot create repos on the user's
-    personal account; a ``repo``-scoped PAT can. Permanent fix: add
-    ``Administration: write`` to the GitHub App at
-    ``github.com/settings/apps`` and reinstall on the user. The PAT path is
-    the same pattern already used in ``github_actions_runner._push_workflow_file``
-    for the ``workflows:write`` fallback.
-
-    Raises:
-        httpx.HTTPStatusError: on any non-200/404 response from GitHub
-            (auth failure, rate limit, org-not-found, etc.). The runner
-            catches this and converts it to a sanitized failure reason.
+    PAT) on a 403 from the create call.
     """
-    full = f"{org}/{repo_name}"
+    from app.config import settings
+
+    target_repo = repo_name or getattr(settings, "github_sandbox_repo", "haunter-sandbox-runner")
+    full = f"{org}/{target_repo}"
     headers = _auth_headers(token)
 
     # 1. Try to fetch the existing repo.
@@ -216,7 +209,7 @@ async def get_or_create_test_repo(
         headers=headers,
     )
     if resp.status_code == 200:
-        logger.info("mirror: test mirror exists: %s", full)
+        logger.info("mirror: universal sandbox mirror exists: %s", full)
         return full
     if resp.status_code != 404:
         # Anything other than "not found" is a real error — surface it.
@@ -224,7 +217,6 @@ async def get_or_create_test_repo(
 
     # 2. Not found — determine whether ``org`` is a GitHub org or a personal
     #    user account so we call the right creation endpoint.
-    #    ``GET /orgs/{owner}`` returns 200 for orgs, 404 for personal accounts.
     org_probe = await gh.get(
         f"{_GITHUB_API_BASE}/orgs/{org}",
         headers=headers,
@@ -232,31 +224,24 @@ async def get_or_create_test_repo(
     is_org = org_probe.status_code == 200
 
     repo_payload = {
-        "name": repo_name,
+        "name": target_repo,
         "private": True,
         "auto_init": True,
-        "description": "Haunter test mirror — auto-managed, do not edit.",
+        "description": "Haunter universal sandbox runner — auto-managed, do not edit.",
     }
 
     if is_org:
-        # GitHub org: use the org repo creation endpoint.
-        # Requires the App installation to have administration:write on the org.
         create_url = f"{_GITHUB_API_BASE}/orgs/{org}/repos"
     else:
-        # Personal account: use the user repo creation endpoint.
-        # Works whenever the installation token covers the user's repos.
         create_url = f"{_GITHUB_API_BASE}/user/repos"
 
     create_resp = await gh.post(create_url, headers=headers, json=repo_payload)
 
-    # On 403 (App installation lacks administration:write / repository
-    # creation), retry once with the PAT. Same fallback pattern as
-    # _push_workflow_file for the workflows:write gap.
+    # On 403, retry once with fallback PAT.
     if create_resp.status_code == 403 and fallback_token and fallback_token != token:
         logger.warning(
             "mirror: repo create 403 with App installation token — "
-            "retrying with fallback PAT (App needs 'Administration: write' "
-            "permission — add it at github.com/settings/apps)"
+            "retrying with fallback PAT"
         )
         create_resp = await gh.post(
             create_url,
@@ -266,12 +251,30 @@ async def get_or_create_test_repo(
 
     create_resp.raise_for_status()
     logger.info(
-        "mirror: created test mirror: %s (via %s endpoint, token=%s)",
+        "mirror: created universal sandbox mirror: %s (via %s endpoint, token=%s)",
         full,
         "orgs" if is_org else "user",
         "fallback_pat" if (fallback_token and create_resp.request.headers.get("Authorization") == f"Bearer {fallback_token}") else "app_token",
     )
     return full
+
+
+async def get_or_create_test_repo(
+    gh: httpx.AsyncClient,
+    org: str,
+    repo_name: Optional[str] = None,
+    *,
+    token: str,
+    fallback_token: Optional[str] = None,
+) -> str:
+    """Deprecated alias for get_or_create_test_mirror."""
+    return await get_or_create_test_mirror(
+        gh,
+        org,
+        repo_name=repo_name,
+        token=token,
+        fallback_token=fallback_token,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -378,37 +381,43 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     return {path: "\n".join(content_lines) for path, content_lines in files.items()}
 
 
-async def push_patch_as_commit(
+async def push_patch_to_mirror(
     gh: httpx.AsyncClient,
     repo_full: str,
     *,
     branch: str,
-    base_sha: str,
     patch_text: str,
     commit_message: str,
     token: str,
+    workflow_filename: str = "",
+    workflow_content: str = "",
+    seed_files: Optional[dict[str, bytes]] = None,
 ) -> str:
     """
-    Apply ``patch_text`` as a single commit on a new branch and return the new head SHA.
+    Construct an isolated orphan commit on ``refs/heads/{branch}`` containing:
+      a) Seeded repository files (from tarball)
+      b) .github/workflows/{workflow_filename}
+      c) The patch diff modifications
 
-    Flow (Git Data API: blobs → trees → commits → refs):
-      1. Parse the patch into ``{file_path: new_content}``.
-      2. For each file, POST a blob.
-      3. POST a tree on top of ``base_sha``'s tree, with the new blobs.
-      4. POST a commit with the new tree, parent ``base_sha``.
-      5. POST a ref ``refs/heads/{branch}`` pointing at the new commit.
-         If the ref already exists (422), PATCH it with ``force: true``
-         — a previous attempt with the same ``attempt_number`` may have
-         left a half-pushed branch behind.
+    Flow (Git Data API: tree -> commit -> ref):
+      1. Combines seeded files, workflow file, and patch changes into a file map.
+      2. Creates blobs (or inlines text entries <50KB) for all files.
+      3. POST /git/trees with base_tree: None (fresh root tree).
+      4. POST /git/commits with parents: [] (orphan root commit).
+      5. POST /git/refs to refs/heads/{branch} (or PATCH force:true on 422).
+
+    Never mutates or force-pushes to main or default branch.
 
     Args:
-        gh: shared httpx.AsyncClient (timeout configured by the caller).
-        repo_full: ``org/repo_name`` of the test mirror.
-        branch: target branch name, e.g. ``haunter-attempt-1``.
-        base_sha: commit SHA the new branch should fork from.
+        gh: shared httpx.AsyncClient.
+        repo_full: ``org/repo_name`` of the universal mirror.
+        branch: target branch name, e.g. ``sandbox/run-{run_id}-att-{attempt_number}``.
         patch_text: unified diff, possibly multi-file.
         commit_message: commit message (e.g. ``f"haunter attempt {n}"``).
         token: GitHub App installation token (write scope).
+        workflow_filename: e.g. ``haunter-test-py.yml``.
+        workflow_content: raw yaml text of the workflow.
+        seed_files: optional {path: bytes} dict of repository files extracted from tarball.
 
     Returns:
         The new head commit SHA.
@@ -418,104 +427,118 @@ async def push_patch_as_commit(
         httpx.HTTPStatusError: on any GitHub API error.
     """
     if not branch or not branch.strip():
-        raise ValueError("push_patch_as_commit: branch is empty")
-    if not base_sha or not base_sha.strip():
-        raise ValueError("push_patch_as_commit: base_sha is empty")
+        raise ValueError("push_patch_to_mirror: branch is empty")
+    if not patch_text or not patch_text.strip():
+        raise ValueError("push_patch_to_mirror: patch_text is empty")
 
     files = _parse_patch_files(patch_text)
 
     # MVP guardrail — surface large patches as a clear ValueError so the
     # runner can mark the attempt as a config issue rather than burning
-    # attempts on a silent no-op. See module docstring for fallback plan.
+    # attempts on a silent no-op.
     if len(files) > _MAX_PATCH_FILES:
         raise ValueError(
-            f"push_patch_as_commit: patch touches {len(files)} files, "
+            f"push_patch_to_mirror: patch touches {len(files)} files, "
             f"max supported in MVP is {_MAX_PATCH_FILES} (Contents-API "
             f"fallback is future work)"
         )
     if len(patch_text.encode("utf-8")) > _MAX_PATCH_BYTES:
         raise ValueError(
-            f"push_patch_as_commit: patch size exceeds MVP limit "
+            f"push_patch_to_mirror: patch size exceeds MVP limit "
             f"({_MAX_PATCH_BYTES} bytes); Contents-API fallback is future work"
         )
 
     headers = _auth_headers(token)
 
-    # ---------------------------------------------------------------
-    # 1. Get the base commit's tree SHA (needed as base_tree for step 3)
-    # ---------------------------------------------------------------
-    base_commit_resp = await gh.get(
-        f"{_GITHUB_API_BASE}/repos/{repo_full}/git/commits/{base_sha}",
-        headers=headers,
-    )
-    base_commit_resp.raise_for_status()
-    base_tree_sha: str = base_commit_resp.json()["tree"]["sha"]
+    # 1. Combine all files:
+    # a) Seeded repository files (from tarball)
+    all_files: dict[str, bytes] = dict(seed_files) if seed_files else {}
 
-    # ---------------------------------------------------------------
-    # 2. Create a blob for each new file
-    # ---------------------------------------------------------------
-    tree_entries: list[dict[str, str]] = []
-    for path, content in files.items():
-        blob_resp = await gh.post(
-            f"{_GITHUB_API_BASE}/repos/{repo_full}/git/blobs",
-            headers=headers,
-            json={"content": content, "encoding": "utf-8"},
-        )
-        blob_resp.raise_for_status()
-        blob_sha: str = blob_resp.json()["sha"]
-        tree_entries.append(
-            {
-                "path": path,
-                "mode": "100644",
-                "type": "blob",
-                "sha": blob_sha,
-            }
-        )
+    # b) .github/workflows/{workflow_filename}
+    if workflow_filename and workflow_content:
+        wf_path = f".github/workflows/{workflow_filename}"
+        all_files[wf_path] = workflow_content.encode("utf-8")
 
-    # ---------------------------------------------------------------
-    # 3. Create a tree on top of the base tree
-    # ---------------------------------------------------------------
+    # c) The patch diff modifications
+    for path, content_str in files.items():
+        all_files[path] = content_str.encode("utf-8")
+
+    if not all_files:
+        raise ValueError("push_patch_to_mirror: no files to commit")
+
+    # 2. Build tree entries & blobs
+    tree_entries: list[dict[str, Any]] = []
+    blobs_to_create: list[tuple[str, bytes]] = []
+
+    for path, content_bytes in all_files.items():
+        if len(content_bytes) < 50_000:
+            try:
+                text_content = content_bytes.decode("utf-8")
+                tree_entries.append({
+                    "path": path,
+                    "mode": "100644",
+                    "type": "blob",
+                    "content": text_content,
+                })
+                continue
+            except UnicodeDecodeError:
+                pass
+        blobs_to_create.append((path, content_bytes))
+
+    if blobs_to_create:
+        async def _create_blob(p: str, c: bytes) -> tuple[str, str]:
+            encoded = base64.b64encode(c).decode("ascii")
+            resp = await gh.post(
+                f"{_GITHUB_API_BASE}/repos/{repo_full}/git/blobs",
+                headers=headers,
+                json={"content": encoded, "encoding": "base64"},
+            )
+            resp.raise_for_status()
+            return p, resp.json()["sha"]
+
+        for i in range(0, len(blobs_to_create), 16):
+            batch = blobs_to_create[i : i + 16]
+            results = await asyncio.gather(*(_create_blob(p, c) for p, c in batch))
+            for p, s in results:
+                tree_entries.append({"path": p, "mode": "100644", "type": "blob", "sha": s})
+            if i + 16 < len(blobs_to_create):
+                await asyncio.sleep(0.5)
+
+    # 3. Create fresh root tree (base_tree: None)
     tree_resp = await gh.post(
         f"{_GITHUB_API_BASE}/repos/{repo_full}/git/trees",
         headers=headers,
-        json={"base_tree": base_tree_sha, "tree": tree_entries},
+        json={"base_tree": None, "tree": tree_entries},
     )
     tree_resp.raise_for_status()
     new_tree_sha: str = tree_resp.json()["sha"]
 
-    # ---------------------------------------------------------------
-    # 4. Create the commit
-    # ---------------------------------------------------------------
+    # 4. Create orphan root commit (parents: [])
     commit_resp = await gh.post(
         f"{_GITHUB_API_BASE}/repos/{repo_full}/git/commits",
         headers=headers,
         json={
             "message": commit_message,
             "tree": new_tree_sha,
-            "parents": [base_sha],
+            "parents": [],
         },
     )
     commit_resp.raise_for_status()
     new_commit_sha: str = commit_resp.json()["sha"]
 
-    # ---------------------------------------------------------------
-    # 5. Create (or update) the branch ref
-    # ---------------------------------------------------------------
-    ref = f"refs/heads/{branch}"
+    # 5. Create (or update) the branch ref pointing to refs/heads/{branch}
+    clean_branch = (
+        branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
+    )
+    ref = f"refs/heads/{clean_branch}"
     ref_resp = await gh.post(
         f"{_GITHUB_API_BASE}/repos/{repo_full}/git/refs",
         headers=headers,
         json={"ref": ref, "sha": new_commit_sha},
     )
     if ref_resp.status_code == 422:
-        # Branch already exists from a prior half-pushed attempt — update
-        # it to the new commit. The branch name includes the attempt
-        # number, so collisions imply a retry; force:true is correct.
-        # Note: the PATCH URL uses heads/{branch} (without "refs/" prefix) —
-        # GitHub strips it from the path segment; including it doubles to
-        # "refs/refs/heads/{branch}" and returns 422 "Reference does not exist".
         update_resp = await gh.patch(
-            f"{_GITHUB_API_BASE}/repos/{repo_full}/git/refs/heads/{branch}",
+            f"{_GITHUB_API_BASE}/repos/{repo_full}/git/refs/heads/{clean_branch}",
             headers=headers,
             json={"sha": new_commit_sha, "force": True},
         )
@@ -524,9 +547,36 @@ async def push_patch_as_commit(
         ref_resp.raise_for_status()
 
     logger.info(
-        "mirror: pushed commit sha=%s on branch %s (files=%d)",
+        "mirror: pushed orphan commit sha=%s on branch %s (files=%d)",
         new_commit_sha,
-        branch,
-        len(files),
+        clean_branch,
+        len(all_files),
     )
     return new_commit_sha
+
+
+async def push_patch_as_commit(
+    gh: httpx.AsyncClient,
+    repo_full: str,
+    *,
+    branch: str,
+    base_sha: str = "",
+    patch_text: str,
+    commit_message: str,
+    token: str,
+    workflow_filename: str = "",
+    workflow_content: str = "",
+    seed_files: Optional[dict[str, bytes]] = None,
+) -> str:
+    """Deprecated compatibility wrapper for push_patch_to_mirror."""
+    return await push_patch_to_mirror(
+        gh,
+        repo_full,
+        branch=branch,
+        patch_text=patch_text,
+        workflow_filename=workflow_filename,
+        workflow_content=workflow_content,
+        commit_message=commit_message,
+        token=token,
+        seed_files=seed_files,
+    )

@@ -1,7 +1,7 @@
 name: haunter-test-py
 on:
   push:
-    branches: [haunter-attempt-*]
+    branches: ["sandbox/**"]
   workflow_dispatch:
 
 # No secrets. No env. No deploy. By design.

@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     # PEM is loaded at runtime from SSM SecureString (see github.md Phase 1.3)
     # so the private key never enters Terraform state, .env, or lambda.zip.
     github_sandbox_org: str = "haunter-sandboxes"
+    github_sandbox_repo: str = "haunter-sandbox-runner"
     github_sandbox_app_id: Optional[str] = None
     github_sandbox_installation_id: Optional[str] = None
     github_sandbox_app_private_key_ssm_path: str = "/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY"
