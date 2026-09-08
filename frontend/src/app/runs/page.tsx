@@ -294,7 +294,7 @@ export default function RunsPage() {
                 placeholder="Search branch, sha, diagnosis..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="h-9 pl-9 pr-8 text-xs font-mono rounded-[6px] bg-zinc-900/50 border-zinc-800/80 focus-visible:ring-0 focus:ring-0 focus-visible:border-amber-400/80 focus:border-amber-400/80 placeholder:text-zinc-500 placeholder:font-sans transition-colors"
+                className="h-9 pl-9 pr-8 text-xs font-mono rounded-[6px] bg-zinc-900/50 border-zinc-800/80 focus:outline-none focus:border-amber-400/80 focus:ring-1 focus:ring-amber-400/25 placeholder:text-zinc-500 placeholder:font-sans transition-all"
               />
               {!searchQuery ? (
                 <div className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center">
