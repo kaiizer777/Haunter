@@ -14,7 +14,7 @@ export function Topbar({ title, subtitle, actions }: TopbarProps) {
   const { user, logout } = useAuth();
 
   return (
-    <header className="sticky top-0 z-20 flex h-16 w-full items-center justify-between border-b border-zinc-800 bg-[#09090b]/90 px-6 backdrop-blur-sm">
+    <header className="sticky top-0 z-30 flex h-16 w-full items-center justify-between border-b border-zinc-800 bg-[#09090b]/90 px-6 backdrop-blur-sm">
       <div className="flex items-center gap-3.5">
         <div>
           <h1 className="text-base font-semibold tracking-tight text-zinc-100">

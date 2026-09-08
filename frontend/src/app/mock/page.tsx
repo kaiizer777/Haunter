@@ -535,7 +535,7 @@ export default function MockRunsPage() {
           {/* ===================================================================== */}
           {/* 3. FILTER BAR CONTAINER                                               */}
           {/* ===================================================================== */}
-          <div className="flex flex-wrap items-center justify-between gap-4 rounded-[7px] border border-zinc-800 bg-[#121215] p-3.5">
+          <div className="relative z-20 flex flex-wrap items-center justify-between gap-4 rounded-[7px] border border-zinc-800 bg-[#121215] p-3.5">
             <div className="flex flex-wrap items-center gap-3.5 flex-1 min-w-[300px]">
               <div className="flex items-center gap-2 text-[13px] text-zinc-400 font-medium pl-1">
                 <Filter className="h-4 w-4 text-amber-400" />

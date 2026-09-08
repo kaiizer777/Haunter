@@ -110,7 +110,7 @@ export function SelectDropdown({
   return (
     <div
       ref={containerRef}
-      className={cn("relative inline-block text-left", className)}
+      className={cn("relative inline-block text-left", isOpen ? "z-30" : "z-auto", className)}
       onKeyDown={handleKeyDown}
     >
       <button

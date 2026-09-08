@@ -278,7 +278,7 @@ export default function RunsPage() {
     >
       <div className="space-y-6 min-w-0">
         {/* Modern Filter Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] p-3.5">
+        <div className="relative z-20 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] p-3.5">
           <div className="flex flex-wrap items-center gap-3.5 flex-1 min-w-[300px]">
             <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-medium pl-1">
               <Filter className="h-3.5 w-3.5 text-zinc-500" />
@@ -412,7 +412,7 @@ export default function RunsPage() {
 
         {/* Selection Toolbar */}
         {selectedRunIds.size > 0 && (
-          <div className="border border-zinc-700/80 bg-zinc-900/95 backdrop-blur shadow-xl rounded-lg px-4 py-2.5 flex items-center justify-between text-xs animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <div className="relative z-10 border border-zinc-700/80 bg-zinc-900/95 backdrop-blur shadow-xl rounded-lg px-4 py-2.5 flex items-center justify-between text-xs animate-in fade-in slide-in-from-bottom-2 duration-200">
             <div className="flex items-center gap-2.5">
               <span className="inline-flex h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)]" />
               <span className="font-mono text-zinc-300 text-[11px]">
@@ -445,7 +445,7 @@ export default function RunsPage() {
         )}
 
         {/* Dense Table */}
-        <div className="rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm overflow-hidden shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)]">
+        <div className="relative z-0 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm overflow-hidden shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)]">
           {loading ? (
             <div className="p-4 space-y-3">
               <Skeleton className="h-9 w-full" />
