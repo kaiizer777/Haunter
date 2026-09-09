@@ -11,7 +11,7 @@ describe("confidence-chart.tsx", () => {
       screen.getByText(/Confidence vs\. Sandbox Outcome Correlation/i)
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Synthetic fallback data — no live eval results yet/i)
+      screen.getByText(/Synthetic golden fixtures/i)
     ).toBeInTheDocument();
 
     // Default stats from FALLBACK_POINTS (18 points)
@@ -34,7 +34,7 @@ describe("confidence-chart.tsx", () => {
     const { container } = render(<ConfidenceOutcomeChart data={customData} />);
 
     expect(
-      screen.queryByText(/Synthetic fallback data — no live eval results yet/i)
+      screen.queryByText(/Synthetic golden fixtures/i)
     ).not.toBeInTheDocument();
 
     // Total attempts: 4

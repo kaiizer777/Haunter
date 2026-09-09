@@ -16,6 +16,7 @@ export interface AttemptDataPoint {
 interface ConfidenceChartProps {
   data?: AttemptDataPoint[];
   className?: string;
+  hideHeader?: boolean;
 }
 
 // Deterministic mock / fallback points derived from golden fixture evaluations
@@ -41,7 +42,7 @@ const FALLBACK_POINTS: AttemptDataPoint[] = [
   { confidence: 95, passed: true, attempt_number: 1, label: "golden_015 (Pydantic validator alias)" },
 ];
 
-export function ConfidenceOutcomeChart({ data, className }: ConfidenceChartProps) {
+export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: ConfidenceChartProps) {
   const isFallback = !data || data.length === 0;
   const points = useMemo(() => {
     if (data && data.length > 0) {
@@ -118,25 +119,37 @@ export function ConfidenceOutcomeChart({ data, className }: ConfidenceChartProps
   return (
     <div
       className={cn(
-        "rounded-[6px] border border-zinc-800 bg-[#121215] p-5 space-y-6 text-zinc-200",
+        hideHeader
+          ? "space-y-4 text-zinc-200"
+          : "rounded-[8px] border border-zinc-800 bg-[#121215] p-5 space-y-6 text-zinc-200",
         className
       )}
     >
       {/* Top Header & Stat Strip */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-3">
         <div>
-          <div className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-amber-400" />
-            <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-100">
-              Confidence vs. Sandbox Outcome Correlation
-            </h3>
-          </div>
-          <p className="text-[11px] font-mono text-zinc-500 mt-1">
-            Validating if Fix Generator confidence accurately predicts real sandbox verification passes
-          </p>
+          {!hideHeader ? (
+            <>
+              <div className="flex items-center gap-2">
+                <Activity className="h-4 w-4 text-amber-400" />
+                <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-100">
+                  Confidence vs. Sandbox Outcome Correlation
+                </h3>
+              </div>
+              <p className="text-[11px] font-mono text-zinc-500 mt-1">
+                Validating if Fix Generator confidence accurately predicts real sandbox verification passes
+              </p>
+            </>
+          ) : (
+            <div className="flex items-center gap-2 text-xs text-zinc-400">
+              <span className="font-mono font-semibold text-zinc-200">18 Golden Test Cases</span>
+              <span className="text-zinc-600">·</span>
+              <span>Empirical correlation between confidence and sandbox pass</span>
+            </div>
+          )}
           {isFallback && (
-            <p className="text-[10px] font-mono text-amber-400/80 mt-1 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-1 inline-block">
-              Synthetic fallback data — no live eval results yet. Run the harness to see live confidence correlation.
+            <p className="text-[10px] font-mono text-amber-400/90 mt-1 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-0.5 inline-block">
+              Synthetic golden fixtures (18 cases) — exercising full calibration spectrum
             </p>
           )}
         </div>

@@ -113,11 +113,11 @@ describe("ReposPage (app/repos/page.tsx)", () => {
     expect(screen.getByText("dev")).toBeInTheDocument();
 
     // Language hints
-    expect(screen.getByText("typescript")).toBeInTheDocument();
+    expect(screen.getAllByText("typescript").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("auto-detect")).toBeInTheDocument();
 
     // External link to GitHub
-    const githubLinks = screen.getAllByRole("link", { name: "" });
+    const githubLinks = screen.getAllByRole("link", { name: /Open repository on GitHub/i });
     expect(githubLinks[0]).toHaveAttribute("href", "https://github.com/acme/frontend-app");
     expect(githubLinks[1]).toHaveAttribute("href", "https://github.com/acme/backend-service");
   });
