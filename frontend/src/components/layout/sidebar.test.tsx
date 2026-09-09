@@ -69,7 +69,7 @@ describe("sidebar.tsx", () => {
     await screen.findByTitle("claude-sonnet-4-5");
   });
 
-  it("renders navigation links including AI Reliability & Evals (Live) for non-admin user", async () => {
+  it("renders navigation links including AI Reliability & Evals for non-admin user", async () => {
     render(<Sidebar />);
 
     const runsLink = screen.getByRole("link", { name: /runs/i });
@@ -78,19 +78,16 @@ describe("sidebar.tsx", () => {
     const evalLink = screen.getByRole("link", { name: /ai reliability & evals/i });
 
     expect(runsLink).toHaveAttribute("href", "/runs");
+    expect(within(runsLink).queryByText("Live")).not.toBeInTheDocument();
     expect(reposLink).toHaveAttribute("href", "/repos");
     expect(configLink).toHaveAttribute("href", "/config");
-    // The AI Reliability & Evals link is shown for all users (not admin-gated)
-    // and carries a "Live" badge to mark it as the user-facing telemetry
-    // dashboard. The "Live" badge is scoped to this link because the Model
-    // Config link also renders a "Live" badge.
     expect(evalLink).toHaveAttribute("href", "/eval");
-    expect(within(evalLink).getByText("Live")).toBeInTheDocument();
+    expect(within(evalLink).queryByText("Live")).not.toBeInTheDocument();
 
     await screen.findByTitle("claude-sonnet-4-5");
   });
 
-  it("renders AI Reliability & Evals with Live badge when user.is_admin is true", async () => {
+  it("renders AI Reliability & Evals when user.is_admin is true", async () => {
     vi.mocked(useAuth).mockReturnValue({
       user: adminUser,
       loading: false,
@@ -101,12 +98,10 @@ describe("sidebar.tsx", () => {
 
     render(<Sidebar />);
 
-    // The AI Reliability & Evals entry is not admin-gated: admin users see
-    // the exact same link and the same "Live" badge as non-admin users.
     const evalLink = screen.getByRole("link", { name: /ai reliability & evals/i });
     expect(evalLink).toBeInTheDocument();
     expect(evalLink).toHaveAttribute("href", "/eval");
-    expect(within(evalLink).getByText("Live")).toBeInTheDocument();
+    expect(within(evalLink).queryByText("Live")).not.toBeInTheDocument();
     await screen.findByTitle("claude-sonnet-4-5");
   });
 
@@ -181,5 +176,23 @@ describe("sidebar.tsx", () => {
 
     // Resolving after unmount should not trigger state update error
     resolvePromise!(mockModelConfig);
+  });
+
+  it("triggers navigation on keyboard shortcut keydown", async () => {
+    render(<Sidebar />);
+
+    const reposLink = screen.getByRole("link", { name: /repositories/i });
+    const clickSpy = vi.spyOn(reposLink, "click");
+
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "2",
+        metaKey: true,
+        bubbles: true,
+      })
+    );
+
+    expect(clickSpy).toHaveBeenCalled();
+    await screen.findByTitle("claude-sonnet-4-5");
   });
 });
