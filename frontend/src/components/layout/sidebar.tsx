@@ -68,7 +68,14 @@ export function Sidebar() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  const navItems = [
+  interface NavItem {
+    name: string;
+    href: string;
+    icon: typeof Activity;
+    badge?: string;
+  }
+
+  const navItems: NavItem[] = [
     {
       name: "Runs",
       href: "/runs",

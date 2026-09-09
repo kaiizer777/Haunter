@@ -681,7 +681,13 @@ export default function RunsPage() {
         )}
 
         {/* High-Precision CI Runs Table */}
-        <div className="relative z-0 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm overflow-hidden shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)]">
+        <div className="relative z-0 overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.3)]">
+          {/* Subtle light-from-above ambient gradient sheen */}
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
+          />
+
           {loading ? (
             <div className="p-4 space-y-3">
               <Skeleton className="h-10 w-full bg-zinc-900/60" />
@@ -715,8 +721,8 @@ export default function RunsPage() {
           ) : (
             <div className="overflow-x-auto">
               <Table>
-                <TableHeader className="border-b border-zinc-800/80 bg-[#09090b]">
-                  <TableRow className="border-b border-zinc-800/80 hover:bg-transparent">
+                <TableHeader className="border-b border-zinc-800/90 bg-gradient-to-b from-[#141418] to-[#0c0c10] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_3px_rgba(0,0,0,0.35)]">
+                  <TableRow className="border-b border-zinc-800/90 hover:bg-transparent">
                     {/* Column 0: CHECKBOX (Standard UX Left Position) */}
                     <TableHead className="w-10 pl-4 py-3 text-center">
                       <div className="flex items-center justify-center">
@@ -790,10 +796,10 @@ export default function RunsPage() {
                       <TableRow
                         key={run.id}
                         onClick={() => router.push(`/runs/detail?id=${run.id}`)}
-                        className={`cursor-pointer group transition-all duration-150 border-b border-zinc-800/40 hover:bg-zinc-800/35 ${
+                        className={`cursor-pointer group transition-all duration-150 border-b border-zinc-800/40 hover:bg-gradient-to-r hover:from-zinc-800/50 hover:via-zinc-800/30 hover:to-zinc-800/10 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05),inset_0_-1px_0_rgba(0,0,0,0.2)] active:translate-y-[0.5px] ${
                           isSelected
-                            ? "bg-amber-500/[0.04] border-l-2 border-l-amber-400 hover:bg-amber-500/[0.07]"
-                            : "border-l-2 border-l-transparent"
+                            ? "bg-amber-500/[0.05] border-l-[3px] border-l-amber-400 shadow-[inset_0_0_16px_rgba(245,158,11,0.04)] hover:bg-amber-500/[0.08]"
+                            : "border-l-[3px] border-l-transparent"
                         } ${isBatchDeleting ? "opacity-50 pointer-events-none" : ""}`}
                       >
                         {/* Column 0: CHECKBOX */}
@@ -837,7 +843,7 @@ export default function RunsPage() {
                           <div className="flex items-center gap-2 font-mono text-xs text-zinc-400 min-w-0">
                             {isFixBranch ? (
                               <span
-                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[11px] truncate max-w-[170px]"
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[5px] bg-gradient-to-b from-amber-500/15 via-amber-500/10 to-amber-500/5 border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 text-amber-300 text-[11px] font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_1px_2px_rgba(0,0,0,0.3)] truncate max-w-[170px]"
                                 title={branchName}
                               >
                                 <Sparkles className="h-3 w-3 text-amber-400 shrink-0" />
@@ -857,7 +863,7 @@ export default function RunsPage() {
                               type="button"
                               onClick={(e) => handleCopySha(e, run.head_sha)}
                               title="Click to copy full commit SHA"
-                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/50 hover:border-zinc-600 text-[11px] text-zinc-400 hover:text-zinc-200 font-mono transition-colors shrink-0 group/commit"
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-850 text-[11px] text-zinc-400 hover:text-zinc-200 font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.3)] hover:border-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_1px_3px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] transition-all shrink-0 group/commit"
                             >
                               <GitCommit className="h-3 w-3 text-zinc-500 group-hover/commit:text-amber-400 shrink-0" />
                               <span>{commitSha}</span>
@@ -916,7 +922,7 @@ export default function RunsPage() {
                               e.stopPropagation();
                               router.push(`/runs/detail?id=${run.id}`);
                             }}
-                            className="group/btn h-7 px-2.5 text-xs font-mono rounded-[5px] text-zinc-400 hover:text-zinc-100 bg-zinc-800/30 hover:bg-zinc-800/80 border border-zinc-800/80 hover:border-zinc-700/80 transition-all inline-flex items-center gap-1.5"
+                            className="group/btn h-7 px-2.5 text-xs font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-800/80 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all inline-flex items-center gap-1.5"
                           >
                             <span>Trace</span>
                             <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500 group-hover/btn:text-amber-400 group-hover/btn:translate-x-0.5 group-hover/btn:-translate-y-0.5 transition-all" />
@@ -932,7 +938,7 @@ export default function RunsPage() {
 
           {/* Pagination Footer */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between border-t border-zinc-800/60 bg-[#09090b] px-5 py-3 text-xs text-zinc-400">
+            <div className="flex items-center justify-between border-t border-zinc-800/80 bg-gradient-to-b from-[#0e0e12] to-[#09090c] px-5 py-3 text-xs text-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
               <span className="font-mono text-[11px] text-zinc-500 tabular-nums">
                 Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total} runs
               </span>
@@ -942,7 +948,7 @@ export default function RunsPage() {
                   size="sm"
                   onClick={() => setPage((p) => Math.max(0, p - 1))}
                   disabled={page === 0 || loading}
-                  className="h-7 px-2.5 text-[11px] font-mono rounded-[4px] border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/80 text-zinc-300 hover:text-zinc-100 disabled:opacity-40"
+                  className="h-7 px-2.5 text-[11px] font-mono rounded-[5px] bg-gradient-to-b from-zinc-800/80 to-zinc-900/80 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-800/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] text-zinc-300 hover:text-zinc-100 disabled:opacity-40"
                 >
                   <ChevronLeft className="h-3.5 w-3.5 mr-1 text-zinc-500" />
                   Prev
@@ -955,7 +961,7 @@ export default function RunsPage() {
                   size="sm"
                   onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
                   disabled={page >= totalPages - 1 || loading}
-                  className="h-7 px-2.5 text-[11px] font-mono rounded-[4px] border-zinc-800 bg-zinc-900/60 hover:bg-zinc-800/80 text-zinc-300 hover:text-zinc-100 disabled:opacity-40"
+                  className="h-7 px-2.5 text-[11px] font-mono rounded-[5px] bg-gradient-to-b from-zinc-800/80 to-zinc-900/80 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-800/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] text-zinc-300 hover:text-zinc-100 disabled:opacity-40"
                 >
                   Next
                   <ChevronRight className="h-3.5 w-3.5 ml-1 text-zinc-500" />
