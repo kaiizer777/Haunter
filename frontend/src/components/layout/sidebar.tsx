@@ -149,19 +149,19 @@ export function Sidebar() {
               href={item.href}
               aria-current={isActive ? "page" : undefined}
               className={cn(
-                "relative flex items-center justify-between rounded-[6px] px-3.5 py-2.5 text-sm font-medium transition-all duration-150 group select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-400/80 focus-visible:ring-offset-1 focus-visible:ring-offset-[#0c0c0e]",
+                "relative flex items-center justify-between rounded-[6px] px-3.5 py-2.5 text-sm font-medium transition-all duration-150 group select-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-400/80 focus-visible:ring-offset-1 focus-visible:ring-offset-[#0c0c0e] active:translate-y-[0.5px]",
                 isActive
-                  ? "bg-zinc-800/90 text-zinc-100 font-semibold border border-zinc-700/60 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08),0_1px_3px_rgba(0,0,0,0.3)]"
-                  : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/40 border border-transparent hover:border-zinc-800/80 hover:shadow-[0_1px_2px_rgba(0,0,0,0.2)]"
+                  ? "bg-zinc-800/90 text-zinc-100 font-semibold border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-800/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_2px_5px_rgba(0,0,0,0.35)] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)]"
+                  : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/40 border border-transparent hover:border-t-zinc-700/60 hover:border-x-zinc-800/60 hover:border-b-zinc-900/80 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_2px_5px_rgba(0,0,0,0.25)] hover:-translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.35)]"
               )}
             >
-              {/* Active left indicator pip & ambient gradient */}
+              {/* Active left indicator pip & 3D painted light depth overlay */}
               {isActive && (
                 <>
                   <span className="absolute left-0 top-1/2 -translate-y-1/2 h-5.5 w-[3px] rounded-r-full bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500 shadow-[0_0_8px_rgba(251,191,36,0.85)]" />
                   <span
                     aria-hidden="true"
-                    className="pointer-events-none absolute inset-0 rounded-[6px] bg-gradient-to-r from-amber-400/[0.04] via-transparent to-transparent"
+                    className="pointer-events-none absolute inset-0 rounded-[6px] bg-gradient-to-b from-white/[0.05] via-amber-400/[0.02] to-black/[0.1] shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
                   />
                 </>
               )}
@@ -198,7 +198,13 @@ export function Sidebar() {
 
       {/* Footer System Telemetry Status */}
       <div className="p-3.5 border-t border-zinc-800/80 bg-[#09090b]/80 backdrop-blur-md">
-        <div className="rounded-lg border border-zinc-800/90 bg-gradient-to-b from-[#131317] via-[#101014] to-[#0c0c0f] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_12px_rgba(0,0,0,0.35)]">
+        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#16161b] via-[#111115] to-[#0b0b0e] p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_4px_16px_rgba(0,0,0,0.5),0_1px_2px_rgba(0,0,0,0.3)] group transition-all duration-200">
+          {/* Subtle light-from-above ambient gradient sheen */}
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent"
+          />
+
           <div className="flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 text-zinc-200">
               <span className="relative flex h-2 w-2">
@@ -207,33 +213,35 @@ export function Sidebar() {
               </span>
               <span className="font-semibold tracking-tight text-zinc-200">Pipeline Live</span>
             </div>
-            <div className="flex items-center gap-1 rounded-[4px] bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 text-[10px] font-mono text-emerald-400">
+            <div className="flex items-center gap-1 rounded-[5px] bg-gradient-to-b from-emerald-500/15 via-emerald-500/10 to-emerald-500/5 border-t border-t-emerald-400/40 border-x border-x-emerald-500/25 border-b border-b-emerald-600/20 px-1.5 py-0.5 text-[10px] font-mono text-emerald-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_1px_2px_rgba(0,0,0,0.3)]">
               <ShieldCheck className="h-3 w-3" />
               <span>99.9%</span>
             </div>
           </div>
 
-          <div className="my-2.5 h-px w-full bg-gradient-to-r from-transparent via-zinc-800 to-transparent" />
+          <div className="my-2.5 h-px w-full bg-gradient-to-r from-transparent via-zinc-700/50 to-transparent" />
 
           <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
             <div className="flex items-center gap-1.5">
-              <Cpu className="h-3 w-3 text-zinc-500" />
+              <Cpu className="h-3.5 w-3.5 text-zinc-500" />
               <span>Active Model</span>
             </div>
             <span
-              className="rounded-[4px] bg-zinc-900/90 border border-zinc-700/70 px-1.5 py-0.5 text-zinc-200 truncate max-w-[125px] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] inline-block font-mono text-right font-medium hover:border-amber-500/40 transition-colors"
+              className="rounded-[5px] bg-gradient-to-b from-zinc-900 via-zinc-900/95 to-zinc-950 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-900 px-2 py-0.5 text-zinc-200 truncate max-w-[125px] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_2px_rgba(0,0,0,0.4)] inline-block font-mono text-right font-medium hover:border-amber-500/50 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_0_8px_rgba(245,158,11,0.15)] transition-all"
               title={activeModel}
             >
               {activeModel.replace("-free", "")}
             </span>
           </div>
 
-          <div className="mt-2.5 pt-2 border-t border-zinc-800/60 flex items-center justify-between text-[10px] font-mono text-zinc-500">
+          <div className="mt-2.5 pt-2 border-t border-zinc-800/70 flex items-center justify-between text-[10px] font-mono text-zinc-500">
             <div className="flex items-center gap-1.5">
               <span className="h-1.5 w-1.5 rounded-full bg-amber-400/80 shadow-[0_0_6px_rgba(245,158,11,0.5)]" />
               <span>Sandbox</span>
             </div>
-            <span className="text-zinc-400">Isolated Mirror</span>
+            <span className="text-zinc-300 rounded-[4px] bg-zinc-900/70 border border-zinc-800/80 px-1.5 py-0.5 text-[9px] font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              Isolated Mirror
+            </span>
           </div>
         </div>
       </div>
