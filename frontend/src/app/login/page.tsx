@@ -13,8 +13,6 @@ import {
   AlertCircle,
   Cpu,
   Zap,
-  Activity,
-  Lock,
   Loader2,
   Layers,
 } from "lucide-react";
@@ -73,14 +71,14 @@ export default function LoginPage() {
       {/* Top minimal header navigation */}
       <header className="relative z-20 flex h-12 shrink-0 w-full items-center justify-between border-b border-zinc-800/80 bg-zinc-950/50 px-6 backdrop-blur-md lg:px-12">
         <div className="flex items-center gap-2.5 ml-2 sm:ml-6 lg:ml-8">
-          <div className="relative flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-b from-amber-400/20 via-amber-500/10 to-transparent border border-amber-500/30 text-amber-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_8px_rgba(0,0,0,0.5)]">
-            <TerminalSquare className="h-3.5 w-3.5 text-amber-400" />
+          <div className="relative flex h-7.5 w-7.5 items-center justify-center rounded-lg bg-gradient-to-b from-amber-400/20 via-amber-500/10 to-transparent border border-amber-500/30 text-amber-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_8px_rgba(0,0,0,0.5)]">
+            <TerminalSquare className="h-4 w-4 text-amber-400" />
           </div>
           <div className="flex items-center gap-2">
-            <span className="font-mono text-[11px] font-bold tracking-[0.18em] text-zinc-100 uppercase">
+            <span className="font-mono text-[13px] font-bold tracking-[0.16em] text-zinc-100 uppercase">
               HAUNTER
             </span>
-            <span className="rounded-[4px] bg-zinc-850 px-1.5 py-0.5 text-[9px] font-mono text-zinc-400 border border-zinc-750">
+            <span className="rounded-[4px] bg-zinc-850 px-1.5 py-0.5 text-[9.5px] font-mono text-zinc-400 border border-zinc-750">
               CI/CD AGENT
             </span>
           </div>
@@ -199,7 +197,7 @@ export default function LoginPage() {
 
           {/* Right Column: Tactile Auth Card */}
           <div className="flex justify-center lg:col-span-5">
-            <div className="relative w-full max-w-[375px] translate-y-2 lg:translate-y-2.5">
+            <div className="relative w-full max-w-[375px] translate-y-4 lg:translate-y-6">
               {/* Soft amber floor contact shadow */}
               <div
                 aria-hidden="true"
@@ -239,24 +237,18 @@ export default function LoginPage() {
                   <Button
                     onClick={handleGitHubLogin}
                     disabled={isRedirecting}
-                    className="group relative w-full h-10.5 flex items-center justify-center gap-2.5 rounded-lg text-zinc-950 font-bold text-xs bg-gradient-to-b from-white via-zinc-100 to-zinc-200 border-t border-t-white border-x border-x-zinc-300 border-b border-b-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_2px_8px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:from-white hover:to-zinc-100 hover:shadow-[inset_0_1px_0_rgba(255,255,255,1),0_4px_16px_rgba(0,0,0,0.5)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#101014] transition-all cursor-pointer overflow-hidden disabled:opacity-80"
+                    className="relative w-full h-10.5 flex items-center justify-center gap-2.5 rounded-lg text-zinc-950 font-bold text-xs bg-white border border-zinc-200 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#101014] cursor-pointer disabled:opacity-80 active:opacity-90"
                   >
-                    {/* Hover sheen sweep */}
-                    <span
-                      aria-hidden="true"
-                      className="pointer-events-none absolute inset-0 -translate-x-full group-hover:translate-x-full bg-gradient-to-r from-transparent via-white/40 to-transparent transition-transform duration-700"
-                    />
-
                     {isRedirecting ? (
                       <>
                         <Loader2 className="h-4 w-4 shrink-0 animate-spin text-zinc-950" />
-                        <span className="relative z-10 text-xs font-semibold">Connecting to GitHub...</span>
+                        <span className="text-xs font-semibold">Connecting to GitHub...</span>
                       </>
                     ) : (
                       <>
-                        <GitHubIcon className="h-4.5 w-4.5 shrink-0 transition-transform group-hover:scale-105 relative z-10" />
-                        <span className="relative z-10 text-xs font-semibold">Continue with GitHub</span>
-                        <ArrowRight className="h-3.5 w-3.5 ml-auto text-zinc-600 group-hover:text-zinc-950 group-hover:translate-x-0.5 transition-all relative z-10" />
+                        <GitHubIcon className="h-4.5 w-4.5 shrink-0 text-zinc-950" />
+                        <span className="text-xs font-bold text-zinc-950">Continue with GitHub</span>
+                        <ArrowRight className="h-3.5 w-3.5 ml-auto text-zinc-500" />
                       </>
                     )}
                   </Button>
