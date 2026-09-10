@@ -229,13 +229,13 @@ export default function EvalPage() {
         size="sm"
         onClick={() => fetchAll(true)}
         disabled={isRefreshing || loading}
-        className="h-8 px-2.5 text-xs font-mono rounded-[5px] border-zinc-800 bg-[#121215] hover:bg-zinc-800 hover:text-zinc-100 text-zinc-400 flex items-center gap-1.5 transition-all shadow-sm"
+        className="group h-8 px-3 text-xs font-mono rounded-[6px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all"
         title="Refresh live eval telemetry"
       >
         <RotateCw
           className={cn(
-            "h-3.5 w-3.5",
-            (isRefreshing || loading) && "animate-spin text-amber-400"
+            "h-3.5 w-3.5 transition-colors",
+            isRefreshing || loading ? "animate-spin text-amber-400" : "text-zinc-400 group-hover:text-amber-400"
           )}
         />
         <span className="hidden sm:inline">Refresh</span>

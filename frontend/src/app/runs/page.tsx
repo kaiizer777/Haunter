@@ -372,10 +372,10 @@ export default function RunsPage() {
             size="sm"
             onClick={() => fetchRuns(true)}
             disabled={loading || isRefreshing}
-            className="h-8 px-2.5 text-xs font-mono rounded-[5px] border-zinc-800 bg-zinc-900/80 hover:bg-zinc-800 hover:text-zinc-100 text-zinc-400 flex items-center gap-1.5 transition-all shadow-sm"
+            className="group h-8 px-3 text-xs font-mono rounded-[6px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all"
             title="Refresh runs list (Hot-key: R)"
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? "animate-spin text-amber-400" : "text-zinc-400"}`} />
+            <RefreshCw className={`h-3.5 w-3.5 transition-colors ${isRefreshing ? "animate-spin text-amber-400" : "text-zinc-400 group-hover:text-amber-400"}`} />
             <span className="hidden sm:inline">Refresh</span>
           </Button>
 
@@ -385,7 +385,7 @@ export default function RunsPage() {
               size="sm"
               onClick={handleBatchDelete}
               disabled={isBatchDeleting}
-              className="h-8 px-3 text-xs font-mono font-medium rounded-[5px] flex items-center gap-1.5 shadow-sm"
+              className="h-8 px-3 text-xs font-mono font-medium rounded-[6px] bg-gradient-to-b from-red-600 via-red-650 to-red-800 hover:from-red-500 hover:via-red-600 hover:to-red-750 text-white border-t border-t-red-400/60 border-x border-x-red-600/70 border-b border-b-red-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_6px_rgba(220,38,38,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.6)] flex items-center gap-1.5 transition-all"
             >
               <Trash2 className="h-3.5 w-3.5" />
               {isBatchDeleting ? "Deleting..." : `Delete (${selectedRunIds.size})`}
@@ -648,21 +648,31 @@ export default function RunsPage() {
 
         {/* Floating Batch Selection Toolbar */}
         {selectedRunIds.size > 0 && (
-          <div className="relative z-10 border border-zinc-700/80 bg-zinc-900/95 backdrop-blur shadow-xl rounded-lg px-4 py-2.5 flex items-center justify-between text-xs animate-in fade-in slide-in-from-bottom-2 duration-200">
-            <div className="flex items-center gap-2.5">
-              <span className="inline-flex h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)]" />
-              <span className="font-mono text-zinc-300 text-[11px]">
-                <span className="font-semibold text-zinc-100 tabular-nums">{selectedRunIds.size}</span> run
-                {selectedRunIds.size > 1 ? "s" : ""} selected
-              </span>
+          <div className="relative z-10 overflow-hidden rounded-xl border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#18181f]/95 via-[#131317]/95 to-[#0d0d11]/95 backdrop-blur-md px-4 py-2.5 flex items-center justify-between text-xs shadow-[inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-1px_0_rgba(0,0,0,0.5),0_12px_32px_rgba(0,0,0,0.65),0_2px_6px_rgba(0,0,0,0.4)] animate-in fade-in slide-in-from-bottom-2 duration-200">
+            {/* Subtle light-from-above ambient gradient sheen */}
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 top-0 h-4 bg-gradient-to-b from-white/[0.06] to-transparent rounded-t-xl"
+            />
+            <div className="flex items-center gap-2.5 relative z-10">
+              <div className="flex items-center gap-2 px-2.5 py-1 rounded-[6px] bg-gradient-to-b from-amber-500/15 via-amber-500/10 to-amber-500/5 border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_1px_2px_rgba(0,0,0,0.3)]">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)]" />
+                </span>
+                <span className="font-mono text-amber-200 text-[11px] font-medium tracking-tight">
+                  <span className="font-bold text-amber-100 tabular-nums">{selectedRunIds.size}</span> run
+                  {selectedRunIds.size > 1 ? "s" : ""} selected
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2.5 relative z-10">
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setSelectedRunIds(new Set())}
                 disabled={isBatchDeleting}
-                className="h-7 px-2.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 rounded-[4px] transition-colors"
+                className="h-7 px-2.5 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.3)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_1px_3px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all"
               >
                 Clear selection
               </Button>
@@ -671,7 +681,7 @@ export default function RunsPage() {
                 size="sm"
                 onClick={handleBatchDelete}
                 disabled={isBatchDeleting}
-                className="flex items-center gap-1.5 h-7 px-3 text-[11px] font-mono font-medium rounded-[4px] shadow-sm transition-all"
+                className="flex items-center gap-1.5 h-7 px-3 text-[11px] font-mono font-medium rounded-[5px] bg-gradient-to-b from-red-600 via-red-650 to-red-800 hover:from-red-500 hover:via-red-600 hover:to-red-750 text-white border-t border-t-red-400/60 border-x border-x-red-600/70 border-b border-b-red-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_6px_rgba(220,38,38,0.35),0_1px_2px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.6)] transition-all disabled:opacity-50"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 {isBatchDeleting ? "Deleting..." : `Delete Selected (${selectedRunIds.size})`}
