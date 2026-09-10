@@ -582,35 +582,35 @@ export default function MockRunsPage() {
                     value: "",
                     label: "All Statuses",
                     badge: (
-                      <span className="h-2 w-2 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.7)]" />
                     ),
                   },
                   {
                     value: "completed",
                     label: "Completed / PR Opened",
                     badge: (
-                      <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]" />
                     ),
                   },
                   {
                     value: "fix_generation",
                     label: "Generating Fix",
                     badge: (
-                      <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse shadow-[0_0_6px_rgba(251,191,36,0.7)]" />
                     ),
                   },
                   {
                     value: "error",
                     label: "Error / Failed",
                     badge: (
-                      <span className="h-2 w-2 rounded-full bg-rose-400 shadow-[0_0_8px_rgba(251,113,133,0.6)]" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-rose-400 shadow-[0_0_6px_rgba(251,113,133,0.7)]" />
                     ),
                   },
                   {
                     value: "fallback",
                     label: "Fallback Comment",
                     badge: (
-                      <span className="h-2 w-2 rounded-full bg-violet-400 shadow-[0_0_8px_rgba(167,139,250,0.6)]" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-violet-400 shadow-[0_0_6px_rgba(167,139,250,0.7)]" />
                     ),
                   },
                 ]}
