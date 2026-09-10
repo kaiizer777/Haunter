@@ -253,6 +253,8 @@ function formatModelDisplayName(id: string, rawName?: string): string {
     "ling-3.0-flash-fin-free": "Ling 3.0 Flash Fin",
     "deepseek-v4-flash-free": "DeepSeek V4 Flash",
     "muse-spark-1.3-contributor-free": "Muse Spark 1.3 Contributor",
+    "muse-spark-1.2-contributor-free": "Muse Spark 1.2 Contributor",
+    "mimo-v2.5-free": "Mimo V2.5",
     "qwen-2.5-coder-32b-instruct-free": "Qwen 2.5 Coder 32B",
     "deepseek-r1-distill-qwen-32b-free": "DeepSeek R1 Distill Qwen",
     "llama-3.3-70b-instruct-free": "Llama 3.3 70B Instruct",
@@ -491,16 +493,18 @@ export default function ModelConfigPage() {
   const currentRepo = repos.find((r) => r.id === selectedRepoId);
   const activeSpec = getModelSpec(activeConfig?.model_name || selectedModel);
 
-  // Normalize model list
-  const currentModels = useMemo(() => {
+  // Normalize provider model list
+  const allProviderModels = useMemo(() => {
     const options = modelOptionsByProvider[selectedProvider] || [];
     const hasSelected = options.some((m) => m.id === selectedModel);
-    const list = hasSelected
+    return hasSelected
       ? options
       : [{ id: selectedModel, name: selectedModel, tag: "Active" }, ...options];
+  }, [modelOptionsByProvider, selectedProvider, selectedModel]);
 
-    // Filter by query and speed category
-    return list.filter((m) => {
+  // Filter by query and speed category
+  const currentModels = useMemo(() => {
+    return allProviderModels.filter((m) => {
       const spec = getModelSpec(m.id, m.tag);
       const friendlyName = formatModelDisplayName(m.id, m.name).toLowerCase();
       const q = searchQuery.toLowerCase().trim();
@@ -519,9 +523,7 @@ export default function ModelConfigPage() {
       if (speedFilter === "reasoning") return spec.speedCategory === "reasoning";
       return true;
     });
-  }, [modelOptionsByProvider, selectedProvider, selectedModel, searchQuery, speedFilter]);
-
-  const allProviderModelsCount = (modelOptionsByProvider[selectedProvider] || []).length;
+  }, [allProviderModels, searchQuery, speedFilter]);
 
   return (
     <AppLayout
@@ -840,13 +842,12 @@ export default function ModelConfigPage() {
                     key={p.id}
                     type="button"
                     onClick={() => handleProviderChange(p.id)}
-                    disabled={isGlobalDisabled || isPending}
+                    disabled={isPending}
                     className={cn(
                       "flex items-center gap-2 rounded-[5px] px-3.5 py-1.5 text-xs sm:text-sm font-mono font-medium transition-all cursor-pointer select-none",
                       isSelected
                         ? "bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/80 font-bold"
-                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40",
-                      isGlobalDisabled && "opacity-50 cursor-not-allowed"
+                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
                     )}
                   >
                     <Icon className={cn("h-4 w-4", isSelected ? meta.accentText : "text-zinc-500")} />
@@ -880,12 +881,19 @@ export default function ModelConfigPage() {
           <div className="relative z-10 space-y-4 pt-1">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <h3 className="text-xs font-mono font-bold uppercase tracking-wider text-zinc-200">
-                  Select Model Architecture ({currentModels.length} of {allProviderModelsCount} available)
-                </h3>
-                <span className="text-xs text-zinc-400">
-                  Click any card to select for autonomous CI failure healing
-                </span>
+                <div className="flex items-center gap-2.5">
+                  <h3 className="text-xs font-mono font-bold uppercase tracking-wider text-zinc-200">
+                    Model Architectures
+                  </h3>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-[4px] bg-zinc-900 border border-zinc-800 text-[10.5px] font-mono text-zinc-400">
+                    {searchQuery || speedFilter !== "all"
+                      ? `${currentModels.length} of ${allProviderModels.length} Available`
+                      : `${allProviderModels.length} Available`}
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  Select an inference engine to power autonomous CI failure diagnostics & fix generation
+                </p>
               </div>
 
               {/* Quick Filter Tabs & Search Bar */}
@@ -897,8 +905,8 @@ export default function ModelConfigPage() {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Filter models (/)..."
-                    className="h-7.5 pl-8 pr-7 rounded-[6px] border border-zinc-800 bg-zinc-900/80 text-xs font-mono text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-amber-400/80 focus:ring-1 focus:ring-amber-400/30 w-36 sm:w-48 transition-all"
+                    placeholder="Filter models..."
+                    className="h-8 pl-8.5 pr-7 rounded-[6px] border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#121216] to-[#0c0c0e] font-mono text-xs text-zinc-200 placeholder:text-zinc-500 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4),0_1px_2px_rgba(0,0,0,0.2)] focus:outline-none focus:border-t-amber-400 focus:border-x-amber-500/70 focus:ring-1 focus:ring-amber-400/25 w-36 sm:w-48 transition-all"
                   />
                   {searchQuery ? (
                     <button
@@ -920,15 +928,15 @@ export default function ModelConfigPage() {
                   )}
                 </div>
 
-                <div className="inline-flex rounded-[6px] border border-zinc-800 bg-[#09090b]/90 p-0.5 text-xs font-mono">
+                <div className="inline-flex rounded-[7px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#0a0a0d] p-1 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] text-xs font-mono gap-1">
                   <button
                     type="button"
                     onClick={() => setSpeedFilter("all")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[4px] text-[11px] font-medium transition-colors cursor-pointer",
+                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "all"
-                        ? "bg-zinc-800 text-zinc-100 font-semibold"
-                        : "text-zinc-400 hover:text-zinc-200"
+                        ? "bg-gradient-to-b from-zinc-700/90 via-zinc-750 to-zinc-800/90 text-zinc-100 font-bold border-t border-t-zinc-500/70 border-x border-x-zinc-600/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
+                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
                     )}
                   >
                     All
@@ -937,10 +945,10 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("free")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[4px] text-[11px] font-medium transition-colors cursor-pointer",
+                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "free"
-                        ? "bg-emerald-950/80 text-emerald-300 font-semibold border border-emerald-800/40"
-                        : "text-zinc-400 hover:text-zinc-200"
+                        ? "bg-gradient-to-b from-emerald-900/90 via-emerald-950 to-emerald-950/90 text-emerald-300 font-bold border-t border-t-emerald-500/70 border-x border-x-emerald-600/60 border-b border-b-emerald-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
+                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
                     )}
                   >
                     Free Tier
@@ -949,10 +957,10 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("fast")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[4px] text-[11px] font-medium transition-colors cursor-pointer",
+                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "fast"
-                        ? "bg-cyan-950/80 text-cyan-300 font-semibold border border-cyan-800/40"
-                        : "text-zinc-400 hover:text-zinc-200"
+                        ? "bg-gradient-to-b from-cyan-900/90 via-cyan-950 to-cyan-950/90 text-cyan-300 font-bold border-t border-t-cyan-500/70 border-x border-x-cyan-600/60 border-b border-b-cyan-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
+                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
                     )}
                   >
                     Fast
@@ -961,10 +969,10 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("reasoning")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[4px] text-[11px] font-medium transition-colors cursor-pointer",
+                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "reasoning"
-                        ? "bg-purple-950/80 text-purple-300 font-semibold border border-purple-800/40"
-                        : "text-zinc-400 hover:text-zinc-200"
+                        ? "bg-gradient-to-b from-purple-900/90 via-purple-950 to-purple-950/90 text-purple-300 font-bold border-t border-t-purple-500/70 border-x border-x-purple-600/60 border-b border-b-purple-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
+                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
                     )}
                   >
                     Deep CoT
@@ -1007,6 +1015,21 @@ export default function ModelConfigPage() {
                   const spec = getModelSpec(m.id, m.tag);
                   const displayName = formatModelDisplayName(m.id, m.name);
 
+                  // Calculate glass chip styling based on tag/free status
+                  const isFreeModel = spec.isFree || m.tag.toLowerCase().includes("free");
+                  const isFastModel = spec.speedCategory === "fast";
+                  const isReasoningModel = spec.speedCategory === "reasoning";
+
+                  const badgePill = isSelected
+                    ? "bg-amber-950/60 border border-amber-700/70 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.25)]"
+                    : isFreeModel
+                    ? "bg-emerald-950/60 border border-emerald-700/60 text-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.15)]"
+                    : isFastModel
+                    ? "bg-cyan-950/60 border border-cyan-700/60 text-cyan-400 shadow-[0_0_8px_rgba(6,182,212,0.15)]"
+                    : isReasoningModel
+                    ? "bg-purple-950/60 border border-purple-700/60 text-purple-300 shadow-[0_0_8px_rgba(168,85,247,0.15)]"
+                    : "bg-zinc-800/90 border border-zinc-700/80 text-zinc-200";
+
                   return (
                     <div
                       key={m.id}
@@ -1026,33 +1049,41 @@ export default function ModelConfigPage() {
                         }
                       }}
                       className={cn(
-                        "group relative flex flex-col justify-between rounded-xl border p-4 sm:p-5 text-left select-none transition-all duration-150 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60",
+                        "group relative flex flex-col justify-between rounded-xl p-5 text-left select-none transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 overflow-hidden",
                         isSelected
-                          ? "border-amber-400/90 bg-gradient-to-b from-[#1c1a16] via-[#141417] to-[#0e0e11] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.15),0_4px_24px_rgba(245,158,11,0.14)] ring-1 ring-amber-400/40"
-                          : "border-zinc-800/90 bg-[#0c0c0f] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03),0_2px_8px_rgba(0,0,0,0.25)] hover:border-zinc-700 hover:bg-[#121216] hover:-translate-y-0.5",
-                        "active:translate-y-0 active:scale-[0.99]",
-                        isGlobalDisabled && "opacity-60 cursor-not-allowed hover:translate-y-0"
+                          ? "border-t border-t-amber-400 border-x border-x-amber-500/60 border-b border-b-amber-950 bg-gradient-to-b from-[#1a140b]/95 via-[#130f08]/95 to-[#0c0a05]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_0_24px_rgba(245,158,11,0.22),0_8px_24px_rgba(0,0,0,0.5)] ring-1 ring-amber-400/50"
+                          : "border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_12px_28px_rgba(0,0,0,0.5)]",
+                        !isGlobalDisabled ? "cursor-pointer active:translate-y-[0.5px]" : "cursor-default"
                       )}
                     >
-                      <div className="space-y-3 w-full">
-                        {/* Header: Tag + Live Status + Tactile Radio Indicator */}
+                      {/* Top Specular Sheen (identical to bottom cards) */}
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b to-transparent z-10",
+                          isSelected ? "from-amber-400/[0.14]" : "from-white/[0.04]"
+                        )}
+                      />
+
+                      <div className="space-y-3.5 w-full relative z-10">
+                        {/* Header: Tag + Live Status + Radio Indicator */}
                         <div className="flex items-center justify-between gap-2">
-                          <span className={cn("text-[11px] font-mono font-semibold px-2.5 py-0.5 rounded-md border", spec.tagColor)}>
+                          <span className={cn("text-[11px] font-mono font-semibold px-2.5 py-0.5 rounded-[5px]", badgePill)}>
                             {m.tag}
                           </span>
                           <div className="flex items-center gap-2">
                             {isLive && (
-                              <span className="text-[11px] font-mono font-semibold bg-emerald-950/80 border border-emerald-700/70 text-emerald-400 px-2 py-0.5 rounded flex items-center gap-1.5 shadow-sm">
-                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                              <span className="text-[10.5px] font-mono font-semibold bg-emerald-950/60 border border-emerald-800/60 text-emerald-400 px-2.5 py-0.5 rounded-[5px] flex items-center gap-1.5 shadow-[0_0_8px_rgba(52,211,153,0.25)]">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,1)]" />
                                 Live in Prod
                               </span>
                             )}
                             <div
                               className={cn(
-                                "h-4 w-4 rounded-full border-2 flex items-center justify-center transition-all duration-150",
+                                "h-4 w-4 rounded-full flex items-center justify-center transition-all duration-150",
                                 isSelected
-                                  ? "border-amber-400 bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.5)]"
-                                  : "border-zinc-600 bg-zinc-900 group-hover:border-zinc-400"
+                                  ? "border border-amber-400 bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.7)]"
+                                  : "border border-zinc-700 bg-[#08080a] group-hover:border-zinc-500 shadow-inner"
                               )}
                             >
                               {isSelected && <div className="h-1.5 w-1.5 rounded-full bg-zinc-950" />}
@@ -1062,18 +1093,21 @@ export default function ModelConfigPage() {
 
                         {/* Model Friendly Title & Technical Identifier Slug */}
                         <div>
-                          <h4 className="text-base font-bold text-zinc-100 group-hover:text-amber-300 transition-colors tracking-tight">
+                          <h4 className={cn(
+                            "text-[15px] font-bold tracking-tight transition-colors",
+                            isSelected ? "text-amber-300 font-bold" : "text-zinc-100 group-hover:text-white"
+                          )}>
                             {displayName}
                           </h4>
-                          <div className="mt-1 flex items-center gap-1.5">
-                            <span className="font-mono text-[11px] text-zinc-400 bg-[#070709] border border-zinc-800 px-2 py-0.5 rounded select-all font-medium truncate max-w-[200px]">
+                          <div className="mt-1.5 flex items-center gap-1.5">
+                            <span className="font-mono text-[11px] text-zinc-300 bg-[#08080a] border border-zinc-800/90 px-2.5 py-0.5 rounded-[4px] select-all font-medium truncate max-w-[210px] shadow-inner">
                               {m.id}
                             </span>
                             <button
                               type="button"
                               onClick={(e) => handleCopyModelId(m.id, e)}
                               title="Copy model identifier"
-                              className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 rounded transition-colors cursor-pointer"
+                              className="p-1 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-[4px] transition-colors cursor-pointer border border-transparent hover:border-zinc-700"
                             >
                               {copiedModelId === m.id ? (
                                 <Check className="h-3 w-3 text-emerald-400" />
@@ -1086,33 +1120,47 @@ export default function ModelConfigPage() {
 
                         {/* Specs row: Context Window & TTFT Latency */}
                         <div className="flex items-center gap-2 text-xs font-mono pt-0.5">
-                          <span className="flex items-center gap-1 bg-zinc-900/90 text-zinc-300 border border-zinc-800 px-2 py-0.5 rounded font-medium">
-                            <Layers className="h-3 w-3 text-zinc-500" />
+                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2.5 py-1 rounded-[5px] font-medium text-[11px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+                            <Layers className="h-3.5 w-3.5 text-zinc-400 group-hover:text-zinc-300" />
                             <span>{spec.contextWindow}</span>
                           </span>
-                          <span className="flex items-center gap-1 bg-zinc-900/90 text-zinc-300 border border-zinc-800 px-2 py-0.5 rounded font-medium">
-                            <Gauge className="h-3 w-3 text-zinc-500" />
+                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2.5 py-1 rounded-[5px] font-medium text-[11px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+                            <span
+                              className={cn(
+                                "h-1.5 w-1.5 rounded-full",
+                                spec.speedCategory === "fast"
+                                  ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,1)]"
+                                  : spec.speedCategory === "reasoning"
+                                  ? "bg-purple-400 shadow-[0_0_6px_rgba(192,132,252,1)]"
+                                  : "bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,1)]"
+                              )}
+                            />
                             <span>{spec.latencyRating}</span>
                           </span>
                         </div>
 
                         {/* Specialty Description */}
-                        <p className="text-xs text-zinc-300/90 leading-relaxed font-sans line-clamp-2">
+                        <p className="text-[12px] text-zinc-300 group-hover:text-zinc-200 leading-relaxed font-sans line-clamp-2 transition-colors">
                           {spec.specialty}
                         </p>
                       </div>
 
                       {/* Card Footer */}
-                      <div className="mt-4 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-400">
+                      <div className="relative z-10 mt-3.5 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-400">
                         <span className="font-medium text-zinc-400 font-mono text-[11px]">
                           {spec.recommendedRole}
                         </span>
-                        <span className={cn("font-semibold text-xs flex items-center gap-1", isSelected ? "text-amber-400" : "text-zinc-500 group-hover:text-zinc-300")}>
+                        <span className={cn("font-semibold text-xs flex items-center gap-1 font-mono transition-colors", isSelected ? "text-amber-300 font-bold" : "text-zinc-400 group-hover:text-zinc-200")}>
                           {isSelected ? (
-                            <>
-                              <Check className="h-3.5 w-3.5" />
+                            <span className="flex items-center gap-1.5 bg-amber-400/20 border border-amber-500/60 text-amber-300 px-2.5 py-1 rounded-[5px] shadow-[0_0_10px_rgba(245,158,11,0.2)] font-bold">
+                              <Check className="h-3.5 w-3.5 text-amber-300 stroke-[2.5]" />
                               <span>Selected</span>
-                            </>
+                            </span>
+                          ) : isGlobalDisabled ? (
+                            <span className="flex items-center gap-1 text-zinc-500 font-normal">
+                              <Lock className="h-3 w-3 text-zinc-500" />
+                              <span>Read-Only</span>
+                            </span>
                           ) : (
                             <span>Select Engine →</span>
                           )}
