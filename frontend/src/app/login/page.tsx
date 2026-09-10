@@ -239,12 +239,12 @@ export default function LoginPage() {
                   <Button
                     onClick={handleGitHubLogin}
                     disabled={isRedirecting}
-                    className="group relative w-full h-10.5 flex items-center justify-center gap-2.5 rounded-lg text-zinc-950 font-bold text-xs bg-gradient-to-b from-white via-zinc-100 to-zinc-200 border-t border-t-white border-x border-x-zinc-300 border-b border-b-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_2px_8px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:from-white hover:to-zinc-100 hover:shadow-[inset_0_1px_0_rgba(255,255,255,1),0_4px_16px_rgba(0,0,0,0.5)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#101014] transition-all cursor-pointer overflow-hidden disabled:opacity-80"
+                    className="group relative w-full h-11 flex items-center justify-center gap-2.5 rounded-lg text-zinc-950 font-bold text-xs bg-gradient-to-b from-white via-zinc-50 to-zinc-200 border-t border-t-white border-x border-x-zinc-200 border-b-[3.5px] border-b-zinc-400/90 shadow-[inset_0_1px_0_rgba(255,255,255,1),0_4px_12px_rgba(0,0,0,0.4),0_1px_2px_rgba(0,0,0,0.2)] hover:from-white hover:to-zinc-100 hover:border-b-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,1),0_6px_18px_rgba(0,0,0,0.5)] hover:-translate-y-[0.5px] active:translate-y-[2px] active:border-b-[1px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.25),0_1px_2px_rgba(0,0,0,0.2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#101014] transition-all cursor-pointer overflow-hidden disabled:opacity-80"
                   >
                     {/* Hover sheen sweep */}
                     <span
                       aria-hidden="true"
-                      className="pointer-events-none absolute inset-0 -translate-x-full group-hover:translate-x-full bg-gradient-to-r from-transparent via-white/40 to-transparent transition-transform duration-700"
+                      className="pointer-events-none absolute inset-0 -translate-x-full group-hover:translate-x-full bg-gradient-to-r from-transparent via-white/45 to-transparent transition-transform duration-700"
                     />
 
                     {isRedirecting ? (
@@ -254,9 +254,9 @@ export default function LoginPage() {
                       </>
                     ) : (
                       <>
-                        <GitHubIcon className="h-4.5 w-4.5 shrink-0 transition-transform group-hover:scale-105 relative z-10" />
-                        <span className="relative z-10 text-xs font-semibold">Continue with GitHub</span>
-                        <ArrowRight className="h-3.5 w-3.5 ml-auto text-zinc-600 group-hover:text-zinc-950 group-hover:translate-x-0.5 transition-all relative z-10" />
+                        <GitHubIcon className="h-4.5 w-4.5 shrink-0 transition-transform group-hover:scale-110 relative z-10 text-zinc-950" />
+                        <span className="relative z-10 text-xs font-bold tracking-tight">Continue with GitHub</span>
+                        <ArrowRight className="h-3.5 w-3.5 ml-auto text-zinc-600 group-hover:text-zinc-950 group-hover:translate-x-1 transition-transform relative z-10" />
                       </>
                     )}
                   </Button>
