@@ -5,38 +5,29 @@ import { useRouter } from "next/navigation";
 import { AppLayout } from "@/components/layout/app-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { StatusBadge } from "@/components/runs/status-badge";
 import { ConfidenceOutcomeChart } from "@/components/eval/confidence-chart";
 import { EvalBenchmarkModal } from "@/components/eval/eval-benchmark-modal";
 import {
   api,
   UserEvalMetricsOut,
-  RunOut,
-  RepoOut,
   ApiError,
 } from "@/lib/api";
-import { formatRelativeTime, cn } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import {
   Inbox,
   TrendingUp,
   Activity,
   Clock,
-  DollarSign,
   AlertCircle,
-  GitBranch,
-  GitCommit,
   Target,
-  RotateCw,
-  Search,
-  ArrowUpRight,
   Zap,
   CheckCircle2,
   BarChart3,
   ScatterChart as ScatterIcon,
   ShieldCheck,
   Sparkles,
-  X,
+  RefreshCw,
+  Coins,
 } from "lucide-react";
 
 /**
@@ -54,20 +45,6 @@ function formatMinutesSeconds(totalSeconds: number | null | undefined): string {
   return `${m}m ${s}s`;
 }
 
-/**
- * Format the duration between two ISO timestamps.
- */
-function formatRangeDuration(
-  createdAt: string | null | undefined,
-  updatedAt: string | null | undefined
-): string {
-  if (!createdAt || !updatedAt) return "—";
-  const start = new Date(createdAt).getTime();
-  const end = new Date(updatedAt).getTime();
-  if (isNaN(start) || isNaN(end) || end < start) return "—";
-  return formatMinutesSeconds((end - start) / 1000);
-}
-
 export default function EvalPage() {
   const router = useRouter();
 
@@ -76,45 +53,23 @@ export default function EvalPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Recent runs (telemetry table)
-  const [recentRuns, setRecentRuns] = useState<RunOut[]>([]);
-  const [reposMap, setReposMap] = useState<Record<string, RepoOut>>({});
-  const [recentLoading, setRecentLoading] = useState(true);
-
-  // Search filter for recent runs table
-  const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "pr_opened" | "failed">("all");
-
   // Calibration View Mode: "brackets" | "scatter"
   const [calibrationTab, setCalibrationTab] = useState<"brackets" | "scatter">("brackets");
 
   // Eval Benchmark Modal state
   const [isBenchmarkOpen, setIsBenchmarkOpen] = useState(false);
 
-  const fetchAll = useCallback(async (manual = false) => {
+  const fetchMetrics = useCallback(async (manual = false) => {
     if (manual) {
       setIsRefreshing(true);
     } else {
       setLoading(true);
     }
     setError(null);
-    setRecentLoading(true);
 
     try {
-      const [m, runsRes, repos] = await Promise.all([
-        api.getUserEvalMetrics(),
-        api
-          .getRuns({ limit: 10 })
-          .catch(() => ({ runs: [] as RunOut[], total: 0 })),
-        api.getRepos().catch(() => [] as RepoOut[]),
-      ]);
+      const m = await api.getUserEvalMetrics();
       setMetrics(m);
-      setRecentRuns(runsRes.runs || []);
-      const map: Record<string, RepoOut> = {};
-      repos.forEach((r) => {
-        map[r.id] = r;
-      });
-      setReposMap(map);
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setError(err.message);
@@ -123,70 +78,30 @@ export default function EvalPage() {
       } else {
         setError("Failed to load AI reliability metrics.");
       }
-      setRecentRuns([]);
     } finally {
       setLoading(false);
       setIsRefreshing(false);
-      setRecentLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
+    fetchMetrics();
+  }, [fetchMetrics]);
 
-  // Status breakdown counts for quick-filter tabs
-  const statusCounts = useMemo(() => {
-    let prOpened = 0;
-    let failed = 0;
-    recentRuns.forEach((r) => {
-      const s = (r.status || "").toLowerCase();
-      if (s === "pr_opened" || s === "completed" || s === "passed") prOpened++;
-      else if (s === "failed" || s === "error") failed++;
-    });
-    return { all: recentRuns.length, pr_opened: prOpened, failed };
-  }, [recentRuns]);
-
-  // Filtered runs based on search input and status filter
-  const filteredRuns = useMemo(() => {
-    let result = recentRuns;
-
-    // Apply quick-status filter
-    if (statusFilter !== "all") {
-      result = result.filter((run) => {
-        const norm = (run.status || "").toLowerCase();
-        if (statusFilter === "pr_opened") {
-          return norm === "pr_opened" || norm === "completed" || norm === "passed";
-        }
-        if (statusFilter === "failed") {
-          return norm === "failed" || norm === "error";
-        }
-        return norm === statusFilter;
-      });
-    }
-
-    // Apply text search filter
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      result = result.filter((run) => {
-        const repo = reposMap[run.repo_id];
-        const repoName = repo ? `${repo.owner}/${repo.name}`.toLowerCase() : "";
-        const status = (run.status || "").toLowerCase();
-        const id = (run.id || "").toLowerCase();
-        const branch = (run.head_branch || "").toLowerCase();
-        const sha = (run.head_sha || "").toLowerCase();
-        return (
-          repoName.includes(q) ||
-          status.includes(q) ||
-          id.includes(q) ||
-          branch.includes(q) ||
-          sha.includes(q)
-        );
-      });
-    }
-
-    return result;
-  }, [recentRuns, reposMap, searchQuery, statusFilter]);
+  // Keyboard shortcut handler: 'r' to refresh
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (["INPUT", "TEXTAREA", "SELECT"].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+      if (e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        fetchMetrics(true);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [fetchMetrics]);
 
   // Calibration status evaluation
   const calibrationHealth = useMemo(() => {
@@ -220,19 +135,19 @@ export default function EvalPage() {
         };
   }, [metrics]);
 
-  // Clean, focused header action bar matching Haunter's design language
+  // Header action bar
   const headerActions = (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2.5">
       {/* Refresh Button */}
       <Button
         variant="outline"
         size="sm"
-        onClick={() => fetchAll(true)}
+        onClick={() => fetchMetrics(true)}
         disabled={isRefreshing || loading}
-        className="group h-8 px-3 text-xs font-mono rounded-[6px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all"
-        title="Refresh live eval telemetry"
+        className="group h-8 px-3 text-xs font-mono rounded-[6px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
+        title="Refresh live eval telemetry (Hot-key: R)"
       >
-        <RotateCw
+        <RefreshCw
           className={cn(
             "h-3.5 w-3.5 transition-colors",
             isRefreshing || loading ? "animate-spin text-amber-400" : "text-zinc-400 group-hover:text-amber-400"
@@ -245,7 +160,7 @@ export default function EvalPage() {
       <Button
         size="sm"
         onClick={() => setIsBenchmarkOpen(true)}
-        className="h-8 px-3.5 text-xs font-medium rounded-[5px] bg-gradient-to-b from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 font-semibold shadow-sm flex items-center gap-1.5 transition-all active:scale-[0.98]"
+        className="flex items-center gap-1.5 bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 font-bold text-xs h-8 px-3.5 rounded-[6px] border-t border-t-amber-200/50 border-x border-x-amber-400/60 border-b border-b-amber-600/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_8px_rgba(245,158,11,0.25)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.3)] cursor-pointer transition-all"
       >
         <Zap className="h-3.5 w-3.5 fill-current" />
         <span>Run Benchmark</span>
@@ -259,25 +174,25 @@ export default function EvalPage() {
       subtitle="Autonomous diagnosis accuracy & sandbox verification telemetry"
       actions={headerActions}
     >
-      <div className="space-y-6 min-w-0 max-w-7xl">
+      <div className="space-y-6 min-w-0 pb-16">
         {/* Loading skeleton */}
         {loading && <DashboardSkeleton />}
 
         {/* Error state */}
         {!loading && error && (
-          <div className="rounded-lg border border-red-900/60 bg-red-950/30 p-4 text-sm text-red-300 flex items-start gap-3 shadow-lg">
-            <AlertCircle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <span className="font-semibold font-mono text-xs uppercase tracking-wider">
+          <div className="rounded-[7px] border border-red-900/60 bg-red-950/30 p-3.5 text-[13px] text-red-300 flex items-start gap-3 shadow-md animate-in fade-in">
+            <AlertCircle className="h-4.5 w-4.5 text-red-400 shrink-0 mt-0.5" />
+            <div className="space-y-0.5 flex-1">
+              <p className="font-semibold text-red-200 font-mono text-xs uppercase tracking-wider">
                 Telemetry Load Failure
-              </span>
-              <p className="text-xs text-red-200/90">{error}</p>
+              </p>
+              <p className="text-xs text-red-300/90 font-mono">{error}</p>
             </div>
             <Button
               variant="outline"
               size="sm"
-              onClick={() => fetchAll(true)}
-              className="ml-auto border-red-800/60 text-red-300 hover:bg-red-900/40 text-xs font-mono"
+              onClick={() => fetchMetrics(true)}
+              className="border-red-800/60 text-red-300 hover:bg-red-900/40 text-xs font-mono rounded-[5px]"
             >
               Retry
             </Button>
@@ -286,30 +201,30 @@ export default function EvalPage() {
 
         {/* Empty state */}
         {!loading && !error && metrics && metrics.total_runs === 0 && (
-          <div className="rounded-lg border border-dashed border-zinc-800 bg-[#121215]/60 p-12 text-center relative overflow-hidden">
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 border border-zinc-800 mb-4">
-              <Inbox className="h-6 w-6 text-zinc-500" />
+          <div className="rounded-xl border border-dashed border-zinc-800/80 bg-[#09090b]/40 p-12 text-center relative overflow-hidden">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-amber-400/10 border border-amber-500/30 text-amber-400 mb-4 shadow-[0_0_20px_rgba(245,158,11,0.15)]">
+              <Inbox className="h-6 w-6" />
             </div>
-            <h3 className="text-sm font-semibold text-zinc-200">
+            <h3 className="text-base font-bold text-zinc-100 font-mono">
               No CI Failures Recorded Yet
             </h3>
-            <p className="text-xs text-zinc-400 mt-2 max-w-md mx-auto leading-relaxed">
+            <p className="text-xs sm:text-sm text-zinc-400 mt-2 max-w-md mx-auto leading-relaxed">
               Connect a GitHub repository or trigger a failing workflow to initialize
               autonomous diagnosis, sandbox verification, and calibration telemetry.
             </p>
-            <div className="mt-5 flex items-center justify-center gap-3">
+            <div className="mt-6 flex items-center justify-center gap-3">
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => router.push("/repos")}
-                className="border-zinc-700 text-xs font-mono"
+                className="border-zinc-700 text-xs font-mono rounded-[6px]"
               >
                 Connect Repository
               </Button>
               <Button
                 size="sm"
                 onClick={() => setIsBenchmarkOpen(true)}
-                className="bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-medium font-semibold"
+                className="bg-gradient-to-b from-amber-400 to-amber-500 text-zinc-950 font-bold text-xs h-8 px-3.5 rounded-[6px] shadow-sm"
               >
                 Run Demo Smoke Benchmark
               </Button>
@@ -321,37 +236,35 @@ export default function EvalPage() {
         {!loading && !error && metrics && metrics.total_runs > 0 && (
           <>
             {/* Top 4 KPI Metric Cards with unified visual hierarchy */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
               {/* 1. Healing Success Rate */}
-              <div className="relative rounded-lg border border-zinc-800/80 bg-[#111114] p-4.5 space-y-3 transition-all duration-150 hover:border-zinc-700/80 hover:bg-[#131317] before:absolute before:inset-x-0 before:top-0 before:h-[1px] before:bg-gradient-to-r before:from-transparent before:via-emerald-500/40 before:to-transparent">
+              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
                     Healing Success Rate
                   </span>
                   <TrendingUp className="h-4 w-4 text-emerald-400" />
                 </div>
 
-                <div className="flex items-baseline justify-between">
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-3xl font-bold font-mono text-emerald-400 tracking-tight">
-                      {metrics.success_rate_pct.toFixed(1)}%
-                    </span>
-                    <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-mono font-medium text-emerald-400">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Live
-                    </span>
-                  </div>
+                <div className="mt-2 flex items-baseline gap-2">
+                  <span className="text-2xl font-bold font-mono text-emerald-400 tabular-nums">
+                    {metrics.success_rate_pct.toFixed(1)}%
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 rounded-[4px] border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.2 text-[10px] font-mono font-medium text-emerald-400">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Live
+                  </span>
                 </div>
 
-                {/* Visual Progress Groove */}
-                <div className="space-y-1.5 pt-0.5">
-                  <div className="h-1.5 w-full rounded-full bg-zinc-900 overflow-hidden border border-zinc-800">
+                {/* Progress Track */}
+                <div className="mt-2 space-y-1.5">
+                  <div className="h-1.5 w-full rounded-full bg-zinc-900 overflow-hidden border border-zinc-800/80">
                     <div
                       className="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 transition-all duration-500"
                       style={{ width: `${Math.min(100, Math.max(5, metrics.success_rate_pct))}%` }}
                     />
                   </div>
-                  <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
+                  <div className="flex items-center justify-between text-[11px] font-mono text-zinc-500">
                     <span>
                       {metrics.healed_runs} of {metrics.total_runs} healed
                     </span>
@@ -363,35 +276,35 @@ export default function EvalPage() {
               </div>
 
               {/* 2. Total Pipeline Failures */}
-              <div className="relative rounded-lg border border-zinc-800/80 bg-[#111114] p-4.5 space-y-3 transition-all duration-150 hover:border-zinc-700/80 hover:bg-[#131317] before:absolute before:inset-x-0 before:top-0 before:h-[1px] before:bg-gradient-to-r before:from-transparent before:via-white/[0.08] before:to-transparent">
+              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
                     Total Pipeline Failures
                   </span>
                   <Activity className="h-4 w-4 text-zinc-400" />
                 </div>
 
-                <div className="flex items-baseline justify-between">
+                <div className="mt-2 flex items-baseline justify-between">
                   <div className="flex items-baseline gap-1.5">
-                    <span className="text-3xl font-bold font-mono text-zinc-100 tracking-tight">
+                    <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
                       {metrics.total_runs}
                     </span>
-                    <span className="text-xs font-mono text-zinc-500">runs</span>
+                    <span className="text-[11px] font-mono text-zinc-500">runs</span>
                   </div>
                   <div className="flex items-center gap-1.5 text-[10px] font-mono">
-                    <span className="rounded border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-400">
+                    <span className="rounded-[4px] border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.2 text-emerald-400">
                       {metrics.healed_runs} resolved
                     </span>
                     {metrics.total_runs - metrics.healed_runs > 0 && (
-                      <span className="rounded border border-zinc-700 bg-zinc-800/80 px-1.5 py-0.5 text-zinc-400">
+                      <span className="rounded-[4px] border border-zinc-700 bg-zinc-800/80 px-1.5 py-0.2 text-zinc-400">
                         {metrics.total_runs - metrics.healed_runs} open
                       </span>
                     )}
                   </div>
                 </div>
 
-                <div className="space-y-1.5 pt-0.5">
-                  <div className="h-1.5 w-full rounded-full bg-zinc-900 overflow-hidden border border-zinc-800 flex">
+                <div className="mt-2 space-y-1.5">
+                  <div className="h-1.5 w-full rounded-full bg-zinc-900 overflow-hidden border border-zinc-800/80 flex">
                     <div
                       className="h-full bg-emerald-400"
                       style={{
@@ -405,34 +318,34 @@ export default function EvalPage() {
                       }}
                     />
                   </div>
-                  <p className="text-[11px] text-zinc-400 truncate">
+                  <p className="text-[11px] text-zinc-500 truncate">
                     Across all connected GitHub repositories
                   </p>
                 </div>
               </div>
 
               {/* 3. Avg Resolution Time */}
-              <div className="relative rounded-lg border border-zinc-800/80 bg-[#111114] p-4.5 space-y-3 transition-all duration-150 hover:border-zinc-700/80 hover:bg-[#131317] before:absolute before:inset-x-0 before:top-0 before:h-[1px] before:bg-gradient-to-r before:from-transparent before:via-white/[0.08] before:to-transparent">
+              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
                     Avg Resolution Time
                   </span>
-                  <Clock className="h-4 w-4 text-zinc-400" />
+                  <Clock className="h-4 w-4 text-amber-400" />
                 </div>
 
-                <div className="flex items-baseline justify-between">
-                  <span className="text-3xl font-bold font-mono text-zinc-100 tracking-tight">
+                <div className="mt-2 flex items-baseline justify-between">
+                  <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
                     {formatMinutesSeconds(metrics.avg_duration_seconds)}
                   </span>
-                  <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-0.5 text-[10px] font-mono font-medium text-sky-400">
+                  <span className="rounded-[4px] border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.2 text-[10px] font-mono font-medium text-sky-400">
                     Rapid MTTR
                   </span>
                 </div>
 
-                <div className="space-y-1 pt-0.5">
+                <div className="mt-2 space-y-0.5">
                   <div className="flex items-center gap-1.5 text-[11px] text-zinc-300">
                     <ShieldCheck className="h-3.5 w-3.5 text-sky-400 shrink-0" />
-                    <span>Webhook receipt → sandbox verified</span>
+                    <span className="truncate">Webhook receipt → sandbox verified</span>
                   </div>
                   <p className="text-[10px] font-mono text-zinc-500 truncate">
                     Wall clock end-to-end execution
@@ -441,24 +354,24 @@ export default function EvalPage() {
               </div>
 
               {/* 4. Total Healing Cost & Efficiency */}
-              <div className="relative rounded-lg border border-zinc-800/80 bg-[#111114] p-4.5 space-y-3 transition-all duration-150 hover:border-zinc-700/80 hover:bg-[#131317] before:absolute before:inset-x-0 before:top-0 before:h-[1px] before:bg-gradient-to-r before:from-transparent before:via-amber-400/30 before:to-transparent">
+              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
+                  <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
                     Total Healing Cost
                   </span>
-                  <DollarSign className="h-4 w-4 text-amber-400" />
+                  <Coins className="h-4 w-4 text-amber-400" />
                 </div>
 
-                <div className="flex items-baseline justify-between">
-                  <span className="text-3xl font-bold font-mono text-zinc-100 tracking-tight">
+                <div className="mt-2 flex items-baseline justify-between">
+                  <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
                     ${metrics.total_cost.toFixed(4)}
                   </span>
-                  <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-mono font-medium text-amber-400">
+                  <span className="rounded-[4px] border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.2 text-[10px] font-mono font-medium text-amber-400">
                     ~${metrics.avg_cost_per_run.toFixed(4)} / run
                   </span>
                 </div>
 
-                <div className="space-y-1 pt-0.5">
+                <div className="mt-2 space-y-0.5">
                   <div className="flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium">
                     <Sparkles className="h-3.5 w-3.5 text-amber-400 shrink-0" />
                     <span>~98% cheaper than human triage</span>
@@ -471,9 +384,15 @@ export default function EvalPage() {
             </div>
 
             {/* Model Calibration Section: Split Cockpit with Autonomous Gating & Calibration Bands */}
-            <div className="relative rounded-lg border border-zinc-800/80 bg-[#111114] p-5 space-y-5 shadow-sm before:absolute before:inset-x-0 before:top-0 before:h-[1px] before:bg-gradient-to-r before:from-transparent before:via-white/[0.08] before:to-transparent">
+            <div className="relative z-0 overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.3)] p-5 space-y-5">
+              {/* Top ambient light sheen */}
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
+              />
+
               {/* Section Header & View Switcher */}
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-4 relative z-20">
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <Target className="h-4 w-4 text-amber-400" />
@@ -483,11 +402,11 @@ export default function EvalPage() {
                     {calibrationHealth && (
                       <span
                         className={cn(
-                          "rounded-full border px-2 py-0.5 text-[10px] font-mono font-medium flex items-center gap-1.5",
+                          "rounded-[4px] border px-2 py-0.5 text-[10px] font-mono font-medium flex items-center gap-1.5",
                           calibrationHealth.badgeColor
                         )}
                       >
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
                         {calibrationHealth.label}
                       </span>
                     )}
@@ -498,51 +417,53 @@ export default function EvalPage() {
                 </div>
 
                 {/* View Switcher Tabs */}
-                <div className="flex items-center gap-1 rounded-md border border-zinc-800 bg-[#09090b] p-1 text-xs font-mono">
+                <div className="flex items-center gap-1.5 p-1 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm">
                   <button
+                    type="button"
                     onClick={() => setCalibrationTab("brackets")}
                     className={cn(
-                      "flex items-center gap-1.5 rounded-[4px] px-3 py-1 text-[11px] font-medium transition-all",
+                      "flex items-center gap-1.5 px-3 py-1.5 rounded-[5px] text-xs font-mono transition-all cursor-pointer",
                       calibrationTab === "brackets"
-                        ? "bg-zinc-800 text-zinc-100 shadow-sm"
-                        : "text-zinc-400 hover:text-zinc-200"
+                        ? "bg-zinc-800 text-zinc-100 font-semibold border border-zinc-700/60 shadow-sm"
+                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
                     )}
                   >
                     <BarChart3 className="h-3.5 w-3.5 text-emerald-400" />
-                    Calibration Bands
+                    <span>Calibration Bands</span>
                   </button>
                   <button
+                    type="button"
                     onClick={() => setCalibrationTab("scatter")}
                     className={cn(
-                      "flex items-center gap-1.5 rounded-[4px] px-3 py-1 text-[11px] font-medium transition-all",
+                      "flex items-center gap-1.5 px-3 py-1.5 rounded-[5px] text-xs font-mono transition-all cursor-pointer",
                       calibrationTab === "scatter"
-                        ? "bg-zinc-800 text-zinc-100 shadow-sm"
-                        : "text-zinc-400 hover:text-zinc-200"
+                        ? "bg-zinc-800 text-zinc-100 font-semibold border border-zinc-700/60 shadow-sm"
+                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
                     )}
                   >
                     <ScatterIcon className="h-3.5 w-3.5 text-amber-400" />
-                    Fixture Scatter (18 Cases)
+                    <span>Fixture Scatter (18 Cases)</span>
                   </button>
                 </div>
               </div>
 
               {/* View 1: Live Calibration Bands & Gating Architecture */}
               {calibrationTab === "brackets" && (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4.5 items-stretch relative z-20">
                   {/* Left Column: Autonomous Gating Policy Card */}
-                  <div className="lg:col-span-4 rounded-md border border-zinc-800/80 bg-[#0c0c0f] p-4 flex flex-col justify-between space-y-4">
+                  <div className="lg:col-span-4 rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#141419]/90 to-[#0e0e12]/90 p-4.5 flex flex-col justify-between space-y-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                     <div className="space-y-3.5">
                       <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2.5">
-                        <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
+                        <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
                           Autonomous Gating Principle
                         </span>
-                        <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                        <ShieldCheck className="h-4 w-4 text-emerald-400" />
                       </div>
 
                       <div className="space-y-1.5">
                         <div className="flex items-baseline gap-2">
                           <span className="text-2xl font-bold font-mono text-zinc-100">≥ 90%</span>
-                          <span className="text-xs font-mono text-emerald-400 font-medium">Safety Threshold</span>
+                          <span className="text-xs font-mono text-emerald-400 font-semibold">Safety Threshold</span>
                         </div>
                         <p className="text-xs text-zinc-400 leading-relaxed">
                           The model only proceeds to open GitHub PRs when confidence satisfies safety thresholds.
@@ -550,29 +471,29 @@ export default function EvalPage() {
                         </p>
                       </div>
 
-                      <div className="pt-2 border-t border-zinc-800/60 space-y-2 text-xs">
+                      <div className="pt-2.5 border-t border-zinc-800/80 space-y-2 text-xs font-mono">
                         <div className="flex items-center justify-between text-zinc-400">
                           <span>Gating Tier Accuracy:</span>
-                          <span className="font-mono font-semibold text-emerald-400">
+                          <span className="font-semibold text-emerald-400">
                             {metrics.confidence_calibration.find((b) => b.bucket === "90-100%")?.accuracy_pct.toFixed(1) ?? "75.0"}%
                           </span>
                         </div>
                         <div className="flex items-center justify-between text-zinc-400">
                           <span>Sub-threshold Fallback:</span>
-                          <span className="font-mono text-zinc-300">Diagnosis-only comment</span>
+                          <span className="text-zinc-300">Diagnosis-only comment</span>
                         </div>
                       </div>
                     </div>
 
-                    <div className="rounded border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-2 text-[11px] text-emerald-300 flex items-center gap-2">
+                    <div className="rounded-[6px] border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-[11px] font-mono text-emerald-300 flex items-center gap-2">
                       <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
                       <span>Zero unverified code commits to production repos.</span>
                     </div>
                   </div>
 
                   {/* Right Column: Unified Calibration Bands List */}
-                  <div className="lg:col-span-8 rounded-md border border-zinc-800/80 bg-[#0c0c0f] p-4 space-y-3">
-                    <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2 text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
+                  <div className="lg:col-span-8 rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#141419]/90 to-[#0e0e12]/90 p-4.5 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                    <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2.5 text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
                       <span>Confidence Band</span>
                       <span>Sandbox Verification Status</span>
                     </div>
@@ -587,18 +508,18 @@ export default function EvalPage() {
                           <div
                             key={bucket.bucket}
                             className={cn(
-                              "rounded-md border p-3 transition-all",
+                              "rounded-lg border p-3 transition-all",
                               hasAttempts
-                                ? "border-zinc-800 bg-[#111114] hover:border-zinc-700"
+                                ? "border-zinc-700/80 bg-[#16161c]/90 hover:border-zinc-600 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)]"
                                 : "border-zinc-800/50 bg-[#0d0d10]/60"
                             )}
                           >
                             <div className="flex items-center justify-between text-xs">
                               <div className="flex items-center gap-2">
-                                <span className="font-mono font-semibold text-zinc-200">
+                                <span className="font-mono font-bold text-zinc-100 text-[12.5px]">
                                   {bucket.bucket}
                                 </span>
-                                <span className="text-[11px] text-zinc-500">
+                                <span className="text-[11px] text-zinc-400">
                                   {isGatingBand
                                     ? "Production Gating Tier"
                                     : bucket.bucket === "75-90%"
@@ -608,7 +529,7 @@ export default function EvalPage() {
                                     : "Low / Exploratory Band"}
                                 </span>
                                 {isGatingBand && (
-                                  <span className="rounded-[4px] border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.2 text-[9px] font-mono font-medium text-emerald-400">
+                                  <span className="rounded-[4px] border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.2 text-[9px] font-mono font-semibold text-emerald-400">
                                     PR Gated
                                   </span>
                                 )}
@@ -616,7 +537,7 @@ export default function EvalPage() {
 
                               {hasAttempts ? (
                                 <div className="flex items-center gap-2 font-mono text-xs">
-                                  <span className="rounded border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-400">
+                                  <span className="rounded-[4px] border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-bold text-emerald-400">
                                     {bucket.accuracy_pct.toFixed(1)}% Accuracy
                                   </span>
                                   <span className="text-zinc-400 text-[11px]">
@@ -669,296 +590,8 @@ export default function EvalPage() {
 
               {/* View 2: Golden Harness Scatter Visualizer */}
               {calibrationTab === "scatter" && (
-                <div className="space-y-3">
+                <div className="space-y-3 relative z-20">
                   <ConfidenceOutcomeChart className="border-0 bg-transparent p-0" />
-                </div>
-              )}
-            </div>
-
-            {/* High-Precision AI Healing Telemetry Section */}
-            <div className="relative rounded-lg border border-zinc-800/80 bg-[#0d0d10] overflow-hidden shadow-sm before:absolute before:inset-x-0 before:top-0 before:h-[1px] before:bg-gradient-to-r before:from-transparent before:via-white/[0.08] before:to-transparent">
-              {/* Table Header Row 1: Section Title & View All Action */}
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 p-4 bg-[#0a0a0d]">
-                <div className="flex items-center gap-3">
-                  <div className="h-8 w-8 rounded-[6px] bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
-                    <Sparkles className="h-4 w-4 text-amber-400" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-100">
-                        Recent AI Healing Telemetry
-                      </h3>
-                      <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-mono text-emerald-400 flex items-center gap-1.5">
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        Live Feed
-                      </span>
-                    </div>
-                    <p className="text-xs text-zinc-400 mt-0.5">
-                      Latest pipeline runs handled by autonomous diagnosis and fix agents.
-                    </p>
-                  </div>
-                </div>
-
-                {/* View All Runs Button */}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => router.push("/runs")}
-                  className="h-8 px-3 border-zinc-800 bg-[#0c0c0e] text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 text-xs font-mono shrink-0 rounded-[5px] shadow-sm flex items-center gap-1.5 transition-all active:scale-[0.98] self-start sm:self-auto"
-                >
-                  <span>View All Runs</span>
-                  <ArrowUpRight className="h-3.5 w-3.5 text-zinc-400" />
-                </Button>
-              </div>
-
-              {/* Table Controls Row 2: Status Filter Tabs & Search Bar */}
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-2.5 bg-[#09090b]/80 border-b border-zinc-800/80">
-                {/* Quick-filter status tabs */}
-                <div className="flex items-center gap-1 rounded-[6px] border border-zinc-800 bg-[#0d0d10] p-1 text-[11px] font-mono">
-                  <button
-                    onClick={() => setStatusFilter("all")}
-                    className={cn(
-                      "rounded-[4px] px-2.5 py-1 transition-all",
-                      statusFilter === "all"
-                        ? "bg-zinc-800 text-zinc-100 shadow-sm font-semibold"
-                        : "text-zinc-400 hover:text-zinc-200"
-                    )}
-                  >
-                    All ({statusCounts.all})
-                  </button>
-                  <button
-                    onClick={() => setStatusFilter("pr_opened")}
-                    className={cn(
-                      "rounded-[4px] px-2.5 py-1 transition-all flex items-center gap-1.5",
-                      statusFilter === "pr_opened"
-                        ? "bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30 shadow-sm"
-                        : "text-zinc-400 hover:text-emerald-400"
-                    )}
-                  >
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    PR Opened ({statusCounts.pr_opened})
-                  </button>
-                  {statusCounts.failed > 0 && (
-                    <button
-                      onClick={() => setStatusFilter("failed")}
-                      className={cn(
-                        "rounded-[4px] px-2.5 py-1 transition-all flex items-center gap-1.5",
-                        statusFilter === "failed"
-                          ? "bg-rose-500/20 text-rose-300 font-semibold border border-rose-500/30 shadow-sm"
-                          : "text-zinc-400 hover:text-rose-400"
-                      )}
-                    >
-                      <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
-                      Failed ({statusCounts.failed})
-                    </button>
-                  )}
-                </div>
-
-                {/* Search Input with comfortable width & shortcut hint */}
-                <div className="relative w-full sm:w-72 md:w-80">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none" />
-                  <Input
-                    type="text"
-                    placeholder="Filter by repository or status..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="h-8 pl-8.5 pr-8 text-xs font-mono bg-[#0d0d10] border-zinc-800 focus:border-amber-400 focus:ring-1 focus:ring-amber-400/20 text-zinc-200 placeholder:text-zinc-500 placeholder:font-sans rounded-[5px]"
-                  />
-                  {!searchQuery ? (
-                    <div className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center">
-                      <kbd className="inline-flex h-4 min-w-4 items-center justify-center rounded border border-zinc-700/60 bg-zinc-800/60 px-1 font-mono text-[10px] text-zinc-400 select-none">
-                        /
-                      </kbd>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setSearchQuery("")}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200 p-0.5"
-                      aria-label="Clear filter"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Table Body */}
-              {recentLoading ? (
-                <div className="p-4 space-y-3">
-                  <Skeleton className="h-12 w-full bg-zinc-900/60" />
-                  <Skeleton className="h-12 w-full bg-zinc-900/60" />
-                  <Skeleton className="h-12 w-full bg-zinc-900/60" />
-                </div>
-              ) : filteredRuns.length === 0 ? (
-                <div className="p-12 text-center space-y-2.5">
-                  <Activity className="h-6 w-6 mx-auto text-zinc-600" />
-                  <p className="text-xs text-zinc-400">
-                    {searchQuery || statusFilter !== "all"
-                      ? "No runs matching filter query."
-                      : "No recent runs available."}
-                  </p>
-                  {(searchQuery || statusFilter !== "all") && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        setSearchQuery("");
-                        setStatusFilter("all");
-                      }}
-                      className="text-xs text-amber-400 hover:text-amber-300 h-7 font-mono"
-                    >
-                      Reset filter
-                    </Button>
-                  )}
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b border-zinc-800/80 bg-[#09090b] text-zinc-400 font-mono uppercase tracking-wider text-[10px] select-none">
-                        <th className="text-left py-3 px-4 font-semibold w-[260px]">Repository & Run</th>
-                        <th className="text-left py-3 px-3 font-semibold w-[150px]">Status</th>
-                        <th className="text-left py-3 px-3 font-semibold">Branch / Commit</th>
-                        <th className="text-left py-3 px-3 font-semibold w-[130px]">Duration</th>
-                        <th className="text-left py-3 px-3 font-semibold w-[120px]">Compute Cost</th>
-                        <th className="text-left py-3 px-3 font-semibold w-[110px]">Created</th>
-                        <th className="text-right py-3 pr-4 font-semibold w-[100px]">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-zinc-800/40">
-                      {filteredRuns.map((run) => {
-                        const repo = reposMap[run.repo_id];
-                        const repoLabel = repo
-                          ? `${repo.owner}/${repo.name}`
-                          : `repo-${run.repo_id.slice(0, 8)}`;
-                        const commitSha = run.head_sha ? run.head_sha.slice(0, 7) : null;
-                        const branchName = run.head_branch || null;
-                        const isFixBranch =
-                          branchName &&
-                          (branchName.startsWith("haunter/") ||
-                            branchName.startsWith("fix-") ||
-                            branchName.startsWith("fix/"));
-
-                        return (
-                          <tr
-                            key={run.id}
-                            onClick={() => router.push(`/runs/detail?id=${run.id}`)}
-                            className="group hover:bg-zinc-800/35 transition-all duration-150 cursor-pointer border-l-2 border-l-transparent hover:border-l-amber-400"
-                          >
-                            {/* Repository & Run */}
-                            <td className="py-3.5 px-4 font-mono text-zinc-200">
-                              <div className="flex items-center gap-2.5">
-                                <div className="h-7 w-7 rounded-[5px] bg-zinc-900 border border-zinc-800 flex items-center justify-center shrink-0 group-hover:border-zinc-700 transition-colors">
-                                  <GitBranch className="h-3.5 w-3.5 text-zinc-400 group-hover:text-amber-400 transition-colors" />
-                                </div>
-                                <div className="min-w-0">
-                                  <div className="font-semibold text-zinc-100 group-hover:text-amber-400 transition-colors truncate text-xs">
-                                    {repoLabel}
-                                  </div>
-                                  <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono mt-0.5">
-                                    <span>Run #{run.github_run_id || run.id.slice(0, 6)}</span>
-                                    {run.head_branch && (
-                                      <>
-                                        <span className="text-zinc-700">•</span>
-                                        <span>{run.head_branch}</span>
-                                      </>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-
-                            {/* Status */}
-                            <td className="py-3.5 px-3 whitespace-nowrap">
-                              <StatusBadge status={run.status} />
-                            </td>
-
-                            {/* Branch / Commit */}
-                            <td className="py-3.5 px-3">
-                              <div className="flex items-center gap-2 font-mono text-xs text-zinc-400 min-w-0">
-                                {branchName ? (
-                                  isFixBranch ? (
-                                    <span
-                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[11px] truncate max-w-[160px]"
-                                      title={branchName}
-                                    >
-                                      <Sparkles className="h-3 w-3 text-amber-400 shrink-0" />
-                                      <span className="truncate">{branchName}</span>
-                                    </span>
-                                  ) : (
-                                    <span
-                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] bg-zinc-900 border border-zinc-800/80 text-zinc-300 text-[11px] truncate max-w-[150px]"
-                                      title={branchName}
-                                    >
-                                      <GitBranch className="h-3 w-3 text-zinc-500 shrink-0" />
-                                      <span className="truncate">{branchName}</span>
-                                    </span>
-                                  )
-                                ) : (
-                                  <span className="text-zinc-600 text-[11px]">—</span>
-                                )}
-
-                                {commitSha && (
-                                  <>
-                                    <span className="text-zinc-700 shrink-0 select-none">•</span>
-                                    <span
-                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] bg-zinc-900 border border-zinc-800/80 text-[11px] text-zinc-400 font-mono shrink-0"
-                                      title={run.head_sha}
-                                    >
-                                      <GitCommit className="h-3 w-3 text-zinc-500 shrink-0" />
-                                      <span>{commitSha}</span>
-                                    </span>
-                                  </>
-                                )}
-                              </div>
-                            </td>
-
-                            {/* Duration */}
-                            <td className="py-3.5 px-3 font-mono text-zinc-300 whitespace-nowrap">
-                              <div className="flex items-center gap-1.5 text-xs">
-                                <Clock className="h-3.5 w-3.5 text-zinc-500" />
-                                <span>
-                                  {formatRangeDuration(run.created_at, run.updated_at)}
-                                </span>
-                              </div>
-                              <span className="text-[10px] text-zinc-500 block mt-0.5">Wall-clock MTTR</span>
-                            </td>
-
-                            {/* Cost */}
-                            <td className="py-3.5 px-3 font-mono whitespace-nowrap">
-                              {run.cost && run.cost > 0 ? (
-                                <div>
-                                  <span className="font-semibold text-emerald-400 text-xs">
-                                    ${run.cost.toFixed(4)}
-                                  </span>
-                                  <span className="text-[10px] text-zinc-500 block mt-0.5">
-                                    {run.tokens ? `${run.tokens.toLocaleString()} tokens` : "Subagent tokens"}
-                                  </span>
-                                </div>
-                              ) : (
-                                <span className="text-zinc-500 text-xs">—</span>
-                              )}
-                            </td>
-
-                            {/* Created */}
-                            <td className="py-3.5 px-3 font-mono text-zinc-400 text-xs whitespace-nowrap">
-                              <span title={run.created_at ? new Date(run.created_at).toLocaleString() : ""}>
-                                {formatRelativeTime(run.created_at)}
-                              </span>
-                            </td>
-
-                            {/* Action Link Button */}
-                            <td className="py-3.5 pr-4 text-right whitespace-nowrap">
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-[4px] border border-zinc-800/80 bg-zinc-900/60 text-[11px] font-mono text-zinc-400 group-hover:text-amber-400 group-hover:border-amber-500/30 group-hover:bg-amber-500/10 transition-all shadow-sm">
-                                <span>Inspect</span>
-                                <ArrowUpRight className="h-3 w-3" />
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
                 </div>
               )}
             </div>
@@ -971,7 +604,7 @@ export default function EvalPage() {
         isOpen={isBenchmarkOpen}
         onClose={() => setIsBenchmarkOpen(false)}
         onSuccess={() => {
-          fetchAll(true);
+          fetchMetrics(true);
         }}
       />
     </AppLayout>
@@ -983,23 +616,24 @@ export default function EvalPage() {
  */
 function DashboardSkeleton() {
   return (
-    <div className="space-y-6 min-w-0 max-w-7xl">
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Skeleton className="h-32 w-full rounded-lg" />
-        <Skeleton className="h-32 w-full rounded-lg" />
-        <Skeleton className="h-32 w-full rounded-lg" />
-        <Skeleton className="h-32 w-full rounded-lg" />
+    <div className="space-y-6 min-w-0">
+      <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
+        <Skeleton className="h-32 w-full rounded-lg bg-zinc-900/60" />
+        <Skeleton className="h-32 w-full rounded-lg bg-zinc-900/60" />
+        <Skeleton className="h-32 w-full rounded-lg bg-zinc-900/60" />
+        <Skeleton className="h-32 w-full rounded-lg bg-zinc-900/60" />
       </div>
-      <div className="space-y-3 rounded-lg border border-zinc-800 bg-[#111114] p-5">
+      <div className="space-y-3 rounded-xl border border-zinc-800 bg-[#111114] p-5">
         <div className="space-y-1.5">
-          <Skeleton className="h-4 w-48" />
-          <Skeleton className="h-3 w-72" />
+          <Skeleton className="h-4 w-48 bg-zinc-900/60" />
+          <Skeleton className="h-3 w-72 bg-zinc-900/60" />
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 pt-2">
-          <Skeleton className="lg:col-span-4 h-48 w-full rounded-md" />
-          <Skeleton className="lg:col-span-8 h-48 w-full rounded-md" />
+          <Skeleton className="lg:col-span-4 h-48 w-full rounded-md bg-zinc-900/60" />
+          <Skeleton className="lg:col-span-8 h-48 w-full rounded-md bg-zinc-900/60" />
         </div>
       </div>
     </div>
   );
 }
+

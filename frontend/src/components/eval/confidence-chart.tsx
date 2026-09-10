@@ -121,7 +121,7 @@ export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: 
       className={cn(
         hideHeader
           ? "space-y-4 text-zinc-200"
-          : "rounded-[8px] border border-zinc-800 bg-[#121215] p-5 space-y-6 text-zinc-200",
+          : "rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-5 space-y-6 text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.3)]",
         className
       )}
     >
@@ -142,13 +142,13 @@ export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: 
             </>
           ) : (
             <div className="flex items-center gap-2 text-xs text-zinc-400">
-              <span className="font-mono font-semibold text-zinc-200">18 Golden Test Cases</span>
+              <span className="font-mono font-bold text-zinc-200">18 Golden Test Cases</span>
               <span className="text-zinc-600">·</span>
-              <span>Empirical correlation between confidence and sandbox pass</span>
+              <span className="font-mono text-zinc-400 text-[11px]">Empirical correlation between confidence and sandbox pass</span>
             </div>
           )}
           {isFallback && (
-            <p className="text-[10px] font-mono text-amber-400/90 mt-1 border border-amber-900/40 bg-amber-950/20 rounded px-2 py-0.5 inline-block">
+            <p className="text-[10px] font-mono text-amber-400/90 mt-1.5 border border-amber-900/40 bg-amber-950/20 rounded-[4px] px-2 py-0.5 inline-block">
               Synthetic golden fixtures (18 cases) — exercising full calibration spectrum
             </p>
           )}
@@ -156,11 +156,11 @@ export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: 
 
         {/* Monospace KPI Metrics Strip */}
         <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
-          <div className="rounded-[4px] border border-zinc-800 bg-[#0c0c0e] px-2.5 py-1">
+          <div className="rounded-[5px] border border-zinc-800 bg-[#0c0c0e]/90 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)] px-2.5 py-1">
             <span className="text-zinc-500 mr-1.5">Pearson r:</span>
             <span
               className={cn(
-                "font-semibold",
+                "font-bold",
                 stats.r >= 0.6
                   ? "text-emerald-400"
                   : stats.r >= 0.3
@@ -172,23 +172,23 @@ export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: 
             </span>
           </div>
 
-          <div className="rounded-[4px] border border-zinc-800 bg-[#0c0c0e] px-2.5 py-1">
+          <div className="rounded-[5px] border border-zinc-800 bg-[#0c0c0e]/90 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)] px-2.5 py-1">
             <span className="text-zinc-500 mr-1.5">Pass Rate:</span>
-            <span className="text-amber-400 font-semibold">{stats.passRate}%</span>
+            <span className="text-amber-400 font-bold">{stats.passRate}%</span>
           </div>
 
-          <div className="rounded-[4px] border border-zinc-800 bg-[#0c0c0e] px-2.5 py-1">
+          <div className="rounded-[5px] border border-zinc-800 bg-[#0c0c0e]/90 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)] px-2.5 py-1">
             <span className="text-zinc-500 mr-1.5">Attempts:</span>
-            <span className="text-zinc-300 font-semibold">{stats.total}</span>
+            <span className="text-zinc-200 font-bold">{stats.total}</span>
           </div>
         </div>
       </div>
 
       {/* Grid: Left Calibration Bars + Right Scatter Visualizer */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
         {/* Left: Calibration Bracket Breakdown */}
-        <div className="lg:col-span-5 space-y-3.5 rounded-[5px] border border-zinc-800/80 bg-[#09090b] p-4">
-          <div className="flex items-center justify-between border-b border-zinc-800 pb-2 text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
+        <div className="lg:col-span-5 space-y-3.5 rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#141419]/90 to-[#0e0e12]/90 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2 text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
             <span>Confidence Bracket</span>
             <span>Actual Pass Rate</span>
           </div>
@@ -204,7 +204,7 @@ export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: 
                     </span>
                     <span
                       className={cn(
-                        "font-semibold",
+                        "font-bold",
                         b.rate >= 75
                           ? "text-emerald-400"
                           : b.rate >= 50
@@ -220,14 +220,14 @@ export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: 
                 </div>
 
                 {/* Dense Progress Bar */}
-                <div className="h-2 w-full rounded-[2px] bg-zinc-900 overflow-hidden border border-zinc-800">
+                <div className="h-1.5 w-full rounded-full bg-zinc-900 overflow-hidden border border-zinc-800/80">
                   <div
                     className={cn(
                       "h-full transition-all duration-300",
                       b.rate >= 75
-                        ? "bg-emerald-400"
+                        ? "bg-gradient-to-r from-emerald-500 to-emerald-400"
                         : b.rate >= 50
-                        ? "bg-amber-400"
+                        ? "bg-gradient-to-r from-amber-500 to-amber-400"
                         : "bg-zinc-600"
                     )}
                     style={{ width: `${b.rate}%` }}
@@ -237,19 +237,19 @@ export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: 
             ))}
           </div>
 
-          <div className="pt-2 text-[10px] font-mono text-zinc-500 flex items-center gap-1.5 border-t border-zinc-900">
+          <div className="pt-2 text-[10px] font-mono text-zinc-500 flex items-center gap-1.5 border-t border-zinc-800/60">
             <TrendingUp className="h-3 w-3 text-amber-400 shrink-0" />
             <span>Monotonic pass rate increase demonstrates healthy model calibration.</span>
           </div>
         </div>
 
         {/* Right: Scatter / Attempt Distribution Visualizer */}
-        <div className="lg:col-span-7 space-y-3 rounded-[5px] border border-zinc-800/80 bg-[#09090b] p-4">
-          <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400 border-b border-zinc-800 pb-2">
+        <div className="lg:col-span-7 space-y-3 rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#141419]/90 to-[#0e0e12]/90 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-zinc-400 border-b border-zinc-800/80 pb-2">
             <span>Scatter Distribution (X: Confidence % → Y: Result)</span>
             <div className="flex items-center gap-3">
-              <span className="flex items-center gap-1 text-emerald-400">
-                <span className="h-2 w-2 rounded-full bg-emerald-400" /> Pass
+              <span className="flex items-center gap-1 text-emerald-400 font-medium">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]" /> Pass
               </span>
               <span className="flex items-center gap-1 text-zinc-500">
                 <span className="h-2 w-2 rounded-full bg-zinc-600" /> Fail
@@ -338,7 +338,7 @@ export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: 
           </div>
 
           {/* Hover Detail Card */}
-          <div className="min-h-[38px] rounded-[4px] border border-zinc-800/80 bg-[#121215] px-3 py-2 text-[11px] font-mono">
+          <div className="min-h-[38px] rounded-[6px] border border-zinc-800/80 bg-[#0d0d10]/90 px-3 py-2 text-[11px] font-mono shadow-inner">
             {hoveredPoint ? (
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5">
@@ -382,3 +382,4 @@ export function ConfidenceOutcomeChart({ data, className, hideHeader = false }: 
     </div>
   );
 }
+
