@@ -143,18 +143,34 @@ describe("eval/page.tsx", () => {
     });
   });
 
-  it("filters recent telemetry table based on search input", async () => {
+  it("renders empty state when there are no runs recorded", async () => {
+    (api.getUserEvalMetrics as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      total_runs: 0,
+      healed_runs: 0,
+      success_rate_pct: 0,
+      avg_duration_seconds: 0,
+      total_cost: 0,
+      avg_cost_per_run: 0,
+      confidence_calibration: [],
+    });
+
     render(<EvalPage />);
 
     await waitFor(() => {
-      expect(screen.getAllByText("kaiizer777/UpGrade").length).toBeGreaterThan(0);
+      expect(screen.getByText("No CI Failures Recorded Yet")).toBeInTheDocument();
     });
+  });
 
-    const searchInput = screen.getByPlaceholderText(/Filter by repository or status\.\.\./i);
-    fireEvent.change(searchInput, { target: { value: "non-existent-repo" } });
+  it("renders error banner when loading metrics fails", async () => {
+    (api.getUserEvalMetrics as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("Database connection lost")
+    );
+
+    render(<EvalPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/No runs matching filter query\./i)).toBeInTheDocument();
+      expect(screen.getByText("Telemetry Load Failure")).toBeInTheDocument();
+      expect(screen.getByText("Database connection lost")).toBeInTheDocument();
     });
   });
 

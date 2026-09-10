@@ -523,9 +523,8 @@ export default function ReposPage() {
                           <div className="flex items-center gap-2">
                             <FolderGit2 className="h-4 w-4 text-amber-400/80 shrink-0" />
                             <div className="flex items-center gap-1 font-mono text-xs">
-                              <span className="text-zinc-400">{repo.owner}/</span>
                               <span className="font-bold text-zinc-100 group-hover:text-amber-300 transition-colors">
-                                {repo.name}
+                                {repo.owner}/{repo.name}
                               </span>
                             </div>
                             <a
@@ -605,7 +604,7 @@ export default function ReposPage() {
                             onClick={() => handleDeleteRepo(repo.id, `${repo.owner}/${repo.name}`)}
                             disabled={deletingId === repo.id}
                             className="h-7 w-7 rounded-[5px] text-zinc-400 hover:text-red-400 bg-gradient-to-b from-zinc-800/70 via-zinc-850/80 to-zinc-900/90 border border-zinc-700/50 hover:border-red-500/40 hover:bg-red-950/30 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] transition-all cursor-pointer"
-                            title="Disconnect repository"
+                            title="Disconnect repo"
                           >
                             {deletingId === repo.id ? (
                               <RefreshCw className="h-3.5 w-3.5 animate-spin text-red-400" />
