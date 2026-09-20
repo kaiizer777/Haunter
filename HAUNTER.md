@@ -314,7 +314,7 @@ Haunter employs a dedicated, serverless sandbox verification engine based entire
 - **Installation Token Cache:** GitHub App installation tokens are minted via `POST /app/installations/{installation_id}/access_tokens` and cached in `_TOKEN_CACHE` with a 5-minute pre-expiry margin (55 minutes effective TTL).
 
 ### 5.2 Deterministic Test Mirror Isolation
-- **Namespace Strategy:** Isolated test mirrors are created under the configured sandbox organization or primary account `kaiizer777`.
+- **Namespace Strategy:** Isolated test mirrors are created under the configured sandbox organization or primary account (default `haunter-sandboxes` in config, configured via `GITHUB_SANDBOX_ORG=kaiizer777`).
 - **Deterministic Naming:** Repositories are mapped per user to ensure tenant isolation:
   $$\text{hash} = \text{SHA256}(\text{user\_github\_id} + \text{":haunter-sandbox-v1"})[0:8]$$
   $$\text{repo\_name} = \text{"haunter-test-" + hash}$$
@@ -379,6 +379,7 @@ erDiagram
         string github_username
         text avatar_url
         text access_token
+        string role
         timestamp created_at
         timestamp updated_at
     }
@@ -476,6 +477,7 @@ erDiagram
 - `github_username`: `String(255)` (Non-nullable).
 - `avatar_url`: `Text` (Nullable).
 - `access_token`: `Text` (Nullable, encrypted at rest via Fernet).
+- `role`: `String(32)` (Non-nullable, default `"user"`).
 - `created_at`: `TIMESTAMP(timezone=True)` (Default UTC now).
 - `updated_at`: `TIMESTAMP(timezone=True)` (On-update UTC now).
 

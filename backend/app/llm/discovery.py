@@ -10,6 +10,7 @@ to the last known discovered list or a minimal bootstrap fallback set on failure
 import asyncio
 import logging
 import time
+import uuid
 from typing import Any
 from urllib.parse import urljoin
 
@@ -85,6 +86,8 @@ async def get_dynamic_free_models(
     headers = {
         "Authorization": f"Bearer {resolved_api_key}",
         "Content-Type": "application/json",
+        "User-Agent": "opencode/1.0.0",
+        "x-session-id": f"sess_{uuid.uuid4().hex}",
     }
 
     async with _cache_lock:

@@ -204,3 +204,114 @@ async def post_commit_comment(
         raise GitHubClientError(f"GitHub API returned error {response.status_code}")
 
     return response.json()
+
+
+async def fetch_repo_tree_paths(
+    owner: str,
+    repo: str,
+    sha: str,
+    token: Optional[str] = None,
+    max_paths: int = 60,
+) -> list[str]:
+    """
+    Fetch repository file tree paths via Git Trees API (recursive).
+    Filters out hidden directories/files (.git, .github) and common vendor dirs.
+    Returns prioritized source files up to max_paths.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error("Network error fetching git tree for %s/%s @ %s: %s", owner, repo, sha, exc)
+            return []
+
+    if response.is_error:
+        logger.warning("GitHub API error fetching git tree for %s/%s @ %s: %s", owner, repo, sha, response.status_code)
+        return []
+
+    data = response.json()
+    tree = data.get("tree", [])
+    paths = []
+    _IGNORE_PREFIXES = (
+        ".git/",
+        ".github/",
+        "node_modules/",
+        ".venv/",
+        "venv/",
+        "__pycache__/",
+        "dist/",
+        "build/",
+        ".pytest_cache/",
+        ".mypy_cache/",
+    )
+    _INTERESTING_EXTS = (
+        ".py",
+        ".ts",
+        ".js",
+        ".tsx",
+        ".jsx",
+        ".go",
+        ".rs",
+        ".java",
+        ".rb",
+        ".json",
+        ".toml",
+        ".yaml",
+        ".yml",
+        ".ini",
+        ".cfg",
+    )
+
+    for item in tree:
+        if item.get("type") != "blob":
+            continue
+        p = item.get("path", "")
+        if any(p.startswith(ign) or f"/{ign}" in f"/{p}" for ign in _IGNORE_PREFIXES):
+            continue
+        if p.endswith(_INTERESTING_EXTS) or "." not in p:
+            paths.append(p)
+            if len(paths) >= max_paths:
+                break
+
+    return paths
+
+
+async def fetch_file_content(
+    owner: str,
+    repo: str,
+    path: str,
+    sha: str,
+    token: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Fetch raw file content from GitHub at a specific commit SHA.
+    Returns plain text or None on 404 / errors.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{path}?ref={sha}"
+    headers = _build_headers(token=token, accept="application/vnd.github.v3.raw")
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.warning("Network error fetching file %s for %s/%s @ %s: %s", path, owner, repo, sha, exc)
+            return None
+
+    if response.status_code == 404:
+        logger.debug("File %s not found in %s/%s @ %s", path, owner, repo, sha)
+        return None
+    if response.is_error:
+        logger.warning(
+            "GitHub API error (%s) fetching file %s for %s/%s @ %s",
+            response.status_code,
+            path,
+            owner,
+            repo,
+            sha,
+        )
+        return None
+
+    return response.text

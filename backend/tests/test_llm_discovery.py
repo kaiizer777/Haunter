@@ -73,6 +73,10 @@ async def test_get_dynamic_free_models_filters_free_tier() -> None:
     result = await get_dynamic_free_models(api_key="test_key_123")
 
     assert route.call_count == 1
+    req_headers = route.calls.last.request.headers
+    assert req_headers["Authorization"] == "Bearer test_key_123"
+    assert req_headers["User-Agent"] == "opencode/1.0.0"
+    assert req_headers["x-session-id"].startswith("sess_")
     assert result == ["nemotron-3.5-lightning-free", "qwen-2.5-coder-free"]
 
 

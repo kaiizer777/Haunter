@@ -54,8 +54,9 @@ import asyncio
 import base64
 import hashlib
 import logging
+import os
 import re
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import httpx
 
@@ -304,6 +305,249 @@ async def get_or_create_test_repo(
 _FILE_HEADER_RE: re.Pattern[str] = re.compile(r"^(?:---|\+\+\+)\s+(?:[ab]/)?(\S+)")
 
 
+_HUNK_HEADER_RE: re.Pattern[str] = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
+
+
+def resolve_file_path(target_path: str, existing_paths: Iterable[str]) -> str:
+    """
+    Resolve a target file path against known repository paths.
+
+    1. If target_path is already in existing_paths, return as-is.
+    2. Normalize slashes and strip leading 'a/' or 'b/'.
+    3. Try exact suffix match: e.g. target_path == 'analytics.py' matches 'backend/app/core/analytics.py'.
+    4. If there is a single unique match, return the resolved full path.
+    5. If no match or ambiguous (>1 candidates), return target_path unchanged.
+    """
+    existing_set = set(existing_paths)
+    if target_path in existing_set:
+        return target_path
+
+    norm = target_path.replace("\\", "/").strip()
+    if norm.startswith("a/") or norm.startswith("b/"):
+        norm = norm[2:]
+    norm = norm.lstrip("/")
+
+    if norm in existing_set:
+        return norm
+
+    # 1. Exact suffix match with leading slash
+    suffix_matches = [p for p in existing_paths if p.endswith("/" + norm)]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+
+    # 2. Basename match if norm has no directory components
+    if "/" not in norm:
+        base_matches = [p for p in existing_paths if os.path.basename(p) == norm]
+        if len(base_matches) == 1:
+            return base_matches[0]
+
+    return target_path
+
+
+def _split_patch_by_file(patch_text: str) -> tuple[dict[str, str], list[str]]:
+    """
+    Split a multi-file unified diff into {file_path: file_patch_text} and deleted_paths.
+    """
+    file_patches: dict[str, list[str]] = {}
+    deleted_paths: list[str] = []
+    current_path: Optional[str] = None
+    old_path: Optional[str] = None
+
+    for line in patch_text.splitlines():
+        if (line.startswith("---") or line.startswith("+++")) and _FILE_HEADER_RE.match(line):
+            m = _FILE_HEADER_RE.match(line)
+            assert m is not None
+            raw_path = m.group(1).strip()
+            if line.startswith("---"):
+                old_path = raw_path
+                current_path = None
+            elif line.startswith("+++"):
+                if raw_path == "/dev/null":
+                    if old_path and old_path != "/dev/null":
+                        deleted_paths.append(old_path)
+                    current_path = None
+                else:
+                    current_path = raw_path
+                    if current_path not in file_patches:
+                        file_patches[current_path] = []
+            continue
+
+        if current_path is not None:
+            file_patches[current_path].append(line)
+
+    result = {p: "\n".join(lines) for p, lines in file_patches.items()}
+    return result, deleted_paths
+
+
+def apply_unified_diff(base_content: str, patch_text: str) -> str:
+    """
+    Apply a unified diff (supports partial hunks) to base_content string.
+    If base_content is empty (new file), reconstructs from '+' lines.
+    """
+    lines = patch_text.splitlines()
+    hunks = []
+    current_hunk = None
+
+    for line in lines:
+        if line.startswith("@@"):
+            m = _HUNK_HEADER_RE.match(line)
+            if m:
+                old_start = int(m.group(1))
+                old_len = int(m.group(2)) if m.group(2) is not None else 1
+                new_start = int(m.group(3))
+                new_len = int(m.group(4)) if m.group(4) is not None else 1
+                current_hunk = {
+                    "old_start": old_start,
+                    "old_len": old_len,
+                    "new_start": new_start,
+                    "new_len": new_len,
+                    "lines": [],
+                }
+                hunks.append(current_hunk)
+                continue
+        if current_hunk is not None:
+            if line.startswith(("+", "-", " ")) or line == "":
+                current_hunk["lines"].append(line)
+
+    if not hunks:
+        added = [l[1:] for l in lines if l.startswith("+")]
+        res = "\n".join(added) if added else base_content
+        if base_content.endswith("\n") and not res.endswith("\n"):
+            res += "\n"
+        return res
+
+    if not base_content.strip():
+        # New file creation
+        added = []
+        for h in hunks:
+            for l in h["lines"]:
+                if l.startswith("+"):
+                    added.append(l[1:])
+                elif l.startswith(" ") or l == "":
+                    added.append(l[1:] if l.startswith(" ") else "")
+        return "\n".join(added)
+
+    base_lines = base_content.splitlines()
+    offset = 0
+
+    for h in hunks:
+        old_lines = []
+        new_lines = []
+        for l in h["lines"]:
+            if l.startswith(" "):
+                old_lines.append(l[1:])
+                new_lines.append(l[1:])
+            elif l.startswith("-"):
+                old_lines.append(l[1:])
+            elif l.startswith("+"):
+                new_lines.append(l[1:])
+            elif l == "":
+                old_lines.append("")
+                new_lines.append("")
+
+        if not old_lines:
+            insert_idx = max(0, min(len(base_lines), (h["old_start"] - 1) + offset))
+            base_lines[insert_idx:insert_idx] = new_lines
+            offset += len(new_lines)
+            continue
+
+        expected_idx = (h["old_start"] - 1) + offset
+        match_idx = None
+
+        if 0 <= expected_idx <= len(base_lines) - len(old_lines):
+            if base_lines[expected_idx : expected_idx + len(old_lines)] == old_lines:
+                match_idx = expected_idx
+
+        if match_idx is None:
+            for delta in range(1, 51):
+                for candidate in (expected_idx - delta, expected_idx + delta):
+                    if 0 <= candidate <= len(base_lines) - len(old_lines):
+                        if base_lines[candidate : candidate + len(old_lines)] == old_lines:
+                            match_idx = candidate
+                            break
+                if match_idx is not None:
+                    break
+
+        if match_idx is None:
+            for idx in range(len(base_lines) - len(old_lines) + 1):
+                if base_lines[idx : idx + len(old_lines)] == old_lines:
+                    match_idx = idx
+                    break
+
+        if match_idx is not None:
+            base_lines[match_idx : match_idx + len(old_lines)] = new_lines
+            offset += len(new_lines) - len(old_lines)
+        else:
+            clean_old = [l.strip() for l in old_lines]
+            for idx in range(len(base_lines) - len(old_lines) + 1):
+                if [b.strip() for b in base_lines[idx : idx + len(old_lines)]] == clean_old:
+                    match_idx = idx
+                    base_lines[match_idx : match_idx + len(old_lines)] = new_lines
+                    offset += len(new_lines) - len(old_lines)
+                    break
+
+        # Tier 3: Targeted remove-line matching (handles omitted/added blank lines in context)
+        if match_idx is None:
+            to_remove = [l[1:] for l in h["lines"] if l.startswith("-")]
+            to_add = [l[1:] for l in h["lines"] if l.startswith("+")]
+            if to_remove:
+                clean_rem = [l.strip() for l in to_remove]
+                candidates = [
+                    idx for idx in range(len(base_lines) - len(to_remove) + 1)
+                    if [b.strip() for b in base_lines[idx : idx + len(to_remove)]] == clean_rem
+                ]
+                if candidates:
+                    best_cand = min(candidates, key=lambda c: abs(c - expected_idx))
+                    # Check indentation of target base line
+                    target_indent = len(base_lines[best_cand]) - len(base_lines[best_cand].lstrip())
+                    if to_add and to_add[0].strip():
+                        add_indent = len(to_add[0]) - len(to_add[0].lstrip())
+                        indent_diff = target_indent - add_indent
+                        if indent_diff != 0:
+                            adjusted_add = []
+                            for al in to_add:
+                                if al.strip():
+                                    if indent_diff > 0:
+                                        adjusted_add.append(" " * indent_diff + al)
+                                    else:
+                                        strip_count = min(len(al) - len(al.lstrip()), -indent_diff)
+                                        adjusted_add.append(al[strip_count:])
+                                else:
+                                    adjusted_add.append("")
+                            to_add = adjusted_add
+
+                    base_lines[best_cand : best_cand + len(to_remove)] = to_add
+                    offset += len(to_add) - len(to_remove)
+                    match_idx = best_cand
+                    logger.info("mirror: tier-3 targeted match applied at line %d", best_cand + 1)
+            elif to_add:
+                # Pure insertion without deletion: match non-empty context anchor
+                non_empty_ctx = [l[1:].strip() for l in h["lines"] if l.startswith(" ") and l[1:].strip()]
+                if non_empty_ctx:
+                    anchor = non_empty_ctx[0]
+                    for idx, bl in enumerate(base_lines):
+                        if bl.strip() == anchor:
+                            insert_at = idx + 1
+                            base_lines[insert_at:insert_at] = to_add
+                            offset += len(to_add)
+                            match_idx = insert_at
+                            logger.info("mirror: tier-3 anchor insertion applied at line %d", insert_at + 1)
+                            break
+
+        if match_idx is None:
+            logger.warning(
+                "mirror: hunk starting at line %d could not be matched against file (%d lines)",
+                h.get("old_start", 0),
+                len(base_lines),
+            )
+
+
+    res = "\n".join(base_lines)
+    if base_content.endswith("\n") and not res.endswith("\n"):
+        res += "\n"
+    return res
+
+
 def _parse_patch(patch_text: str) -> tuple[dict[str, str], list[str]]:
     """
     Parse a unified diff into (files_dict, deleted_paths).
@@ -421,7 +665,10 @@ async def push_patch_to_mirror(
         raise ValueError("push_patch_to_mirror: patch_text is empty")
 
     files, deleted_paths = _parse_patch(patch_text)
-    if not files and not deleted_paths:
+    split_files, split_deleted = _split_patch_by_file(patch_text)
+    combined_deleted = set(deleted_paths) | set(split_deleted)
+
+    if not files and not combined_deleted:
         raise ValueError("push_patch_to_mirror: patch did not parse to any file changes")
 
     # MVP guardrail — surface large patches as a clear ValueError so the
@@ -445,18 +692,44 @@ async def push_patch_to_mirror(
     # a) Seeded repository files (from tarball)
     all_files: dict[str, bytes] = dict(seed_files) if seed_files else {}
 
-    # Prune files explicitly deleted by the patch
-    for del_p in deleted_paths:
-        all_files.pop(del_p, None)
+    # Prune files explicitly deleted by the patch (resolving path against seed files)
+    for del_p in combined_deleted:
+        resolved_del = resolve_file_path(del_p, all_files.keys())
+        if resolved_del != del_p:
+            logger.info("mirror: auto-resolved deleted path '%s' -> '%s'", del_p, resolved_del)
+        all_files.pop(resolved_del, None)
 
     # b) .github/workflows/{workflow_filename}
     if workflow_filename and workflow_content:
         wf_path = f".github/workflows/{workflow_filename}"
         all_files[wf_path] = workflow_content.encode("utf-8")
 
-    # c) The patch diff modifications
-    for path, content_str in files.items():
-        all_files[path] = content_str.encode("utf-8")
+    # c) The patch diff modifications (with unified diff application & path resolution)
+    for path, patch_for_file in split_files.items():
+        resolved_path = resolve_file_path(path, all_files.keys())
+        if resolved_path != path:
+            logger.info(
+                "mirror: auto-resolved patch path '%s' -> '%s' against seed files",
+                path,
+                resolved_path,
+            )
+        if resolved_path in all_files:
+            try:
+                base_str = all_files[resolved_path].decode("utf-8")
+            except UnicodeDecodeError:
+                base_str = all_files[resolved_path].decode("utf-8", errors="replace")
+            new_content = apply_unified_diff(base_str, patch_for_file)
+            all_files[resolved_path] = new_content.encode("utf-8")
+        else:
+            # New file
+            new_content = apply_unified_diff("", patch_for_file)
+            all_files[resolved_path] = new_content.encode("utf-8")
+
+    # Fallback for any file captured in files that split_files missed
+    for path, fallback_content in files.items():
+        resolved_path = resolve_file_path(path, all_files.keys())
+        if resolved_path not in all_files:
+            all_files[resolved_path] = fallback_content.encode("utf-8")
 
     if not all_files:
         raise ValueError("push_patch_to_mirror: no files to commit")

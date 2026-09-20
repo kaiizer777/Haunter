@@ -8,6 +8,7 @@ and supports tool-calling passthrough without exposing secrets.
 
 import logging
 import time
+import uuid
 from typing import Any
 from urllib.parse import urljoin
 
@@ -28,10 +29,12 @@ class OpenCodeZenProvider:
         base_url: str | None = None,
         api_key: str | None = None,
         timeout: float = 120.0,
+        session_id: str | None = None,
     ) -> None:
         self.base_url = (base_url or settings.opencode_zen_base_url).rstrip("/") + "/"
         self._api_key = api_key or settings.opencode_zen_api_key
         self.timeout = timeout
+        self.session_id = session_id or f"sess_{uuid.uuid4().hex}"
 
     async def complete(
         self,
@@ -57,9 +60,12 @@ class OpenCodeZenProvider:
             raise LLMAuthenticationError("OPENCODE_ZEN_API_KEY is not configured in settings or environment")
 
         endpoint = urljoin(self.base_url, "chat/completions")
+        session_id = kwargs.pop("session_id", None) or self.session_id
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
+            "User-Agent": "opencode/1.0.0",
+            "x-session-id": session_id,
         }
 
         # Clamp `max_tokens` to the configured ceiling. Subagents currently pass

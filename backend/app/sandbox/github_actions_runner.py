@@ -430,13 +430,44 @@ async def _list_workflow_runs(
     return resp.json().get("workflow_runs", []) or []
 
 
+def _extract_relevant_failure_log(raw_log: str, max_chars: int = 3500) -> str:
+    """
+    Extract the relevant test failure output from raw GitHub Actions job logs.
+    Strips post-job cleanup and focuses on test failures, assertion errors, and tracebacks.
+    """
+    if not raw_log:
+        return ""
+    # Strip any post-job cleanup boilerplate
+    cleanup_idx = raw_log.find("Post job cleanup")
+    if cleanup_idx != -1:
+        log_content = raw_log[:cleanup_idx].rstrip()
+    else:
+        log_content = raw_log.rstrip()
+
+    node_dep_idx = log_content.find("Node 20 is being deprecated")
+    if node_dep_idx != -1:
+        log_content = log_content[:node_dep_idx].rstrip()
+
+    # Look for pytest failure sections (prioritize FAILURES and summary)
+    markers = ["=== FAILURES ===", "=== short test summary info ===", "FAILED ", "##[error]Process completed with exit code"]
+    for m in markers:
+        idx = log_content.find(m)
+        if idx != -1:
+            snippet = log_content[idx:].strip()
+            if len(snippet) > max_chars:
+                return snippet[-max_chars:].strip()
+            return snippet
+
+    return log_content[-max_chars:].strip()
+
+
 async def _get_workflow_run_log_tail(
     client: httpx.AsyncClient,
     repo_full: str,
     run_id: int,
     *,
     token: str,
-    max_bytes: int = 2048,
+    max_bytes: int = 4096,
 ) -> str:
     """
     Return a brief failure summary from a workflow run's jobs.
@@ -462,16 +493,33 @@ async def _get_workflow_run_log_tail(
 
         # Summarise failed jobs/steps.
         lines: list[str] = []
+        failed_job_id: Optional[int] = None
         for job in jobs:
             job_name = job.get("name", f"job#{job.get('id')})")
             conclusion = job.get("conclusion") or "unknown"
             lines.append(f"Job '{job_name}': {conclusion}")
+            if conclusion == "failure" and failed_job_id is None:
+                failed_job_id = job.get("id")
             for step in job.get("steps", []):
                 step_conclusion = step.get("conclusion") or step.get("status", "")
                 if step_conclusion not in ("success", "skipped", ""):
                     lines.append(
                         f"  Step '{step.get('name', '?')}': {step_conclusion}"
                     )
+
+        if failed_job_id:
+            try:
+                log_resp = await client.get(
+                    f"{_GITHUB_API_BASE}/repos/{repo_full}/actions/jobs/{failed_job_id}/logs",
+                    headers=_auth_headers(token),
+                    follow_redirects=True,
+                )
+                if log_resp.status_code == 200:
+                    raw_log = log_resp.text
+                    tail_chars = _extract_relevant_failure_log(raw_log, max_chars=3500)
+                    lines.append(f"\n--- Test Failure Log ---\n{tail_chars}")
+            except Exception as log_err:
+                logger.debug("github_actions_runner: failed to fetch failed job log tail: %s", log_err)
 
         summary = "\n".join(lines)
         return summary[-max_bytes:] if len(summary) > max_bytes else summary

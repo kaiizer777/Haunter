@@ -53,6 +53,7 @@ from app.llm.exceptions import (
     LLMRateLimitError,
     LLMTimeoutError,
 )
+from app.llm.opencode_zen import OpenCodeZenProvider
 from app.models import ModelConfig, Repo, User
 from tests.conftest import truncate_all
 
@@ -64,7 +65,7 @@ OPENCODE_ZEN_MODELS_ENDPOINT = "https://opencode.ai/zen/v1/models"
 @respx.mock
 async def test_llm_client_complete_mocked_200():
     """LLMClient.complete() parses 200 response into content, usage, latency_ms, and model."""
-    respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+    route = respx.post(OPENCODE_ZEN_ENDPOINT).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -96,8 +97,40 @@ async def test_llm_client_complete_mocked_200():
         assert res["latency_ms"] >= 0
         assert res["model"] == "nemotron-3.5-lightning-free"
         assert res["tool_calls"] is None
+        assert route.called
+        req_headers = route.calls.last.request.headers
+        assert req_headers["User-Agent"] == "opencode/1.0.0"
+        assert req_headers["x-session-id"].startswith("sess_")
     finally:
         settings.opencode_zen_api_key = orig_key
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_opencode_zen_provider_sends_required_free_tier_headers():
+    """OpenCodeZenProvider must send User-Agent: opencode/1.0.0 and x-session-id."""
+    route = respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                "model": "nemotron-3.5-lightning-free",
+            },
+        )
+    )
+    provider = OpenCodeZenProvider(
+        base_url="https://opencode.ai/zen/v1",
+        api_key="test-api-key",
+        session_id="sess_custom_test_123",
+    )
+    res = await provider.complete(messages=[{"role": "user", "content": "hi"}])
+    assert res["content"] == "ok"
+    assert route.called
+    headers = route.calls.last.request.headers
+    assert headers["Authorization"] == "Bearer test-api-key"
+    assert headers["User-Agent"] == "opencode/1.0.0"
+    assert headers["x-session-id"] == "sess_custom_test_123"
 
 
 @pytest.mark.asyncio

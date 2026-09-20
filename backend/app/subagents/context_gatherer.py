@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, Optional
@@ -139,6 +140,64 @@ def _extract_file_paths_from_diff(diff_text: str) -> list[str]:
     return paths
 
 
+def _discover_candidate_files_to_inspect(logs_text: str, repo_paths: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Identify up to 2 candidate implementation files related to the failure,
+    plus up to 1 candidate test file.
+    Matches test file stems against repo tree, prioritizing core/services logic over routers.
+    """
+    candidates: list[str] = []
+    test_files: list[str] = []
+
+    # 1. Match test file names (e.g. tests/test_analytics.py or test_analytics.py)
+    test_file_matches = re.findall(r"(?:[\w\-/]+/)?(test_[\w\-]+)\.(?:py|ts|js)", logs_text or "")
+    test_stems = set(test_file_matches)
+
+    matching_files: list[str] = []
+    for t_stem in test_stems:
+        core_name = t_stem[5:] if t_stem.startswith("test_") else t_stem
+        for p in repo_paths:
+            basename = os.path.basename(p)
+            base_stem = os.path.splitext(basename)[0]
+            if not p.startswith("test") and "/test" not in p and "/tests/" not in p:
+                if base_stem == core_name or base_stem == t_stem:
+                    if p not in matching_files:
+                        matching_files.append(p)
+            else:
+                if (base_stem == t_stem or base_stem == f"test_{core_name}") and p not in test_files:
+                    test_files.append(p)
+
+    # Prioritize core logic over routers: core/, services/, models/ > api/, routers/
+    def _priority_score(path: str) -> int:
+        norm = path.replace("\\", "/").lower()
+        if "/core/" in norm or "/services/" in norm or "/models/" in norm:
+            return 0
+        if "/lib/" in norm or "/utils/" in norm:
+            return 1
+        if "/routers/" in norm or "/api/" in norm:
+            return 3
+        return 2
+
+    matching_files.sort(key=_priority_score)
+    for mf in matching_files:
+        if mf not in candidates:
+            candidates.append(mf)
+
+    # 2. Match implementation files mentioned directly in tracebacks
+    trace_files = re.findall(
+        r"(?:File\s+[\"']|[\s/])([\w\-/]+\.(?:py|ts|js))[\"']?,\s+line\s+\d+",
+        logs_text or "",
+    )
+    for tf in trace_files:
+        norm_tf = tf.replace("\\", "/").strip()
+        for p in repo_paths:
+            if (p == norm_tf or p.endswith("/" + norm_tf)) and not p.startswith("test") and "/test" not in p and "/tests/" not in p:
+                if p not in candidates:
+                    candidates.append(p)
+
+    return candidates[:2], test_files[:1]
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -178,13 +237,14 @@ async def gather_context(
     Gather CI failure context and return a distilled root-cause summary.
 
     Steps:
-      1. Fetch logs, diff, commit metadata concurrently (3-way gather, each
-         guarded by FETCH_TIMEOUT_S).
-      2. Truncate each to CAP_CHARS.
-      3. Redact secrets from each string.
-      4. Make a single LLMClient call with all three inputs fused.
-      5. Persist a run_steps row (tokens, latency, cost).
-      6. Return the summary string (targeted: 200–400 tokens ≈ 800–1600 chars).
+      1. Concurrent fetch of workflow logs, commit diff, and commit metadata.
+      2. Independent character truncation (CAP_CHARS).
+      3. Independent secret redaction (_redact_secrets).
+      4. LLM synthesis with empty-response retry (_call_with_empty_retry).
+      5. Persist run_steps trace row (tokens, latency, cost).
+      6. Enrich summary with file list from diff or repo tree.
+      7. Inject source code of candidate failing files.
+      8. Return distilled summary string.
 
     Raw inputs are not stored anywhere — only the distilled summary propagates.
     """
@@ -254,6 +314,7 @@ async def gather_context(
     #    Bounded to _MAX_FILE_PATHS_IN_SUMMARY to stay in the input window.
     # -------------------------------------------------------------------------
     file_paths = _extract_file_paths_from_diff(diff_clean)
+    tree_paths: list[str] = []
     if file_paths:
         file_section = (
             "\n\n## Files in the failing commit\n"
@@ -265,6 +326,75 @@ async def gather_context(
             run.id,
             len(file_paths),
         )
+    else:
+        try:
+            tree_paths = await gh.fetch_repo_tree_paths(owner=owner, repo=name, sha=sha)
+            if tree_paths:
+                tree_section = (
+                    "\n\n## Repository Files\n"
+                    + "\n".join(f"- {p}" for p in tree_paths)
+                )
+                summary = (summary or "").rstrip() + tree_section
+                logger.info(
+                    "context_gatherer: run=%s appended %d repository tree path(s) to summary",
+                    run.id,
+                    len(tree_paths),
+                )
+        except Exception as exc:
+            logger.warning("context_gatherer: run=%s failed to fetch repo tree paths: %s", run.id, exc)
+
+    # -------------------------------------------------------------------------
+    # 7. Discover and inject source code of candidate failing files & tests
+    # -------------------------------------------------------------------------
+    all_known_paths = file_paths or tree_paths
+    if all_known_paths:
+        try:
+            candidate_files, test_files = _discover_candidate_files_to_inspect(logs_clean, all_known_paths)
+            for cand_path in candidate_files:
+                file_content = await gh.fetch_file_content(owner=owner, repo=name, path=cand_path, sha=sha)
+                if file_content:
+                    lines = file_content.splitlines()
+                    if len(lines) > 250:
+                        capped = "\n".join(lines[:250]) + "\n... (truncated)"
+                    else:
+                        capped = file_content
+                    clean_code = _redact_secrets(capped)
+                    source_section = (
+                        f"\n\n## Source Code of Failing Files\n"
+                        f"### {cand_path}\n"
+                        f"```python\n{clean_code}\n```\n"
+                    )
+                    summary = (summary or "").rstrip() + source_section
+                    logger.info(
+                        "context_gatherer: run=%s injected source code for %s (%d lines)",
+                        run.id,
+                        cand_path,
+                        len(lines),
+                    )
+
+            for test_path in test_files:
+                test_content = await gh.fetch_file_content(owner=owner, repo=name, path=test_path, sha=sha)
+                if test_content:
+                    lines = test_content.splitlines()
+                    if len(lines) > 200:
+                        capped = "\n".join(lines[:200]) + "\n... (truncated)"
+                    else:
+                        capped = test_content
+                    clean_test = _redact_secrets(capped)
+                    test_section = (
+                        f"\n\n## Failing Test Files (for reference — do NOT modify test files)\n"
+                        f"### {test_path}\n"
+                        f"```python\n{clean_test}\n```\n"
+                    )
+                    summary = (summary or "").rstrip() + test_section
+                    logger.info(
+                        "context_gatherer: run=%s injected test file %s (%d lines)",
+                        run.id,
+                        test_path,
+                        len(lines),
+                    )
+        except Exception as exc:
+            logger.warning("context_gatherer: run=%s failed to inject candidate source/test code: %s", run.id, exc)
 
     # -------------------------------------------------------------------------
     # 7. Return distilled summary (with file list appended)
