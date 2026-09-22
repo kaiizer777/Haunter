@@ -502,3 +502,100 @@ async def fetch_pull_request_diff(
     return response.text
 
 
+
+
+async def fetch_git_tree(
+    owner: str,
+    repo: str,
+    tree_sha: str,
+    recursive: bool = True,
+    token=None,
+) -> "dict[str, Any]":
+    """
+    Fetch the full git tree for a given commit or tree SHA via GitHub Git Data API.
+
+    GET /repos/{owner}/{repo}/git/trees/{tree_sha}?recursive=1
+
+    Returns the raw GitHub response dict containing a "tree" list of blob/tree entries.
+    Callers are responsible for filtering (binary blobs, ignored dirs, etc.).
+
+    Raises:
+        GitHubResourceNotFoundError: SHA or repo not found (404).
+        GitHubRateLimitError: API rate limit exceeded (403/429 with rate-limit body).
+        GitHubAuthError: Authentication failure (401/403 without rate-limit body).
+        GitHubClientError: Network errors or other API failures.
+    """
+    params = "?recursive=1" if recursive else ""
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{tree_sha}{params}"
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error("Network error fetching git tree for %s/%s @ %s", owner, repo, tree_sha)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"Git tree not found for {owner}/{repo} @ {tree_sha}")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    return response.json()
+
+
+async def fetch_branch_sha(
+    owner: str,
+    repo: str,
+    branch: str,
+    token=None,
+) -> str:
+    """
+    Fetch the current HEAD commit SHA for a given branch.
+
+    GET /repos/{owner}/{repo}/branches/{branch}
+
+    Returns the 40-character commit SHA string.
+
+    Raises:
+        GitHubResourceNotFoundError: Branch or repo not found (404).
+        GitHubRateLimitError: API rate limit exceeded.
+        GitHubAuthError: Authentication failure (401/403).
+        GitHubClientError: Network errors, missing commit data, or other API failures.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/branches/{branch}"
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error("Network error fetching branch SHA for %s/%s branch %s", owner, repo, branch)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"Branch '{branch}' not found for {owner}/{repo}")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    data = response.json()
+    try:
+        sha: str = data["commit"]["sha"]
+    except (KeyError, TypeError) as exc:
+        raise GitHubClientError(
+            f"Unexpected branch API response structure for {owner}/{repo} branch '{branch}'"
+        ) from exc
+
+    return sha

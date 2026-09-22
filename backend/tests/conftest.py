@@ -25,7 +25,7 @@ load_dotenv()
 from app.auth import _encrypt_token, _sign_state, _sign_user_id
 from app.config import settings
 from app.db import async_session_maker as _prod_session_maker
-from app.models import Attempt, EvalResult, ModelConfig, Repo, Run, RunStep, User
+from app.models import AgentSession, Attempt, EvalResult, ModelConfig, Repo, Run, RunStep, User
 from main import app
 
 # ---------------------------------------------------------------------------
@@ -97,6 +97,7 @@ async def truncate_all(db: AsyncSession) -> None:
     for stmt in (
         "DELETE FROM system_configs",
         "DELETE FROM code_reviews",
+        "DELETE FROM agent_sessions",
         "DELETE FROM eval_results",
         "DELETE FROM attempts",
         "DELETE FROM run_steps",

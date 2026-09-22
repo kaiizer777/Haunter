@@ -368,3 +368,67 @@ class UserEvalMetricsOut(BaseModel):
     confidence_calibration: list[ConfidenceBucket]
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Agent Session schemas (Phase 1 — Cloud Agentic Live Session)
+# ---------------------------------------------------------------------------
+
+
+class SessionCreateIn(BaseModel):
+    """
+    Request body for POST /sessions.
+
+    branch_name defaults to repo.default_branch server-side if omitted.
+    title defaults to "Pairing Session" if omitted.
+    extra="forbid" prevents mass-assignment injection.
+    """
+
+    repo_id: uuid.UUID
+    branch_name: Optional[str] = Field(None, max_length=255)
+    title: Optional[str] = Field(None, max_length=255)
+
+    model_config = {"extra": "forbid"}
+
+
+class SessionOut(BaseModel):
+    """
+    Full session DTO returned by all session endpoints.
+
+    repo_owner and repo_name are populated server-side via join —
+    never derived from client input.
+    """
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    repo_id: uuid.UUID
+    repo_owner: str
+    repo_name: str
+    title: str
+    status: str
+    branch_name: str
+    base_sha: str
+    conversation_history: list[dict[str, Any]]
+    staged_patches: dict[str, str]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class SessionListOut(BaseModel):
+    sessions: list[SessionOut]
+    total: int
+
+
+class SessionCloseIn(BaseModel):
+    """
+    Optional request body for POST /sessions/{session_id}/close.
+
+    reason is informational only — stored nowhere in Phase 1.
+    extra="forbid" prevents injection via unexpected fields.
+    """
+
+    reason: Optional[str] = Field(None, max_length=1000)
+
+    model_config = {"extra": "forbid"}

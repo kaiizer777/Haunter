@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UUID, UniqueConstraint, Float
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, Integer, String, Text, UUID, UniqueConstraint, Float
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -49,6 +49,9 @@ class User(Base):
     )
 
     repos: Mapped[list["Repo"]] = relationship("Repo", back_populates="user", cascade="all, delete-orphan")
+    agent_sessions: Mapped[list["AgentSession"]] = relationship(
+        "AgentSession", back_populates="user", cascade="all, delete-orphan"
+    )
 
     @property
     def is_admin(self) -> bool:
@@ -80,6 +83,9 @@ class Repo(Base):
     runs: Mapped[list["Run"]] = relationship("Run", back_populates="repo", cascade="all, delete-orphan")
     code_reviews: Mapped[list["CodeReview"]] = relationship(
         "CodeReview", back_populates="repo", cascade="all, delete-orphan"
+    )
+    agent_sessions: Mapped[list["AgentSession"]] = relationship(
+        "AgentSession", back_populates="repo", cascade="all, delete-orphan"
     )
 
     __table_args__ = (
@@ -263,3 +269,55 @@ class CodeReview(Base):
 
     repo: Mapped["Repo"] = relationship("Repo", back_populates="code_reviews")
 
+
+class AgentSession(Base):
+    """
+    Cloud Agentic Live Session — persistent pairing session between a user and a repo.
+
+    Tracks conversation history, staged patches, and the pinned base SHA used
+    for all file fetches and diff applications within the session.
+
+    Lifecycle: active → completed | closed.
+    Concurrency: at most 2 active sessions per user (enforced at API layer).
+    """
+
+    __tablename__ = "agent_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    repo_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("repos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="Pairing Session")
+    # Allowed statuses: "active" | "completed" | "closed"
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
+    branch_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Pinned commit SHA — all file fetches and diffs within this session reference this SHA.
+    base_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    # Append-only list of {role, content, timestamp} dicts.
+    conversation_history: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    # Mapping of file_path -> unified patch string for staged (uncommitted) changes.
+    staged_patches: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="agent_sessions")
+    repo: Mapped["Repo"] = relationship("Repo", back_populates="agent_sessions")
+
+    __table_args__ = (
+        # Composite index for fast active-session lookups per user.
+        # Column order: equality first (user_id), then status.
+        Index("ix_agent_sessions_user_id_status", "user_id", "status"),
+    )
