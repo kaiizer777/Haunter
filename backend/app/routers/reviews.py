@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
-from typing import Annotated, Any, Optional
+from typing import Annotated, Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload

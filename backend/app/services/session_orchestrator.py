@@ -466,7 +466,7 @@ class SessionOrchestrator:
         # Validate patch size — mirror the SandboxInput 512 KB limit.
         MAX_PATCH_BYTES = 512 * 1024
         if len(diff.encode("utf-8")) > MAX_PATCH_BYTES:
-            return f"Error: diff exceeds maximum size (512 KB)."
+            return "Error: diff exceeds maximum size (512 KB)."
 
         # Stage the patch (upsert).
         staged_patches[path] = diff

@@ -186,7 +186,7 @@ describe("sidebar.tsx", () => {
 
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
-        key: "2",
+        key: "3",
         metaKey: true,
         bubbles: true,
       })

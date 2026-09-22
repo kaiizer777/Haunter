@@ -262,7 +262,7 @@ def _format_function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> 
         args_strs.append("*")
 
     # Keyword-only args
-    for kwarg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+    for kwarg, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True):
         kw_str = kwarg.arg
         if kwarg.annotation:
             kw_str += f": {ast.unparse(kwarg.annotation)}"

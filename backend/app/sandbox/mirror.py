@@ -410,7 +410,7 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
                 current_hunk["lines"].append(line)
 
     if not hunks:
-        added = [l[1:] for l in lines if l.startswith("+")]
+        added = [ln[1:] for ln in lines if ln.startswith("+")]
         res = "\n".join(added) if added else base_content
         if base_content.endswith("\n") and not res.endswith("\n"):
             res += "\n"
@@ -420,11 +420,11 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
         # New file creation
         added = []
         for h in hunks:
-            for l in h["lines"]:
-                if l.startswith("+"):
-                    added.append(l[1:])
-                elif l.startswith(" ") or l == "":
-                    added.append(l[1:] if l.startswith(" ") else "")
+            for ln in h["lines"]:
+                if ln.startswith("+"):
+                    added.append(ln[1:])
+                elif ln.startswith(" ") or ln == "":
+                    added.append(ln[1:] if ln.startswith(" ") else "")
         return "\n".join(added)
 
     base_lines = base_content.splitlines()
@@ -433,15 +433,15 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
     for h in hunks:
         old_lines = []
         new_lines = []
-        for l in h["lines"]:
-            if l.startswith(" "):
-                old_lines.append(l[1:])
-                new_lines.append(l[1:])
-            elif l.startswith("-"):
-                old_lines.append(l[1:])
-            elif l.startswith("+"):
-                new_lines.append(l[1:])
-            elif l == "":
+        for ln in h["lines"]:
+            if ln.startswith(" "):
+                old_lines.append(ln[1:])
+                new_lines.append(ln[1:])
+            elif ln.startswith("-"):
+                old_lines.append(ln[1:])
+            elif ln.startswith("+"):
+                new_lines.append(ln[1:])
+            elif ln == "":
                 old_lines.append("")
                 new_lines.append("")
 
@@ -478,7 +478,7 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
             base_lines[match_idx : match_idx + len(old_lines)] = new_lines
             offset += len(new_lines) - len(old_lines)
         else:
-            clean_old = [l.strip() for l in old_lines]
+            clean_old = [ln.strip() for ln in old_lines]
             for idx in range(len(base_lines) - len(old_lines) + 1):
                 if [b.strip() for b in base_lines[idx : idx + len(old_lines)]] == clean_old:
                     match_idx = idx
@@ -488,10 +488,10 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
 
         # Tier 3: Targeted remove-line matching (handles omitted/added blank lines in context)
         if match_idx is None:
-            to_remove = [l[1:] for l in h["lines"] if l.startswith("-")]
-            to_add = [l[1:] for l in h["lines"] if l.startswith("+")]
+            to_remove = [ln[1:] for ln in h["lines"] if ln.startswith("-")]
+            to_add = [ln[1:] for ln in h["lines"] if ln.startswith("+")]
             if to_remove:
-                clean_rem = [l.strip() for l in to_remove]
+                clean_rem = [ln.strip() for ln in to_remove]
                 candidates = [
                     idx for idx in range(len(base_lines) - len(to_remove) + 1)
                     if [b.strip() for b in base_lines[idx : idx + len(to_remove)]] == clean_rem
@@ -522,7 +522,7 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
                     logger.info("mirror: tier-3 targeted match applied at line %d", best_cand + 1)
             elif to_add:
                 # Pure insertion without deletion: match non-empty context anchor
-                non_empty_ctx = [l[1:].strip() for l in h["lines"] if l.startswith(" ") and l[1:].strip()]
+                non_empty_ctx = [ln[1:].strip() for ln in h["lines"] if ln.startswith(" ") and ln[1:].strip()]
                 if non_empty_ctx:
                     anchor = non_empty_ctx[0]
                     for idx, bl in enumerate(base_lines):

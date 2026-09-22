@@ -14,7 +14,7 @@ Orchestrates the asynchronous code review pipeline:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 import uuid
 
 from sqlalchemy import select
@@ -28,7 +28,7 @@ from app.github_client import (
     fetch_diff,
     fetch_pull_request_diff,
 )
-from app.models import CodeReview, Repo
+from app.models import CodeReview
 from app.subagents.code_reviewer import (
     analyze_diff,
     format_github_suggestion,

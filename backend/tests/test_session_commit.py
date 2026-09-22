@@ -93,7 +93,7 @@ _SAMPLE_PATCH = """\
 -    return 1
 +    # fixed
 +    return 2
- 
+
 """
 
 _ORIGINAL_FILE = """\
