@@ -315,3 +315,190 @@ async def fetch_file_content(
         return None
 
     return response.text
+
+
+async def fetch_pr_comments(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Fetch all comments on a pull request / issue thread via GitHub Issues API.
+    GET /repos/{owner}/{repo}/issues/{pr_number}/comments
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error("Network error fetching PR comments for %s/%s PR #%s", owner, repo, pr_number)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"PR comments not found for {owner}/{repo} PR #{pr_number}")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    return response.json()
+
+
+async def post_pr_comment(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    body: str,
+    token: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Post a comment to a pull request / issue thread via GitHub Issues API.
+    POST /repos/{owner}/{repo}/issues/{pr_number}/comments
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.post(url, headers=headers, json={"body": body})
+        except httpx.RequestError as exc:
+            logger.error("Network error posting PR comment for %s/%s PR #%s", owner, repo, pr_number)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"PR not found for {owner}/{repo} PR #{pr_number} to post comment")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    return response.json()
+
+
+async def fetch_pull_request(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Fetch pull request metadata (head branch, base branch, head SHA) via GitHub Pulls API.
+    GET /repos/{owner}/{repo}/pulls/{pr_number}
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error("Network error fetching pull request %s/%s PR #%s", owner, repo, pr_number)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"Pull request not found for {owner}/{repo} PR #{pr_number}")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    return response.json()
+
+
+async def create_pull_request_review(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    commit_sha: str,
+    body: str,
+    comments: list[dict[str, Any]],
+    event: str = "COMMENT",
+    token: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Submit a formal pull request review via GitHub Pulls API.
+    POST /repos/{owner}/{repo}/pulls/{pr_number}/reviews
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+    payload = {
+        "commit_id": commit_sha,
+        "body": body,
+        "event": event,
+        "comments": comments,
+    }
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error("Network error submitting PR review for %s/%s PR #%s", owner, repo, pr_number)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"PR not found for {owner}/{repo} PR #{pr_number} to submit review")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        logger.error("GitHub API error %d submitting review: %s", response.status_code, response.text)
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text}")
+
+    return response.json()
+
+
+async def create_commit_comment(
+    owner: str,
+    repo: str,
+    commit_sha: str,
+    body: str,
+    token: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Create a comment on a commit. Wraps post_commit_comment.
+    """
+    return await post_commit_comment(owner=owner, repo=repo, sha=commit_sha, body=body, token=token)
+
+
+async def fetch_pull_request_diff(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+) -> str:
+    """
+    Fetch the unified git diff for a pull request.
+    GET /repos/{owner}/{repo}/pulls/{pr_number} with diff accept header.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
+    headers = _build_headers(token=token, accept="application/vnd.github.v3.diff")
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error("Network error fetching PR diff for %s/%s PR #%s", owner, repo, pr_number)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"Pull request diff not found for {owner}/{repo} PR #{pr_number}")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    return response.text
+
+

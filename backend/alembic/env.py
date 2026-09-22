@@ -45,7 +45,16 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = settings.async_database_url_unpooled
+    from app.config import _to_asyncpg_url
+
+    target_url = (
+        os.environ.get("ALEMBIC_DATABASE_URL")
+        or os.environ.get("TARGET_DATABASE_URL")
+        or settings.async_database_url_unpooled
+    )
+    target_url = _to_asyncpg_url(target_url)
+
+    url = target_url
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -69,9 +78,17 @@ async def run_async_migrations() -> None:
     and associate a connection with the context.
 
     """
+    from app.config import _to_asyncpg_url
+
+    target_url = (
+        os.environ.get("ALEMBIC_DATABASE_URL")
+        or os.environ.get("TARGET_DATABASE_URL")
+        or settings.async_database_url_unpooled
+    )
+    target_url = _to_asyncpg_url(target_url)
 
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = settings.async_database_url_unpooled
+    configuration["sqlalchemy.url"] = target_url
 
     connectable = async_engine_from_config(
         configuration,
@@ -83,6 +100,8 @@ async def run_async_migrations() -> None:
         await connection.run_sync(do_run_migrations)
 
     await connectable.dispose()
+
+
 
 
 def run_migrations_online() -> None:

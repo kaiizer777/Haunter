@@ -76,6 +76,22 @@ export function StatusBadge({ status, className, showDot = true }: StatusBadgePr
       isPulsing = true;
       break;
 
+    case "flake_verification":
+      dotColor = "bg-amber-400";
+      colorClasses = "border-amber-500/20 bg-amber-500/[0.08] text-amber-400";
+      variant = "warning";
+      label = "Checking Flake";
+      isPulsing = true;
+      break;
+
+    case "flaky_detected":
+    case "flaky_test":
+      dotColor = "bg-amber-400";
+      colorClasses = "border-amber-500/30 bg-amber-500/10 text-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.15)]";
+      variant = "warning";
+      label = "Flaky Test";
+      break;
+
     case "pending_pr":
       dotColor = "bg-emerald-400";
       colorClasses = "border-emerald-500/20 bg-emerald-500/[0.08] text-emerald-400";
@@ -89,6 +105,8 @@ export function StatusBadge({ status, className, showDot = true }: StatusBadgePr
       break;
   }
 
+  const isFlaky = normalized === "flaky_detected" || normalized === "flaky_test";
+
   return (
     <Badge
       variant={variant}
@@ -99,22 +117,26 @@ export function StatusBadge({ status, className, showDot = true }: StatusBadgePr
       )}
     >
       {showDot && (
-        <span className="relative inline-flex items-center justify-center mr-1.5 shrink-0">
-          {isPulsing && (
+        isFlaky ? (
+          <span className="mr-1 text-[10px] shrink-0 leading-none">⚠️</span>
+        ) : (
+          <span className="relative inline-flex items-center justify-center mr-1.5 shrink-0">
+            {isPulsing && (
+              <span
+                className={cn(
+                  "animate-ping absolute inline-flex h-1.5 w-1.5 rounded-full opacity-75",
+                  dotColor
+                )}
+              />
+            )}
             <span
               className={cn(
-                "animate-ping absolute inline-flex h-1.5 w-1.5 rounded-full opacity-75",
+                "h-1.5 w-1.5 rounded-full inline-block shadow-[0_0_6px_currentColor]",
                 dotColor
               )}
             />
-          )}
-          <span
-            className={cn(
-              "h-1.5 w-1.5 rounded-full inline-block shadow-[0_0_6px_currentColor]",
-              dotColor
-            )}
-          />
-        </span>
+          </span>
+        )
       )}
       {label}
     </Badge>

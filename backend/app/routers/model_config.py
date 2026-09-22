@@ -42,6 +42,7 @@ _PROVIDER_BASE_URLS: dict[str, str] = {
     "opencode_zen": "https://opencode.ai/zen/v1",
     "openai": "https://api.openai.com/v1",
     "anthropic": "https://api.anthropic.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
 }
 
 
@@ -234,10 +235,17 @@ async def get_available_models_endpoint(
         AvailableModelItem(id="claude-haiku-3-5", name="Claude Haiku 3.5", tag="Low Latency"),
     ]
 
+    groq_items = [
+        AvailableModelItem(id="openai/gpt-oss-120b", name="GPT-OSS 120B", tag="High Reasoning · Fallback"),
+        AvailableModelItem(id="llama-3.3-70b-versatile", name="Llama 3.3 70B Versatile", tag="Fast · Production"),
+        AvailableModelItem(id="llama-3.1-8b-instant", name="Llama 3.1 8B Instant", tag="Ultra Fast"),
+    ]
+
     return AvailableModelsOut(
         opencode_zen=zen_items,
         openai=openai_items,
         anthropic=anthropic_items,
+        groq=groq_items,
     )
 
 

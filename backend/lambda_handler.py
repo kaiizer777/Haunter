@@ -82,6 +82,16 @@ async def _run_pipeline(run_id_str: str) -> None:
     logger.info("lambda_handler: pipeline completed for run_id=%s", run_id)
 
 
+async def _run_review_pipeline(review_id_str: str) -> None:
+    """Run run_code_review_pipeline in async context with a fresh DB session."""
+    from app.services.review_orchestrator import run_code_review_pipeline
+
+    review_id = _uuid.UUID(review_id_str)
+    logger.info("lambda_handler: code review mode, review_id=%s", review_id)
+    await run_code_review_pipeline(review_id)
+    logger.info("lambda_handler: code review completed for review_id=%s", review_id)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -94,6 +104,7 @@ def handler(event: dict, context) -> dict:
     Detects invocation mode and dispatches accordingly:
     - HTTP event (API GW / Function URL): Mangum → FastAPI
     - Pipeline event ({"run_id": "...", "token": "..."}): asyncio.run(handle_failed_run)
+    - Code review event ({"review_id": "...", "token": "..."}): asyncio.run(run_code_review_pipeline)
 
     Pipeline self-invoke is authenticated via HMAC-SHA256 over run_id using
     GITHUB_WEBHOOK_SECRET (fallback SESSION_SECRET_KEY) to prevent unauthenticated
@@ -138,5 +149,39 @@ def handler(event: dict, context) -> dict:
             return {"error": str(exc), "run_id": run_id_str}
         return {"status": "completed", "run_id": run_id_str}
 
+    # Code review invocation: {"review_id": "...", "token": "..."} without HTTP context
+    if "review_id" in event and "requestContext" not in event:
+        review_id_str = event["review_id"]
+        try:
+            from app.config import settings as _settings
+
+            _hmac_key = getattr(_settings, "github_webhook_secret", None) or getattr(
+                _settings, "session_secret_key", None
+            )
+            if _hmac_key:
+                expected = hmac.new(
+                    _hmac_key.encode(), str(review_id_str).encode(), hashlib.sha256
+                ).hexdigest()
+                provided = event.get("token") or ""
+                if not provided or not hmac.compare_digest(expected, str(provided)):
+                    logger.warning(
+                        "lambda_handler: rejected unauthenticated review invoke for review_id=%s",
+                        review_id_str,
+                    )
+                    return {"error": "unauthorized review invocation", "review_id": review_id_str}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("lambda_handler: HMAC check error for review_id=%s: %s", review_id_str, exc)
+            pass
+        logger.info("lambda_handler: received review invocation for review_id=%s", review_id_str)
+        try:
+            asyncio.run(_run_review_pipeline(review_id_str))
+        except Exception as exc:
+            logger.exception(
+                "lambda_handler: review pipeline failed for review_id=%s: %s", review_id_str, exc
+            )
+            return {"error": str(exc), "review_id": review_id_str}
+        return {"status": "completed", "review_id": review_id_str}
+
     # HTTP invocation: API Gateway HTTP API v2 or Lambda Function URL
     return _get_mangum_handler()(event, context)
+

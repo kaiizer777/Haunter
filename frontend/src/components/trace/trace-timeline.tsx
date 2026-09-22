@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { TraceOut } from "@/lib/api";
 import { formatCost, formatLatency, formatRelativeTime } from "@/lib/utils";
 import { 
@@ -12,7 +12,10 @@ import {
   Copy,
   Check,
   Clock,
-  Sparkles
+  Sparkles,
+  ChevronDown,
+  ChevronUp,
+  FileCode2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ConfidenceBar } from "@/components/runs/confidence-bar";
@@ -30,6 +33,7 @@ function getStepMetadata(stepName: string) {
       role: "Context Gatherer",
       desc: "Scans repository context, extracts CI logs, and isolates failure site",
       badgeColor: "border-amber-500/30 bg-amber-500/10 text-amber-300",
+      accentDot: "bg-amber-400 border-amber-500/40 shadow-[0_0_8px_rgba(245,158,11,0.3)]",
     };
   }
   if (normalized.includes("fix") || normalized.includes("generator")) {
@@ -38,6 +42,7 @@ function getStepMetadata(stepName: string) {
       role: "Fix Generator",
       desc: "Synthesizes minimal diff patch targeted directly at root cause",
       badgeColor: "border-cyan-500/30 bg-cyan-500/10 text-cyan-300",
+      accentDot: "bg-cyan-400 border-cyan-500/40 shadow-[0_0_8px_rgba(6,182,212,0.3)]",
     };
   }
   if (normalized.includes("sandbox") || normalized.includes("verify")) {
@@ -46,6 +51,7 @@ function getStepMetadata(stepName: string) {
       role: "Sandbox Verifier",
       desc: "Runs verification pipeline in isolated ephemeral mirror repository",
       badgeColor: "border-purple-500/30 bg-purple-500/10 text-purple-300",
+      accentDot: "bg-purple-400 border-purple-500/40 shadow-[0_0_8px_rgba(168,85,247,0.3)]",
     };
   }
   if (normalized.includes("pr") || normalized.includes("writer")) {
@@ -54,6 +60,7 @@ function getStepMetadata(stepName: string) {
       role: "PR Writer",
       desc: "Composes pull request branch, title, and detailed diagnostic summary",
       badgeColor: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+      accentDot: "bg-emerald-400 border-emerald-500/40 shadow-[0_0_8px_rgba(52,211,153,0.3)]",
     };
   }
   return {
@@ -61,7 +68,95 @@ function getStepMetadata(stepName: string) {
     role: "Pipeline Step",
     desc: "Autonomous workflow subagent task execution",
     badgeColor: "border-zinc-700 bg-zinc-800 text-zinc-300",
+    accentDot: "bg-zinc-400 border-zinc-500/40 shadow-[0_0_8px_rgba(161,161,170,0.3)]",
   };
+}
+
+function DiffViewer({ patchText }: { patchText: string }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const lines = useMemo(() => patchText.split("\n"), [patchText]);
+
+  const { addCount, delCount, filePath } = useMemo(() => {
+    let adds = 0;
+    let dels = 0;
+    let path = "";
+    for (const l of lines) {
+      if (l.startsWith("+++ b/")) {
+        path = l.slice(6);
+      } else if (l.startsWith("+") && !l.startsWith("+++")) {
+        adds++;
+      } else if (l.startsWith("-") && !l.startsWith("---")) {
+        dels++;
+      }
+    }
+    return { addCount: adds, delCount: dels, filePath: path };
+  }, [lines]);
+
+  const shouldTruncate = lines.length > 18;
+  const displayedLines = shouldTruncate && !expanded ? lines.slice(0, 16) : lines;
+
+  return (
+    <div className="space-y-1.5">
+      <div className="rounded-[6px] border border-zinc-800/90 bg-[#070709] overflow-hidden shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)]">
+        {/* Diff File Header Bar */}
+        {filePath && (
+          <div className="flex items-center justify-between border-b border-zinc-800/80 bg-zinc-900/60 px-3 py-1.5 text-[11px] font-mono text-zinc-300">
+            <span className="flex items-center gap-1.5 text-zinc-300 font-semibold">
+              <FileCode2 className="h-3 w-3 text-zinc-500" />
+              {filePath}
+            </span>
+            <div className="flex items-center gap-2 font-mono text-[10px]">
+              {addCount > 0 && <span className="text-emerald-400 font-semibold">+{addCount}</span>}
+              {delCount > 0 && <span className="text-rose-400 font-semibold">-{delCount}</span>}
+            </div>
+          </div>
+        )}
+
+        {/* Diff Body */}
+        <pre className="overflow-x-auto p-3 text-[11.5px] font-mono leading-relaxed select-text">
+          {displayedLines.map((line, lIdx) => {
+            const isAdd = line.startsWith("+") && !line.startsWith("+++");
+            const isDel = line.startsWith("-") && !line.startsWith("---");
+            const isHunk = line.startsWith("@@");
+            const isHeader = line.startsWith("---") || line.startsWith("+++");
+
+            let lineClass = "text-zinc-300";
+            if (isAdd) lineClass = "bg-emerald-950/30 text-emerald-300 border-l-2 border-emerald-500/80 pl-2 -ml-2";
+            else if (isDel) lineClass = "bg-rose-950/30 text-rose-300 border-l-2 border-rose-500/80 pl-2 -ml-2";
+            else if (isHunk) lineClass = "bg-cyan-950/20 text-cyan-400 font-semibold";
+            else if (isHeader) lineClass = "text-zinc-400 font-medium";
+
+            return (
+              <div key={lIdx} className={`${lineClass} font-mono py-[1px]`}>
+                {line || " "}
+              </div>
+            );
+          })}
+        </pre>
+
+        {shouldTruncate && (
+          <div className="border-t border-zinc-800/70 bg-zinc-900/40 p-1 text-center">
+            <button
+              type="button"
+              onClick={() => setExpanded(!expanded)}
+              className="inline-flex items-center gap-1 text-[11px] font-mono text-zinc-400 hover:text-zinc-200 transition-colors py-0.5 px-2"
+            >
+              {expanded ? (
+                <>
+                  <ChevronUp className="h-3 w-3" /> Show less
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="h-3 w-3" /> Show all {lines.length} lines (+{lines.length - 16} more)
+                </>
+              )}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function TraceTimeline({ trace }: TraceTimelineProps) {
@@ -90,7 +185,7 @@ export function TraceTimeline({ trace }: TraceTimelineProps) {
 
           return (
             <div key={`${step.step_name}-${idx}`} className="relative group">
-              {/* Connector segment to next node (only if not the last item) */}
+              {/* Connector segment to next node */}
               {!isLastItem && (
                 <span
                   aria-hidden="true"
@@ -135,14 +230,14 @@ export function TraceTimeline({ trace }: TraceTimelineProps) {
                           {meta.role}
                         </span>
                       </div>
-                      <p className="text-[11px] text-zinc-400 mt-0.5 hidden sm:block">
+                      <p className="text-[11px] text-zinc-400 mt-0.5 hidden sm:block font-mono">
                         {meta.desc}
                       </p>
                     </div>
                   </div>
 
                   {/* Numerics: Tokens, Latency, Cost */}
-                  <div className="flex items-center gap-2.5 sm:gap-3 text-xs font-mono">
+                  <div className="flex items-center gap-2 sm:gap-2.5 text-xs font-mono">
                     <div className="flex items-center gap-1 rounded-[5px] border border-zinc-800 bg-zinc-900/80 px-2.5 py-1 text-zinc-300" title="Input / Output Tokens">
                       <span className="text-zinc-500 text-[10px] font-mono">In:</span>
                       <span className="text-zinc-200 font-semibold">{step.input_tokens || 0}</span>
@@ -186,7 +281,7 @@ export function TraceTimeline({ trace }: TraceTimelineProps) {
 
           return (
             <div key={`attempt-${attempt.attempt_number}`} className="relative group">
-              {/* Connector segment to next attempt (only if not the last attempt) */}
+              {/* Connector segment to next attempt */}
               {!isLastAttempt && (
                 <span
                   aria-hidden="true"
@@ -296,7 +391,7 @@ export function TraceTimeline({ trace }: TraceTimelineProps) {
                         variant="outline"
                         size="sm"
                         onClick={() => handleCopyPatch(attempt.patch_text!, attempt.attempt_number)}
-                        className="h-7 px-2.5 text-xs font-mono bg-gradient-to-b from-zinc-800/90 to-zinc-900 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] active:translate-y-[0.5px] transition-all"
+                        className="h-7 px-2.5 text-xs font-mono rounded-[5px] bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-950 text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all"
                       >
                         {copiedPatchAttempt === attempt.attempt_number ? (
                           <>
@@ -312,28 +407,7 @@ export function TraceTimeline({ trace }: TraceTimelineProps) {
                       </Button>
                     </div>
 
-                    <div className="rounded-[6px] border border-zinc-800/90 bg-[#070709] overflow-hidden shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)]">
-                      <pre className="max-h-80 overflow-x-auto p-3 text-[11.5px] font-mono leading-relaxed select-text">
-                        {attempt.patch_text.split("\n").map((line, lIdx) => {
-                          const isAdd = line.startsWith("+") && !line.startsWith("+++");
-                          const isDel = line.startsWith("-") && !line.startsWith("---");
-                          const isHunk = line.startsWith("@@");
-                          const isHeader = line.startsWith("---") || line.startsWith("+++");
-
-                          let lineClass = "text-zinc-300";
-                          if (isAdd) lineClass = "bg-emerald-950/30 text-emerald-300 border-l-2 border-emerald-500/80 pl-2 -ml-2";
-                          else if (isDel) lineClass = "bg-rose-950/30 text-rose-300 border-l-2 border-rose-500/80 pl-2 -ml-2";
-                          else if (isHunk) lineClass = "bg-cyan-950/20 text-cyan-400 font-semibold";
-                          else if (isHeader) lineClass = "text-zinc-400 font-medium";
-
-                          return (
-                            <div key={lIdx} className={`${lineClass} font-mono py-[1px]`}>
-                              {line || " "}
-                            </div>
-                          );
-                        })}
-                      </pre>
-                    </div>
+                    <DiffViewer patchText={attempt.patch_text} />
                   </div>
                 )}
               </div>

@@ -85,6 +85,16 @@ class Settings(BaseSettings):
     # a larger context window.
     opencode_zen_max_output_tokens: int = 250_000
 
+    # Groq LLM Provider Configuration
+    # GROQ_API_KEY and GROQ_MODEL_NAME are loaded via environment variables or .env.
+    # Injected per request, never logged or hardcoded in source code.
+    groq_api_key: Optional[str] = None
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model_name: Optional[str] = Field(
+        default="openai/gpt-oss-120b",
+        description="Default Groq model name from env",
+    )
+
     # Optional admin user UUID string for global model config switcher authorization
     admin_user_id: Optional[str] = None
 

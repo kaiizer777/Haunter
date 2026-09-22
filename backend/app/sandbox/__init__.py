@@ -22,6 +22,7 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from app.sandbox.runner import (
+    DeterminismResult,
     SandboxInput,
     SandboxResult,
     _sanitize_failure_reason,
@@ -36,12 +37,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DeterminismResult",
     "SandboxInput",
     "SandboxResult",
     "SANDBOX_PROVIDERS",
     "_sanitize_failure_reason",
     "make_result",
     "verify",
+    "verify_determinism",
     "verify_patch",
 ]
 
@@ -296,3 +299,38 @@ def _to_legacy(result: dict) -> dict:
         "failure_reason": result.get("reason"),
         "build_duration_ms": result.get("duration_ms", 0),
     }
+
+
+async def verify_determinism(
+    run: "Run",
+    repo: "Repo",
+    target_test: Optional[str] = None,
+    runs_count: int = 2,
+    db: "Optional[AsyncSession]" = None,
+) -> DeterminismResult:
+    """
+    Verify test determinism (pre-flight flaky test check).
+
+    Re-runs target_test across runs_count iterations against clean head_sha without patches.
+    Returns DeterminismResult(is_flaky, consecutive_passes, iteration_results).
+    """
+    from app.config import settings
+
+    provider: str = getattr(settings, "sandbox_provider", "github_actions").lower().strip()
+    if provider == "github_actions":
+        runner_class = _load_github_actions_runner()
+        runner = runner_class()
+        if hasattr(runner, "verify_determinism"):
+            return await runner.verify_determinism(
+                run=run,
+                repo=repo,
+                target_test=target_test,
+                runs_count=runs_count,
+            )
+
+    logger.warning("sandbox: verify_determinism not implemented for provider %r", provider)
+    return DeterminismResult(
+        is_flaky=False,
+        consecutive_passes=0,
+        iteration_results=[],
+    )

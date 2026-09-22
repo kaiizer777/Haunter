@@ -424,6 +424,7 @@ def _build_messages(
     diagnosis_summary: str,
     prior_attempt: Optional[Attempt],
     validation_error_context: Optional[str] = None,
+    review_feedback: Optional[str] = None,
 ) -> list[dict[str, str]]:
     """
     Build the messages list for the LLM call.
@@ -505,10 +506,6 @@ def _build_messages(
     # exact reason verbatim.
     if prior_attempt is not None:
         # Stub assistant turn — schema anchor for the upcoming user turn.
-        # The model treats the next user message as a refinement request,
-        # not a fresh prompt. Crucial: this is acknowledgement only,
-        # NOT a hallucinated fix (the model would otherwise condition
-        # the next user turn on invented patch content).
         messages.append({
             "role": "assistant",
             "content": (
@@ -534,6 +531,27 @@ def _build_messages(
         )
         messages.append({"role": "user", "content": prior_content})
 
+    # Reviewer critique refinement turn (Feature 1: Interactive PR feedback loop)
+    if review_feedback:
+        messages.append({
+            "role": "assistant",
+            "content": (
+                "Acknowledged. I will refine the patch according to the reviewer critique "
+                "while preserving passing test behavior, adhering to repository architecture, "
+                "and satisfying all unified diff formatting requirements."
+            ),
+        })
+        messages.append({
+            "role": "user",
+            "content": (
+                f"## Reviewer Critique & Requested Adjustments\n"
+                f"{review_feedback}\n\n"
+                "Refine the patch to incorporate the reviewer's instructions while preserving "
+                "passing test behavior and adhering to all diff formatting constraints. "
+                "patch MUST be a unified diff with '---', '+++', and '@@' markers. Return JSON only."
+            ),
+        })
+
     if validation_error_context is not None:
         # Stub assistant turn — anchors the format-correction request.
         messages.append({
@@ -555,8 +573,6 @@ def _build_messages(
         })
 
     # Invariant check: no two consecutive same-role messages (after system).
-    # Use RuntimeError (not AssertionError) so the check is NOT disabled
-    # under `python -O`. This is a contract violation, not a debug check.
     for i in range(1, len(messages)):
         if messages[i]["role"] == messages[i - 1]["role"]:
             raise RuntimeError(
@@ -579,6 +595,7 @@ async def _call_and_parse(
     db: AsyncSession,
     run_id: uuid.UUID,
     repo_id: Optional[uuid.UUID],
+    review_feedback: Optional[str] = None,
 ) -> tuple[FixOutput, dict]:
     """
     Call LLMClient and parse FixOutput from the response.
@@ -625,6 +642,7 @@ async def _call_and_parse(
         diagnosis_summary=diagnosis_summary,
         prior_attempt=prior_attempt,
         validation_error_context=error_context,
+        review_feedback=review_feedback,
     )
 
     retry_response = await llm.complete(
@@ -669,6 +687,7 @@ async def _call_with_format_retry(
     db: AsyncSession,
     run_id: uuid.UUID,
     repo_id: Optional[uuid.UUID],
+    review_feedback: Optional[str] = None,
 ) -> tuple[FixOutput, dict]:
     """Call the LLM, parse, validate patch format. On format failure, retry
     ONCE with an explicit format-correction prompt. On second failure, raise
@@ -684,6 +703,7 @@ async def _call_with_format_retry(
         db=db,
         run_id=run_id,
         repo_id=repo_id,
+        review_feedback=review_feedback,
     )
 
     # If low confidence or empty patch, do not format-retry: return as-is
@@ -708,6 +728,7 @@ async def _call_with_format_retry(
                 diagnosis_summary=diagnosis_summary,
                 prior_attempt=prior_attempt,
                 validation_error_context=f"patch format: {e}",
+                review_feedback=review_feedback,
             )
             fix_output, response = await _call_and_parse(
                 messages=messages,
@@ -716,13 +737,12 @@ async def _call_with_format_retry(
                 db=db,
                 run_id=run_id,
                 repo_id=repo_id,
+                review_feedback=review_feedback,
             )
             if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
                 return fix_output, response
 
     # Final attempt: validate and raise exhausted if it still fails.
-    # This is the "give up" branch after the loop above has retried
-    # _PATCH_FORMAT_RETRY_CAP times.
     try:
         _validate_patch(fix_output.patch)
         return fix_output, response
@@ -740,6 +760,7 @@ async def generate_fix(
     diagnosis_summary: str,
     prior_attempt: Optional[Attempt],
     db: AsyncSession,
+    review_feedback: Optional[str] = None,
 ) -> Attempt:
     """
     Generate a fix patch for a failed CI run and persist it as an Attempt row.
@@ -751,6 +772,7 @@ async def generate_fix(
         prior_attempt:     Previous Attempt if this is a retry, else None.
                            Only patch_text and failure_reason are used — not raw logs.
         db:                Active AsyncSession.
+        review_feedback:   Optional reviewer critique/instructions from PR feedback loop.
 
     Returns:
         The newly inserted Attempt ORM object.
@@ -796,16 +818,11 @@ async def generate_fix(
 
     # -------------------------------------------------------------------------
     # 2. Deterministic ModuleNotFoundError fast-path.
-    #    Only taken on the FIRST attempt (prior_attempt is None). On retry,
-    #    the deterministic patch already failed verification — re-emitting it
-    #    would produce the exact same failure_reason tail, trigger check_fast_fail,
-    #    and bail to fallback without ever invoking the LLM. Gating on
-    #    `prior_attempt is None` forces Attempt 2+ through _call_with_format_retry
-    #    so the LLM can reason about the prior failure context.
+    #    Only taken on the FIRST attempt when NO review_feedback is present.
     # -------------------------------------------------------------------------
     deterministic_patch: Optional[str] = (
         _module_not_found_path_fix(run.diagnosis_summary or diagnosis_summary)
-        if prior_attempt is None
+        if prior_attempt is None and review_feedback is None
         else None
     )
     used_deterministic: bool = deterministic_patch is not None
@@ -829,6 +846,7 @@ async def generate_fix(
         messages = _build_messages(
             diagnosis_summary=diagnosis_summary,
             prior_attempt=prior_attempt,
+            review_feedback=review_feedback,
         )
 
         # ---------------------------------------------------------------------
@@ -843,14 +861,13 @@ async def generate_fix(
             db=db,
             run_id=run.id,
             repo_id=repo_id,
+            review_feedback=review_feedback,
         )
 
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     # -------------------------------------------------------------------------
     # 4. Low-confidence / no-op gate — soft skip BEFORE any DB insert
-    #    This must run BEFORE _validate_patch so that a zero-confidence empty
-    #    patch raises LowConfidenceSkip (soft) rather than PatchRejected (hard).
     # -------------------------------------------------------------------------
     if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
         logger.info(
@@ -872,14 +889,15 @@ async def generate_fix(
     _validate_patch(fix_output.patch)
 
     # -------------------------------------------------------------------------
-    # 6. Insert Attempt row — patch stored as untrusted Text (escape on render)
+    # 6. Insert Attempt row — persist reviewer critique in strategy_notes (Feature 1)
     # -------------------------------------------------------------------------
+    persisted_notes = (review_feedback or fix_output.strategy_notes or "")[:500]
     attempt = Attempt(
         run_id=run.id,
         attempt_number=attempt_number,
         patch_text=fix_output.patch,
         confidence_score=fix_output.confidence,
-        strategy_notes=fix_output.strategy_notes,
+        strategy_notes=persisted_notes if persisted_notes else None,
         verification_status="pending",
     )
     db.add(attempt)

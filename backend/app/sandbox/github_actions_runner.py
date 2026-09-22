@@ -65,7 +65,13 @@ from app.sandbox.mirror import (
     get_universal_sandbox_repo,
     push_patch_to_mirror,
 )
-from app.sandbox.runner import SandboxInput, SandboxResult, SandboxRunner, make_result
+from app.sandbox.runner import (
+    DeterminismResult,
+    SandboxInput,
+    SandboxResult,
+    SandboxRunner,
+    make_result,
+)
 from app.sandbox.runner import _sanitize_failure_reason
 
 logger = logging.getLogger(__name__)
@@ -1096,4 +1102,211 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                     _non_retryable_reason(exc, prefix="GitHub Actions sandbox")
                 ),
                 duration_ms=int((time.monotonic() - t_start) * 1000),
+            )
+
+    async def verify_determinism(
+        self,
+        run: Any,
+        repo: Any,
+        target_test: Optional[str] = None,
+        runs_count: int = 2,
+    ) -> DeterminismResult:
+        """
+        Verify test determinism by re-running the test target against clean head_sha
+        without patches in an isolated sandbox mirror repo across runs_count iterations.
+
+        Returns DeterminismResult with:
+          - is_flaky: True if all runs_count iterations pass despite failing in original CI
+          - consecutive_passes: count of successful clean runs
+          - iteration_results: list of {iteration, passed, duration_ms, logs}
+        """
+        from app.config import settings
+
+        t_overall_start = time.monotonic()
+        org: str = getattr(settings, "github_sandbox_org", None) or "haunter-sandboxes"
+        app_id: Optional[str] = getattr(settings, "github_sandbox_app_id", None)
+        installation_id: Optional[str] = getattr(settings, "github_sandbox_installation_id", None)
+        ssm_path: str = getattr(
+            settings,
+            "github_sandbox_app_private_key_ssm_path",
+            "/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY",
+        )
+        poll_interval: float = float(getattr(settings, "github_sandbox_poll_interval_seconds", 10.0) or 10.0)
+        poll_timeout: float = float(getattr(settings, "github_sandbox_poll_timeout_seconds", 120.0) or 120.0)
+        workflow_filename_py: str = getattr(settings, "github_sandbox_workflow_filename_py", "haunter-test-py.yml")
+        workflow_filename_ts: str = getattr(settings, "github_sandbox_workflow_filename_ts", "haunter-test-ts.yml")
+
+        iteration_results: list[dict[str, Any]] = []
+        consecutive_passes = 0
+
+        if not app_id or not installation_id:
+            logger.warning("verify_determinism: GITHUB_SANDBOX_APP_ID or INSTALLATION_ID not configured")
+            return DeterminismResult(
+                is_flaky=False,
+                consecutive_passes=0,
+                iteration_results=[{
+                    "iteration": 1,
+                    "passed": False,
+                    "duration_ms": 0,
+                    "logs": "Sandbox credentials not configured",
+                }],
+            )
+
+        try:
+            token = await mint_installation_token(
+                app_id=app_id,
+                installation_id=installation_id,
+                ssm_path=ssm_path,
+            )
+        except Exception as exc:
+            logger.warning("verify_determinism: token mint failed (%s: %s)", type(exc).__name__, exc)
+            return DeterminismResult(
+                is_flaky=False,
+                consecutive_passes=0,
+                iteration_results=[{
+                    "iteration": 1,
+                    "passed": False,
+                    "duration_ms": int((time.monotonic() - t_overall_start) * 1000),
+                    "logs": f"Token mint failed: {exc}",
+                }],
+            )
+
+        fallback_token: Optional[str] = getattr(settings, "github_token", None)
+        repo_full = get_universal_sandbox_repo(org)
+        user_repo_full = f"{repo.owner}/{repo.name}"
+        head_sha = getattr(run, "head_sha", None) or getattr(repo, "default_branch", "main")
+
+        try:
+            async with httpx.AsyncClient(timeout=_API_TIMEOUT_SECONDS) as client:
+                repo_full = await get_or_create_test_mirror(
+                    client,
+                    org,
+                    token=token,
+                    fallback_token=fallback_token,
+                )
+
+                # Fetch seed files once from user repo tarball at head_sha
+                seed_files: dict[str, bytes] = {}
+                if user_repo_full and head_sha:
+                    from app.sandbox._seed_tarball import (
+                        fetch_user_repo_tarball,
+                        parse_tar_to_files,
+                    )
+                    try:
+                        tar_bytes, used_token = await fetch_user_repo_tarball(
+                            client, user_repo_full, head_sha, token, fallback_token
+                        )
+                        seed_files = parse_tar_to_files(
+                            tar_bytes, max_files=settings.seed_max_files
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "verify_determinism: failed to fetch seed tarball (%s: %s)",
+                            type(exc).__name__,
+                            exc,
+                        )
+
+                language = detect_language(list(seed_files.keys()))
+                workflow_filename = workflow_filename_py if language == "py" else workflow_filename_ts
+                try:
+                    workflow_content = _load_workflow_template(workflow_filename)
+                except FileNotFoundError as exc:
+                    logger.warning("verify_determinism: workflow template %s not found: %s", workflow_filename, exc)
+                    return DeterminismResult(
+                        is_flaky=False,
+                        consecutive_passes=0,
+                        iteration_results=[],
+                    )
+
+                for i in range(1, runs_count + 1):
+                    t_iter_start = time.monotonic()
+                    branch = f"haunter-flake-check-{run.id}-{i}"
+                    iter_passed = False
+                    iter_logs = ""
+
+                    try:
+                        # Push clean tree with empty patch to mirror branch
+                        commit_message = f"haunter flake determinism check {i}/{runs_count} [target={target_test or 'all'}]"
+                        iter_head_sha = await push_patch_to_mirror(
+                            client,
+                            repo_full,
+                            branch=branch,
+                            patch_text="",
+                            workflow_filename=workflow_filename,
+                            workflow_content=workflow_content,
+                            commit_message=commit_message,
+                            token=token,
+                            seed_files=seed_files,
+                        )
+
+                        # Poll workflow runs
+                        deadline = time.monotonic() + poll_timeout
+                        while time.monotonic() < deadline:
+                            await asyncio.sleep(poll_interval)
+                            wf_runs = await _list_workflow_runs(client, repo_full, iter_head_sha, token=token)
+                            if not wf_runs:
+                                continue
+                            if all(r.get("status") == "completed" for r in wf_runs):
+                                iter_passed = all(
+                                    (r.get("conclusion") or "").lower() == "success"
+                                    for r in wf_runs
+                                )
+                                if not iter_passed:
+                                    failed_run = next(
+                                        (r for r in wf_runs if (r.get("conclusion") or "").lower() != "success"),
+                                        wf_runs[0],
+                                    )
+                                    iter_logs = await _get_workflow_run_log_tail(
+                                        client, repo_full, failed_run["id"], token=token
+                                    )
+                                break
+                    except Exception as iter_exc:
+                        logger.warning(
+                            "verify_determinism: iteration %d error (%s: %s)",
+                            i,
+                            type(iter_exc).__name__,
+                            iter_exc,
+                        )
+                        iter_passed = False
+                        iter_logs = str(iter_exc)
+                    finally:
+                        await _delete_branch_ref(
+                            client,
+                            repo_full,
+                            branch,
+                            token=token,
+                            fallback_token=fallback_token,
+                        )
+
+                    iter_duration_ms = int((time.monotonic() - t_iter_start) * 1000)
+                    iteration_results.append({
+                        "iteration": i,
+                        "passed": iter_passed,
+                        "duration_ms": iter_duration_ms,
+                        "logs": iter_logs,
+                    })
+
+                    if iter_passed:
+                        consecutive_passes += 1
+                    else:
+                        # Deterministic failure reproduced on clean code
+                        break
+
+            is_flaky = (consecutive_passes == runs_count)
+            return DeterminismResult(
+                is_flaky=is_flaky,
+                consecutive_passes=consecutive_passes,
+                iteration_results=iteration_results,
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "verify_determinism: unexpected error (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
+            return DeterminismResult(
+                is_flaky=False,
+                consecutive_passes=consecutive_passes,
+                iteration_results=iteration_results,
             )

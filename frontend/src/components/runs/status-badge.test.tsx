@@ -74,6 +74,23 @@ describe("status-badge.tsx", () => {
     expect(container.querySelector(".bg-emerald-400")).toBeInTheDocument();
   });
 
+  it("renders Checking Flake with pulsing amber dot for flake_verification", () => {
+    const { container } = render(<StatusBadge status="flake_verification" />);
+    expect(screen.getByText("Checking Flake")).toBeInTheDocument();
+    expect(container.querySelector(".animate-ping")).toBeInTheDocument();
+    expect(container.querySelector(".bg-amber-400")).toBeInTheDocument();
+  });
+
+  it("renders Flaky Test with alert icon for flaky_detected and flaky_test", () => {
+    const { container, rerender } = render(<StatusBadge status="flaky_detected" />);
+    expect(screen.getByText("Flaky Test")).toBeInTheDocument();
+    expect(container.textContent).toContain("⚠️");
+
+    rerender(<StatusBadge status="flaky_test" />);
+    expect(screen.getByText("Flaky Test")).toBeInTheDocument();
+    expect(container.textContent).toContain("⚠️");
+  });
+
   it("renders default formatted label for unknown status", () => {
     render(<StatusBadge status="custom_eval_stage" />);
     expect(screen.getByText("custom eval stage")).toBeInTheDocument();

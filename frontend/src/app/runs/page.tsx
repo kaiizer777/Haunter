@@ -610,6 +610,13 @@ export default function RunsPage() {
                     ),
                   },
                   {
+                    value: "flaky_detected",
+                    label: "Flaky Test",
+                    badge: (
+                      <span className="text-[10px] leading-none">⚠️</span>
+                    ),
+                  },
+                  {
                     value: "fallback",
                     label: "Fallback Comment",
                     badge: (
@@ -832,7 +839,14 @@ export default function RunsPage() {
 
                         {/* Column 1: STATUS */}
                         <TableCell className="px-3 py-3 align-middle whitespace-nowrap">
-                          <StatusBadge status={run.status} />
+                          <div className="flex flex-col gap-0.5 items-start">
+                            <StatusBadge status={run.status} />
+                            {(run.status === "flaky_detected" || run.conclusion === "flaky_test") && (
+                              <span className="text-[10px] text-amber-400 font-mono font-medium tracking-tight">
+                                Passed 2/2 clean runs (quarantined)
+                              </span>
+                            )}
+                          </div>
                         </TableCell>
 
                         {/* Column 2: REPOSITORY */}

@@ -32,6 +32,7 @@ from app.llm.exceptions import (
     LLMRateLimitError,
     LLMTimeoutError,
 )
+from app.llm.groq import GroqProvider
 from app.llm.opencode_zen import OpenCodeZenProvider
 
 logger = logging.getLogger(__name__)
@@ -96,8 +97,23 @@ class LLMClient:
         explicit_model = kwargs.pop("model", None)
         response_format = kwargs.get("response_format")
 
-        if target_provider not in ("opencode_zen", "openai", "anthropic"):
+        if target_provider not in ("opencode_zen", "openai", "anthropic", "groq"):
             raise LLMError(f"Unsupported LLM provider: {target_provider}")
+
+        if target_provider == "groq":
+            groq_model = explicit_model or settings.groq_model_name or "openai/gpt-oss-120b"
+            provider = GroqProvider(
+                base_url=settings.groq_base_url,
+                api_key=settings.groq_api_key,
+                model=groq_model,
+                timeout=self.timeout,
+            )
+            return await provider.complete(
+                messages=messages,
+                model=groq_model,
+                tools=tools,
+                **kwargs,
+            )
 
         seed_model = explicit_model or config.model_name
 
@@ -136,9 +152,30 @@ class LLMClient:
                     messages=messages,
                     model=model_name,
                     tools=tools,
-                    **kwargs,
+                    **dict(kwargs),
                 )
-            except (LLMAuthenticationError, LLMInvalidRequestError) as fatal:
+            except LLMAuthenticationError as fatal:
+                # OpenCode auth/tier failure (FreeTierError / 403 / 401): fall back to Groq if configured
+                logger.error(
+                    "llm_client: model=%s fatal %s — checking Groq fallback",
+                    model_name,
+                    type(fatal).__name__,
+                )
+                if target_provider == "opencode_zen" and settings.groq_api_key:
+                    try:
+                        return await self._fallback_to_groq(
+                            messages=messages,
+                            tools=tools,
+                            **kwargs,
+                        )
+                    except Exception as fallback_exc:
+                        logger.error(
+                            "llm_client: Groq fallback failed after auth error: %s",
+                            fallback_exc,
+                        )
+                        raise fatal from fallback_exc
+                raise
+            except LLMInvalidRequestError as fatal:
                 # Policy 3 (Global Auth) & Client Schema Errors: fail fast across all models
                 logger.error(
                     "llm_client: model=%s fatal %s — re-raising immediately across all models",
@@ -224,7 +261,46 @@ class LLMClient:
             len(chain),
             len(attempts_log),
         )
-        raise LLMExhaustedFreeTierError(attempts=attempts_log)
+        exhaustion_error = LLMExhaustedFreeTierError(attempts=attempts_log)
+        if target_provider == "opencode_zen" and settings.groq_api_key:
+            try:
+                return await self._fallback_to_groq(
+                    messages=messages,
+                    tools=tools,
+                    **kwargs,
+                )
+            except Exception as fallback_exc:
+                logger.error(
+                    "llm_client: Groq fallback failed after exhaustion: %s",
+                    fallback_exc,
+                )
+                raise exhaustion_error from fallback_exc
+
+        raise exhaustion_error
+
+    async def _fallback_to_groq(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Fall back to Groq provider when OpenCode Zen is unavailable, exhausted, or blocked."""
+        logger.warning(
+            "All OpenCode Zen models failed/blocked. Falling back to Groq provider with model=%s",
+            settings.groq_model_name,
+        )
+        provider = GroqProvider(
+            base_url=settings.groq_base_url,
+            api_key=settings.groq_api_key,
+            model=settings.groq_model_name,
+            timeout=self.timeout,
+        )
+        return await provider.complete(
+            messages=messages,
+            model=settings.groq_model_name,
+            tools=tools,
+            **kwargs,
+        )
 
     @staticmethod
     def _is_json_invalid(

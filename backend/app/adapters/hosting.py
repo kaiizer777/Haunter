@@ -128,6 +128,17 @@ class HostingAdapter(ABC):
         Must not block — return as fast as possible.
         """
 
+    @abstractmethod
+    async def schedule_review(
+        self,
+        review_id: UUID,
+        background_tasks: "BackgroundTasks",
+    ) -> None:
+        """
+        Schedule run_code_review_pipeline(review_id) to execute asynchronously.
+        Must not block — return as fast as possible.
+        """
+
 
 # ---------------------------------------------------------------------------
 # AWS adapter (Lambda) — async self-invoke via boto3
@@ -204,6 +215,52 @@ class AWSHostingAdapter(HostingAdapter):
             function_name,
             run_id,
         )
+
+    async def schedule_review(
+        self,
+        review_id: UUID,
+        background_tasks: "BackgroundTasks",
+    ) -> None:
+        import hashlib
+        import hmac
+        import json
+        from app.config import settings
+
+        function_name = settings.aws_lambda_function_name
+        if not function_name:
+            import os
+            function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+
+        if not function_name:
+            logger.info(
+                "hosting(aws): AWS_LAMBDA_FUNCTION_NAME not set; "
+                "using in-process BackgroundTasks for code review"
+            )
+            from app.services.review_orchestrator import run_code_review_pipeline
+            background_tasks.add_task(run_code_review_pipeline, review_id)
+            return
+
+        hmac_key = getattr(settings, "github_webhook_secret", None) or getattr(
+            settings, "session_secret_key", ""
+        )
+        token = ""
+        if hmac_key:
+            token = hmac.new(
+                hmac_key.encode(), str(review_id).encode(), hashlib.sha256
+            ).hexdigest()
+        payload_dict: dict[str, str] = {"review_id": str(review_id)}
+        if token:
+            payload_dict["token"] = token
+        payload = json.dumps(payload_dict).encode()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _invoke_lambda_async, function_name, payload)
+        logger.info(
+            "hosting(aws): async-invoked Lambda %s for review=%s",
+            function_name,
+            review_id,
+        )
+
 
 
 def _invoke_lambda_async(function_name: str, payload: bytes) -> None:

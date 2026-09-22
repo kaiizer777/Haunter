@@ -26,11 +26,18 @@ import re
 import time
 from typing import Any, Optional
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import github_client as gh
 from app.llm import LLMClient
-from app.models import Repo, Run, RunStep
+from app.models import Attempt, Repo, Run, RunStep
+from app.subagents.ast_analyzer import (
+    extract_generic_symbol_context,
+    extract_python_ast_context,
+    extract_stack_frames,
+    format_ast_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -198,19 +205,71 @@ def _discover_candidate_files_to_inspect(logs_text: str, repo_paths: list[str]) 
     return candidates[:2], test_files[:1]
 
 
+def extract_failing_test_target(text: str) -> Optional[str]:
+    """
+    Extract candidate failing test path or test identifier from failure logs or diagnosis summary.
+
+    Handles:
+      1. Explicit markdown section: '## Failing Test Files ... ### <path>'
+      2. Pytest FAILED report line: 'FAILED tests/test_foo.py::test_bar'
+      3. Pytest path::test format: 'tests/test_foo.py::test_bar'
+      4. Jest/Vitest FAIL report line: 'FAIL src/components/foo.test.ts'
+      5. Standalone test file path: 'tests/test_something.py' or 'src/something.test.ts'
+    """
+    if not text or not text.strip():
+        return None
+
+    # 1. Section header in summary: "## Failing Test Files ... ### <path>"
+    m_section = re.search(r"## Failing Test Files[^\n]*\n+###\s*([^\s\n\r`]+)", text)
+    section_path = m_section.group(1).strip() if m_section else None
+
+    # 2. Pytest explicit FAILED line: e.g. "FAILED tests/test_foo.py::test_bar"
+    m_failed = re.search(
+        r"(?:FAIL|FAILED)\s+([a-zA-Z0-9_\-./]+(?:::[a-zA-Z0-9_]+)?)",
+        text,
+    )
+    if m_failed:
+        cand = m_failed.group(1).strip().rstrip(":")
+        return cand
+
+    # 3. Path with test function: e.g. "tests/test_analytics.py::test_metrics_calc"
+    m_py_func = re.search(
+        r"([a-zA-Z0-9_\-./]+(?:test_[a-zA-Z0-9_\-]+|[a-zA-Z0-9_\-]+_test)\.(?:py|ts|js)::[a-zA-Z0-9_]+)",
+        text,
+    )
+    if m_py_func:
+        return m_py_func.group(1).strip()
+
+    # 4. If section path found, use it
+    if section_path:
+        return section_path
+
+    # 5. Standalone test file path: tests/test_foo.py or foo.test.ts or test_foo.py
+    m_test_file = re.search(
+        r"([a-zA-Z0-9_\-./]*(?:test_[a-zA-Z0-9_\-]+|[a-zA-Z0-9_\-]+_test|[a-zA-Z0-9_\-]+\.test|[a-zA-Z0-9_\-]+\.spec)\.(?:py|ts|js))",
+        text,
+    )
+    if m_test_file:
+        return m_test_file.group(1).strip()
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 
-async def _safe_fetch(coro: Any, label: str) -> str:
+async def _safe_fetch(coro: Any, label: str) -> Any:
     """
     Await `coro` with FETCH_TIMEOUT_S. On timeout or any exception, log a
-    structured warning and return an empty string. Never propagates exceptions
+    structured warning and return an empty string/result. Never propagates exceptions
     so asyncio.gather can still collect results from the other two fetches.
     """
     try:
         result = await asyncio.wait_for(coro, timeout=FETCH_TIMEOUT_S)
+        if isinstance(result, list):
+            return result
         # Normalise: commit metadata dict → compact JSON string
         if isinstance(result, dict):
             result = json.dumps(result, default=str)
@@ -226,6 +285,145 @@ async def _safe_fetch(coro: Any, label: str) -> str:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def extract_reviewer_feedback(diagnosis_summary: str) -> Optional[str]:
+    """
+    Extract the reviewer feedback instruction from a PR feedback diagnosis summary.
+    """
+    if not diagnosis_summary:
+        return None
+    marker = "## Reviewer Feedback"
+    if marker not in diagnosis_summary:
+        return None
+    section = diagnosis_summary.split(marker, 1)[1]
+    if "\n## " in section:
+        section = section.split("\n## ", 1)[0]
+    return section.strip() or None
+
+
+async def gather_pr_feedback_context(
+    run: Run,
+    repo: Repo,
+    db: AsyncSession,
+) -> str:
+    """
+    Context gatherer for interactive PR feedback loop (run.parent_run_id is set).
+
+    Fetches:
+      1. Reviewer comment body and preceding PR comment thread via GitHub Issues API.
+      2. Previous verified attempt patch and strategy notes from parent run's Attempt.
+      3. File diff of the existing PR branch.
+    Redacts all secrets via _redact_secrets() before assembling into diagnosis_summary.
+    """
+    t0 = time.monotonic()
+    owner = repo.owner
+    name = repo.name
+    pr_number = run.pr_number
+    pr_branch = run.pr_branch or run.head_branch
+
+    token: Optional[str] = None
+    try:
+        from app.github.pr import get_installation_token
+        token = await get_installation_token(repo)
+    except Exception:
+        token = None
+
+    # 1. Fetch parent run's attempt
+    prior_patch = ""
+    prior_strategy_notes = ""
+    prior_attempt_num = 1
+    if run.parent_run_id:
+        stmt = (
+            select(Attempt)
+            .where(Attempt.run_id == run.parent_run_id)
+            .order_by(Attempt.attempt_number.desc())
+        )
+        parent_attempts = (await db.scalars(stmt)).all()
+        prior_attempt = next(
+            (a for a in parent_attempts if a.verification_status == "pass"),
+            parent_attempts[0] if parent_attempts else None,
+        )
+        if prior_attempt:
+            prior_patch = prior_attempt.patch_text or ""
+            prior_strategy_notes = prior_attempt.strategy_notes or ""
+            prior_attempt_num = prior_attempt.attempt_number
+
+    # 2. Fetch PR comments & diff concurrently
+    comments_raw: Any = []
+    diff_raw: str = ""
+    if pr_number:
+        comments_raw, diff_raw = await asyncio.gather(
+            _safe_fetch(
+                gh.fetch_pr_comments(owner=owner, repo=name, pr_number=pr_number, token=token),
+                label="pr_comments",
+            ),
+            _safe_fetch(
+                gh.fetch_diff(owner=owner, repo=name, sha=pr_branch, token=token),
+                label="pr_branch_diff",
+            ),
+        )
+
+    # 3. Format and extract reviewer critique from comment thread
+    comments_list = comments_raw if isinstance(comments_raw, list) else []
+    formatted_comments: list[str] = []
+    latest_reviewer_instruction = ""
+
+    for item in comments_list:
+        if not isinstance(item, dict):
+            continue
+        c_body = item.get("body", "")
+        author = item.get("user", {}).get("login", "unknown") if isinstance(item.get("user"), dict) else "unknown"
+        assoc = item.get("author_association", "NONE")
+        formatted_comments.append(f"Comment by @{author} ({assoc}):\n{c_body.strip()}\n")
+        if "@haunter" in c_body.lower():
+            latest_reviewer_instruction = c_body.strip()
+
+    if not latest_reviewer_instruction and formatted_comments:
+        latest_reviewer_instruction = formatted_comments[-1]
+
+    # 4. Redact secrets across all assembled sections
+    clean_instruction = _redact_secrets(latest_reviewer_instruction)
+    clean_comments = _redact_secrets("\n---\n".join(formatted_comments)) if formatted_comments else "(no comments found)"
+    clean_patch = _redact_secrets(prior_patch) if prior_patch else "(no previous patch)"
+    clean_notes = _redact_secrets(prior_strategy_notes) if prior_strategy_notes else "(none)"
+    clean_diff = _redact_secrets(str(diff_raw or "")) if diff_raw else "(no branch diff available)"
+
+    # Truncate to CAP_CHARS
+    clean_instruction = clean_instruction[:CAP_CHARS]
+    clean_comments = clean_comments[:CAP_CHARS]
+    clean_patch = clean_patch[:CAP_CHARS]
+    clean_notes = clean_notes[:CAP_CHARS]
+    clean_diff = clean_diff[:CAP_CHARS]
+
+    # 5. Assemble diagnosis_summary
+    sections = [
+        f"## Reviewer Feedback\n{clean_instruction}",
+        f"## Preceding PR Comments\n{clean_comments}",
+        f"## Previous Verified Patch (Attempt #{prior_attempt_num})\n```diff\n{clean_patch}\n```",
+        f"## Previous Strategy Notes\n{clean_notes}",
+        f"## Existing PR Branch Diff\n```diff\n{clean_diff}\n```",
+    ]
+    summary = "\n\n".join(sections)
+
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    await _persist_run_step(
+        db=db,
+        run_id=run.id,
+        step_name="context_gatherer",
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=latency_ms,
+        error=False,
+    )
+
+    logger.info(
+        "context_gatherer: run=%s assembled PR feedback context (comments=%d diff_len=%d)",
+        run.id,
+        len(comments_list),
+        len(clean_diff),
+    )
+    return summary
 
 
 async def gather_context(
@@ -248,6 +446,9 @@ async def gather_context(
 
     Raw inputs are not stored anywhere — only the distilled summary propagates.
     """
+    if run.parent_run_id is not None:
+        return await gather_pr_feedback_context(run=run, repo=repo, db=db)
+
     owner = repo.owner
     name = repo.name
     sha = run.head_sha
@@ -346,6 +547,7 @@ async def gather_context(
     # -------------------------------------------------------------------------
     # 7. Discover and inject source code of candidate failing files & tests
     # -------------------------------------------------------------------------
+    fetched_contents: dict[str, str] = {}
     all_known_paths = file_paths or tree_paths
     if all_known_paths:
         try:
@@ -353,6 +555,7 @@ async def gather_context(
             for cand_path in candidate_files:
                 file_content = await gh.fetch_file_content(owner=owner, repo=name, path=cand_path, sha=sha)
                 if file_content:
+                    fetched_contents[cand_path] = file_content
                     lines = file_content.splitlines()
                     if len(lines) > 250:
                         capped = "\n".join(lines[:250]) + "\n... (truncated)"
@@ -375,6 +578,7 @@ async def gather_context(
             for test_path in test_files:
                 test_content = await gh.fetch_file_content(owner=owner, repo=name, path=test_path, sha=sha)
                 if test_content:
+                    fetched_contents[test_path] = test_content
                     lines = test_content.splitlines()
                     if len(lines) > 200:
                         capped = "\n".join(lines[:200]) + "\n... (truncated)"
@@ -397,7 +601,57 @@ async def gather_context(
             logger.warning("context_gatherer: run=%s failed to inject candidate source/test code: %s", run.id, exc)
 
     # -------------------------------------------------------------------------
-    # 7. Return distilled summary (with file list appended)
+    # 8. Deep AST & Symbol Call-Graph Context Expansion (Feature 3)
+    #    Parses stack trace frames and extracts enclosing function / class scopes
+    #    for frames within the target repo (max 5 frames to guard rate limits).
+    # -------------------------------------------------------------------------
+    try:
+        combined_paths = list(file_paths)
+        if not tree_paths:
+            try:
+                tree_paths = await gh.fetch_repo_tree_paths(owner=owner, repo=name, sha=sha)
+            except Exception as exc:
+                logger.warning("context_gatherer: run=%s failed to fetch repo tree for AST: %s", run.id, exc)
+
+        if tree_paths:
+            for tp in tree_paths:
+                if tp not in combined_paths:
+                    combined_paths.append(tp)
+
+        frames = extract_stack_frames(logs_clean, repo_paths=combined_paths or None, max_frames=5)
+        if frames:
+            ast_sections: list[str] = []
+            for frame in frames:
+                content = fetched_contents.get(frame.file_path)
+                if not content:
+                    content = await gh.fetch_file_content(owner=owner, repo=name, path=frame.file_path, sha=sha)
+                    if content:
+                        fetched_contents[frame.file_path] = content
+
+                if content:
+                    if frame.file_path.endswith(".py"):
+                        ast_ctx = extract_python_ast_context(content, frame.line_number)
+                    else:
+                        ast_ctx = extract_generic_symbol_context(content, frame.line_number, frame.symbol_name)
+
+                    if ast_ctx:
+                        formatted = format_ast_context(frame, ast_ctx)
+                        clean_formatted = _redact_secrets(formatted)
+                        ast_sections.append(clean_formatted)
+
+            if ast_sections:
+                ast_header = "\n\n## Enclosing Scope & Symbol Context\n"
+                summary = (summary or "").rstrip() + ast_header + "\n\n".join(ast_sections)
+                logger.info(
+                    "context_gatherer: run=%s injected AST & symbol context for %d frame(s)",
+                    run.id,
+                    len(ast_sections),
+                )
+    except Exception as exc:
+        logger.warning("context_gatherer: run=%s failed to extract AST symbol context: %s", run.id, exc)
+
+    # -------------------------------------------------------------------------
+    # 9. Return distilled summary (with file list and symbol context appended)
     # -------------------------------------------------------------------------
     logger.info(
         "context_gatherer: run=%s input_tokens=%d output_tokens=%d latency_ms=%d",

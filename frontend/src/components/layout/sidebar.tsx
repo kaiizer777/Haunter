@@ -49,9 +49,10 @@ export function Sidebar() {
       if ((e.metaKey || e.ctrlKey || e.altKey) && !e.shiftKey) {
         const keyMap: Record<string, string> = {
           "1": "/runs",
-          "2": "/repos",
-          "3": "/eval",
-          "4": "/config",
+          "2": "/reviews",
+          "3": "/repos",
+          "4": "/eval",
+          "5": "/config",
         };
         const targetHref = keyMap[e.key];
         if (targetHref) {
@@ -82,6 +83,11 @@ export function Sidebar() {
       icon: Activity,
     },
     {
+      name: "Code Reviews",
+      href: "/reviews",
+      icon: ShieldCheck,
+    },
+    {
       name: "Repositories",
       href: "/repos",
       icon: GitBranch,
@@ -97,6 +103,7 @@ export function Sidebar() {
       icon: Sliders,
     },
   ];
+
 
   return (
     <aside

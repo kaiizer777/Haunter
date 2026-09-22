@@ -185,6 +185,42 @@ def make_result(
     )
 
 
+class DeterminismResult(dict):
+    """
+    Result of flaky test determinism verification.
+
+    Attributes / keys:
+        is_flaky             bool         — True iff all clean rerun iterations passed
+        consecutive_passes   int          — Number of consecutive passes achieved
+        iteration_results    list[dict]   — Per-iteration telemetry (duration_ms, passed, logs)
+    """
+
+    def __init__(
+        self,
+        *,
+        is_flaky: bool,
+        consecutive_passes: int,
+        iteration_results: list[dict],
+    ) -> None:
+        super().__init__(
+            is_flaky=is_flaky,
+            consecutive_passes=consecutive_passes,
+            iteration_results=iteration_results,
+        )
+
+    @property
+    def is_flaky(self) -> bool:
+        return self["is_flaky"]
+
+    @property
+    def consecutive_passes(self) -> int:
+        return self["consecutive_passes"]
+
+    @property
+    def iteration_results(self) -> list[dict]:
+        return self["iteration_results"]
+
+
 # Moved from app.sandbox.verifier during cleanup session 1
 def _sanitize_failure_reason(raw: str) -> str:
     """

@@ -7,6 +7,7 @@ import { AppLayout } from "@/components/layout/app-layout";
 import { StatusBadge } from "@/components/runs/status-badge";
 import { CostBreakdown } from "@/components/trace/cost-breakdown";
 import { TraceTimeline } from "@/components/trace/trace-timeline";
+import { DiagnosisView } from "@/components/trace/diagnosis-view";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { api, TraceOut } from "@/lib/api";
@@ -15,12 +16,13 @@ import {
   ArrowLeft,
   ExternalLink,
   GitPullRequest,
+  GitBranch,
   AlertCircle,
-  FileText,
   Clock,
   AlertTriangle,
   Copy,
   Check,
+  Activity,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
@@ -49,7 +51,7 @@ export default function RunDetailClient() {
       if (err instanceof Error) {
         setError(err.message);
       } else {
-        setError("Failed to fetch run trace timeline.");
+        setError("Failed to fetch run trace timeline from server.");
       }
     } finally {
       setLoading(false);
@@ -78,7 +80,7 @@ export default function RunDetailClient() {
               variant="outline"
               size="sm"
               onClick={handleCopyRunId}
-              className="flex items-center gap-1.5 text-xs font-mono h-8 rounded-[6px] bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all"
+              className="flex items-center gap-1.5 text-xs font-mono h-8 rounded-[6px] bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-950 text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all"
               title="Copy full Run UUID"
             >
               {copiedId ? (
@@ -99,10 +101,10 @@ export default function RunDetailClient() {
             <Button
               variant="outline"
               size="sm"
-              className="flex items-center gap-1.5 text-xs font-mono h-8 rounded-[6px] bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all"
+              className="flex items-center gap-1.5 text-xs font-mono h-8 rounded-[6px] bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-950 text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all"
             >
               <ArrowLeft className="h-3.5 w-3.5 text-zinc-400" />
-              Back to Runs
+              <span>Back to Runs</span>
             </Button>
           </Link>
         </div>
@@ -145,13 +147,18 @@ export default function RunDetailClient() {
                 className="pointer-events-none absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent"
               />
 
+              {/* Status & Actions Header */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-4">
                 <div className="flex items-center gap-3 flex-wrap">
                   <StatusBadge status={trace.run.status} />
 
-                  {/* Coarse failure classification (only when orchestrator did NOT
-                      record a specific failure_reason — they carry the same intent
-                      and showing both is redundant). */}
+                  {(trace.run.status === "flaky_detected" || trace.run.conclusion === "flaky_test") && (
+                    <Badge variant="warning" className="text-[10px] font-mono px-2 py-0.5 rounded-[4px] border-amber-500/30 bg-amber-500/10 text-amber-300">
+                      Passed 2/2 clean runs (quarantined)
+                    </Badge>
+                  )}
+
+                  {/* Coarse failure classification */}
                   {trace.failure_classification && !trace.run.failure_reason && (
                     <Badge variant="destructive" className="text-[10px] font-mono px-2 py-0.5 rounded-[4px]">
                       <AlertTriangle className="h-2.5 w-2.5 mr-1" />
@@ -163,6 +170,13 @@ export default function RunDetailClient() {
                     <Clock className="h-3.5 w-3.5 text-zinc-500" />
                     {formatRelativeTime(trace.run.created_at)}
                   </span>
+
+                  {trace.run.pr_branch && (
+                    <span className="font-mono text-xs text-zinc-400 flex items-center gap-1.5 bg-zinc-900/80 border border-zinc-800 px-2.5 py-1 rounded-[5px]">
+                      <GitBranch className="h-3.5 w-3.5 text-zinc-500" />
+                      <span className="text-zinc-300">{trace.run.pr_branch}</span>
+                    </span>
+                  )}
                 </div>
 
                 {/* PR Link (if opened) */}
@@ -171,7 +185,7 @@ export default function RunDetailClient() {
                     href={trace.run.pr_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 rounded-[6px] border-t border-t-emerald-300/70 border-x border-x-emerald-600/70 border-b border-b-emerald-950 bg-gradient-to-b from-emerald-600/90 via-emerald-700 to-emerald-800 px-3 py-1.5 text-xs font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_8px_rgba(16,185,129,0.25)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.3),0_3px_12px_rgba(16,185,129,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all"
+                    className="inline-flex items-center gap-1.5 rounded-[6px] border-t border-t-emerald-300/70 border-x border-x-emerald-600/70 border-b border-b-emerald-950 bg-gradient-to-b from-emerald-600/90 via-emerald-700 to-emerald-800 px-3.5 py-1.5 text-xs font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_8px_rgba(16,185,129,0.25)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.3),0_3px_12px_rgba(16,185,129,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all"
                   >
                     <GitPullRequest className="h-3.5 w-3.5 text-emerald-100" />
                     <span>View Pull Request #{trace.run.pr_number || ""}</span>
@@ -180,13 +194,10 @@ export default function RunDetailClient() {
                 )}
               </div>
 
-              {/* Failure Reason (Phase 15) — explicit cause written by the
-                  orchestrator on every error path. Rendered above the diagnosis
-                  so the user sees *why* before *what was diagnosed*. Only shown
-                  for runs that ended in error/fallback. */}
+              {/* Failure Reason */}
               {trace.run.failure_reason && (
                 <div className="rounded-[6px] border border-rose-800/60 bg-gradient-to-b from-rose-950/40 via-rose-950/20 to-[#0c0809] p-3.5 space-y-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-                  <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-rose-300">
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-rose-300 font-mono">
                     <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />
                     <span>Failure Reason</span>
                   </div>
@@ -196,17 +207,9 @@ export default function RunDetailClient() {
                 </div>
               )}
 
-              {/* Diagnosis Summary (Plain text safe rendering) */}
+              {/* Elevated Root Cause Diagnosis Component */}
               {trace.run.diagnosis_summary && (
-                <div className="rounded-[6px] border border-amber-500/30 bg-gradient-to-b from-amber-950/20 via-[#0e0e11] to-[#09090b] p-3.5 space-y-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-                  <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-amber-400">
-                    <FileText className="h-3.5 w-3.5" />
-                    <span>Root Cause Diagnosis</span>
-                  </div>
-                  <p className="text-xs text-zinc-300 leading-relaxed font-mono whitespace-pre-wrap select-text">
-                    {trace.run.diagnosis_summary}
-                  </p>
-                </div>
+                <DiagnosisView summary={trace.run.diagnosis_summary} />
               )}
             </div>
 
@@ -220,13 +223,19 @@ export default function RunDetailClient() {
                 className="pointer-events-none absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent"
               />
 
-              <div className="border-b border-zinc-800/80 pb-3.5">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-200 font-mono flex items-center gap-2">
-                  Autonomous Execution Timeline
-                </h3>
-                <p className="text-[11px] text-zinc-400 mt-0.5 font-mono">
-                  Step-by-step trace from context gathering to sandbox verification and PR dispatch
-                </p>
+              <div className="border-b border-zinc-800/80 pb-3.5 flex items-center justify-between">
+                <div>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-200 font-mono flex items-center gap-2">
+                    <Activity className="h-3.5 w-3.5 text-amber-400" />
+                    <span>Autonomous Execution Timeline</span>
+                  </h3>
+                  <p className="text-[11px] text-zinc-400 mt-0.5 font-mono">
+                    Step-by-step trace from context gathering to sandbox verification and PR dispatch
+                  </p>
+                </div>
+                <span className="text-[11px] font-mono text-zinc-500 bg-zinc-900/80 border border-zinc-800 px-2 py-0.5 rounded-[4px]">
+                  {trace.steps.length} {trace.steps.length === 1 ? "step" : "steps"} • {trace.attempts.length} {trace.attempts.length === 1 ? "attempt" : "attempts"}
+                </span>
               </div>
 
               <TraceTimeline trace={trace} />

@@ -1,7 +1,7 @@
 name: haunter-test-ts
 on:
   push:
-    branches: ["sandbox/**"]
+    branches: ["sandbox/**", "haunter-flake-check-**"]
   workflow_dispatch:
 
 permissions:

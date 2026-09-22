@@ -1341,8 +1341,16 @@ def test_model_config_update_schema_validation():
     assert m5.model_name == "claude-sonnet-4-5"
 
     # Invalid anthropic model
+    # Valid groq models
+    m6 = ModelConfigUpdate(provider="groq", model_name="openai/gpt-oss-120b")
+    assert m6.model_name == "openai/gpt-oss-120b"
+
+    m7 = ModelConfigUpdate(provider="groq", model_name="llama-3.3-70b-versatile")
+    assert m7.model_name == "llama-3.3-70b-versatile"
+
+    # Invalid groq model (empty string)
     with pytest.raises(ValidationError):
-        ModelConfigUpdate(provider="anthropic", model_name="claude-unapproved")
+        ModelConfigUpdate(provider="groq", model_name="")
 
 
 @pytest.mark.asyncio
@@ -1370,4 +1378,205 @@ async def test_get_available_models_endpoint_direct():
     assert not any(m.id == "paid-model" for m in res.opencode_zen)
     assert any(m.id == "gpt-4o" for m in res.openai)
     assert any(m.id == "claude-sonnet-4-5" for m in res.anthropic)
+    assert any(m.id == "openai/gpt-oss-120b" for m in res.groq)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_groq_provider_success():
+    """Verify GroqProvider posts to {settings.groq_base_url}/chat/completions with bearer auth, model from env, and parses response."""
+    from app.llm.groq import GroqProvider
+
+    groq_endpoint = f"{settings.groq_base_url.rstrip('/')}/chat/completions"
+    orig_key = settings.groq_api_key
+    orig_model = settings.groq_model_name
+    settings.groq_api_key = "gsk_test_groq_key_123"
+    settings.groq_model_name = "llama-3.3-70b-versatile"
+
+    route = respx.post(groq_endpoint).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-groq-mock-1",
+                "model": "llama-3.3-70b-versatile",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Fix generated via Groq",
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 120, "completion_tokens": 45},
+            },
+        )
+    )
+
+    try:
+        provider = GroqProvider()
+        res = await provider.complete(messages=[{"role": "user", "content": "hello groq"}])
+        assert res["content"] == "Fix generated via Groq"
+        assert res["usage"] == {"input_tokens": 120, "output_tokens": 45}
+        assert res["latency_ms"] >= 0
+        assert res["model"] == "llama-3.3-70b-versatile"
+        assert res["tool_calls"] is None
+        assert route.called
+        headers = route.calls.last.request.headers
+        assert headers["Authorization"] == "Bearer gsk_test_groq_key_123"
+        sent_body = json.loads(route.calls.last.request.content)
+        assert sent_body["model"] == "llama-3.3-70b-versatile"
+    finally:
+        settings.groq_api_key = orig_key
+        settings.groq_model_name = orig_model
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_opencode_zen_fallback_to_groq_on_free_tier_error():
+    """Mock OpenCode Zen returning HTTP 403 FreeTierError.
+    Configure settings.groq_api_key = "gsk_test_key" and settings.groq_model_name = "llama-3.3-70b-versatile".
+    Mock Groq endpoint returning 200 OK with content "Fixed via Groq".
+    Verify LLMClient.complete() automatically routes to Groq and succeeds.
+    """
+    orig_zen_key = settings.opencode_zen_api_key
+    orig_groq_key = settings.groq_api_key
+    orig_groq_model = settings.groq_model_name
+
+    settings.opencode_zen_api_key = "test_zen_key_123"
+    settings.groq_api_key = "gsk_test_key"
+    settings.groq_model_name = "llama-3.3-70b-versatile"
+
+    zen_route = respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+        return_value=httpx.Response(403, text="FreeTierError: Free tier access restricted")
+    )
+    groq_endpoint = f"{settings.groq_base_url.rstrip('/')}/chat/completions"
+    groq_route = respx.post(groq_endpoint).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "choices": [{"message": {"role": "assistant", "content": "Fixed via Groq"}}],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 20},
+            },
+        )
+    )
+
+    client = LLMClient()
+    try:
+        res = await client.complete(messages=[{"role": "user", "content": "diagnose failure"}])
+        assert res["content"] == "Fixed via Groq"
+        assert res["model"] == "llama-3.3-70b-versatile"
+        assert zen_route.called
+        assert groq_route.called
+        headers = groq_route.calls.last.request.headers
+        assert headers["Authorization"] == "Bearer gsk_test_key"
+        sent_body = json.loads(groq_route.calls.last.request.content)
+        assert sent_body["model"] == "llama-3.3-70b-versatile"
+    finally:
+        settings.opencode_zen_api_key = orig_zen_key
+        settings.groq_api_key = orig_groq_key
+        settings.groq_model_name = orig_groq_model
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_opencode_zen_fallback_to_groq_on_model_exhaustion():
+    """When all OpenCode Zen models fail with 500 server errors, LLMClient seamlessly falls back to Groq."""
+    from app.llm.config import ResolvedModelConfig
+
+    seed = ResolvedModelConfig(
+        provider="opencode_zen",
+        model_name="nemotron-3.5-lightning-free",
+        base_url="https://opencode.ai/zen/v1",
+    )
+    seed_async = AsyncMock(return_value=seed)
+
+    orig_zen_key = settings.opencode_zen_api_key
+    orig_groq_key = settings.groq_api_key
+    orig_groq_model = settings.groq_model_name
+
+    settings.opencode_zen_api_key = "test_zen_key_123"
+    settings.groq_api_key = "gsk_exhaust_key"
+    settings.groq_model_name = "openai/gpt-oss-120b"
+
+    zen_route = respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+        return_value=httpx.Response(500, text="Internal Server Error")
+    )
+    groq_endpoint = f"{settings.groq_base_url.rstrip('/')}/chat/completions"
+    groq_route = respx.post(groq_endpoint).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-oss-120b",
+                "choices": [{"message": {"role": "assistant", "content": "Exhaustion resolved via Groq"}}],
+                "usage": {"prompt_tokens": 40, "completion_tokens": 15},
+            },
+        )
+    )
+
+    client = LLMClient()
+    try:
+        with patch("app.llm.client.get_active_model_config", seed_async), \
+             patch("app.llm.client.get_dynamic_free_models", AsyncMock(return_value=["nemotron-3-ultra-free"])), \
+             patch("asyncio.sleep", return_value=None):
+            res = await client.complete(messages=[{"role": "user", "content": "exhaustion test"}])
+            assert res["content"] == "Exhaustion resolved via Groq"
+            assert res["model"] == "openai/gpt-oss-120b"
+            assert zen_route.called
+            assert groq_route.called
+    finally:
+        settings.opencode_zen_api_key = orig_zen_key
+        settings.groq_api_key = orig_groq_key
+        settings.groq_model_name = orig_groq_model
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_groq_direct_provider_call():
+    """LLMClient.complete(..., provider='groq') directly invokes Groq without touching OpenCode Zen."""
+    orig_key = settings.groq_api_key
+    orig_model = settings.groq_model_name
+    settings.groq_api_key = "gsk_direct_key"
+    settings.groq_model_name = "openai/gpt-oss-120b"
+
+    groq_endpoint = f"{settings.groq_base_url.rstrip('/')}/chat/completions"
+    groq_route = respx.post(groq_endpoint).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model": "openai/gpt-oss-120b",
+                "choices": [{"message": {"role": "assistant", "content": "Direct Groq call ok"}}],
+                "usage": {"prompt_tokens": 30, "completion_tokens": 10},
+            },
+        )
+    )
+
+    client = LLMClient()
+    try:
+        res = await client.complete(
+            messages=[{"role": "user", "content": "hi"}],
+            provider="groq",
+        )
+        assert res["content"] == "Direct Groq call ok"
+        assert res["model"] == "openai/gpt-oss-120b"
+        assert groq_route.called
+    finally:
+        settings.groq_api_key = orig_key
+        settings.groq_model_name = orig_model
+
+
+@pytest.mark.asyncio
+async def test_groq_provider_missing_api_key_raises_auth_error():
+    """GroqProvider raises LLMAuthenticationError when no API key is configured."""
+    from app.llm.groq import GroqProvider
+
+    orig_key = settings.groq_api_key
+    settings.groq_api_key = None
+    try:
+        provider = GroqProvider()
+        with pytest.raises(LLMAuthenticationError) as exc_info:
+            await provider.complete(messages=[{"role": "user", "content": "hi"}])
+        assert "GROQ_API_KEY is not configured" in str(exc_info.value)
+    finally:
+        settings.groq_api_key = orig_key
 

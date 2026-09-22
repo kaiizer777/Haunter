@@ -78,6 +78,9 @@ class Repo(Base):
 
     user: Mapped["User"] = relationship("User", back_populates="repos")
     runs: Mapped[list["Run"]] = relationship("Run", back_populates="repo", cascade="all, delete-orphan")
+    code_reviews: Mapped[list["CodeReview"]] = relationship(
+        "CodeReview", back_populates="repo", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         UniqueConstraint("user_id", "owner", "name", name="uq_repo_user_owner_name"),
@@ -122,7 +125,18 @@ class Run(Base):
     # see *why* a run failed, not just that it did.
     failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Feature 1 — Interactive PR Feedback Loop lineage
+    parent_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+
     repo: Mapped["Repo"] = relationship("Repo", back_populates="runs")
+    parent_run: Mapped[Optional["Run"]] = relationship(
+        "Run", remote_side=lambda: [Run.id], back_populates="children_runs"
+    )
+    children_runs: Mapped[list["Run"]] = relationship(
+        "Run", back_populates="parent_run", cascade="all, delete-orphan"
+    )
     run_steps: Mapped[list["RunStep"]] = relationship("RunStep", back_populates="run", cascade="all, delete-orphan")
     attempts: Mapped[list["Attempt"]] = relationship("Attempt", back_populates="run", cascade="all, delete-orphan")
     eval_result: Mapped[Optional["EvalResult"]] = relationship("EvalResult", back_populates="run", uselist=False, cascade="all, delete-orphan")
@@ -223,3 +237,29 @@ class SystemConfig(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class CodeReview(Base):
+    """
+    Autonomous push-level code review and actionable remediation record.
+    Tracks risk scores (0-100), structured AST/diff findings, and GitHub review/comment delivery.
+    """
+
+    __tablename__ = "code_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), index=True)
+    commit_sha: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    pr_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    risk_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="completed")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    repo: Mapped["Repo"] = relationship("Repo", back_populates="code_reviews")
+

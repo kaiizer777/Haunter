@@ -62,5 +62,6 @@ infra/aws/tfplan
 !frontend/agents.md
 !aws.md
 !workers.md
+!future.md
 
 

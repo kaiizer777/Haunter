@@ -661,30 +661,37 @@ async def push_patch_to_mirror(
     """
     if not branch or not branch.strip():
         raise ValueError("push_patch_to_mirror: branch is empty")
-    if not patch_text or not patch_text.strip():
-        raise ValueError("push_patch_to_mirror: patch_text is empty")
 
-    files, deleted_paths = _parse_patch(patch_text)
-    split_files, split_deleted = _split_patch_by_file(patch_text)
-    combined_deleted = set(deleted_paths) | set(split_deleted)
+    files: dict[str, str] = {}
+    deleted_paths: list[str] = []
+    split_files: dict[str, str] = {}
+    combined_deleted: set[str] = set()
 
-    if not files and not combined_deleted:
-        raise ValueError("push_patch_to_mirror: patch did not parse to any file changes")
+    if patch_text and patch_text.strip():
+        files, deleted_paths = _parse_patch(patch_text)
+        split_files, split_deleted = _split_patch_by_file(patch_text)
+        combined_deleted = set(deleted_paths) | set(split_deleted)
 
-    # MVP guardrail — surface large patches as a clear ValueError so the
-    # runner can mark the attempt as a config issue rather than burning
-    # attempts on a silent no-op.
-    if len(files) > _MAX_PATCH_FILES:
-        raise ValueError(
-            f"push_patch_to_mirror: patch touches {len(files)} files, "
-            f"max supported in MVP is {_MAX_PATCH_FILES} (Contents-API "
-            f"fallback is future work)"
-        )
-    if len(patch_text.encode("utf-8")) > _MAX_PATCH_BYTES:
-        raise ValueError(
-            f"push_patch_to_mirror: patch size exceeds MVP limit "
-            f"({_MAX_PATCH_BYTES} bytes); Contents-API fallback is future work"
-        )
+        if not files and not combined_deleted:
+            raise ValueError("push_patch_to_mirror: patch did not parse to any file changes")
+
+        # MVP guardrail — surface large patches as a clear ValueError so the
+        # runner can mark the attempt as a config issue rather than burning
+        # attempts on a silent no-op.
+        if len(files) > _MAX_PATCH_FILES:
+            raise ValueError(
+                f"push_patch_to_mirror: patch touches {len(files)} files, "
+                f"max supported in MVP is {_MAX_PATCH_FILES} (Contents-API "
+                f"fallback is future work)"
+            )
+        if len(patch_text.encode("utf-8")) > _MAX_PATCH_BYTES:
+            raise ValueError(
+                f"push_patch_to_mirror: patch size exceeds MVP limit "
+                f"({_MAX_PATCH_BYTES} bytes); Contents-API fallback is future work"
+            )
+    else:
+        if not seed_files and not (workflow_filename and workflow_content):
+            raise ValueError("push_patch_to_mirror: patch_text is empty and no seed_files or workflow provided")
 
     headers = _auth_headers(token)
 

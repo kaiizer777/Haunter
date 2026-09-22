@@ -86,6 +86,7 @@ export interface RunSummaryOut {
   id: string;
   repo_id: string;
   status: string;
+  conclusion?: string | null;
   diagnosis_summary: string | null;
   created_at: string;
   updated_at: string;
@@ -114,6 +115,38 @@ export interface RepoStatsOut {
   avg_cost: number;
   avg_latency_ms: number;
 }
+
+export interface ReviewFindingOut {
+  file_path: string;
+  line_start: number;
+  line_end: number;
+  category: "security" | "logic" | "performance" | "api_compatibility" | string;
+  severity: "low" | "medium" | "high" | "critical" | string;
+  critique: string;
+  suggested_patch?: string | null;
+}
+
+export interface CodeReviewOut {
+  id: string;
+  repo_id: string;
+  repo_owner?: string | null;
+  repo_name?: string | null;
+  commit_sha: string;
+  pr_number?: number | null;
+  risk_score: number;
+  summary: string;
+  findings: ReviewFindingOut[];
+  status: string;
+  input_tokens: number;
+  output_tokens: number;
+  created_at: string;
+}
+
+export interface CodeReviewListOut {
+  reviews: CodeReviewOut[];
+  total: number;
+}
+
 
 export interface FixtureScoreItem {
   fixture_id: string;
@@ -344,4 +377,44 @@ export const api = {
     api.get<ModelConfigOut>(`/config/model${repoId ? `?repo_id=${repoId}` : ""}`),
   updateModelConfig: (data: ModelConfigUpdate) =>
     api.put<ModelConfigOut>("/config/model", data),
+
+  // Code Reviews endpoints
+  getCodeReviews: (params?: {
+    repo_id?: string;
+    limit?: number;
+    offset?: number;
+    min_risk?: number;
+    severity?: string;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.repo_id) query.append("repo_id", params.repo_id);
+    if (params?.limit) query.append("limit", params.limit.toString());
+    if (params?.offset !== undefined) query.append("offset", params.offset.toString());
+    if (params?.min_risk !== undefined) query.append("min_risk", params.min_risk.toString());
+    if (params?.severity) query.append("severity", params.severity);
+    const qs = query.toString();
+    return api.get<CodeReviewListOut>(`/reviews${qs ? `?${qs}` : ""}`);
+  },
+
+  getRepoReviews: (
+    repoId: string,
+    params?: {
+      limit?: number;
+      offset?: number;
+      min_risk?: number;
+      severity?: string;
+    }
+  ) => {
+    const query = new URLSearchParams();
+    if (params?.limit) query.append("limit", params.limit.toString());
+    if (params?.offset !== undefined) query.append("offset", params.offset.toString());
+    if (params?.min_risk !== undefined) query.append("min_risk", params.min_risk.toString());
+    if (params?.severity) query.append("severity", params.severity);
+    const qs = query.toString();
+    return api.get<CodeReviewListOut>(`/repos/${repoId}/reviews${qs ? `?${qs}` : ""}`);
+  },
+
+  getReviewDetail: (reviewId: string) =>
+    api.get<CodeReviewOut>(`/reviews/${reviewId}`),
 };
+

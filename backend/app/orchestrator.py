@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import html as html_module
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -61,6 +62,7 @@ _FAILURE_REASON_TAIL_CHARS: int = 200
 _TERMINAL_STATUSES: frozenset[str] = frozenset({
     "pr_opened",
     "fallback_commented",
+    "flaky_detected",
     "completed",
     "error",
 })
@@ -76,13 +78,15 @@ logger = logging.getLogger(__name__)
 class RunStatus(str, Enum):
     pending = "pending"
     context_gathering = "context_gathering"
+    flake_verification = "flake_verification"
     fix_generation = "fix_generation"
     verification = "verification"
     pending_pr = "pending_pr"
     fallback = "fallback"
-    # Phase 8 terminal statuses
+    # Phase 8 & Feature 2 terminal statuses
     pr_opened = "pr_opened"             # PR successfully created on GitHub
     fallback_commented = "fallback_commented"  # diagnosis comment posted (all attempts exhausted)
+    flaky_detected = "flaky_detected"   # quarantined flaky test (passed 2/2 clean runs)
     completed = "completed"             # legacy — kept for backward compatibility
     error = "error"
 
@@ -100,7 +104,8 @@ _FAST_FAIL_ELIGIBLE_STEPS: frozenset[str] = frozenset({
 # error is reachable from every non-terminal state.
 _ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
     RunStatus.pending:              {RunStatus.context_gathering, RunStatus.error},
-    RunStatus.context_gathering:    {RunStatus.fix_generation, RunStatus.error},
+    RunStatus.context_gathering:    {RunStatus.flake_verification, RunStatus.fix_generation, RunStatus.error},
+    RunStatus.flake_verification:   {RunStatus.flaky_detected, RunStatus.fix_generation, RunStatus.error},
     RunStatus.fix_generation:       {RunStatus.verification, RunStatus.fallback, RunStatus.error},
     RunStatus.verification:         {RunStatus.pending_pr, RunStatus.fallback, RunStatus.fix_generation, RunStatus.error},
     RunStatus.pending_pr:           {RunStatus.pr_opened, RunStatus.error},
@@ -108,6 +113,7 @@ _ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
     # Terminal states — no transitions out
     RunStatus.pr_opened:            set(),
     RunStatus.fallback_commented:   set(),
+    RunStatus.flaky_detected:       set(),
     RunStatus.completed:            set(),
     RunStatus.error:                set(),
 }
@@ -412,11 +418,139 @@ async def _orchestrator_pipeline_body(
     )
 
     # ----------------------------------------------------------------
-    # context_gathering → fix_generation
+    # Flaky Test Detective & Quarantine Engine (Feature 2)
     # ----------------------------------------------------------------
-    # IDEMPOTENT: only transition if currently in `context_gathering`.
-    # If a prior invocation already moved past it, skip and resume.
-    if run.status == RunStatus.context_gathering.value:
+    if run.parent_run_id is not None:
+        logger.info(
+            "orchestrator: run=%s is an interactive PR refinement run (parent_run_id=%s) "
+            "— bypassing flake verification directly to fix_generation",
+            run_id,
+            run.parent_run_id,
+        )
+        await _transition(run, RunStatus.fix_generation, db)
+        state["step"] = RunStatus.fix_generation.value
+    elif run.status == RunStatus.context_gathering.value:
+        from app.subagents.context_gatherer import extract_failing_test_target
+
+        target_test = extract_failing_test_target(summary)
+        if target_test:
+            logger.info(
+                "orchestrator: run=%s isolated failing test target %r — entering flake_verification",
+                run_id,
+                target_test,
+            )
+            await _transition(run, RunStatus.flake_verification, db)
+            state["step"] = RunStatus.flake_verification.value
+
+            t_flake_start = time.monotonic()
+            determinism_result = None
+            try:
+                from app.sandbox import verify_determinism
+
+                determinism_result = await verify_determinism(
+                    run=run,
+                    repo=repo,
+                    target_test=target_test,
+                    runs_count=2,
+                    db=db,
+                )
+            except Exception as flake_exc:
+                logger.warning(
+                    "orchestrator: run=%s verify_determinism error (%s: %s) — falling through to fix_generation",
+                    run_id,
+                    type(flake_exc).__name__,
+                    flake_exc,
+                )
+
+            flake_latency_ms = int((time.monotonic() - t_flake_start) * 1000)
+
+            # Persist RunStep trace row for flake_verification with latency and 0 tokens
+            try:
+                flake_step = RunStep(
+                    run_id=run.id,
+                    step_name="flake_verification",
+                    input_tokens=0,
+                    output_tokens=0,
+                    latency_ms=flake_latency_ms,
+                    cost_estimate=0.0,
+                )
+                db.add(flake_step)
+                await db.commit()
+            except Exception as step_exc:
+                logger.warning(
+                    "orchestrator: failed to persist flake_verification RunStep for run=%s (%s: %s)",
+                    run_id,
+                    type(step_exc).__name__,
+                    step_exc,
+                )
+
+            if determinism_result and determinism_result.is_flaky:
+                # Case A: Passes 2/2 times -> Flaky test detected!
+                run.conclusion = "flaky_test"
+                consecutive_passes = determinism_result.consecutive_passes or 2
+                run.failure_reason = (
+                    f"Flaky test detected in {target_test}: passed "
+                    f"{consecutive_passes}/{consecutive_passes} consecutive clean runs"
+                )
+                run.updated_at = datetime.now(timezone.utc)
+                db.add(run)
+                await db.commit()
+
+                try:
+                    from app.github.pr import get_installation_token
+                    from app.github_client import post_commit_comment
+                    from app.subagents.context_gatherer import _redact_secrets
+
+                    github_token = await get_installation_token(repo)
+                    raw_comment = (
+                        f"⚠️ Flaky test detected in `{target_test}`. "
+                        f"Passed {consecutive_passes}/{consecutive_passes} clean runs in sandbox. "
+                        "Fix generation aborted — quarantine suggested."
+                    )
+                    comment_body = _redact_secrets(raw_comment)
+                    await post_commit_comment(
+                        owner=repo.owner,
+                        repo=repo.name,
+                        sha=run.head_sha,
+                        body=comment_body,
+                        token=github_token,
+                    )
+                except Exception as comment_exc:
+                    logger.warning(
+                        "orchestrator: run=%s failed to post flaky commit comment: %s",
+                        run_id,
+                        comment_exc,
+                    )
+
+                await _transition(run, RunStatus.flaky_detected, db)
+                state["step"] = RunStatus.flaky_detected.value
+                state["decisions"].append("flaky_test_detected")
+                logger.info(
+                    "orchestrator: run=%s flaky test detected in %r — pipeline terminated early (0 tokens)",
+                    run_id,
+                    target_test,
+                )
+                return
+
+            # Case B: Rerun failed or determinism check inconclusive -> proceed to fix_generation
+            logger.info(
+                "orchestrator: run=%s determinism check failed/inconclusive — transitioning to fix_generation",
+                run_id,
+            )
+            await _transition(run, RunStatus.fix_generation, db)
+            state["step"] = RunStatus.fix_generation.value
+
+        else:
+            # Edge Case: No specific test target isolated -> Fall through to fix_generation
+            logger.info(
+                "orchestrator: run=%s no specific test target isolated — proceeding directly to fix_generation",
+                run_id,
+            )
+            await _transition(run, RunStatus.fix_generation, db)
+            state["step"] = RunStatus.fix_generation.value
+
+    elif run.status == RunStatus.flake_verification.value:
+        # Re-entry while in flake_verification -> proceed to fix_generation
         await _transition(run, RunStatus.fix_generation, db)
         state["step"] = RunStatus.fix_generation.value
     else:
@@ -484,11 +618,17 @@ async def _orchestrator_pipeline_body(
 
                 # ---- Generate fix ----
                 try:
+                    review_feedback: Optional[str] = None
+                    if run.parent_run_id is not None:
+                        from app.subagents.context_gatherer import extract_reviewer_feedback
+                        review_feedback = extract_reviewer_feedback(run.diagnosis_summary or "")
+
                     attempt = await generate_fix(
                         run=run,
                         diagnosis_summary=run.diagnosis_summary or "",
                         prior_attempt=prior_attempt,
                         db=attempt_db,
+                        review_feedback=review_feedback,
                     )
                     state["decisions"].append(
                         f"fix_generated_attempt_{attempt.attempt_number}"
@@ -619,6 +759,69 @@ async def _orchestrator_pipeline_body(
                     await _transition(run, RunStatus.pending_pr, attempt_db)
                     state["step"] = RunStatus.pending_pr.value
                     state["decisions"].append("verification_passed")
+
+                    # Feature 1: Refinement run on existing PR branch
+                    if run.parent_run_id is not None:
+                        try:
+                            from app.github.pr import commit_patch, get_installation_token
+                            from app.github_client import post_pr_comment
+
+                            token = await get_installation_token(repo)
+                            target_branch = run.pr_branch or run.head_branch
+                            pr_number = run.pr_number
+
+                            commit_sha = await commit_patch(
+                                owner=repo.owner,
+                                repo=repo.name,
+                                branch=target_branch,
+                                patch_text=attempt.patch_text,
+                                commit_msg=f"Refine fix based on feedback (attempt #{attempt.attempt_number})",
+                                token=token,
+                            )
+
+                            confirmation_comment = (
+                                "🤖 @haunter updated the PR based on your feedback:\n\n"
+                                f"- Refined fix committed: `{commit_sha[:7]}`\n"
+                                "- Verified in sandbox CI."
+                            )
+                            if pr_number:
+                                await post_pr_comment(
+                                    owner=repo.owner,
+                                    repo=repo.name,
+                                    pr_number=pr_number,
+                                    body=confirmation_comment,
+                                    token=token,
+                                )
+
+                            run.updated_at = datetime.now(timezone.utc)
+                            attempt_db.add(run)
+                            await attempt_db.commit()
+
+                            await _transition(run, RunStatus.pr_opened, attempt_db)
+                            state["step"] = RunStatus.pr_opened.value
+                            logger.info(
+                                "orchestrator: run=%s refinement commit %s appended to PR #%s",
+                                run_id,
+                                commit_sha[:7],
+                                pr_number,
+                            )
+                        except Exception as pr_err:
+                            logger.error(
+                                "orchestrator: run=%s PR refinement commit failed (%s: %s)",
+                                run_id,
+                                type(pr_err).__name__,
+                                pr_err,
+                            )
+                            await _persist_failure_reason(
+                                db=attempt_db,
+                                run=run,
+                                reason=_format_failure_reason("pr_refinement", pr_err),
+                            )
+                            try:
+                                await _transition(run, RunStatus.error, attempt_db)
+                            except InvalidTransitionError:
+                                pass
+                        return
 
                     # ---- Phase 8: generate PR text + open PR ----
                     try:
@@ -813,15 +1016,31 @@ async def _orchestrator_pipeline_body(
                 )
 
                 from app.github.pr import get_installation_token
-                from app.github_client import post_commit_comment
                 github_token = await get_installation_token(repo)
-                await post_commit_comment(
-                    owner=repo.owner,
-                    repo=repo.name,
-                    sha=run.head_sha,
-                    body=fallback_body,
-                    token=github_token,
-                )
+
+                # Feature 1: If interactive PR refinement, post diagnostic comment to PR
+                if run.parent_run_id is not None and run.pr_number:
+                    from app.github_client import post_pr_comment
+                    pr_fallback_body = (
+                        "⚠️ @haunter was unable to verify the requested adjustments in sandbox CI:\n\n"
+                        f"{fallback_body}"
+                    )
+                    await post_pr_comment(
+                        owner=repo.owner,
+                        repo=repo.name,
+                        pr_number=run.pr_number,
+                        body=pr_fallback_body,
+                        token=github_token,
+                    )
+                else:
+                    from app.github_client import post_commit_comment
+                    await post_commit_comment(
+                        owner=repo.owner,
+                        repo=repo.name,
+                        sha=run.head_sha,
+                        body=fallback_body,
+                        token=github_token,
+                    )
                 await _transition(run, RunStatus.fallback_commented, fb_db)
                 state["step"] = RunStatus.fallback_commented.value
             except Exception as e:
@@ -999,12 +1218,7 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
             try:
                 async with async_session_maker() as error_db:
                     fresh_run = await error_db.get(Run, run_id)
-                    if fresh_run is not None and fresh_run.status not in {
-                        RunStatus.pr_opened.value,
-                        RunStatus.fallback_commented.value,
-                        RunStatus.completed.value,
-                        RunStatus.error.value,
-                    }:
+                    if fresh_run is not None and fresh_run.status not in _TERMINAL_STATUSES:
                         # Persist a trace step so the timeline shows why we gave up,
                         # then write the failure_reason, then transition to error.
                         # Each commits independently so a partial-failure still

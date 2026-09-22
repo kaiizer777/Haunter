@@ -61,7 +61,7 @@ class AvailableRepoOut(BaseModel):
 
 # Allowlisted providers — no free-text to prevent base_url injection.
 # Extend this list when a new provider is vetted and approved.
-AllowedProvider = Literal["opencode_zen", "openai", "anthropic"]
+AllowedProvider = Literal["opencode_zen", "openai", "anthropic", "groq"]
 
 # Allowlisted hosting/sandbox providers — never free-text, never derived
 # from request headers. Used by PUT /config/hosting and validated in the
@@ -87,6 +87,7 @@ class ModelConfigUpdate(BaseModel):
     - For 'opencode_zen': allows any model name ending with '-free'.
     - For 'openai': allows approved OpenAI models (gpt-4o, gpt-4o-mini).
     - For 'anthropic': allows approved Anthropic models (claude-sonnet-4-5, claude-haiku-3-5).
+    - For 'groq': allows non-empty model names.
     base_url is derived server-side from the provider allowlist, never from the client.
     """
 
@@ -117,6 +118,9 @@ class ModelConfigUpdate(BaseModel):
                     f"Invalid model '{model}' for provider 'anthropic'. "
                     f"Allowed models: {sorted(ANTHROPIC_MODELS)}"
                 )
+        elif provider == "groq":
+            if not model:
+                raise ValueError("Model name cannot be empty for provider 'groq'.")
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
@@ -133,6 +137,7 @@ class AvailableModelsOut(BaseModel):
     opencode_zen: list[AvailableModelItem]
     openai: list[AvailableModelItem]
     anthropic: list[AvailableModelItem]
+    groq: list[AvailableModelItem] = []
 
 
 class ModelConfigOut(BaseModel):
@@ -166,7 +171,8 @@ class LLMResponseOut(BaseModel):
 class RunOut(BaseModel):
     id: uuid.UUID
     repo_id: uuid.UUID
-    github_run_id: int
+    parent_run_id: Optional[uuid.UUID] = None
+    github_run_id: Optional[int] = None
     github_delivery_id: Optional[str] = None
     head_sha: str
     head_branch: str
@@ -189,7 +195,7 @@ class BatchDeleteRunsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Webhook schemas (GitHub workflow_run event)
+# Webhook schemas (GitHub workflow_run, issue_comment, pull_request_review_comment)
 # ---------------------------------------------------------------------------
 
 
@@ -220,6 +226,68 @@ class WorkflowRunObj(BaseModel):
 class WorkflowRunWebhookPayload(BaseModel):
     action: str
     workflow_run: WorkflowRunObj
+    repository: WorkflowRunRepo
+
+    model_config = {"extra": "ignore"}
+
+
+class IssueCommentUser(BaseModel):
+    login: str = Field(..., min_length=1, max_length=255)
+
+    model_config = {"extra": "ignore"}
+
+
+class IssueCommentObj(BaseModel):
+    id: int
+    body: str = Field(..., min_length=1)
+    author_association: str = Field(default="NONE", max_length=50)
+    user: Optional[IssueCommentUser] = None
+
+    model_config = {"extra": "ignore"}
+
+
+class IssuePullRequestRef(BaseModel):
+    url: Optional[str] = None
+    html_url: Optional[str] = None
+
+    model_config = {"extra": "ignore"}
+
+
+class IssueObj(BaseModel):
+    number: int
+    pull_request: Optional[IssuePullRequestRef] = None
+
+    model_config = {"extra": "ignore"}
+
+
+class PullRequestBranchRef(BaseModel):
+    ref: str = Field(..., max_length=255)
+    sha: Optional[str] = None
+
+    model_config = {"extra": "ignore"}
+
+
+class PullRequestObj(BaseModel):
+    number: int
+    head: PullRequestBranchRef
+    base: Optional[PullRequestBranchRef] = None
+
+    model_config = {"extra": "ignore"}
+
+
+class IssueCommentWebhookPayload(BaseModel):
+    action: str
+    comment: IssueCommentObj
+    issue: IssueObj
+    repository: WorkflowRunRepo
+
+    model_config = {"extra": "ignore"}
+
+
+class PullRequestReviewCommentWebhookPayload(BaseModel):
+    action: str
+    comment: IssueCommentObj
+    pull_request: PullRequestObj
     repository: WorkflowRunRepo
 
     model_config = {"extra": "ignore"}
