@@ -674,6 +674,7 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
         await handle_failed_run(child_run.id)
 
     # Refresh child run
+    db.expire_all()
     res = await db.execute(select(Run).where(Run.id == child_run.id))
     updated_run = res.scalar_one()
 
@@ -759,6 +760,7 @@ async def test_refinement_verification_failure_posts_diagnostic_pr_comment(
         await handle_failed_run(child_run.id)
 
     # Refresh child run
+    db.expire_all()
     res = await db.execute(select(Run).where(Run.id == child_run.id))
     updated_run = res.scalar_one()
 

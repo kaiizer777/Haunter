@@ -177,7 +177,7 @@ async def test_pipeline_happy_path_full_flow(db: AsyncSession) -> None:
         await db.commit()
         return mock_summary
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db):
+    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
         attempt = _make_mock_attempt(run.id, 1, strategy_notes="add missing import")
         db.add(attempt)
         step = RunStep(
@@ -275,7 +275,7 @@ async def test_pipeline_retry_sandbox_fail_then_pass(db: AsyncSession) -> None:
 
     prior_attempts_received: list[Optional[Attempt]] = []
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db):
+    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
         prior_attempts_received.append(prior_attempt)
         attempt_num = len(prior_attempts_received)
         attempt = _make_mock_attempt(
@@ -360,7 +360,7 @@ async def test_pipeline_exhausted_retries_posts_diagnosis_comment(db: AsyncSessi
 
     attempt_counter = 0
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db):
+    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
         nonlocal attempt_counter
         attempt_counter += 1
         attempt = _make_mock_attempt(
@@ -436,7 +436,7 @@ async def test_pipeline_fast_fail_repeated_sandbox_failure(db: AsyncSession) -> 
 
     attempt_counter = 0
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db):
+    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
         nonlocal attempt_counter
         attempt_counter += 1
         attempt = _make_mock_attempt(run.id, attempt_counter)
@@ -601,7 +601,7 @@ async def test_pipeline_sandbox_crash_sets_error(db: AsyncSession) -> None:
     run = await _create_test_run(db, repo, status="pending")
     run_id = run.id
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db):
+    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
         attempt = _make_mock_attempt(run.id, 1)
         db.add(attempt)
         await db.commit()
@@ -643,7 +643,7 @@ async def test_pipeline_pr_writer_crash_sets_error(db: AsyncSession) -> None:
     run = await _create_test_run(db, repo, status="pending")
     run_id = run.id
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db):
+    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
         attempt = _make_mock_attempt(run.id, 1)
         db.add(attempt)
         await db.commit()
@@ -685,7 +685,7 @@ async def test_pipeline_fallback_comment_crash_sets_error(db: AsyncSession) -> N
 
     attempt_counter = 0
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db):
+    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
         nonlocal attempt_counter
         attempt_counter += 1
         attempt = _make_mock_attempt(run.id, attempt_counter)
@@ -784,7 +784,7 @@ async def test_pipeline_idempotent_reentry_from_fix_generation(db: AsyncSession)
     )
     run_id = run.id
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db):
+    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
         attempt = _make_mock_attempt(run.id, 1)
         db.add(attempt)
         await db.commit()
