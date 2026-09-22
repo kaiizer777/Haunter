@@ -246,10 +246,14 @@ async def test_pipeline_happy_path_full_flow(db: AsyncSession) -> None:
     step_names = {s.step_name for s in steps}
     assert {"context_gatherer", "fix_generator", "pr_writer"}.issubset(step_names)
 
+    _LLM_STEPS = {"context_gatherer", "fix_generator", "pr_writer"}
     for step in steps:
-        assert step.input_tokens is not None and step.input_tokens > 0
-        assert step.output_tokens is not None and step.output_tokens > 0
+        # Non-LLM infra steps (flake_verification, orchestrator_timeout, etc.)
+        # legitimately persist 0 tokens — only enforce > 0 for LLM-backed steps.
         assert step.latency_ms is not None and step.latency_ms >= 0
+        if step.step_name in _LLM_STEPS:
+            assert step.input_tokens is not None and step.input_tokens > 0
+            assert step.output_tokens is not None and step.output_tokens > 0
 
 
 # ---------------------------------------------------------------------------
