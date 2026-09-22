@@ -461,3 +461,32 @@ class SandboxVerificationOut(BaseModel):
     passed: bool
     run_url: Optional[str] = None
     logs: Optional[str] = None
+
+
+class SessionCommitIn(BaseModel):
+    """
+    Request body for POST /sessions/{session_id}/commit.
+
+    title: PR title string.
+    body: Optional PR description markdown.
+    extra="forbid" prevents mass-assignment injection.
+    """
+
+    title: str = Field(..., min_length=1, max_length=255)
+    body: str | None = Field(None, max_length=65535)
+
+    model_config = {"extra": "forbid"}
+
+
+class SessionCommitOut(BaseModel):
+    """
+    Response DTO for POST /sessions/{session_id}/commit.
+
+    pr_url:    Direct GitHub URL to the newly opened pull request.
+    pr_number: Pull request number in the repository.
+    commit_sha: The SHA of the commit pushed to the session branch.
+    """
+
+    pr_url: str
+    pr_number: int
+    commit_sha: str

@@ -599,3 +599,221 @@ async def fetch_branch_sha(
         ) from exc
 
     return sha
+
+
+# ---------------------------------------------------------------------------
+# Git Data API -- used by the commit publisher (Phase 3 Cloud Agentic Session)
+# ---------------------------------------------------------------------------
+
+
+async def create_blob(
+    owner: str,
+    repo: str,
+    content: str,
+    encoding: str = "utf-8",
+    installation_token=None,
+) -> str:
+    """
+    Create a Git blob for a single file content.
+
+    POST /repos/{owner}/{repo}/git/blobs
+    Returns the blob SHA.
+
+    Raises:
+        GitHubAuthError: 401/403 from GitHub API.
+        GitHubRateLimitError: Rate limit hit.
+        GitHubClientError: Network errors or unexpected API failures.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/blobs"
+    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    payload = {"content": content, "encoding": encoding}
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error("Network error creating blob for %s/%s", owner, repo)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+
+    data = response.json()
+    sha: str = data["sha"]
+    return sha
+
+
+async def create_git_tree(
+    owner: str,
+    repo: str,
+    tree: list,
+    base_tree=None,
+    installation_token=None,
+) -> str:
+    """
+    Create a Git tree object.
+
+    POST /repos/{owner}/{repo}/git/trees
+    Returns the tree SHA.
+
+    Each entry in tree must be a dict with: path, mode, type, sha.
+
+    Raises:
+        GitHubAuthError, GitHubRateLimitError, GitHubClientError.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees"
+    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    payload = {"tree": tree}
+    if base_tree is not None:
+        payload["base_tree"] = base_tree
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error("Network error creating git tree for %s/%s", owner, repo)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+
+    data = response.json()
+    sha: str = data["sha"]
+    return sha
+
+
+async def create_git_commit(
+    owner: str,
+    repo: str,
+    message: str,
+    tree_sha: str,
+    parents: list,
+    installation_token=None,
+) -> str:
+    """
+    Create a Git commit object.
+
+    POST /repos/{owner}/{repo}/git/commits
+    Returns the commit SHA.
+
+    Raises:
+        GitHubAuthError, GitHubRateLimitError, GitHubClientError.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/commits"
+    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    payload = {"message": message, "tree": tree_sha, "parents": parents}
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error("Network error creating git commit for %s/%s", owner, repo)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+
+    data = response.json()
+    sha: str = data["sha"]
+    return sha
+
+
+async def update_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    commit_sha: str,
+    force: bool = False,
+    installation_token=None,
+) -> None:
+    """
+    Update a branch ref to point at a new commit SHA.
+
+    PATCH /repos/{owner}/{repo}/git/refs/heads/{branch}
+
+    Raises:
+        GitHubResourceNotFoundError: Branch not found (404).
+        GitHubAuthError, GitHubRateLimitError, GitHubClientError.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{branch}"
+    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    payload = {"sha": commit_sha, "force": force}
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.patch(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error("Network error updating branch ref for %s/%s branch %s", owner, repo, branch)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"Branch ref not found: {owner}/{repo}/heads/{branch}")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+
+
+async def create_pull_request(
+    owner: str,
+    repo: str,
+    title: str,
+    head: str,
+    base: str,
+    body=None,
+    installation_token=None,
+) -> "dict[str, Any]":
+    """
+    Open a pull request.
+
+    POST /repos/{owner}/{repo}/pulls
+    Returns the full PR dict (contains html_url, number, etc.).
+
+    Raises:
+        GitHubAuthError, GitHubRateLimitError, GitHubClientError.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
+    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    payload: dict = {"title": title, "head": head, "base": base}
+    if body is not None:
+        payload["body"] = body
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error("Network error creating pull request for %s/%s", owner, repo)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+
+    return response.json()

@@ -227,6 +227,56 @@ export interface AvailableModelsOut {
   anthropic: AvailableModelItem[];
 }
 
+
+// ---------------------------------------------------------------------------
+// Session types (Phase 3 -- Cloud Agentic Live Session)
+// ---------------------------------------------------------------------------
+
+export interface SessionOut {
+  id: string;
+  user_id: string;
+  repo_id: string;
+  repo_owner: string;
+  repo_name: string;
+  title: string;
+  status: "active" | "completed" | "closed";
+  branch_name: string;
+  base_sha: string;
+  conversation_history: Record<string, unknown>[];
+  staged_patches: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionListOut {
+  sessions: SessionOut[];
+  total: number;
+}
+
+export interface SessionCreateIn {
+  repo_id: string;
+  branch_name?: string | null;
+  title?: string | null;
+}
+
+export interface SessionCommitIn {
+  title: string;
+  body?: string | null;
+}
+
+export interface SessionCommitOut {
+  pr_url: string;
+  pr_number: number;
+  commit_sha: string;
+}
+
+export interface SandboxVerificationOut {
+  status: string;
+  passed: boolean;
+  run_url: string | null;
+  logs: string | null;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -416,5 +466,34 @@ export const api = {
 
   getReviewDetail: (reviewId: string) =>
     api.get<CodeReviewOut>(`/reviews/${reviewId}`),
+
+  // Session endpoints (Phase 3 -- Cloud Agentic Live Session)
+  listSessions: (params?: { status?: string; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.status) query.append("status", params.status);
+    if (params?.limit) query.append("limit", params.limit.toString());
+    if (params?.offset !== undefined) query.append("offset", params.offset.toString());
+    const qs = query.toString();
+    return api.get<SessionListOut>(`/sessions${qs ? `?${qs}` : ""}`);
+  },
+
+  getSession: (sessionId: string) =>
+    api.get<SessionOut>(`/sessions/${sessionId}`),
+
+  createSession: (data: SessionCreateIn) =>
+    api.post<SessionOut>("/sessions", data),
+
+  closeSession: (sessionId: string) =>
+    api.post<SessionOut>(`/sessions/${sessionId}/close`, {}),
+
+  verifySession: (sessionId: string) =>
+    api.post<SandboxVerificationOut>(`/sessions/${sessionId}/verify`),
+
+  commitSession: (sessionId: string, data: SessionCommitIn) =>
+    api.post<SessionCommitOut>(`/sessions/${sessionId}/commit`, data),
+
+  getSessionTree: (sessionId: string) =>
+    api.get<string[]>(`/sessions/${sessionId}/tree`),
+
 };
 

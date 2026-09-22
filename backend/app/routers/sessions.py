@@ -46,6 +46,8 @@ from app.schemas import (
     SandboxVerificationOut,
     SessionChatIn,
     SessionCloseIn,
+    SessionCommitIn,
+    SessionCommitOut,
     SessionCreateIn,
     SessionListOut,
     SessionOut,
@@ -534,4 +536,270 @@ async def verify_session(
         passed=verification_result.get("passed", False),
         run_url=verification_result.get("run_url"),
         logs=verification_result.get("logs"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 -- Commit Publisher: POST /sessions/{session_id}/commit
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/sessions/{session_id}/commit",
+    response_model=SessionCommitOut,
+)
+async def commit_session(
+    session_id: uuid.UUID,
+    body: SessionCommitIn,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SessionCommitOut:
+    """
+    Apply staged patches, push a commit to the session branch, and open a PR.
+
+    Security:
+    - Session must belong to current_user.id (IDOR prevention).
+    - Session must be active (400 if closed/completed).
+    - staged_patches must be non-empty (422 if empty).
+    - Returns 404 for unowned/non-existent sessions.
+
+    Commit pipeline:
+    1. Fetch base file content at session.base_sha for each staged file.
+    2. Apply unified diff via patch_applier.apply_unified_diff.
+    3. Create Git blob for each patched file.
+    4. Create a Git tree rooted at session.base_sha.
+    5. Create a Git commit.
+    6. Update the session branch ref.
+    7. Open a PR against the repo default branch.
+    8. Mark session status="completed", record PR metadata in conversation_history.
+    """
+    from datetime import datetime, timezone
+
+    from app.github_client import (
+        GitHubClientError as _GHErr,
+        create_blob as _create_blob,
+        create_git_commit as _create_commit,
+        create_git_tree as _create_tree,
+        create_pull_request as _create_pr,
+        fetch_file_content as _fetch_file,
+        update_branch_ref as _update_ref,
+    )
+    from app.services.patch_applier import apply_unified_diff
+
+    # ------------------------------------------------------------------
+    # 1. Load session with repo join -- object-level auth.
+    # ------------------------------------------------------------------
+    stmt = (
+        select(AgentSession)
+        .options(selectinload(AgentSession.repo))
+        .where(
+            AgentSession.id == session_id,
+            AgentSession.user_id == current_user.id,
+        )
+    )
+    result = await db.execute(stmt)
+    session: Optional[AgentSession] = result.scalars().first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    # ------------------------------------------------------------------
+    # 2. State guards.
+    # ------------------------------------------------------------------
+    if session.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot commit a session with status={session.status!r}. "
+                "Only active sessions can be committed."
+            ),
+        )
+
+    staged_patches: dict[str, str] = session.staged_patches or {}
+    if not staged_patches:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No staged patches to commit. Stage at least one file patch via the chat agent.",
+        )
+
+    repo = session.repo
+
+    # ------------------------------------------------------------------
+    # 3. Resolve GitHub installation token.
+    # ------------------------------------------------------------------
+    try:
+        gh_token: Optional[str] = await get_installation_token(repo)
+    except Exception:
+        gh_token = None
+
+    # ------------------------------------------------------------------
+    # 4. Apply patches: fetch base content, apply diff, create blobs.
+    # ------------------------------------------------------------------
+    tree_entries: list[dict] = []
+
+    for file_path, patch_text in staged_patches.items():
+        base_content: Optional[str] = await _fetch_file(
+            owner=repo.owner,
+            repo=repo.name,
+            path=file_path,
+            sha=session.base_sha,
+            token=gh_token,
+        )
+        original = base_content if base_content is not None else ""
+
+        try:
+            patched_content = apply_unified_diff(original, patch_text)
+        except ValueError as exc:
+            logger.error(
+                "sessions/commit: patch application failed for %s in session %s: %s",
+                file_path, session_id, exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Patch for '{file_path}' could not be applied cleanly: {exc}",
+            )
+
+        try:
+            blob_sha = await _create_blob(
+                owner=repo.owner,
+                repo=repo.name,
+                content=patched_content,
+                encoding="utf-8",
+                installation_token=gh_token,
+            )
+        except _GHErr as exc:
+            logger.error(
+                "sessions/commit: create_blob failed for %s in session %s: %s",
+                file_path, session_id, exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to create Git blob for '{file_path}' via GitHub API: {exc}",
+            )
+
+        tree_entries.append({
+            "path": file_path,
+            "mode": "100644",
+            "type": "blob",
+            "sha": blob_sha,
+        })
+
+    # ------------------------------------------------------------------
+    # 5. Create Git tree (rooted at base_sha as base_tree).
+    # ------------------------------------------------------------------
+    try:
+        tree_sha = await _create_tree(
+            owner=repo.owner,
+            repo=repo.name,
+            tree=tree_entries,
+            base_tree=session.base_sha,
+            installation_token=gh_token,
+        )
+    except _GHErr as exc:
+        logger.error("sessions/commit: create_git_tree failed for session %s: %s", session_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to create Git tree via GitHub API: {exc}",
+        )
+
+    # ------------------------------------------------------------------
+    # 6. Create Git commit.
+    # ------------------------------------------------------------------
+    commit_message = body.title
+    if body.body:
+        commit_message = f"{body.title}\n\n{body.body}"
+
+    try:
+        commit_sha = await _create_commit(
+            owner=repo.owner,
+            repo=repo.name,
+            message=commit_message,
+            tree_sha=tree_sha,
+            parents=[session.base_sha],
+            installation_token=gh_token,
+        )
+    except _GHErr as exc:
+        logger.error("sessions/commit: create_git_commit failed for session %s: %s", session_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to create Git commit via GitHub API: {exc}",
+        )
+
+    # ------------------------------------------------------------------
+    # 7. Update branch ref.
+    # ------------------------------------------------------------------
+    try:
+        await _update_ref(
+            owner=repo.owner,
+            repo=repo.name,
+            branch=session.branch_name,
+            commit_sha=commit_sha,
+            force=False,
+            installation_token=gh_token,
+        )
+    except _GHErr as exc:
+        logger.error(
+            "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
+            session_id, session.branch_name, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to update branch ref via GitHub API: {exc}",
+        )
+
+    # ------------------------------------------------------------------
+    # 8. Open pull request against repo default branch.
+    # ------------------------------------------------------------------
+    pr_base = repo.default_branch or "main"
+    try:
+        pr_data: dict = await _create_pr(
+            owner=repo.owner,
+            repo=repo.name,
+            title=body.title,
+            head=session.branch_name,
+            base=pr_base,
+            body=body.body,
+            installation_token=gh_token,
+        )
+    except _GHErr as exc:
+        logger.error("sessions/commit: create_pull_request failed for session %s: %s", session_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to open pull request via GitHub API: {exc}",
+        )
+
+    pr_url: str = pr_data.get("html_url", "")
+    pr_number: int = pr_data.get("number", 0)
+
+    # ------------------------------------------------------------------
+    # 9. Persist: mark session completed, record PR metadata.
+    # ------------------------------------------------------------------
+    session.status = "completed"
+    session.updated_at = datetime.now(timezone.utc)
+
+    history: list = list(session.conversation_history or [])
+    history.append({
+        "role": "system",
+        "content": (
+            f"Commit published. PR #{pr_number} opened: {pr_url}\n"
+            f"Commit SHA: {commit_sha}"
+        ),
+        "pr_url": pr_url,
+        "pr_number": pr_number,
+        "commit_sha": commit_sha,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    session.conversation_history = history
+
+    await db.commit()
+
+    logger.info(
+        "sessions/commit: session %s committed -- PR #%s %s commit=%s",
+        session_id, pr_number, pr_url, commit_sha,
+    )
+
+    return SessionCommitOut(
+        pr_url=pr_url,
+        pr_number=pr_number,
+        commit_sha=commit_sha,
     )

@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   TerminalSquare,
   Cpu,
+  Zap,
 } from "lucide-react";
 import { api, ModelConfigOut } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -53,6 +54,7 @@ export function Sidebar() {
           "3": "/repos",
           "4": "/eval",
           "5": "/config",
+          "6": "/sessions",
         };
         const targetHref = keyMap[e.key];
         if (targetHref) {
@@ -101,6 +103,11 @@ export function Sidebar() {
       name: "Model Config",
       href: "/config",
       icon: Sliders,
+    },
+    {
+      name: "Live Sessions",
+      href: "/sessions",
+      icon: Zap,
     },
   ];
 
