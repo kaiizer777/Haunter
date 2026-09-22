@@ -432,3 +432,32 @@ class SessionCloseIn(BaseModel):
     reason: Optional[str] = Field(None, max_length=1000)
 
     model_config = {"extra": "forbid"}
+
+
+class SessionChatIn(BaseModel):
+    """
+    Request body for POST /sessions/{session_id}/chat.
+
+    message: The user's natural-language prompt to the pairing agent.
+    extra="forbid" prevents mass-assignment injection.
+    """
+
+    message: str = Field(..., min_length=1, max_length=32_000)
+
+    model_config = {"extra": "forbid"}
+
+
+class SandboxVerificationOut(BaseModel):
+    """
+    Response DTO for POST /sessions/{session_id}/verify.
+
+    status:  One of "queued" | "running" | "passed" | "failed".
+    passed:  True iff sandbox tests passed.
+    run_url: Optional GitHub Actions workflow run URL.
+    logs:    Optional truncated test output.
+    """
+
+    status: str
+    passed: bool
+    run_url: Optional[str] = None
+    logs: Optional[str] = None

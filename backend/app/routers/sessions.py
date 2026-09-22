@@ -1,5 +1,5 @@
 """
-Agent Session API endpoints — Cloud Agentic Live Session Phase 1.
+Agent Session API endpoints — Cloud Agentic Live Session Phases 1 & 2.
 
 Exposes:
   POST /sessions                        — Create a new pairing session.
@@ -7,12 +7,16 @@ Exposes:
   GET  /sessions/{session_id}           — Fetch a single session.
   GET  /sessions/{session_id}/tree      — Fetch filtered repository file tree.
   POST /sessions/{session_id}/close     — Close an active session.
+  POST /sessions/{session_id}/chat      — Stream LLM-driven agent response (SSE).
+  POST /sessions/{session_id}/verify    — Dispatch staged patches to sandbox runner.
 
 Security invariants:
 - Requires authentication via get_current_user on all endpoints.
 - Enforces multi-tenant isolation: every query is scoped to current_user.id.
 - Returns 404 for non-existent or unowned sessions/repos (no existence oracle leaks).
 - Concurrency guard: rejects POST /sessions when user already has >= 2 active sessions.
+- /chat verifies session.user_id == current_user.id before streaming.
+- /verify verifies session.user_id == current_user.id and session.status == active.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -37,7 +42,16 @@ from app.github_client import (
     fetch_git_tree,
 )
 from app.models import AgentSession, Repo, User
-from app.schemas import SessionCloseIn, SessionCreateIn, SessionListOut, SessionOut
+from app.schemas import (
+    SandboxVerificationOut,
+    SessionChatIn,
+    SessionCloseIn,
+    SessionCreateIn,
+    SessionListOut,
+    SessionOut,
+)
+from app.services.session_orchestrator import SessionOrchestrator
+from app.services.session_streamer import SseQueue
 
 logger = logging.getLogger(__name__)
 
@@ -344,3 +358,180 @@ async def close_session(
         await db.refresh(session)
 
     return _map_session_to_out(session, session.repo)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Chat (SSE Streaming) & Verify endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/sessions/{session_id}/chat")
+async def chat_session(
+    session_id: uuid.UUID,
+    body: SessionChatIn,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamingResponse:
+    """
+    Submit a user message to the live pairing agent and stream the response via SSE.
+
+    Security:
+    - Session must belong to current_user.id (IDOR prevention via DB scoped query).
+    - Session must have status == "active".
+    - Returns 404 for unowned or non-existent sessions (no existence oracle leak).
+    - Returns 409 if a concurrent prompt is already in flight.
+
+    SSE event stream uses:
+        event: thought         — streaming agent reasoning tokens
+        event: tool_call       — agent tool invocation notification
+        event: file_diff       — staged file patch
+        event: error           — error payload
+        event: done            — stream termination marker
+
+    Response headers:
+        Content-Type: text/event-stream
+        Cache-Control: no-cache
+        Connection: keep-alive
+        X-Accel-Buffering: no
+    """
+    # Object-level authorization: session must be active and owned by caller.
+    stmt = (
+        select(AgentSession)
+        .where(
+            AgentSession.id == session_id,
+            AgentSession.user_id == current_user.id,
+        )
+    )
+    result = await db.execute(stmt)
+    session: Optional[AgentSession] = result.scalars().first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    if session.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Session is not active (status={session.status!r}). Cannot submit prompt.",
+        )
+
+    # Resolve GitHub installation token for file reads — best-effort.
+    try:
+        from sqlalchemy.orm import selectinload as _sel
+        repo_stmt = (
+            select(AgentSession)
+            .options(_sel(AgentSession.repo))
+            .where(AgentSession.id == session_id)
+        )
+        repo_result = await db.execute(repo_stmt)
+        full_session: Optional[AgentSession] = repo_result.scalars().first()
+        repo = full_session.repo if full_session else None
+        gh_token: Optional[str] = await get_installation_token(repo) if repo else None
+    except Exception:
+        gh_token = None
+
+    # Build the SSE queue and orchestrator.
+    queue = SseQueue()
+    orchestrator = SessionOrchestrator(
+        session_id=session_id,
+        db=db,
+        gh_token=gh_token,
+    )
+
+    import asyncio as _asyncio
+
+    # Launch the orchestrator in a background task so the StreamingResponse
+    # generator can start yielding immediately while the LLM runs.
+    _asyncio.ensure_future(orchestrator.run(user_message=body.message, queue=queue))
+
+    return StreamingResponse(
+        queue.stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/verify",
+    response_model=SandboxVerificationOut,
+)
+async def verify_session(
+    session_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SandboxVerificationOut:
+    """
+    Dispatch all currently staged patches to the isolated sandbox runner.
+
+    Requires:
+    - Session must belong to current_user.id.
+    - Session must be active.
+    - At least one staged patch must exist.
+
+    Calls the sandbox verifier subagent (`backend/app/subagents/sandbox_verifier.py`)
+    which triggers a GitHub Actions CI workflow on the isolated mirror repo.
+
+    Returns SandboxVerificationOut with status, passed, run_url, and logs.
+    """
+    # Object-level authorization + active guard.
+    stmt = (
+        select(AgentSession)
+        .options(selectinload(AgentSession.repo))
+        .where(
+            AgentSession.id == session_id,
+            AgentSession.user_id == current_user.id,
+        )
+    )
+    result = await db.execute(stmt)
+    session: Optional[AgentSession] = result.scalars().first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    if session.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Session is not active (status={session.status!r}). Cannot verify.",
+        )
+
+    staged_patches: dict[str, str] = session.staged_patches or {}
+    if not staged_patches:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No staged patches to verify. Stage at least one patch via the chat agent first.",
+        )
+
+    repo = session.repo
+
+    # Resolve GitHub installation token.
+    try:
+        gh_token: Optional[str] = await get_installation_token(repo)
+    except Exception:
+        gh_token = None
+
+    # Dispatch to sandbox verifier.
+    from app.subagents.sandbox_verifier import verify_session_patches
+
+    try:
+        verification_result = await verify_session_patches(
+            session=session,
+            repo=repo,
+            staged_patches=staged_patches,
+            gh_token=gh_token,
+        )
+    except Exception as exc:
+        logger.error(
+            "sessions: sandbox verification failed for session=%s: %s", session_id, exc
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Sandbox verification failed. Please try again.",
+        )
+
+    return SandboxVerificationOut(
+        status=verification_result.get("status", "failed"),
+        passed=verification_result.get("passed", False),
+        run_url=verification_result.get("run_url"),
+        logs=verification_result.get("logs"),
+    )
