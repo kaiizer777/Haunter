@@ -56,6 +56,8 @@ import {
   Terminal,
   ShieldCheck,
   TestTube2,
+  Globe,
+  Package,
 } from "lucide-react";
 import { api, SessionOut, ApiError, AvailableModelItem } from "@/lib/api";
 import { useSessionStream, ChatMessage, ToolCallChip } from "@/hooks/useSessionStream";
@@ -354,6 +356,12 @@ function ToolExecutionAccordion({
       c.name === "run_linter" ||
       c.name === "run_targeted_tests"
   ).length;
+  const webCount = toolCalls.filter(
+    (c) =>
+      c.name === "search_web_docs" ||
+      c.name === "fetch_web_content" ||
+      c.name === "fetch_package_metadata"
+  ).length;
 
   let summaryTitle = `Executed ${toolCalls.length} tool${toolCalls.length !== 1 ? "s" : ""}`;
   if (editCount > 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0) {
@@ -362,6 +370,8 @@ function ToolExecutionAccordion({
     summaryTitle = `Analyzing symbols (${symbolCount} lookup${symbolCount > 1 ? "s" : ""})`;
   } else if (sandboxCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0) {
     summaryTitle = `Running sandbox (${sandboxCount} command${sandboxCount > 1 ? "s" : ""})`;
+  } else if (webCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0 && sandboxCount === 0) {
+    summaryTitle = `Searching web (${webCount} request${webCount > 1 ? "s" : ""})`;
   } else if (fileCount > 0 && folderCount > 0) {
     summaryTitle = `Exploring ${fileCount} file${fileCount > 1 ? "s" : ""}, ${folderCount} folder${folderCount > 1 ? "s" : ""}`;
   } else if (searchCount > 0 && fileCount === 0 && folderCount === 0) {
@@ -525,6 +535,27 @@ function ToolExecutionAccordion({
                 tCount !== undefined
                   ? `Ran tests on ${tCount} target${tCount !== 1 ? "s" : ""}`
                   : "Ran targeted tests";
+            } else if (chip.name === "search_web_docs") {
+              const query = (chip.args?.query as string) || "";
+              const domain = (chip.args?.domain as string) || "";
+              icon = <Globe className="h-3.5 w-3.5 text-sky-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = domain
+                ? `Searched docs for '${query}' on ${domain}`
+                : `Searched docs for '${query}'`;
+            } else if (chip.name === "fetch_web_content") {
+              const fetchUrl = (chip.args?.url as string) || "";
+              const shortUrl =
+                fetchUrl.length > 60 ? fetchUrl.slice(0, 57) + "…" : fetchUrl;
+              icon = <ExternalLink className="h-3.5 w-3.5 text-cyan-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Read external page ${shortUrl}`;
+            } else if (chip.name === "fetch_package_metadata") {
+              const pkgName = (chip.args?.package_name as string) || "";
+              const eco = (chip.args?.ecosystem as string) || "";
+              icon = <Package className="h-3.5 w-3.5 text-amber-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Checked ${pkgName} (${eco})`;
             }
 
             return (

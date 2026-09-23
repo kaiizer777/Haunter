@@ -64,6 +64,11 @@ from app.services.session_tools.sandbox import (
     tool_run_linter,
     tool_run_targeted_tests,
 )
+from app.services.session_tools.web import (
+    tool_search_web_docs,
+    tool_fetch_web_content,
+    tool_fetch_package_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -518,6 +523,92 @@ _TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web_docs",
+            "description": (
+                "Search the live web and developer documentation via TinyFish Search API. "
+                "Use this to look up current library APIs, breaking changes, migration guides, "
+                "and external references that may not be in the repository. "
+                "Returns Markdown-formatted results with titles, URLs, and snippets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (e.g. 'FastAPI lifespan migration', 'httpx AsyncClient timeout').",
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Optional domain to restrict results to (e.g. 'docs.python.org', 'react.dev').",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default 5, max 20).",
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_web_content",
+            "description": (
+                "Fetch and render a web page, GitHub issue, or documentation page as clean Markdown "
+                "via TinyFish Fetch API (stealth Chromium rendering, ad/noise stripped). "
+                "Use this after search_web_docs to read the full content of a specific URL. "
+                "Only http:// and https:// URLs pointing to public hosts are permitted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full URL to fetch (e.g. 'https://docs.python.org/3/library/asyncio.html').",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format — 'markdown' (default) or 'text'.",
+                    },
+                },
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_package_metadata",
+            "description": (
+                "Check official package metadata (latest version, license, summary, dependencies) "
+                "directly from PyPI or the npm registry. "
+                "Use this to verify whether a dependency is up-to-date, identify breaking version jumps, "
+                "or confirm the correct package name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ecosystem": {
+                        "type": "string",
+                        "enum": ["pypi", "npm"],
+                        "description": "Package registry: 'pypi' for Python packages, 'npm' for JavaScript/TypeScript packages.",
+                    },
+                    "package_name": {
+                        "type": "string",
+                        "description": "Exact package name (e.g. 'httpx', 'react', '@types/node').",
+                    },
+                },
+                "required": ["ecosystem", "package_name"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -559,7 +650,13 @@ def _build_system_prompt(
         " 14. `find_references(symbol, path)` — find all call sites and usages of a symbol (word-boundary matched, capped at 50).\n"
         " 15. `run_terminal_command(command, timeout_sec)` — run a shell command and return stdout/stderr/exit code. Output streams live to the terminal drawer.\n"
         " 16. `run_linter(paths, linter)` — run ruff/eslint on the specified files and get diagnostics.\n"
-        " 17. `run_targeted_tests(test_targets, timeout_sec)` — run pytest or vitest on specific test files and capture tracebacks.\n\n"
+        " 17. `run_targeted_tests(test_targets, timeout_sec)` — run pytest or vitest on specific test files and capture tracebacks.\n"
+        " 18. `search_web_docs(query, domain, max_results)` — search live web/docs via TinyFish for up-to-date library APIs, breaking changes, and migration guides.\n"
+        " 19. `fetch_web_content(url, format)` — fetch and render a public documentation page or GitHub issue as clean Markdown via TinyFish.\n"
+        " 20. `fetch_package_metadata(ecosystem, package_name)` — check official latest version, license, and dependencies from PyPI or npm.\n\n"
+        "You have access to live web tools. Use `search_web_docs` and `fetch_web_content` via TinyFish "
+        "to look up documentation and breaking API changes. "
+        "Use `fetch_package_metadata` to check official package versions before suggesting upgrades.\n"
         "For code modifications, prefer `str_replace` over `stage_patch`. "
         "Always provide enough surrounding lines in `old_str` so it matches uniquely — "
         "the tool will reject the edit if `old_str` is ambiguous or missing.\n"
@@ -968,6 +1065,12 @@ class SessionOrchestrator:
                 args=args,
                 queue=queue,
             )
+        elif tool_name == "search_web_docs":
+            return await self._tool_search_web_docs(args=args)
+        elif tool_name == "fetch_web_content":
+            return await self._tool_fetch_web_content(args=args)
+        elif tool_name == "fetch_package_metadata":
+            return await self._tool_fetch_package_metadata(args=args)
         else:
             logger.warning(
                 "session_orchestrator: unknown tool_name=%r in session=%s",
@@ -1319,6 +1422,36 @@ class SessionOrchestrator:
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
+
+    # ------------------------------------------------------------------
+    # Web intelligence tool handlers (Phase 3)
+    # ------------------------------------------------------------------
+
+    async def _tool_search_web_docs(self, args: dict[str, Any]) -> str:
+        query: str = str(args.get("query", ""))
+        domain: str | None = args.get("domain") or None
+        try:
+            max_results: int = int(args.get("max_results", 5))
+        except (TypeError, ValueError):
+            max_results = 5
+        return await tool_search_web_docs(
+            query=query,
+            domain=domain,
+            max_results=max_results,
+        )
+
+    async def _tool_fetch_web_content(self, args: dict[str, Any]) -> str:
+        url: str = str(args.get("url", ""))
+        format: str = str(args.get("format", "markdown"))
+        return await tool_fetch_web_content(url=url, format=format)
+
+    async def _tool_fetch_package_metadata(self, args: dict[str, Any]) -> str:
+        ecosystem: str = str(args.get("ecosystem", ""))
+        package_name: str = str(args.get("package_name", ""))
+        return await tool_fetch_package_metadata(
+            ecosystem=ecosystem,
+            package_name=package_name,
+        )
 
     # ------------------------------------------------------------------
     # DB helpers

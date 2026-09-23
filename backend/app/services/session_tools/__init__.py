@@ -38,6 +38,12 @@ from app.services.session_tools.sandbox import (
     tool_run_linter,
     tool_run_targeted_tests,
 )
+from app.services.session_tools.web import (
+    _validate_external_url,
+    tool_search_web_docs,
+    tool_fetch_web_content,
+    tool_fetch_package_metadata,
+)
 
 __all__ = [
     # recon
@@ -72,4 +78,9 @@ __all__ = [
     "tool_run_terminal_command",
     "tool_run_linter",
     "tool_run_targeted_tests",
+    # web intelligence (Phase 3)
+    "_validate_external_url",
+    "tool_search_web_docs",
+    "tool_fetch_web_content",
+    "tool_fetch_package_metadata",
 ]
