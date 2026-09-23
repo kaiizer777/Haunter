@@ -27,6 +27,9 @@ export interface ChatMessage {
   content: string;
   thoughts?: string[];
   toolCalls?: ToolCallChip[];
+  thoughtDurationSeconds?: number;
+  model?: string;
+  provider?: string;
 }
 
 export interface ToolCallChip {
@@ -72,7 +75,10 @@ export function useSessionStream(sessionId: string) {
   const abortRef = useRef<AbortController | null>(null);
 
   const sendChatMessage = useCallback(
-    async (prompt: string): Promise<void> => {
+    async (
+      prompt: string,
+      options?: { model?: string; provider?: string },
+    ): Promise<void> => {
       if (isStreaming) return;
 
       // Abort any stale stream.
@@ -84,18 +90,29 @@ export function useSessionStream(sessionId: string) {
       setMessages((prev) => [...prev, { role: "user", content: prompt }]);
       setIsStreaming(true);
 
+      // Track start time for thought duration calculations
+      const streamStartTime = Date.now();
+      let streamThoughtDuration = 0;
+
       // Working state for the current assistant turn being streamed.
       let thoughts: string[] = [];
       let toolCalls: ToolCallChip[] = [];
       let assistantContent = "";
+      // Capture the requested model/provider for display on the response bubble.
+      const requestedModel = options?.model ?? "";
+      const requestedProvider = options?.provider ?? "";
 
       try {
         const url = `${API_BASE}/sessions/${sessionId}/chat`;
+        const requestBody: Record<string, unknown> = { message: prompt };
+        if (options?.model) requestBody.model = options.model;
+        if (options?.provider) requestBody.provider = options.provider;
+
         const res = await fetch(url, {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: prompt }),
+          body: JSON.stringify(requestBody),
           signal: controller.signal,
         });
 
@@ -135,13 +152,16 @@ export function useSessionStream(sessionId: string) {
 
         // Incremental SSE frame handler.
         const handleFrame = (frame: SseFrame) => {
+          const elapsedSec = Math.max(1, Math.round((Date.now() - streamStartTime) / 1000));
           switch (frame.event) {
             case "thought": {
               const thought =
                 typeof frame.data === "string"
                   ? frame.data
-                  : (frame.data as Record<string, string>)?.content ?? "";
+                  : (frame.data as Record<string, string>)?.delta ??
+                    (frame.data as Record<string, string>)?.content ?? "";
               thoughts = [...thoughts, thought];
+              streamThoughtDuration = elapsedSec;
               // Update the in-progress assistant message.
               setMessages((prev) => {
                 const copy = [...prev];
@@ -152,6 +172,7 @@ export function useSessionStream(sessionId: string) {
                     thoughts,
                     toolCalls,
                     content: assistantContent,
+                    thoughtDurationSeconds: streamThoughtDuration,
                   };
                 } else {
                   copy.push({
@@ -159,6 +180,9 @@ export function useSessionStream(sessionId: string) {
                     content: assistantContent,
                     thoughts,
                     toolCalls,
+                    thoughtDurationSeconds: streamThoughtDuration,
+                    model: requestedModel,
+                    provider: requestedProvider,
                   });
                 }
                 return copy;
@@ -168,15 +192,22 @@ export function useSessionStream(sessionId: string) {
             case "tool_call": {
               const d = frame.data as Record<string, unknown>;
               const chip: ToolCallChip = {
-                name: (d?.name as string) ?? "unknown_tool",
+                name: (d?.tool as string) ?? (d?.name as string) ?? "unknown_tool",
                 args: (d?.args as Record<string, unknown>) ?? undefined,
               };
               toolCalls = [...toolCalls, chip];
+              if (!streamThoughtDuration) streamThoughtDuration = elapsedSec;
               setMessages((prev) => {
                 const copy = [...prev];
                 const last = copy[copy.length - 1];
                 if (last?.role === "assistant") {
-                  copy[copy.length - 1] = { ...last, thoughts, toolCalls, content: assistantContent };
+                  copy[copy.length - 1] = {
+                    ...last,
+                    thoughts,
+                    toolCalls,
+                    content: assistantContent,
+                    thoughtDurationSeconds: streamThoughtDuration,
+                  };
                 }
                 return copy;
               });
@@ -211,10 +242,20 @@ export function useSessionStream(sessionId: string) {
             }
             case "done": {
               // Finalise the assistant message with all accumulated content.
+              // The backend emits the LLM response text via put_thought ({"delta": "..."})
+              // and never emits a separate content event, so if assistantContent is empty
+              // we promote the last non-heartbeat thought as the visible response.
+              const HEARTBEAT = "Analyzing your request…";
+              const contentThought = thoughts.filter((t) => t !== HEARTBEAT).at(-1) ?? "";
               const finalContent =
                 typeof frame.data === "string"
                   ? frame.data
-                  : assistantContent;
+                  : assistantContent || contentThought;
+              // Keep all thoughts in the accordion but strip the response from thoughts
+              // so it doesn't display twice (once as content, once collapsed).
+              const displayThoughts = thoughts.filter(
+                (t) => t !== HEARTBEAT && t !== contentThought
+              );
               setMessages((prev) => {
                 const copy = [...prev];
                 const last = copy[copy.length - 1];
@@ -222,16 +263,28 @@ export function useSessionStream(sessionId: string) {
                   copy[copy.length - 1] = {
                     ...last,
                     content: finalContent || last.content,
-                    thoughts,
+                    thoughts: displayThoughts.length ? displayThoughts : last.thoughts,
                     toolCalls,
+                    thoughtDurationSeconds: streamThoughtDuration || last.thoughtDurationSeconds,
+                    model: requestedModel || last.model,
+                    provider: requestedProvider || last.provider,
                   };
                 } else {
-                  copy.push({ role: "assistant", content: finalContent, thoughts, toolCalls });
+                  copy.push({
+                    role: "assistant",
+                    content: finalContent,
+                    thoughts: displayThoughts,
+                    toolCalls,
+                    thoughtDurationSeconds: streamThoughtDuration,
+                    model: requestedModel,
+                    provider: requestedProvider,
+                  });
                 }
                 return copy;
               });
               break;
             }
+
             default: {
               // Unknown event type — treat as assistant content token.
               if (typeof frame.data === "string") {
@@ -283,12 +336,19 @@ export function useSessionStream(sessionId: string) {
     [sessionId, isStreaming]
   );
 
+  const stopStreaming = useCallback(() => {
+    abortRef.current?.abort();
+    setIsStreaming(false);
+  }, []);
+
   return {
     messages,
     stagedPatches,
     sandboxStatus,
     isStreaming,
     sendChatMessage,
+    stopStreaming,
     setStagedPatches,
+    setMessages,
   };
 }
