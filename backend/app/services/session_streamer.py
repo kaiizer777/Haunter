@@ -11,7 +11,7 @@ Wire format per spec:
     data: <json_string>\\n
     \\n
 
-Allowed event names: thought | tool_call | file_diff | sandbox_status | error | done
+Allowed event names: thought | tool_call | file_diff | sandbox_status | terminal_output | error | done
 
 Security:
   - Never emits raw exception objects or internal paths to the stream.
@@ -38,7 +38,7 @@ _STREAM_DONE = object()
 
 # Allowed SSE event names — enforced at format time to prevent protocol drift.
 _ALLOWED_EVENTS: frozenset[str] = frozenset(
-    {"thought", "tool_call", "file_diff", "sandbox_status", "error", "done"}
+    {"thought", "tool_call", "file_diff", "sandbox_status", "terminal_output", "error", "done"}
 )
 
 
@@ -139,6 +139,16 @@ class SseQueue:
         if status not in {"queued", "running", "passed", "failed"}:
             raise ValueError(f"put_sandbox_status: invalid status {status!r}")
         await self.put_event("sandbox_status", {"status": status, "logs": logs})
+
+    async def put_terminal_output(self, chunk: str, stream: str = "stdout") -> None:
+        """
+        Stream a chunk of terminal output (stdout or stderr) to the client.
+
+        Args:
+            chunk:  Raw text chunk from the subprocess output.
+            stream: One of "stdout" | "stderr" (informational for the client).
+        """
+        await self.put_event("terminal_output", {"chunk": chunk, "stream": stream})
 
     async def put_error(self, error: str, code: str) -> None:
         await self.put_event("error", {"error": error, "code": code})

@@ -53,6 +53,7 @@ type SseEventType =
   | "file_diff"
   | "tool_call"
   | "sandbox_status"
+  | "terminal_output"
   | "error"
   | "done";
 
@@ -70,6 +71,7 @@ export function useSessionStream(sessionId: string) {
   const [stagedPatches, setStagedPatches] = useState<Record<string, string>>({});
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
 
   // AbortController ref so we can cancel in-flight streams on unmount / new message.
   const abortRef = useRef<AbortController | null>(null);
@@ -232,6 +234,14 @@ export function useSessionStream(sessionId: string) {
               });
               break;
             }
+            case "terminal_output": {
+              const d = frame.data as Record<string, string>;
+              const chunk = d?.chunk ?? (typeof frame.data === "string" ? frame.data : "");
+              if (chunk) {
+                setTerminalLogs((prev) => [...prev, chunk]);
+              }
+              break;
+            }
             case "error": {
               const errMsg =
                 typeof frame.data === "string"
@@ -354,6 +364,7 @@ export function useSessionStream(sessionId: string) {
     stagedPatches,
     sandboxStatus,
     isStreaming,
+    terminalLogs,
     sendChatMessage,
     stopStreaming,
     setStagedPatches,

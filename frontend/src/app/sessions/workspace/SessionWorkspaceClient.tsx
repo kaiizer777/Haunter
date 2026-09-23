@@ -48,6 +48,14 @@ import {
   Code2,
   Search,
   Zap,
+  Compass,
+  FolderTree,
+  FilePlus,
+  FileMinus,
+  Layers,
+  Terminal,
+  ShieldCheck,
+  TestTube2,
 } from "lucide-react";
 import { api, SessionOut, ApiError, AvailableModelItem } from "@/lib/api";
 import { useSessionStream, ChatMessage, ToolCallChip } from "@/hooks/useSessionStream";
@@ -321,12 +329,43 @@ function ToolExecutionAccordion({
   }
 
   // Generate clean summary title like Screenshot 2: "Exploring 1 file, 1 folder"
-  const fileCount = toolCalls.filter((c) => c.name === "read_file" || c.name === "stage_patch").length;
-  const folderCount = toolCalls.filter((c) => c.name === "list_files").length;
+  const fileCount = toolCalls.filter(
+    (c) => c.name === "read_file" || c.name === "stage_patch" || c.name === "read_file_slice" || c.name === "get_file_outline"
+  ).length;
+  const folderCount = toolCalls.filter(
+    (c) => c.name === "list_files" || c.name === "list_directory"
+  ).length;
+  const searchCount = toolCalls.filter(
+    (c) => c.name === "grep_search" || c.name === "glob_files"
+  ).length;
+  const editCount = toolCalls.filter(
+    (c) =>
+      c.name === "str_replace" ||
+      c.name === "create_file" ||
+      c.name === "delete_file" ||
+      c.name === "apply_multi_patch"
+  ).length;
+  const symbolCount = toolCalls.filter(
+    (c) => c.name === "find_symbol" || c.name === "find_references"
+  ).length;
+  const sandboxCount = toolCalls.filter(
+    (c) =>
+      c.name === "run_terminal_command" ||
+      c.name === "run_linter" ||
+      c.name === "run_targeted_tests"
+  ).length;
 
   let summaryTitle = `Executed ${toolCalls.length} tool${toolCalls.length !== 1 ? "s" : ""}`;
-  if (fileCount > 0 && folderCount > 0) {
+  if (editCount > 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0) {
+    summaryTitle = `Edited ${editCount} file${editCount > 1 ? "s" : ""}`;
+  } else if (symbolCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0) {
+    summaryTitle = `Analyzing symbols (${symbolCount} lookup${symbolCount > 1 ? "s" : ""})`;
+  } else if (sandboxCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0) {
+    summaryTitle = `Running sandbox (${sandboxCount} command${sandboxCount > 1 ? "s" : ""})`;
+  } else if (fileCount > 0 && folderCount > 0) {
     summaryTitle = `Exploring ${fileCount} file${fileCount > 1 ? "s" : ""}, ${folderCount} folder${folderCount > 1 ? "s" : ""}`;
+  } else if (searchCount > 0 && fileCount === 0 && folderCount === 0) {
+    summaryTitle = `Searching codebase (${searchCount} quer${searchCount > 1 ? "ies" : "y"})`;
   } else if (fileCount > 0) {
     summaryTitle = `Analyzing ${fileCount} file${fileCount > 1 ? "s" : ""}`;
   } else if (folderCount > 0) {
@@ -363,8 +402,130 @@ function ToolExecutionAccordion({
           {/* List of tool calls */}
           {toolCalls.map((chip, idx) => {
             const rawPath = (chip.args?.path as string) || "";
-            const isListFiles = chip.name === "list_files";
             const isStagePatch = chip.name === "stage_patch";
+            const isListFiles = chip.name === "list_files";
+            const isGrepSearch = chip.name === "grep_search";
+            const isGlobFiles = chip.name === "glob_files";
+            const isReadFileSlice = chip.name === "read_file_slice";
+            const isListDirectory = chip.name === "list_directory";
+            const isStrReplace = chip.name === "str_replace";
+            const isCreateFile = chip.name === "create_file";
+            const isDeleteFile = chip.name === "delete_file";
+            const isMultiPatch = chip.name === "apply_multi_patch";
+            const isGetFileOutline = chip.name === "get_file_outline";
+            const isFindSymbol = chip.name === "find_symbol";
+            const isFindReferences = chip.name === "find_references";
+            const isRunTerminal = chip.name === "run_terminal_command";
+            const isRunLinter = chip.name === "run_linter";
+            const isRunTests = chip.name === "run_targeted_tests";
+
+            let icon = <FileText className="h-3.5 w-3.5 text-blue-400/80 shrink-0" />;
+            let label = rawPath || chip.name;
+            let actionPrefix = isStagePatch ? "Staged" : "Analyzed";
+            let showViewDiff = false;
+
+            if (isGrepSearch) {
+              const query = (chip.args?.query as string) || "";
+              const matchCount = chip.args?.match_count as number | undefined;
+              icon = <Search className="h-3.5 w-3.5 text-cyan-400/80 shrink-0" />;
+              actionPrefix = "";
+              label =
+                matchCount !== undefined
+                  ? `Searched '${query}' (${matchCount} match${matchCount !== 1 ? "es" : ""})`
+                  : `Searched '${query}'`;
+            } else if (isGlobFiles) {
+              const pattern = (chip.args?.pattern as string) || "";
+              const fileCount = chip.args?.file_count as number | undefined;
+              icon = <Compass className="h-3.5 w-3.5 text-emerald-400/80 shrink-0" />;
+              actionPrefix = "";
+              label =
+                fileCount !== undefined
+                  ? `Found ${fileCount} files matching '${pattern}'`
+                  : `Found files matching '${pattern}'`;
+            } else if (isReadFileSlice) {
+              const start = chip.args?.start_line ?? 1;
+              const end = chip.args?.end_line ?? start;
+              icon = <FileText className="h-3.5 w-3.5 text-sky-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Read ${rawPath} (L${start}-L${end})`;
+            } else if (isListDirectory) {
+              const dirPath = rawPath || (chip.args?.path as string) || ".";
+              icon = <FolderTree className="h-3.5 w-3.5 text-amber-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Listed directory ${dirPath}`;
+            } else if (isListFiles) {
+              icon = <Folder className="h-3.5 w-3.5 text-amber-400/80 shrink-0" />;
+            } else if (isStagePatch) {
+              icon = <FileCode2 className="h-3.5 w-3.5 text-violet-400/80 shrink-0" />;
+              showViewDiff = true;
+            } else if (isStrReplace) {
+              icon = <FileCode2 className="h-3.5 w-3.5 text-violet-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Edited ${rawPath}`;
+              showViewDiff = true;
+            } else if (isCreateFile) {
+              icon = <FilePlus className="h-3.5 w-3.5 text-emerald-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Created ${rawPath}`;
+              showViewDiff = true;
+            } else if (isDeleteFile) {
+              icon = <FileMinus className="h-3.5 w-3.5 text-rose-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Deleted ${rawPath}`;
+            } else if (isMultiPatch) {
+              const patchList = (chip.args?.patches as unknown[]) || [];
+              icon = <Layers className="h-3.5 w-3.5 text-indigo-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Multi-file edit (${patchList.length} file${patchList.length !== 1 ? "s" : ""})`;
+            } else if (isGetFileOutline) {
+              icon = <FileCode2 className="h-3.5 w-3.5 text-sky-300/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Outlined ${rawPath || "file"}`;
+            } else if (isFindSymbol) {
+              const symName = (chip.args?.name as string) || "";
+              const symCount = chip.args?.symbol_count as number | undefined;
+              icon = <Search className="h-3.5 w-3.5 text-violet-400/80 shrink-0" />;
+              actionPrefix = "";
+              label =
+                symCount !== undefined
+                  ? `Found symbol '${symName}' (${symCount} match${symCount !== 1 ? "es" : ""})`
+                  : `Found symbol '${symName}'`;
+            } else if (isFindReferences) {
+              const symName = (chip.args?.symbol as string) || "";
+              const refCount = chip.args?.match_count as number | undefined;
+              icon = <Zap className="h-3.5 w-3.5 text-amber-300/80 shrink-0" />;
+              actionPrefix = "";
+              label =
+                refCount !== undefined
+                  ? `References for '${symName}' (${refCount} call site${refCount !== 1 ? "s" : ""})`
+                  : `References for '${symName}'`;
+            } else if (isRunTerminal) {
+              const cmd = (chip.args?.command as string) || "";
+              const exitCode = chip.args?.exit_code as number | undefined;
+              const shortCmd = cmd.length > 40 ? cmd.slice(0, 37) + "…" : cmd;
+              icon = <Terminal className="h-3.5 w-3.5 text-emerald-300/80 shrink-0" />;
+              actionPrefix = "";
+              label =
+                exitCode !== undefined
+                  ? `Ran '${shortCmd}' (exit: ${exitCode})`
+                  : `Ran '${shortCmd}'`;
+            } else if (isRunLinter) {
+              const fCount = chip.args?.file_count as number | undefined;
+              icon = <ShieldCheck className="h-3.5 w-3.5 text-sky-300/80 shrink-0" />;
+              actionPrefix = "";
+              label =
+                fCount !== undefined
+                  ? `Linted ${fCount} file${fCount !== 1 ? "s" : ""}`
+                  : "Ran linter";
+            } else if (isRunTests) {
+              const tCount = chip.args?.target_count as number | undefined;
+              icon = <TestTube2 className="h-3.5 w-3.5 text-violet-300/80 shrink-0" />;
+              actionPrefix = "";
+              label =
+                tCount !== undefined
+                  ? `Ran tests on ${tCount} target${tCount !== 1 ? "s" : ""}`
+                  : "Ran targeted tests";
+            }
 
             return (
               <div
@@ -372,22 +533,18 @@ function ToolExecutionAccordion({
                 className="flex items-center justify-between gap-3 text-xs text-zinc-400 py-0.5 group"
               >
                 <div className="flex items-center gap-2 font-sans truncate min-w-0">
-                  <span className="text-zinc-500 font-normal">
-                    {isStagePatch ? "Staged" : "Analyzed"}
-                  </span>
-                  {isListFiles ? (
-                    <Folder className="h-3.5 w-3.5 text-amber-400/80 shrink-0" />
-                  ) : isStagePatch ? (
-                    <FileCode2 className="h-3.5 w-3.5 text-violet-400/80 shrink-0" />
-                  ) : (
-                    <FileText className="h-3.5 w-3.5 text-blue-400/80 shrink-0" />
+                  {actionPrefix && (
+                    <span className="text-zinc-500 font-normal">
+                      {actionPrefix}
+                    </span>
                   )}
-                  <span className="font-mono text-zinc-200 truncate" title={rawPath}>
-                    {rawPath || chip.name}
+                  {icon}
+                  <span className="font-mono text-zinc-200 truncate" title={label}>
+                    {label}
                   </span>
                 </div>
 
-                {isStagePatch && rawPath && onViewDiff && (
+                {showViewDiff && rawPath && onViewDiff && (
                   <button
                     onClick={() => onViewDiff(rawPath)}
                     className="shrink-0 rounded border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] font-mono text-violet-300 hover:bg-violet-500/20 transition-colors"
@@ -541,6 +698,64 @@ function ChatBubble({
         </div>
       )}
 
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Terminal Drawer — collapsible live terminal output panel
+// ---------------------------------------------------------------------------
+
+function TerminalDrawer({ logs }: { logs: string[] }) {
+  const [open, setOpen] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom when new chunks arrive.
+  useEffect(() => {
+    if (open) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs, open]);
+
+  if (logs.length === 0) return null;
+
+  // Combine all chunks into a single string for display.
+  const fullOutput = logs.join("");
+
+  return (
+    <div className="flex-none border-t border-zinc-800/60 bg-[#0a0a0d]">
+      {/* Header / toggle bar */}
+      <button
+        onClick={() => setOpen((p) => !p)}
+        className="flex w-full items-center justify-between px-4 py-2 text-xs font-mono text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/40 transition-colors select-none"
+        id="terminal-drawer-toggle"
+      >
+        <div className="flex items-center gap-2">
+          <Terminal className="h-3.5 w-3.5 text-emerald-400/80" />
+          <span className="text-zinc-300 font-medium">Terminal</span>
+          <span className="rounded-full bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-px text-[10px] font-mono text-emerald-400">
+            {logs.length} chunk{logs.length !== 1 ? "s" : ""}
+          </span>
+        </div>
+        <ChevronUp
+          className={`h-3.5 w-3.5 text-zinc-500 transition-transform duration-200 ${
+            open ? "" : "rotate-180"
+          }`}
+        />
+      </button>
+
+      {/* Output pane */}
+      {open && (
+        <div className="max-h-52 overflow-y-auto px-4 py-3 bg-[#060608]">
+          <pre
+            id="terminal-output-content"
+            className="text-[11px] font-mono text-emerald-200/80 leading-relaxed whitespace-pre-wrap break-words"
+          >
+            {fullOutput}
+          </pre>
+          <div ref={bottomRef} />
+        </div>
+      )}
     </div>
   );
 }
@@ -733,6 +948,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     messages,
     stagedPatches,
     isStreaming,
+    terminalLogs,
     sendChatMessage,
     stopStreaming,
     setStagedPatches,
@@ -1202,6 +1418,11 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                   <div ref={chatBottomRef} className="h-4" />
                 </div>
               </div>
+
+              {/* ============================================================ */}
+              {/* TERMINAL DRAWER — live streaming command output               */}
+              {/* ============================================================ */}
+              <TerminalDrawer logs={terminalLogs} />
 
               {/* ============================================================ */}
               {/* SINGLE INPUT BAR (Matches Screenshot 2)                     */}

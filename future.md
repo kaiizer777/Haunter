@@ -1,105 +1,166 @@
-# HAUNTER — Future Roadmap & Architectural Specifications
+# HAUNTER — Future Engineering Roadmap: Level 9 Agent Evolution
 
-This document defines the architectural specification and implementation plan for the **Cloud Agentic Live Session** (In-Browser Interactive Pairing Workspace).
-
----
-
-## Cloud Agentic Live Session (In-Browser Interactive Pairing Workspace)
-
-### 1. Architectural Overview & Topology
-Autonomous fire-and-forget fixing is powerful, but developers frequently want to collaborate directly with the agent—guiding architecture decisions, tweaking candidate patches, asking questions against the codebase, and testing changes interactively without checking out branches locally. The Cloud Agentic Live Session provides a real-time, browser-based pairing environment with live code editing, streaming reasoning, and instantaneous sandbox verification.
-
-```
-User clicks "Start Agentic Session" on Dashboard or PR
-                           │
-                           ▼
-FastAPI Session Controller (`backend/app/routers/sessions.py`)
-  • Initializes session state in Neon Postgres (`agent_sessions`)
-  • Enforces max 2 active sessions per user
-  • Fetches target repo file tree & symbols via GitHub Git Data API
-                           │
-                           ▼
-Cloudflare Next.js Frontend (`frontend/src/app/sessions/[id]/page.tsx`)
-  ┌─────────────────────────┬─────────────────────────┐
-  │   Agent Chat Dock       │   Monaco Multi-File IDE │
-  │   (SSE Streaming Logs)  │   (Interactive Editor)  │
-  └─────────────────────────┴─────────────────────────┘
-                           │
-User submits prompt: "Refactor user authentication to support passkeys"
-                           │
-                           ▼
-Live Orchestrator Engine (`backend/app/services/session_orchestrator.py`)
-  ├── 1. Stream agent thoughts & tool calls via Server-Sent Events (SSE)
-  ├── 2. Stream unified diffs & file edits directly into Monaco Editor
-  ├── 3. Trigger Sandbox Runner in background against live edits (`POST /sessions/{id}/verify`)
-  └── 4. User reviews live diffs -> clicks "Commit & Open PR" (`POST /sessions/{id}/commit`)
-                           │
-                           ▼
-GitHub Git Data API directly commits changes to target repository branch & opens PR
-```
+Clean, phase-by-phase execution roadmap to evolve the Haunter Live Pairing Agent from basic file reading into a production-grade, Level 9 Autonomous Pairing & CI Diagnostic Engineer.
 
 ---
 
-### 2. Database Schema (`backend/app/models.py`)
+## Phase 1: High-ROI Repo Recon & Navigation
+- **Complexity**: `Low`
+- **Goal**: Eliminate context-window bloat by allowing the agent to discover files and search strings without loading entire files into memory.
 
-```python
-class AgentSession(Base):
-    __tablename__ = "agent_sessions"
+### Deliverables
+- **`backend/app/services/session_tools/recon.py`**:
+  - `grep_search(query: str, path_prefix?: str, case_sensitive?: bool = False, max_results?: int = 25)`: Fast regex/substring search across repository files.
+  - `glob_files(pattern: str, exclude_hidden?: bool = True)`: Pattern-based file path discovery.
+  - `read_file_slice(path: str, start_line: int, end_line: int)`: Surgical line-range reader with 1-based indexing.
+  - `list_directory(path: str = ".", depth: int = 2)`: Hierarchical folder tree explorer.
+- **`backend/app/services/session_orchestrator.py`**:
+  - Register Phase 1 tools in `_TOOLS` and dispatch loop.
+- **`frontend/src/app/sessions/workspace/SessionWorkspaceClient.tsx`**:
+  - Add chip icons and summary counters in `ToolExecutionAccordion` for `grep_search`, `glob_files`, and `read_file_slice`.
+- **Tests**:
+  - `backend/tests/test_session_recon_tools.py`: Unit tests for regex matching, path validation, slice limits, and depth capping.
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), index=True)
-    title: Mapped[str] = mapped_column(String(255), nullable=False, default="Pairing Session")
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")  # active, completed, closed
-    branch_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    base_sha: Mapped[str] = mapped_column(String(40), nullable=False)
-    conversation_history: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
-    staged_patches: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)  # file_path -> patch
-    created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
-    )
-
-    user: Mapped["User"] = relationship("User", backref="agent_sessions")
-    repo: Mapped["Repo"] = relationship("Repo", backref="agent_sessions")
-```
+### Exit Criteria
+- `pytest backend/tests/test_session_recon_tools.py` passes cleanly.
+- Agent successfully locates target code using `grep_search` and reads only the relevant 30-line slice.
 
 ---
 
-## Phased Execution Roadmap
+## Phase 2: Surgical Code Editing Engine
+- **Complexity**: `Medium`
+- **Goal**: Replace brittle unified diff line offsets with exact string replacement, eliminating syntax and patch-rejection errors.
 
-The implementation is partitioned into three sequential, production-grade phases:
+### Deliverables
+- **`backend/app/services/session_tools/editor.py`**:
+  - `str_replace(path: str, old_str: str, new_str: str)`: Exact search-and-replace tool. Fails closed with descriptive error if `old_str` is not uniquely found.
+  - `create_file(path: str, content: str)`: Clean file creation.
+  - `delete_file(path: str)`: Staged file deletion.
+  - `apply_multi_patch(patches: list[dict])`: Atomic multi-file editing in a single turn.
+  - Automatically converts string replacements into unified diffs to update `staged_patches` and Monaco models.
+- **`backend/app/services/session_orchestrator.py`**:
+  - Integrate editor tools and emit `file_diff` SSE events.
+- **`frontend/src/app/sessions/workspace/SessionWorkspaceClient.tsx`**:
+  - Support multi-tab file switching when `apply_multi_patch` touches multiple files simultaneously.
+- **Tests**:
+  - `backend/tests/test_session_editor_tools.py`: Tests for unique matches, non-unique match rejection, empty strings, and multi-file rollback on error.
 
-### Phase 1: Database Foundation, Session Controller & Git Tree Ingestion
-- **Alembic Migration**: `backend/alembic/versions/f6a7b8c9d0e1_add_agent_sessions_table.py` (chained from `e5f6a7b8c9d0`). Server defaults for JSONB (`'[]'::jsonb`, `'{}'::jsonb`) and timestamps (`now()`).
-- **SQLAlchemy 2.0 Model**: Add `AgentSession` to `backend/app/models.py` with foreign keys, index decorators, and bidirectional relationships on `User` and `Repo`.
-- **Pydantic Schemas**: Define `SessionCreateIn`, `SessionOut`, `SessionListOut`, `SessionUpdateIn` with strict validation.
-- **GitHub Git Data API Client**: Extend `backend/app/github_client.py` with `fetch_git_tree` (`GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1`) and `fetch_branch_sha`.
-- **Session API Router**: `backend/app/routers/sessions.py`:
-  - `POST /sessions`: Validate repo ownership, resolve branch base SHA, enforce max 2 concurrent active sessions per user, initialize session row.
-  - `GET /sessions`: List active/recent sessions for current user with repo metadata.
-  - `GET /sessions/{id}`: Detailed session state with staged patches and conversation history (404 on unowned to avoid IDOR leaks).
-  - `POST /sessions/{id}/close`: Mark session status as `closed`.
-- **Router Registration**: Register router in `backend/main.py`.
-- **Test Suite**: `backend/tests/test_sessions_api.py` covering multi-tenant isolation, concurrent session limits, branch resolution, and CRUD lifecycle.
+### Exit Criteria
+- `pytest backend/tests/test_session_editor_tools.py` passes.
+- Code modifications succeed without line-number calculation errors.
 
-### Phase 2: Real-Time SSE Streamer, LLM Tool-Calling & Sandbox Verification
-- **SSE Protocol Specification**: Standardized SSE chunk wire format (`event: thought`, `event: file_diff`, `event: sandbox_status`, `event: error`, `event: done`).
-- **SSE Streamer Engine**: `backend/app/services/session_streamer.py` providing async generator for `StreamingResponse`.
-- **Live Session Orchestrator**: `backend/app/services/session_orchestrator.py`:
-  - Maintains conversation memory in `conversation_history`.
-  - Parses LLM tool calls for file reading and patch staging.
-  - Updates `staged_patches` atomically in Neon Postgres.
-- **Verification Endpoint**: `POST /sessions/{id}/verify` dispatching active staged patches to the isolated sandbox runner and returning test status.
-- **Test Suite**: `backend/tests/test_session_orchestrator.py` testing streaming generation, prompt building, and patch state updates.
+---
 
-### Phase 3: Monaco Multi-File IDE Frontend, Live Diff Viewer & 1-Click Commit Publisher
-- **Monaco Editor Integration**: `@monaco-editor/react` embedded inside `frontend/src/app/sessions/[id]/page.tsx` with side-by-side diff view and file tab switcher.
-- **Live Stream Consumer**: Custom React hook (`useSessionStream`) connecting to SSE endpoint and updating chat timeline and Monaco models with sub-250ms latency.
-- **Top Action Bar**: Interactive triggers for "Run Tests in Sandbox" and "Commit & Open PR".
-- **GitHub Commit Publisher**: `POST /sessions/{id}/commit` creating Git tree objects and commit blobs via GitHub Git Data API, pushing to branch, and opening PR with author attribution.
-- **Sessions Dashboard**: `frontend/src/app/sessions/page.tsx` listing user sessions with tactile obsidian styling, status tags, and resume buttons.
-- **Sidebar Integration**: Link in `frontend/src/components/layout/sidebar.tsx`.
-- **Frontend Verification**: Clean `tsc --noEmit` and `npm run lint`.
+## Phase 3: TinyFish Live Web & Docs Intelligence
+- **Complexity**: `Low`
+- **Goal**: Connect the agent to the live 2026 web ecosystem to verify modern library APIs, breaking changes, and external docs.
+
+### Deliverables
+- **`backend/app/services/session_tools/web.py`**:
+  - Client integration with **TinyFish Search API** (`api.tinyfish.io/v1/search`) and **Fetch API** (`api.tinyfish.io/v1/fetch`) using `settings.tinyfish_api_key`.
+  - `search_web_docs(query: str, domain?: str, max_results?: int = 5)`: Returns token-dense, rank-stable JSON search results.
+  - `fetch_web_content(url: str, format?: str = "markdown")`: Scrapes live documentation via stealth Chromium, stripping ads and noise.
+  - `fetch_package_metadata(ecosystem: str, package_name: str)`: Fast PyPI/npm version and advisory checker.
+- **`backend/app/services/session_orchestrator.py`**:
+  - Expose web tools to the agent loop with domain safety allowlists.
+- **`frontend/src/app/sessions/workspace/SessionWorkspaceClient.tsx`**:
+  - Render web search chips with clickable source URLs in the chat timeline.
+- **Tests**:
+  - `backend/tests/test_session_web_tools.py`: Tests with mocked TinyFish HTTP responses covering success, rate limits, and fallback paths.
+
+### Exit Criteria
+- `pytest backend/tests/test_session_web_tools.py` passes.
+- Agent successfully queries TinyFish API for library documentation and cites sources.
+
+---
+
+## Phase 4: AST & Code Intelligence (LSP-Grade)
+- **Complexity**: `High`
+- **Goal**: Provide the agent with structural code understanding across files without invoking full language servers.
+
+### Deliverables
+- **`backend/app/services/session_tools/symbols.py`**:
+  - Lightweight Tree-sitter / AST parser for Python and TypeScript/JavaScript.
+  - `find_symbol(name: str, kind?: str)`: Locates functions, classes, interfaces, or types across the codebase.
+  - `find_references(symbol: str, path: str)`: Finds all call sites and usages of a symbol across the project.
+  - `get_file_outline(path: str)`: Returns signatures and docstrings of a file without the function bodies.
+- **`backend/app/services/session_orchestrator.py`**:
+  - Wire symbol tools into agent loop.
+- **`frontend/src/app/sessions/workspace/SessionWorkspaceClient.tsx`**:
+  - Quick outline inspection drawer and symbol reference chips.
+- **Tests**:
+  - `backend/tests/test_session_symbols.py`: Verification on nested classes, async functions, TypeScript interfaces, and imported usages.
+
+### Exit Criteria
+- `pytest backend/tests/test_session_symbols.py` passes.
+- Agent correctly identifies callers of a refactored method across multiple files.
+
+---
+
+## Phase 5: Autonomous Sandbox Execution & Test Automation
+- **Complexity**: `High`
+- **Goal**: Enable the agent to execute shell commands, linters, and tests inside the isolated sandbox runner and self-correct on failure.
+
+### Deliverables
+- **`backend/app/services/session_tools/sandbox.py`**:
+  - `run_terminal_command(command: str, timeout_sec?: int = 60)`: Dispatches command to isolated GitHub Actions mirror runner / container.
+  - `run_linter(paths: list[str])`: Fast static analysis (`ruff`, `eslint`, `tsc --noEmit`).
+  - `run_targeted_tests(test_targets: list[str])`: Executes targeted test files (`pytest`, `vitest`).
+  - Real-time SSE streaming for terminal stdout/stderr (`event: terminal_output`).
+- **`backend/app/services/session_streamer.py`**:
+  - Add `put_terminal_output(chunk: str)` to `SseQueue`.
+- **`frontend/src/app/sessions/workspace/SessionWorkspaceClient.tsx`**:
+  - Integrated Terminal drawer below Monaco editor rendering streaming ANSI logs.
+- **Tests**:
+  - `backend/tests/test_session_sandbox_tools.py`: Tests for timeout handling, exit code reporting, and command injection sanitization.
+
+### Exit Criteria
+- `pytest backend/tests/test_session_sandbox_tools.py` passes.
+- Agent runs `pytest` in sandbox, reads failing trace, fixes code via `str_replace`, and re-runs until tests pass.
+
+---
+
+## Phase 6: Interactive Planning & Clarification UI
+- **Complexity**: `Medium`
+- **Goal**: Make the agent's multi-step execution transparent and give the user one-click interactive controls for decisions.
+
+### Deliverables
+- **Database Migration**:
+  - Add `plan: JSONB` and `waiting_input: JSONB` columns to `agent_sessions` table.
+- **`backend/app/services/session_tools/planning.py`**:
+  - `update_plan(tasks: list[dict])`: Updates live task graph (`pending`, `in_progress`, `completed`).
+  - `ask_user_clarification(question: str, options: list[str])`: Pauses agent execution and waits for user input.
+- **API Endpoints (`backend/app/routers/sessions.py`)**:
+  - `POST /sessions/{id}/clarify`: Resumes the agent loop with the user's selected choice.
+- **`frontend/src/app/sessions/workspace/SessionWorkspaceClient.tsx`**:
+  - Real-time Plan Checklist widget in the sidebar.
+  - Interactive chip selector modal in the chat dock when clarification is requested.
+- **Tests**:
+  - `backend/tests/test_session_planning.py`: Tests for plan state persistence, loop pausing, and resume on input.
+
+### Exit Criteria
+- `pytest backend/tests/test_session_planning.py` passes.
+- Interactive clarification modal renders in frontend; selecting an option immediately resumes agent reasoning.
+
+---
+
+## Phase 7: Session Time Machine & Pre-Commit Security
+- **Complexity**: `High`
+- **Goal**: Safety net for instant turn-by-turn rollbacks and automated security scanning prior to opening a PR.
+
+### Deliverables
+- **`backend/app/services/session_tools/checkpoints.py`**:
+  - Snapshot manager saving `(checkpoint_id, timestamp, staged_patches_snapshot, description)` after each turn.
+  - `checkpoint_restore(checkpoint_id: str)`: Rewinds staged files and conversation state.
+  - `scan_security_vulnerabilities(paths: list[str])`: Pre-commit scan using TruffleHog regexes (secrets/tokens) + AST SQL injection checks.
+- **API Endpoint**:
+  - `POST /sessions/{id}/checkpoints/{checkpoint_id}/restore`.
+- **`frontend/src/app/sessions/workspace/SessionWorkspaceClient.tsx`**:
+  - Visual Time Machine timeline slider with 1-click Undo/Redo in Monaco header.
+  - Security Audit Status badge on the "Commit & Open PR" button.
+- **Tests**:
+  - `backend/tests/test_session_checkpoints.py`: Tests for exact rollback fidelity and secret detection.
+
+### Exit Criteria
+- `pytest backend/tests/test_session_checkpoints.py` passes.
+- Rolling back restores prior diffs in Monaco instantly; hardcoded fake secret triggers security blocker.

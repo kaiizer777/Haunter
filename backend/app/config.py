@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     # Optional admin user UUID string for global model config switcher authorization
     admin_user_id: Optional[str] = None
 
+    # TinyFish API Configuration (Web Search, Stealth Fetch & Agent API)
+    tinyfish_api_key: Optional[str] = None
+    tinyfish_base_url: str = "https://api.tinyfish.io/v1"
+
     # GitHub App credentials for repo-write operations (Phase 8).
     # App permissions required: contents:write, pull_requests:write — NO administration.
     # github_app_private_key is a PEM string — load from SSM / Secret Manager in prod.
