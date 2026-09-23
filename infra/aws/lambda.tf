@@ -197,6 +197,15 @@ resource "aws_lambda_function" "haunter" {
       # LLM
       OPENCODE_ZEN_API_KEY = var.opencode_zen_api_key
 
+      # Groq LLM Provider
+      GROQ_API_KEY    = var.groq_api_key
+      GROQ_BASE_URL   = var.groq_base_url
+      GROQ_MODEL_NAME = var.groq_model_name
+
+      # TinyFish API (Web Search & Stealth Fetch)
+      TINYFISH_API_KEY  = var.tinyfish_api_key
+      TINYFISH_BASE_URL = var.tinyfish_base_url
+
       # Token encryption (at-rest protection for users.access_token — required, see config.py:125)
       TOKEN_ENCRYPTION_KEY = var.token_encryption_key
     }

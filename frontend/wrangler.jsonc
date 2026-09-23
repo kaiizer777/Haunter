@@ -6,7 +6,7 @@
   "workers_dev": true,
   "assets": {
     "directory": "./out",
-    "not_found_handling": "single-page-app"
+    "not_found_handling": "single-page-application"
   },
   "observability": {
     "enabled": true

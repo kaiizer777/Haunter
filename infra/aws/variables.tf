@@ -148,3 +148,40 @@ variable "sandbox_provider" {
   type        = string
   default     = "aws"
 }
+
+# ---------------------------------------------------------------------------
+# LLM & Web Intelligence variables (Groq + TinyFish)
+# ---------------------------------------------------------------------------
+
+variable "groq_api_key" {
+  description = "Groq API key for LLM calls."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "groq_base_url" {
+  description = "Groq API base URL."
+  type        = string
+  default     = "https://api.groq.com/openai/v1"
+}
+
+variable "groq_model_name" {
+  description = "Groq model name."
+  type        = string
+  default     = "openai/gpt-oss-120b"
+}
+
+variable "tinyfish_api_key" {
+  description = "TinyFish API key for web search and fetch intelligence."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "tinyfish_base_url" {
+  description = "TinyFish API base URL."
+  type        = string
+  default     = "https://api.tinyfish.io/v1"
+}
+
