@@ -58,8 +58,14 @@ import {
   TestTube2,
   Globe,
   Package,
+  ListTodo,
+  HelpCircle,
+  Clock,
+  Undo2,
+  History,
+  ShieldAlert,
 } from "lucide-react";
-import { api, SessionOut, ApiError, AvailableModelItem } from "@/lib/api";
+import { api, SessionOut, CheckpointOut, ApiError, AvailableModelItem } from "@/lib/api";
 import { useSessionStream, ChatMessage, ToolCallChip } from "@/hooks/useSessionStream";
 import { AppLayout } from "@/components/layout/app-layout";
 
@@ -120,6 +126,17 @@ function StatusChip({ status }: { status: string }) {
           <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
         </span>
         active
+      </span>
+    );
+  }
+  if (status === "awaiting_clarification") {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 text-[11px] font-mono font-medium text-amber-300">
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60" />
+          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
+        </span>
+        awaiting clarification
       </span>
     );
   }
@@ -362,6 +379,9 @@ function ToolExecutionAccordion({
       c.name === "fetch_web_content" ||
       c.name === "fetch_package_metadata"
   ).length;
+  const planCount = toolCalls.filter(
+    (c) => c.name === "update_plan" || c.name === "ask_user_clarification"
+  ).length;
 
   let summaryTitle = `Executed ${toolCalls.length} tool${toolCalls.length !== 1 ? "s" : ""}`;
   if (editCount > 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0) {
@@ -372,6 +392,8 @@ function ToolExecutionAccordion({
     summaryTitle = `Running sandbox (${sandboxCount} command${sandboxCount > 1 ? "s" : ""})`;
   } else if (webCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0 && sandboxCount === 0) {
     summaryTitle = `Searching web (${webCount} request${webCount > 1 ? "s" : ""})`;
+  } else if (planCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0 && sandboxCount === 0 && webCount === 0) {
+    summaryTitle = "Planning execution";
   } else if (fileCount > 0 && folderCount > 0) {
     summaryTitle = `Exploring ${fileCount} file${fileCount > 1 ? "s" : ""}, ${folderCount} folder${folderCount > 1 ? "s" : ""}`;
   } else if (searchCount > 0 && fileCount === 0 && folderCount === 0) {
@@ -556,6 +578,33 @@ function ToolExecutionAccordion({
               icon = <Package className="h-3.5 w-3.5 text-amber-400/80 shrink-0" />;
               actionPrefix = "";
               label = `Checked ${pkgName} (${eco})`;
+            } else if (chip.name === "update_plan") {
+              const comp = (chip.args?.completed_count as number) ?? 0;
+              const tot = (chip.args?.total_count as number) ?? 0;
+              icon = <ListTodo className="h-3.5 w-3.5 text-indigo-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Updated task checklist (${comp}/${tot})`;
+            } else if (chip.name === "ask_user_clarification") {
+              const question = (chip.args?.question as string) || "";
+              icon = <HelpCircle className="h-3.5 w-3.5 text-amber-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Asked for clarification: '${question}'`;
+            } else if (chip.name === "checkpoint_restore") {
+              const cpId = (chip.args?.checkpoint_id as string) || "";
+              icon = <Undo2 className="h-3.5 w-3.5 text-violet-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = `Restored to checkpoint '${cpId}'`;
+            } else if (chip.name === "scan_security_vulnerabilities") {
+              const scanPaths = (chip.args?.paths as string[]) || [];
+              const scanResult = (chip.args?.scan_result as string) || "";
+              const isClean = scanResult.toLowerCase().includes("passed");
+              icon = isClean
+                ? <ShieldCheck className="h-3.5 w-3.5 text-emerald-400/80 shrink-0" />
+                : <ShieldAlert className="h-3.5 w-3.5 text-red-400/80 shrink-0" />;
+              actionPrefix = "";
+              label = isClean
+                ? `Security scan passed (${scanPaths.length} file${scanPaths.length !== 1 ? "s" : ""})`
+                : `Security violations found in ${scanPaths.length} file${scanPaths.length !== 1 ? "s" : ""}`;
             }
 
             return (
@@ -980,15 +1029,52 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     stagedPatches,
     isStreaming,
     terminalLogs,
+    plan,
+    pendingClarification,
+    checkpoints,
     sendChatMessage,
     stopStreaming,
     setStagedPatches,
     setMessages,
+    setPlan,
+    setPendingClarification,
+    setCheckpoints,
   } = useSessionStream(sessionId);
 
   const [chatInput, setChatInput] = useState("");
+  const [showPlanSidebar, setShowPlanSidebar] = useState(true);
+  const [showTimeMachine, setShowTimeMachine] = useState(false);
+  const [timeMachineRestoring, setTimeMachineRestoring] = useState<string | null>(null);
+  const [securityViolations, setSecurityViolations] = useState<string | null>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // -------------------------------------------------------------------------
+  // Clarification selection handler
+  // -------------------------------------------------------------------------
+
+  const handleClarificationSelect = async (choice: string) => {
+    try {
+      setPendingClarification(null);
+      // Optimistically append user's response in chat
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", content: `[User Clarification Response]: ${choice}` },
+      ]);
+      await api.clarifySession(sessionId, { response: choice });
+      if (session) {
+        setSession({ ...session, status: "active", waiting_input: null });
+      }
+      // Trigger the next agent chat turn automatically
+      await sendChatMessage(`Proceed with: ${choice}`, {
+        model: selectedModelId,
+        provider: selectedProvider === "auto" ? undefined : selectedProvider,
+      });
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to submit clarification.";
+      setActionError(msg);
+    }
+  };
 
   // -------------------------------------------------------------------------
   // Load session on mount
@@ -1011,6 +1097,13 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
           const firstFile = Object.keys(s.staged_patches)[0];
           setActiveFile(firstFile);
         }
+        // Pre-populate plan and waiting_input if present.
+        if (s.plan && s.plan.length > 0) {
+          setPlan(s.plan);
+        }
+        if (s.status === "awaiting_clarification" && s.waiting_input) {
+          setPendingClarification(s.waiting_input);
+        }
         // Hydrate chat history from DB — skip tool messages (internal LLM plumbing).
         if (s.conversation_history && s.conversation_history.length > 0) {
           const hydrated: import("@/hooks/useSessionStream").ChatMessage[] = s.conversation_history
@@ -1021,13 +1114,17 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
             }));
           if (hydrated.length > 0) setMessages(hydrated);
         }
+        // Seed checkpoints from DB.
+        if (s.checkpoints && s.checkpoints.length > 0) {
+          setCheckpoints(s.checkpoints as CheckpointOut[]);
+        }
       })
       .catch((err) => {
         const msg = err instanceof ApiError ? err.message : "Failed to load session.";
         setPageError(msg);
       })
       .finally(() => setPageLoading(false));
-  }, [sessionId, setStagedPatches, setMessages]);
+  }, [sessionId, setStagedPatches, setMessages, setPlan, setPendingClarification, setCheckpoints]);
 
   // Auto-scroll chat to bottom on new messages
   useEffect(() => {
@@ -1138,6 +1235,26 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     }
   };
 
+  const handleRestoreCheckpoint = async (checkpointId: string) => {
+    if (timeMachineRestoring) return;
+    setTimeMachineRestoring(checkpointId);
+    setActionError(null);
+    try {
+      const updated = await api.restoreCheckpoint(sessionId, checkpointId);
+      // Sync staged patches to restored state (SSE handles Monaco buffers for live sessions,
+      // but for REST restore we update state directly).
+      setStagedPatches(updated.staged_patches);
+      setCheckpoints((updated.checkpoints ?? []) as CheckpointOut[]);
+      setSession(updated);
+      setShowTimeMachine(false);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to restore checkpoint.";
+      setActionError(msg);
+    } finally {
+      setTimeMachineRestoring(null);
+    }
+  };
+
   const handleViewDiffForFile = (filePath: string) => {
     setActiveFile(filePath);
     setViewMode("diffs");
@@ -1238,6 +1355,25 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
       {/* Status chip */}
       <StatusChip status={session.status} />
 
+      {/* Plan checklist toggle button */}
+      {plan.length > 0 && (
+        <button
+          onClick={() => setShowPlanSidebar((prev) => !prev)}
+          className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-xs font-mono transition-all ${
+            showPlanSidebar
+              ? "border-amber-500/40 bg-amber-500/15 text-amber-300 shadow-sm"
+              : "border-zinc-700/60 bg-zinc-800/60 text-zinc-400 hover:text-zinc-200"
+          }`}
+          title="Toggle execution plan checklist"
+        >
+          <ListTodo className="h-3.5 w-3.5" />
+          <span>Plan</span>
+          <span className="rounded-full bg-amber-500/20 px-1.5 py-0.2 text-[10px] text-amber-300">
+            {plan.filter((t) => t.status === "completed").length}/{plan.length}
+          </span>
+        </button>
+      )}
+
       {/* Verify sandbox button */}
       {isActive && (
         <button
@@ -1256,17 +1392,94 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
         </button>
       )}
 
-      {/* Commit & PR button */}
+      {/* Time Machine — checkpoint rewind control */}
+      {isActive && checkpoints.length > 0 && (
+        <div className="relative">
+          <button
+            onClick={() => setShowTimeMachine((prev) => !prev)}
+            className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-mono transition-all ${
+              showTimeMachine
+                ? "border-violet-500/40 bg-violet-500/15 text-violet-300 shadow-sm"
+                : "border-zinc-700/60 bg-zinc-800/60 text-zinc-400 hover:text-zinc-200"
+            }`}
+            title="Session Time Machine — view and restore checkpoints"
+          >
+            <History className="h-3.5 w-3.5" />
+            <span>History</span>
+            <span className="rounded-full bg-violet-500/20 px-1.5 py-0.2 text-[10px] text-violet-300">
+              {checkpoints.length}
+            </span>
+          </button>
+
+          {showTimeMachine && (
+            <div className="absolute right-0 top-full mt-1.5 z-40 w-80 rounded-2xl border border-zinc-800 bg-[#14141a] shadow-[0_16px_48px_rgba(0,0,0,0.8)] overflow-hidden">
+              <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-800">
+                <div className="flex items-center gap-2 text-xs font-semibold text-zinc-200">
+                  <History className="h-3.5 w-3.5 text-violet-400" />
+                  Session Time Machine
+                </div>
+                <button
+                  onClick={() => setShowTimeMachine(false)}
+                  className="text-zinc-500 hover:text-zinc-300 transition-colors"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {[...checkpoints].reverse().map((cp) => (
+                  <div
+                    key={cp.checkpoint_id}
+                    className="flex items-center justify-between gap-2 px-3.5 py-2.5 border-b border-zinc-800/60 hover:bg-zinc-800/40 transition-colors"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-mono text-zinc-200 truncate">{cp.description}</p>
+                      <p className="text-[10px] text-zinc-500 mt-0.5 font-mono">
+                        Turn {cp.turn} · {Object.keys(cp.staged_patches).length} file{Object.keys(cp.staged_patches).length !== 1 ? "s" : ""} · {new Date(cp.timestamp).toLocaleTimeString()}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleRestoreCheckpoint(cp.checkpoint_id)}
+                      disabled={timeMachineRestoring === cp.checkpoint_id}
+                      className="shrink-0 flex items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] font-mono text-violet-300 hover:bg-violet-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {timeMachineRestoring === cp.checkpoint_id ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Undo2 className="h-3 w-3" />
+                      )}
+                      Restore
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Commit & PR button with Security Badge */}
       {isActive && (
-        <button
-          id="commit-pr-btn"
-          onClick={() => setShowCommitModal(true)}
-          disabled={patchFiles.length === 0}
-          className="flex items-center gap-1.5 rounded-xl border border-violet-500/40 bg-gradient-to-b from-violet-600 to-violet-700 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:from-violet-500 hover:to-violet-600 active:translate-y-px transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <GitPullRequest className="h-3.5 w-3.5" />
-          <span>Commit & PR</span>
-        </button>
+        <div className="relative flex items-center gap-1.5">
+          {securityViolations && (
+            <button
+              onClick={() => setSecurityViolations(null)}
+              title="Security violations detected — click to dismiss"
+              className="flex items-center gap-1 rounded-xl border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-[10px] font-mono text-red-300 hover:bg-red-500/20 transition-colors"
+            >
+              <ShieldAlert className="h-3.5 w-3.5" />
+              Security risk
+            </button>
+          )}
+          <button
+            id="commit-pr-btn"
+            onClick={() => setShowCommitModal(true)}
+            disabled={patchFiles.length === 0}
+            className="flex items-center gap-1.5 rounded-xl border border-violet-500/40 bg-gradient-to-b from-violet-600 to-violet-700 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:from-violet-500 hover:to-violet-600 active:translate-y-px transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <GitPullRequest className="h-3.5 w-3.5" />
+            <span>Commit & PR</span>
+          </button>
+        </div>
       )}
 
       {/* Close session button */}
@@ -1445,6 +1658,44 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                       onViewDiff={handleViewDiffForFile}
                     />
                   ))}
+
+                  {/* Clarification Request Card with Choice Pills */}
+                  {pendingClarification && (
+                    <div className="my-4 rounded-2xl border border-amber-500/40 bg-gradient-to-br from-amber-500/15 via-[#16161c] to-zinc-900/90 p-4 shadow-xl backdrop-blur-xl animate-in fade-in slide-in-from-bottom-2 duration-300">
+                      <div className="flex items-start gap-3">
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                          <HelpCircle className="h-4 w-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-[10px] font-mono uppercase tracking-wider text-amber-400 font-semibold">
+                              Clarification Requested
+                            </span>
+                            <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                          </div>
+                          <p className="text-sm font-medium text-zinc-100 leading-snug">
+                            {pendingClarification.question}
+                          </p>
+                          <p className="text-xs text-zinc-400 mt-1">
+                            Choose an option below to guide the agent and resume execution:
+                          </p>
+                          <div className="mt-3.5 flex flex-wrap gap-2">
+                            {pendingClarification.options.map((option, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => handleClarificationSelect(option)}
+                                disabled={isStreaming}
+                                className="flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-amber-500/15 px-3.5 py-2 text-xs font-mono text-amber-200 hover:bg-amber-500/30 hover:border-amber-400 hover:text-white active:scale-95 transition-all shadow-sm cursor-pointer disabled:opacity-50"
+                              >
+                                <Check className="h-3.5 w-3.5 text-amber-400" />
+                                <span>{option}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   <div ref={chatBottomRef} className="h-4" />
                 </div>
@@ -1902,6 +2153,98 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                     <MessageSquare className="h-3.5 w-3.5" />
                     <span>Go to Chat</span>
                   </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ============================================================== */}
+          {/* PLAN CHECKLIST SIDEBAR (Collapsible)                            */}
+          {/* ============================================================== */}
+          {plan.length > 0 && (
+            <div
+              className={`flex flex-col border-l border-zinc-800 bg-[#0c0c0e] transition-all duration-200 shrink-0 ${
+                showPlanSidebar ? "w-72" : "w-10"
+              }`}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2.5 bg-[#101014]">
+                <button
+                  onClick={() => setShowPlanSidebar((prev) => !prev)}
+                  className="flex items-center gap-2 text-xs font-semibold text-zinc-200 hover:text-white transition-colors"
+                  title="Toggle plan checklist"
+                >
+                  <ListTodo className="h-4 w-4 text-amber-400 shrink-0" />
+                  {showPlanSidebar && <span>Execution Plan</span>}
+                </button>
+                {showPlanSidebar && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-mono text-amber-300">
+                      {plan.filter((t) => t.status === "completed").length}/{plan.length}
+                    </span>
+                    <button
+                      onClick={() => setShowPlanSidebar(false)}
+                      className="text-zinc-500 hover:text-zinc-300"
+                    >
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {showPlanSidebar && (
+                <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                  {/* Progress bar */}
+                  <div className="mb-3">
+                    <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 mb-1">
+                      <span>Progress</span>
+                      <span>
+                        {Math.round(
+                          (plan.filter((t) => t.status === "completed").length / plan.length) * 100
+                        )}
+                        %
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-amber-500 to-emerald-500 transition-all duration-300"
+                        style={{
+                          width: `${(plan.filter((t) => t.status === "completed").length / plan.length) * 100}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Task list */}
+                  {plan.map((task) => {
+                    let taskIcon = <Clock className="h-3.5 w-3.5 text-zinc-500 shrink-0" />;
+                    let taskBg = "bg-zinc-900/40 border-zinc-800/60 text-zinc-400";
+                    if (task.status === "completed") {
+                      taskIcon = <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />;
+                      taskBg = "bg-emerald-950/20 border-emerald-500/20 text-zinc-200 line-through opacity-80";
+                    } else if (task.status === "in_progress") {
+                      taskIcon = <Loader2 className="h-3.5 w-3.5 text-amber-400 shrink-0 animate-spin" />;
+                      taskBg = "bg-amber-950/30 border-amber-500/40 text-amber-100 font-medium shadow-sm";
+                    } else if (task.status === "failed") {
+                      taskIcon = <XCircle className="h-3.5 w-3.5 text-rose-400 shrink-0" />;
+                      taskBg = "bg-rose-950/20 border-rose-500/30 text-rose-200";
+                    }
+
+                    return (
+                      <div
+                        key={task.id}
+                        className={`flex items-start gap-2.5 rounded-xl border p-2.5 text-xs transition-all ${taskBg}`}
+                      >
+                        <div className="mt-0.5">{taskIcon}</div>
+                        <div className="flex-1 min-w-0">
+                          <span className="block leading-relaxed break-words">{task.title}</span>
+                          <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider block mt-0.5">
+                            {task.status.replace("_", " ")}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

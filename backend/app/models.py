@@ -304,6 +304,21 @@ class AgentSession(Base):
     staged_patches: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict
     )
+    # Phase 6 — Interactive Planning & Clarification
+    # Live multi-step task checklist: list of {id, title, status} dicts
+    plan: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
+    )
+    # Active clarification request when status="awaiting_clarification"
+    waiting_input: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
+    # Phase 7 — Session Time Machine: turn-by-turn snapshots for instant rollback.
+    # Capped at 20 entries (oldest dropped when limit reached).
+    # Schema: [{checkpoint_id, turn, timestamp, description, staged_patches, history_length}]
+    checkpoints: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

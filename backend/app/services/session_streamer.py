@@ -38,7 +38,19 @@ _STREAM_DONE = object()
 
 # Allowed SSE event names — enforced at format time to prevent protocol drift.
 _ALLOWED_EVENTS: frozenset[str] = frozenset(
-    {"thought", "tool_call", "file_diff", "sandbox_status", "terminal_output", "error", "done"}
+    {
+        "thought",
+        "tool_call",
+        "file_diff",
+        "sandbox_status",
+        "terminal_output",
+        "plan_update",
+        "clarification_requested",
+        "checkpoint_created",
+        "checkpoint_restored",
+        "error",
+        "done",
+    }
 )
 
 
@@ -149,6 +161,20 @@ class SseQueue:
             stream: One of "stdout" | "stderr" (informational for the client).
         """
         await self.put_event("terminal_output", {"chunk": chunk, "stream": stream})
+
+    async def put_plan_update(self, tasks: list[dict[str, Any]]) -> None:
+        await self.put_event("plan_update", {"tasks": tasks})
+
+    async def put_clarification_requested(self, question: str, options: list[str]) -> None:
+        await self.put_event("clarification_requested", {"question": question, "options": options})
+
+    async def put_checkpoint_created(self, checkpoint: dict[str, Any]) -> None:
+        """Emit checkpoint_created event with the new checkpoint metadata."""
+        await self.put_event("checkpoint_created", checkpoint)
+
+    async def put_checkpoint_restored(self, checkpoint_id: str, staged_patches: dict[str, str]) -> None:
+        """Emit checkpoint_restored event to sync Monaco editor buffers."""
+        await self.put_event("checkpoint_restored", {"checkpoint_id": checkpoint_id, "staged_patches": staged_patches})
 
     async def put_error(self, error: str, code: str) -> None:
         await self.put_event("error", {"error": error, "code": code})

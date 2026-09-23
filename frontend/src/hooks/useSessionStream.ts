@@ -16,7 +16,7 @@
  */
 
 import { useCallback, useRef, useState } from "react";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, CheckpointOut, PlanTask, WaitingInput } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,6 +54,10 @@ type SseEventType =
   | "tool_call"
   | "sandbox_status"
   | "terminal_output"
+  | "plan_update"
+  | "clarification_requested"
+  | "checkpoint_created"
+  | "checkpoint_restored"
   | "error"
   | "done";
 
@@ -72,6 +76,9 @@ export function useSessionStream(sessionId: string) {
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
+  const [plan, setPlan] = useState<PlanTask[]>([]);
+  const [pendingClarification, setPendingClarification] = useState<WaitingInput | null>(null);
+  const [checkpoints, setCheckpoints] = useState<CheckpointOut[]>([]);
 
   // AbortController ref so we can cancel in-flight streams on unmount / new message.
   const abortRef = useRef<AbortController | null>(null);
@@ -242,6 +249,37 @@ export function useSessionStream(sessionId: string) {
               }
               break;
             }
+            case "plan_update": {
+              const d = frame.data as Record<string, unknown>;
+              const tasks = (d?.tasks as PlanTask[]) || [];
+              setPlan(tasks);
+              break;
+            }
+            case "clarification_requested": {
+              const d = frame.data as Record<string, unknown>;
+              const question = (d?.question as string) || "";
+              const options = (d?.options as string[]) || [];
+              setPendingClarification({ question, options });
+              break;
+            }
+            case "checkpoint_created": {
+              const cp = frame.data as CheckpointOut;
+              if (cp?.checkpoint_id) {
+                setCheckpoints((prev) => {
+                  // Replace if same id exists, otherwise append. Cap at 20.
+                  const filtered = prev.filter((c) => c.checkpoint_id !== cp.checkpoint_id);
+                  return [...filtered, cp].slice(-20);
+                });
+              }
+              break;
+            }
+            case "checkpoint_restored": {
+              const d = frame.data as Record<string, unknown>;
+              const restoredPatches = (d?.staged_patches as Record<string, string>) ?? {};
+              // Immediately overwrite stagedPatches so Monaco editor buffers sync.
+              setStagedPatches(restoredPatches);
+              break;
+            }
             case "error": {
               const errMsg =
                 typeof frame.data === "string"
@@ -365,9 +403,15 @@ export function useSessionStream(sessionId: string) {
     sandboxStatus,
     isStreaming,
     terminalLogs,
+    plan,
+    pendingClarification,
+    checkpoints,
     sendChatMessage,
     stopStreaming,
     setStagedPatches,
     setMessages,
+    setPlan,
+    setPendingClarification,
+    setCheckpoints,
   };
 }

@@ -391,6 +391,36 @@ class SessionCreateIn(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class PlanTask(BaseModel):
+    """A single step in the agent's live execution plan."""
+
+    id: str = Field(..., min_length=1, max_length=100)
+    title: str = Field(..., min_length=1, max_length=500)
+    status: Literal["pending", "in_progress", "completed", "failed"]
+
+    model_config = {"extra": "forbid"}
+
+
+class ClarificationIn(BaseModel):
+    """Request body for POST /sessions/{id}/clarify."""
+
+    response: str = Field(..., min_length=1, max_length=2000)
+
+    model_config = {"extra": "forbid"}
+
+
+class CheckpointOut(BaseModel):
+    """Single checkpoint snapshot metadata for the Time Machine UI."""
+
+    checkpoint_id: str
+    turn: int
+    timestamp: str
+    description: str
+    files_count: int
+
+    model_config = {"extra": "forbid"}
+
+
 class SessionOut(BaseModel):
     """
     Full session DTO returned by all session endpoints.
@@ -410,6 +440,9 @@ class SessionOut(BaseModel):
     base_sha: str
     conversation_history: list[dict[str, Any]]
     staged_patches: dict[str, str]
+    plan: list[dict[str, Any]] = Field(default_factory=list)
+    waiting_input: Optional[dict[str, Any]] = None
+    checkpoints: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

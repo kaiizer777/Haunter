@@ -363,8 +363,6 @@ def _select_test_framework(targets: list[str]) -> tuple[str, list[str]]:
     Returns:
         Tuple of (framework_name, argv_prefix).
     """
-    ts_exts = {".ts", ".tsx", ".js", ".jsx", ".spec.ts", ".test.ts", ".spec.js", ".test.js"}
-
     for t in targets:
         lower = t.lower()
         # Vitest targets: .ts/.tsx/.js or spec.*/test.* patterns

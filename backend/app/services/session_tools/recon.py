@@ -15,7 +15,6 @@ import re
 from typing import Any
 
 from app.github_client import (
-    GitHubClientError,
     fetch_file_content,
     fetch_git_tree,
 )

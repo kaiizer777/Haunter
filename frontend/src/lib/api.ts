@@ -233,6 +233,27 @@ export interface AvailableModelsOut {
 // Session types (Phase 3 -- Cloud Agentic Live Session)
 // ---------------------------------------------------------------------------
 
+export interface PlanTask {
+  id: string;
+  title: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+}
+
+export interface WaitingInput {
+  question: string;
+  options: string[];
+  timestamp?: string;
+}
+
+export interface CheckpointOut {
+  checkpoint_id: string;
+  turn: number;
+  timestamp: string;
+  description: string;
+  staged_patches: Record<string, string>;
+  history_length: number;
+}
+
 export interface SessionOut {
   id: string;
   user_id: string;
@@ -240,11 +261,14 @@ export interface SessionOut {
   repo_owner: string;
   repo_name: string;
   title: string;
-  status: "active" | "completed" | "closed";
+  status: "active" | "completed" | "closed" | "awaiting_clarification";
   branch_name: string;
   base_sha: string;
   conversation_history: Record<string, unknown>[];
   staged_patches: Record<string, string>;
+  plan: PlanTask[];
+  waiting_input?: WaitingInput | null;
+  checkpoints: CheckpointOut[];
   created_at: string;
   updated_at: string;
 }
@@ -495,6 +519,12 @@ export const api = {
 
   getSessionTree: (sessionId: string) =>
     api.get<string[]>(`/sessions/${sessionId}/tree`),
+
+  clarifySession: (sessionId: string, data: { response: string }) =>
+    api.post<SessionOut>(`/sessions/${sessionId}/clarify`, data),
+
+  restoreCheckpoint: (sessionId: string, checkpointId: string) =>
+    api.post<SessionOut>(`/sessions/${sessionId}/checkpoints/${checkpointId}/restore`, {}),
 
 };
 

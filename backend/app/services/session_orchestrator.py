@@ -69,6 +69,15 @@ from app.services.session_tools.web import (
     tool_fetch_web_content,
     tool_fetch_package_metadata,
 )
+from app.services.session_tools.planning import (
+    tool_ask_user_clarification,
+    tool_update_plan,
+)
+from app.services.session_tools.checkpoints import (
+    create_checkpoint,
+    tool_checkpoint_restore,
+    tool_scan_security_vulnerabilities,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -609,6 +618,121 @@ _TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_plan",
+            "description": (
+                "Update and render the multi-step execution plan checklist for the user. "
+                "For multi-step requests, start by calling update_plan to outline your steps. "
+                "Update task statuses ('pending', 'in_progress', 'completed', 'failed') as you progress."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "List of task objects in the execution plan.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "Unique identifier for the task step (e.g. '1', 'explore_code').",
+                                },
+                                "title": {
+                                    "type": "string",
+                                    "description": "Short, human-readable description of the step.",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed", "failed"],
+                                    "description": "Current status of the task.",
+                                },
+                            },
+                            "required": ["id", "title", "status"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["tasks"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user_clarification",
+            "description": (
+                "Ask the user for clarification when you encounter ambiguous architectural trade-offs, "
+                "multiple valid implementation choices, or design decisions that require human input. "
+                "This pauses agent execution and presents clickable choice pills in the frontend."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The specific question or decision for the user to answer.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of 2 to 5 actionable options or choices for the user to pick from.",
+                    },
+                },
+                "required": ["question", "options"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "checkpoint_restore",
+            "description": (
+                "Restore the session state to a prior checkpoint by its checkpoint_id. "
+                "Reverts staged patches and conversation history to the snapshotted state. "
+                "Use this when a change direction was wrong and needs to be rolled back."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "checkpoint_id": {
+                        "type": "string",
+                        "description": "The checkpoint ID to restore to (e.g. 'cp_a1b2c3d4').",
+                    },
+                },
+                "required": ["checkpoint_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_security_vulnerabilities",
+            "description": (
+                "Scan staged file paths for secrets (AWS keys, GitHub PATs, API keys) and "
+                "code injection flaws (SQL f-string injection, shell injection) before committing. "
+                "Call this before completing any task that modifies files to ensure no credentials "
+                "or injection vulnerabilities were accidentally introduced."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of relative file paths to scan.",
+                    },
+                },
+                "required": ["paths"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -653,7 +777,12 @@ def _build_system_prompt(
         " 17. `run_targeted_tests(test_targets, timeout_sec)` — run pytest or vitest on specific test files and capture tracebacks.\n"
         " 18. `search_web_docs(query, domain, max_results)` — search live web/docs via TinyFish for up-to-date library APIs, breaking changes, and migration guides.\n"
         " 19. `fetch_web_content(url, format)` — fetch and render a public documentation page or GitHub issue as clean Markdown via TinyFish.\n"
-        " 20. `fetch_package_metadata(ecosystem, package_name)` — check official latest version, license, and dependencies from PyPI or npm.\n\n"
+        " 20. `fetch_package_metadata(ecosystem, package_name)` — check official latest version, license, and dependencies from PyPI or npm.\n"
+        " 21. `update_plan(tasks)` — update and render a live multi-step task checklist (statuses: pending, in_progress, completed, failed).\n"
+        " 22. `ask_user_clarification(question, options)` — pause execution and ask the user to pick between trade-offs or design decisions.\n\n"
+        "For multi-step requests, start by calling update_plan to outline your steps. "
+        "Update task statuses as you progress. If you encounter ambiguous architectural trade-offs, "
+        "call ask_user_clarification to let the user decide.\n"
         "You have access to live web tools. Use `search_web_docs` and `fetch_web_content` via TinyFish "
         "to look up documentation and breaking API changes. "
         "Use `fetch_package_metadata` to check official package versions before suggesting upgrades.\n"
@@ -666,7 +795,12 @@ def _build_system_prompt(
         "To prevent context-window bloat, prefer `get_file_outline` over reading entire files, "
         "and use `grep_search`, `glob_files`, `read_file_slice` for targeted exploration.\n"
         "Use `find_references` before renaming or refactoring a function to inspect all callers.\n"
-        "Explain your reasoning clearly and concisely.\n\n"
+        "Explain your reasoning clearly and concisely.\n"
+        " 23. `checkpoint_restore(checkpoint_id)` — restore session state to a prior checkpoint, reverting staged patches and conversation history.\n"
+        " 24. `scan_security_vulnerabilities(paths)` — scan staged files for secrets (AWS keys, GitHub PATs, API keys) and injection flaws before committing.\n\n"
+        "Security requirement: Before completing any task that modifies files, call `scan_security_vulnerabilities` "
+        "on the modified file paths to verify that no secrets or SQL injection vulnerabilities were accidentally introduced. "
+        "Do not declare the task complete if violations are found — fix them first.\n\n"
         f"Currently staged files:\n{staged_summary}"
     )
 
@@ -858,6 +992,7 @@ class SessionOrchestrator:
                 break
 
             # 4. Dispatch each tool call.
+            paused_for_clarification = False
             for tc in tool_calls:
                 tool_name: str = tc.get("function", {}).get("name", "")
                 raw_args: str = tc.get("function", {}).get("arguments", "{}")
@@ -876,32 +1011,42 @@ class SessionOrchestrator:
                     base_sha=session.base_sha,
                     staged_patches=staged_patches,
                     queue=queue,
+                    session=session,
                 )
+
+                if tool_name == "ask_user_clarification":
+                    paused_for_clarification = True
 
                 # Populate match_count / file_count / symbol_count on args for frontend UI chips.
                 if tool_name == "grep_search":
                     if not tool_result.startswith("Error") and not tool_result.startswith("No matches"):
-                        args["match_count"] = len([l for l in tool_result.splitlines() if l.strip()])
+                        args["match_count"] = len([line for line in tool_result.splitlines() if line.strip()])
                     else:
                         args["match_count"] = 0
                 elif tool_name == "glob_files":
                     if not tool_result.startswith("Error") and not tool_result.startswith("No files"):
-                        args["file_count"] = len([l for l in tool_result.splitlines() if l.strip()])
+                        args["file_count"] = len([line for line in tool_result.splitlines() if line.strip()])
                     else:
                         args["file_count"] = 0
                 elif tool_name == "find_symbol":
                     if not tool_result.startswith("Error") and not tool_result.startswith("No definitions"):
                         # First line is the header "Found N definition(s)…"
-                        data_lines = [l for l in tool_result.splitlines()[1:] if l.strip()]
+                        data_lines = [line for line in tool_result.splitlines()[1:] if line.strip()]
                         args["symbol_count"] = len(data_lines)
                     else:
                         args["symbol_count"] = 0
                 elif tool_name == "find_references":
                     if not tool_result.startswith("Error") and not tool_result.startswith("No references"):
-                        data_lines = [l for l in tool_result.splitlines()[1:] if l.strip()]
+                        data_lines = [line for line in tool_result.splitlines()[1:] if line.strip()]
                         args["match_count"] = len(data_lines)
                     else:
                         args["match_count"] = 0
+                elif tool_name == "update_plan":
+                    tasks = args.get("tasks", [])
+                    if isinstance(tasks, list):
+                        completed = sum(1 for t in tasks if isinstance(t, dict) and t.get("status") == "completed")
+                        args["completed_count"] = completed
+                        args["total_count"] = len(tasks)
 
                 await queue.put_tool_call(tool_name, args)
 
@@ -913,6 +1058,16 @@ class SessionOrchestrator:
                 }
                 new_entries.append(tool_result_msg)
                 messages.append(tool_result_msg)
+
+                if paused_for_clarification:
+                    break
+
+            if paused_for_clarification:
+                logger.info(
+                    "session_orchestrator: session=%s paused for user clarification",
+                    self.session_id,
+                )
+                break
         else:
             # Exceeded MAX_ITERATIONS — soft stop, not an error.
             logger.warning(
@@ -922,6 +1077,24 @@ class SessionOrchestrator:
 
         # 5. Persist updated state to DB atomically.
         updated_history = conversation_history + new_entries
+        session.conversation_history = updated_history
+        session.staged_patches = staged_patches
+
+        # Auto-checkpoint after each turn if staged_patches were modified.
+        turn_number = len(updated_history)
+        if staged_patches:
+            cp = create_checkpoint(
+                session=session,
+                description=f"Turn {turn_number}: {user_message[:80]}",
+                turn=turn_number,
+            )
+            try:
+                await queue.put_checkpoint_created(cp)
+            except Exception as cp_exc:
+                logger.warning(
+                    "session_orchestrator: failed to emit checkpoint_created event: %s", cp_exc
+                )
+
         await self._persist(session, updated_history, staged_patches)
 
         # 6. Signal stream end.
@@ -944,6 +1117,7 @@ class SessionOrchestrator:
         base_sha: str,
         staged_patches: dict[str, str],
         queue: SseQueue,
+        session: AgentSession | None = None,
     ) -> str:
         """
         Execute a single tool call and return a string result for the LLM.
@@ -1071,6 +1245,28 @@ class SessionOrchestrator:
             return await self._tool_fetch_web_content(args=args)
         elif tool_name == "fetch_package_metadata":
             return await self._tool_fetch_package_metadata(args=args)
+        elif tool_name == "update_plan":
+            if session is None:
+                return "Error: Session context is required to update plan."
+            return await self._tool_update_plan(args=args, session=session, queue=queue)
+        elif tool_name == "ask_user_clarification":
+            if session is None:
+                return "Error: Session context is required to request clarification."
+            return await self._tool_ask_user_clarification(args=args, session=session, queue=queue)
+        elif tool_name == "checkpoint_restore":
+            if session is None:
+                return "Error: Session context is required for checkpoint_restore."
+            return await self._tool_checkpoint_restore(args=args, session=session, queue=queue)
+        elif tool_name == "scan_security_vulnerabilities":
+            if session is None:
+                return "Error: Session context is required for scan_security_vulnerabilities."
+            return self._tool_scan_security_vulnerabilities(
+                args=args,
+                session=session,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+            )
         else:
             logger.warning(
                 "session_orchestrator: unknown tool_name=%r in session=%s",
@@ -1451,6 +1647,67 @@ class SessionOrchestrator:
         return await tool_fetch_package_metadata(
             ecosystem=ecosystem,
             package_name=package_name,
+        )
+
+    async def _tool_update_plan(
+        self,
+        args: dict[str, Any],
+        session: AgentSession,
+        queue: SseQueue,
+    ) -> str:
+        tasks = args.get("tasks", [])
+        return await tool_update_plan(tasks=tasks, session=session, queue=queue, db=self.db)
+
+    async def _tool_ask_user_clarification(
+        self,
+        args: dict[str, Any],
+        session: AgentSession,
+        queue: SseQueue,
+    ) -> str:
+        question = str(args.get("question", ""))
+        raw_options = args.get("options", [])
+        options = [str(opt) for opt in raw_options] if isinstance(raw_options, list) else []
+        return await tool_ask_user_clarification(
+            question=question,
+            options=options,
+            session=session,
+            queue=queue,
+            db=self.db,
+        )
+
+    async def _tool_checkpoint_restore(
+        self,
+        args: dict[str, Any],
+        session: AgentSession,
+        queue: SseQueue,
+    ) -> str:
+        checkpoint_id: str = str(args.get("checkpoint_id", "")).strip()
+        if not checkpoint_id:
+            return "Error: checkpoint_id is required."
+        return await tool_checkpoint_restore(
+            checkpoint_id=checkpoint_id,
+            session=session,
+            queue=queue,
+            db=self.db,
+        )
+
+    def _tool_scan_security_vulnerabilities(
+        self,
+        args: dict[str, Any],
+        session: AgentSession,
+        repo_owner: str,
+        repo_name: str,
+        base_sha: str,
+    ) -> str:
+        raw_paths = args.get("paths", [])
+        paths: list[str] = [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
+        return tool_scan_security_vulnerabilities(
+            paths=paths,
+            session=session,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            base_sha=base_sha,
+            gh_token=self.gh_token,
         )
 
     # ------------------------------------------------------------------

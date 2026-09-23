@@ -44,6 +44,15 @@ from app.services.session_tools.web import (
     tool_fetch_web_content,
     tool_fetch_package_metadata,
 )
+from app.services.session_tools.planning import (
+    tool_ask_user_clarification,
+    tool_update_plan,
+)
+from app.services.session_tools.checkpoints import (
+    create_checkpoint,
+    tool_checkpoint_restore,
+    tool_scan_security_vulnerabilities,
+)
 
 __all__ = [
     # recon
@@ -83,4 +92,11 @@ __all__ = [
     "tool_search_web_docs",
     "tool_fetch_web_content",
     "tool_fetch_package_metadata",
+    # planning (Phase 6)
+    "tool_update_plan",
+    "tool_ask_user_clarification",
+    # checkpoints & security (Phase 7)
+    "create_checkpoint",
+    "tool_checkpoint_restore",
+    "tool_scan_security_vulnerabilities",
 ]

@@ -43,6 +43,7 @@ from app.github_client import (
 )
 from app.models import AgentSession, Repo, User
 from app.schemas import (
+    ClarificationIn,
     SandboxVerificationOut,
     SessionChatIn,
     SessionCloseIn,
@@ -60,7 +61,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["sessions"])
 
 # Statuses allowed on the AgentSession model.
-_VALID_STATUSES = {"active", "completed", "closed"}
+_VALID_STATUSES = {"active", "completed", "closed", "awaiting_clarification"}
 
 # Directories and prefixes to strip from the tree response.
 # These are never useful to the pairing agent and can be large.
@@ -100,6 +101,9 @@ def _map_session_to_out(session: AgentSession, repo: Repo) -> SessionOut:
         base_sha=session.base_sha,
         conversation_history=session.conversation_history or [],
         staged_patches=session.staged_patches or {},
+        plan=session.plan or [],
+        waiting_input=session.waiting_input,
+        checkpoints=list(session.checkpoints or []),
         created_at=session.created_at,
         updated_at=session.updated_at,
     )
@@ -810,3 +814,137 @@ async def commit_session(
         pr_number=pr_number,
         commit_sha=commit_sha,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Clarification: POST /sessions/{session_id}/clarify
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/sessions/{session_id}/clarify",
+    response_model=SessionOut,
+)
+async def clarify_session(
+    session_id: uuid.UUID,
+    body: ClarificationIn,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SessionOut:
+    """
+    Submit user clarification response to resume an agent pairing session.
+
+    Security & invariants:
+    - Enforces object-level ownership (session.user_id == current_user.id).
+    - Returns 404 for unowned or non-existent sessions (no IDOR existence leak).
+    - Rejects with 400 Bad Request if session.status != "awaiting_clarification".
+    - Appends chosen option to session.conversation_history:
+      {"role": "user", "content": f"[User Clarification Response]: {body.response}"}
+    - Resets session.status = "active" and session.waiting_input = None.
+    - Commits changes and returns SessionOut.
+    """
+    stmt = (
+        select(AgentSession)
+        .options(selectinload(AgentSession.repo))
+        .where(
+            AgentSession.id == session_id,
+            AgentSession.user_id == current_user.id,
+        )
+    )
+    result = await db.execute(stmt)
+    session: Optional[AgentSession] = result.scalars().first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    if session.status != "awaiting_clarification":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Session is not awaiting clarification (current status: {session.status!r}). "
+                "Cannot submit clarification."
+            ),
+        )
+
+    # Append response to conversation history.
+    history: list[dict[str, Any]] = list(session.conversation_history or [])
+    history.append({
+        "role": "user",
+        "content": f"[User Clarification Response]: {body.response}",
+    })
+    session.conversation_history = history
+
+    # Reset session status and clear waiting_input.
+    session.status = "active"
+    session.waiting_input = None
+    session.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(session)
+
+    return _map_session_to_out(session, session.repo)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — Checkpoint Restore: POST /sessions/{session_id}/checkpoints/{checkpoint_id}/restore
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/sessions/{session_id}/checkpoints/{checkpoint_id}/restore",
+    response_model=SessionOut,
+)
+async def restore_checkpoint(
+    session_id: uuid.UUID,
+    checkpoint_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SessionOut:
+    """
+    Restore a session to a prior checkpoint by ID.
+
+    Security invariants:
+    - Enforces object-level ownership (session.user_id == current_user.id).
+    - Returns 404 for unowned or non-existent sessions (no IDOR existence leak).
+    - Returns 404 if checkpoint_id is not found in session.checkpoints.
+    - Reverts staged_patches and truncates conversation_history to the checkpoint snapshot.
+    - Commits changes and returns updated SessionOut.
+    """
+    stmt = (
+        select(AgentSession)
+        .options(selectinload(AgentSession.repo))
+        .where(
+            AgentSession.id == session_id,
+            AgentSession.user_id == current_user.id,
+        )
+    )
+    result = await db.execute(stmt)
+    session: Optional[AgentSession] = result.scalars().first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    # Verify checkpoint exists before calling restore.
+    checkpoints: list[dict[str, Any]] = list(session.checkpoints or [])
+    cp = next((c for c in checkpoints if c.get("checkpoint_id") == checkpoint_id), None)
+    if cp is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Checkpoint '{checkpoint_id}' not found in session.",
+        )
+
+    # Restore state directly (no SSE queue needed for the REST endpoint path).
+    session.staged_patches = dict(cp["staged_patches"])
+    history_length: int = cp["history_length"]
+    session.conversation_history = list((session.conversation_history or [])[:history_length])
+    session.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(session)
+
+    logger.info(
+        "sessions/restore_checkpoint: session %s restored to checkpoint %s",
+        session_id, checkpoint_id,
+    )
+
+    return _map_session_to_out(session, session.repo)

@@ -39,16 +39,22 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
 # ---------------------------------------------------------------------------
-# CORS — exact origin match only, never wildcard with credentials
-# allow_origins=[FRONTEND_URL] + allow_credentials=True is correct.
-# Wildcard "*" with credentials is both insecure and browser-rejected (RFC).
+# CORS — allow configured frontend origin (+ localhost/127.0.0.1 variants)
+# allow_credentials=True requires explicit origins (RFC 6454), wildcard "*" origin disallowed.
+# Wildcard headers ["*"] allows modern browser fetch preflight headers (Cache-Control, Authorization, etc.)
 # ---------------------------------------------------------------------------
+cors_origins = [settings.frontend_url.rstrip("/")]
+if "://localhost" in settings.frontend_url:
+    cors_origins.append(settings.frontend_url.replace("://localhost", "://127.0.0.1").rstrip("/"))
+elif "://127.0.0.1" in settings.frontend_url:
+    cors_origins.append(settings.frontend_url.replace("://127.0.0.1", "://localhost").rstrip("/"))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url],
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Cookie"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
+    allow_headers=["*"],
 )
 
 app.include_router(auth_router, prefix="/auth")
