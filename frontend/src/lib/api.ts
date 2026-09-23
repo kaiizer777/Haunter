@@ -225,6 +225,7 @@ export interface AvailableModelsOut {
   opencode_zen: AvailableModelItem[];
   openai: AvailableModelItem[];
   anthropic: AvailableModelItem[];
+  groq?: AvailableModelItem[];
 }
 
 

@@ -12,6 +12,7 @@ interface AppLayoutProps {
   title: string;
   subtitle?: string;
   actions?: React.ReactNode;
+  noPadding?: boolean;
 }
 
 export function AppLayout({
@@ -19,6 +20,7 @@ export function AppLayout({
   title,
   subtitle,
   actions,
+  noPadding = false,
 }: AppLayoutProps) {
   const { user, loading } = useAuth();
   const router = useRouter();
@@ -72,7 +74,7 @@ export function AppLayout({
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 pl-[264px] min-h-screen">
         <Topbar title={title} subtitle={subtitle} actions={actions} />
-        <main className="flex-1 min-w-0 p-6 overflow-y-auto">
+        <main className={`flex-1 min-w-0 ${noPadding ? "p-0 flex flex-col overflow-hidden" : "p-6 overflow-y-auto"}`}>
           {children}
         </main>
       </div>

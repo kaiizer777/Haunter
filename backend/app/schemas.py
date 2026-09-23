@@ -443,6 +443,8 @@ class SessionChatIn(BaseModel):
     """
 
     message: str = Field(..., min_length=1, max_length=32_000)
+    model: Optional[str] = Field(default=None, max_length=255)
+    provider: Optional[str] = Field(default=None, max_length=100)
 
     model_config = {"extra": "forbid"}
 

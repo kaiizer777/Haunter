@@ -306,7 +306,7 @@ function SessionCard({ session, onClose }: SessionCardProps) {
         {/* Actions */}
         <div className="flex items-center gap-2">
           <Link
-            href={`/sessions/${session.id}`}
+            href={`/sessions/workspace?id=${session.id}`}
             id={`session-resume-${session.id}`}
             className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-3 py-1.5 text-xs font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] hover:from-amber-500/25 active:translate-y-px transition-all"
           >
@@ -373,7 +373,7 @@ export default function SessionsPage() {
 
   const handleCreated = (session: SessionOut) => {
     setShowModal(false);
-    router.push(`/sessions/${session.id}`);
+    router.push(`/sessions/workspace?id=${session.id}`);
   };
 
   return (

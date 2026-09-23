@@ -442,7 +442,14 @@ async def chat_session(
 
     # Launch the orchestrator in a background task so the StreamingResponse
     # generator can start yielding immediately while the LLM runs.
-    _asyncio.ensure_future(orchestrator.run(user_message=body.message, queue=queue))
+    _asyncio.ensure_future(
+        orchestrator.run(
+            user_message=body.message,
+            queue=queue,
+            model=body.model,
+            provider=body.provider,
+        )
+    )
 
     return StreamingResponse(
         queue.stream(),
