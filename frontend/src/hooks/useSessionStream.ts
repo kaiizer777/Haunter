@@ -256,6 +256,13 @@ export function useSessionStream(sessionId: string) {
               const displayThoughts = thoughts.filter(
                 (t) => t !== HEARTBEAT && t !== contentThought
               );
+              // Use the actual model reported by the backend (reflects fallbacks).
+              // Falls back to requestedModel for older deploys that don't emit model_used.
+              const doneData = frame.data as Record<string, unknown>;
+              const actualModel =
+                (typeof doneData?.model_used === "string" && doneData.model_used)
+                  ? doneData.model_used
+                  : requestedModel;
               setMessages((prev) => {
                 const copy = [...prev];
                 const last = copy[copy.length - 1];
@@ -266,7 +273,7 @@ export function useSessionStream(sessionId: string) {
                     thoughts: displayThoughts.length ? displayThoughts : last.thoughts,
                     toolCalls,
                     thoughtDurationSeconds: streamThoughtDuration || last.thoughtDurationSeconds,
-                    model: requestedModel || last.model,
+                    model: actualModel || last.model,
                     provider: requestedProvider || last.provider,
                   };
                 } else {
@@ -276,7 +283,7 @@ export function useSessionStream(sessionId: string) {
                     thoughts: displayThoughts,
                     toolCalls,
                     thoughtDurationSeconds: streamThoughtDuration,
-                    model: requestedModel,
+                    model: actualModel,
                     provider: requestedProvider,
                   });
                 }
@@ -284,6 +291,7 @@ export function useSessionStream(sessionId: string) {
               });
               break;
             }
+
 
             default: {
               // Unknown event type — treat as assistant content token.

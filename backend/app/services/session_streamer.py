@@ -143,8 +143,12 @@ class SseQueue:
     async def put_error(self, error: str, code: str) -> None:
         await self.put_event("error", {"error": error, "code": code})
 
-    async def put_done(self, session_id: str, staged_files_count: int) -> None:
-        await self.put_event("done", {"session_id": session_id, "staged_files_count": staged_files_count})
+    async def put_done(self, session_id: str, staged_files_count: int, model_used: str = "") -> None:
+        await self.put_event("done", {
+            "session_id": session_id,
+            "staged_files_count": staged_files_count,
+            "model_used": model_used,
+        })
         await self.close()
 
     # ------------------------------------------------------------------

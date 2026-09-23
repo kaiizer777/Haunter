@@ -184,6 +184,26 @@ def _build_system_prompt(
     )
 
 
+def _infer_provider(model: str) -> str | None:
+    """
+    Infer the LLM provider from a model identifier string.
+
+    Rules (applied in order):
+    - Contains "/" (e.g. "openai/gpt-oss-120b", "meta-llama/…") → "groq"
+    - Contains "llama", "mixtral", or "groq" (case-insensitive) → "groq"
+    - Ends with "-free" or contains "nemotron" → "opencode_zen"
+    - Otherwise: None (LLMClient falls back to DB-configured active provider)
+    """
+    m = model.strip().lower()
+    if "/" in m:
+        return "groq"
+    if any(kw in m for kw in ("llama", "mixtral", "groq")):
+        return "groq"
+    if m.endswith("-free") or "nemotron" in m:
+        return "opencode_zen"
+    return None
+
+
 # ------------------------------------------------------------------
 # Concurrent-session guard error
 # ------------------------------------------------------------------
@@ -214,18 +234,33 @@ class SessionOrchestrator:
         self.gh_token = gh_token
         self._llm = LLMClient(timeout=120.0)
 
-    async def run(self, user_message: str, queue: SseQueue) -> None:
+    async def run(
+        self,
+        user_message: str,
+        queue: SseQueue,
+        model: str | None = None,
+        provider: str | None = None,
+    ) -> None:
         """
         Execute one conversational turn and stream events onto `queue`.
 
         Loads session state from DB, runs the LLM tool-calling loop, persists
         updated conversation_history and staged_patches, then emits `done`.
 
+        Args:
+            user_message: The user's prompt text.
+            queue: SSE event queue for streaming back to the client.
+            model: Optional model override (e.g. "llama-3.3-70b-versatile").
+            provider: Optional provider override ("groq" | "opencode_zen"). If
+                omitted and model is given, provider is inferred from the model
+                name: Groq-style names (contains "llama", "groq", or "/" prefix)
+                → "groq"; "-free" suffix or "nemotron" → "opencode_zen".
+
         All exceptions are caught here; an `error` SSE event is emitted and
         the queue is closed so the HTTP response terminates cleanly.
         """
         try:
-            await self._execute(user_message, queue)
+            await self._execute(user_message, queue, model=model, provider=provider)
         except SessionBusyError:
             await queue.put_error(
                 "Another prompt is already in progress for this session. Please wait.",
@@ -242,7 +277,18 @@ class SessionOrchestrator:
             )
             await queue.close()
 
-    async def _execute(self, user_message: str, queue: SseQueue) -> None:
+    async def _execute(
+        self,
+        user_message: str,
+        queue: SseQueue,
+        model: str | None = None,
+        provider: str | None = None,
+    ) -> None:
+        # Resolve effective provider — explicit > inferred from model name > DB config (LLMClient default).
+        effective_provider: str | None = provider
+        if effective_provider is None and model is not None:
+            effective_provider = _infer_provider(model)
+
         # 1. Load session from DB — re-validate ownership at the data layer.
         session = await self._load_session()
         if session is None:
@@ -271,6 +317,8 @@ class SessionOrchestrator:
 
         # Track assistant turns and tool results to append to history.
         new_entries: list[dict[str, Any]] = [user_msg]
+        # Track the actual model that produced the final response (updated each LLM call).
+        actual_model_used: str = model or ""
 
         # 3. Tool-calling loop — max 10 iterations to prevent runaway loops.
         MAX_ITERATIONS = 10
@@ -280,11 +328,18 @@ class SessionOrchestrator:
                 await queue.put_thought("Analyzing your request…")
 
             try:
+                llm_kwargs: dict[str, Any] = {
+                    "tool_choice": "auto",
+                    "db": self.db,
+                }
+                if effective_provider is not None:
+                    llm_kwargs["provider"] = effective_provider
+                if model is not None:
+                    llm_kwargs["model"] = model
                 response = await self._llm.complete(
                     messages=messages,
                     tools=_TOOLS,
-                    tool_choice="auto",
-                    db=self.db,
+                    **llm_kwargs,
                 )
             except LLMError as exc:
                 logger.error(
@@ -297,6 +352,8 @@ class SessionOrchestrator:
 
             content: str | None = response.get("content")
             tool_calls: list[dict[str, Any]] | None = response.get("tool_calls")
+            # Capture the actual model that responded (may differ from requested due to fallback).
+            actual_model_used = response.get("model") or actual_model_used
 
             # Emit any assistant text as thought deltas.
             if content:
@@ -359,6 +416,7 @@ class SessionOrchestrator:
         await queue.put_done(
             session_id=str(self.session_id),
             staged_files_count=len(staged_patches),
+            model_used=actual_model_used,
         )
 
     # ------------------------------------------------------------------
