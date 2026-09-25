@@ -77,7 +77,7 @@ describe("LoginPage (app/login/page.tsx)", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it("redirects authenticated user to /runs", () => {
+  it("redirects authenticated user to /sessions", () => {
     vi.mocked(useAuth).mockReturnValue({
       user: {
         id: "usr_1",
@@ -95,7 +95,7 @@ describe("LoginPage (app/login/page.tsx)", () => {
     render(<LoginPage />);
 
     expect(mockReplace).toHaveBeenCalledTimes(1);
-    expect(mockReplace).toHaveBeenCalledWith("/runs");
+    expect(mockReplace).toHaveBeenCalledWith("/sessions");
   });
 
   it("does not redirect when authentication state is still loading", () => {

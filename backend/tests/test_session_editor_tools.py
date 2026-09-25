@@ -2,14 +2,16 @@
 Unit tests for Haunter Session Editor Tools (Phase 2).
 
 Covers:
-  1. test_str_replace_success            — unique match, valid diff, staged_patches updated.
-  2. test_str_replace_not_found          — descriptive error when old_str absent.
-  3. test_str_replace_duplicate_occurrence — ambiguity error when old_str appears >1.
-  4. test_create_file                    — /dev/null to b/path diff, staged_patches updated.
-  5. test_delete_file                    — a/path to /dev/null diff, staged_patches updated.
-  6. test_apply_multi_patch_atomic_success — 2+ files, all committed atomically.
-  7. test_apply_multi_patch_atomic_rollback — second edit fails; first NOT staged.
-  8. test_path_traversal_blocked         — ../../etc/shadow rejected.
+  1. test_str_replace_success                  — unique match, valid diff, staged_patches updated.
+  2. test_str_replace_not_found                — descriptive error when old_str absent.
+  3. test_str_replace_duplicate_occurrence     — ambiguity error when old_str appears >1.
+  4. test_create_file                          — /dev/null to b/path diff, staged_patches updated.
+  5. test_delete_file                          — a/path to /dev/null diff, staged_patches updated.
+  6. test_apply_multi_patch_atomic_success     — 2+ files, all committed atomically.
+  7. test_apply_multi_patch_atomic_rollback    — second edit fails; first NOT staged.
+  8. test_path_traversal_blocked               — ../../etc/shadow rejected.
+  9. test_apply_multi_patch_sequential_same_file — two sequential edits on same file produce a
+                                                   correct base->final diff that applies cleanly.
 """
 
 from __future__ import annotations
@@ -369,3 +371,57 @@ async def test_path_traversal_blocked() -> None:
 
     # All checks — nothing should have been staged.
     assert staged == {}
+
+
+# ---------------------------------------------------------------------------
+# 9. apply_multi_patch — sequential edits on the same file
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_apply_multi_patch_sequential_same_file() -> None:
+    """
+    Two sequential str_replace ops on the same file produce a base->final unified diff
+    that contains both changes and applies cleanly against the original file at commit time.
+
+    Regression test for the _apply_staged_diff / difflib.restore() bug where the second
+    edit would fail because _resolve_current_content fell back to base content instead of
+    the post-first-edit content.
+    """
+    from app.services.patch_applier import apply_unified_diff
+
+    original = "x = 1\ny = 2\nz = 3\n"
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+
+    patches_input = [
+        {"type": "str_replace", "path": "mod.py", "old_str": "x = 1", "new_str": "x = 99"},
+        # Second edit on the same file — requires seeing the post-first-edit state.
+        {"type": "str_replace", "path": "mod.py", "old_str": "y = 2", "new_str": "y = 200"},
+    ]
+
+    with _gh_patch(original):
+        result = await tool_apply_multi_patch(
+            patches=patches_input,
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="abc123",
+            staged_patches=staged,
+            queue=queue,
+        )
+
+    assert result == "Successfully applied 2 file edits atomically.", result
+    assert "mod.py" in staged
+
+    diff = staged["mod.py"]
+    # The committed diff must encode BOTH changes relative to the original base.
+    assert "-x = 1" in diff
+    assert "+x = 99" in diff
+    assert "-y = 2" in diff
+    assert "+y = 200" in diff
+
+    # The diff must apply cleanly against the ORIGINAL file (simulating commit-time behaviour).
+    patched = apply_unified_diff(original, diff)
+    assert "x = 99" in patched
+    assert "y = 200" in patched
+    assert "z = 3" in patched
+

@@ -502,6 +502,167 @@ async def fetch_pull_request_diff(
     return response.text
 
 
+async def fetch_commits(
+    owner: str,
+    repo: str,
+    sha: str,
+    path: Optional[str] = None,
+    per_page: int = 20,
+    token: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    List commits on a branch (optionally filtered to a file path).
+
+    Maps to GET /repos/{owner}/{repo}/commits?sha=<sha>&path=<path>&per_page=<n>.
+    Returns abbreviated commit dicts: {sha, message, author, date, url}.
+    Capped at per_page (max 100).
+    """
+    per_page = max(1, min(per_page, 100))
+    params: dict[str, Any] = {"sha": sha, "per_page": per_page}
+    if path:
+        params["path"] = path
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits"
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        try:
+            response = await client.get(url, headers=headers, params=params)
+        except httpx.RequestError as exc:
+            logger.error("Network error fetching commits for %s/%s: %s", owner, repo, exc)
+            raise GitHubClientError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(f"Commits not found for {owner}/{repo} @ {sha}")
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    raw: list[dict[str, Any]] = response.json()
+    commits: list[dict[str, Any]] = []
+    for item in raw:
+        commit_data = item.get("commit", {})
+        author_data = commit_data.get("author", {})
+        full_message: str = commit_data.get("message", "")
+        first_line = full_message.split("\n", 1)[0]
+        commits.append(
+            {
+                "sha": item.get("sha", "")[:12],
+                "full_sha": item.get("sha", ""),
+                "message": first_line,
+                "author": author_data.get("name", "unknown"),
+                "date": author_data.get("date", ""),
+                "url": item.get("html_url", ""),
+            }
+        )
+    return commits
+
+
+async def fetch_blame(
+    owner: str,
+    repo: str,
+    path: str,
+    ref: str,
+    token: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Fetch git blame annotations for a file via GitHub GraphQL API.
+
+    Returns a list of blame range dicts:
+      {start_line, end_line, sha, message, author, date, age_days}
+
+    Falls back to an empty list on auth or network failure.
+    """
+    query = """
+query Blame($owner: String!, $repo: String!, $ref: String!, $path: String!) {
+  repository(owner: $owner, name: $repo) {
+    object(expression: $ref) {
+      ... on Commit {
+        blame(path: $path) {
+          ranges {
+            startingLine
+            endingLine
+            commit {
+              oid
+              messageHeadline
+              committedDate
+              author { name }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+    payload = {
+        "query": query,
+        "variables": {"owner": owner, "repo": repo, "ref": ref, "path": path},
+    }
+    resolved_token = token or settings.github_token
+    gql_headers = {
+        "Accept": "application/json",
+        "User-Agent": "Haunter-Autonomous-Agent/1.0",
+        "Content-Type": "application/json",
+    }
+    if resolved_token:
+        gql_headers["Authorization"] = f"Bearer {resolved_token}"
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(
+                "https://api.github.com/graphql", headers=gql_headers, json=payload
+            )
+        except httpx.RequestError as exc:
+            logger.warning("Network error fetching blame for %s/%s %s: %s", owner, repo, path, exc)
+            return []
+
+    if response.is_error:
+        logger.warning("GitHub GraphQL error %s fetching blame for %s/%s %s", response.status_code, owner, repo, path)
+        return []
+
+    data = response.json()
+    if data.get("errors"):
+        logger.warning("GitHub GraphQL blame errors for %s/%s %s: %s", owner, repo, path, data["errors"])
+        return []
+
+    try:
+        ranges_raw: list[dict[str, Any]] = (
+            data["data"]["repository"]["object"]["blame"]["ranges"]
+        )
+    except (KeyError, TypeError):
+        return []
+
+    import datetime as _dt
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    result: list[dict[str, Any]] = []
+    for r in ranges_raw:
+        commit = r.get("commit", {})
+        committed_date_str: str = commit.get("committedDate", "")
+        age_days: Optional[int] = None
+        if committed_date_str:
+            try:
+                committed_dt = _dt.datetime.fromisoformat(committed_date_str.replace("Z", "+00:00"))
+                age_days = (now - committed_dt).days
+            except ValueError:
+                pass
+        result.append(
+            {
+                "start_line": r.get("startingLine"),
+                "end_line": r.get("endingLine"),
+                "sha": commit.get("oid", "")[:12],
+                "message": commit.get("messageHeadline", ""),
+                "author": (commit.get("author") or {}).get("name", "unknown"),
+                "date": committed_date_str,
+                "age_days": age_days,
+            }
+        )
+    return result
+
 
 
 async def fetch_git_tree(

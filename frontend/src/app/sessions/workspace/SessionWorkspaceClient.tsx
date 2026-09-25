@@ -14,7 +14,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
@@ -120,10 +120,10 @@ const FALLBACK_MODELS = {
 function StatusChip({ status }: { status: string }) {
   if (status === "active") {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-mono font-medium text-emerald-300">
+      <span className="inline-flex items-center gap-1.5 rounded-full border-t border-t-emerald-400/40 border-x border-x-emerald-500/30 border-b border-b-emerald-600/20 bg-gradient-to-b from-emerald-500/15 to-emerald-500/5 px-2.5 py-0.5 text-[11px] font-mono font-medium text-emerald-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)]">
         <span className="relative flex h-1.5 w-1.5">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60" />
-          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
+          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
         </span>
         active
       </span>
@@ -131,10 +131,10 @@ function StatusChip({ status }: { status: string }) {
   }
   if (status === "awaiting_clarification") {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 text-[11px] font-mono font-medium text-amber-300">
+      <span className="inline-flex items-center gap-1.5 rounded-full border-t border-t-amber-400/50 border-x border-x-amber-500/35 border-b border-b-amber-600/25 bg-gradient-to-b from-amber-500/20 to-amber-500/5 px-2.5 py-0.5 text-[11px] font-mono font-medium text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]">
         <span className="relative flex h-1.5 w-1.5">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60" />
-          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
+          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.8)]" />
         </span>
         awaiting clarification
       </span>
@@ -142,14 +142,14 @@ function StatusChip({ status }: { status: string }) {
   }
   if (status === "completed") {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-violet-500/30 bg-violet-500/10 px-2.5 py-0.5 text-[11px] font-mono font-medium text-violet-300">
+      <span className="inline-flex items-center gap-1.5 rounded-full border-t border-t-violet-400/40 border-x border-x-violet-500/30 border-b border-b-violet-600/20 bg-gradient-to-b from-violet-500/15 to-violet-500/5 px-2.5 py-0.5 text-[11px] font-mono font-medium text-violet-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)]">
         <CheckCircle2 className="h-3 w-3" />
         completed
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-700/60 bg-zinc-800/60 px-2.5 py-0.5 text-[11px] font-mono font-medium text-zinc-400">
+    <span className="inline-flex items-center gap-1.5 rounded-full border-t border-t-zinc-650/50 border-x border-x-zinc-750/50 border-b border-b-zinc-850 bg-gradient-to-b from-zinc-800/80 to-zinc-900/80 px-2.5 py-0.5 text-[11px] font-mono font-medium text-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
       <Circle className="h-3 w-3" />
       {status}
     </span>
@@ -673,8 +673,8 @@ function ChatBubble({
 
   if (isSystem) {
     return (
-      <div className="my-2 flex items-center justify-center">
-        <div className="rounded-full border border-zinc-800 bg-zinc-900/60 px-3.5 py-1 text-[11px] font-mono text-zinc-500">
+      <div className="my-3 flex items-center justify-center">
+        <div className="rounded-full border-t border-t-zinc-750/50 border-x border-x-zinc-800/60 border-b border-b-zinc-900 bg-[#101014] px-3.5 py-1 text-[11px] font-mono text-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
           {message.content}
         </div>
       </div>
@@ -683,11 +683,13 @@ function ChatBubble({
 
   if (isUser) {
     return (
-      <div className="flex justify-end my-5">
-        <div className="max-w-[85%] rounded-2xl border border-zinc-800/80 bg-[#18181c] px-4 py-3 shadow-sm">
-          <p className="text-sm font-sans text-zinc-100 leading-relaxed whitespace-pre-wrap">
-            {message.content}
-          </p>
+      <div className="flex justify-end my-6">
+        <div className="flex flex-col items-end max-w-[85%]">
+          <div className="relative rounded-2xl border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-900 bg-gradient-to-b from-[#1c1c22] to-[#141418] px-4.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_8px_rgba(0,0,0,0.35)]">
+            <p className="text-[13.5px] font-sans text-zinc-100 leading-relaxed whitespace-pre-wrap selection:bg-amber-500/30">
+              {message.content}
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -967,6 +969,7 @@ function CommitModal({ sessionId, onClose, onSuccess }: CommitModalProps) {
 // ---------------------------------------------------------------------------
 
 export default function SessionWorkspaceClient({ sessionId: propSessionId }: { sessionId?: string } = {}) {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const sessionId = propSessionId || searchParams.get("id") || "";
 
@@ -1082,8 +1085,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
   useEffect(() => {
     if (!sessionId) {
-      setPageLoading(false);
-      setPageError("No session ID specified.");
+      router.replace("/sessions");
       return;
     }
 
@@ -1290,7 +1292,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
             <AlertTriangle className="h-6 w-6" />
           </div>
           <p className="text-sm text-zinc-400">{pageError ?? "Session not found."}</p>
-          <Link href="/sessions" className="text-xs font-mono text-amber-400 hover:underline">
+          <Link href="/sessions?list=true" className="text-xs font-mono text-amber-400 hover:underline">
             Back to sessions
           </Link>
         </div>
@@ -1304,13 +1306,13 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   const topbarActions = (
     <div className="flex items-center gap-2">
       {/* View Switcher: Chat (Screenshot 2 style) | Diffs | Split */}
-      <div className="flex items-center rounded-xl border border-zinc-800 bg-zinc-900/80 p-0.5">
+      <div className="flex items-center rounded-xl border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#0c0c10] p-1 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)]">
         <button
           onClick={() => setViewMode("chat")}
-          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all ${
+          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all active:translate-y-[0.5px] ${
             viewMode === "chat"
-              ? "bg-zinc-800 text-zinc-100 shadow-sm"
-              : "text-zinc-400 hover:text-zinc-200"
+              ? "bg-gradient-to-b from-zinc-800 via-zinc-800 to-zinc-850 text-zinc-100 font-semibold border-t border-t-zinc-600/70 border-x border-x-zinc-700/50 border-b border-b-zinc-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]"
+              : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60"
           }`}
           title="Chat view"
         >
@@ -1320,10 +1322,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
         <button
           onClick={() => setViewMode("diffs")}
-          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all ${
+          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all active:translate-y-[0.5px] ${
             viewMode === "diffs"
-              ? "bg-zinc-800 text-zinc-100 shadow-sm"
-              : "text-zinc-400 hover:text-zinc-200"
+              ? "bg-gradient-to-b from-zinc-800 via-zinc-800 to-zinc-850 text-zinc-100 font-semibold border-t border-t-zinc-600/70 border-x border-x-zinc-700/50 border-b border-b-zinc-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]"
+              : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60"
           }`}
           title="Monaco Diff Editor"
         >
@@ -1338,10 +1340,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
         <button
           onClick={() => setViewMode("split")}
-          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all ${
+          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all active:translate-y-[0.5px] ${
             viewMode === "split"
-              ? "bg-zinc-800 text-zinc-100 shadow-sm"
-              : "text-zinc-400 hover:text-zinc-200"
+              ? "bg-gradient-to-b from-zinc-800 via-zinc-800 to-zinc-850 text-zinc-100 font-semibold border-t border-t-zinc-600/70 border-x border-x-zinc-700/50 border-b border-b-zinc-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]"
+              : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60"
           }`}
           title="Side-by-side split view"
         >
@@ -1359,10 +1361,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
       {plan.length > 0 && (
         <button
           onClick={() => setShowPlanSidebar((prev) => !prev)}
-          className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-xs font-mono transition-all ${
+          className={`flex items-center gap-1.5 rounded-xl border-t border-x border-b px-2.5 py-1 text-xs font-mono transition-all active:translate-y-[0.5px] ${
             showPlanSidebar
-              ? "border-amber-500/40 bg-amber-500/15 text-amber-300 shadow-sm"
-              : "border-zinc-700/60 bg-zinc-800/60 text-zinc-400 hover:text-zinc-200"
+              ? "border-t-amber-400/50 border-x-amber-500/35 border-b-amber-600/30 bg-gradient-to-b from-amber-500/20 to-amber-500/10 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]"
+              : "border-t-zinc-700/60 border-x-zinc-800/60 border-b-zinc-950 bg-gradient-to-b from-zinc-800/80 to-zinc-900/90 text-zinc-400 hover:text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
           }`}
           title="Toggle execution plan checklist"
         >
@@ -1380,7 +1382,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
           id="verify-sandbox-btn"
           onClick={handleVerify}
           disabled={sandboxLoading || patchFiles.length === 0}
-          className="flex items-center gap-1.5 rounded-xl border border-zinc-700/60 bg-zinc-800/70 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          className="flex items-center gap-1.5 rounded-xl border-t border-t-zinc-600/70 border-x border-x-zinc-750/60 border-b border-b-zinc-950 bg-gradient-to-b from-zinc-800 to-zinc-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:text-white hover:border-t-zinc-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_2px_4px_rgba(0,0,0,0.25)] active:translate-y-[0.5px] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           title={patchFiles.length === 0 ? "Stage a patch to run verification" : "Run tests in sandbox"}
         >
           {sandboxLoading ? (
@@ -1397,10 +1399,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
         <div className="relative">
           <button
             onClick={() => setShowTimeMachine((prev) => !prev)}
-            className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-mono transition-all ${
+            className={`flex items-center gap-1.5 rounded-xl border-t border-x border-b px-2.5 py-1.5 text-xs font-mono transition-all active:translate-y-[0.5px] ${
               showTimeMachine
-                ? "border-violet-500/40 bg-violet-500/15 text-violet-300 shadow-sm"
-                : "border-zinc-700/60 bg-zinc-800/60 text-zinc-400 hover:text-zinc-200"
+                ? "border-t-violet-400/50 border-x-violet-500/35 border-b-violet-600/30 bg-gradient-to-b from-violet-500/20 to-violet-500/10 text-violet-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]"
+                : "border-t-zinc-700/60 border-x-zinc-800/60 border-b-zinc-950 bg-gradient-to-b from-zinc-800/80 to-zinc-900/90 text-zinc-400 hover:text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
             }`}
             title="Session Time Machine — view and restore checkpoints"
           >
@@ -1412,7 +1414,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
           </button>
 
           {showTimeMachine && (
-            <div className="absolute right-0 top-full mt-1.5 z-40 w-80 rounded-2xl border border-zinc-800 bg-[#14141a] shadow-[0_16px_48px_rgba(0,0,0,0.8)] overflow-hidden">
+            <div className="absolute right-0 top-full mt-1.5 z-40 w-80 rounded-2xl border-t border-t-zinc-700/80 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#121217]/98 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_16px_48px_rgba(0,0,0,0.8)] backdrop-blur-2xl overflow-hidden">
               <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-800">
                 <div className="flex items-center gap-2 text-xs font-semibold text-zinc-200">
                   <History className="h-3.5 w-3.5 text-violet-400" />
@@ -1440,7 +1442,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                     <button
                       onClick={() => handleRestoreCheckpoint(cp.checkpoint_id)}
                       disabled={timeMachineRestoring === cp.checkpoint_id}
-                      className="shrink-0 flex items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] font-mono text-violet-300 hover:bg-violet-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="shrink-0 flex items-center gap-1 rounded-lg border-t border-t-violet-400/50 border-x border-x-violet-500/30 border-b border-b-violet-900 bg-gradient-to-b from-violet-500/20 to-violet-600/10 px-2 py-0.5 text-[10px] font-mono text-violet-300 hover:text-violet-100 hover:border-t-violet-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_2px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {timeMachineRestoring === cp.checkpoint_id ? (
                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -1474,7 +1476,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
             id="commit-pr-btn"
             onClick={() => setShowCommitModal(true)}
             disabled={patchFiles.length === 0}
-            className="flex items-center gap-1.5 rounded-xl border border-violet-500/40 bg-gradient-to-b from-violet-600 to-violet-700 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:from-violet-500 hover:to-violet-600 active:translate-y-px transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 rounded-xl border-t border-t-violet-400/60 border-x border-x-violet-600/60 border-b border-b-violet-950 bg-gradient-to-b from-violet-600 via-violet-650 to-violet-700 px-3.5 py-1.5 text-xs font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_8px_rgba(124,58,237,0.3)] hover:brightness-105 active:translate-y-[0.5px] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <GitPullRequest className="h-3.5 w-3.5" />
             <span>Commit & PR</span>
@@ -1487,7 +1489,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
         <button
           id="close-session-btn"
           onClick={handleClose}
-          className="flex items-center gap-1 rounded-xl border border-zinc-700/60 bg-zinc-800/60 px-2.5 py-1.5 text-xs font-medium text-zinc-400 hover:text-red-300 hover:border-red-500/30 hover:bg-red-500/10 transition-colors"
+          className="flex items-center justify-center h-7 w-7 rounded-xl border-t border-t-zinc-700/60 border-x border-x-zinc-800/60 border-b border-b-zinc-950 bg-gradient-to-b from-zinc-800/80 to-zinc-900 text-zinc-400 hover:text-red-300 hover:border-t-red-500/50 hover:bg-red-500/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all"
           title="Close session"
         >
           <X className="h-3.5 w-3.5" />
@@ -1589,19 +1591,25 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
           {/* ============================================================== */}
           {(viewMode === "chat" || viewMode === "split") && (
             <div
-              className={`flex flex-col h-full bg-[#09090b] ${
+              className={`flex flex-col h-full bg-[#09090b] relative ${
                 viewMode === "split"
                   ? "w-[45%] border-r border-zinc-800"
                   : "w-full"
               }`}
             >
+              {/* Subtle ambient lighting */}
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 h-72 w-full max-w-2xl rounded-full bg-amber-500/[0.025] blur-3xl"
+              />
+
               {/* Scrollable Conversation Stream */}
-              <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6">
+              <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 relative z-10">
                 <div className="mx-auto max-w-3xl w-full">
                   {/* Empty state / Welcome */}
                   {messages.length === 0 && (
                     <div className="flex flex-col items-center justify-center min-h-[50vh] text-center gap-5 py-12">
-                      <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-zinc-800 bg-[#121216] text-amber-400 shadow-inner">
+                      <div className="flex h-14 w-14 items-center justify-center rounded-2xl border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/10 to-amber-600/5 text-amber-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_0_24px_rgba(245,158,11,0.15)]">
                         <Sparkles className="h-7 w-7" />
                       </div>
                       <div>
@@ -1635,7 +1643,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                           <button
                             key={idx}
                             onClick={() => handleSendChat(item.prompt)}
-                            className="rounded-xl border border-zinc-800/80 bg-[#121216]/60 p-3 hover:bg-[#18181f] hover:border-zinc-700 transition-all text-left group"
+                            className="rounded-xl border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 bg-gradient-to-b from-[#15151a] to-[#0f0f13] p-3.5 hover:border-t-amber-500/50 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_4px_16px_rgba(0,0,0,0.4)] transition-all text-left group active:translate-y-[0.5px]"
                           >
                             <span className="block text-[11px] font-mono text-zinc-400 group-hover:text-amber-300 transition-colors">
                               {item.title}
@@ -1709,11 +1717,41 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
               {/* ============================================================ */}
               {/* SINGLE INPUT BAR (Matches Screenshot 2)                     */}
               {/* ============================================================ */}
-              <div className="flex-none w-full bg-gradient-to-t from-[#09090b] via-[#09090b]/95 to-transparent pt-3 pb-5 px-4 md:px-8">
+              <div className="flex-none w-full bg-gradient-to-t from-[#09090b] via-[#09090b]/95 to-transparent pt-2 pb-5 px-4 md:px-8">
                 <div className="mx-auto max-w-3xl w-full relative">
+                  {/* Contextual Suggestion Pills when conversation is active */}
+                  {messages.length > 0 && !isStreaming && (
+                    <div className="flex items-center gap-2 mb-2.5 overflow-x-auto pb-1 scrollbar-none select-none">
+                      <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider shrink-0 mr-1">
+                        Suggestions:
+                      </span>
+                      <button
+                        onClick={() => handleSendChat("Run targeted tests in sandbox")}
+                        className="shrink-0 flex items-center gap-1.5 rounded-full border-t border-t-zinc-750/70 border-x border-x-zinc-800 border-b border-b-zinc-950 bg-gradient-to-b from-zinc-850 to-zinc-900/90 px-3 py-1 text-xs font-mono text-zinc-400 hover:text-amber-300 hover:border-t-amber-500/50 hover:bg-amber-500/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] transition-all cursor-pointer active:translate-y-[0.5px]"
+                      >
+                        <TestTube2 className="h-3 w-3 text-amber-400" />
+                        <span>Run tests</span>
+                      </button>
+                      <button
+                        onClick={() => handleSendChat("Show what files are currently staged")}
+                        className="shrink-0 flex items-center gap-1.5 rounded-full border-t border-t-zinc-750/70 border-x border-x-zinc-800 border-b border-b-zinc-950 bg-gradient-to-b from-zinc-850 to-zinc-900/90 px-3 py-1 text-xs font-mono text-zinc-400 hover:text-violet-300 hover:border-t-violet-500/50 hover:bg-violet-500/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] transition-all cursor-pointer active:translate-y-[0.5px]"
+                      >
+                        <FileCode2 className="h-3 w-3 text-violet-400" />
+                        <span>Check staged</span>
+                      </button>
+                      <button
+                        onClick={() => handleSendChat("Explain the CI failure and recommended fix")}
+                        className="shrink-0 flex items-center gap-1.5 rounded-full border-t border-t-zinc-750/70 border-x border-x-zinc-800 border-b border-b-zinc-950 bg-gradient-to-b from-zinc-850 to-zinc-900/90 px-3 py-1 text-xs font-mono text-zinc-400 hover:text-emerald-300 hover:border-t-emerald-500/50 hover:bg-emerald-500/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] transition-all cursor-pointer active:translate-y-[0.5px]"
+                      >
+                        <Sparkles className="h-3 w-3 text-emerald-400" />
+                        <span>Explain fix</span>
+                      </button>
+                    </div>
+                  )}
+
                   {/* Floating Action Menu Popover (when "+" is clicked) */}
                   {actionMenuOpen && (
-                    <div className="absolute bottom-[calc(100%+8px)] left-3 z-30 w-56 rounded-2xl border border-zinc-800 bg-[#14141a] p-1.5 shadow-2xl backdrop-blur-xl">
+                    <div className="absolute bottom-[calc(100%+8px)] left-3 z-30 w-56 rounded-2xl border-t border-t-zinc-700/80 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#121217]/98 p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_16px_40px_rgba(0,0,0,0.7)] backdrop-blur-2xl">
                       <div className="px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wider text-zinc-500">
                         Quick Actions
                       </div>
@@ -1765,7 +1803,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
                   {/* Model Selector Popover */}
                   {modelPickerOpen && (
-                    <div className="absolute bottom-[calc(100%+10px)] left-12 z-30 w-80 rounded-2xl border border-zinc-800/80 bg-[#111115] shadow-[0_24px_64px_rgba(0,0,0,0.8)] backdrop-blur-xl overflow-hidden">
+                    <div className="absolute bottom-[calc(100%+10px)] left-12 z-30 w-80 rounded-2xl border-t border-t-zinc-700/80 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#121217]/98 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_24px_64px_rgba(0,0,0,0.8)] backdrop-blur-2xl overflow-hidden">
                       {/* Header */}
                       <div className="flex items-center justify-between px-3.5 pt-3 pb-2 border-b border-zinc-800/60">
                         <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
@@ -1945,7 +1983,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                   )}
 
                   {/* Input Card Container (Matches Screenshot 2) */}
-                  <div className="relative rounded-2xl border border-zinc-700/60 bg-[#121216]/95 backdrop-blur-xl p-3 shadow-2xl transition-all focus-within:border-zinc-500/80 focus-within:ring-1 focus-within:ring-zinc-600/30">
+                  <div className="relative rounded-2xl border-t border-t-zinc-700/70 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#141419]/95 via-[#111115]/98 to-[#0b0b0e]/98 backdrop-blur-2xl p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_12px_40px_rgba(0,0,0,0.65)] transition-all focus-within:border-t-zinc-500 focus-within:ring-1 focus-within:ring-amber-500/25">
                     {/* Textarea */}
                     <textarea
                       ref={textareaRef}
@@ -1980,10 +2018,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                             setActionMenuOpen((prev) => !prev);
                             setModelPickerOpen(false);
                           }}
-                          className={`flex h-7 w-7 items-center justify-center rounded-lg border transition-all ${
+                          className={`flex h-7 w-7 items-center justify-center rounded-lg border-t border-x border-b transition-all active:translate-y-[0.5px] ${
                             actionMenuOpen
-                              ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
-                              : "border-zinc-700/60 bg-zinc-800/60 text-zinc-400 hover:bg-zinc-700/60 hover:text-zinc-200"
+                              ? "border-t-amber-400/60 border-x-amber-500/40 border-b-amber-700 bg-amber-500/20 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.15)]"
+                              : "border-t-zinc-650/70 border-x-zinc-750/60 border-b-zinc-900 bg-gradient-to-b from-zinc-800 to-zinc-850 text-zinc-300 hover:text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_2px_rgba(0,0,0,0.3)]"
                           }`}
                           title="Actions & Prompts"
                         >
@@ -1997,25 +2035,25 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                             setModelPickerOpen((prev) => !prev);
                             setActionMenuOpen(false);
                           }}
-                          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-mono transition-all ${
+                          className={`flex items-center gap-2 rounded-lg px-2.5 py-1 text-xs font-mono border-t border-x border-b transition-all active:translate-y-[0.5px] ${
                             modelPickerOpen
-                              ? "bg-zinc-800 text-zinc-100 border border-zinc-700"
-                              : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+                              ? "border-t-zinc-600 border-x-zinc-700 border-b-zinc-900 bg-zinc-800 text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
+                              : "border-t-zinc-700/60 border-x-zinc-800/60 border-b-zinc-950 bg-gradient-to-b from-zinc-850 to-zinc-900/90 text-zinc-300 hover:text-white hover:border-t-zinc-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)]"
                           }`}
                         >
                           {/* Provider indicator dot */}
                           <span
                             className={`inline-block h-1.5 w-1.5 rounded-full shrink-0 ${
                               selectedProvider === "groq"
-                                ? "bg-orange-400"
+                                ? "bg-orange-400 shadow-[0_0_6px_rgba(251,146,60,0.8)]"
                                 : selectedProvider === "anthropic"
-                                ? "bg-violet-400"
+                                ? "bg-violet-400 shadow-[0_0_6px_rgba(167,139,250,0.8)]"
                                 : selectedProvider === "openai"
-                                ? "bg-emerald-400"
-                                : "bg-amber-400"
+                                ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]"
+                                : "bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)]"
                             }`}
                           />
-                          <span className="truncate max-w-[140px]">{selectedModelId}</span>
+                          <span className="truncate max-w-[150px] font-medium">{selectedModelId}</span>
                           <ChevronUp className={`h-3 w-3 text-zinc-500 transition-transform ${modelPickerOpen ? "rotate-180" : ""}`} />
                         </button>
                       </div>
@@ -2039,7 +2077,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                           <button
                             type="button"
                             onClick={stopStreaming}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/40 bg-red-500/20 text-red-300 hover:bg-red-500/30 transition-all shadow-sm"
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border-t border-t-red-400/60 border-x border-x-red-500/40 border-b border-b-red-800 bg-gradient-to-b from-red-500/30 to-red-600/20 text-red-300 hover:bg-red-500/40 transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_6px_rgba(239,68,68,0.2)] active:translate-y-[0.5px]"
                             title="Stop generating"
                           >
                             <Square className="h-3.5 w-3.5 fill-current" />
@@ -2051,10 +2089,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                             disabled={!isActive || !chatInput.trim()}
                             className={`flex h-8 w-8 items-center justify-center rounded-lg transition-all ${
                               chatInput.trim()
-                                ? "bg-amber-500 text-zinc-950 font-bold shadow-md hover:bg-amber-400 active:translate-y-px"
-                                : "bg-zinc-800/70 text-zinc-500 cursor-not-allowed"
+                                ? "border-t border-t-amber-300/80 border-x border-x-amber-500/70 border-b border-b-amber-700 bg-gradient-to-b from-amber-400 via-amber-500 to-amber-600 text-zinc-950 font-bold shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_8px_rgba(245,158,11,0.35)] hover:brightness-105 active:translate-y-[0.5px]"
+                                : "border-t border-t-zinc-700/40 border-x border-x-zinc-800/40 border-b border-b-zinc-900 bg-zinc-850/80 text-zinc-600 cursor-not-allowed"
                             }`}
-                            title="Send message"
+                            title="Send message (Enter)"
                           >
                             <Send className="h-3.5 w-3.5" />
                           </button>

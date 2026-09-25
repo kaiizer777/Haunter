@@ -10,9 +10,9 @@
  * Amber accent color, zinc-800 borders, painted-light primary CTAs.
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef, Suspense } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Zap,
   GitBranch,
@@ -334,32 +334,115 @@ function SessionCard({ session, onClose }: SessionCardProps) {
 // Page
 // ---------------------------------------------------------------------------
 
-export default function SessionsPage() {
+function SessionsContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const isListView = searchParams.get("list") === "true" || searchParams.get("list") === "1";
+
   const [sessions, setSessions] = useState<SessionOut[]>([]);
   const [total, setTotal] = useState(0);
   const [repos, setRepos] = useState<RepoOut[]>([]);
   const [loading, setLoading] = useState(true);
+  const [autoLoading, setAutoLoading] = useState(!isListView);
+  const [autoLoadStatus, setAutoLoadStatus] = useState("Checking active sessions…");
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
+  const autoLoadAttemptedRef = useRef(false);
 
   const loadSessions = useCallback(async () => {
     try {
       const data = await api.listSessions({ limit: 50 });
       setSessions(data.sessions);
       setTotal(data.total);
+      return data.sessions;
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "Failed to load sessions.";
       setError(msg);
+      return [];
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadSessions();
-    api.getRepos().then(setRepos).catch(() => {});
-  }, [loadSessions]);
+    if (isListView) {
+      setAutoLoading(false);
+      loadSessions();
+      api.getRepos().then(setRepos).catch(() => {});
+      return;
+    }
+
+    if (autoLoadAttemptedRef.current) return;
+    autoLoadAttemptedRef.current = true;
+
+    // Safety fallback: if auto-load doesn't redirect within 7s, fall back to sessions dashboard
+    const safetyTimer = setTimeout(() => {
+      setAutoLoading(false);
+    }, 7000);
+
+    async function init() {
+      try {
+        setAutoLoading(true);
+        setAutoLoadStatus("Checking active sessions…");
+
+        const [sessionsData, reposData] = await Promise.all([
+          api.listSessions({ limit: 50 }).catch((err) => {
+            console.error("[AutoLoad] listSessions failed:", err);
+            return { sessions: [], total: 0 };
+          }),
+          api.getRepos().catch((err) => {
+            console.error("[AutoLoad] getRepos failed:", err);
+            return [] as RepoOut[];
+          }),
+        ]);
+
+        setSessions(sessionsData.sessions);
+        setTotal(sessionsData.total);
+        setRepos(reposData);
+        setLoading(false);
+
+        // 1. If an active session exists (active or awaiting clarification), resume it immediately
+        const activeSession = sessionsData.sessions.find(
+          (s) => s.status === "active" || s.status === "awaiting_clarification"
+        );
+        if (activeSession) {
+          clearTimeout(safetyTimer);
+          setAutoLoadStatus(`Resuming session: ${activeSession.title || activeSession.id.slice(0, 8)}…`);
+          router.replace(`/sessions/workspace?id=${activeSession.id}`);
+          return;
+        }
+
+        // 2. If no active session, auto-create a new session using the primary repo
+        if (reposData.length > 0) {
+          const defaultRepo = reposData[0];
+          setAutoLoadStatus(`Creating new session on ${defaultRepo.owner}/${defaultRepo.name}…`);
+          const newSession = await api.createSession({
+            repo_id: defaultRepo.id,
+            branch_name: defaultRepo.default_branch || "main",
+            title: `Pairing on ${defaultRepo.name}`,
+          });
+          clearTimeout(safetyTimer);
+          router.replace(`/sessions/workspace?id=${newSession.id}`);
+          return;
+        }
+
+        // 3. No repos connected, cannot auto-create; display dashboard
+        clearTimeout(safetyTimer);
+        setAutoLoading(false);
+      } catch (err) {
+        clearTimeout(safetyTimer);
+        const msg = err instanceof ApiError ? err.message : "Failed to auto-load session.";
+        setError(msg);
+        setAutoLoading(false);
+      }
+    }
+
+    init();
+
+    return () => {
+      clearTimeout(safetyTimer);
+    };
+  }, [isListView, loadSessions, router]);
 
   const handleClose = async (sessionId: string) => {
     try {
@@ -375,6 +458,59 @@ export default function SessionsPage() {
     setShowModal(false);
     router.push(`/sessions/workspace?id=${session.id}`);
   };
+
+  const handleAutoLaunch = async () => {
+    if (repos.length === 0) {
+      setShowModal(true);
+      return;
+    }
+    const defaultRepo = repos[0];
+    try {
+      setLoading(true);
+      setError(null);
+      const newSession = await api.createSession({
+        repo_id: defaultRepo.id,
+        branch_name: defaultRepo.default_branch || "main",
+        title: `Pairing on ${defaultRepo.name}`,
+      });
+      router.push(`/sessions/workspace?id=${newSession.id}`);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to create session.";
+      setError(msg);
+      setLoading(false);
+    }
+  };
+
+  if (autoLoading) {
+    return (
+      <AppLayout title="Live Sessions" subtitle="Connecting to workspace…">
+        <div className="flex min-h-[80vh] flex-col items-center justify-center bg-[#09090b] px-4 text-center">
+          <div className="relative mb-6">
+            <div className="h-16 w-16 rounded-2xl border border-amber-500/30 bg-gradient-to-b from-amber-500/20 to-amber-600/5 flex items-center justify-center shadow-[0_0_32px_rgba(245,158,11,0.15)]">
+              <Zap className="h-8 w-8 text-amber-400 animate-pulse" />
+            </div>
+            <span className="absolute -bottom-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500/20 border border-emerald-500/40">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
+            </span>
+          </div>
+
+          <h2 className="text-base font-semibold text-zinc-100 mb-1">
+            Launching Live Session
+          </h2>
+          <p className="text-xs font-mono text-zinc-400 mb-6 max-w-sm">
+            {autoLoadStatus}
+          </p>
+
+          <button
+            onClick={() => setAutoLoading(false)}
+            className="text-xs font-mono text-zinc-500 hover:text-amber-400 transition-colors underline underline-offset-4"
+          >
+            Cancel auto-load & view all sessions
+          </button>
+        </div>
+      </AppLayout>
+    );
+  }
 
   return (
     <AppLayout title="Live Sessions" subtitle="Cloud agentic pairing workspace">
@@ -393,14 +529,25 @@ export default function SessionsPage() {
             </p>
           </div>
 
-          <button
-            id="start-new-session-btn"
-            onClick={() => setShowModal(true)}
-            className="flex items-center gap-2 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-4 py-2 text-sm font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] hover:from-amber-500/25 active:translate-y-px transition-all"
-          >
-            <Plus className="h-4 w-4" />
-            New Session
-          </button>
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={handleAutoLaunch}
+              disabled={loading || repos.length === 0}
+              className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-all disabled:opacity-50"
+              title="Automatically create a new session for your primary repo without prompts"
+            >
+              <Zap className="h-3.5 w-3.5 text-amber-400" />
+              Auto Launch
+            </button>
+            <button
+              id="start-new-session-btn"
+              onClick={() => setShowModal(true)}
+              className="flex items-center gap-2 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-4 py-2 text-sm font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] hover:from-amber-500/25 active:translate-y-px transition-all"
+            >
+              <Plus className="h-4 w-4" />
+              New Session
+            </button>
+          </div>
         </div>
 
         {/* Error */}
@@ -426,15 +573,27 @@ export default function SessionsPage() {
             </div>
             <p className="text-sm font-medium text-zinc-400 mb-1">No live sessions</p>
             <p className="text-xs text-zinc-600 font-mono mb-6">
-              Start a session to pair with the AI agent on a repository
+              {repos.length === 0
+                ? "Connect a repository first in the Repositories tab to start pairing"
+                : "Start a session to pair with the AI agent on a repository"}
             </p>
-            <button
-              onClick={() => setShowModal(true)}
-              className="flex items-center gap-2 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-5 py-2.5 text-sm font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] transition-all"
-            >
-              <Plus className="h-4 w-4" />
-              Start First Session
-            </button>
+            {repos.length === 0 ? (
+              <Link
+                href="/repos"
+                className="flex items-center gap-2 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-5 py-2.5 text-sm font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] transition-all"
+              >
+                <GitBranch className="h-4 w-4" />
+                Connect Repositories
+              </Link>
+            ) : (
+              <button
+                onClick={handleAutoLaunch}
+                className="flex items-center gap-2 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-5 py-2.5 text-sm font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] transition-all"
+              >
+                <Zap className="h-4 w-4" />
+                Start First Session
+              </button>
+            )}
           </div>
         )}
 
@@ -461,5 +620,19 @@ export default function SessionsPage() {
         />
       )}
     </AppLayout>
+  );
+}
+
+export default function SessionsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-[#09090b]">
+          <Loader2 className="h-7 w-7 animate-spin text-amber-400" />
+        </div>
+      }
+    >
+      <SessionsContent />
+    </Suspense>
   );
 }

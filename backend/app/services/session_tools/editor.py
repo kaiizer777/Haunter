@@ -35,17 +35,40 @@ def _apply_staged_diff(base_content: str, diff_text: str) -> str:
     Reconstruct the current working buffer by applying a staged unified diff
     on top of the base content.
 
-    This is a best-effort reconstruction — it walks hunks and applies them.
-    If the patch can't be applied cleanly we fall back to base_content so the
+    Extracts the new-side content from the unified diff by collecting context
+    lines (prefixed with ' ') and addition lines (prefixed with '+'), skipping
+    the unified diff header lines ('---', '+++', '@@').
+
+    If the diff is empty or malformed, falls back to base_content so the
     downstream occurrence check will catch any real conflicts.
     """
-    try:
-        result = list(
-            difflib.restore(diff_text.splitlines(keepends=True), 2)  # restored "new" side
-        )
-        return "".join(result)
-    except Exception:
+    if not diff_text:
         return base_content
+
+    result_lines: list[str] = []
+    in_hunk = False
+    for line in diff_text.splitlines(keepends=True):
+        if line.startswith("--- ") or line.startswith("+++ "):
+            # Unified diff file headers -- skip.
+            continue
+        if line.startswith("@@ "):
+            # Hunk header -- marks start of patch content.
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        if line.startswith("+") and not line.startswith("+++ "):
+            # Added line -- appears in new file.
+            result_lines.append(line[1:])
+        elif line.startswith(" "):
+            # Context line -- appears in both old and new.
+            result_lines.append(line[1:])
+        # Lines starting with '-' are deletions -- skip them.
+
+    if not result_lines:
+        return base_content
+
+    return "".join(result_lines)
 
 
 async def _resolve_current_content(
@@ -293,6 +316,11 @@ async def tool_apply_multi_patch(
     copy of staged_patches). If any validation fails, staged_patches is left
     untouched and a descriptive error is returned.
 
+    For sequential edits on the same file, each edit sees the post-previous-edit
+    content. The final committed diff for each file is generated from the original
+    base content to the final working content, so it applies cleanly against the
+    unmodified file at commit time.
+
     Supported entry types:
       - {"type": "str_replace", "path": ..., "old_str": ..., "new_str": ...}
       - {"type": "create_file", "path": ..., "content": ...}
@@ -306,8 +334,15 @@ async def tool_apply_multi_patch(
     # Work on a scratch copy so we don't mutate staged_patches on failure.
     scratch_patches: dict[str, str] = dict(staged_patches)
 
-    # Accumulate (path, diff, action) for committed items.
-    committed: list[tuple[str, str, str]] = []
+    # Track original base content per file (first fetch from GitHub).
+    # Used to generate the final base->final diff at commit time.
+    base_contents: dict[str, str | None] = {}
+
+    # Track evolving working content per file across sequential edits.
+    working_contents: dict[str, str] = {}
+
+    # Accumulate (path, action) for committed items (diff computed after loop).
+    committed_paths: list[tuple[str, str]] = []  # (path, action)
 
     # Validate and dry-run every operation sequentially (order matters for
     # multi-edit on the same file within one batch).
@@ -328,14 +363,20 @@ async def tool_apply_multi_patch(
             if not old_str:
                 return f"Error in {label}: old_str must not be empty."
 
-            content = await _resolve_current_content(
-                path=path,
-                staged_patches=scratch_patches,
-                repo_owner=repo_owner,
-                repo_name=repo_name,
-                base_sha=base_sha,
-                gh_token=gh_token,
-            )
+            # Fetch base content on first access to this path.
+            if path not in base_contents:
+                base_contents[path] = await _resolve_current_content(
+                    path=path,
+                    staged_patches=scratch_patches,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
+                    base_sha=base_sha,
+                    gh_token=gh_token,
+                )
+
+            # Use working content if available (post-previous-edit state),
+            # otherwise use the freshly fetched base.
+            content = working_contents.get(path, base_contents[path])
             if content is None:
                 return f"Error in {label}: File not found: '{path}'."
 
@@ -349,9 +390,9 @@ async def tool_apply_multi_patch(
                 )
 
             new_content = content.replace(old_str, new_str, 1)
-            diff = _make_unified_diff(content, new_content, path)
-            scratch_patches[path] = diff
-            committed.append((path, diff, "modify"))
+            working_contents[path] = new_content
+            if path not in [p for p, _ in committed_paths]:
+                committed_paths.append((path, "modify"))
 
         elif op_type == "create_file":
             path = str(entry.get("path", ""))
@@ -362,16 +403,13 @@ async def tool_apply_multi_patch(
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 
-            diff = "".join(
-                difflib.unified_diff(
-                    [],
-                    content_str.splitlines(keepends=True),
-                    fromfile="/dev/null",
-                    tofile=f"b/{path}",
-                )
-            )
-            scratch_patches[path] = diff
-            committed.append((path, diff, "create"))
+            base_contents[path] = None  # new file -- no base
+            working_contents[path] = content_str
+            if path not in [p for p, _ in committed_paths]:
+                committed_paths.append((path, "create"))
+            else:
+                # Overwrite existing action with create for this path.
+                committed_paths = [(p, "create" if p == path else a) for p, a in committed_paths]
 
         elif op_type == "delete_file":
             path = str(entry.get("path", ""))
@@ -381,27 +419,23 @@ async def tool_apply_multi_patch(
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 
-            content = await _resolve_current_content(
-                path=path,
-                staged_patches=scratch_patches,
-                repo_owner=repo_owner,
-                repo_name=repo_name,
-                base_sha=base_sha,
-                gh_token=gh_token,
-            )
-            if content is None:
+            if path not in base_contents:
+                base_contents[path] = await _resolve_current_content(
+                    path=path,
+                    staged_patches=scratch_patches,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
+                    base_sha=base_sha,
+                    gh_token=gh_token,
+                )
+            if base_contents.get(path) is None and working_contents.get(path) is None:
                 return f"Error in {label}: File not found: '{path}'."
 
-            diff = "".join(
-                difflib.unified_diff(
-                    content.splitlines(keepends=True),
-                    [],
-                    fromfile=f"a/{path}",
-                    tofile="/dev/null",
-                )
-            )
-            scratch_patches[path] = diff
-            committed.append((path, diff, "delete"))
+            working_contents[path] = ""  # deletion: final content is empty
+            if path not in [p for p, _ in committed_paths]:
+                committed_paths.append((path, "delete"))
+            else:
+                committed_paths = [(p, "delete" if p == path else a) for p, a in committed_paths]
 
         else:
             return (
@@ -409,8 +443,45 @@ async def tool_apply_multi_patch(
                 "Expected 'str_replace', 'create_file', or 'delete_file'."
             )
 
-    # All validations passed — commit to real staged_patches and emit events.
-    for path, diff, action in committed:
+    # All validations passed -- build final diffs from base->final and commit.
+    # Use an ordered dict to deduplicate paths while preserving first-seen order.
+    seen_paths: set[str] = set()
+    final_committed: list[tuple[str, str, str]] = []  # (path, diff, action)
+
+    for path, action in committed_paths:
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+
+        final_content = working_contents.get(path, "")
+        base_content = base_contents.get(path)
+
+        if action == "create":
+            diff = "".join(
+                difflib.unified_diff(
+                    [],
+                    final_content.splitlines(keepends=True),
+                    fromfile="/dev/null",
+                    tofile=f"b/{path}",
+                )
+            )
+        elif action == "delete":
+            src = base_content or ""
+            diff = "".join(
+                difflib.unified_diff(
+                    src.splitlines(keepends=True),
+                    [],
+                    fromfile=f"a/{path}",
+                    tofile="/dev/null",
+                )
+            )
+        else:  # modify
+            src = base_content or ""
+            diff = _make_unified_diff(src, final_content, path)
+
+        final_committed.append((path, diff, action))
+
+    for path, diff, action in final_committed:
         staged_patches[path] = diff
         try:
             await queue.put_file_diff(path=path, diff=diff, action=action)

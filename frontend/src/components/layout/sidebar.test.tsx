@@ -59,11 +59,11 @@ describe("sidebar.tsx", () => {
     });
   });
 
-  it("renders the brand header with link to /runs and system status", async () => {
+  it("renders the brand header with link to /sessions and system status", async () => {
     render(<Sidebar />);
 
     const brandLink = screen.getByRole("link", { name: /haunter autonomous ci/i });
-    expect(brandLink).toHaveAttribute("href", "/runs");
+    expect(brandLink).toHaveAttribute("href", "/sessions");
     expect(screen.getByText("v1.0")).toBeInTheDocument();
     expect(screen.getByText("Pipeline Live")).toBeInTheDocument();
     await screen.findByTitle("claude-sonnet-4-5");
@@ -72,11 +72,13 @@ describe("sidebar.tsx", () => {
   it("renders navigation links including AI Reliability & Evals for non-admin user", async () => {
     render(<Sidebar />);
 
+    const sessionsLink = screen.getByRole("link", { name: /live sessions/i });
     const runsLink = screen.getByRole("link", { name: /runs/i });
     const reposLink = screen.getByRole("link", { name: /repositories/i });
     const configLink = screen.getByRole("link", { name: /model config/i });
     const evalLink = screen.getByRole("link", { name: /ai reliability & evals/i });
 
+    expect(sessionsLink).toHaveAttribute("href", "/sessions");
     expect(runsLink).toHaveAttribute("href", "/runs");
     expect(within(runsLink).queryByText("Live")).not.toBeInTheDocument();
     expect(reposLink).toHaveAttribute("href", "/repos");
@@ -186,7 +188,7 @@ describe("sidebar.tsx", () => {
 
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
-        key: "3",
+        key: "4",
         metaKey: true,
         bubbles: true,
       })

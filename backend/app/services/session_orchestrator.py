@@ -78,6 +78,12 @@ from app.services.session_tools.checkpoints import (
     tool_checkpoint_restore,
     tool_scan_security_vulnerabilities,
 )
+from app.services.session_tools.git import (
+    tool_git_blame,
+    tool_git_diff,
+    tool_git_log,
+    tool_git_show,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -465,11 +471,15 @@ _TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to execute (e.g. 'pytest tests/test_auth.py -v').",
+                        "description": "Shell command to execute (e.g. 'pytest tests/test_auth.py -v', 'cd backend && python -m pytest tests/').",
                     },
                     "timeout_sec": {
                         "type": "integer",
                         "description": "Maximum execution time in seconds (default 60, max 300).",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory relative to repo root (e.g. 'backend').",
                     },
                 },
                 "required": ["command"],
@@ -498,6 +508,10 @@ _TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "Linter override ('auto' by default — auto-detected from extensions).",
                     },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory relative to repo root (e.g. 'backend').",
+                    },
                 },
                 "required": ["paths"],
                 "additionalProperties": False,
@@ -525,6 +539,10 @@ _TOOLS: list[dict[str, Any]] = [
                     "timeout_sec": {
                         "type": "integer",
                         "description": "Maximum execution time in seconds (default 120, max 300).",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory relative to repo root (e.g. 'backend').",
                     },
                 },
                 "required": ["test_targets"],
@@ -733,6 +751,99 @@ _TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": (
+                "List recent commits on the session branch, optionally filtered to a specific file path. "
+                "Returns sha, date, author, and first-line commit message for each entry. "
+                "Use this to understand change history before reading or modifying a file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional relative file path to restrict history to (e.g. 'src/auth.py').",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of commits to return (default 20, max 30).",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_blame",
+            "description": (
+                "Annotate each line range of a file with the commit that last modified it. "
+                "Shows who changed what and when — essential for understanding the provenance of a bug or a pattern. "
+                "Uses GitHub GraphQL blame API."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative file path to annotate (e.g. 'backend/app/auth.py').",
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_show",
+            "description": (
+                "Show full metadata (author, date, message, stats, files changed) and unified diff for a single commit SHA. "
+                "Use after git_log to inspect what a specific commit changed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "commit_sha": {
+                        "type": "string",
+                        "description": "Full or abbreviated (min 6 chars) commit SHA.",
+                    },
+                },
+                "required": ["commit_sha"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": (
+                "Show a unified diff between two refs (branch names, commit SHAs, or tags). "
+                "Use this to compare the session branch against main, or any two commit SHAs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "base": {
+                        "type": "string",
+                        "description": "Base ref (branch, SHA, or tag) — the 'before' side of the diff.",
+                    },
+                    "head": {
+                        "type": "string",
+                        "description": "Head ref (branch, SHA, or tag) — the 'after' side of the diff.",
+                    },
+                },
+                "required": ["base", "head"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -772,14 +883,20 @@ def _build_system_prompt(
         " 12. `get_file_outline(path)` — return signatures, classes, and docstrings of a file without implementation bodies (saves context tokens).\n"
         " 13. `find_symbol(name, kind)` — locate definitions of functions, classes, interfaces, or types across the codebase.\n"
         " 14. `find_references(symbol, path)` — find all call sites and usages of a symbol (word-boundary matched, capped at 50).\n"
-        " 15. `run_terminal_command(command, timeout_sec)` — run a shell command and return stdout/stderr/exit code. Output streams live to the terminal drawer.\n"
-        " 16. `run_linter(paths, linter)` — run ruff/eslint on the specified files and get diagnostics.\n"
-        " 17. `run_targeted_tests(test_targets, timeout_sec)` — run pytest or vitest on specific test files and capture tracebacks.\n"
+        " 15. `run_terminal_command(command, timeout_sec, cwd)` — run a shell command and return stdout/stderr/exit code. Supports chained commands (&&, ;) and directory navigation (cd). Output streams live to the terminal drawer.\n"
+        " 16. `run_linter(paths, linter, cwd)` — run ruff/eslint on the specified files and get diagnostics.\n"
+        " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — run pytest or vitest on specific test files and capture tracebacks.\n"
         " 18. `search_web_docs(query, domain, max_results)` — search live web/docs via TinyFish for up-to-date library APIs, breaking changes, and migration guides.\n"
         " 19. `fetch_web_content(url, format)` — fetch and render a public documentation page or GitHub issue as clean Markdown via TinyFish.\n"
         " 20. `fetch_package_metadata(ecosystem, package_name)` — check official latest version, license, and dependencies from PyPI or npm.\n"
         " 21. `update_plan(tasks)` — update and render a live multi-step task checklist (statuses: pending, in_progress, completed, failed).\n"
-        " 22. `ask_user_clarification(question, options)` — pause execution and ask the user to pick between trade-offs or design decisions.\n\n"
+        " 22. `ask_user_clarification(question, options)` — pause execution and ask the user to pick between trade-offs or design decisions.\n"
+        " 23. `checkpoint_restore(checkpoint_id)` — restore session state to a prior checkpoint, reverting staged patches and conversation history.\n"
+        " 24. `scan_security_vulnerabilities(paths)` — scan staged files for secrets and injection flaws before committing.\n"
+        " 25. `git_log(path, limit)` — list commit history on the session branch (optionally scoped to a file). Returns sha, date, author, message.\n"
+        " 26. `git_blame(path)` — annotate each line range of a file with the commit that last modified it (author, date, sha, message).\n"
+        " 27. `git_show(commit_sha)` — show full metadata and unified diff for a single commit.\n"
+        " 28. `git_diff(base, head)` — unified diff between two refs (branch names, SHAs, or tags).\n\n"
         "For multi-step requests, start by calling update_plan to outline your steps. "
         "Update task statuses as you progress. If you encounter ambiguous architectural trade-offs, "
         "call ask_user_clarification to let the user decide.\n"
@@ -792,12 +909,13 @@ def _build_system_prompt(
         "After proposing changes with `str_replace` or `create_file`, always run `run_targeted_tests` "
         "on the affected test files to verify your fix before declaring completion. "
         "If tests fail, read the traceback, correct the code with `str_replace`, and re-run until they pass.\n"
+        "When running tests in multi-directory repositories (e.g. backend/ or frontend/), use `run_targeted_tests` "
+        "with specific existing test paths (or explore available tests first with `glob_files('**/*test*')`), "
+        "or use `run_terminal_command` with `cd <dir> && ...` or `cwd`.\n"
         "To prevent context-window bloat, prefer `get_file_outline` over reading entire files, "
         "and use `grep_search`, `glob_files`, `read_file_slice` for targeted exploration.\n"
         "Use `find_references` before renaming or refactoring a function to inspect all callers.\n"
         "Explain your reasoning clearly and concisely.\n"
-        " 23. `checkpoint_restore(checkpoint_id)` — restore session state to a prior checkpoint, reverting staged patches and conversation history.\n"
-        " 24. `scan_security_vulnerabilities(paths)` — scan staged files for secrets (AWS keys, GitHub PATs, API keys) and injection flaws before committing.\n\n"
         "Security requirement: Before completing any task that modifies files, call `scan_security_vulnerabilities` "
         "on the modified file paths to verify that no secrets or SQL injection vulnerabilities were accidentally introduced. "
         "Do not declare the task complete if violations are found — fix them first.\n\n"
@@ -823,6 +941,47 @@ def _infer_provider(model: str) -> str | None:
     if m.endswith("-free") or "nemotron" in m:
         return "opencode_zen"
     return None
+
+
+def _prune_conversation_history(
+    history: list[dict[str, Any]],
+    max_chars: int = 80_000,
+) -> list[dict[str, Any]]:
+    """
+    Prune conversation history for LLM context window while maintaining turn integrity.
+
+    Full history remains stored in DB; this only trims the messages sent in the active prompt.
+    Ensures no orphan tool result is sent without its preceding assistant tool call,
+    and cuts cleanly on user turn boundaries.
+    """
+    if not history:
+        return []
+
+    user_indices = [i for i, m in enumerate(history) if m.get("role") == "user"]
+    if not user_indices:
+        return list(history[-10:])
+
+    selected_turns: list[list[dict[str, Any]]] = []
+    total_chars = 0
+
+    for i in range(len(user_indices) - 1, -1, -1):
+        turn_start = user_indices[i]
+        turn_end = user_indices[i + 1] if i + 1 < len(user_indices) else len(history)
+        turn_messages = history[turn_start:turn_end]
+
+        turn_chars = sum(
+            len(str(m.get("content", ""))) + len(str(m.get("tool_calls", "")))
+            for m in turn_messages
+        )
+
+        if selected_turns and (total_chars + turn_chars > max_chars):
+            break
+
+        selected_turns.append(turn_messages)
+        total_chars += turn_chars
+
+    selected_turns.reverse()
+    return [m for turn in selected_turns for m in turn]
 
 
 # ------------------------------------------------------------------
@@ -934,7 +1093,8 @@ class SessionOrchestrator:
             ),
         }
         user_msg: dict[str, Any] = {"role": "user", "content": user_message}
-        messages: list[dict[str, Any]] = [system_msg] + conversation_history + [user_msg]
+        pruned_history = _prune_conversation_history(conversation_history)
+        messages: list[dict[str, Any]] = [system_msg] + pruned_history + [user_msg]
 
         # Track assistant turns and tool results to append to history.
         new_entries: list[dict[str, Any]] = [user_msg]
@@ -1266,6 +1426,32 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+            )
+        elif tool_name == "git_log":
+            return await self._tool_git_log(
+                args=args,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+            )
+        elif tool_name == "git_blame":
+            return await self._tool_git_blame(
+                args=args,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+            )
+        elif tool_name == "git_show":
+            return await self._tool_git_show(
+                args=args,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+            )
+        elif tool_name == "git_diff":
+            return await self._tool_git_diff(
+                args=args,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
             )
         else:
             logger.warning(
@@ -1720,6 +1906,9 @@ class SessionOrchestrator:
         queue: SseQueue,
     ) -> str:
         command: str = str(args.get("command", ""))
+        cwd: str | None = args.get("cwd")
+        if cwd is not None:
+            cwd = str(cwd)
         try:
             timeout_sec: int = int(args.get("timeout_sec", 60))
         except (TypeError, ValueError):
@@ -1728,6 +1917,7 @@ class SessionOrchestrator:
             command=command,
             timeout_sec=timeout_sec,
             queue=queue,
+            cwd=cwd,
         )
         # Populate exit_code on args for frontend chip counters.
         first_line = result.splitlines()[0] if result else ""
@@ -1745,6 +1935,9 @@ class SessionOrchestrator:
         raw_paths = args.get("paths", [])
         paths: list[str] = [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
         linter: str = str(args.get("linter", "auto"))
+        cwd: str | None = args.get("cwd")
+        if cwd is not None:
+            cwd = str(cwd)
         try:
             timeout_sec: int = int(args.get("timeout_sec", 60))
         except (TypeError, ValueError):
@@ -1754,6 +1947,7 @@ class SessionOrchestrator:
             linter=linter,
             timeout_sec=timeout_sec,
             queue=queue,
+            cwd=cwd,
         )
         # Populate file_count for frontend chip.
         args["file_count"] = len(paths)
@@ -1768,6 +1962,9 @@ class SessionOrchestrator:
         test_targets: list[str] = (
             [str(t) for t in raw_targets] if isinstance(raw_targets, list) else []
         )
+        cwd: str | None = args.get("cwd")
+        if cwd is not None:
+            cwd = str(cwd)
         try:
             timeout_sec: int = int(args.get("timeout_sec", 120))
         except (TypeError, ValueError):
@@ -1776,12 +1973,87 @@ class SessionOrchestrator:
             test_targets=test_targets,
             timeout_sec=timeout_sec,
             queue=queue,
+            cwd=cwd,
         )
         # Populate target_count for frontend chip.
         args["target_count"] = len(test_targets)
         return result
 
+    async def _tool_git_log(
+        self,
+        args: dict[str, Any],
+        repo_owner: str,
+        repo_name: str,
+        base_sha: str,
+    ) -> str:
+        path: str = str(args.get("path", ""))
+        try:
+            limit: int = int(args.get("limit", 20))
+        except (TypeError, ValueError):
+            limit = 20
+        return await tool_git_log(
+            branch=base_sha,
+            path=path,
+            limit=limit,
+            owner=repo_owner,
+            repo=repo_name,
+            token=self.gh_token,
+        )
+
+    async def _tool_git_blame(
+        self,
+        args: dict[str, Any],
+        repo_owner: str,
+        repo_name: str,
+        base_sha: str,
+    ) -> str:
+        path: str = str(args.get("path", ""))
+        if not path:
+            return "Error: 'path' is required for git_blame."
+        return await tool_git_blame(
+            path=path,
+            ref=base_sha,
+            owner=repo_owner,
+            repo=repo_name,
+            token=self.gh_token,
+        )
+
+    async def _tool_git_show(
+        self,
+        args: dict[str, Any],
+        repo_owner: str,
+        repo_name: str,
+    ) -> str:
+        commit_sha: str = str(args.get("commit_sha", ""))
+        if not commit_sha:
+            return "Error: 'commit_sha' is required for git_show."
+        return await tool_git_show(
+            commit_sha=commit_sha,
+            owner=repo_owner,
+            repo=repo_name,
+            token=self.gh_token,
+        )
+
+    async def _tool_git_diff(
+        self,
+        args: dict[str, Any],
+        repo_owner: str,
+        repo_name: str,
+    ) -> str:
+        base: str = str(args.get("base", ""))
+        head: str = str(args.get("head", ""))
+        if not base or not head:
+            return "Error: 'base' and 'head' are both required for git_diff."
+        return await tool_git_diff(
+            base=base,
+            head=head,
+            owner=repo_owner,
+            repo=repo_name,
+            token=self.gh_token,
+        )
+
     async def _load_session(self) -> AgentSession | None:
+
         """
         Load the AgentSession with its repo relationship.
 

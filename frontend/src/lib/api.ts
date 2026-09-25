@@ -323,9 +323,16 @@ async function request<T>(
   }
 
   let res: Response;
+  const timeoutSignal =
+    typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
+      ? AbortSignal.timeout(15000)
+      : undefined;
+  const signal = options.signal ?? timeoutSignal;
+
   try {
     res = await fetch(url, {
       ...options,
+      signal,
       headers,
       credentials: "include",
     });

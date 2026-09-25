@@ -281,10 +281,11 @@ export function useSessionStream(sessionId: string) {
               break;
             }
             case "error": {
+              const d = frame.data as Record<string, unknown> | undefined;
               const errMsg =
                 typeof frame.data === "string"
                   ? frame.data
-                  : (frame.data as Record<string, string>)?.message ?? "Agent error";
+                  : (d?.error as string) ?? (d?.message as string) ?? "Agent error";
               setMessages((prev) => [...prev, { role: "system", content: `Error: ${errMsg}` }]);
               break;
             }

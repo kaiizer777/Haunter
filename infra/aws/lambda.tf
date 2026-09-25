@@ -203,8 +203,10 @@ resource "aws_lambda_function" "haunter" {
       GROQ_MODEL_NAME = var.groq_model_name
 
       # TinyFish API (Web Search & Stealth Fetch)
-      TINYFISH_API_KEY  = var.tinyfish_api_key
-      TINYFISH_BASE_URL = var.tinyfish_base_url
+      TINYFISH_API_KEY    = var.tinyfish_api_key
+      TINYFISH_BASE_URL   = var.tinyfish_base_url
+      TINYFISH_SEARCH_URL = var.tinyfish_search_url
+      TINYFISH_FETCH_URL  = var.tinyfish_fetch_url
 
       # Token encryption (at-rest protection for users.access_token — required, see config.py:125)
       TOKEN_ENCRYPTION_KEY = var.token_encryption_key

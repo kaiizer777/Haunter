@@ -38,7 +38,7 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!loading && user) {
-      router.replace("/runs");
+      router.replace("/sessions");
     }
   }, [user, loading, router]);
 

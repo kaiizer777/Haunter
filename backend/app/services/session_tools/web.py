@@ -122,19 +122,27 @@ async def tool_search_web_docs(
     # Clamp max_results to a sane range.
     max_results = max(1, min(max_results, 20))
 
-    payload: dict[str, Any] = {"query": query, "limit": max_results}
+    params: dict[str, Any] = {"query": query}
     if domain:
-        payload["domain"] = domain
+        clean_domain = domain.strip()
+        if "://" in clean_domain:
+            clean_domain = urlparse(clean_domain).hostname or clean_domain
+        clean_domain = clean_domain.rstrip("/")
+        if clean_domain:
+            params["include_domains"] = clean_domain
+
+    search_url = getattr(settings, "tinyfish_search_url", "https://api.search.tinyfish.ai")
+    headers = {
+        "X-API-Key": settings.tinyfish_api_key,
+        "Authorization": f"Bearer {settings.tinyfish_api_key}",
+    }
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                f"{settings.tinyfish_base_url}/search",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {settings.tinyfish_api_key}",
-                    "Content-Type": "application/json",
-                },
+            response = await client.get(
+                search_url,
+                params=params,
+                headers=headers,
             )
     except httpx.HTTPError as exc:
         logger.warning("tool_search_web_docs: HTTP error: %s", exc)
@@ -158,7 +166,7 @@ async def tool_search_web_docs(
         return f"No relevant documentation found for '{query}'."
 
     lines: list[str] = []
-    for item in results:
+    for item in results[:max_results]:
         title = item.get("title") or item.get("url", "")
         url = item.get("url", "")
         snippet = item.get("snippet") or item.get("description") or ""
@@ -197,17 +205,20 @@ async def tool_fetch_web_content(
     except ValueError as exc:
         return f"Error: {exc}"
 
-    payload: dict[str, Any] = {"url": validated_url, "format": format}
+    payload: dict[str, Any] = {"urls": [validated_url]}
+    fetch_url = getattr(settings, "tinyfish_fetch_url", "https://api.fetch.tinyfish.ai")
+    headers = {
+        "X-API-Key": settings.tinyfish_api_key,
+        "Authorization": f"Bearer {settings.tinyfish_api_key}",
+        "Content-Type": "application/json",
+    }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{settings.tinyfish_base_url}/fetch",
+                fetch_url,
                 json=payload,
-                headers={
-                    "Authorization": f"Bearer {settings.tinyfish_api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
             )
     except httpx.HTTPError as exc:
         logger.warning("tool_fetch_web_content: HTTP error for url=%s: %s", url, exc)
@@ -225,7 +236,16 @@ async def tool_fetch_web_content(
     except Exception:
         return "Error: could not parse TinyFish fetch response."
 
-    content: str = data.get("content") or data.get("markdown") or data.get("text") or ""
+    results: list[dict[str, Any]] = data.get("results", []) if isinstance(data, dict) else []
+    first = results[0] if results and isinstance(results[0], dict) else (data if isinstance(data, dict) else {})
+    content: str = (
+        first.get("text")
+        or first.get("content")
+        or first.get("markdown")
+        or data.get("text")
+        or data.get("content")
+        or ""
+    )
     if not content:
         return f"No content returned for URL: {url}"
 

@@ -37,6 +37,10 @@ _PER_MODEL_REJECTION_PHRASES: tuple[str, ...] = (
     "unknown model",
     "invalid model",
     "model does not exist",
+    "freetiererror",
+    "free tier",
+    "free-tier",
+    "model is unavailable",
 )
 
 # Phrases that indicate an HTTP 400 is an upstream provider or model server error

@@ -346,3 +346,66 @@ async def test_session_verify_dispatch(
     assert data["passed"] is True
     assert data["run_url"] == "https://github.com/test-org/haunter-test-mirror/actions/runs/12345"
     assert "All tests passed" in data["logs"]
+
+
+# ---------------------------------------------------------------------------
+# Test 6: _prune_conversation_history context management & turn integrity
+# ---------------------------------------------------------------------------
+
+
+def test_prune_conversation_history_empty() -> None:
+    from app.services.session_orchestrator import _prune_conversation_history
+
+    assert _prune_conversation_history([]) == []
+
+
+def test_prune_conversation_history_within_budget() -> None:
+    from app.services.session_orchestrator import _prune_conversation_history
+
+    history = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi there"},
+    ]
+    assert _prune_conversation_history(history, max_chars=1000) == history
+
+
+def test_prune_conversation_history_turn_boundary_integrity() -> None:
+    from app.services.session_orchestrator import _prune_conversation_history
+
+    # Turn 1: 500 chars
+    t1_user = {"role": "user", "content": "A" * 200}
+    t1_asst = {"role": "assistant", "content": "B" * 200, "tool_calls": [{"id": "c1", "function": {"name": "test"}}]}
+    t1_tool = {"role": "tool", "tool_call_id": "c1", "content": "C" * 100}
+
+    # Turn 2: 500 chars
+    t2_user = {"role": "user", "content": "D" * 200}
+    t2_asst = {"role": "assistant", "content": "E" * 200, "tool_calls": [{"id": "c2", "function": {"name": "test"}}]}
+    t2_tool = {"role": "tool", "tool_call_id": "c2", "content": "F" * 100}
+
+    history = [t1_user, t1_asst, t1_tool, t2_user, t2_asst, t2_tool]
+
+    # With max_chars=600, Turn 1 should be pruned, and Turn 2 should start on user boundary
+    pruned = _prune_conversation_history(history, max_chars=600)
+    assert len(pruned) == 3
+    assert pruned[0]["role"] == "user"
+    assert pruned[0]["content"] == "D" * 200
+    assert pruned[1]["role"] == "assistant"
+    assert pruned[2]["role"] == "tool"
+    assert pruned[2]["tool_call_id"] == "c2"
+
+
+def test_prune_conversation_history_always_keeps_latest_turn() -> None:
+    from app.services.session_orchestrator import _prune_conversation_history
+
+    t1_user = {"role": "user", "content": "Old turn"}
+    t2_user = {"role": "user", "content": "X" * 1000}
+    t2_asst = {"role": "assistant", "content": "Y" * 1000}
+
+    history = [t1_user, t2_user, t2_asst]
+    # Even if max_chars is smaller than latest turn, latest turn is kept intact
+    pruned = _prune_conversation_history(history, max_chars=500)
+    assert len(pruned) == 2
+    assert pruned[0]["role"] == "user"
+    assert pruned[0]["content"] == "X" * 1000
+    assert pruned[1]["role"] == "assistant"
+

@@ -337,3 +337,159 @@ async def test_sse_queue_put_terminal_output() -> None:
     assert "terminal_output" in item
     assert "hello stdout" in item
     assert "stdout" in item
+
+
+# ---------------------------------------------------------------------------
+# 8. Command chaining, directory navigation, and resilient execution
+# ---------------------------------------------------------------------------
+
+
+def test_parse_command_chain_splitting() -> None:
+    """parse_command_chain correctly splits on && and ; while preserving quoted tokens."""
+    from app.services.session_tools.sandbox import parse_command_chain
+
+    chains = parse_command_chain("cd backend && python -m pytest tests/test_main.py -q")
+    assert len(chains) == 2
+    assert chains[0] == (["cd", "backend"], "&&")
+    assert chains[1] == (["python", "-m", "pytest", "tests/test_main.py", "-q"], "")
+
+    quoted = parse_command_chain('echo "hello && world"; git status')
+    assert len(quoted) == 2
+    assert quoted[0] == (["echo", "hello && world"], ";")
+    assert quoted[1] == (["git", "status"], "")
+
+
+@pytest.mark.asyncio
+async def test_run_terminal_command_chained_cd_execution() -> None:
+    """Chained cd command navigates into target directory and executes subcommand."""
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def _fake_run(argv, timeout_sec, queue=None, cwd=None):
+        calls.append((argv, cwd))
+        return (0, "6 passed\n", "", 0.5)
+
+    with patch(
+        "app.services.session_tools.sandbox._run_subprocess",
+        new=_fake_run,
+    ):
+        result = await tool_run_terminal_command(
+            command="cd tests && pytest -q",
+            timeout_sec=60,
+        )
+
+    assert "Exit code: 0" in result
+    assert "6 passed" in result
+    assert len(calls) == 1
+    assert calls[0][0] == ["pytest", "-q"]
+    assert calls[0][1] is not None and calls[0][1].endswith("tests")
+
+
+@pytest.mark.asyncio
+async def test_run_terminal_command_cd_already_in_directory() -> None:
+    """cd into current folder name (e.g. cd backend when already in backend) succeeds as no-op."""
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def _fake_run(argv, timeout_sec, queue=None, cwd=None):
+        calls.append((argv, cwd))
+        return (0, "all good\n", "", 0.2)
+
+    with patch(
+        "app.services.session_tools.sandbox._run_subprocess",
+        new=_fake_run,
+    ):
+        result = await tool_run_terminal_command(
+            command="cd backend && python --version",
+            timeout_sec=60,
+            cwd="C:/dummy/repo/backend",
+        )
+
+    assert "Exit code: 0" in result
+    assert len(calls) == 1
+    assert calls[0][0] == ["python", "--version"]
+
+
+@pytest.mark.asyncio
+async def test_run_terminal_command_cd_missing_directory() -> None:
+    """cd into non-existent directory halts execution on && and returns exit code 1."""
+    result = await tool_run_terminal_command(
+        command="cd non_existent_dir_98765 && pytest",
+        timeout_sec=60,
+    )
+    assert "Exit code: 1" in result
+    assert "no such file or directory" in result.lower()
+    assert "non_existent_dir_98765" in result
+
+
+@pytest.mark.asyncio
+async def test_run_subprocess_real_execution() -> None:
+    """Real subprocess execution works without NotImplementedError or Subprocess error."""
+    import sys
+    from app.services.session_tools.sandbox import _run_subprocess
+
+    code, stdout, stderr, dur = await _run_subprocess(
+        argv=[sys.executable, "-c", "print('sandbox ok')"],
+        timeout_sec=10,
+    )
+    assert code == 0
+    assert "sandbox ok" in stdout
+    assert stderr == ""
+
+
+def test_prepare_cmd_argv_resolution() -> None:
+    """_prepare_cmd_argv maps python/pytest/ruff to sys.executable invocations."""
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    assert _prepare_cmd_argv(["python", "app/main.py"]) == [sys.executable, "app/main.py"]
+    assert _prepare_cmd_argv(["python3", "app/main.py"]) == [sys.executable, "app/main.py"]
+    assert _prepare_cmd_argv(["pytest", "-v", "tests/"]) == [sys.executable, "-m", "pytest", "-v", "tests/"]
+    assert _prepare_cmd_argv(["ruff", "check", "app/"]) == [sys.executable, "-m", "ruff", "check", "app/"]
+
+
+def test_loop_supports_subprocesses_selector_check() -> None:
+    """_loop_supports_subprocesses identifies SelectorEventLoop as lacking subprocesses on Windows."""
+    import sys
+    from app.services.session_tools.sandbox import _loop_supports_subprocesses
+
+    class FakeSelectorLoop:
+        pass
+    FakeSelectorLoop.__name__ = "_WindowsSelectorEventLoop"
+
+    if sys.platform == "win32":
+        assert _loop_supports_subprocesses(FakeSelectorLoop()) is False
+
+
+@pytest.mark.asyncio
+async def test_run_subprocess_fallback_on_unsupported_loop() -> None:
+    """_run_subprocess delegates to _run_subprocess_sync in thread pool when loop lacks subprocess support."""
+    import sys
+    from app.services.session_tools.sandbox import _run_subprocess
+
+    with patch(
+        "app.services.session_tools.sandbox._loop_supports_subprocesses",
+        return_value=False,
+    ):
+        code, stdout, stderr, dur = await _run_subprocess(
+            argv=[sys.executable, "-c", "print('threaded fallback')"],
+            timeout_sec=10,
+        )
+        assert code == 0
+        assert "threaded fallback" in stdout
+        assert stderr == ""
+
+
+@pytest.mark.asyncio
+async def test_subprocess_error_formatting_never_empty() -> None:
+    """When a subprocess throws an exception with an empty str (e.g. NotImplementedError), error is descriptive."""
+    import sys
+    from app.services.session_tools.sandbox import _run_subprocess_sync
+
+    with patch("subprocess.Popen", side_effect=NotImplementedError()):
+        code, stdout, stderr, dur = _run_subprocess_sync(
+            argv=["dummy_cmd"],
+            timeout_sec=10,
+        )
+        assert code == -1
+        assert "Subprocess error (NotImplementedError)" in stderr
+
+

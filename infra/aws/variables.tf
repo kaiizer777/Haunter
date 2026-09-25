@@ -185,3 +185,16 @@ variable "tinyfish_base_url" {
   default     = "https://api.tinyfish.io/v1"
 }
 
+variable "tinyfish_search_url" {
+  description = "TinyFish Search API URL."
+  type        = string
+  default     = "https://api.search.tinyfish.ai"
+}
+
+variable "tinyfish_fetch_url" {
+  description = "TinyFish Fetch API URL."
+  type        = string
+  default     = "https://api.fetch.tinyfish.ai"
+}
+
+
