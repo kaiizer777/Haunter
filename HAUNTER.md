@@ -707,13 +707,19 @@ frontend/src/app/
 ├── runs/
 │   ├── page.tsx           # Global runs feed (status, confidence, timings)
 │   └── detail/page.tsx    # Single-run trace view (query param ?id={run_id})
+├── sessions/
+│   ├── page.tsx           # Live pairing sessions dashboard (create, list, filter)
+│   └── workspace/page.tsx # Interactive studio (WebContainer preview, Monaco diff, chat)
+├── settings/page.tsx      # Repository operational governance & policy bounds
 ├── eval/page.tsx          # Golden eval suite runner, history, and diff inspector
 └── config/page.tsx        # LLM model switcher and hosting provider diagnostics
 ```
 
-### 11.1 Client-Side State & Cross-Origin Auth
-- **SPA Query Pattern:** Detail pages utilize query-parameter routing (`/runs/detail?id=...`) to maintain compatibility with static asset hosting (`output: "export"`).
-- **Credentials Handling:** All API requests pass `credentials: "include"` via standard `fetch` or React hooks to transmit the `haunter_session` cookie across origins to the Lambda Function URL.
+### 11.1 Client-Side State, WebContainer & Cross-Origin Auth
+- **SPA Query Pattern:** Detail pages utilize query-parameter routing (`/runs/detail?id=...`, `/sessions/workspace?id=...`, `/settings?repo_id=...`) to maintain compatibility with static asset hosting (`output: "export"`).
+- **Credentials Handling:** All API requests pass `credentials: "include"` via standard `fetch` or custom React hooks to transmit the `haunter_session` cookie across origins to the Lambda Function URL.
+- **In-Browser WebContainer Runtime:** Dynamically boots `@webcontainer/api` to execute local Node/Next.js development servers in-browser with responsive viewport toggling and slide-out environment variable controls. Cross-origin isolation (`Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`) is served via Cloudflare Workers Static Assets (`out/_headers`).
+- **Monaco Diff Editor Integration:** Dynamically imported `@monaco-editor/react` Diff Editor renders real-time side-by-side unified diffs for staged session patches before committing.
 - **Observability Rendering:** The run detail view visualizes the complete execution timeline by polling `/runs/{id}/steps`, rendering individual subagent latency, token consumption, and cost estimates.
 
 ---
@@ -779,3 +785,129 @@ Original drafts specified `SameSite=Lax` for session cookies. In cross-origin to
    npm run build
    npx wrangler deploy
    ```
+
+---
+
+## 14. Autonomous Read-Only Auditor Bot ("Auditor Mode")
+
+### 14.1 Philosophy & Zero-Mutation Invariant
+Auditor Mode transforms Haunter into a dedicated, read-only AI Senior Staff Engineer & Security Reviewer bot for connected repositories.
+- **Strict Zero-Mutation Boundary:** Under Auditor Mode, the engine is cryptographically and logically barred from creating git branches, pushing commits, opening pull requests, or modifying files.
+- **Actionable Self-Healing Reports:** Rather than opening unsolicited PRs, the auditor generates structured, high-confidence reports with exact code snippets, line numbers, and copy-pasteable surgical unified diffs.
+
+### 14.2 Webhook Triggers & Filter Matrix
+Configured per repository via granular event flags evaluated in `backend/app/webhooks.py`:
+- `on_pull_request`: Triggered on `pull_request.opened` and `pull_request.synchronize` to audit new PR diffs against the base branch.
+- `on_ci_failure`: Triggered on `workflow_run.completed` with conclusion `failure`. Conducts an automated root-cause analysis without creating an unsolicited PR.
+- `on_ci_success`: Triggered on `workflow_run.completed` with conclusion `success`. Runs regression and performance checks on verified green builds.
+- `on_manual_mention`: Triggered on `issue_comment.created` matching `@haunter audit`. Conducts an on-demand ad-hoc review of the PR or issue context.
+
+### 14.3 Multi-Perspective Audit Core (`backend/app/subagents/auditor.py`)
+Audits repository diffs across four comprehensive engineering perspectives:
+1. **Security & Vulnerability Analysis:**
+   - OWASP API Top 10 vulnerabilities (BOLA/IDOR, broken authentication, mass assignment).
+   - Insecure direct object references and tenant boundary leaks (`WHERE user_id = ...` validation).
+   - Server-Side Request Forgery (SSRF), SQL injection, command injection, and shell escaping.
+   - Constant-time cryptographic verification leaks (`timingSafeEqual` / `compare_digest`).
+   - Hardcoded API keys, tokens, credentials, and connection strings.
+2. **Architecture & Concurrency Integrity:**
+   - State mutation races, check-then-act anti-patterns, and missing transaction isolation.
+   - Connection pool leaks, unclosed resources, and hanging asynchronous tasks.
+   - Idempotency lifecycle failures on critical mutation endpoints.
+3. **Regressions & Boundary Correctness:**
+   - Edge case handling: null/undefined states, empty collections, off-by-one errors.
+   - Silent exception swallowing (`except Exception: pass`) and control-flow hijacking.
+   - Backward compatibility breaks in public API contracts.
+4. **Performance & Resource Discipline:**
+   - N+1 database queries, missing index alignment, unbounded pagination (`OFFSET`).
+   - Blocking synchronous operations inside event loops (`async def`).
+
+### 14.4 Asynchronous Worker Pipeline (`backend/app/services/audit_pipeline.py`)
+- **Durable Ingestion:** Webhook deliveries are acknowledged with HTTP 200 in `<1s` and dispatched to an in-memory asynchronous worker pool (`start_audit_dispatch_workers()`) or standalone Lambda worker (`audit_dispatcher_handler.py`).
+- **Delivery Deduplication:** Guarded by unique delivery ID constraints (`audit_delivery_fingerprints`) preventing duplicate executions under webhook replay attacks.
+
+### 14.5 GitHub Publisher (`backend/app/github/audit_publisher.py`)
+- Emits markdown summaries and line-level PR review annotations directly to GitHub via the GitHub REST API (`POST /repos/{owner}/{repo}/pulls/{number}/reviews`).
+- Summaries feature health scores (0–100), key takeaways, categorized findings, and surgical unified diffs.
+
+---
+
+## 15. Granular Per-Repository Governance & Policy Engine
+
+### 15.1 Multi-Tenant Governance Schema
+Every repository registered in Haunter is governed by a dedicated configuration row in `repo_settings` linked to the owning tenant (`user_id`):
+- `enable_auto_pr`: Boolean gate controlling whether the engine may open pull requests.
+- `enable_auditor_bot`: Master kill-switch for the read-only auditor bot.
+- `trigger_on_pr`, `trigger_on_ci_failure`, `trigger_on_ci_success`, `trigger_on_manual_mention`: Event-level trigger flags.
+- `confidence_threshold`: Minimum confidence score (0–100) required before proposing fixes.
+- `allowed_branches_pattern`: Regex pattern restricting automated actions to matching branches (e.g. `^feature/.*`).
+- `ignore_draft_prs`: Bypasses processing for PRs marked as draft.
+- `max_cost_per_run_cents`: Hard budget ceiling per remediation run.
+
+### 15.2 1-Click Governance Presets
+The `/settings` dashboard exposes 6 enterprise presets:
+- **Autonomous DevOps (`autonomous`):** Auto-PR generation, full CI failure repair, and automated code review enabled.
+- **Conservative Guardian (`conservative`):** High-assurance mode requiring 90%+ confidence thresholds and strict branch allowlists.
+- **Standard (`standard`):** Dual-engine CI repair and code review with balanced confidence thresholds (70%).
+- **Auditor Only (`audit_only`):** Strictly read-only security auditor bot with zero automated code changes.
+- **Live Studio Only (`live_studio_only`):** Dedicated to in-browser WebContainer live pairing and manual verification.
+- **Custom (`custom`):** Granular, toggle-by-toggle configuration.
+
+---
+
+## 16. Cloud Agentic Live Pairing Sessions & Interactive Studio
+
+### 16.1 In-Browser Compute via StackBlitz WebContainer
+Haunter integrates StackBlitz `@webcontainer/api` to provide an interactive in-browser development and execution sandbox:
+- **Zero-Cloud Compute Overhead:** Developers boot a real Node.js virtual container directly inside the browser tab, mounting repository files without spinning up expensive remote VMs.
+- **Cross-Origin Isolation Architecture:** Enforces `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers via Cloudflare Workers Static Assets (`out/_headers`) and Next.js development server configuration (`next.config.ts`).
+- **Live Dev Server & HMR:** Boots `npm run dev` in the container, capturing the `server-ready` event to render live previews in an interactive iframe with Desktop, Tablet, and Mobile viewports.
+- **Hot Path In-Memory Sync:** File modifications made by the session agent stream directly into the container's virtual filesystem (`writeFile`), triggering instant hot-module replacement without restarting dev servers.
+
+### 16.2 Real-Time SSE Streaming Protocol
+Interactive pairing sessions connect via `POST /sessions/{id}/chat` using standard `fetch` with `credentials: "include"`, receiving structured Server-Sent Events (SSE):
+- `thought`: Incremental thought tokens and reasoning duration (`"Thought for 7s >"`).
+- `tool_call`: Tool invocations with arguments and grouped UI chips.
+- `file_diff`: Staged unified diffs streamed directly to the Monaco editor.
+- `sandbox_queued`, `sandbox_progress`, `sandbox_result`: Live status of GitHub Actions sandbox verification.
+- `terminal_output`: Real-time stdout/stderr chunk streaming.
+- `checkpoint_created`, `checkpoint_restored`: Git snapshot state changes.
+- `audit_scan_start`, `audit_progress`, `audit_report`: Live in-studio security audits.
+
+### 16.3 Surgical Session Toolset
+- **Surgical Editing:** `str_replace` (exact search-and-replace enforcing unique occurrences), `create_file`, `delete_file`, and `apply_multi_patch` (atomic multi-file edit transactions).
+- **Codebase Reconnaissance:** `grep_search`, `glob_files`, `read_file_slice`, `symbol_definitions`, and `find_references`.
+- **Git Provenance:** `git_log`, `git_blame`, `git_show`, and `git_diff` powered directly by GitHub REST/GraphQL APIs.
+- **Live Web Docs:** `search_web_docs`, `fetch_web_content`, and `fetch_package_metadata` with hardened private-IP SSRF protection.
+- **Autonomous CI Verification:** `verify_in_ci_sandbox` dispatches staged session patches directly to GitHub Actions sandbox mirrors.
+- **In-Studio Slash Commands:** `/security-scan` and `/repo-audit` execute parallel audits, rendering interactive `AuditReportCard` components with 1-click **Stage Surgical Fix** buttons.
+- **Specialized Subagent Delegation (`SubagentRunner`):** Ephemeral delegation to 5 isolated personas (`repo_navigator`, `feature_architect`, `bug_hunter`, `sandbox_verifier`, `security_auditor`) with bounded iterations and shared reference patch state.
+
+---
+
+## 17. Multi-Model LLM Engine & Enterprise Prompt Hygiene
+
+### 17.1 Multi-Model Adapter Suite
+Haunter provides pluggable LLM provider adapters managed in `backend/app/llm/`:
+- **OpenCode Zen API (Default):** High-speed inference using `nemotron-3.5-lightning-free` via `https://opencode.ai/zen/v1`.
+- **OpenAI:** Direct integration supporting `gpt-4o` and `gpt-4o-mini`.
+- **Anthropic:** Native adapter supporting `claude-3-5-sonnet`.
+- **Dynamic Free Discovery:** Scrapes and activates verified free-tier models dynamically.
+
+### 17.2 Prompt Hygiene & Operational Hardening
+- **Strict Role Alternation:** Enforces alternating `system` → `user` → `assistant` turns, inserting synthetic assistant turns where needed to prevent degradation on open-weights models.
+- **Secret Redaction Pipeline:** Automatically scrubs API keys, private keys, database connection strings, and authorization tokens prior to tokenization.
+- **Empty Response & Format Retries:** Detects blank completions or malformed diff headers and automatically retries with corrective prompt feedback.
+
+---
+
+## 18. End-to-End Verification & Test Suite Standards
+
+### 18.1 Backend Verification Suite (Pytest)
+- **1,495 Tests Passing (100%):** Spans 55+ test files in `backend/tests/`.
+- Covers finite-state machine transitions, AST code injection, patch traversal guards, sandbox tarball seeding, check-run polling, IDOR tenant isolation, session checkpoints, and multi-perspective auditor rulesets.
+
+### 18.2 Frontend Verification Suite (Vitest)
+- **32 Test Suites, 276 Tests Passing (100%):** Validates all UI components in `frontend/src/`.
+- Covers Next.js App Router surfaces, SSE stream parsers, WebContainer lifecycle hooks, Monaco diff viewers, repo governance cards, and interactive eval benchmark modals.
+

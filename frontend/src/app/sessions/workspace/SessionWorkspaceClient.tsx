@@ -13,7 +13,7 @@
  *   - Verification runner and PR commit workflow.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -126,6 +126,44 @@ const FALLBACK_MODELS = {
     { id: "gpt-4o-mini", name: "GPT-4o Mini", tag: "GPT" },
   ],
 } as const satisfies Record<string, { id: string; name: string; tag: string }[]>;
+
+const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "nemotron-3.5-lightning-free": 131072,
+  "laguna-s-2.1-free": 131072,
+  "space-bunny-free": 131072,
+  "deepseek-r1-0528-free": 65536,
+  "llama-3.3-70b-versatile": 131072,
+  "llama-3.1-8b-instant": 131072,
+  "openai/gpt-oss-120b": 131072,
+  "deepseek-r1-distill-llama-70b": 131072,
+  "gemma2-9b-it": 8192,
+  "claude-sonnet-4-5": 200000,
+  "claude-haiku-3-5": 200000,
+  "gpt-4o": 128000,
+  "gpt-4o-mini": 128000,
+};
+
+const MODEL_SHORT_NAMES: Record<string, string> = {
+  "nemotron-3.5-lightning-free": "Nemotron 3.5",
+  "laguna-s-2.1-free": "Laguna 2.1",
+  "space-bunny-free": "Space Bunny",
+  "deepseek-r1-0528-free": "DeepSeek R1",
+  "llama-3.3-70b-versatile": "Llama 3.3 70B",
+  "llama-3.1-8b-instant": "Llama 3.1 8B",
+  "openai/gpt-oss-120b": "GPT OSS 120B",
+  "deepseek-r1-distill-llama-70b": "DeepSeek R1 70B",
+  "gemma2-9b-it": "Gemma 2 9B",
+  "claude-sonnet-4-5": "Claude 3.5 Sonnet",
+  "claude-haiku-3-5": "Claude 3.5 Haiku",
+  "gpt-4o": "GPT-4o",
+  "gpt-4o-mini": "GPT-4o Mini",
+};
+
+function formatTokens(count: number): string {
+  if (count >= 1000000) return `${(count / 1000000).toFixed(1)}M`;
+  if (count >= 1000) return `${(count / 1000).toFixed(count >= 10000 ? 0 : 1)}k`;
+  return `${count}`;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers & Sub-components
@@ -2128,6 +2166,28 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     setViewMode("diffs");
   };
 
+  // Calculate total session tokens from messages, tool calls, staged diffs, and context
+  const calculatedTokens = useMemo(() => {
+    let charCount = 0;
+    for (const m of messages) {
+      charCount += m.content?.length || 0;
+      if (m.thoughts?.length) {
+        for (const t of m.thoughts) charCount += t.length;
+      }
+      if (m.toolCalls?.length) {
+        for (const tc of m.toolCalls) {
+          charCount += tc.name.length + (tc.args ? JSON.stringify(tc.args).length : 0);
+        }
+      }
+    }
+    for (const patch of Object.values(stagedPatches)) {
+      charCount += (patch?.length || 0) * 0.75;
+    }
+    // Base prompt & tool schemas ~ 1,200 tokens when conversation started
+    const estimated = Math.max(0, Math.round(charCount / 3.8)) + (messages.length > 0 ? 1200 : 0);
+    return estimated;
+  }, [messages, stagedPatches]);
+
   // -------------------------------------------------------------------------
   // Rendering helpers
   // -------------------------------------------------------------------------
@@ -2170,6 +2230,11 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   }
 
   const isActive = session.status === "active";
+
+  const activeModelKey = selectedModelId || "nemotron-3.5-lightning-free";
+  const contextWindow = MODEL_CONTEXT_WINDOWS[activeModelKey] || 131072;
+  const modelDisplayName = MODEL_SHORT_NAMES[activeModelKey] || activeModelKey.split("-")[0] || "AI Model";
+  const tokenPercent = Math.min(100, Math.max(0, (calculatedTokens / contextWindow) * 100));
 
   // Topbar actions: View switchers, Verify, Commit PR, Close
   const topbarActions = (
@@ -2232,6 +2297,59 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
           <Globe className="h-3.5 w-3.5" />
           <span>Preview</span>
         </button>
+      </div>
+
+      {/* AI Model & Context Token Stats Block */}
+      <div
+        className="flex items-center gap-2.5 rounded-xl border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#0c0c10] px-3 py-1.5 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] select-none"
+        title={`Active Model: ${activeModelKey} (${selectedProvider})\nContext: ${calculatedTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens (${tokenPercent.toFixed(1)}% used)`}
+      >
+        <div className="flex items-center gap-1.5">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-40" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)]" />
+          </span>
+          <span className="text-xs font-medium text-zinc-200 font-sans whitespace-nowrap">
+            {modelDisplayName}
+          </span>
+        </div>
+
+        <div className="h-3 w-px bg-zinc-800" />
+
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 font-mono text-xs whitespace-nowrap">
+            <span className="text-zinc-200 font-semibold">{formatTokens(calculatedTokens)}</span>
+            <span className="text-zinc-500">/</span>
+            <span className="text-zinc-400">{formatTokens(contextWindow)}</span>
+            <span className="text-zinc-500 text-[10px]">tok</span>
+          </div>
+
+          <div className="flex items-center gap-1.5 rounded-md bg-zinc-900 border border-zinc-800 px-1.5 py-0.5">
+            <div className="w-8 h-1 rounded-full bg-zinc-800 overflow-hidden">
+              <div
+                className={`h-full transition-all duration-300 ${
+                  tokenPercent > 85
+                    ? "bg-rose-500"
+                    : tokenPercent > 60
+                    ? "bg-amber-400"
+                    : "bg-emerald-400"
+                }`}
+                style={{ width: `${Math.max(4, tokenPercent)}%` }}
+              />
+            </div>
+            <span
+              className={`text-[10px] font-mono font-medium ${
+                tokenPercent > 85
+                  ? "text-rose-400"
+                  : tokenPercent > 60
+                  ? "text-amber-300"
+                  : "text-emerald-400"
+              }`}
+            >
+              {tokenPercent.toFixed(1)}%
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* Live CI status chip — queued → running → passed/failed with run link */}
