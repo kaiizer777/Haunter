@@ -219,6 +219,7 @@ export interface AvailableModelItem {
   id: string;
   name: string;
   tag: string;
+  context_window?: number;
 }
 
 export interface AvailableModelsOut {
@@ -387,14 +388,17 @@ export class ApiError extends Error {
   }
 }
 
+type RequestOptions = RequestInit & { silent?: boolean };
+
 async function request<T>(
   endpoint: string,
-  options: RequestInit = {}
+  options: RequestOptions = {}
 ): Promise<T> {
+  const { silent, ...fetchOptions } = options;
   const url = `${API_BASE}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
   
-  const headers = new Headers(options.headers || {});
-  if (!headers.has("Content-Type") && options.body && typeof options.body === "string") {
+  const headers = new Headers(fetchOptions.headers || {});
+  if (!headers.has("Content-Type") && fetchOptions.body && typeof fetchOptions.body === "string") {
     headers.set("Content-Type", "application/json");
   }
 
@@ -403,18 +407,18 @@ async function request<T>(
     typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
       ? AbortSignal.timeout(15000)
       : undefined;
-  const signal = options.signal ?? timeoutSignal;
+  const signal = fetchOptions.signal ?? timeoutSignal;
 
   try {
     res = await fetch(url, {
-      ...options,
+      ...fetchOptions,
       signal,
       headers,
       credentials: "include",
     });
   } catch (err) {
-    if (typeof window !== "undefined") {
-      console.error(`[API Network Error] ${options.method || "GET"} ${url}:`, err);
+    if (!silent && typeof window !== "undefined") {
+      console.error(`[API Network Error] ${fetchOptions.method || "GET"} ${url}:`, err);
     }
     throw new ApiError(
       "Network connection failure. Please verify the backend service is running.",
@@ -468,27 +472,27 @@ async function request<T>(
 }
 
 export const api = {
-  get: <T>(endpoint: string, options?: RequestInit) =>
+  get: <T>(endpoint: string, options?: RequestOptions) =>
     request<T>(endpoint, { method: "GET", ...options }),
 
-  post: <T>(endpoint: string, body?: unknown, options?: RequestInit) =>
+  post: <T>(endpoint: string, body?: unknown, options?: RequestOptions) =>
     request<T>(endpoint, {
       method: "POST",
       body: body !== undefined ? JSON.stringify(body) : undefined,
       ...options,
     }),
 
-  put: <T>(endpoint: string, body?: unknown, options?: RequestInit) =>
+  put: <T>(endpoint: string, body?: unknown, options?: RequestOptions) =>
     request<T>(endpoint, {
       method: "PUT",
       body: body !== undefined ? JSON.stringify(body) : undefined,
       ...options,
     }),
 
-  delete: <T>(endpoint: string, options?: RequestInit) =>
+  delete: <T>(endpoint: string, options?: RequestOptions) =>
     request<T>(endpoint, { method: "DELETE", ...options }),
 
-  patch: <T>(endpoint: string, body?: unknown, options?: RequestInit) =>
+  patch: <T>(endpoint: string, body?: unknown, options?: RequestOptions) =>
     request<T>(endpoint, {
       method: "PATCH",
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -496,7 +500,7 @@ export const api = {
     }),
 
   // Auth endpoints
-  getMe: () => api.get<AuthUser>("/auth/me"),
+  getMe: () => api.get<AuthUser>("/auth/me", { silent: true }),
   logout: () => api.post<{ detail: string }>("/auth/logout"),
 
   // Repos endpoints
@@ -541,8 +545,8 @@ export const api = {
   // Model Config endpoints
   getAvailableModels: () =>
     api.get<AvailableModelsOut>("/config/model/available"),
-  getModelConfig: (repoId?: string) =>
-    api.get<ModelConfigOut>(`/config/model${repoId ? `?repo_id=${repoId}` : ""}`),
+  getModelConfig: (repoId?: string, options?: RequestOptions) =>
+    api.get<ModelConfigOut>(`/config/model${repoId ? `?repo_id=${repoId}` : ""}`, options),
   updateModelConfig: (data: ModelConfigUpdate) =>
     api.put<ModelConfigOut>("/config/model", data),
 
