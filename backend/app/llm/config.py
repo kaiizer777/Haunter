@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import async_session_maker
-from app.models import ModelConfig, Repo
+from app.models import ModelConfig, ModelConfigScope, Repo
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +26,52 @@ class ResolvedModelConfig:
     base_url: str
 
 
+def default_base_url_for_provider(provider: str | None = None) -> str:
+    """Derive the fallback base URL for a provider from live settings (Phase 3.2 Issue 5).
+
+    Maps ``settings.default_provider`` (or an explicit provider name) to its
+    configured base URL instead of hardcoding the OpenCode Zen URL for every
+    provider. Unknown providers fall back to the OpenCode Zen base URL.
+    """
+    name = (provider or settings.default_provider or "opencode_zen").strip().lower()
+    mapping: dict[str, str] = {
+        "opencode_zen": settings.opencode_zen_base_url,
+        "openai": settings.openai_base_url,
+        "anthropic": settings.anthropic_base_url,
+        "groq": settings.groq_base_url,
+    }
+    return mapping.get(name, settings.opencode_zen_base_url)
+
+
 async def _resolve_from_db(
     session: AsyncSession,
     repo_id: uuid.UUID | None = None,
 ) -> ResolvedModelConfig | None:
-    # 1. Check per-repo override if repo_id is provided
+    # 1. Check per-repo override if repo_id is provided (repo scope wins).
     if repo_id is not None:
+        # 1a. Direct repo-scoped lookup: newest active scope='repo' row pinned
+        # to this repo. Works even when repos.active_model_config_id is NULL.
+        scoped_result = await session.execute(
+            select(ModelConfig)
+            .where(
+                ModelConfig.is_active == True,  # noqa: E712
+                ModelConfig.scope == ModelConfigScope.REPO.value,
+                ModelConfig.repo_id == repo_id,
+            )
+            .order_by(ModelConfig.created_at.desc())
+            .limit(1)
+        )
+        scoped_cfg = scoped_result.scalar_one_or_none()
+        if scoped_cfg is not None:
+            return ResolvedModelConfig(
+                provider=scoped_cfg.provider,
+                model_name=scoped_cfg.model_name,
+                base_url=scoped_cfg.base_url,
+            )
+
+        # 1b. Legacy linkage fallback: repos.active_model_config_id pointing
+        # at an active row (any scope). Preserves backward compatibility with
+        # rows written before the scope discriminator existed.
         repo_result = await session.execute(select(Repo).where(Repo.id == repo_id))
         repo = repo_result.scalar_one_or_none()
         if repo and repo.active_model_config_id:
@@ -49,10 +89,14 @@ async def _resolve_from_db(
                     base_url=cfg.base_url,
                 )
 
-    # 2. Query global active model config
+    # 2. Query global active model config — strictly global scope so repo
+    # overrides are never returned as the platform default.
     global_result = await session.execute(
         select(ModelConfig)
-        .where(ModelConfig.is_active == True)  # noqa: E712
+        .where(
+            ModelConfig.is_active == True,  # noqa: E712
+            ModelConfig.scope == ModelConfigScope.GLOBAL.value,
+        )
         .order_by(ModelConfig.created_at.desc())
         .limit(1)
     )
@@ -77,7 +121,8 @@ async def get_active_model_config(
     Order of precedence:
     1. Repo-specific active model config (if repo_id provided and linked)
     2. Global active model config from DB (model_configs where is_active=true)
-    3. Environment variable defaults (DEFAULT_PROVIDER, DEFAULT_MODEL, OPENCODE_ZEN_BASE_URL)
+    3. Environment variable defaults (DEFAULT_PROVIDER, DEFAULT_MODEL, and the
+       provider-matched base URL via default_base_url_for_provider).
     """
     try:
         if db is not None:
@@ -92,9 +137,10 @@ async def get_active_model_config(
     except Exception as exc:
         logger.warning("Failed to query model_configs from DB (%s), using env defaults", exc)
 
-    # Fallback to environment defaults
+    # Fallback to environment defaults — base_url resolves dynamically from
+    # settings.default_provider (Phase 3.2 Issue 5), not a hardcoded Zen URL.
     return ResolvedModelConfig(
         provider=settings.default_provider,
         model_name=settings.default_model,
-        base_url=settings.opencode_zen_base_url,
+        base_url=default_base_url_for_provider(settings.default_provider),
     )

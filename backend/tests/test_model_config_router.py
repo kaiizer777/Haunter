@@ -10,7 +10,7 @@ Covers:
 - PUT /config/model as admin:
   - Creates a new ModelConfig row with is_active=True.
   - Deactivates previous active global ModelConfig rows (single-active invariant).
-- PUT /config/model as non-admin returns 403 Forbidden.
+- PUT /config/model is open to any authenticated user (Phase 3.2 Issue 2: no 403).
 - PUT /config/model with invalid provider (e.g. "gcp") returns 422.
 - PUT /config/model with invalid model (e.g. provider="openai", model="invalid") returns 422.
 - Unauthenticated requests return 401.
@@ -117,14 +117,19 @@ async def test_put_model_config_unauthenticated(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_put_model_config_non_admin_returns_403(
+async def test_put_model_config_open_access_allows_any_authenticated_user(
     db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
 ):
-    """PUT /config/model returns 403 when caller is not the configured admin."""
+    """PUT /config/model is open to any authenticated user (future.md §3.2 Issue 2).
+
+    Regression: the old admin gate returned 403 for normal users. Any
+    authenticated user can now switch the global model freely.
+    """
     await truncate_all(db)
     user = await user_factory()
     client = make_auth_client(user.id)
 
+    # Even with ADMIN_USER_ID pinned to somebody else, a normal user succeeds.
     configured_admin_id = str(uuid.uuid4())
     monkeypatch.setattr(settings, "admin_user_id", configured_admin_id)
 
@@ -132,10 +137,11 @@ async def test_put_model_config_non_admin_returns_403(
     async with client:
         resp = await client.put("/config/model", json=payload)
 
-    assert resp.status_code == 403
-    assert resp.json() == {
-        "detail": "Admin permissions required to update global model config"
-    }
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["provider"] == "opencode_zen"
+    assert data["model_name"] == "nemotron-3.5-lightning-free"
+    assert data["is_active"] is True
 
 
 @pytest.mark.asyncio
@@ -196,7 +202,7 @@ async def test_put_model_config_invalid_model_returns_422(
 
 
 @pytest.mark.asyncio
-async def test_put_model_config_admin_active_row_invariant(
+async def test_put_model_config_active_row_invariant(
     db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
 ):
     """
@@ -335,7 +341,7 @@ async def test_repo_model_config_ownership_enforced(
 
 
 @pytest.mark.asyncio
-async def test_put_model_config_admin_role_succeeds(
+async def test_put_model_config_persisted_role_succeeds(
     db: AsyncSession, user_factory, make_auth_client
 ):
     """PUT /config/model succeeds when user has role='admin' in DB without needing admin_user_id env."""
@@ -350,3 +356,128 @@ async def test_put_model_config_admin_role_succeeds(
     assert resp.status_code == 200
     assert resp.json()["model_name"] == "nemotron-3.5-lightning-free"
     assert resp.json()["is_active"] is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.1 — Per-Repo vs Global isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_put_global_preserves_repo_overrides(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """
+    PUT /config/model (global) must deactivate ONLY scope='global' rows.
+
+    Regression for future.md §3.2 Issue 1: the old
+    UPDATE ... WHERE is_active=true wiped repo-specific active configs.
+    """
+    await truncate_all(db)
+    admin_user = await user_factory(role="admin")
+    client = make_auth_client(admin_user.id)
+    monkeypatch.setattr(settings, "admin_user_id", str(admin_user.id))
+
+    # Seed one active global config.
+    global_cfg = ModelConfig(
+        provider="opencode_zen",
+        model_name="nemotron-3.5-lightning-free",
+        base_url="https://opencode.ai/zen/v1",
+        is_active=True,
+        scope="global",
+    )
+    db.add(global_cfg)
+    await db.commit()
+
+    # Seed one repo with its own active repo-scoped override.
+    repo = Repo(
+        user_id=admin_user.id,
+        owner="acme",
+        name="service",
+    )
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+    repo_id = repo.id
+
+    repo_cfg = ModelConfig(
+        provider="openai",
+        model_name="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        is_active=True,
+        scope="repo",
+        repo_id=repo_id,
+        user_id=admin_user.id,
+    )
+    db.add(repo_cfg)
+    await db.commit()
+    await db.refresh(repo_cfg)
+    repo.active_model_config_id = repo_cfg.id
+    await db.commit()
+
+    # Global switch — must not touch the repo override.
+    async with client:
+        resp = await client.put("/config/model", json={"provider": "openai", "model_name": "gpt-4o-mini"})
+
+    assert resp.status_code == 200
+    assert resp.json()["scope"] == "global"
+
+    db.expire_all()
+    result = await db.execute(select(ModelConfig))
+    rows = {str(c.id): c for c in result.scalars().all()}
+
+    # Old global deactivated, new global active.
+    assert rows[str(global_cfg.id)].is_active is False
+    assert rows[str(global_cfg.id)].scope == "global"
+    assert rows[resp.json()["id"]].is_active is True
+    assert rows[resp.json()["id"]].scope == "global"
+
+    # Repo override untouched.
+    assert rows[str(repo_cfg.id)].is_active is True
+    assert rows[str(repo_cfg.id)].scope == "repo"
+    assert rows[str(repo_cfg.id)].model_name == "gpt-4o"
+
+    # Repo GET still resolves the override, global GET resolves the new default.
+    client2 = make_auth_client(admin_user.id)
+    async with client2:
+        repo_resp = await client2.get(f"/config/model?repo_id={repo_id}")
+        assert repo_resp.status_code == 200
+        assert repo_resp.json()["model_name"] == "gpt-4o"
+        assert repo_resp.json()["scope"] == "repo"
+
+        global_resp = await client2.get("/config/model")
+        assert global_resp.status_code == 200
+        assert global_resp.json()["model_name"] == "gpt-4o-mini"
+        assert global_resp.json()["scope"] == "global"
+
+
+@pytest.mark.asyncio
+async def test_put_repo_stamps_repo_scope(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """PUT /config/model/{repo_id} stamps scope='repo' + repo_id/user_id pins."""
+    await truncate_all(db)
+    user = await user_factory()
+    repo = Repo(user_id=user.id, owner="acme", name="api")
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    client = make_auth_client(user.id)
+    async with client:
+        resp = await client.put(
+            f"/config/model/{repo.id}",
+            json={"provider": "anthropic", "model_name": "claude-sonnet-4-5"},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["scope"] == "repo"
+    assert data["repo_id"] == str(repo.id)
+    assert data["user_id"] == str(user.id)
+
+    db.expire_all()
+    row = (await db.execute(select(ModelConfig).where(ModelConfig.id == data["id"]))).scalar_one()
+    assert row.scope == "repo"
+    assert row.repo_id == repo.id
+    assert row.is_active is True

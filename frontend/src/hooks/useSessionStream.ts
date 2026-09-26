@@ -30,6 +30,7 @@ export interface ChatMessage {
   thoughtDurationSeconds?: number;
   model?: string;
   provider?: string;
+  auditScan?: AuditCardState;
 }
 
 export interface ToolCallChip {
@@ -44,6 +45,116 @@ export interface SandboxStatus {
   run_url?: string;
 }
 
+export interface AuditFinding {
+  id: string;
+  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "BLOCKER" | "WARNING" | "NOTE" | string;
+  category?: string;
+  perspective?: string;
+  file_path: string;
+  line_start?: number;
+  line_end?: number;
+  line_number?: number;
+  title?: string;
+  description: string;
+  suggested_fix?: string;
+  remediation_diff?: string;
+  can_auto_fix?: boolean;
+}
+
+export interface AuditScanStartEvent {
+  scan_id?: string;
+  target_label?: string;
+  target_path?: string;
+  perspectives?: string[];
+  scan_type?: string;
+  total_files_estimated?: number;
+  timestamp?: number | string;
+}
+
+export interface AuditProgressEvent {
+  scan_id?: string;
+  completed_perspectives?: number;
+  total_perspectives?: number;
+  current_perspective?: string;
+  status?: string;
+  files_scanned?: number;
+  total_files?: number;
+  current_file?: string;
+}
+
+export interface AuditReportEvent {
+  scan_id?: string;
+  audit_id?: string;
+  scan_type?: string;
+  target_label?: string;
+  executive_summary?: string;
+  summary?: string;
+  findings: AuditFinding[];
+  confidence?: number;
+  health_score?: number;
+  remediation_diff?: string;
+  publish_allowed?: boolean;
+}
+
+export interface AuditCardState {
+  scan_id: string;
+  target_label: string;
+  perspectives?: string[];
+  scan_type?: string;
+  startedAt: number;
+  status: "scanning" | "completed" | "failed";
+  progress?: {
+    completed: number;
+    total: number;
+    current?: string;
+    statusText?: string;
+  };
+  report?: AuditReportEvent;
+}
+
+export interface SubagentStartEvent {
+  role: string;
+  task: string;
+  startedAt: number;
+}
+
+export interface SubagentDoneEvent {
+  role: string;
+  summary: string;
+  patchesModified: string[];
+}
+
+export interface SandboxQueuedEvent {
+  run_url: string;
+  workflow_name: string;
+}
+
+export interface SandboxProgressEvent {
+  step_name: string;
+  status: "in_progress" | "completed";
+}
+
+export interface SandboxResultEvent {
+  passed: boolean;
+  status?: string;
+  exit_code?: number;
+  summary?: string;
+  run_url?: string;
+  duration_s?: number;
+  logs?: string;
+}
+
+export interface UseSessionStreamOptions {
+  onSubagentStart?: (event: SubagentStartEvent) => void;
+  onSubagentDone?: (event: SubagentDoneEvent) => void;
+  onSandboxQueued?: (event: SandboxQueuedEvent) => void;
+  onSandboxProgress?: (event: SandboxProgressEvent) => void;
+  onSandboxResult?: (event: SandboxResultEvent) => void;
+  onAuditScanStart?: (event: AuditScanStartEvent) => void;
+  onAuditProgress?: (event: AuditProgressEvent) => void;
+  onAuditReport?: (event: AuditReportEvent) => void;
+}
+
 // ---------------------------------------------------------------------------
 // SSE frame type discriminated union (matches server event names)
 // ---------------------------------------------------------------------------
@@ -53,11 +164,20 @@ type SseEventType =
   | "file_diff"
   | "tool_call"
   | "sandbox_status"
+  | "sandbox_queued"
+  | "sandbox_progress"
+  | "sandbox_start"
+  | "sandbox_result"
   | "terminal_output"
   | "plan_update"
   | "clarification_requested"
   | "checkpoint_created"
   | "checkpoint_restored"
+  | "subagent_start"
+  | "subagent_done"
+  | "audit_scan_start"
+  | "audit_progress"
+  | "audit_report"
   | "error"
   | "done";
 
@@ -70,18 +190,30 @@ interface SseFrame {
 // Hook
 // ---------------------------------------------------------------------------
 
-export function useSessionStream(sessionId: string) {
+export function useSessionStream(sessionId: string, options?: UseSessionStreamOptions) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [stagedPatches, setStagedPatches] = useState<Record<string, string>>({});
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
+  const [sandboxQueued, setSandboxQueued] = useState<SandboxQueuedEvent | null>(null);
+  const [sandboxProgress, setSandboxProgress] = useState<SandboxProgressEvent | null>(null);
+  const [sandboxSteps, setSandboxSteps] = useState<SandboxProgressEvent[]>([]);
+  const [sandboxResult, setSandboxResult] = useState<SandboxResultEvent | null>(null);
+  const [ciStartedAt, setCiStartedAt] = useState<number | null>(null);
+  const [ciFinishedAt, setCiFinishedAt] = useState<number | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
   const [plan, setPlan] = useState<PlanTask[]>([]);
   const [pendingClarification, setPendingClarification] = useState<WaitingInput | null>(null);
   const [checkpoints, setCheckpoints] = useState<CheckpointOut[]>([]);
+  const [auditScans, setAuditScans] = useState<AuditCardState[]>([]);
+  const [activeAudit, setActiveAudit] = useState<AuditCardState | null>(null);
 
   // AbortController ref so we can cancel in-flight streams on unmount / new message.
   const abortRef = useRef<AbortController | null>(null);
+
+  // Stable ref for optional subagent callbacks so sendChatMessage stays referentially stable.
+  const optionsRef = useRef<UseSessionStreamOptions | undefined>(options);
+  optionsRef.current = options;
 
   const sendChatMessage = useCallback(
     async (
@@ -233,19 +365,176 @@ export function useSessionStream(sessionId: string) {
             }
             case "sandbox_status": {
               const d = frame.data as Record<string, unknown>;
-              setSandboxStatus({
-                status: (d?.status as string) ?? "unknown",
-                passed: (d?.passed as boolean) ?? undefined,
-                logs: (d?.logs as string) ?? undefined,
-                run_url: (d?.run_url as string) ?? undefined,
+              const status = (d?.status as string) ?? "unknown";
+              const passed =
+                typeof d?.passed === "boolean"
+                  ? (d.passed as boolean)
+                  : status === "passed"
+                    ? true
+                    : status === "failed"
+                      ? false
+                      : undefined;
+              // Preserve the CI run_url from the earlier sandbox_queued event
+              // when this payload omits it (backend put_sandbox_status only
+              // sends {status, logs}).
+              const incomingRunUrl = (d?.run_url as string) ?? undefined;
+              const incomingLogs = (d?.logs as string) ?? undefined;
+              setSandboxStatus((prev) => ({
+                status,
+                passed,
+                logs: incomingLogs ?? prev?.logs,
+                run_url: incomingRunUrl ?? prev?.run_url,
+              }));
+              if (status === "passed" || status === "failed") {
+                setCiFinishedAt((prev) => prev ?? Date.now());
+                const result: SandboxResultEvent = {
+                  passed: passed ?? status === "passed",
+                  status,
+                  run_url: (d?.run_url as string) ?? undefined,
+                  logs: (d?.logs as string) ?? undefined,
+                };
+                setSandboxResult(result);
+                optionsRef.current?.onSandboxResult?.(result);
+              } else if (status === "queued" || status === "running") {
+                setCiStartedAt((prev) => prev ?? Date.now());
+              }
+              break;
+            }
+            case "sandbox_queued": {
+              const d = frame.data as Record<string, unknown>;
+              const evt: SandboxQueuedEvent = {
+                run_url: (d?.run_url as string) ?? "pending",
+                workflow_name:
+                  (d?.workflow_name as string) ??
+                  (d?.workflow as string) ??
+                  "auto",
+              };
+              setSandboxQueued(evt);
+              setSandboxResult(null);
+              // Fresh run — reset per-run step state so the previous run's
+              // steps/progress never leak into the new run's chip.
+              // terminalLogs stay append-only: they are a cross-run audit
+              // buffer (capped at 1000 chunks), not per-run state.
+              setSandboxProgress(null);
+              setSandboxSteps([]);
+              setCiStartedAt(Date.now());
+              setCiFinishedAt(null);
+              // Seed a queued status so the Live CI chip renders immediately,
+              // even before the backend emits sandbox_status. A new queued
+              // event always starts a fresh run (backend emits a trailing
+              // queued with the final run_url just before sandbox_status,
+              // which this correctly preserves via run_url).
+              setSandboxStatus((prev) => ({
+                status: "queued",
+                passed: undefined,
+                logs: prev?.logs,
+                run_url: evt.run_url !== "pending" ? evt.run_url : prev?.run_url,
+              }));
+              optionsRef.current?.onSandboxQueued?.(evt);
+              break;
+            }
+            case "sandbox_progress": {
+              const d = frame.data as Record<string, unknown>;
+              const rawStatus = (d?.status as string) ?? "in_progress";
+              const evt: SandboxProgressEvent = {
+                step_name: (d?.step_name as string) ?? "step",
+                status: rawStatus === "completed" ? "completed" : "in_progress",
+              };
+              setSandboxProgress(evt);
+              setSandboxSteps((prev) => [...prev, evt].slice(-20));
+              // A step transition implies the run is live — promote queued to
+              // running unless a terminal status already landed.
+              setSandboxStatus((prev) => {
+                if (!prev) return { status: "running" };
+                if (prev.status === "passed" || prev.status === "failed") return prev;
+                if (prev.status === "running") return prev;
+                return { ...prev, status: "running" };
               });
+              setCiStartedAt((prev) => prev ?? Date.now());
+              optionsRef.current?.onSandboxProgress?.(evt);
+              break;
+            }
+            case "sandbox_start": {
+              // Legacy alias from the §4.2 architecture diagram
+              // ({ run_url, branch, status }). Normalize to sandbox_queued.
+              const d = frame.data as Record<string, unknown>;
+              const evt: SandboxQueuedEvent = {
+                run_url: (d?.run_url as string) ?? "pending",
+                workflow_name:
+                  (d?.workflow_name as string) ??
+                  (d?.branch as string) ??
+                  "auto",
+              };
+              setSandboxQueued(evt);
+              setSandboxResult(null);
+              // Fresh run — reset per-run step state so the previous run's
+              // steps/progress never leak into the new run's chip.
+              // terminalLogs stay append-only: they are a cross-run audit
+              // buffer (capped at 1000 chunks), not per-run state.
+              setSandboxProgress(null);
+              setSandboxSteps([]);
+              setCiStartedAt(Date.now());
+              setCiFinishedAt(null);
+              setSandboxStatus((prev) => ({
+                status: "queued",
+                passed: undefined,
+                logs: prev?.logs,
+                run_url: evt.run_url !== "pending" ? evt.run_url : prev?.run_url,
+              }));
+              optionsRef.current?.onSandboxQueued?.(evt);
+              break;
+            }
+            case "sandbox_result": {
+              // Terminal CI verdict ({ passed, exit_code, summary }).
+              // Normalize into sandboxStatus so chip + badge share one source.
+              const d = frame.data as Record<string, unknown>;
+              const passed = Boolean(d?.passed);
+              const runUrl =
+                (d?.run_url as string) ??
+                (d?.runUrl as string) ??
+                undefined;
+              const summary =
+                (d?.summary as string) ??
+                (d?.logs as string) ??
+                undefined;
+              const result: SandboxResultEvent = {
+                passed,
+                status: passed ? "passed" : "failed",
+                exit_code:
+                  typeof d?.exit_code === "number"
+                    ? (d.exit_code as number)
+                    : typeof d?.exitCode === "number"
+                      ? (d.exitCode as number)
+                      : undefined,
+                summary,
+                run_url: runUrl,
+                duration_s:
+                  typeof d?.duration_s === "number"
+                    ? (d.duration_s as number)
+                    : typeof d?.durationS === "number"
+                      ? (d.durationS as number)
+                      : undefined,
+                logs: summary,
+              };
+              setSandboxResult(result);
+              setCiFinishedAt(Date.now());
+              setSandboxStatus((prev) => ({
+                status: passed ? "passed" : "failed",
+                passed,
+                logs: summary ?? prev?.logs,
+                run_url: runUrl ?? prev?.run_url,
+              }));
+              optionsRef.current?.onSandboxResult?.(result);
               break;
             }
             case "terminal_output": {
               const d = frame.data as Record<string, string>;
               const chunk = d?.chunk ?? (typeof frame.data === "string" ? frame.data : "");
               if (chunk) {
-                setTerminalLogs((prev) => [...prev, chunk]);
+                // Raw GitHub Actions lines flow through this event alongside
+                // local sandbox output — merge into one terminal buffer (capped
+                // so a huge CI log cannot blow memory or shift layout).
+                setTerminalLogs((prev) => [...prev, chunk].slice(-1000));
               }
               break;
             }
@@ -278,6 +567,309 @@ export function useSessionStream(sessionId: string) {
               const restoredPatches = (d?.staged_patches as Record<string, string>) ?? {};
               // Immediately overwrite stagedPatches so Monaco editor buffers sync.
               setStagedPatches(restoredPatches);
+              break;
+            }
+            case "subagent_start": {
+              const { role, task } = frame.data as { role: string; task: string };
+              optionsRef.current?.onSubagentStart?.({ role, task, startedAt: Date.now() });
+              break;
+            }
+            case "subagent_done": {
+              const { role, summary, patches_modified } = frame.data as {
+                role: string;
+                summary: string;
+                patches_modified: string[];
+              };
+              optionsRef.current?.onSubagentDone?.({ role, summary, patchesModified: patches_modified ?? [] });
+              break;
+            }
+            case "audit_scan_start": {
+              const d = (frame.data as Record<string, unknown>) || {};
+              const scanId = (d.scan_id as string) || `scan_${Date.now()}`;
+              const targetLabel =
+                (d.target_label as string) ||
+                (d.target_path as string) ||
+                (d.scan_type as string) ||
+                "Repository";
+              const rawPerspectives = Array.isArray(d.perspectives)
+                ? (d.perspectives as string[])
+                : d.scan_type
+                  ? [d.scan_type as string]
+                  : [];
+              const rawTimestamp =
+                typeof d.timestamp === "number"
+                  ? d.timestamp
+                  : typeof d.timestamp === "string"
+                    ? Date.parse(d.timestamp) || Date.now()
+                    : Date.now();
+              const totalEst =
+                rawPerspectives.length ||
+                (typeof d.total_files_estimated === "number" ? d.total_files_estimated : 1);
+
+              const scanState: AuditCardState = {
+                scan_id: scanId,
+                target_label: targetLabel,
+                perspectives: rawPerspectives,
+                scan_type: (d.scan_type as string) ?? undefined,
+                startedAt: rawTimestamp,
+                status: "scanning",
+                progress: {
+                  completed: 0,
+                  total: Math.max(totalEst, 1),
+                  statusText: "Initializing audit scan…",
+                },
+              };
+
+              setActiveAudit(scanState);
+              setAuditScans((prev) => {
+                const idx = prev.findIndex((s) => s.scan_id === scanId);
+                if (idx >= 0) {
+                  const copy = [...prev];
+                  copy[idx] = scanState;
+                  return copy;
+                }
+                return [...prev, scanState];
+              });
+
+              setMessages((prev) => {
+                const copy = [...prev];
+                const last = copy[copy.length - 1];
+                if (last && last.role === "assistant" && !last.auditScan) {
+                  copy[copy.length - 1] = {
+                    ...last,
+                    auditScan: scanState,
+                  };
+                  return copy;
+                } else if (last && last.auditScan && last.auditScan.scan_id === scanId) {
+                  copy[copy.length - 1] = {
+                    ...last,
+                    auditScan: scanState,
+                  };
+                  return copy;
+                }
+                return [
+                  ...copy,
+                  {
+                    role: "assistant",
+                    content: "",
+                    auditScan: scanState,
+                  },
+                ];
+              });
+
+              optionsRef.current?.onAuditScanStart?.({
+                scan_id: scanId,
+                target_label: targetLabel,
+                target_path: (d.target_path as string) ?? undefined,
+                perspectives: rawPerspectives,
+                scan_type: (d.scan_type as string) ?? undefined,
+                total_files_estimated:
+                  typeof d.total_files_estimated === "number"
+                    ? d.total_files_estimated
+                    : undefined,
+                timestamp: rawTimestamp,
+              });
+              break;
+            }
+            case "audit_progress": {
+              const d = (frame.data as Record<string, unknown>) || {};
+              const scanId = (d.scan_id as string) || "";
+              const completed =
+                typeof d.completed_perspectives === "number"
+                  ? d.completed_perspectives
+                  : typeof d.files_scanned === "number"
+                    ? d.files_scanned
+                    : 0;
+              const total =
+                typeof d.total_perspectives === "number"
+                  ? d.total_perspectives
+                  : typeof d.total_files === "number"
+                    ? d.total_files
+                    : 1;
+              const current =
+                (d.current_perspective as string) ||
+                (d.current_file as string) ||
+                "";
+              const rawStatus = (d.status as string) || "";
+              const statusText =
+                rawStatus ||
+                (current
+                  ? `Analyzing ${current}…`
+                  : `Scanning (${completed}/${Math.max(total, 1)})…`);
+
+              const updateProgress = (scan: AuditCardState): AuditCardState => ({
+                ...scan,
+                status: "scanning",
+                progress: {
+                  completed,
+                  total: Math.max(total, 1),
+                  current,
+                  statusText,
+                },
+              });
+
+              setActiveAudit((prev) => (prev ? updateProgress(prev) : null));
+              setAuditScans((prev) =>
+                prev.map((s) =>
+                  s.scan_id === scanId || (!scanId && s.status === "scanning")
+                    ? updateProgress(s)
+                    : s
+                )
+              );
+
+              setMessages((prev) =>
+                prev.map((msg) => {
+                  if (
+                    msg.auditScan &&
+                    (msg.auditScan.scan_id === scanId ||
+                      (!scanId && msg.auditScan.status === "scanning"))
+                  ) {
+                    return {
+                      ...msg,
+                      auditScan: updateProgress(msg.auditScan),
+                    };
+                  }
+                  return msg;
+                })
+              );
+
+              optionsRef.current?.onAuditProgress?.({
+                scan_id: scanId || undefined,
+                completed_perspectives:
+                  typeof d.completed_perspectives === "number"
+                    ? d.completed_perspectives
+                    : undefined,
+                total_perspectives:
+                  typeof d.total_perspectives === "number"
+                    ? d.total_perspectives
+                    : undefined,
+                current_perspective:
+                  (d.current_perspective as string) ?? undefined,
+                status: (d.status as string) ?? undefined,
+                files_scanned:
+                  typeof d.files_scanned === "number"
+                    ? d.files_scanned
+                    : undefined,
+                total_files:
+                  typeof d.total_files === "number" ? d.total_files : undefined,
+                current_file: (d.current_file as string) ?? undefined,
+              });
+              break;
+            }
+            case "audit_report": {
+              const d = (frame.data as Record<string, unknown>) || {};
+              const scanId =
+                (d.scan_id as string) ||
+                (d.audit_id as string) ||
+                `scan_${Date.now()}`;
+              const findings = Array.isArray(d.findings)
+                ? (d.findings as AuditFinding[])
+                : [];
+              const summary =
+                (d.executive_summary as string) ||
+                (d.summary as string) ||
+                "Audit scan complete.";
+
+              const reportEvent: AuditReportEvent = {
+                scan_id: scanId,
+                audit_id: (d.audit_id as string) ?? undefined,
+                scan_type: (d.scan_type as string) ?? undefined,
+                target_label: (d.target_label as string) ?? undefined,
+                executive_summary: summary,
+                summary,
+                findings,
+                confidence:
+                  typeof d.confidence === "number" ? d.confidence : undefined,
+                health_score:
+                  typeof d.health_score === "number" ? d.health_score : undefined,
+                remediation_diff: (d.remediation_diff as string) ?? undefined,
+                publish_allowed:
+                  typeof d.publish_allowed === "boolean"
+                    ? d.publish_allowed
+                    : undefined,
+              };
+
+              const completeScan = (scan: AuditCardState): AuditCardState => ({
+                ...scan,
+                status: "completed",
+                report: reportEvent,
+                progress: scan.progress
+                  ? {
+                      ...scan.progress,
+                      completed: scan.progress.total,
+                      statusText: "Audit complete",
+                    }
+                  : undefined,
+              });
+
+              setActiveAudit((prev) =>
+                prev
+                  ? completeScan(prev)
+                  : {
+                      scan_id: scanId,
+                      target_label: reportEvent.target_label || "Repository Audit",
+                      startedAt: Date.now(),
+                      status: "completed",
+                      report: reportEvent,
+                    }
+              );
+
+              setAuditScans((prev) => {
+                const exists = prev.some(
+                  (s) => s.scan_id === scanId || s.status === "scanning"
+                );
+                if (!exists) {
+                  return [
+                    ...prev,
+                    {
+                      scan_id: scanId,
+                      target_label: reportEvent.target_label || "Repository Audit",
+                      startedAt: Date.now(),
+                      status: "completed",
+                      report: reportEvent,
+                    },
+                  ];
+                }
+                return prev.map((s) =>
+                  s.scan_id === scanId || s.status === "scanning"
+                    ? completeScan(s)
+                    : s
+                );
+              });
+
+              setMessages((prev) => {
+                let found = false;
+                const updated = prev.map((msg) => {
+                  if (
+                    msg.auditScan &&
+                    (msg.auditScan.scan_id === scanId ||
+                      msg.auditScan.status === "scanning")
+                  ) {
+                    found = true;
+                    return {
+                      ...msg,
+                      auditScan: completeScan(msg.auditScan),
+                    };
+                  }
+                  return msg;
+                });
+                if (!found) {
+                  updated.push({
+                    role: "assistant",
+                    content: "",
+                    auditScan: {
+                      scan_id: scanId,
+                      target_label: reportEvent.target_label || "Repository Audit",
+                      startedAt: Date.now(),
+                      status: "completed",
+                      report: reportEvent,
+                    },
+                  });
+                }
+                return updated;
+              });
+
+              optionsRef.current?.onAuditReport?.(reportEvent);
               break;
             }
             case "error": {
@@ -402,17 +994,32 @@ export function useSessionStream(sessionId: string) {
     messages,
     stagedPatches,
     sandboxStatus,
+    sandboxQueued,
+    sandboxProgress,
+    sandboxSteps,
+    sandboxResult,
+    ciStartedAt,
+    ciFinishedAt,
     isStreaming,
     terminalLogs,
     plan,
     pendingClarification,
     checkpoints,
+    auditScans,
+    activeAudit,
     sendChatMessage,
     stopStreaming,
     setStagedPatches,
     setMessages,
+    setTerminalLogs,
     setPlan,
     setPendingClarification,
     setCheckpoints,
+    setAuditScans,
+    setActiveAudit,
+    setSandboxQueued,
+    setSandboxProgress,
+    setSandboxStatus,
+    setSandboxResult,
   };
 }

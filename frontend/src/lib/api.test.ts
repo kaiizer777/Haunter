@@ -477,5 +477,40 @@ describe("api.ts", () => {
       expect(capturedOpts.method).toBe("PUT");
       expect(capturedOpts.body).toBe(JSON.stringify(payload));
     });
+
+    it("api.patch calls PATCH with serialized json body", async () => {
+      const payload = { enable_auto_fix: false };
+      await api.patch("/repos/r-1/settings", payload);
+      expect(capturedUrl).toBe("https://api.example.com/repos/r-1/settings");
+      expect(capturedOpts.method).toBe("PATCH");
+      expect(capturedOpts.body).toBe(JSON.stringify(payload));
+    });
+
+    it("api.getSettingsRepos calls GET /settings/repos", async () => {
+      await api.getSettingsRepos();
+      expect(capturedUrl).toBe("https://api.example.com/settings/repos");
+      expect(capturedOpts.method).toBe("GET");
+    });
+
+    it("api.getRepoSettings calls GET /repos/:repoId/settings", async () => {
+      await api.getRepoSettings("repo-123");
+      expect(capturedUrl).toBe("https://api.example.com/repos/repo-123/settings");
+      expect(capturedOpts.method).toBe("GET");
+    });
+
+    it("api.updateRepoSettings calls PATCH /repos/:repoId/settings", async () => {
+      const payload = { min_confidence_threshold: 85 };
+      await api.updateRepoSettings("repo-123", payload);
+      expect(capturedUrl).toBe("https://api.example.com/repos/repo-123/settings");
+      expect(capturedOpts.method).toBe("PATCH");
+      expect(capturedOpts.body).toBe(JSON.stringify(payload));
+    });
+
+    it("api.applyRepoPreset calls POST /repos/:repoId/settings/preset/:presetName", async () => {
+      await api.applyRepoPreset("repo-123", "conservative");
+      expect(capturedUrl).toBe("https://api.example.com/repos/repo-123/settings/preset/conservative");
+      expect(capturedOpts.method).toBe("POST");
+      expect(capturedOpts.body).toBe(JSON.stringify({}));
+    });
   });
 });

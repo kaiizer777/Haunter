@@ -78,6 +78,25 @@ variable "github_webhook_secret" {
   sensitive   = true
 }
 
+variable "audit_self_invoke_secret" {
+  description = "Dedicated HMAC secret for signed audit worker self-invocations."
+  type        = string
+  sensitive   = true
+}
+
+variable "github_auditor_app_id" {
+  description = "GitHub App ID used only for Auditor Mode read operations."
+  type        = string
+  default     = ""
+}
+
+variable "github_auditor_app_private_key" {
+  description = "PEM private key for the read-only Auditor Mode GitHub App."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "opencode_zen_api_key" {
   description = "OpenCode Zen API key for LLM calls."
   type        = string

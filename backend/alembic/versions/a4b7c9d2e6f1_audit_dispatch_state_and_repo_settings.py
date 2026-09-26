@@ -1,0 +1,149 @@
+"""add operational repo settings and recoverable audit dispatch state
+
+Revision ID: a4b7c9d2e6f1
+Revises: f2a9c4e7b1d3
+Create Date: 2026-09-25 00:00:00.000000
+"""
+
+from __future__ import annotations
+
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "a4b7c9d2e6f1"
+down_revision: Union[str, Sequence[str], None] = "f2a9c4e7b1d3"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.add_column(
+        "repos",
+        sa.Column("auditor_github_install_id", sa.Integer(), nullable=True),
+    )
+    op.create_table(
+        "repo_settings",
+        sa.Column("id", sa.UUID(as_uuid=True), nullable=False),
+        sa.Column("repo_id", sa.UUID(as_uuid=True), nullable=False),
+        sa.Column(
+            "enable_auditor_mode",
+            sa.Boolean(),
+            server_default=sa.false(),
+            nullable=False,
+        ),
+        sa.Column(
+            "audit_trigger_on_pr",
+            sa.Boolean(),
+            server_default=sa.true(),
+            nullable=False,
+        ),
+        sa.Column(
+            "audit_trigger_on_ci_failure",
+            sa.Boolean(),
+            server_default=sa.true(),
+            nullable=False,
+        ),
+        sa.Column(
+            "audit_trigger_on_ci_success",
+            sa.Boolean(),
+            server_default=sa.false(),
+            nullable=False,
+        ),
+        sa.Column(
+            "audit_trigger_on_manual_mention",
+            sa.Boolean(),
+            server_default=sa.true(),
+            nullable=False,
+        ),
+        sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["repo_id"], ["repos.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("repo_id"),
+    )
+    op.create_index("ix_repo_settings_repo_id", "repo_settings", ["repo_id"], unique=True)
+
+    op.add_column(
+        "audit_jobs",
+        sa.Column("attempts", sa.Integer(), server_default="0", nullable=False),
+    )
+    op.add_column(
+        "audit_jobs",
+        sa.Column(
+            "dispatch_attempts",
+            sa.Integer(),
+            server_default="0",
+            nullable=False,
+        ),
+    )
+    op.add_column(
+        "audit_jobs",
+        sa.Column("next_attempt_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    )
+    op.execute(sa.text("UPDATE audit_jobs SET next_attempt_at = created_at"))
+    op.alter_column(
+        "audit_jobs",
+        "next_attempt_at",
+        existing_type=sa.TIMESTAMP(timezone=True),
+        nullable=False,
+    )
+    op.add_column(
+        "audit_jobs",
+        sa.Column("lease_expires_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    )
+    op.add_column(
+        "audit_jobs",
+        sa.Column("last_error", sa.String(length=64), nullable=True),
+    )
+    op.drop_constraint("ck_audit_jobs_status", "audit_jobs", type_="check")
+    op.create_check_constraint(
+        "ck_audit_jobs_status",
+        "audit_jobs",
+        "status IN ('queued', 'dispatching', 'running', 'completed', 'failed')",
+    )
+    op.create_check_constraint(
+        "ck_audit_jobs_attempts",
+        "audit_jobs",
+        "attempts >= 0",
+    )
+    op.create_check_constraint(
+        "ck_audit_jobs_dispatch_attempts",
+        "audit_jobs",
+        "dispatch_attempts >= 0",
+    )
+    op.create_index(
+        "ix_audit_jobs_dispatch_queue",
+        "audit_jobs",
+        ["status", "next_attempt_at"],
+    )
+    op.create_index(
+        "ix_audit_jobs_lease_expires_at",
+        "audit_jobs",
+        ["lease_expires_at"],
+    )
+
+
+def downgrade() -> None:
+    """Refuse: this downgrade is a data-loss operation.
+
+    Dropping `repo_settings` deletes every repository's auditor configuration —
+    the per-repo kill switch, the four trigger toggles and their settings
+    version — with no other copy anywhere. Dropping the `audit_jobs` dispatch
+    columns discards the durable outbox state, so a job that was mid-dispatch
+    becomes indistinguishable from one that never started, and a half-rolled-back
+    deployment would leave the dispatcher claiming jobs it can no longer fence.
+
+    A downgrade that silently discards operator configuration and in-flight work
+    is refused with an explicit error rather than executed. Roll forward, or
+    archive the affected rows by hand before attempting a downgrade.
+    """
+    raise RuntimeError(
+        "refusing to downgrade a4b7c9d2e6f1: dropping repo_settings would destroy "
+        "every repository's auditor trigger configuration (including the per-repo "
+        "kill switch) and dropping the audit_jobs dispatch columns would discard "
+        "the durable outbox state for in-flight jobs. Roll forward, or export the "
+        "affected rows before attempting a downgrade."
+    )
+

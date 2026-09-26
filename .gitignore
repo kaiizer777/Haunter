@@ -63,5 +63,7 @@ infra/aws/tfplan
 !aws.md
 !workers.md
 !future.md
+!future02.md
+
 
 

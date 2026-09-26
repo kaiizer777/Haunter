@@ -1,7 +1,10 @@
 import logging
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -16,7 +19,12 @@ from app.routers.hosting_config import router as hosting_config_router
 from app.routers.model_config import router as model_config_router
 from app.routers.reviews import router as reviews_router
 from app.routers.sessions import router as sessions_router
+from app.routers.settings import router as settings_router
 from app.routers.traces import router as traces_router
+from app.services.audit_pipeline import (
+    start_audit_dispatch_workers,
+    stop_audit_dispatch_workers,
+)
 from app.webhooks import router as webhooks_router
 
 # Configure root logger to INFO so all logger.info() calls in submodules
@@ -30,7 +38,17 @@ logger = logging.getLogger(__name__)
 # Per-IP limiting applied to auth endpoints in auth.py via @limiter.limit().
 # The limiter instance lives in app.limiter to avoid circular imports.
 # ---------------------------------------------------------------------------
-app = FastAPI(title="Haunter Backend")
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    worker_count = start_audit_dispatch_workers()
+    logger.info("audit dispatch workers started count=%s", worker_count)
+    try:
+        yield
+    finally:
+        await stop_audit_dispatch_workers()
+
+
+app = FastAPI(title="Haunter Backend", lifespan=lifespan)
 
 
 # Attach limiter to app state — slowapi reads it from here
@@ -65,6 +83,7 @@ app.include_router(hosting_config_router)
 app.include_router(traces_router)
 app.include_router(reviews_router)
 app.include_router(sessions_router)
+app.include_router(settings_router)
 app.include_router(webhooks_router)
 app.include_router(eval_router)
 

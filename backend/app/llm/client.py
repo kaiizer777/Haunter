@@ -22,7 +22,8 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.llm.config import get_active_model_config
+from app.llm.anthropic import AnthropicAdapter
+from app.llm.config import default_base_url_for_provider, get_active_model_config
 from app.llm.discovery import BOOTSTRAP_FREE_MODELS, get_dynamic_free_models
 from app.llm.exceptions import (
     LLMAuthenticationError,
@@ -34,6 +35,7 @@ from app.llm.exceptions import (
 )
 from app.llm.groq import GroqProvider
 from app.llm.opencode_zen import OpenCodeZenProvider
+from app.llm.openai import OpenAIAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,44 @@ class LLMClient:
             return await provider.complete(
                 messages=messages,
                 model=groq_model,
+                tools=tools,
+                **kwargs,
+            )
+
+        if target_provider == "openai":
+            openai_model = explicit_model or config.model_name
+            provider = OpenAIAdapter(
+                base_url=(
+                    config.base_url
+                    if config.provider == "openai"
+                    else default_base_url_for_provider("openai")
+                ),
+                api_key=settings.openai_api_key,
+                model=openai_model,
+                timeout=self.timeout,
+            )
+            return await provider.complete(
+                messages=messages,
+                model=openai_model,
+                tools=tools,
+                **kwargs,
+            )
+
+        if target_provider == "anthropic":
+            anthropic_model = explicit_model or config.model_name
+            provider = AnthropicAdapter(
+                base_url=(
+                    config.base_url
+                    if config.provider == "anthropic"
+                    else default_base_url_for_provider("anthropic")
+                ),
+                api_key=settings.anthropic_api_key,
+                model=anthropic_model,
+                timeout=self.timeout,
+            )
+            return await provider.complete(
+                messages=messages,
+                model=anthropic_model,
                 tools=tools,
                 **kwargs,
             )

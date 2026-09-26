@@ -31,6 +31,24 @@ class StackFrame:
     symbol_name: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class PythonScope:
+    name: str
+    start_line: int
+    end_line: int
+    class_name: Optional[str]
+    node: Any
+    is_function: bool
+
+
+@dataclass(frozen=True)
+class ParsedPythonSource:
+    source: str
+    lines: tuple[str, ...]
+    imports: tuple[str, ...]
+    scopes: tuple[PythonScope, ...]
+
+
 # ---------------------------------------------------------------------------
 # Stack Trace Regexes
 # ---------------------------------------------------------------------------
@@ -286,109 +304,130 @@ def _format_function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> 
     return sig
 
 
-def extract_python_ast_context(source_code: str, line_number: int) -> Optional[dict[str, Any]]:
-    """
-    Analyze Python source code using built-in `ast` and extract:
-      - Enclosing function/method name and reconstructed signature
-      - Enclosing class name (if inside a class)
-      - Module-level import declarations
-      - Enclosing code snippet (start line, end line, snippet string)
-    """
-    if not source_code:
+def parse_python_source(source_code: str) -> Optional[ParsedPythonSource]:
+    if not isinstance(source_code, str) or not source_code:
         return None
-
     try:
         tree = ast.parse(source_code)
-    except Exception:
+    except (SyntaxError, ValueError, RecursionError):
         return None
+    imports = tuple(
+        ast.unparse(node)
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    )
+    scopes: list[PythonScope] = []
 
-    lines = source_code.splitlines()
-
-    # Collect module-level imports
-    imports: list[str] = []
-    for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            imports.append(ast.unparse(node))
-
-    # Find enclosing function / class containing line_number
-    enclosing_func: Optional[ast.FunctionDef | ast.AsyncFunctionDef] = None
-    enclosing_class: Optional[ast.ClassDef] = None
-
-    class ScopeVisitor(ast.NodeVisitor):
+    class ScopeIndexer(ast.NodeVisitor):
         def __init__(self) -> None:
-            self.current_classes: list[ast.ClassDef] = []
-            self.matching_func: Optional[ast.FunctionDef | ast.AsyncFunctionDef] = None
-            self.matching_class: Optional[ast.ClassDef] = None
+            self.class_stack: list[str] = []
 
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
-            self.current_classes.append(node)
+            scopes.append(
+                PythonScope(
+                    name=node.name,
+                    start_line=node.lineno,
+                    end_line=getattr(node, "end_lineno", node.lineno),
+                    class_name=self.class_stack[-1] if self.class_stack else None,
+                    node=node,
+                    is_function=False,
+                )
+            )
+            self.class_stack.append(node.name)
             self.generic_visit(node)
-            self.current_classes.pop()
+            self.class_stack.pop()
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            self._check_func(node)
+            self._visit_function(node)
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            self._check_func(node)
+            self._visit_function(node)
 
-        def _check_func(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-            start = getattr(node, "lineno", 0)
-            end = getattr(node, "end_lineno", start)
-            if start <= line_number <= end:
-                # Innermost match
-                self.matching_func = node
-                if self.current_classes:
-                    self.matching_class = self.current_classes[-1]
+        def _visit_function(
+            self,
+            node: ast.FunctionDef | ast.AsyncFunctionDef,
+        ) -> None:
+            scopes.append(
+                PythonScope(
+                    name=node.name,
+                    start_line=node.lineno,
+                    end_line=getattr(node, "end_lineno", node.lineno),
+                    class_name=self.class_stack[-1] if self.class_stack else None,
+                    node=node,
+                    is_function=True,
+                )
+            )
             self.generic_visit(node)
 
-    visitor = ScopeVisitor()
-    visitor.visit(tree)
-    enclosing_func = visitor.matching_func
-    enclosing_class = visitor.matching_class
+    ScopeIndexer().visit(tree)
+    return ParsedPythonSource(
+        source=source_code,
+        lines=tuple(source_code.splitlines()),
+        imports=imports[:10],
+        scopes=tuple(scopes),
+    )
 
-    if not enclosing_func:
-        # Check if line is at least inside a class body
-        for node in tree.body:
-            if isinstance(node, ast.ClassDef):
-                start = getattr(node, "lineno", 0)
-                end = getattr(node, "end_lineno", start)
-                if start <= line_number <= end:
-                    enclosing_class = node
-                    break
 
-    signature = _format_function_signature(enclosing_func) if enclosing_func else None
-
-    # Determine snippet boundaries
-    if enclosing_func:
-        start_line = getattr(enclosing_func, "lineno", 1)
-        end_line = getattr(enclosing_func, "end_lineno", len(lines))
-    elif enclosing_class:
-        start_line = getattr(enclosing_class, "lineno", 1)
-        end_line = getattr(enclosing_class, "end_lineno", len(lines))
+def extract_python_ast_context_from_index(
+    parsed: ParsedPythonSource,
+    line_number: int,
+) -> dict[str, Any]:
+    if line_number < 1 or line_number > len(parsed.lines):
+        raise ValueError("line number is outside source")
+    containing = [
+        scope
+        for scope in parsed.scopes
+        if scope.start_line <= line_number <= scope.end_line
+    ]
+    functions = [scope for scope in containing if scope.is_function]
+    classes = [scope for scope in containing if not scope.is_function]
+    function_scope = (
+        min(functions, key=lambda scope: (scope.end_line - scope.start_line, -scope.start_line))
+        if functions
+        else None
+    )
+    class_scope = (
+        min(classes, key=lambda scope: (scope.end_line - scope.start_line, -scope.start_line))
+        if classes
+        else None
+    )
+    if function_scope is not None:
+        start_line = function_scope.start_line
+        end_line = function_scope.end_line
+        signature = _format_function_signature(function_scope.node)
+    elif class_scope is not None:
+        start_line = class_scope.start_line
+        end_line = class_scope.end_line
+        signature = None
     else:
-        # Context window around the target line
         start_line = max(1, line_number - 10)
-        end_line = min(len(lines), line_number + 10)
-
-    # Bound snippet to max 60 lines to keep prompt compact (acceptance criteria: <= 25,000 tokens)
+        end_line = min(len(parsed.lines), line_number + 10)
+        signature = None
     if end_line - start_line > 60:
-        end_line = min(len(lines), start_line + 60)
-        snippet_lines = lines[start_line - 1 : end_line]
-        snippet = "\n".join(snippet_lines) + "\n... (truncated)"
+        end_line = min(len(parsed.lines), start_line + 60)
+        snippet = "\n".join(parsed.lines[start_line - 1 : end_line]) + "\n... (truncated)"
     else:
-        snippet_lines = lines[start_line - 1 : end_line]
-        snippet = "\n".join(snippet_lines)
-
+        snippet = "\n".join(parsed.lines[start_line - 1 : end_line])
     return {
-        "enclosing_class": enclosing_class.name if enclosing_class else None,
-        "enclosing_symbol": enclosing_func.name if enclosing_func else None,
+        "enclosing_class": class_scope.name if class_scope else None,
+        "enclosing_symbol": function_scope.name if function_scope else None,
         "signature": signature,
-        "imports": imports[:10],  # top 10 imports
+        "imports": list(parsed.imports),
         "start_line": start_line,
         "end_line": end_line,
         "snippet": snippet,
         "language": "python",
     }
+
+
+def extract_python_ast_context(source_code: str, line_number: int) -> Optional[dict[str, Any]]:
+    parsed = parse_python_source(source_code)
+    if parsed is None:
+        return None
+    try:
+        return extract_python_ast_context_from_index(parsed, line_number)
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------

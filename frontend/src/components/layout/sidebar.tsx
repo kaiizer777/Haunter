@@ -12,6 +12,7 @@ import {
   TerminalSquare,
   Cpu,
   Zap,
+  Settings,
 } from "lucide-react";
 import { api, ModelConfigOut } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -34,7 +35,7 @@ export function Sidebar() {
     };
   }, []);
 
-  // Keyboard shortcut listener (Cmd/Ctrl/Alt + 1-4) for rapid developer navigation
+  // Keyboard shortcut listener (Cmd/Ctrl/Alt + 1-7) for rapid developer navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -55,6 +56,7 @@ export function Sidebar() {
           "4": "/repos",
           "5": "/eval",
           "6": "/config",
+          "7": "/settings",
         };
         const targetHref = keyMap[e.key];
         if (targetHref) {
@@ -98,6 +100,11 @@ export function Sidebar() {
       name: "Repositories",
       href: "/repos",
       icon: GitBranch,
+    },
+    {
+      name: "Settings",
+      href: "/settings",
+      icon: Settings,
     },
     {
       name: "AI Reliability & Evals",

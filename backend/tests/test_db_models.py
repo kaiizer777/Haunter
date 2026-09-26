@@ -2,8 +2,8 @@
 Database schema, model invariants, migrations, and connection pool tests (test_db_models.py).
 """
 
-from datetime import datetime, timezone
-import uuid
+import hashlib
+
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -14,7 +14,7 @@ from sqlalchemy.pool import NullPool
 
 from app.config import _to_asyncpg_url
 from app.db import engine, engine_unpooled
-from app.models import Attempt, ModelConfig, Repo, Run, RunStep, User
+from app.models import Attempt, AuditJob, ModelConfig, Repo, RepoSettings, Run, RunStep, User
 from tests.conftest import truncate_all
 
 
@@ -25,7 +25,11 @@ async def test_alembic_head_and_migration_check():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"Expected exactly 1 migration head, found {heads}"
-    assert heads[0] is not None
+    assert heads[0] == "d8e9f0a1b2c3"
+    assert script.get_revision("a4b7c9d2e6f1").down_revision == "f2a9c4e7b1d3"
+    assert script.get_revision("b6d8f0a2c4e6").down_revision == "a4b7c9d2e6f1"
+    assert script.get_revision("c7a1b2c3d4e5").down_revision == "b6d8f0a2c4e6"
+    assert script.get_revision("d8e9f0a1b2c3").down_revision == "c7a1b2c3d4e5"
 
 
 def test_to_asyncpg_url_variants():
@@ -252,4 +256,89 @@ async def test_model_configs_defaults(db: AsyncSession):
     assert cfg.model_name == "nemotron-3.5-lightning-free"
     assert cfg.base_url == "https://opencode.ai/zen/v1"
     assert cfg.is_active is True
+    assert cfg.scope == "global"
     assert cfg.created_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_repo_settings_safe_defaults_and_unique_repo(
+    db: AsyncSession,
+):
+    await truncate_all(db)
+    user = User(github_id=906, github_username="auditor_settings", access_token="t6")
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    repo = Repo(
+        user_id=user.id,
+        owner="settings-org",
+        name="settings-repo",
+        auditor_github_install_id=987654,
+    )
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    settings_row = RepoSettings(repo_id=repo.id)
+    db.add(settings_row)
+    await db.commit()
+    await db.refresh(settings_row)
+
+    assert settings_row.enable_auditor_mode is False
+    assert settings_row.audit_trigger_on_pr is True
+    assert settings_row.audit_trigger_on_ci_failure is True
+    assert settings_row.audit_trigger_on_ci_success is False
+    assert settings_row.audit_trigger_on_manual_mention is True
+    assert repo.auditor_github_install_id == 987654
+
+    db.add(RepoSettings(repo_id=repo.id))
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_audit_job_has_recoverable_dispatch_defaults(
+    db: AsyncSession,
+):
+    await truncate_all(db)
+    user = User(github_id=907, github_username="audit_outbox", access_token="t7")
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    repo = Repo(user_id=user.id, owner="outbox-org", name="outbox-repo")
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    job = AuditJob(
+        audit_id="audit-dddddddddddd",
+        repo_id=repo.id,
+        delivery_id="delivery-outbox-defaults",
+        # `delivery_fingerprint` is NOT NULL by schema: a delivery id alone is
+        # not an idempotency key, so the payload digest is part of the row's
+        # identity and has no default to fall back on.
+        delivery_fingerprint=hashlib.sha256(
+            b"outbox-defaults-payload"
+        ).hexdigest(),
+        audit_type="pr_audit",
+        base_sha="b" * 40,
+        status="queued",
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    assert job.attempts == 0
+    assert job.dispatch_attempts == 0
+    assert job.base_sha == "b" * 40
+    assert len(job.delivery_fingerprint) == 64
+    assert job.next_attempt_at is not None
+    assert job.next_attempt_at.tzinfo is not None
+    assert job.lease_expires_at is None
+    assert job.last_error is None
+
+    job.status = "skipped_no_diff"
+    await db.commit()
+    await db.refresh(job)
+    assert job.status == "skipped_no_diff"

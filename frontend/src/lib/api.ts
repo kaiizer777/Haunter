@@ -302,6 +302,82 @@ export interface SandboxVerificationOut {
   logs: string | null;
 }
 
+export interface RepoWithSettingsOut {
+  repo_id: string;
+  repo_full_name: string;
+  preset_profile: string;
+  features: {
+    auto_fixer: boolean;
+    auditor_mode: boolean;
+    live_sessions: boolean;
+    webcontainer_preview: boolean;
+    ci_sandbox: boolean;
+    subagents: boolean;
+  };
+  audit_triggers: {
+    on_pr: boolean;
+    on_ci_failure: boolean;
+    on_ci_success: boolean;
+    on_manual_mention: boolean;
+  };
+  monitored_branches: string[];
+}
+
+export interface RepoSettingsOut {
+  id?: string;
+  repo_id: string;
+  preset: string;
+  preset_profile: string;
+  enable_auto_fix: boolean;
+  enable_auto_fixer?: boolean;
+  enable_auditor_mode: boolean;
+  enable_sandbox_verification: boolean;
+  enable_ci_sandbox?: boolean;
+  enable_pr_comments: boolean;
+  enable_live_sessions: boolean;
+  enable_webcontainer_preview: boolean;
+  enable_subagents: boolean;
+  audit_trigger_on_pr: boolean;
+  audit_trigger_on_ci_failure: boolean;
+  audit_trigger_on_ci_success: boolean;
+  audit_trigger_on_manual_mention: boolean;
+  allowed_branches: string[];
+  monitored_branches?: string[];
+  ignore_draft_prs: boolean;
+  min_confidence_threshold: number;
+  max_cost_per_run_cents: number;
+  model_override_scope: string;
+  settings_version: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface RepoSettingsUpdate {
+  preset?: string;
+  preset_profile?: string;
+  enable_auto_fix?: boolean;
+  enable_auto_fixer?: boolean;
+  enable_auditor_mode?: boolean;
+  enable_sandbox_verification?: boolean;
+  enable_ci_sandbox?: boolean;
+  enable_pr_comments?: boolean;
+  enable_live_sessions?: boolean;
+  enable_webcontainer_preview?: boolean;
+  enable_subagents?: boolean;
+  audit_trigger_on_pr?: boolean;
+  audit_trigger_on_ci_failure?: boolean;
+  audit_trigger_on_ci_success?: boolean;
+  audit_trigger_on_manual_mention?: boolean;
+  allowed_branches?: string[];
+  monitored_branches?: string[];
+  ignore_draft_prs?: boolean;
+  min_confidence_threshold?: number;
+  max_cost_per_run_cents?: number;
+  model_override_scope?: string;
+  features?: Record<string, boolean>;
+  audit_triggers?: Record<string, boolean>;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -336,7 +412,10 @@ async function request<T>(
       headers,
       credentials: "include",
     });
-  } catch {
+  } catch (err) {
+    if (typeof window !== "undefined") {
+      console.error(`[API Network Error] ${options.method || "GET"} ${url}:`, err);
+    }
     throw new ApiError(
       "Network connection failure. Please verify the backend service is running.",
       0
@@ -408,6 +487,13 @@ export const api = {
 
   delete: <T>(endpoint: string, options?: RequestInit) =>
     request<T>(endpoint, { method: "DELETE", ...options }),
+
+  patch: <T>(endpoint: string, body?: unknown, options?: RequestInit) =>
+    request<T>(endpoint, {
+      method: "PATCH",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      ...options,
+    }),
 
   // Auth endpoints
   getMe: () => api.get<AuthUser>("/auth/me"),
@@ -533,5 +619,12 @@ export const api = {
   restoreCheckpoint: (sessionId: string, checkpointId: string) =>
     api.post<SessionOut>(`/sessions/${sessionId}/checkpoints/${checkpointId}/restore`, {}),
 
+  // Settings endpoints (Phase 6.4 - Granular Per-Repo Feature Governance)
+  getSettingsRepos: () => api.get<RepoWithSettingsOut[]>("/settings/repos"),
+  getRepoSettings: (repoId: string) => api.get<RepoSettingsOut>(`/repos/${repoId}/settings`),
+  updateRepoSettings: (repoId: string, data: RepoSettingsUpdate) =>
+    api.patch<RepoSettingsOut>(`/repos/${repoId}/settings`, data),
+  applyRepoPreset: (repoId: string, presetName: string) =>
+    api.post<RepoSettingsOut>(`/repos/${repoId}/settings/preset/${presetName}`, {}),
 };
 

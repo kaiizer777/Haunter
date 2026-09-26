@@ -63,6 +63,7 @@ from app.services.session_tools.sandbox import (
     tool_run_terminal_command,
     tool_run_linter,
     tool_run_targeted_tests,
+    tool_verify_ci_sandbox,
 )
 from app.services.session_tools.web import (
     tool_search_web_docs,
@@ -83,6 +84,12 @@ from app.services.session_tools.git import (
     tool_git_diff,
     tool_git_log,
     tool_git_show,
+)
+from app.services.session_tools.audit import (
+    TOOL_RUN_AUDIT_SCAN,
+    handle_slash_command,
+    parse_slash_command,
+    tool_run_audit_scan,
 )
 
 logger = logging.getLogger(__name__)
@@ -553,6 +560,31 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "verify_in_ci_sandbox",
+            "description": (
+                "Dispatch all currently staged patches to the isolated GitHub Actions CI sandbox mirror repo. "
+                "Runs the real repository test suite in GitHub Actions, streams CI logs live, and returns "
+                "pass/fail status with full compiler/test error tracebacks for self-healing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workflow_file": {
+                        "type": "string",
+                        "description": "Optional specific workflow file to trigger (e.g. 'ci.yml' or 'test.yml'). Default auto-detects.",
+                    },
+                    "timeout_sec": {
+                        "type": "integer",
+                        "description": "Maximum seconds to wait for GitHub Actions CI run completion (default 180, max 600).",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_web_docs",
             "description": (
                 "Search the live web and developer documentation via TinyFish Search API. "
@@ -844,6 +876,62 @@ _TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "invoke_subagent",
+            "description": (
+                "Delegate a complex, focused sub-task to a specialized subagent. "
+                "Use this when a request benefits from a dedicated expert rather than handling everything directly.\n"
+                "Available roles:\n"
+                "  - 'repo_navigator': deep codebase exploration, symbol graphs, cross-file context.\n"
+                "    Use BEFORE feature_architect or bug_hunter on large or unfamiliar codebases.\n"
+                "  - 'feature_architect': implements multi-file features, endpoints, models, UI components.\n"
+                "    Writes and stages code — use for any significant implementation work.\n"
+                "  - 'bug_hunter': diagnoses root causes from tracebacks, writes surgical fix patches\n"
+                "    and regression tests. Use when the user reports a bug or unexpected behavior.\n"
+                "  - 'sandbox_verifier': runs tests, linting, terminal commands to validate correctness.\n"
+                "    Read-only — does NOT write or modify code.\n"
+                "  - 'code_guardian': performs security, performance, and API compatibility review\n"
+                "    on staged diffs. Read-only — returns structured findings only.\n"
+                "The subagent runs to completion and returns a structured summary. "
+                "Staged patches produced by the subagent are automatically visible to you."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "role": {
+                        "type": "string",
+                        "enum": [
+                            "repo_navigator",
+                            "feature_architect",
+                            "bug_hunter",
+                            "sandbox_verifier",
+                            "code_guardian",
+                        ],
+                        "description": "The specialized subagent role to dispatch.",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": (
+                            "Detailed, self-contained task briefing. Include: what to do, which files "
+                            "are likely involved (if known), expected output, and any constraints."
+                        ),
+                    },
+                    "target_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional list of relative file paths the subagent should focus on."
+                        ),
+                    },
+                },
+                "required": ["role", "task"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    TOOL_RUN_AUDIT_SCAN,
 ]
 
 
@@ -886,17 +974,20 @@ def _build_system_prompt(
         " 15. `run_terminal_command(command, timeout_sec, cwd)` — run a shell command and return stdout/stderr/exit code. Supports chained commands (&&, ;) and directory navigation (cd). Output streams live to the terminal drawer.\n"
         " 16. `run_linter(paths, linter, cwd)` — run ruff/eslint on the specified files and get diagnostics.\n"
         " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — run pytest or vitest on specific test files and capture tracebacks.\n"
-        " 18. `search_web_docs(query, domain, max_results)` — search live web/docs via TinyFish for up-to-date library APIs, breaking changes, and migration guides.\n"
-        " 19. `fetch_web_content(url, format)` — fetch and render a public documentation page or GitHub issue as clean Markdown via TinyFish.\n"
-        " 20. `fetch_package_metadata(ecosystem, package_name)` — check official latest version, license, and dependencies from PyPI or npm.\n"
-        " 21. `update_plan(tasks)` — update and render a live multi-step task checklist (statuses: pending, in_progress, completed, failed).\n"
-        " 22. `ask_user_clarification(question, options)` — pause execution and ask the user to pick between trade-offs or design decisions.\n"
-        " 23. `checkpoint_restore(checkpoint_id)` — restore session state to a prior checkpoint, reverting staged patches and conversation history.\n"
-        " 24. `scan_security_vulnerabilities(paths)` — scan staged files for secrets and injection flaws before committing.\n"
-        " 25. `git_log(path, limit)` — list commit history on the session branch (optionally scoped to a file). Returns sha, date, author, message.\n"
-        " 26. `git_blame(path)` — annotate each line range of a file with the commit that last modified it (author, date, sha, message).\n"
-        " 27. `git_show(commit_sha)` — show full metadata and unified diff for a single commit.\n"
-        " 28. `git_diff(base, head)` — unified diff between two refs (branch names, SHAs, or tags).\n\n"
+        " 18. `verify_in_ci_sandbox(workflow_file, timeout_sec)` — dispatch staged patches to the isolated GitHub Actions CI sandbox mirror, stream CI logs live, and return pass/fail with tracebacks for self-healing.\n"
+        " 19. `search_web_docs(query, domain, max_results)` — search live web/docs via TinyFish for up-to-date library APIs, breaking changes, and migration guides.\n"
+        " 20. `fetch_web_content(url, format)` — fetch and render a public documentation page or GitHub issue as clean Markdown via TinyFish.\n"
+        " 21. `fetch_package_metadata(ecosystem, package_name)` — check official latest version, license, and dependencies from PyPI or npm.\n"
+        " 22. `update_plan(tasks)` — update and render a live multi-step task checklist (statuses: pending, in_progress, completed, failed).\n"
+        " 23. `ask_user_clarification(question, options)` — pause execution and ask the user to pick between trade-offs or design decisions.\n"
+        " 24. `checkpoint_restore(checkpoint_id)` — restore session state to a prior checkpoint, reverting staged patches and conversation history.\n"
+        " 25. `scan_security_vulnerabilities(paths)` — scan staged files for secrets and injection flaws before committing.\n"
+        " 26. `git_log(path, limit)` — list commit history on the session branch (optionally scoped to a file). Returns sha, date, author, message.\n"
+        " 27. `git_blame(path)` — annotate each line range of a file with the commit that last modified it (author, date, sha, message).\n"
+        " 28. `git_show(commit_sha)` — show full metadata and unified diff for a single commit.\n"
+        " 29. `git_diff(base, head)` — unified diff between two refs (branch names, SHAs, or tags).\n"
+        " 30. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
+        "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n\n"
         "For multi-step requests, start by calling update_plan to outline your steps. "
         "Update task statuses as you progress. If you encounter ambiguous architectural trade-offs, "
         "call ask_user_clarification to let the user decide.\n"
@@ -909,6 +1000,11 @@ def _build_system_prompt(
         "After proposing changes with `str_replace` or `create_file`, always run `run_targeted_tests` "
         "on the affected test files to verify your fix before declaring completion. "
         "If tests fail, read the traceback, correct the code with `str_replace`, and re-run until they pass.\n"
+        "For cloud-native verification, call `verify_in_ci_sandbox` to dispatch staged patches to the isolated "
+        "GitHub Actions mirror — it streams CI logs live and returns pass/fail with tracebacks for self-healing. "
+        "Re-run it after each fix until CI passes.\n"
+        "Self-healing loop: on FAILED, inspect the returned CI logs/traceback, apply a targeted fix "
+        "with `str_replace`, then re-run `verify_in_ci_sandbox`; repeat up to 3 attempts before declaring completion.\n"
         "When running tests in multi-directory repositories (e.g. backend/ or frontend/), use `run_targeted_tests` "
         "with specific existing test paths (or explore available tests first with `glob_files('**/*test*')`), "
         "or use `run_terminal_command` with `cd <dir> && ...` or `cwd`.\n"
@@ -919,6 +1015,9 @@ def _build_system_prompt(
         "Security requirement: Before completing any task that modifies files, call `scan_security_vulnerabilities` "
         "on the modified file paths to verify that no secrets or SQL injection vulnerabilities were accidentally introduced. "
         "Do not declare the task complete if violations are found — fix them first.\n\n"
+        "You are the Lead Architect of this session. For complex tasks, delegate via invoke_subagent rather than doing everything yourself. "
+        "Standard implementation chain: invoke repo_navigator first on large codebases → then feature_architect → then sandbox_verifier. "
+        "Always validate patches with sandbox_verifier or run_targeted_tests after any feature_architect or bug_hunter run.\n"
         f"Currently staged files:\n{staged_summary}"
     )
 
@@ -1077,6 +1176,38 @@ class SessionOrchestrator:
             return
 
         repo = session.repo  # selectinloaded by _load_session
+
+        # Slash command interception — bypasses standard LLM turn and delegates to auditor
+        slash_cmd = parse_slash_command(user_message)
+        if slash_cmd is not None:
+            scope_label = slash_cmd.path_filter or slash_cmd.target_type
+            await queue.put_thought(f"Executing {slash_cmd.command} on {scope_label}…")
+            conversation_history = list(session.conversation_history or [])
+            staged_patches = dict(session.staged_patches or {})
+            _, response_text = await handle_slash_command(
+                cmd=slash_cmd,
+                session=session,
+                repo_owner=repo.owner,
+                repo_name=repo.name,
+                base_sha=session.base_sha,
+                staged_patches=staged_patches,
+                queue=queue,
+                llm=self._llm,
+                gh_token=self.gh_token,
+                db=self.db,
+            )
+            updated_history = conversation_history + [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": response_text},
+            ]
+            session.conversation_history = updated_history
+            await self._persist(session, updated_history, staged_patches)
+            await queue.put_done(
+                session_id=str(self.session_id),
+                staged_files_count=len(staged_patches),
+                model_used=model or "haunter-auditor",
+            )
+            return
 
         # 2. Build messages: system prompt + history + new user message.
         conversation_history: list[dict[str, Any]] = list(session.conversation_history or [])
@@ -1399,6 +1530,15 @@ class SessionOrchestrator:
                 args=args,
                 queue=queue,
             )
+        elif tool_name == "verify_in_ci_sandbox":
+            if session is None:
+                return "Error: Session context is required for verify_in_ci_sandbox."
+            return await self._tool_verify_ci_sandbox(
+                args=args,
+                staged_patches=staged_patches,
+                session=session,
+                queue=queue,
+            )
         elif tool_name == "search_web_docs":
             return await self._tool_search_web_docs(args=args)
         elif tool_name == "fetch_web_content":
@@ -1452,6 +1592,30 @@ class SessionOrchestrator:
                 args=args,
                 repo_owner=repo_owner,
                 repo_name=repo_name,
+            )
+        elif tool_name == "invoke_subagent":
+            if session is None:
+                return "Error: Session context required for invoke_subagent."
+            return await self._tool_invoke_subagent(
+                args=args,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=staged_patches,
+                session=session,
+                queue=queue,
+            )
+        elif tool_name == "run_audit_scan":
+            if session is None:
+                return "Error: Session context is required for run_audit_scan."
+            return await self._tool_run_audit_scan(
+                args=args,
+                session=session,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=staged_patches,
+                queue=queue,
             )
         else:
             logger.warning(
@@ -1979,6 +2143,45 @@ class SessionOrchestrator:
         args["target_count"] = len(test_targets)
         return result
 
+    async def _tool_verify_ci_sandbox(
+        self,
+        args: dict[str, Any],
+        staged_patches: dict[str, str],
+        session: AgentSession,
+        queue: SseQueue,
+    ) -> str:
+        """
+        Dispatch staged patches to the isolated CI sandbox (Phase 4.1).
+
+        Reads session.staged_patches + session.repo, routes via the hybrid
+        engine (SANDBOX_PROVIDER aware), streams sandbox_queued +
+        terminal_output progress, and returns pass/fail with exit code,
+        duration, and failing logs for LLM self-healing.
+        """
+        raw_workflow = args.get("workflow_file")
+        workflow_file: str | None = str(raw_workflow).strip() if raw_workflow else None
+        if workflow_file == "":
+            workflow_file = None
+        try:
+            timeout_sec: int = int(args.get("timeout_sec", 180))
+        except (TypeError, ValueError):
+            timeout_sec = 180
+
+        repo = getattr(session, "repo", None)
+
+        result = await tool_verify_ci_sandbox(
+            workflow_file=workflow_file,
+            timeout_sec=timeout_sec,
+            queue=queue,
+            session=session,
+            repo=repo,
+            staged_patches=staged_patches,
+            gh_token=self.gh_token,
+        )
+        # Populate workflow label for frontend chip counters.
+        args["workflow_file"] = workflow_file or "auto"
+        return result
+
     async def _tool_git_log(
         self,
         args: dict[str, Any],
@@ -2050,6 +2253,83 @@ class SessionOrchestrator:
             owner=repo_owner,
             repo=repo_name,
             token=self.gh_token,
+        )
+
+    async def _tool_invoke_subagent(
+        self,
+        args: dict[str, Any],
+        repo_owner: str,
+        repo_name: str,
+        base_sha: str,
+        staged_patches: dict[str, str],
+        session: AgentSession,
+        queue: SseQueue,
+    ) -> str:
+        from app.services.session_tools.subagents import (
+            SubagentRunner,
+            SubagentError,
+            VALID_ROLES,
+        )
+
+        role: str = str(args.get("role") or "")
+        task: str = str(args.get("task") or "")
+        raw = args.get("target_files") or []
+        target_files: list[str] = [str(p) for p in raw] if isinstance(raw, list) else []
+
+        if role not in VALID_ROLES:
+            return f"Error: unknown role {role!r}. Valid roles: {sorted(VALID_ROLES)}."
+        if not task.strip():
+            return "Error: task must not be empty."
+
+        runner = SubagentRunner(
+            role=role,
+            task=task,
+            target_files=target_files,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            base_sha=base_sha,
+            staged_patches=staged_patches,  # shared reference
+            session=session,
+            queue=queue,
+            llm=self._llm,
+            gh_token=self.gh_token,
+            model=None,
+            provider=None,
+        )
+
+        try:
+            return await runner.run()
+        except SubagentError as exc:
+            logger.error(
+                "session_orchestrator: subagent role=%s failed in session=%s: %s",
+                role, self.session_id, exc.message,
+            )
+            return (
+                f"Subagent '{role}' failed: {exc.message}. "
+                "You may retry the delegation or proceed without it."
+            )
+
+    async def _tool_run_audit_scan(
+        self,
+        args: dict[str, Any],
+        session: AgentSession,
+        repo_owner: str,
+        repo_name: str,
+        base_sha: str,
+        staged_patches: dict[str, str],
+        queue: SseQueue,
+    ) -> str:
+        return await tool_run_audit_scan(
+            args=args,
+            session=session,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            base_sha=base_sha,
+            staged_patches=staged_patches,
+            queue=queue,
+            llm=self._llm,
+            gh_token=self.gh_token,
+            db=self.db,
         )
 
     async def _load_session(self) -> AgentSession | None:

@@ -4,6 +4,11 @@
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  // Prod COOP/COEP (WebContainer/SharedArrayBuffer) are served by Workers
+  // Static Assets from out/_headers (authored in public/_headers). The
+  // `assets` table has no `headers` field in wrangler 4.x schema, so headers
+  // live in _headers — not here. This Worker is assets-only (no `main`), so
+  // _headers rules apply to all static-asset responses.
   "assets": {
     "directory": "./out",
     "not_found_handling": "single-page-application"

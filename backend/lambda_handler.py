@@ -12,6 +12,10 @@ Two invocation modes:
    Event has "run_id" key and no "requestContext" → runs handle_failed_run()
    directly. Lambda timeout must be 900s (15 min) to cover full pipeline.
 
+The audit outbox poller is NOT handled here. It runs in a separate function
+(audit_dispatcher_handler) that has no Function URL and no public invoke
+permission, so the only caller is EventBridge.
+
 Cost model (always-free, permanent — not 12-month like EC2):
   Lambda free tier: 1,000,000 requests + 400,000 GB-seconds/month.
   At 10 users / 3 repos / ~20 webhooks/week:
@@ -34,11 +38,11 @@ Security:
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import logging
-import os
+import re
 import uuid as _uuid
+
+from app.self_invocation import KIND_PIPELINE, KIND_REVIEW
 
 # Configure root logger to INFO before any module-level code runs.
 # Python's default root level is WARNING — without this, every logger.info()
@@ -82,6 +86,19 @@ async def _run_pipeline(run_id_str: str) -> None:
     logger.info("lambda_handler: pipeline completed for run_id=%s", run_id)
 
 
+async def _run_audit(audit_id: str, dispatch_fence_token: str) -> bool:
+    from app.services.audit_pipeline import process_audit_job
+
+    logger.info("lambda_handler: audit mode, audit_id=%s", audit_id)
+    completed = await process_audit_job(audit_id, dispatch_fence_token)
+    logger.info(
+        "lambda_handler: audit finished audit_id=%s completed=%s",
+        audit_id,
+        completed,
+    )
+    return completed
+
+
 async def _run_review_pipeline(review_id_str: str) -> None:
     """Run run_code_review_pipeline in async context with a fresh DB session."""
     from app.services.review_orchestrator import run_code_review_pipeline
@@ -97,47 +114,102 @@ async def _run_review_pipeline(review_id_str: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _verify_self_invocation(kind: str, identifier: str, event: dict) -> bool:
+    """Fail closed on any missing secret, import failure, or token mismatch.
+
+    A verification helper that cannot run means the invocation is
+    unauthenticated, and an unauthenticated invocation must not be able to
+    trigger paid LLM pipeline work. There is no dev-mode bypass.
+    """
+    try:
+        from app.self_invocation import verify_self_invocation as _verify
+
+        return _verify(kind, identifier, event.get("token"))
+    except Exception as exc:  # noqa: BLE001 — any failure is an authentication failure
+        logger.warning(
+            "lambda_handler: self-invocation check failed kind=%s error_type=%s",
+            kind,
+            type(exc).__name__,
+        )
+        return False
+
+
 def handler(event: dict, context) -> dict:
     """
-    AWS Lambda handler.
+    AWS Lambda handler for the public Function URL.
 
     Detects invocation mode and dispatches accordingly:
     - HTTP event (API GW / Function URL): Mangum → FastAPI
-    - Pipeline event ({"run_id": "...", "token": "..."}): asyncio.run(handle_failed_run)
-    - Code review event ({"review_id": "...", "token": "..."}): asyncio.run(run_code_review_pipeline)
+    - Audit event ({"audit_id", "dispatch_fence_token", "token"}): bounded worker
+    - Pipeline event ({"run_id", "token"}): asyncio.run(handle_failed_run)
+    - Code review event ({"review_id", "token"}): run_code_review_pipeline
 
-    Pipeline self-invoke is authenticated via HMAC-SHA256 over run_id using
-    GITHUB_WEBHOOK_SECRET (fallback SESSION_SECRET_KEY) to prevent unauthenticated
-    direct InvokeFunction from triggering arbitrary run_id (S-06). The hosting
-    adapter includes the token; direct Invoke without valid token is rejected.
+    All three self-invocation modes are authenticated with the dedicated
+    `audit_self_invoke_secret` via app.self_invocation: the same construction,
+    domain-separated by kind, and required to be non-empty. There is no fallback
+    to the webhook signing or session secret, so leaking either of those cannot
+    be used to trigger pipeline work, and there is no unsigned dispatch branch
+    here — the audit dispatcher runs in its own IAM-only Lambda function
+    (audit_dispatcher_handler) with no Function URL attached.
     """
+    if not isinstance(event, dict):
+        return {"error": "invalid invocation"}
+
+    # The public function must never act as a dispatcher. The outbox poller is a
+    # separate function that only EventBridge can invoke.
+    if "operation" in event and "requestContext" not in event:
+        logger.warning("lambda_handler: rejected operation dispatch attempt")
+        return {"error": "unsupported invocation"}
+
+    if "audit_id" in event and "requestContext" not in event:
+        from app.services.audit_pipeline import verify_audit_self_invocation
+
+        audit_id = event.get("audit_id")
+        dispatch_fence_token = event.get("dispatch_fence_token")
+        if not isinstance(audit_id, str) or not re.fullmatch(
+            r"audit-[0-9a-f]{12}", audit_id, flags=re.ASCII
+        ):
+            return {"error": "unauthorized audit invocation"}
+        try:
+            authorized = verify_audit_self_invocation(
+                audit_id,
+                dispatch_fence_token,
+                event.get("token"),
+            )
+        except Exception as exc:  # noqa: BLE001 — never let auth crash the handler
+            logger.warning(
+                "lambda_handler: audit HMAC check error error_type=%s",
+                type(exc).__name__,
+            )
+            return {"error": "unauthorized audit invocation"}
+        if not authorized:
+            logger.warning("lambda_handler: rejected unauthenticated audit invocation")
+            return {"error": "unauthorized audit invocation"}
+        if not isinstance(dispatch_fence_token, str):
+            return {"error": "unauthorized audit invocation"}
+        logger.info("lambda_handler: received audit invocation audit_id=%s", audit_id)
+        try:
+            completed = asyncio.run(_run_audit(audit_id, dispatch_fence_token))
+            if not completed:
+                return {"error": "audit worker failed", "audit_id": audit_id}
+        except Exception as exc:
+            logger.error(
+                "lambda_handler: audit failed for audit_id=%s error_type=%s",
+                audit_id,
+                type(exc).__name__,
+            )
+            return {"error": "audit worker failed", "audit_id": audit_id}
+        return {"status": "completed", "audit_id": audit_id}
+
     # Pipeline invocation: {"run_id": "...", "token": "..."} without HTTP context
     if "run_id" in event and "requestContext" not in event:
-        run_id_str = event["run_id"]
-        # HMAC verification — fail closed when secret is configured
-        try:
-            # Lazy import settings to avoid import at cold-start when env not set
-            from app.config import settings as _settings
-
-            _hmac_key = getattr(_settings, "github_webhook_secret", None) or getattr(
-                _settings, "session_secret_key", None
+        run_id_str = str(event["run_id"])
+        if not _verify_self_invocation(KIND_PIPELINE, run_id_str, event):
+            logger.warning(
+                "lambda_handler: rejected unauthenticated pipeline invoke for run_id=%s",
+                run_id_str,
             )
-            if _hmac_key:
-                expected = hmac.new(
-                    _hmac_key.encode(), str(run_id_str).encode(), hashlib.sha256
-                ).hexdigest()
-                provided = event.get("token") or ""
-                # Use constant-time compare to prevent timing side-channel
-                if not provided or not hmac.compare_digest(expected, str(provided)):
-                    logger.warning(
-                        "lambda_handler: rejected unauthenticated pipeline invoke for run_id=%s",
-                        run_id_str,
-                    )
-                    return {"error": "unauthorized pipeline invocation", "run_id": run_id_str}
-        except Exception as exc:  # noqa: BLE001 — never let HMAC check crash handler
-            logger.warning("lambda_handler: HMAC check error for run_id=%s: %s", run_id_str, exc)
-            # If settings cannot be loaded, fall through to allow pipeline (dev mode without secret)
-            pass
+            return {"error": "unauthorized pipeline invocation", "run_id": run_id_str}
         logger.info("lambda_handler: received pipeline invocation for run_id=%s", run_id_str)
         try:
             asyncio.run(_run_pipeline(run_id_str))
@@ -151,33 +223,23 @@ def handler(event: dict, context) -> dict:
 
     # Code review invocation: {"review_id": "...", "token": "..."} without HTTP context
     if "review_id" in event and "requestContext" not in event:
-        review_id_str = event["review_id"]
-        try:
-            from app.config import settings as _settings
-
-            _hmac_key = getattr(_settings, "github_webhook_secret", None) or getattr(
-                _settings, "session_secret_key", None
+        review_id_str = str(event["review_id"])
+        if not _verify_self_invocation(KIND_REVIEW, review_id_str, event):
+            logger.warning(
+                "lambda_handler: rejected unauthenticated review invoke for review_id=%s",
+                review_id_str,
             )
-            if _hmac_key:
-                expected = hmac.new(
-                    _hmac_key.encode(), str(review_id_str).encode(), hashlib.sha256
-                ).hexdigest()
-                provided = event.get("token") or ""
-                if not provided or not hmac.compare_digest(expected, str(provided)):
-                    logger.warning(
-                        "lambda_handler: rejected unauthenticated review invoke for review_id=%s",
-                        review_id_str,
-                    )
-                    return {"error": "unauthorized review invocation", "review_id": review_id_str}
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("lambda_handler: HMAC check error for review_id=%s: %s", review_id_str, exc)
-            pass
-        logger.info("lambda_handler: received review invocation for review_id=%s", review_id_str)
+            return {"error": "unauthorized review invocation", "review_id": review_id_str}
+        logger.info(
+            "lambda_handler: received review invocation for review_id=%s", review_id_str
+        )
         try:
             asyncio.run(_run_review_pipeline(review_id_str))
         except Exception as exc:
             logger.exception(
-                "lambda_handler: review pipeline failed for review_id=%s: %s", review_id_str, exc
+                "lambda_handler: review pipeline failed for review_id=%s: %s",
+                review_id_str,
+                exc,
             )
             return {"error": str(exc), "review_id": review_id_str}
         return {"status": "completed", "review_id": review_id_str}

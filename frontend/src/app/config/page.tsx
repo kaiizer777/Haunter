@@ -5,7 +5,6 @@ import { AppLayout } from "@/components/layout/app-layout";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SelectDropdown } from "@/components/ui/select-dropdown";
-import { useAuth } from "@/lib/auth-context";
 import { api, ModelConfigOut, RepoOut, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
@@ -22,7 +21,6 @@ import {
   Check,
   RefreshCw,
   Activity,
-  ShieldAlert,
   ArrowRight,
   Search,
   X,
@@ -42,6 +40,7 @@ const PROVIDER_OPTIONS = [
   { id: "opencode_zen", name: "OpenCode Zen", defaultModel: "nemotron-3.5-lightning-free" },
   { id: "openai", name: "OpenAI", defaultModel: "gpt-4o" },
   { id: "anthropic", name: "Anthropic", defaultModel: "claude-sonnet-4-5" },
+  { id: "groq", name: "Groq", defaultModel: "openai/gpt-oss-120b" },
 ];
 
 const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string }[]> = {
@@ -57,6 +56,11 @@ const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: stri
   anthropic: [
     { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", tag: "SOTA Fixes" },
     { id: "claude-haiku-3-5", name: "Claude Haiku 3.5", tag: "Low Latency" },
+  ],
+  groq: [
+    { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B", tag: "High Reasoning · Fallback" },
+    { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B Versatile", tag: "Fast · Production" },
+    { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B Instant", tag: "Ultra Fast" },
   ],
 };
 
@@ -102,6 +106,16 @@ const PROVIDER_METADATA: Record<
     icon: Sparkles,
     accentText: "text-orange-400",
     badgeClass: "bg-orange-400/10 border-orange-400/30 text-orange-300",
+  },
+  groq: {
+    name: "Groq",
+    tag: "LPU · Ultra-Low Latency",
+    shortBadge: "LPU Speed",
+    description: "Ultra-low-latency LPU inference for rapid CI triage, fallback healing, and high-throughput patch synthesis.",
+    baseUrl: "https://api.groq.com/openai/v1",
+    icon: Gauge,
+    accentText: "text-rose-400",
+    badgeClass: "bg-rose-400/10 border-rose-400/30 text-rose-300",
   },
 };
 
@@ -237,6 +251,36 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     speedCategory: "fast",
     isFree: false,
   },
+  "openai/gpt-oss-120b": {
+    contextWindow: "128k Context",
+    specialty: "Open Reasoning & Multi-Step CI Patch Synthesis",
+    latencyRating: "~340ms TTFT",
+    latencyMs: 340,
+    recommendedRole: "High-Reasoning Fallback",
+    tagColor: "bg-rose-950/60 border-rose-700/60 text-rose-300",
+    speedCategory: "reasoning",
+    isFree: false,
+  },
+  "llama-3.3-70b-versatile": {
+    contextWindow: "128k Context",
+    specialty: "Production Triage & High-Throughput Fix Generation",
+    latencyRating: "~190ms TTFT",
+    latencyMs: 190,
+    recommendedRole: "Production Triage",
+    tagColor: "bg-rose-950/60 border-rose-700/60 text-rose-300",
+    speedCategory: "fast",
+    isFree: false,
+  },
+  "llama-3.1-8b-instant": {
+    contextWindow: "128k Context",
+    specialty: "Ultra-Fast Lint, Config & Unit Test Gating",
+    latencyRating: "~120ms TTFT",
+    latencyMs: 120,
+    recommendedRole: "Ultra-Fast Gating",
+    tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
+    speedCategory: "fast",
+    isFree: false,
+  },
 };
 
 /**
@@ -262,6 +306,9 @@ function formatModelDisplayName(id: string, rawName?: string): string {
     "gpt-4o-mini": "GPT-4o Mini",
     "claude-sonnet-4-5": "Claude Sonnet 4.5",
     "claude-haiku-3-5": "Claude Haiku 3.5",
+    "openai/gpt-oss-120b": "GPT-OSS 120B",
+    "llama-3.3-70b-versatile": "Llama 3.3 70B Versatile",
+    "llama-3.1-8b-instant": "Llama 3.1 8B Instant",
   };
 
   if (KNOWN_NAMES[id]) return KNOWN_NAMES[id];
@@ -313,13 +360,12 @@ function getModelSpec(modelId: string, tag?: string): ModelSpec {
 }
 
 export default function ModelConfigPage() {
-  const { user } = useAuth();
-
   const [repos, setRepos] = useState<RepoOut[]>([]);
   const [selectedScope, setSelectedScope] = useState<"global" | "repo">("global");
   const [selectedRepoId, setSelectedRepoId] = useState<string>("");
 
   const [activeConfig, setActiveConfig] = useState<ModelConfigOut | null>(null);
+  const [globalConfig, setGlobalConfig] = useState<ModelConfigOut | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>("opencode_zen");
   const [selectedModel, setSelectedModel] = useState<string>("nemotron-3.5-lightning-free");
   const [modelOptionsByProvider, setModelOptionsByProvider] = useState<
@@ -331,6 +377,7 @@ export default function ModelConfigPage() {
 
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
@@ -349,6 +396,7 @@ export default function ModelConfigPage() {
             opencode_zen: data.opencode_zen?.length ? data.opencode_zen : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen,
             openai: data.openai?.length ? data.openai : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.openai,
             anthropic: data.anthropic?.length ? data.anthropic : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.anthropic,
+            groq: data.groq?.length ? data.groq : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.groq,
           });
         }
       })
@@ -376,11 +424,21 @@ export default function ModelConfigPage() {
     }
     setError(null);
     try {
-      const repoIdParam = selectedScope === "repo" ? selectedRepoId : undefined;
-      const cfg = await api.getModelConfig(repoIdParam);
-      setActiveConfig(cfg);
-      setSelectedProvider(cfg.provider);
-      setSelectedModel(cfg.model_name);
+      // Always resolve the platform default so repo scope can show
+      // override-vs-inherit badges and offer a 1-click reset.
+      const globalCfg = await api.getModelConfig();
+      setGlobalConfig(globalCfg);
+
+      if (selectedScope === "repo" && selectedRepoId) {
+        const repoCfg = await api.getModelConfig(selectedRepoId);
+        setActiveConfig(repoCfg);
+        setSelectedProvider(repoCfg.provider);
+        setSelectedModel(repoCfg.model_name);
+      } else {
+        setActiveConfig(globalCfg);
+        setSelectedProvider(globalCfg.provider);
+        setSelectedModel(globalCfg.model_name);
+      }
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setError(err.message);
@@ -415,11 +473,21 @@ export default function ModelConfigPage() {
         const payload = {
           provider: selectedProvider,
           model_name: selectedModel,
-          repo_id: selectedScope === "repo" ? selectedRepoId : undefined,
+          repo_id: selectedScope === "repo" ? selectedRepoId || undefined : undefined,
         };
 
         const updated = await api.updateModelConfig(payload);
         setActiveConfig(updated);
+        if (selectedScope === "global") {
+          setGlobalConfig(updated);
+        } else if (selectedRepoId) {
+          // Keep repo override tracking in sync without a full repos refetch.
+          setRepos((prev) =>
+            prev.map((r) =>
+              r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
+            )
+          );
+        }
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 4500);
       } catch (err: unknown) {
@@ -432,7 +500,50 @@ export default function ModelConfigPage() {
     });
   }, [selectedProvider, selectedModel, selectedScope, selectedRepoId]);
 
-  const isGlobalDisabled = selectedScope === "global" && !user?.is_admin;
+  // 1-click "Reset to Global Default": apply the platform default
+  // provider/model onto the selected repo scope.
+  const handleResetToGlobalDefault = useCallback(async () => {
+    if (!globalConfig || !selectedRepoId || isResetting) return;
+    setError(null);
+    setSaveSuccess(false);
+    setIsResetting(true);
+    try {
+      const updated = await api.updateModelConfig({
+        provider: globalConfig.provider,
+        model_name: globalConfig.model_name,
+        repo_id: selectedRepoId,
+      });
+      setActiveConfig(updated);
+      setSelectedProvider(updated.provider);
+      setSelectedModel(updated.model_name);
+      setRepos((prev) =>
+        prev.map((r) =>
+          r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
+        )
+      );
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 4500);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        setError("Failed to reset repo to the global default.");
+      }
+    } finally {
+      setIsResetting(false);
+    }
+  }, [globalConfig, selectedRepoId, isResetting]);
+
+  // Repo scope badge state: custom override vs inheriting platform default.
+  // Value-based comparison so a reset (values equal to global) reads as
+  // inheriting even though a repo-scoped row still exists server-side.
+  const isRepoCustomOverride = useMemo(() => {
+    if (selectedScope !== "repo" || !activeConfig || !globalConfig) return false;
+    return (
+      activeConfig.provider !== globalConfig.provider ||
+      activeConfig.model_name !== globalConfig.model_name
+    );
+  }, [selectedScope, activeConfig, globalConfig]);
 
   const isDirty = useMemo(() => {
     if (!activeConfig) return false;
@@ -453,7 +564,7 @@ export default function ModelConfigPage() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
-        if (!isGlobalDisabled && !isPending && isDirty) {
+        if (!isPending && isDirty) {
           handleSaveConfig();
         }
       } else if (e.key === "/") {
@@ -466,7 +577,7 @@ export default function ModelConfigPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isGlobalDisabled, isPending, isDirty, handleSaveConfig, fetchActiveConfig]);
+  }, [isPending, isDirty, handleSaveConfig, fetchActiveConfig]);
 
   const handleDiscardChanges = () => {
     if (activeConfig) {
@@ -541,7 +652,7 @@ export default function ModelConfigPage() {
           )}
 
           {/* Direct Topbar Save button when configuration is dirty */}
-          {isDirty && !isGlobalDisabled && (
+          {isDirty && (
             <Button
               size="sm"
               onClick={handleSaveConfig}
@@ -697,11 +808,6 @@ export default function ModelConfigPage() {
                 >
                   <Globe className="h-3.5 w-3.5 text-amber-400" />
                   <span>Global Platform Default</span>
-                  {!user?.is_admin && (
-                    <span className="ml-1 rounded bg-zinc-900 border border-zinc-700 px-1.5 py-0.2 text-[10px] text-zinc-400 font-mono">
-                      Admin
-                    </span>
-                  )}
                 </button>
 
                 <button
@@ -725,53 +831,47 @@ export default function ModelConfigPage() {
               </div>
             </div>
 
-            {/* Scope Explainer / Status Badge */}
-            <div className="flex items-center gap-2">
-              <span
-                className={cn(
-                  "text-xs font-mono font-medium px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none",
-                  user?.is_admin
-                    ? "bg-emerald-950/40 border-emerald-800/50 text-emerald-400"
-                    : "bg-zinc-900/90 border-zinc-800 text-zinc-400"
-                )}
-              >
-                {user?.is_admin ? (
-                  <>
-                    <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
-                    <span>Admin Superuser</span>
-                  </>
-                ) : (
-                  <>
-                    <Lock className="h-3.5 w-3.5 text-zinc-400" />
-                    <span>Tenant Access (Repo Config Allowed)</span>
-                  </>
-                )}
-              </span>
+            {/* Scope Status Badges: override vs inherit + 1-click reset */}
+            <div className="flex flex-wrap items-center gap-2">
+              {selectedScope === "global" ? (
+                <span className="text-xs font-mono font-medium px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none bg-emerald-950/40 border-emerald-800/50 text-emerald-400">
+                  <Globe className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Global Default · Applies to all repos without overrides</span>
+                </span>
+              ) : isRepoCustomOverride ? (
+                <>
+                  <span className="text-xs font-mono font-semibold px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none bg-cyan-950/50 border-cyan-700/60 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.18)]">
+                    <GitBranch className="h-3.5 w-3.5 text-cyan-300" />
+                    <span>Custom Repo Override</span>
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleResetToGlobalDefault}
+                    disabled={isResetting || loading || !globalConfig || !selectedRepoId}
+                    className="h-7.5 px-3 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border border-zinc-700/60 cursor-pointer"
+                    title={
+                      globalConfig
+                        ? `Reset to global default (${formatModelDisplayName(globalConfig.model_name)})`
+                        : "Reset to global default"
+                    }
+                  >
+                    {isResetting ? (
+                      <RefreshCw className="h-3 w-3 mr-1.5 animate-spin" />
+                    ) : (
+                      <RotateCcw className="h-3 w-3 mr-1.5" />
+                    )}
+                    <span>{isResetting ? "Resetting..." : "Reset to Global Default"}</span>
+                  </Button>
+                </>
+              ) : (
+                <span className="text-xs font-mono font-medium px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none bg-zinc-900/90 border-zinc-700/70 text-zinc-300">
+                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Inheriting Platform Default</span>
+                </span>
+              )}
             </div>
           </div>
-
-          {/* Elevated Non-admin notice for global scope */}
-          {isGlobalDisabled && (
-            <div className="relative z-10 rounded-[8px] border border-amber-500/30 bg-gradient-to-r from-amber-950/30 via-zinc-900/60 to-zinc-900/30 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs sm:text-sm text-zinc-300">
-              <div className="flex items-start sm:items-center gap-3">
-                <ShieldAlert className="h-5 w-5 text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
-                <div className="space-y-0.5">
-                  <span className="font-semibold text-zinc-100">Global Cluster Defaults Are Read-Only</span>
-                  <p className="text-xs text-zinc-400">
-                    Switch to <strong>Repository Override</strong> to customize model routing specifically for your own repos.
-                  </p>
-                </div>
-              </div>
-              <Button
-                size="sm"
-                onClick={() => setSelectedScope("repo")}
-                className="bg-amber-400 text-zinc-950 hover:bg-amber-300 font-semibold text-xs shrink-0 self-start sm:self-auto cursor-pointer"
-              >
-                <span>Switch to Repo Override</span>
-                <ArrowRight className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          )}
 
           {/* Repo SelectDropdown (when Repo Override is selected) */}
           {selectedScope === "repo" && (
@@ -784,27 +884,50 @@ export default function ModelConfigPage() {
                   No connected repositories found. Connect a repository first in the Repositories tab.
                 </div>
               ) : (
-                <div className="flex-1 flex flex-col sm:flex-row sm:items-center gap-3">
-                  <SelectDropdown
-                    value={selectedRepoId}
-                    onChange={(val) => setSelectedRepoId(val)}
-                    options={repos.map((r) => ({
-                      value: r.id,
-                      label: `${r.owner}/${r.name}`,
-                      icon: <FolderGit2 className="h-3.5 w-3.5 text-amber-400/80" />,
-                      description: `Default branch: ${r.default_branch || "main"}${r.language_hint ? ` · ${r.language_hint}` : ""}`,
-                    }))}
-                    placeholder="Select repository..."
-                    buttonClassName="min-w-[260px] h-9 font-mono text-xs"
-                    searchable={repos.length > 5}
-                  />
-                  {currentRepo && (
-                    <span className="text-xs text-zinc-400 font-mono whitespace-nowrap">
-                      Branch: <strong className="text-zinc-200">{currentRepo.default_branch || "main"}</strong>
-                      {currentRepo.language_hint && (
-                        <> · Language: <strong className="text-amber-400/90">{currentRepo.language_hint}</strong></>
+                <div className="flex-1 flex flex-col gap-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                    <SelectDropdown
+                      value={selectedRepoId}
+                      onChange={(val) => setSelectedRepoId(val)}
+                      options={repos.map((r) => ({
+                        value: r.id,
+                        label: `${r.owner}/${r.name}`,
+                        icon: <FolderGit2 className="h-3.5 w-3.5 text-amber-400/80" />,
+                        description: `Default branch: ${r.default_branch || "main"}${r.language_hint ? ` · ${r.language_hint}` : ""}`,
+                      }))}
+                      placeholder="Select repository..."
+                      buttonClassName="min-w-[260px] h-9 font-mono text-xs"
+                      searchable={repos.length > 5}
+                    />
+                    {currentRepo && (
+                      <span className="text-xs text-zinc-400 font-mono whitespace-nowrap">
+                        Branch: <strong className="text-zinc-200">{currentRepo.default_branch || "main"}</strong>
+                        {currentRepo.language_hint && (
+                          <> · Language: <strong className="text-amber-400/90">{currentRepo.language_hint}</strong></>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                  {currentRepo && activeConfig && globalConfig && (
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+                      {isRepoCustomOverride ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-cyan-700/60 bg-cyan-950/50 px-2.5 py-1 text-cyan-300">
+                          <GitBranch className="h-3 w-3" />
+                          <span>
+                            {currentRepo.owner}/{currentRepo.name} uses custom override:{" "}
+                            <strong>{formatModelDisplayName(activeConfig.model_name)}</strong>
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-zinc-700/70 bg-zinc-900/80 px-2.5 py-1 text-zinc-300">
+                          <Globe className="h-3 w-3 text-zinc-400" />
+                          <span>
+                            {currentRepo.owner}/{currentRepo.name} inherits platform default:{" "}
+                            <strong className="text-zinc-100">{formatModelDisplayName(globalConfig.model_name)}</strong>
+                          </span>
+                        </span>
                       )}
-                    </span>
+                    </div>
                   )}
                 </div>
               )}
@@ -1034,16 +1157,16 @@ export default function ModelConfigPage() {
                     <div
                       key={m.id}
                       role="button"
-                      tabIndex={isGlobalDisabled || isPending ? -1 : 0}
+                      tabIndex={isPending ? -1 : 0}
                       aria-pressed={isSelected}
-                      aria-disabled={isGlobalDisabled || isPending}
+                      aria-disabled={isPending}
                       onClick={() => {
-                        if (!isGlobalDisabled && !isPending) {
+                        if (!isPending) {
                           setSelectedModel(m.id);
                         }
                       }}
                       onKeyDown={(e) => {
-                        if ((e.key === "Enter" || e.key === " ") && !isGlobalDisabled && !isPending) {
+                        if ((e.key === "Enter" || e.key === " ") && !isPending) {
                           e.preventDefault();
                           setSelectedModel(m.id);
                         }
@@ -1053,7 +1176,7 @@ export default function ModelConfigPage() {
                         isSelected
                           ? "border-t border-t-amber-400 border-x border-x-amber-500/60 border-b border-b-amber-950 bg-gradient-to-b from-[#1a140b]/95 via-[#130f08]/95 to-[#0c0a05]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_0_24px_rgba(245,158,11,0.22),0_8px_24px_rgba(0,0,0,0.5)] ring-1 ring-amber-400/50"
                           : "border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_12px_28px_rgba(0,0,0,0.5)]",
-                        !isGlobalDisabled ? "cursor-pointer active:translate-y-[0.5px]" : "cursor-default"
+                        "cursor-pointer active:translate-y-[0.5px]"
                       )}
                     >
                       {/* Top Specular Sheen (identical to bottom cards) */}
@@ -1156,11 +1279,6 @@ export default function ModelConfigPage() {
                               <Check className="h-3.5 w-3.5 text-amber-300 stroke-[2.5]" />
                               <span>Selected</span>
                             </span>
-                          ) : isGlobalDisabled ? (
-                            <span className="flex items-center gap-1 text-zinc-500 font-normal">
-                              <Lock className="h-3 w-3 text-zinc-500" />
-                              <span>Read-Only</span>
-                            </span>
                           ) : (
                             <span>Select Engine →</span>
                           )}
@@ -1190,11 +1308,11 @@ export default function ModelConfigPage() {
               )}
               <Button
                 onClick={handleSaveConfig}
-                disabled={isGlobalDisabled || isPending || !isDirty}
+                disabled={isPending || !isDirty}
                 size="sm"
                 className={cn(
                   "relative px-5 py-2 font-mono font-bold text-xs rounded-[6px] transition-all cursor-pointer select-none",
-                  isDirty && !isGlobalDisabled
+                  isDirty
                     ? "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px]"
                     : "bg-zinc-800/90 text-zinc-400 hover:bg-zinc-800 border border-zinc-700/60"
                 )}
@@ -1327,7 +1445,7 @@ export default function ModelConfigPage() {
         </div>
 
         {/* FLOATING ACTION DOCK: When changes are dirty, provide instant saving anywhere on the page */}
-        {isDirty && !isGlobalDisabled && (
+        {isDirty && (
           <div className="fixed bottom-6 inset-x-0 z-40 flex justify-center px-4 pointer-events-none animate-in fade-in slide-in-from-bottom-5 duration-200">
             <div className="pointer-events-auto flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-6 max-w-2xl w-full rounded-2xl border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#18181f]/95 via-[#131317]/95 to-[#0d0d11]/95 p-3.5 sm:px-5 sm:py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_12px_32px_rgba(0,0,0,0.65),0_0_24px_rgba(245,158,11,0.18)] backdrop-blur-md ring-1 ring-amber-400/30">
               <div className="flex items-center gap-3 text-xs sm:text-sm">

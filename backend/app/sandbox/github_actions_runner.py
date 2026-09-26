@@ -59,6 +59,7 @@ from typing import Any, Optional
 
 import httpx
 
+from app.log_hygiene import sanitize_log_value
 from app.sandbox.mirror import (
     detect_language,
     get_or_create_test_mirror,
@@ -497,11 +498,16 @@ async def _get_workflow_run_log_tail(
         if not jobs:
             return f"Workflow run #{run_id}: no job details available."
 
-        # Summarise failed jobs/steps.
+        # Summarise failed jobs/steps. Job and step names are chosen by whoever
+        # authored the workflow file and travel into `failure_reason`, which is
+        # stored on the attempt and re-fed to a model — so they are sanitized at
+        # the boundary rather than trusted because GitHub returned them.
         lines: list[str] = []
         failed_job_id: Optional[int] = None
         for job in jobs:
-            job_name = job.get("name", f"job#{job.get('id')})")
+            job_name = sanitize_log_value(
+                job.get("name", f"job#{job.get('id')}"), 200
+            )
             conclusion = job.get("conclusion") or "unknown"
             lines.append(f"Job '{job_name}': {conclusion}")
             if conclusion == "failure" and failed_job_id is None:
@@ -510,7 +516,8 @@ async def _get_workflow_run_log_tail(
                 step_conclusion = step.get("conclusion") or step.get("status", "")
                 if step_conclusion not in ("success", "skipped", ""):
                     lines.append(
-                        f"  Step '{step.get('name', '?')}': {step_conclusion}"
+                        f"  Step '{sanitize_log_value(step.get('name', '?'), 200)}': "
+                        f"{sanitize_log_value(step_conclusion, 40)}"
                     )
 
         if failed_job_id:

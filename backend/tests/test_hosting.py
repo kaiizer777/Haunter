@@ -18,6 +18,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -63,26 +64,41 @@ def _make_user(admin: bool = False) -> User:
 
 @pytest.mark.asyncio
 async def test_aws_adapter_invokes_lambda_async():
-    """AWSHostingAdapter should call boto3 lambda invoke with InvocationType='Event'."""
+    """AWSHostingAdapter should call boto3 lambda invoke with InvocationType='Event'.
+
+    The payload is signed with the dedicated self-invocation secret (Phase 5.2
+    fail-closed), so the secret has to be configured for the invoke to happen at
+    all — an unconfigured secret raises instead of invoking Lambda unsigned.
+    """
     from fastapi import BackgroundTasks
+
+    from app.self_invocation import KIND_PIPELINE, self_invocation_token
 
     run_id = uuid.uuid4()
     bg = BackgroundTasks()
+    secret = "hosting-test-self-invoke-secret"
 
     mock_boto_client = MagicMock()
     mock_boto_client.invoke.return_value = {"StatusCode": 202}
 
-    with patch("app.config.settings.aws_lambda_function_name", "haunter-test"):
-        with patch("boto3.client", return_value=mock_boto_client):
-            adapter = AWSHostingAdapter()
-            await adapter.schedule_pipeline(run_id, bg)
+    with (
+        patch("app.config.settings.aws_lambda_function_name", "haunter-test"),
+        patch("app.config.settings.audit_self_invoke_secret", secret),
+        patch("boto3.client", return_value=mock_boto_client),
+    ):
+        adapter = AWSHostingAdapter()
+        await adapter.schedule_pipeline(run_id, bg)
 
     mock_boto_client.invoke.assert_called_once()
     call_kwargs = mock_boto_client.invoke.call_args
     assert call_kwargs.kwargs.get("InvocationType") == "Event" or (
         len(call_kwargs.args) > 1 and "Event" in str(call_kwargs)
     )
-    assert str(run_id) in call_kwargs.kwargs.get("Payload", b"").decode()
+    payload = json.loads(call_kwargs.kwargs["Payload"])
+    assert payload["run_id"] == str(run_id)
+    assert payload["token"] == self_invocation_token(
+        KIND_PIPELINE, str(run_id), secret
+    )
 
     # Should NOT have added anything to background_tasks
     assert len(bg.tasks) == 0

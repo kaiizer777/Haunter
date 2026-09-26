@@ -24,11 +24,12 @@ export interface SwitchProps {
   disabled?: boolean;
   id?: string;
   className?: string;
+  "aria-label"?: string;
 }
 
 export const Switch = React.forwardRef<HTMLButtonElement, SwitchProps>(
   function Switch(
-    { checked, onCheckedChange, label, description, tooltip, disabled, id, className },
+    { checked, onCheckedChange, label, description, tooltip, disabled, id, className, "aria-label": ariaLabel },
     ref,
   ) {
     const handleClick = React.useCallback(() => {
@@ -48,10 +49,11 @@ export const Switch = React.forwardRef<HTMLButtonElement, SwitchProps>(
     const button = (
       <button
         ref={ref}
+        id={id}
         type="button"
         role="switch"
         aria-checked={checked}
-        aria-label={typeof label === "string" ? label : undefined}
+        aria-label={ariaLabel ?? (typeof label === "string" ? label : undefined)}
         title={tooltip}
         disabled={disabled}
         onClick={handleClick}

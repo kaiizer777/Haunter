@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # Used by backend/app/github_client.py. Never logged or stored in run rows.
     github_token: Optional[str] = None
 
+    github_auditor_app_id: Optional[str] = None
+    github_auditor_app_private_key: Optional[str] = None
+    audit_self_invoke_secret: Optional[str] = None
+
     # Where to redirect after a successful OAuth callback.
     frontend_url: str
 
@@ -94,6 +98,18 @@ class Settings(BaseSettings):
         default="openai/gpt-oss-120b",
         description="Default Groq model name from env",
     )
+
+    # OpenAI Provider Configuration (Phase 3.2 Issue 3).
+    # OPENAI_API_KEY / OPENAI_BASE_URL are loaded via environment variables or .env.
+    # Injected per request, never logged or hardcoded in source code.
+    openai_api_key: Optional[str] = None
+    openai_base_url: str = "https://api.openai.com/v1"
+
+    # Anthropic Provider Configuration (Phase 3.2 Issue 3).
+    # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL are loaded via environment variables or .env.
+    # Injected per request, never logged or hardcoded in source code.
+    anthropic_api_key: Optional[str] = None
+    anthropic_base_url: str = "https://api.anthropic.com/v1"
 
     # Optional admin user UUID string for global model config switcher authorization
     admin_user_id: Optional[str] = None

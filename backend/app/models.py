@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, Integer, String, Text, UUID, UniqueConstraint, Float
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Float, ForeignKey, Index, Integer, String, Text, UUID, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -27,6 +27,9 @@ class User(Base):
     """
 
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'admin')", name="check_user_role"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
@@ -72,6 +75,7 @@ class Repo(Base):
     default_branch: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     language_hint: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     github_install_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    auditor_github_install_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     active_model_config_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True
     )
@@ -83,6 +87,15 @@ class Repo(Base):
     runs: Mapped[list["Run"]] = relationship("Run", back_populates="repo", cascade="all, delete-orphan")
     code_reviews: Mapped[list["CodeReview"]] = relationship(
         "CodeReview", back_populates="repo", cascade="all, delete-orphan"
+    )
+    audit_jobs: Mapped[list["AuditJob"]] = relationship(
+        "AuditJob", back_populates="repo", cascade="all, delete-orphan"
+    )
+    settings: Mapped[Optional["RepoSettings"]] = relationship(
+        "RepoSettings",
+        back_populates="repo",
+        cascade="all, delete-orphan",
+        uselist=False,
     )
     agent_sessions: Mapped[list["AgentSession"]] = relationship(
         "AgentSession", back_populates="repo", cascade="all, delete-orphan"
@@ -189,7 +202,22 @@ class Attempt(Base):
 
 
 
+class ModelConfigScope(StrEnum):
+    GLOBAL = "global"
+    REPO = "repo"
+
+
 class ModelConfig(Base):
+    """
+    LLM model configuration with per-repo vs global isolation (Phase 3.1).
+
+    - scope='global': platform-wide default. Only these rows are deactivated
+      by PUT /config/model global updates and returned by global lookups.
+    - scope='repo': per-repo override, optionally pinned to repo_id/user_id.
+      Global updates never touch these rows; repo resolution prefers them
+      and falls back to the global active row.
+    """
+
     __tablename__ = "model_configs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -197,8 +225,23 @@ class ModelConfig(Base):
     model_name: Mapped[str] = mapped_column(String(255), nullable=False, default="nemotron-3.5-lightning-free")
     base_url: Mapped[str] = mapped_column(String(255), nullable=False, default="https://opencode.ai/zen/v1")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=ModelConfigScope.GLOBAL.value, server_default="global"
+    )
+    repo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repos.id", ondelete="SET NULL"), nullable=True
+    )
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        Index("ix_model_configs_scope", "scope"),
+        Index("ix_model_configs_repo_id", "repo_id"),
+        Index("ix_model_configs_user_id", "user_id"),
     )
 
 
@@ -268,6 +311,217 @@ class CodeReview(Base):
     )
 
     repo: Mapped["Repo"] = relationship("Repo", back_populates="code_reviews")
+
+
+class RepoSettings(Base):
+    __tablename__ = "repo_settings"
+    __table_args__ = (
+        UniqueConstraint("repo_id", name="repo_settings_repo_id_key"),
+        Index("ix_repo_settings_repo_id", "repo_id", unique=True),
+        CheckConstraint(
+            "min_confidence_threshold >= 0 AND min_confidence_threshold <= 100",
+            name="ck_repo_settings_confidence_bounds",
+        ),
+        CheckConstraint(
+            "max_cost_per_run_cents >= 0",
+            name="ck_repo_settings_cost_bounds",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("repos.id", ondelete="CASCADE"), nullable=False
+    )
+    preset: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="autonomous", server_default="autonomous"
+    )
+    enable_auto_fix: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    enable_auditor_mode: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    enable_sandbox_verification: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    enable_pr_comments: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    enable_live_sessions: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    enable_webcontainer_preview: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    enable_subagents: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+
+    audit_trigger_on_pr: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    audit_trigger_on_ci_failure: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    audit_trigger_on_ci_success: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    audit_trigger_on_manual_mention: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+
+    allowed_branches: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=lambda: ["main", "master"], server_default='["main", "master"]'
+    )
+    ignore_draft_prs: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    min_confidence_threshold: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=80, server_default="80"
+    )
+    max_cost_per_run_cents: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100, server_default="100"
+    )
+    model_override_scope: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="inherit", server_default="inherit"
+    )
+
+    # Monotonic counter bumped whenever trigger semantics change. Persisted on
+    # each audit job so a replayed delivery under changed settings is detected
+    # as a payload conflict instead of silently deduplicating.
+    settings_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    repo: Mapped["Repo"] = relationship("Repo", back_populates="settings")
+
+    @property
+    def preset_profile(self) -> str:
+        return self.preset
+
+    @preset_profile.setter
+    def preset_profile(self, val: str) -> None:
+        self.preset = val
+
+    @property
+    def enable_auto_fixer(self) -> bool:
+        return self.enable_auto_fix
+
+    @enable_auto_fixer.setter
+    def enable_auto_fixer(self, val: bool) -> None:
+        self.enable_auto_fix = val
+
+    @property
+    def enable_ci_sandbox(self) -> bool:
+        return self.enable_sandbox_verification
+
+    @enable_ci_sandbox.setter
+    def enable_ci_sandbox(self, val: bool) -> None:
+        self.enable_sandbox_verification = val
+
+    @property
+    def monitored_branches(self) -> list[str]:
+        return self.allowed_branches
+
+    @monitored_branches.setter
+    def monitored_branches(self, val: list[str]) -> None:
+        self.allowed_branches = val
+
+
+class AuditJob(Base):
+    __tablename__ = "audit_jobs"
+
+    audit_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    repo_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("repos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # SHA-256 over the canonical audit payload. A replayed delivery_id whose
+    # payload does not hash to this value is a conflict, not a duplicate.
+    delivery_fingerprint: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default=""
+    )
+    settings_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    audit_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    ref: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    pr_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    base_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    head_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    workflow_run_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="queued", server_default="queued"
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    dispatch_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # HMAC fence for the current dispatch attempt. Present only while the job
+    # is in `dispatching`; cleared on release, recovery, or processing claim.
+    dispatch_fence_token: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    last_error: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    repo: Mapped["Repo"] = relationship("Repo", back_populates="audit_jobs")
+
+    __table_args__ = (
+        UniqueConstraint("delivery_id", name="uq_audit_jobs_delivery_id"),
+        CheckConstraint(
+            "audit_type IN ('pr_audit', 'ci_failure_audit', 'ci_success_audit', 'manual_audit')",
+            name="ck_audit_jobs_type",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'dispatching', 'running', 'completed', 'failed', 'skipped_no_diff')",
+            name="ck_audit_jobs_status",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_audit_jobs_attempts"),
+        CheckConstraint("dispatch_attempts >= 0", name="ck_audit_jobs_dispatch_attempts"),
+        CheckConstraint("settings_version >= 1", name="ck_audit_jobs_settings_version"),
+        CheckConstraint(
+            "length(delivery_fingerprint) = 64",
+            name="ck_audit_jobs_delivery_fingerprint",
+        ),
+        CheckConstraint(
+            "status NOT IN ('queued', 'dispatching', 'running') "
+            "OR pr_number IS NULL "
+            "OR (base_sha IS NOT NULL AND head_sha IS NOT NULL)",
+            name="ck_audit_jobs_pr_endpoints",
+        ),
+        CheckConstraint(
+            "status <> 'dispatching' OR dispatch_fence_token IS NOT NULL",
+            name="ck_audit_jobs_dispatch_fence",
+        ),
+        Index("ix_audit_jobs_repo_status", "repo_id", "status"),
+        Index("ix_audit_jobs_dispatch_queue", "status", "next_attempt_at"),
+        Index("ix_audit_jobs_lease_expires_at", "lease_expires_at"),
+        Index("ix_audit_jobs_workflow_run_id", "workflow_run_id"),
+    )
 
 
 class AgentSession(Base):

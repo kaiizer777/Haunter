@@ -75,6 +75,7 @@ describe("sidebar.tsx", () => {
     const sessionsLink = screen.getByRole("link", { name: /live sessions/i });
     const runsLink = screen.getByRole("link", { name: /runs/i });
     const reposLink = screen.getByRole("link", { name: /repositories/i });
+    const settingsLink = screen.getByRole("link", { name: /^settings$/i });
     const configLink = screen.getByRole("link", { name: /model config/i });
     const evalLink = screen.getByRole("link", { name: /ai reliability & evals/i });
 
@@ -82,6 +83,7 @@ describe("sidebar.tsx", () => {
     expect(runsLink).toHaveAttribute("href", "/runs");
     expect(within(runsLink).queryByText("Live")).not.toBeInTheDocument();
     expect(reposLink).toHaveAttribute("href", "/repos");
+    expect(settingsLink).toHaveAttribute("href", "/settings");
     expect(configLink).toHaveAttribute("href", "/config");
     expect(evalLink).toHaveAttribute("href", "/eval");
     expect(within(evalLink).queryByText("Live")).not.toBeInTheDocument();
@@ -189,6 +191,24 @@ describe("sidebar.tsx", () => {
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "4",
+        metaKey: true,
+        bubbles: true,
+      })
+    );
+
+    expect(clickSpy).toHaveBeenCalled();
+    await screen.findByTitle("claude-sonnet-4-5");
+  });
+
+  it("triggers settings navigation on keyboard shortcut 7", async () => {
+    render(<Sidebar />);
+
+    const settingsLink = screen.getByRole("link", { name: /^settings$/i });
+    const clickSpy = vi.spyOn(settingsLink, "click");
+
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "7",
         metaKey: true,
         bubbles: true,
       })

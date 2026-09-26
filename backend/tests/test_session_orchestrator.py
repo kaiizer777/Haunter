@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import uuid
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -408,4 +408,144 @@ def test_prune_conversation_history_always_keeps_latest_turn() -> None:
     assert pruned[0]["role"] == "user"
     assert pruned[0]["content"] == "X" * 1000
     assert pruned[1]["role"] == "assistant"
+
+
+# ---------------------------------------------------------------------------
+# Test 7-10: invoke_subagent orchestration (future.md §1.4.5)
+# ---------------------------------------------------------------------------
+
+
+def _make_orchestrator_for_subagent_tests():
+    from app.services.session_orchestrator import SessionOrchestrator
+
+    orch = SessionOrchestrator(
+        session_id=uuid.uuid4(),
+        db=MagicMock(),
+        gh_token=None,
+    )
+    orch._llm = AsyncMock()
+    return orch
+
+
+def _make_subagent_context():
+    session = MagicMock()
+    session.staged_patches = {}
+    queue = AsyncMock()
+    return session, queue
+
+
+@pytest.mark.asyncio
+async def test_invoke_subagent_dispatches_runner() -> None:
+    """
+    SubagentRunner.run mocked to return a fixed summary; orchestrator
+    tool_result contains that exact summary.
+    """
+    orch = _make_orchestrator_for_subagent_tests()
+    session, queue = _make_subagent_context()
+    staged_patches: dict[str, str] = {}
+    fixed_summary = "Navigator summary: auth lives in src/auth.py."
+
+    mock_runner = MagicMock()
+    mock_runner.run = AsyncMock(return_value=fixed_summary)
+
+    with patch(
+        "app.services.session_tools.subagents.SubagentRunner",
+        return_value=mock_runner,
+    ):
+        result = await orch._dispatch_tool(
+            tool_name="invoke_subagent",
+            args={"role": "repo_navigator", "task": "Map the auth module."},
+            repo_owner="test-org",
+            repo_name="test-repo",
+            base_sha="a" * 40,
+            staged_patches=staged_patches,
+            queue=queue,
+            session=session,
+        )
+
+    assert fixed_summary in result
+    mock_runner.run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_invoke_subagent_unknown_role() -> None:
+    """
+    role="totally_made_up" → error string returned, no exception raised.
+    """
+    orch = _make_orchestrator_for_subagent_tests()
+    session, queue = _make_subagent_context()
+
+    result = await orch._dispatch_tool(
+        tool_name="invoke_subagent",
+        args={"role": "totally_made_up", "task": "Do something."},
+        repo_owner="test-org",
+        repo_name="test-repo",
+        base_sha="a" * 40,
+        staged_patches={},
+        queue=queue,
+        session=session,
+    )
+
+    assert "Error: unknown role" in result
+    assert "totally_made_up" in result
+
+
+@pytest.mark.asyncio
+async def test_invoke_subagent_empty_task() -> None:
+    """
+    Empty task → error string returned, no exception raised.
+    """
+    orch = _make_orchestrator_for_subagent_tests()
+    session, queue = _make_subagent_context()
+
+    result = await orch._dispatch_tool(
+        tool_name="invoke_subagent",
+        args={"role": "repo_navigator", "task": "   "},
+        repo_owner="test-org",
+        repo_name="test-repo",
+        base_sha="a" * 40,
+        staged_patches={},
+        queue=queue,
+        session=session,
+    )
+
+    assert "Error: task must not be empty." in result
+
+
+@pytest.mark.asyncio
+async def test_invoke_subagent_subagent_error_is_soft() -> None:
+    """
+    SubagentRunner.run raises SubagentError → orchestrator returns a graceful
+    error string instead of raising, so the parent loop can continue.
+    """
+    from app.services.session_tools.subagents import SubagentError
+
+    orch = _make_orchestrator_for_subagent_tests()
+    session, queue = _make_subagent_context()
+    staged_patches: dict[str, str] = {}
+
+    mock_runner = MagicMock()
+    mock_runner.run = AsyncMock(
+        side_effect=SubagentError("repo_navigator", "LLM unavailable")
+    )
+
+    with patch(
+        "app.services.session_tools.subagents.SubagentRunner",
+        return_value=mock_runner,
+    ):
+        result = await orch._dispatch_tool(
+            tool_name="invoke_subagent",
+            args={"role": "repo_navigator", "task": "Map the auth module."},
+            repo_owner="test-org",
+            repo_name="test-repo",
+            base_sha="a" * 40,
+            staged_patches=staged_patches,
+            queue=queue,
+            session=session,
+        )
+
+    # Soft error: graceful string, no exception propagated.
+    assert "Subagent 'repo_navigator' failed" in result
+    assert "LLM unavailable" in result
+    assert "proceed without it" in result
 

@@ -181,6 +181,106 @@ async def test_get_active_model_config_repo_not_found_or_no_config(
 
 
 @pytest.mark.asyncio
+async def test_get_active_model_config_scoped_repo_lookup_first(
+    db: AsyncSession,
+    user_factory,
+) -> None:
+    """Phase 3.1: scope='repo' row pinned by repo_id wins; global is fallback.
+
+    Covers both resolution paths:
+    - direct scoped lookup (scope='repo' + repo_id) even when
+      repos.active_model_config_id is NULL,
+    - global fallback when no repo row exists.
+    """
+    await truncate_all(db)
+
+    global_cfg = ModelConfig(
+        provider="opencode_zen",
+        model_name="global-active-free",
+        base_url="https://global.endpoint/v1",
+        is_active=True,
+        scope="global",
+    )
+    db.add(global_cfg)
+    await db.commit()
+
+    user = await user_factory(github_id=9881, username="scoped_cfg_user")
+    repo = Repo(user_id=user.id, owner="test-owner", name="scoped-repo")
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    scoped_cfg = ModelConfig(
+        provider="groq",
+        model_name="llama-3.3-70b-versatile",
+        base_url="https://api.groq.com/openai/v1",
+        is_active=True,
+        scope="repo",
+        repo_id=repo.id,
+        user_id=user.id,
+    )
+    db.add(scoped_cfg)
+    await db.commit()
+
+    resolved_repo = await get_active_model_config(db=db, repo_id=repo.id)
+    assert resolved_repo.provider == "groq"
+    assert resolved_repo.model_name == "llama-3.3-70b-versatile"
+
+    resolved_global = await get_active_model_config(db=db, repo_id=None)
+    assert resolved_global.model_name == "global-active-free"
+
+
+@pytest.mark.asyncio
+async def test_get_active_model_config_global_ignores_repo_scope(
+    db: AsyncSession,
+    user_factory,
+) -> None:
+    """Phase 3.1: global lookup never returns a repo-scoped row.
+
+    Regression: without the scope discriminator the newest active row
+    (a repo override) could leak into the platform default.
+    """
+    await truncate_all(db)
+
+    global_cfg = ModelConfig(
+        provider="opencode_zen",
+        model_name="global-active-free",
+        base_url="https://global.endpoint/v1",
+        is_active=True,
+        scope="global",
+        created_at=datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    db.add(global_cfg)
+    await db.commit()
+
+    user = await user_factory(github_id=9882, username="leak_check_user")
+    repo = Repo(user_id=user.id, owner="test-owner", name="leak-repo")
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    # Newer repo override — must NOT leak into the global resolution.
+    newer_repo_cfg = ModelConfig(
+        provider="openai",
+        model_name="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        is_active=True,
+        scope="repo",
+        repo_id=repo.id,
+        user_id=user.id,
+        created_at=datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    db.add(newer_repo_cfg)
+    await db.commit()
+
+    resolved_global = await get_active_model_config(db=db, repo_id=None)
+    assert resolved_global.model_name == "global-active-free"
+
+    resolved_repo = await get_active_model_config(db=db, repo_id=repo.id)
+    assert resolved_repo.model_name == "gpt-4o"
+
+
+@pytest.mark.asyncio
 async def test_get_active_model_config_db_exception_fallback() -> None:
     failing_db = AsyncMock(spec=AsyncSession)
     failing_db.execute.side_effect = RuntimeError("Database connection died")

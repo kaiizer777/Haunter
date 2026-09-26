@@ -11,7 +11,7 @@ Wire format per spec:
     data: <json_string>\\n
     \\n
 
-Allowed event names: thought | tool_call | file_diff | sandbox_status | terminal_output | error | done
+Allowed event names: thought | tool_call | file_diff | sandbox_status | sandbox_queued | sandbox_progress | terminal_output | plan_update | clarification_requested | checkpoint_created | checkpoint_restored | subagent_start | subagent_done | error | done
 
 Security:
   - Never emits raw exception objects or internal paths to the stream.
@@ -43,11 +43,18 @@ _ALLOWED_EVENTS: frozenset[str] = frozenset(
         "tool_call",
         "file_diff",
         "sandbox_status",
+        "sandbox_queued",
+        "sandbox_progress",
         "terminal_output",
         "plan_update",
         "clarification_requested",
         "checkpoint_created",
         "checkpoint_restored",
+        "subagent_start",
+        "subagent_done",
+        "audit_scan_start",
+        "audit_progress",
+        "audit_report",
         "error",
         "done",
     }
@@ -152,6 +159,32 @@ class SseQueue:
             raise ValueError(f"put_sandbox_status: invalid status {status!r}")
         await self.put_event("sandbox_status", {"status": status, "logs": logs})
 
+    async def put_sandbox_queued(self, run_url: str, workflow_name: str) -> None:
+        """
+        Emit sandbox_queued when a CI sandbox run is dispatched.
+
+        Args:
+            run_url: URL of the GitHub Actions run (or "pending" if not yet known).
+            workflow_name: Workflow file or auto-detected workflow label.
+        """
+        await self.put_event(
+            "sandbox_queued", {"run_url": run_url, "workflow_name": workflow_name}
+        )
+
+    async def put_sandbox_progress(self, step_name: str, status: str) -> None:
+        """
+        Emit sandbox_progress for a CI sandbox step transition.
+
+        Args:
+            step_name: Human-readable step (e.g. "dispatch", "polling", "complete").
+            status: One of "in_progress" | "completed".
+        """
+        if status not in {"in_progress", "completed"}:
+            raise ValueError(f"put_sandbox_progress: invalid status {status!r}")
+        await self.put_event(
+            "sandbox_progress", {"step_name": step_name, "status": status}
+        )
+
     async def put_terminal_output(self, chunk: str, stream: str = "stdout") -> None:
         """
         Stream a chunk of terminal output (stdout or stderr) to the client.
@@ -175,6 +208,80 @@ class SseQueue:
     async def put_checkpoint_restored(self, checkpoint_id: str, staged_patches: dict[str, str]) -> None:
         """Emit checkpoint_restored event to sync Monaco editor buffers."""
         await self.put_event("checkpoint_restored", {"checkpoint_id": checkpoint_id, "staged_patches": staged_patches})
+
+    async def put_subagent_start(self, role: str, task: str) -> None:
+        """Emit subagent_start event when a subagent begins execution."""
+        await self.put_event("subagent_start", {"role": role, "task": task})
+
+    async def put_subagent_done(
+        self,
+        role: str,
+        summary: str,
+        patches_modified: list[str],
+    ) -> None:
+        """Emit subagent_done event when a subagent finishes."""
+        await self.put_event("subagent_done", {
+            "role": role,
+            "summary": summary,
+            "patches_modified": patches_modified,
+        })
+
+    async def put_audit_scan_start(
+        self,
+        scan_type: str,
+        total_files_estimated: int = 0,
+        target_path: str = "all",
+    ) -> None:
+        """Emit audit_scan_start event when a repository or security scan starts."""
+        await self.put_event(
+            "audit_scan_start",
+            {
+                "scan_type": scan_type,
+                "total_files_estimated": total_files_estimated,
+                "target_path": target_path,
+            },
+        )
+
+    async def put_audit_progress(
+        self,
+        files_scanned: int,
+        current_file: str,
+        total_files: int = 0,
+    ) -> None:
+        """Emit audit_progress event during file inspection."""
+        await self.put_event(
+            "audit_progress",
+            {
+                "files_scanned": files_scanned,
+                "current_file": current_file,
+                "total_files": total_files,
+            },
+        )
+
+    async def put_audit_report(
+        self,
+        scan_type: str,
+        findings: list[dict[str, Any]],
+        health_score: int,
+        summary: str,
+        audit_id: str = "",
+        severity_counts: dict[str, int] | None = None,
+        report_markdown: str = "",
+    ) -> None:
+        """Emit audit_report event with synthesized findings and health score."""
+        payload: dict[str, Any] = {
+            "scan_type": scan_type,
+            "health_score": health_score,
+            "summary": summary,
+            "findings": findings,
+        }
+        if audit_id:
+            payload["audit_id"] = audit_id
+        if severity_counts is not None:
+            payload["severity_counts"] = severity_counts
+        if report_markdown:
+            payload["report_markdown"] = report_markdown
+        await self.put_event("audit_report", payload)
 
     async def put_error(self, error: str, code: str) -> None:
         await self.put_event("error", {"error": error, "code": code})

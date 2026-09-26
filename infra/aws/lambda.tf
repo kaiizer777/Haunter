@@ -177,8 +177,11 @@ resource "aws_lambda_function" "haunter" {
       FRONTEND_URL = var.frontend_url
 
       # GitHub webhook + API
-      GITHUB_WEBHOOK_SECRET = var.github_webhook_secret
-      GITHUB_TOKEN          = var.github_token
+      GITHUB_WEBHOOK_SECRET               = var.github_webhook_secret
+      GITHUB_TOKEN                        = var.github_token
+      GITHUB_AUDITOR_APP_ID               = var.github_auditor_app_id
+      GITHUB_AUDITOR_APP_PRIVATE_KEY      = var.github_auditor_app_private_key
+      AUDIT_SELF_INVOKE_SECRET            = var.audit_self_invoke_secret
 
       # Hosting + Sandbox provider (Phase 13/14)
       HOSTING_PROVIDER          = "aws"
@@ -270,4 +273,187 @@ resource "aws_lambda_permission" "allow_public_function_url" {
   function_name          = aws_lambda_function.haunter.function_name
   principal              = "*"
   function_url_auth_type = "NONE"
+}
+
+resource "aws_cloudwatch_event_rule" "audit_dispatch" {
+  name                = "${var.project_name}-audit-dispatch"
+  description         = "Poll the durable audit outbox for dispatchable jobs"
+  schedule_expression = "rate(1 minute)"
+  tags = {
+    Project = var.project_name
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Audit dispatcher — separate function, IAM-only
+#
+# This is NOT the public API function. It has no Function URL and no
+# `principal = "*"` invoke permission, so the only principal that can trigger
+# it is EventBridge acting on this specific rule. That is what allows the
+# dispatcher to accept an unsigned schedule event: the event payload is not a
+# trust boundary here, the IAM invoke permission is.
+#
+# The public function (aws_lambda_function.haunter) explicitly refuses any
+# `{"operation": ...}` event, so a request made against the public Function
+# URL cannot drive the outbox even with a guessed operation name.
+#
+# Secrets actually present on the dispatcher, and why.
+#
+# Required by Settings itself, not by the dispatcher: `GITHUB_CLIENT_SECRET` and
+# `SESSION_SECRET_KEY` are non-optional `str` fields on app/config.py, so the
+# process cannot import `app.config` without them. They are not used by
+# `dispatch_audit_jobs` on any path. Same for `GITHUB_WEBHOOK_SECRET`, which is
+# optional in Settings and read only by the webhook ingress in app/webhooks.py —
+# a module the dispatcher never calls — and for `TOKEN_ENCRYPTION_KEY`, which
+# only app/auth.py touches.
+#
+# This is deliberate over-provisioning, and it is the accepted trade for this
+# change: splitting Settings so the dispatcher can run without a login-path
+# secret set is a restructuring of the config surface with its own blast radius
+# across every module that imports settings, which is out of scope here. The
+# compensating control is the IAM policy above, which denies `secretsmanager:*`
+# so the function cannot read a secret at runtime even if the env block were
+# empty.
+#
+# What the dispatcher does genuinely need: DB connectivity, the dedicated
+# self-invoke secret (to sign the audit children it schedules), and the read-only
+# auditor App credentials. It does NOT get the LLM provider keys or any SSM
+# parameter access.
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "audit_dispatcher" {
+  name              = "/aws/lambda/${var.project_name}-audit-dispatcher"
+  retention_in_days = var.log_retention_days
+
+  tags = {
+    Project = var.project_name
+    Phase   = "5.2"
+  }
+}
+
+resource "aws_iam_role" "audit_dispatcher" {
+  name = "${var.project_name}-audit-dispatcher-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "lambda.amazonaws.com" }
+        Action    = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = {
+    Project = var.project_name
+    Phase   = "5.2"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "audit_dispatcher_basic" {
+  role       = aws_iam_role.audit_dispatcher.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "audit_dispatcher_inline" {
+  name = "${var.project_name}-audit-dispatcher-inline-policy"
+  role = aws_iam_role.audit_dispatcher.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowInvokeMainFunction"
+        Effect    = "Allow"
+        Action    = ["lambda:InvokeFunction"]
+        Resource  = aws_lambda_function.haunter.arn
+      },
+      {
+        Sid    = "DenySecretsManagerAndHighPrivilege"
+        Effect = "Deny"
+        Action = [
+          "secretsmanager:*",
+          "iam:*",
+          "ec2:*",
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_lambda_function" "audit_dispatcher" {
+  function_name = "${var.project_name}-audit-dispatcher"
+  description   = "IAM-only durable audit outbox poller (no public endpoint)"
+  role          = aws_iam_role.audit_dispatcher.arn
+
+  package_type  = "Zip"
+  filename      = var.lambda_zip_path
+  source_code_hash = filebase64sha256(var.lambda_zip_path)
+  handler       = "audit_dispatcher_handler.handler"
+  runtime       = "python3.11"
+  architectures = ["x86_64"]
+
+  timeout     = 60
+  memory_size = 256
+
+  environment {
+    variables = {
+      DATABASE_URL          = var.database_url
+      DATABASE_URL_UNPOOLED = var.database_url_unpooled
+
+      GITHUB_CLIENT_ID     = var.github_client_id
+      GITHUB_CLIENT_SECRET = var.github_client_secret
+      CALLBACK_URL         = var.callback_url
+      SESSION_SECRET_KEY   = var.session_secret_key
+      FRONTEND_URL         = var.frontend_url
+
+      GITHUB_WEBHOOK_SECRET          = var.github_webhook_secret
+      GITHUB_AUDITOR_APP_ID          = var.github_auditor_app_id
+      GITHUB_AUDITOR_APP_PRIVATE_KEY = var.github_auditor_app_private_key
+      AUDIT_SELF_INVOKE_SECRET       = var.audit_self_invoke_secret
+
+      HOSTING_PROVIDER = "aws"
+      SANDBOX_PROVIDER = var.sandbox_provider
+
+      TOKEN_ENCRYPTION_KEY = var.token_encryption_key
+
+      # The dispatcher schedules audit children on the main function, not on
+      # itself. Without this, resolve_lambda_function_name() would resolve to
+      # the dispatcher and every child invoke would land in the wrong function.
+      AWS_LAMBDA_FUNCTION_NAME = aws_lambda_function.haunter.function_name
+    }
+  }
+
+  logging_config {
+    log_format = "Text"
+    log_group  = aws_cloudwatch_log_group.audit_dispatcher.name
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.audit_dispatcher_basic,
+    aws_iam_role_policy.audit_dispatcher_inline,
+    aws_cloudwatch_log_group.audit_dispatcher,
+  ]
+
+  tags = {
+    Project = var.project_name
+    Phase   = "5.2"
+  }
+}
+
+resource "aws_cloudwatch_event_target" "audit_dispatch" {
+  rule      = aws_cloudwatch_event_rule.audit_dispatch.name
+  target_id = "audit-dispatch"
+  arn       = aws_lambda_function.audit_dispatcher.arn
+  input     = jsonencode({ operation = "dispatch_audits" })
+}
+
+resource "aws_lambda_permission" "allow_eventbridge_audit_dispatch" {
+  statement_id  = "AllowEventBridgeAuditDispatch"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.audit_dispatcher.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.audit_dispatch.arn
 }

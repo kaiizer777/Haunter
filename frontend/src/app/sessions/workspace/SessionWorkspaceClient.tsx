@@ -64,10 +64,24 @@ import {
   Undo2,
   History,
   ShieldAlert,
+  GitBranch,
 } from "lucide-react";
 import { api, SessionOut, CheckpointOut, ApiError, AvailableModelItem } from "@/lib/api";
-import { useSessionStream, ChatMessage, ToolCallChip } from "@/hooks/useSessionStream";
+import {
+  useSessionStream,
+  ChatMessage,
+  ToolCallChip,
+  SubagentStartEvent,
+  SubagentDoneEvent,
+  AuditFinding,
+  AuditCardState,
+  AuditReportEvent,
+} from "@/hooks/useSessionStream";
+import { AuditReportCard } from "@/components/workspace/AuditReportCard";
 import { AppLayout } from "@/components/layout/app-layout";
+import { WebPreviewPanel } from "@/components/workspace/WebPreviewPanel";
+import { useWebContainer } from "@/hooks/useWebContainer";
+import type { FileSystemTree } from "@/hooks/useWebContainer";
 
 // ---------------------------------------------------------------------------
 // Monaco DiffEditor — loaded dynamically (ssr:false, browser APIs required)
@@ -189,68 +203,265 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Markdown text renderer with inline code, bold, lists, and line breaks
+// Markdown text renderer with tables, headings, lists, blockquotes, inline code
 // ---------------------------------------------------------------------------
+
+function renderInlineTokens(text: string): React.ReactNode[] {
+  if (!text) return [];
+
+  // Match: `code`, **bold**, [link](url)
+  const regex = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g;
+  const parts = text.split(regex);
+
+  return parts.map((part, idx) => {
+    if (part.startsWith("`") && part.endsWith("`") && part.length >= 2) {
+      return (
+        <code
+          key={idx}
+          className="mx-0.5 rounded-[5px] border border-zinc-700/60 bg-zinc-800/90 px-1.5 py-0.5 text-[11px] font-mono text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    if (part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
+      return (
+        <strong key={idx} className="font-semibold text-zinc-100">
+          {renderInlineTokens(part.slice(2, -2))}
+        </strong>
+      );
+    }
+    const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (linkMatch) {
+      return (
+        <a
+          key={idx}
+          href={linkMatch[2]}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-violet-400 hover:text-violet-300 underline underline-offset-2 transition-colors"
+        >
+          {linkMatch[1]}
+        </a>
+      );
+    }
+    return <span key={idx}>{part}</span>;
+  });
+}
+
+function parseTableRow(row: string): string[] {
+  let clean = row.trim();
+  if (clean.startsWith("|")) clean = clean.slice(1);
+  if (clean.endsWith("|")) clean = clean.slice(0, -1);
+  return clean.split("|").map((cell) => cell.trim());
+}
+
+function isTableSeparator(line: string): boolean {
+  const clean = line.trim();
+  if (!clean.includes("-")) return false;
+  const cells = parseTableRow(clean);
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+
+function isTableRow(line: string): boolean {
+  const clean = line.trim();
+  return clean.startsWith("|") || (clean.includes("|") && clean.endsWith("|"));
+}
+
+function parseAlignments(separatorLine: string): ("left" | "center" | "right")[] {
+  const cells = parseTableRow(separatorLine);
+  return cells.map((cell) => {
+    const trimmed = cell.trim();
+    const starts = trimmed.startsWith(":");
+    const ends = trimmed.endsWith(":");
+    if (starts && ends) return "center";
+    if (ends) return "right";
+    return "left";
+  });
+}
 
 function FormattedText({ text }: { text: string }) {
   if (!text) return null;
 
-  // Split into paragraphs / lines
   const lines = text.split("\n");
+  const elements: React.ReactNode[] = [];
+  let i = 0;
+  let keyIndex = 0;
 
-  return (
-    <div className="space-y-1.5">
-      {lines.map((line, lineIdx) => {
-        // Empty lines create a subtle break
-        if (!line.trim()) {
-          return <div key={lineIdx} className="h-1.5" />;
-        }
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
 
-        // Bullet point detection
-        const isBullet = /^\s*[-*]\s+/.test(line);
-        const cleanLine = isBullet ? line.replace(/^\s*[-*]\s+/, "") : line;
+    // 1. Empty lines
+    if (!trimmed) {
+      elements.push(<div key={keyIndex++} className="h-1.5" />);
+      i++;
+      continue;
+    }
 
-        // Inline formatting parse: `code` and **bold**
-        const tokens = cleanLine.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+    // 2. GFM Markdown Table Detection (Current line is table row + next line is separator)
+    if (i + 1 < lines.length && isTableRow(line) && isTableSeparator(lines[i + 1])) {
+      const headers = parseTableRow(line);
+      const alignments = parseAlignments(lines[i + 1]);
+      i += 2;
 
-        const renderedTokens = tokens.map((tok, tokIdx) => {
-          if (tok.startsWith("`") && tok.endsWith("`")) {
-            return (
-              <code
-                key={tokIdx}
-                className="mx-0.5 rounded-[4px] border border-zinc-700/60 bg-zinc-800/80 px-1.5 py-0.5 text-[11px] font-mono text-amber-200"
-              >
-                {tok.slice(1, -1)}
-              </code>
-            );
-          }
-          if (tok.startsWith("**") && tok.endsWith("**")) {
-            return (
-              <strong key={tokIdx} className="font-semibold text-zinc-100">
-                {tok.slice(2, -2)}
-              </strong>
-            );
-          }
-          return tok;
-        });
+      const rows: string[][] = [];
+      while (i < lines.length && isTableRow(lines[i]) && lines[i].trim() !== "" && !isTableSeparator(lines[i])) {
+        rows.push(parseTableRow(lines[i]));
+        i++;
+      }
 
-        if (isBullet) {
-          return (
-            <div key={lineIdx} className="flex items-start gap-2 pl-2">
-              <span className="text-zinc-500 mt-1 select-none">•</span>
-              <p className="flex-1 text-[13.5px] leading-relaxed text-zinc-200">{renderedTokens}</p>
-            </div>
-          );
-        }
+      elements.push(
+        <div
+          key={keyIndex++}
+          className="my-3 overflow-hidden rounded-xl border border-zinc-800 bg-[#0c0c10] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.4)]"
+        >
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="border-b border-zinc-800 bg-[#14141a]">
+                  {headers.map((h, hIdx) => {
+                    const align = alignments[hIdx] || "left";
+                    return (
+                      <th
+                        key={hIdx}
+                        className={`px-3.5 py-2.5 font-mono text-[11px] font-semibold text-zinc-300 uppercase tracking-wider ${
+                          align === "center"
+                            ? "text-center"
+                            : align === "right"
+                            ? "text-right"
+                            : "text-left"
+                        }`}
+                      >
+                        {renderInlineTokens(h)}
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-850/80 font-sans">
+                {rows.map((row, rIdx) => (
+                  <tr
+                    key={rIdx}
+                    className="hover:bg-zinc-800/30 transition-colors duration-100 odd:bg-transparent even:bg-[#111116]/50"
+                  >
+                    {row.map((cell, cIdx) => {
+                      const align = alignments[cIdx] || "left";
+                      return (
+                        <td
+                          key={cIdx}
+                          className={`px-3.5 py-2.5 text-zinc-200 leading-relaxed text-xs ${
+                            align === "center"
+                              ? "text-center"
+                              : align === "right"
+                              ? "text-right"
+                              : "text-left"
+                          }`}
+                        >
+                          {renderInlineTokens(cell)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+      continue;
+    }
 
-        return (
-          <p key={lineIdx} className="text-[13.5px] leading-relaxed text-zinc-200">
-            {renderedTokens}
-          </p>
+    // 3. Headings (#, ##, ###, ####)
+    const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const content = headingMatch[2];
+      if (level === 1) {
+        elements.push(
+          <h1 key={keyIndex++} className="text-base font-semibold text-zinc-100 mt-4 mb-1.5 font-sans">
+            {renderInlineTokens(content)}
+          </h1>
         );
-      })}
-    </div>
-  );
+      } else if (level === 2) {
+        elements.push(
+          <h2 key={keyIndex++} className="text-sm font-semibold text-zinc-100 mt-3 mb-1 font-sans">
+            {renderInlineTokens(content)}
+          </h2>
+        );
+      } else {
+        elements.push(
+          <h3 key={keyIndex++} className="text-xs font-semibold text-zinc-200 mt-2.5 mb-1 font-sans uppercase tracking-wide">
+            {renderInlineTokens(content)}
+          </h3>
+        );
+      }
+      i++;
+      continue;
+    }
+
+    // 4. Blockquote (> quote)
+    if (line.startsWith("> ") || line === ">") {
+      const quoteLines: string[] = [];
+      while (i < lines.length && (lines[i].startsWith("> ") || lines[i] === ">")) {
+        quoteLines.push(lines[i].replace(/^>\s?/, ""));
+        i++;
+      }
+      elements.push(
+        <div
+          key={keyIndex++}
+          className="my-2 border-l-2 border-violet-500/60 bg-violet-500/5 px-3 py-1.5 rounded-r-lg text-xs text-zinc-300 font-sans italic"
+        >
+          {quoteLines.map((ql, qlIdx) => (
+            <p key={qlIdx} className="leading-relaxed">{renderInlineTokens(ql)}</p>
+          ))}
+        </div>
+      );
+      continue;
+    }
+
+    // 5. Unordered List Items (- or * or •)
+    if (/^\s*[-*•]\s+/.test(line)) {
+      const cleanLine = line.replace(/^\s*[-*•]\s+/, "");
+      elements.push(
+        <div key={keyIndex++} className="flex items-start gap-2 pl-2 my-0.5">
+          <span className="text-zinc-500 mt-1 select-none text-[10px]">•</span>
+          <p className="flex-1 text-[13.5px] leading-relaxed text-zinc-200">
+            {renderInlineTokens(cleanLine)}
+          </p>
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    // 6. Ordered List Items (1. 2.)
+    const numListMatch = line.match(/^\s*(\d+)\.\s+(.+)$/);
+    if (numListMatch) {
+      const num = numListMatch[1];
+      const cleanLine = numListMatch[2];
+      elements.push(
+        <div key={keyIndex++} className="flex items-start gap-2 pl-2 my-0.5">
+          <span className="text-zinc-400 font-mono text-xs mt-0.5 select-none">{num}.</span>
+          <p className="flex-1 text-[13.5px] leading-relaxed text-zinc-200">
+            {renderInlineTokens(cleanLine)}
+          </p>
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    // 7. Regular paragraph
+    elements.push(
+      <p key={keyIndex++} className="text-[13.5px] leading-relaxed text-zinc-200">
+        {renderInlineTokens(line)}
+      </p>
+    );
+    i++;
+  }
+
+  return <div className="space-y-1.5">{elements}</div>;
 }
 
 function MarkdownContent({ content }: { content: string }) {
@@ -653,6 +864,72 @@ function ToolExecutionAccordion({
 }
 
 // ---------------------------------------------------------------------------
+// SubagentCard — live wrapper for invoke_subagent start/done SSE events
+// ---------------------------------------------------------------------------
+
+const ROLE_EMOJI: Record<string, string> = {
+  repo_navigator: "🧭",
+  feature_architect: "⚡",
+  bug_hunter: "🔍",
+  sandbox_verifier: "🧪",
+  code_guardian: "🛡️",
+};
+
+type SubagentCardState = {
+  role: string;
+  task: string;
+  startedAt: number;
+  status: "running" | "done";
+  summary?: string;
+  patchesModified?: string[];
+};
+
+function SubagentCard({
+  role,
+  task,
+  summary,
+  patchesModified,
+  status,
+  onViewDiff,
+}: SubagentCardState & { onViewDiff?: (filePath: string) => void }) {
+  const emoji = ROLE_EMOJI[role] ?? "🤖";
+  if (status === "running") {
+    return (
+      <div className="my-2 rounded-xl border border-zinc-800 bg-[#0e0e12] px-3.5 py-2.5" role="status" aria-live="polite">
+        <div className="flex items-center gap-2">
+          <span aria-hidden="true" className="text-sm leading-none">{emoji}</span>
+          <span className="rounded-full border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[11px] text-zinc-200">{role}</span>
+          <span className="relative ml-auto flex h-2 w-2 shrink-0">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
+          </span>
+        </div>
+        <p className="mt-1.5 truncate font-mono text-xs text-zinc-500" title={task}>{task.slice(0, 120)}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="my-2 rounded-xl border border-emerald-500/20 bg-[#0e0e12] px-3.5 py-2.5" aria-live="polite">
+      <div className="flex items-center gap-2">
+        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" aria-label="Subagent complete" />
+        <span aria-hidden="true" className="text-sm leading-none">{emoji}</span>
+        <span className="rounded-full border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[11px] text-zinc-200">{role}</span>
+      </div>
+      {summary && <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-200">{summary}</p>}
+      {patchesModified && patchesModified.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {patchesModified.map((f) => (
+            <button key={f} onClick={() => onViewDiff?.(f)} title={f} className="shrink-0 truncate rounded border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 font-mono text-[10px] text-violet-300 transition-colors hover:bg-violet-500/20">
+              {f}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Chat Bubble (Matches SS2 user pill + clean assistant presentation)
 // ---------------------------------------------------------------------------
 
@@ -660,10 +937,12 @@ function ChatBubble({
   message,
   isLatestStreaming,
   onViewDiff,
+  onStageAuditFix,
 }: {
   message: ChatMessage;
   isLatestStreaming?: boolean;
   onViewDiff?: (filePath: string) => void;
+  onStageAuditFix?: (finding: AuditFinding, diff?: string) => Promise<void> | void;
 }) {
   const [copied, setCopied] = useState(false);
   const [reaction, setReaction] = useState<"up" | "down" | null>(null);
@@ -780,22 +1059,147 @@ function ChatBubble({
         </div>
       )}
 
+      {/* Inline Audit Scan Report Card */}
+      {message.auditScan && (
+        <div className="mt-2.5 w-full">
+          <AuditReportCard
+            scan={message.auditScan}
+            onStageFix={onStageAuditFix}
+            onViewDiff={onViewDiff}
+          />
+        </div>
+      )}
+
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Terminal Drawer — collapsible live terminal output panel
+// ANSI → styled spans (no new deps). Preserves raw GitHub Actions lines while
+// rendering SGR color codes instead of leaking raw escape sequences.
 // ---------------------------------------------------------------------------
 
-function TerminalDrawer({ logs }: { logs: string[] }) {
+const ANSI_FG_COLORS: Record<number, string> = {
+  30: "#71717a",
+  31: "#f87171",
+  32: "#34d399",
+  33: "#fbbf24",
+  34: "#60a5fa",
+  35: "#c084fc",
+  36: "#22d3ee",
+  37: "#e4e4e7",
+  90: "#71717a",
+  91: "#fca5a5",
+  92: "#6ee7b7",
+  93: "#fcd34d",
+  94: "#93c5fd",
+  95: "#d8b4fe",
+  96: "#67e8f9",
+  97: "#fafafa",
+};
+
+interface AnsiSegment {
+  text: string;
+  color?: string;
+  bold?: boolean;
+  dim?: boolean;
+}
+
+function parseAnsiSegments(input: string): AnsiSegment[] {
+  // Normalize progress-bar carriage returns and strip non-SGR escape sequences
+  // (cursor moves, clear-line) so CI logs never break layout.
+  const withoutOsc = input.replace(/\][^\u0007]*\u0007/g, "");
+  const withoutCsi = withoutOsc.replace(/\[(?!([0-9;]*)m)[0-9;?]*[A-Za-z]/g, "");
+  const normalized = withoutCsi.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const sgrRe = /\[([0-9;]*)m/g;
+
+  const segments: AnsiSegment[] = [];
+  let lastIdx = 0;
+  let color: string | undefined;
+  let bold = false;
+  let dim = false;
+
+  const pushText = (text: string) => {
+    if (!text) return;
+    segments.push({ text, color, bold, dim });
+  };
+
+  let match: RegExpExecArray | null;
+  while ((match = sgrRe.exec(normalized)) !== null) {
+    pushText(normalized.slice(lastIdx, match.index));
+    lastIdx = match.index + match[0].length;
+    const codes = match[1] === "" ? [0] : match[1].split(";").map((n) => Number(n));
+    for (const code of codes) {
+      if (code === 0) {
+        color = undefined;
+        bold = false;
+        dim = false;
+      } else if (code === 1) {
+        bold = true;
+      } else if (code === 2) {
+        dim = true;
+      } else if (code === 22) {
+        bold = false;
+        dim = false;
+      } else if (code === 39) {
+        color = undefined;
+      } else if (ANSI_FG_COLORS[code]) {
+        color = ANSI_FG_COLORS[code];
+      }
+      // Background SGR codes (40-47, 100-107) are intentionally ignored —
+      // translucent dark surfaces already provide contrast.
+    }
+  }
+  pushText(normalized.slice(lastIdx));
+  return segments;
+}
+
+function AnsiText({ text, idPrefix }: { text: string; idPrefix: string }) {
+  const segments = parseAnsiSegments(text);
+  return (
+    <>
+      {segments.map((seg, i) => {
+        if (!seg.color && !seg.bold && !seg.dim) {
+          return <span key={`${idPrefix}-${i}`}>{seg.text}</span>;
+        }
+        return (
+          <span
+            key={`${idPrefix}-${i}`}
+            style={{
+              ...(seg.color ? { color: seg.color } : {}),
+              ...(seg.bold ? { fontWeight: 700 } : {}),
+              ...(seg.dim ? { opacity: 0.65 } : {}),
+            }}
+          >
+            {seg.text}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Terminal Drawer — collapsible live terminal output panel
+// Raw GitHub Actions lines arrive via the same terminal_output SSE event as
+// local sandbox output and merge into this single buffer with ANSI colors
+// preserved. flex-none + capped height keeps split-view layout stable.
+// ---------------------------------------------------------------------------
+
+function TerminalDrawer({ logs, ciActive }: { logs: string[]; ciActive?: boolean }) {
   const [open, setOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom when new chunks arrive.
+  // Honors prefers-reduced-motion: instant jump when the user prefers
+  // reduced motion, smooth scroll otherwise.
   useEffect(() => {
     if (open) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      const reduceMotion =
+        typeof window !== "undefined" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      bottomRef.current?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" });
     }
   }, [logs, open]);
 
@@ -811,32 +1215,274 @@ function TerminalDrawer({ logs }: { logs: string[] }) {
         onClick={() => setOpen((p) => !p)}
         className="flex w-full items-center justify-between px-4 py-2 text-xs font-mono text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/40 transition-colors select-none"
         id="terminal-drawer-toggle"
+        aria-expanded={open}
       >
-        <div className="flex items-center gap-2">
-          <Terminal className="h-3.5 w-3.5 text-emerald-400/80" />
+        <div className="flex items-center gap-2 min-w-0">
+          <Terminal className="h-3.5 w-3.5 shrink-0 text-emerald-400/80" />
           <span className="text-zinc-300 font-medium">Terminal</span>
           <span className="rounded-full bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-px text-[10px] font-mono text-emerald-400">
             {logs.length} chunk{logs.length !== 1 ? "s" : ""}
           </span>
+          {ciActive && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-px text-[10px] font-mono text-amber-300">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60" />
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
+              </span>
+              CI live
+            </span>
+          )}
         </div>
         <ChevronUp
-          className={`h-3.5 w-3.5 text-zinc-500 transition-transform duration-200 ${
+          className={`h-3.5 w-3.5 shrink-0 text-zinc-500 transition-transform duration-200 ${
             open ? "" : "rotate-180"
           }`}
         />
       </button>
 
-      {/* Output pane */}
+      {/* Output pane — capped height + overflow so CI bursts never shift layout */}
       {open && (
         <div className="max-h-52 overflow-y-auto px-4 py-3 bg-[#060608]">
           <pre
             id="terminal-output-content"
             className="text-[11px] font-mono text-emerald-200/80 leading-relaxed whitespace-pre-wrap break-words"
           >
-            {fullOutput}
+            <AnsiText text={fullOutput} idPrefix="term" />
           </pre>
           <div ref={bottomRef} />
         </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Live CI Status Chip — queued → running → passed/failed with external link
+// ---------------------------------------------------------------------------
+
+type CiPhase = "queued" | "running" | "passed" | "failed";
+
+function isExternalRunUrl(url: string | null | undefined): url is string {
+  if (!url) return false;
+  if (url === "pending" || url === "unknown") return false;
+  return /^https?:\/\//.test(url);
+}
+
+function extractCiRunNumber(runUrl: string | null | undefined): string | null {
+  if (!runUrl) return null;
+  const runsMatch = runUrl.match(/\/runs\/(\d+)/);
+  if (runsMatch) return runsMatch[1];
+  const trailing = runUrl.match(/(\d{4,})(?:\/)?$/);
+  return trailing ? trailing[1] : null;
+}
+
+function CiStatusChip({
+  phase,
+  runUrl,
+  workflowName,
+  stepName,
+}: {
+  phase: CiPhase;
+  runUrl?: string | null;
+  workflowName?: string | null;
+  stepName?: string | null;
+}) {
+  const linkable = isExternalRunUrl(runUrl);
+  const runNumber = extractCiRunNumber(runUrl ?? null);
+
+  const base =
+    "inline-flex shrink-0 items-center gap-1.5 rounded-full border-t border-x border-b px-2.5 py-0.5 text-[11px] font-mono font-medium transition-colors duration-200";
+
+  if (phase === "passed") {
+    return (
+      <span
+        data-testid="ci-status-chip"
+        data-phase="passed"
+        role="status"
+        aria-live="polite"
+        aria-label={`CI passed${runNumber ? `, run #${runNumber}` : ""}`}
+        className={`${base} border-t-emerald-400/40 border-x-emerald-500/30 border-b-emerald-600/20 bg-gradient-to-b from-emerald-500/15 to-emerald-500/5 text-emerald-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)]`}
+      >
+        <CheckCircle2 className="h-3 w-3" />
+        <span>CI passed{runNumber ? ` · #${runNumber}` : ""}</span>
+        {linkable && (
+          <a
+            href={runUrl as string}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            title="Open GitHub Actions run"
+            aria-label="Open GitHub Actions run"
+            className="inline-flex min-h-[24px] min-w-[24px] items-center justify-center rounded p-1 text-emerald-400 hover:text-emerald-200"
+          >
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </span>
+    );
+  }
+
+  if (phase === "failed") {
+    return (
+      <span
+        data-testid="ci-status-chip"
+        data-phase="failed"
+        role="status"
+        aria-live="polite"
+        aria-label={`CI failed${runNumber ? `, run #${runNumber}` : ""}`}
+        className={`${base} border-t-red-400/40 border-x-red-500/30 border-b-red-600/20 bg-gradient-to-b from-red-500/15 to-red-500/5 text-red-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)]`}
+      >
+        <XCircle className="h-3 w-3" />
+        <span>CI failed{runNumber ? ` · #${runNumber}` : ""}</span>
+        {linkable && (
+          <a
+            href={runUrl as string}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            title="Open GitHub Actions run"
+            aria-label="Open GitHub Actions run"
+            className="inline-flex min-h-[24px] min-w-[24px] items-center justify-center rounded p-1 text-red-400 hover:text-red-200"
+          >
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </span>
+    );
+  }
+
+  if (phase === "running") {
+    const runningLabel = `CI running${stepName ? `, ${stepName}` : workflowName ? `, ${workflowName}` : ""}`;
+    return (
+      <span
+        data-testid="ci-status-chip"
+        data-phase="running"
+        role="status"
+        aria-live="polite"
+        aria-label={runningLabel}
+        className={`${base} border-t-sky-400/40 border-x-sky-500/30 border-b-sky-600/20 bg-gradient-to-b from-sky-500/15 to-sky-500/5 text-sky-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)]`}
+      >
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-60" />
+          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.8)]" />
+        </span>
+        <span className="truncate max-w-[220px]">
+          CI running{stepName ? ` · ${stepName}` : workflowName ? ` · ${workflowName}` : ""}
+        </span>
+        {linkable && (
+          <a
+            href={runUrl as string}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            title="Open GitHub Actions run"
+            aria-label="Open GitHub Actions run"
+            className="inline-flex min-h-[24px] min-w-[24px] shrink-0 items-center justify-center rounded p-1 text-sky-400 hover:text-sky-200"
+          >
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </span>
+    );
+  }
+
+  return (
+    <span
+      data-testid="ci-status-chip"
+      data-phase="queued"
+      role="status"
+      aria-live="polite"
+      aria-label={`CI queued${workflowName ? `, ${workflowName}` : ""}`}
+      className={`${base} border-t-amber-400/50 border-x-amber-500/35 border-b-amber-600/25 bg-gradient-to-b from-amber-500/20 to-amber-500/5 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]`}
+    >
+      <span className="relative flex h-1.5 w-1.5">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60" />
+        <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.8)]" />
+      </span>
+      <span className="truncate max-w-[220px]">CI queued{workflowName ? ` · ${workflowName}` : ""}</span>
+      {linkable && (
+        <a
+          href={runUrl as string}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          title="Open GitHub Actions run"
+          aria-label="Open GitHub Actions run"
+          className="inline-flex min-h-[24px] min-w-[24px] shrink-0 items-center justify-center rounded p-1 text-amber-400 hover:text-amber-200"
+        >
+          <ExternalLink className="h-3 w-3" />
+        </a>
+      )}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Agent Action Badge — CI sandbox verdict rendered inline in the chat stream
+// ---------------------------------------------------------------------------
+
+function CiVerificationBadge({
+  passed,
+  runUrl,
+  durationSeconds,
+  workflowName,
+}: {
+  passed: boolean;
+  runUrl?: string | null;
+  durationSeconds?: number | null;
+  workflowName?: string | null;
+}) {
+  const runNumber = extractCiRunNumber(runUrl ?? null);
+  const linkable = isExternalRunUrl(runUrl);
+  const durationLabel =
+    typeof durationSeconds === "number" && Number.isFinite(durationSeconds)
+      ? ` in ${Math.max(0, Math.round(durationSeconds))}s`
+      : "";
+  const runLabel = runNumber ? `Run #${runNumber}` : workflowName ? `${workflowName}` : "CI run";
+
+  return (
+    <div
+      data-testid="ci-verification-badge"
+      role="status"
+      aria-live="polite"
+      className={`my-2 flex items-center gap-2.5 rounded-xl border px-3.5 py-2.5 transition-colors duration-200 ${
+        passed
+          ? "border-emerald-500/25 bg-emerald-500/[0.07]"
+          : "border-red-500/25 bg-red-500/[0.07]"
+      }`}
+    >
+      <span
+        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border ${
+          passed
+            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+            : "border-red-500/30 bg-red-500/10 text-red-300"
+        }`}
+      >
+        {passed ? <ShieldCheck className="h-4 w-4" /> : <TestTube2 className="h-4 w-4" />}
+      </span>
+      <p className="min-w-0 flex-1 text-[12.5px] leading-snug text-zinc-200">
+        <span className="font-medium text-zinc-100">Agent verified changes</span>
+        <span className="text-zinc-400"> in GitHub Actions CI Sandbox</span>
+        <span className={`font-mono ${passed ? "text-emerald-300" : "text-red-300"}`}>
+          {" "}
+          ({runLabel} — {passed ? "Passed" : "Failed"}
+          {durationLabel})
+        </span>
+      </p>
+      {linkable && (
+        <a
+          href={runUrl as string}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-mono transition-colors ${
+            passed
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+              : "border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+          }`}
+        >
+          <span>View run</span>
+          <ExternalLink className="h-3 w-3" />
+        </a>
       )}
     </div>
   );
@@ -848,15 +1494,41 @@ function TerminalDrawer({ logs }: { logs: string[] }) {
 
 interface CommitModalProps {
   sessionId: string;
+  repoOwner?: string;
+  repoName?: string;
+  branchName?: string;
+  patchCount?: number;
   onClose: () => void;
   onSuccess: (prUrl: string, prNumber: number) => void;
 }
 
-function CommitModal({ sessionId, onClose, onSuccess }: CommitModalProps) {
+function CommitModal({
+  sessionId,
+  repoOwner,
+  repoName,
+  branchName,
+  patchCount = 0,
+  onClose,
+  onSuccess,
+}: CommitModalProps) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      } else if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        const form = document.getElementById("commit-modal-form") as HTMLFormElement | null;
+        if (form) form.requestSubmit();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -882,46 +1554,81 @@ function CommitModal({ sessionId, onClose, onSuccess }: CommitModalProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md transition-all animate-in fade-in duration-200"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="relative w-full max-w-lg rounded-2xl border border-zinc-800 bg-gradient-to-b from-[#14141a] to-[#0d0d11] p-6 shadow-[0_24px_64px_rgba(0,0,0,0.8)]">
-        <div className="flex items-center justify-between mb-5">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl border border-violet-500/30 bg-violet-500/10 text-violet-400">
-              <GitPullRequest className="h-4 w-4" />
+      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border-t border-t-zinc-650/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#121216] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_24px_64px_rgba(0,0,0,0.85)] animate-in fade-in zoom-in-95 duration-150 ease-out">
+        {/* Modal Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800/80 bg-[#15151c]/70">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl border-t border-t-violet-400/40 border-x border-x-violet-500/30 border-b border-b-violet-800/40 bg-gradient-to-b from-violet-500/20 to-violet-600/5 text-violet-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]">
+              <GitPullRequest className="h-4.5 w-4.5" />
             </div>
-            <h2 className="text-sm font-semibold text-zinc-100">Commit & Open PR</h2>
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-100 tracking-tight">Commit & Open PR</h2>
+              <p className="text-xs text-zinc-400 font-normal mt-0.5">Publish verified staged patches to GitHub</p>
+            </div>
           </div>
           <button
             onClick={onClose}
-            className="flex h-7 w-7 items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60 transition-colors"
+            className="flex h-7 w-7 items-center justify-center rounded-lg border border-transparent hover:border-zinc-750 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-all active:translate-y-[0.5px]"
+            title="Close (Esc)"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Target Context Strip */}
+        {(branchName || repoName || patchCount > 0) && (
+          <div className="flex items-center justify-between px-6 py-2.5 bg-[#0d0d12] border-b border-zinc-800/60 text-xs font-mono">
+            <div className="flex items-center gap-2 text-zinc-400">
+              <GitBranch className="h-3.5 w-3.5 text-violet-400/80" />
+              <span className="text-zinc-200 font-medium">{branchName || "main"}</span>
+              {repoOwner && repoName && (
+                <span className="text-zinc-500 text-[11px]">({repoOwner}/{repoName})</span>
+              )}
+            </div>
+            {patchCount > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 border border-amber-500/25 px-2 py-0.5 text-[11px] font-mono text-amber-300">
+                <FileCode2 className="h-3 w-3" />
+                {patchCount} file{patchCount !== 1 ? "s" : ""} staged
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Form Content */}
+        <form id="commit-modal-form" onSubmit={handleSubmit} className="p-6 space-y-4">
+          {/* PR Title Field */}
           <div className="space-y-1.5">
-            <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wide font-mono">
-              PR Title *
-            </label>
+            <div className="flex items-center justify-between">
+              <label htmlFor="commit-title-input" className="text-xs font-medium text-zinc-200">
+                PR Title <span className="text-amber-400 font-bold">*</span>
+              </label>
+              <span className="text-[11px] font-mono text-zinc-500">{title.length}/255</span>
+            </div>
             <input
               id="commit-title-input"
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="fix: resolve null check in auth middleware"
+              placeholder="e.g. fix(auth): resolve null check in token middleware"
               maxLength={255}
-              className="w-full rounded-xl border border-zinc-700/60 bg-zinc-900/90 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500/50 transition-all font-sans"
+              className="w-full rounded-xl border border-zinc-700/80 bg-[#16161d] px-3.5 py-2.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-violet-500/80 focus:ring-1 focus:ring-violet-500/30 focus:bg-[#181822] shadow-[inset_0_1px_2px_rgba(0,0,0,0.4)] transition-all font-mono"
               autoFocus
             />
           </div>
 
+          {/* Description Field */}
           <div className="space-y-1.5">
-            <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wide font-mono">
-              Description <span className="text-zinc-600 normal-case">(optional)</span>
-            </label>
+            <div className="flex items-center justify-between">
+              <label htmlFor="commit-body-input" className="text-xs font-medium text-zinc-200">
+                Description <span className="text-zinc-500 font-normal">(optional)</span>
+              </label>
+              <span className="text-[11px] font-mono text-zinc-500">
+                {body.length > 0 ? `${body.length} chars` : "Markdown supported"}
+              </span>
+            </div>
             <textarea
               id="commit-body-input"
               value={body}
@@ -929,34 +1636,44 @@ function CommitModal({ sessionId, onClose, onSuccess }: CommitModalProps) {
               placeholder="Summary of changes and rationale…"
               rows={4}
               maxLength={65535}
-              className="w-full resize-y rounded-xl border border-zinc-700/60 bg-zinc-900/90 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500/50 transition-all font-mono"
+              className="w-full resize-y rounded-xl border border-zinc-700/80 bg-[#16161d] px-3.5 py-2.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-violet-500/80 focus:ring-1 focus:ring-violet-500/30 focus:bg-[#181822] shadow-[inset_0_1px_2px_rgba(0,0,0,0.4)] transition-all font-mono leading-relaxed"
             />
           </div>
 
+          {/* Error display */}
           {error && (
-            <div className="flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3.5 py-2 text-xs text-red-300">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              {error}
+            <div className="flex items-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs font-mono text-red-300 animate-in fade-in duration-150">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-red-400" />
+              <span>{error}</span>
             </div>
           )}
 
-          <div className="flex items-center gap-3 pt-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 rounded-xl border border-zinc-700/60 bg-zinc-800/60 px-4 py-2.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700/60 hover:text-zinc-100 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              id="commit-submit-btn"
-              type="submit"
-              disabled={loading}
-              className="flex-1 flex items-center justify-center gap-2 rounded-xl border border-violet-500/40 bg-gradient-to-b from-violet-600 to-violet-700 px-4 py-2.5 text-xs font-semibold text-white shadow-lg hover:from-violet-500 hover:to-violet-600 active:translate-y-px transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitPullRequest className="h-4 w-4" />}
-              {loading ? "Publishing…" : "Commit & Open PR"}
-            </button>
+          {/* Footer Toolbar */}
+          <div className="flex items-center justify-between pt-3 border-t border-zinc-800/80 -mx-6 -mb-6 px-6 py-3.5 bg-[#0e0e13]/90 rounded-b-2xl mt-4">
+            <div className="flex items-center gap-1.5 text-[11px] font-mono text-zinc-400">
+              <kbd className="rounded border border-zinc-700/70 bg-zinc-800/90 px-1.5 py-0.5 text-[10px] text-zinc-300 font-sans shadow-sm">
+                ⌘ / Ctrl + ↵
+              </kbd>
+              <span>to submit</span>
+            </div>
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-xl border-t border-t-zinc-700/60 border-x border-x-zinc-800/60 border-b border-b-zinc-950 bg-gradient-to-b from-zinc-800/90 to-zinc-850 px-3.5 py-2 text-xs font-medium text-zinc-300 hover:text-white hover:border-t-zinc-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                id="commit-submit-btn"
+                type="submit"
+                disabled={loading}
+                className="flex items-center justify-center gap-2 rounded-xl border-t border-t-violet-400/60 border-x border-x-violet-600/60 border-b border-b-violet-950 bg-gradient-to-b from-violet-600 via-violet-650 to-violet-700 px-4 py-2 text-xs font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_8px_rgba(124,58,237,0.35)] hover:brightness-105 active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.35)] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitPullRequest className="h-3.5 w-3.5" />}
+                <span>{loading ? "Publishing…" : "Commit & Open PR"}</span>
+              </button>
+            </div>
           </div>
         </form>
       </div>
@@ -977,8 +1694,11 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   const [pageLoading, setPageLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
 
-  // View mode switcher: "chat" (default - Screenshot 2 style), "diffs", "split"
-  const [viewMode, setViewMode] = useState<"chat" | "diffs" | "split">("chat");
+  // View mode switcher: "chat" (default - Screenshot 2 style), "diffs", "split", "preview"
+  const [viewMode, setViewMode] = useState<"chat" | "diffs" | "split" | "preview">("chat");
+
+  // Split right-panel tab: "diffs" (Monaco) vs "preview" (live iframe). Pure UI state.
+  const [splitRightPanel, setSplitRightPanel] = useState<"diffs" | "preview">("diffs");
 
   // Selected file tab in Monaco
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -1026,23 +1746,152 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   });
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
 
-  // Chat & Stream
+  // Subagent progress cards (Phase 1.3) — fed by subagent_start/done SSE events.
+  const [subagents, setSubagents] = useState<SubagentCardState[]>([]);
+
+  const handleSubagentStart = useCallback((e: SubagentStartEvent) => {
+    setSubagents((prev) => [...prev, { ...e, status: "running" as const }]);
+  }, []);
+
+  const handleSubagentDone = useCallback((e: SubagentDoneEvent) => {
+    setSubagents((prev) => {
+      const runningIdx = prev.map((s, i) => ({ s, i })).reverse().find(({ s }) => s.role === e.role && s.status === "running")?.i;
+      if (runningIdx === undefined) {
+        return [...prev, { role: e.role, task: "", startedAt: Date.now(), status: "done" as const, summary: e.summary, patchesModified: e.patchesModified }];
+      }
+      const copy = [...prev];
+      copy[runningIdx] = { ...copy[runningIdx], status: "done" as const, summary: e.summary, patchesModified: e.patchesModified };
+      return copy;
+    });
+  }, []);
+
+  // Chat & Stream (Phase 4.2: live CI sandbox events flow through the same SSE stream)
   const {
     messages,
     stagedPatches,
+    sandboxStatus: liveSandboxStatus,
+    sandboxQueued,
+    sandboxProgress,
+    sandboxResult: liveSandboxResult,
+    ciStartedAt,
+    ciFinishedAt,
     isStreaming,
     terminalLogs,
     plan,
     pendingClarification,
     checkpoints,
+    auditScans,
+    activeAudit,
     sendChatMessage,
     stopStreaming,
     setStagedPatches,
     setMessages,
+    setTerminalLogs,
     setPlan,
     setPendingClarification,
     setCheckpoints,
-  } = useSessionStream(sessionId);
+    setAuditScans,
+    setActiveAudit,
+  } = useSessionStream(sessionId, {
+    onSubagentStart: handleSubagentStart,
+    onSubagentDone: handleSubagentDone,
+  });
+
+  // Live CI derivation — SSE (agent-driven verify_in_ci_sandbox) takes
+  // precedence; the manual top-bar REST verify is the fallback source.
+  // Terminal verdicts win; any live step activity promotes queued → running.
+  const liveCiPhase: CiPhase | null =
+    liveSandboxStatus?.status === "passed"
+      ? "passed"
+      : liveSandboxStatus?.status === "failed"
+        ? "failed"
+        : sandboxProgress || liveSandboxStatus?.status === "running"
+          ? "running"
+          : liveSandboxStatus?.status === "queued" || sandboxQueued
+            ? "queued"
+            : null;
+  const ciRunUrl = liveSandboxStatus?.run_url ?? liveSandboxResult?.run_url ?? sandboxQueued?.run_url ?? null;
+  const ciWorkflowName = sandboxQueued?.workflow_name ?? null;
+  const ciStepName = sandboxProgress?.step_name ?? null;
+  const ciActive = liveCiPhase === "queued" || liveCiPhase === "running" || sandboxLoading;
+  const ciDurationSeconds =
+    ciStartedAt != null && ciFinishedAt != null
+      ? Math.max(0, Math.round((ciFinishedAt - ciStartedAt) / 1000))
+      : liveSandboxResult?.duration_s ?? null;
+
+  // WebContainer live preview (Phase 2.2) — boots a WASM Node runtime in-tab.
+  const {
+    status: wcStatus,
+    previewUrl,
+    terminalOutput: wcTerminalOutput,
+    boot: bootWebContainer,
+    writeFile: wcWriteFile,
+    writeEnvFile,
+    restartDevServer,
+    teardown: wcTeardown,
+    error: wcError,
+  } = useWebContainer();
+
+  // In-container env vars (never persisted).
+  const [previewEnvVars, setPreviewEnvVars] = useState<Record<string, string>>({});
+  // Tracks how many WebContainer chunks have already been merged into
+  // terminalLogs so each chunk is appended exactly once.
+  const wcMergedCountRef = useRef(0);
+
+  // Merge WebContainer terminal output into the existing terminalLogs state
+  // so it flows into the existing <TerminalDrawer logs={terminalLogs} />.
+  // No duplicate TerminalDrawer — one terminal, all output sources.
+  useEffect(() => {
+    if (wcTerminalOutput.length > wcMergedCountRef.current) {
+      const fresh = wcTerminalOutput.slice(wcMergedCountRef.current);
+      wcMergedCountRef.current = wcTerminalOutput.length;
+      setTerminalLogs((prev) => [...prev, ...fresh]);
+    }
+  }, [wcTerminalOutput, setTerminalLogs]);
+
+  // Teardown the container when the workspace unmounts.
+  useEffect(() => () => wcTeardown(), [wcTeardown]);
+
+  // Sync agent-staged patches into the WebContainer filesystem on every change.
+  // Only fires when the preview panel is active AND the container is ready.
+  useEffect(() => {
+    if (wcStatus !== "ready") return;
+    if (viewMode !== "preview" && viewMode !== "split") return;
+
+    const entries = Object.entries(stagedPatches);
+    if (entries.length === 0) return;
+
+    // Write the latest version of each staged file to the container.
+    // parseDiffForMonaco is already available — use its `modified` output as
+    // the complete post-patch file content to write.
+    entries.forEach(([filePath, diff]) => {
+      const { modified } = parseDiffForMonaco(diff);
+      if (modified) {
+        wcWriteFile(filePath, modified).catch((err) => {
+          console.error("[WebContainer] writeFile failed:", filePath, err);
+        });
+      }
+    });
+  }, [stagedPatches, wcStatus, viewMode, wcWriteFile]);
+
+  // Build a v1 synthetic file tree from staged patches + minimal scaffold.
+  // Full repo clone via GitHub API file tree fetch is a v2 enhancement.
+  const handleBootPreview = useCallback(async () => {
+    const fileTree = buildPreviewFileTree(stagedPatches);
+    await bootWebContainer(fileTree);
+  }, [stagedPatches, bootWebContainer]);
+
+  // Iframe remount is owned by WebPreviewPanel's inner refreshNonce —
+  // no outer key here so refresh preserves panel state (viewport, env draft).
+  const handleRefreshPreview = useCallback(() => {}, []);
+
+  const handleSavePreviewEnv = useCallback(
+    async (vars: Record<string, string>) => {
+      setPreviewEnvVars(vars);
+      await writeEnvFile(vars);
+    },
+    [writeEnvFile]
+  );
 
   const [chatInput, setChatInput] = useState("");
   const [showPlanSidebar, setShowPlanSidebar] = useState(true);
@@ -1195,6 +2044,23 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     [chatInput, isStreaming, sendChatMessage, selectedModelId, selectedProvider]
   );
 
+  const handleStageAuditFix = useCallback(
+    async (finding: AuditFinding, diff?: string) => {
+      const patch = diff || finding.remediation_diff || finding.suggested_fix;
+      if (patch && finding.file_path) {
+        setStagedPatches((prev) => ({
+          ...prev,
+          [finding.file_path]: patch,
+        }));
+        setActiveFile(finding.file_path);
+      } else {
+        const prompt = `Apply surgical fix for finding ${finding.id || finding.title || "audit issue"} in ${finding.file_path}${finding.line_start ? `:${finding.line_start}` : ""}${finding.line_end ? `-${finding.line_end}` : ""}`;
+        await handleSendChat(prompt);
+      }
+    },
+    [setStagedPatches, setActiveFile, handleSendChat]
+  );
+
   const handleVerify = async () => {
     setActionError(null);
     setSandboxLoading(true);
@@ -1269,6 +2135,9 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   const patchFiles = Object.keys(stagedPatches);
   const activePatch = activeFile ? stagedPatches[activeFile] ?? "" : "";
   const { original: monacoOriginal, modified: monacoModified } = parseDiffForMonaco(activePatch);
+  // Split right-panel selector — hoisted to a boolean so JSX branches below
+  // don't narrow the `splitRightPanel` union (avoids TS2367 in tab buttons).
+  const showSplitPreview = viewMode === "split" && splitRightPanel === "preview";
 
   // -------------------------------------------------------------------------
   // Loading / error states
@@ -1350,48 +2219,32 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
           <Columns className="h-3.5 w-3.5" />
           <span>Split</span>
         </button>
+
+        <button
+          onClick={() => setViewMode("preview")}
+          className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all active:translate-y-[0.5px] ${
+            viewMode === "preview"
+              ? "bg-gradient-to-b from-zinc-800 via-zinc-800 to-zinc-850 text-zinc-100 font-semibold border-t border-t-zinc-600/70 border-x border-x-zinc-700/50 border-b border-b-zinc-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]"
+              : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60"
+          }`}
+          title="Live WebContainer preview"
+        >
+          <Globe className="h-3.5 w-3.5" />
+          <span>Preview</span>
+        </button>
       </div>
 
-      <div className="h-4 w-px bg-zinc-800 mx-1" />
-
-      {/* Status chip */}
-      <StatusChip status={session.status} />
-
-      {/* Plan checklist toggle button */}
-      {plan.length > 0 && (
-        <button
-          onClick={() => setShowPlanSidebar((prev) => !prev)}
-          className={`flex items-center gap-1.5 rounded-xl border-t border-x border-b px-2.5 py-1 text-xs font-mono transition-all active:translate-y-[0.5px] ${
-            showPlanSidebar
-              ? "border-t-amber-400/50 border-x-amber-500/35 border-b-amber-600/30 bg-gradient-to-b from-amber-500/20 to-amber-500/10 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]"
-              : "border-t-zinc-700/60 border-x-zinc-800/60 border-b-zinc-950 bg-gradient-to-b from-zinc-800/80 to-zinc-900/90 text-zinc-400 hover:text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
-          }`}
-          title="Toggle execution plan checklist"
-        >
-          <ListTodo className="h-3.5 w-3.5" />
-          <span>Plan</span>
-          <span className="rounded-full bg-amber-500/20 px-1.5 py-0.2 text-[10px] text-amber-300">
-            {plan.filter((t) => t.status === "completed").length}/{plan.length}
-          </span>
-        </button>
+      {/* Live CI status chip — queued → running → passed/failed with run link */}
+      {liveCiPhase && (
+        <CiStatusChip
+          phase={liveCiPhase}
+          runUrl={ciRunUrl}
+          workflowName={ciWorkflowName}
+          stepName={ciStepName}
+        />
       )}
-
-      {/* Verify sandbox button */}
-      {isActive && (
-        <button
-          id="verify-sandbox-btn"
-          onClick={handleVerify}
-          disabled={sandboxLoading || patchFiles.length === 0}
-          className="flex items-center gap-1.5 rounded-xl border-t border-t-zinc-600/70 border-x border-x-zinc-750/60 border-b border-b-zinc-950 bg-gradient-to-b from-zinc-800 to-zinc-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:text-white hover:border-t-zinc-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_2px_4px_rgba(0,0,0,0.25)] active:translate-y-[0.5px] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-          title={patchFiles.length === 0 ? "Stage a patch to run verification" : "Run tests in sandbox"}
-        >
-          {sandboxLoading ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-400" />
-          ) : (
-            <FlaskConical className="h-3.5 w-3.5 text-amber-400" />
-          )}
-          <span>{sandboxLoading ? "Running…" : "Run Tests"}</span>
-        </button>
+      {sandboxLoading && !liveCiPhase && (
+        <CiStatusChip phase="running" stepName="verifying" />
       )}
 
       {/* Time Machine — checkpoint rewind control */}
@@ -1556,9 +2409,9 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                 </span>
               </div>
               <div className="flex items-center gap-3">
-                {sandboxResult.run_url && (
+                {isExternalRunUrl(sandboxResult.run_url) && (
                   <a
-                    href={sandboxResult.run_url}
+                    href={sandboxResult.run_url as string}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center gap-1 text-[11px] font-mono text-zinc-400 hover:text-zinc-200 hover:underline"
@@ -1664,8 +2517,57 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                       message={msg}
                       isLatestStreaming={isStreaming && i === messages.length - 1}
                       onViewDiff={handleViewDiffForFile}
+                      onStageAuditFix={handleStageAuditFix}
                     />
                   ))}
+
+                  {/* Live audit scan progress card (if active and not yet attached to message) */}
+                  {activeAudit &&
+                    activeAudit.status === "scanning" &&
+                    !messages.some((m) => m.auditScan?.scan_id === activeAudit.scan_id) && (
+                      <AuditReportCard
+                        scan={activeAudit}
+                        onStageFix={handleStageAuditFix}
+                        onViewDiff={handleViewDiffForFile}
+                      />
+                    )}
+
+                  {/* Subagent progress cards (live start → done) */}
+                  {subagents.length > 0 && (
+                    <div className="space-y-2" aria-live="polite">
+                      {subagents.map((s, i) => (
+                        <SubagentCard
+                          key={`${s.role}-${s.startedAt}-${i}`}
+                          role={s.role}
+                          task={s.task}
+                          startedAt={s.startedAt}
+                          status={s.status}
+                          summary={s.summary}
+                          patchesModified={s.patchesModified}
+                          onViewDiff={handleViewDiffForFile}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Agent CI verification badge — sandbox_result verdict inline */}
+                  {(liveCiPhase === "passed" || liveCiPhase === "failed") &&
+                    liveSandboxStatus && (
+                      <CiVerificationBadge
+                        passed={liveCiPhase === "passed"}
+                        runUrl={ciRunUrl}
+                        durationSeconds={ciDurationSeconds}
+                        workflowName={ciWorkflowName}
+                      />
+                    )}
+                  {sandboxResult && !liveCiPhase && (
+                    <CiVerificationBadge
+                      passed={sandboxResult.passed}
+                      runUrl={sandboxResult.run_url}
+                      durationSeconds={null}
+                      workflowName={null}
+                    />
+                  )}
 
                   {/* Clarification Request Card with Choice Pills */}
                   {pendingClarification && (
@@ -1712,7 +2614,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
               {/* ============================================================ */}
               {/* TERMINAL DRAWER — live streaming command output               */}
               {/* ============================================================ */}
-              <TerminalDrawer logs={terminalLogs} />
+              <TerminalDrawer logs={terminalLogs} ciActive={ciActive} />
 
               {/* ============================================================ */}
               {/* SINGLE INPUT BAR (Matches Screenshot 2)                     */}
@@ -1797,6 +2699,63 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                       >
                         <FileCode2 className="h-3.5 w-3.5 text-violet-400" />
                         <span>View staged diffs</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setChatInput("/security-scan");
+                          setActionMenuOpen(false);
+                          textareaRef.current?.focus();
+                        }}
+                        className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800/80 hover:text-zinc-100 transition-colors"
+                      >
+                        <ShieldAlert className="h-3.5 w-3.5 text-rose-400" />
+                        <span>Security scan (/security-scan)</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setChatInput("/repo-audit");
+                          setActionMenuOpen(false);
+                          textareaRef.current?.focus();
+                        }}
+                        className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800/80 hover:text-zinc-100 transition-colors"
+                      >
+                        <Sparkles className="h-3.5 w-3.5 text-violet-400" />
+                        <span>Code audit (/repo-audit)</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Slash Command Autocomplete Popover */}
+                  {chatInput.startsWith("/") && !chatInput.includes(" ") && (
+                    <div className="absolute bottom-[calc(100%+8px)] left-0 right-0 z-30 mx-auto max-w-lg rounded-xl border border-zinc-800 bg-[#121217]/98 p-1.5 shadow-2xl backdrop-blur-xl">
+                      <div className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                        Slash Commands
+                      </div>
+                      <button
+                        onClick={() => {
+                          setChatInput("/security-scan");
+                          textareaRef.current?.focus();
+                        }}
+                        className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs text-zinc-200 hover:bg-zinc-800/80 transition-colors"
+                      >
+                        <div className="flex items-center gap-2">
+                          <ShieldAlert className="h-4 w-4 text-rose-400" />
+                          <span className="font-mono font-semibold text-rose-300">/security-scan</span>
+                        </div>
+                        <span className="text-[11px] text-zinc-400">Scan for OWASP & secrets</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          setChatInput("/repo-audit");
+                          textareaRef.current?.focus();
+                        }}
+                        className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs text-zinc-200 hover:bg-zinc-800/80 transition-colors"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="h-4 w-4 text-violet-400" />
+                          <span className="font-mono font-semibold text-violet-300">/repo-audit</span>
+                        </div>
+                        <span className="text-[11px] text-zinc-400">Architecture & code quality</span>
                       </button>
                     </div>
                   )}
@@ -2107,6 +3066,8 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
           {/* ============================================================== */}
           {/* MONACO DIFF EDITOR (Active in "diffs" and "split" mode)         */}
+          {/* Split right panel toggles Diff editor vs Preview iframe via     */}
+          {/* splitRightPanel segmented control (pure UI state).              */}
           {/* ============================================================== */}
           {(viewMode === "diffs" || viewMode === "split") && (
             <div
@@ -2114,7 +3075,56 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                 viewMode === "split" ? "flex-1" : "w-full"
               }`}
             >
-              {patchFiles.length > 0 ? (
+              {showSplitPreview ? (
+                <>
+                  {/* Right panel header — segmented control only. Active tab is
+                      known here (preview), so selected states are literals to
+                      avoid narrowing the splitRightPanel union (TS2367). */}
+                  <div className="flex-none flex items-center justify-end border-b border-zinc-800 bg-[#0c0c0e] px-2 py-1.5">
+                    <div
+                      className="flex shrink-0 items-center rounded-lg border border-zinc-800 bg-[#0a0a0d] p-0.5"
+                      role="tablist"
+                      aria-label="Split right panel view"
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={false}
+                        onClick={() => setSplitRightPanel("diffs")}
+                        className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-all text-zinc-500 hover:text-zinc-300"
+                      >
+                        <FileCode2 className="h-3 w-3" />
+                        <span>Diffs</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={true}
+                        onClick={() => setSplitRightPanel("preview")}
+                        className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-all bg-gradient-to-b from-zinc-700 to-zinc-800 text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
+                      >
+                        <Globe className="h-3 w-3" />
+                        <span>Preview</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Preview side — reuses WebPreviewPanel, no new data flows */}
+                  <div className="flex-1 overflow-hidden">
+                    <WebPreviewPanel
+                      status={wcStatus}
+                      previewUrl={previewUrl}
+                      error={wcError}
+                      onBoot={handleBootPreview}
+                      onRefresh={handleRefreshPreview}
+                      onRestartServer={restartDevServer}
+                      onSaveEnv={handleSavePreviewEnv}
+                      initialEnvVars={previewEnvVars}
+                      className="h-full"
+                    />
+                  </div>
+                </>
+              ) : patchFiles.length > 0 ? (
                 <>
                   {/* File tab bar */}
                   <div className="flex-none flex items-center border-b border-zinc-800 bg-[#0c0c0e] overflow-x-auto">
@@ -2145,6 +3155,44 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                         <span>Back to Chat</span>
                       </button>
                     )}
+
+                    {/* Split right-panel segmented control */}
+                    {viewMode === "split" && (
+                      <div
+                        className="ml-auto mr-2 flex shrink-0 items-center rounded-lg border border-zinc-800 bg-[#0a0a0d] p-0.5"
+                        role="tablist"
+                        aria-label="Split right panel view"
+                      >
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={splitRightPanel === "diffs"}
+                          onClick={() => setSplitRightPanel("diffs")}
+                          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-all ${
+                            splitRightPanel === "diffs"
+                              ? "bg-gradient-to-b from-zinc-700 to-zinc-800 text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
+                              : "text-zinc-500 hover:text-zinc-300"
+                          }`}
+                        >
+                          <FileCode2 className="h-3 w-3" />
+                          <span>Diffs</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={splitRightPanel === "preview"}
+                          onClick={() => setSplitRightPanel("preview")}
+                          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-all ${
+                            splitRightPanel === "preview"
+                              ? "bg-gradient-to-b from-zinc-700 to-zinc-800 text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
+                              : "text-zinc-500 hover:text-zinc-300"
+                          }`}
+                        >
+                          <Globe className="h-3 w-3" />
+                          <span>Preview</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {/* Monaco DiffEditor */}
@@ -2173,26 +3221,85 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                 </>
               ) : (
                 /* Empty state when no diffs staged */
-                <div className="flex-1 flex flex-col items-center justify-center gap-5 px-8 text-center">
-                  <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-zinc-800 bg-[#121216] text-zinc-600">
-                    <WrapText className="h-8 w-8" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-medium text-zinc-300">No staged patches yet</p>
-                    <p className="text-xs font-mono text-zinc-500 mt-1">
-                      Ask the agent to inspect and modify files in the chat
-                    </p>
-                  </div>
+                <>
+                  {viewMode === "split" && (
+                    <div className="flex-none flex items-center justify-end border-b border-zinc-800 bg-[#0c0c0e] px-2 py-1.5">
+                      <div
+                        className="flex shrink-0 items-center rounded-lg border border-zinc-800 bg-[#0a0a0d] p-0.5"
+                        role="tablist"
+                        aria-label="Split right panel view"
+                      >
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={splitRightPanel === "diffs"}
+                          onClick={() => setSplitRightPanel("diffs")}
+                          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-all ${
+                            splitRightPanel === "diffs"
+                              ? "bg-gradient-to-b from-zinc-700 to-zinc-800 text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
+                              : "text-zinc-500 hover:text-zinc-300"
+                          }`}
+                        >
+                          <FileCode2 className="h-3 w-3" />
+                          <span>Diffs</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={splitRightPanel === "preview"}
+                          onClick={() => setSplitRightPanel("preview")}
+                          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-all ${
+                            splitRightPanel === "preview"
+                              ? "bg-gradient-to-b from-zinc-700 to-zinc-800 text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
+                              : "text-zinc-500 hover:text-zinc-300"
+                          }`}
+                        >
+                          <Globe className="h-3 w-3" />
+                          <span>Preview</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="flex-1 flex flex-col items-center justify-center gap-5 px-8 text-center">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-zinc-800 bg-[#121216] text-zinc-600">
+                      <WrapText className="h-8 w-8" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-zinc-300">No staged patches yet</p>
+                      <p className="text-xs font-mono text-zinc-500 mt-1">
+                        Ask the agent to inspect and modify files in the chat
+                      </p>
+                    </div>
 
-                  <button
-                    onClick={() => setViewMode("chat")}
-                    className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs font-mono text-amber-300 hover:bg-amber-500/20 transition-colors"
-                  >
-                    <MessageSquare className="h-3.5 w-3.5" />
-                    <span>Go to Chat</span>
-                  </button>
-                </div>
+                    <button
+                      onClick={() => setViewMode("chat")}
+                      className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs font-mono text-amber-300 hover:bg-amber-500/20 transition-colors"
+                    >
+                      <MessageSquare className="h-3.5 w-3.5" />
+                      <span>Go to Chat</span>
+                    </button>
+                  </div>
+                </>
               )}
+            </div>
+          )}
+
+          {/* ============================================================== */}
+          {/* LIVE PREVIEW (Active in "preview" mode)                         */}
+          {/* ============================================================== */}
+          {viewMode === "preview" && (
+            <div className="flex h-full w-full flex-1 flex-col overflow-hidden bg-[#09090b] md:w-auto">
+              <WebPreviewPanel
+                status={wcStatus}
+                previewUrl={previewUrl}
+                error={wcError}
+                onBoot={handleBootPreview}
+                onRefresh={handleRefreshPreview}
+                onRestartServer={restartDevServer}
+                onSaveEnv={handleSavePreviewEnv}
+                initialEnvVars={previewEnvVars}
+                className="flex-1"
+              />
             </div>
           )}
 
@@ -2294,6 +3401,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
       {showCommitModal && (
         <CommitModal
           sessionId={sessionId}
+          repoOwner={session?.repo_owner}
+          repoName={session?.repo_name}
+          branchName={session?.branch_name}
+          patchCount={patchFiles.length}
           onClose={() => setShowCommitModal(false)}
           onSuccess={handleCommitSuccess}
         />
@@ -2355,4 +3466,102 @@ function parseDiffForMonaco(patch: string): { original: string; modified: string
     original: originalLines.join("\n"),
     modified: modifiedLines.join("\n"),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Preview scaffold — v1 synthetic file tree for WebContainer boot.
+// Only agent-staged files + a minimal Vite scaffold are mounted. Full repo
+// clone via GitHub API file tree fetch is a v2 enhancement.
+// ---------------------------------------------------------------------------
+
+const PREVIEW_SCAFFOLD_PACKAGE_JSON = `{
+  "name": "haunter-preview",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 3000 --host --strictPort"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}
+`;
+
+const PREVIEW_SCAFFOLD_VITE_CONFIG = `import { defineConfig } from "vite";
+
+export default defineConfig({
+  server: { port: 3000, host: true, strictPort: true },
+});
+`;
+
+const PREVIEW_SCAFFOLD_INDEX_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Haunter Preview</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
+`;
+
+const PREVIEW_SCAFFOLD_MAIN_JS = `const root = document.getElementById("root");
+if (root) {
+  root.innerHTML =
+    "<main style=\"font-family: ui-monospace, monospace; padding: 32px; color: #e4e4e7;\">" +
+    "<h1 style=\"font-size: 18px; margin-bottom: 8px;\">Haunter Live Preview</h1>" +
+    "<p style=\"font-size: 12px; color: #71717a;\">Container is running. Stage files with the agent to see them here.</p>" +
+    "</main>";
+  document.body.style.background = "#09090b";
+  document.body.style.margin = "0";
+}
+`;
+
+function insertPreviewFile(
+  tree: FileSystemTree,
+  filePath: string,
+  contents: string
+): void {
+  const parts = filePath.replace(/^\/+/, "").split("/").filter(Boolean);
+  if (parts.length === 0) return;
+  let node = tree;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const segment = parts[i];
+    const existing = node[segment] as
+      | { directory: FileSystemTree }
+      | { file: { contents: string } }
+      | undefined;
+    if (!existing || !("directory" in existing)) {
+      const child: FileSystemTree = {};
+      node[segment] = { directory: child };
+      node = child;
+    } else {
+      node = existing.directory;
+    }
+  }
+  node[parts[parts.length - 1]] = { file: { contents } };
+}
+
+function buildPreviewFileTree(
+  stagedPatches: Record<string, string>
+): FileSystemTree {
+  const tree: FileSystemTree = {
+    "package.json": { file: { contents: PREVIEW_SCAFFOLD_PACKAGE_JSON } },
+    "vite.config.js": { file: { contents: PREVIEW_SCAFFOLD_VITE_CONFIG } },
+    "index.html": { file: { contents: PREVIEW_SCAFFOLD_INDEX_HTML } },
+  };
+  insertPreviewFile(tree, "src/main.js", PREVIEW_SCAFFOLD_MAIN_JS);
+
+  for (const [filePath, diff] of Object.entries(stagedPatches)) {
+    const { modified } = parseDiffForMonaco(diff);
+    if (!modified) continue;
+    // Never let a staged patch clobber the scaffold boot contract unless it
+    // explicitly targets that path — last write wins, which is correct.
+    insertPreviewFile(tree, filePath, modified.endsWith("\n") ? modified : `${modified}\n`);
+  }
+
+  return tree;
 }

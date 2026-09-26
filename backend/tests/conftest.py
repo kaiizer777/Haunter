@@ -96,6 +96,8 @@ async def truncate_all(db: AsyncSession) -> None:
         )
     for stmt in (
         "DELETE FROM system_configs",
+        "DELETE FROM repo_settings",
+        "DELETE FROM audit_jobs",
         "DELETE FROM code_reviews",
         "DELETE FROM agent_sessions",
         "DELETE FROM eval_results",

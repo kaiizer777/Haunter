@@ -725,3 +725,203 @@ async def tool_run_targeted_tests(
         f"OUTPUT:\n{stdout_section}\n"
         f"STDERR:\n{stderr_section}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool: verify_in_ci_sandbox (future.md §4.3.1 — Phase 4.1)
+# ---------------------------------------------------------------------------
+
+_CI_MIN_TIMEOUT = 1
+_CI_MAX_TIMEOUT = 600
+_CI_DEFAULT_TIMEOUT = 180
+
+
+def clamp_ci_timeout(timeout_sec: Any) -> int:
+    """Clamp CI sandbox timeout to [1, 600]; fall back to 180 on bad input."""
+    try:
+        value = int(timeout_sec)
+    except (TypeError, ValueError):
+        return _CI_DEFAULT_TIMEOUT
+    return max(_CI_MIN_TIMEOUT, min(_CI_MAX_TIMEOUT, value))
+
+
+async def tool_verify_ci_sandbox(
+    workflow_file: str | None = None,
+    timeout_sec: int = _CI_DEFAULT_TIMEOUT,
+    queue: "SseQueue | None" = None,
+    session: Any | None = None,
+    repo: Any | None = None,
+    staged_patches: dict[str, str] | None = None,
+    gh_token: str | None = None,
+    **_kwargs: Any,
+) -> str:
+    """
+    Dispatch staged patches to the isolated GitHub Actions CI sandbox.
+
+    Hybrid engine (SANDBOX_PROVIDER aware):
+      - "local"          → fast local tool_run_targeted_tests on staged files.
+      - "github_actions" → verify_session_patches (mirror repo + Actions poll).
+
+    Args:
+        workflow_file:  Optional workflow file to trigger (e.g. 'ci.yml').
+                        Default auto-detects from file extensions.
+        timeout_sec:    Max seconds to wait (default 180, max 600, clamped).
+        queue:          SseQueue for sandbox_queued / terminal_output streaming.
+        session:        AgentSession ORM (provides base_sha, staged_patches).
+        repo:           Repo ORM (provides owner/name).
+        staged_patches: dict of {path: unified_diff}. Falls back to
+                        session.staged_patches when omitted.
+        gh_token:       Optional GitHub installation token.
+        **_kwargs:      Accepts and ignores cwd and other orchestrator extras
+                        for signature consistency.
+
+    Returns:
+        Formatted result with passed/failed, exit code, duration, and logs.
+    """
+    from app.config import settings
+
+    timeout_sec = clamp_ci_timeout(timeout_sec)
+
+    # Resolve staged patches — an explicit dict (even if empty) wins so an
+    # empty orchestrator state correctly reports "no patches" instead of
+    # silently falling back to a stale session object. Only when the caller
+    # omits staged_patches (None) do we fall back to session.staged_patches.
+    if staged_patches is not None:
+        patches: dict[str, str] = dict(staged_patches)
+    elif session is not None:
+        try:
+            patches = dict(getattr(session, "staged_patches", None) or {})
+        except Exception:
+            patches = {}
+    else:
+        patches = {}
+
+    if not patches:
+        return "Error: No staged patches to verify. Stage at least one patch first."
+
+    # Defense-in-depth: validate staged patch paths before sorted()/combined
+    # patch construction — skip invalid entries with a warning, never crash.
+    from app.services.session_tools.recon import _validate_file_path as _validate_ci_path
+
+    _valid_patches: dict[str, str] = {}
+    for _p, _d in patches.items():
+        try:
+            _validate_ci_path(_p)
+        except Exception as exc:
+            logger.warning("tool_verify_ci_sandbox: skipping invalid patch path %r: %s", _p, exc)
+            continue
+        _valid_patches[_p] = _d
+    patches = _valid_patches
+    if not patches:
+        return "Error: No staged patches to verify. Stage at least one patch first."
+
+    # Normalise workflow label for display (runner auto-detects regardless).
+    workflow_label = ((workflow_file or "").strip() or "auto")[:128]
+    if workflow_file is not None:
+        workflow_file = workflow_file.strip() or None
+
+    provider = str(getattr(settings, "sandbox_provider", "github_actions") or "github_actions")
+    provider = provider.lower().strip()
+
+    # ---- Local fast path: run staged files through the local test runner.
+    if provider == "local":
+        test_targets = sorted(patches.keys())
+        if queue is not None:
+            try:
+                await queue.put_sandbox_queued(
+                    run_url="local", workflow_name=workflow_label
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning("tool_verify_ci_sandbox: SSE emit failed: %s", exc)
+            try:
+                await queue.put_terminal_output(
+                    f"[ci-sandbox] Local provider: running {len(test_targets)} "
+                    f"target(s) via tool_run_targeted_tests "
+                    f"(timeout={timeout_sec}s)...\n",
+                    stream="stdout",
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning("tool_verify_ci_sandbox: SSE emit failed: %s", exc)
+        # NOTE: effective local cap is 300 via tool_run_targeted_tests (pre-existing); 600s timeout is clamped downstream.
+        local_result = await tool_run_targeted_tests(
+            test_targets=test_targets,
+            timeout_sec=timeout_sec,
+            queue=queue,
+        )
+        return (
+            f"CI sandbox verification (provider=local, workflow={workflow_label}):\n"
+            f"{local_result}"
+        )
+
+    # ---- GitHub Actions path: bridge through verify_session_patches.
+    if session is None or repo is None:
+        return (
+            "Error: Session and repo context are required for CI sandbox "
+            "verification (provider=github_actions)."
+        )
+
+    from app.subagents.sandbox_verifier import verify_session_patches
+
+    # Dispatcher-level start events (spec §4.3.1): sandbox_queued +
+    # terminal_output. The verifier itself emits further polling progress;
+    # emitting here guarantees the frontend sees dispatch immediately even
+    # when the verifier is mocked in tests.
+    if queue is not None:
+        try:
+            await queue.put_sandbox_queued(run_url="pending", workflow_name=workflow_label)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("tool_verify_ci_sandbox: SSE emit failed: %s", exc)
+        try:
+            await queue.put_terminal_output(
+                f"[ci-sandbox] Dispatching {len(patches)} file(s) "
+                f"(workflow={workflow_label}, timeout={timeout_sec}s)...\n",
+                stream="stdout",
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("tool_verify_ci_sandbox: SSE emit failed: %s", exc)
+
+    t_start = time.monotonic()
+    result = await verify_session_patches(
+        session=session,
+        repo=repo,
+        staged_patches=patches,
+        gh_token=gh_token,
+        queue=queue,
+        workflow_file=workflow_file,
+        timeout_sec=timeout_sec,
+    )
+    duration = time.monotonic() - t_start
+
+    passed = bool(result.get("passed", False))
+    status = str(result.get("status", "passed" if passed else "failed"))
+    run_url = result.get("run_url") or "(none)"
+    raw_logs = result.get("logs") or ""
+    logs = raw_logs.strip() if isinstance(raw_logs, str) else str(raw_logs).strip()
+    logs = logs or "(empty)"
+    # Cap logs in the LLM tool response so a huge CI tail cannot blow context.
+    if len(logs) > 6000:
+        logs = logs[-6000:]
+    verdict = "PASSED" if passed else "FAILED"
+    exit_code = 0 if passed else 1
+
+    if queue is not None:
+        try:
+            await queue.put_sandbox_progress(step_name="complete", status="completed")
+        except Exception as exc:  # pragma: no cover
+            logger.warning("tool_verify_ci_sandbox: SSE emit failed: %s", exc)
+        try:
+            await queue.put_sandbox_status(
+                status="passed" if passed else "failed",
+                logs=logs[:2000],
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("tool_verify_ci_sandbox: SSE emit failed: %s", exc)
+
+    return (
+        f"CI sandbox verification: {verdict}\n"
+        f"Workflow: {workflow_label}\n"
+        f"Status: {status}\n"
+        f"Exit code: {exit_code} (Duration: {duration:.2f}s)\n"
+        f"Run URL: {run_url}\n"
+        f"LOGS:\n{logs}"
+    )

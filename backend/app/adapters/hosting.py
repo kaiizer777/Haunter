@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
@@ -139,6 +140,16 @@ class HostingAdapter(ABC):
         Must not block — return as fast as possible.
         """
 
+    @abstractmethod
+    async def schedule_audit(self, audit_id: str, dispatch_fence_token: str) -> None:
+        """Schedule one durable audit job without using request background tasks.
+
+        `dispatch_fence_token` is the signed per-attempt fence minted by the
+        dispatcher. It is bound into the child invocation token so a delayed
+        child from an earlier dispatch attempt cannot be mistaken for the
+        current one.
+        """
+
 
 # ---------------------------------------------------------------------------
 # AWS adapter (Lambda) — async self-invoke via boto3
@@ -173,40 +184,36 @@ class AWSHostingAdapter(HostingAdapter):
         run_id: UUID,
         background_tasks: "BackgroundTasks",
     ) -> None:
-        import hashlib
-        import hmac
         import json
-        from app.config import settings
 
-        function_name = settings.aws_lambda_function_name
-        if not function_name:
-            # Fall back to the env var Lambda automatically sets for itself
-            import os
-            function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        from app.lambda_runtime import resolve_lambda_function_name
+        from app.self_invocation import (
+            KIND_PIPELINE,
+            SelfInvocationError,
+            self_invocation_token,
+        )
 
+        function_name = resolve_lambda_function_name()
         if not function_name:
             logger.error(
-                "hosting(aws): AWS_LAMBDA_FUNCTION_NAME not set; "
+                "hosting(aws): AWS Lambda function name is not configured; "
                 "falling back to in-process BackgroundTasks — pipeline may not execute on Lambda"
             )
             from app.orchestrator import handle_failed_run
             background_tasks.add_task(handle_failed_run, run_id)
             return
 
-        # HMAC for pipeline self-invoke — prevents unauthenticated direct InvokeFunction
-        # from triggering arbitrary run_id (S-06). Key is github_webhook_secret (or session_secret_key fallback).
-        hmac_key = getattr(settings, "github_webhook_secret", None) or getattr(
-            settings, "session_secret_key", ""
-        )
-        token = ""
-        if hmac_key:
-            token = hmac.new(
-                hmac_key.encode(), str(run_id).encode(), hashlib.sha256
-            ).hexdigest()
-        payload_dict: dict[str, str] = {"run_id": str(run_id)}
-        if token:
-            payload_dict["token"] = token
-        payload = json.dumps(payload_dict).encode()
+        try:
+            token = self_invocation_token(KIND_PIPELINE, str(run_id))
+        except SelfInvocationError:
+            logger.error(
+                "hosting(aws): self-invocation secret is not configured; "
+                "refusing to invoke Lambda for run=%s",
+                run_id,
+            )
+            raise
+
+        payload = json.dumps({"run_id": str(run_id), "token": token}).encode()
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _invoke_lambda_async, function_name, payload)
@@ -221,37 +228,36 @@ class AWSHostingAdapter(HostingAdapter):
         review_id: UUID,
         background_tasks: "BackgroundTasks",
     ) -> None:
-        import hashlib
-        import hmac
         import json
-        from app.config import settings
 
-        function_name = settings.aws_lambda_function_name
-        if not function_name:
-            import os
-            function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        from app.lambda_runtime import resolve_lambda_function_name
+        from app.self_invocation import (
+            KIND_REVIEW,
+            SelfInvocationError,
+            self_invocation_token,
+        )
 
+        function_name = resolve_lambda_function_name()
         if not function_name:
             logger.info(
-                "hosting(aws): AWS_LAMBDA_FUNCTION_NAME not set; "
+                "hosting(aws): AWS Lambda function name is not configured; "
                 "using in-process BackgroundTasks for code review"
             )
             from app.services.review_orchestrator import run_code_review_pipeline
             background_tasks.add_task(run_code_review_pipeline, review_id)
             return
 
-        hmac_key = getattr(settings, "github_webhook_secret", None) or getattr(
-            settings, "session_secret_key", ""
-        )
-        token = ""
-        if hmac_key:
-            token = hmac.new(
-                hmac_key.encode(), str(review_id).encode(), hashlib.sha256
-            ).hexdigest()
-        payload_dict: dict[str, str] = {"review_id": str(review_id)}
-        if token:
-            payload_dict["token"] = token
-        payload = json.dumps(payload_dict).encode()
+        try:
+            token = self_invocation_token(KIND_REVIEW, str(review_id))
+        except SelfInvocationError:
+            logger.error(
+                "hosting(aws): self-invocation secret is not configured; "
+                "refusing to invoke Lambda for review=%s",
+                review_id,
+            )
+            raise
+
+        payload = json.dumps({"review_id": str(review_id), "token": token}).encode()
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _invoke_lambda_async, function_name, payload)
@@ -261,6 +267,39 @@ class AWSHostingAdapter(HostingAdapter):
             review_id,
         )
 
+    async def schedule_audit(self, audit_id: str, dispatch_fence_token: str) -> None:
+        import json
+
+        from app.lambda_runtime import resolve_lambda_function_name
+        from app.services.audit_pipeline import audit_child_invocation_token
+
+        if not isinstance(audit_id, str) or not re.fullmatch(
+            r"audit-[0-9a-f]{12}", audit_id, flags=re.ASCII
+        ):
+            raise ValueError("audit id is invalid")
+
+        function_name = resolve_lambda_function_name()
+        if not function_name:
+            raise RuntimeError("AWS Lambda function name is not configured")
+
+        token = audit_child_invocation_token(audit_id, dispatch_fence_token)
+        payload = json.dumps(
+            {
+                "audit_id": audit_id,
+                "dispatch_fence_token": dispatch_fence_token,
+                "token": token,
+            }
+        ).encode()
+        loop = asyncio.get_running_loop()
+        # No wait_for: cancelling this coroutine cannot stop the executor
+        # thread, so a timeout would release the dispatch lease while a
+        # delayed child invoke was still in flight. The boto Config timeouts
+        # bound the call and the thread always finishes before we return.
+        await loop.run_in_executor(None, _invoke_lambda_async, function_name, payload)
+        logger.info(
+            "hosting(aws): async-invoked Lambda for audit_id=%s",
+            audit_id,
+        )
 
 
 def _invoke_lambda_async(function_name: str, payload: bytes) -> None:
@@ -268,11 +307,20 @@ def _invoke_lambda_async(function_name: str, payload: bytes) -> None:
     Synchronous boto3 call (run in executor to avoid blocking event loop).
     InvocationType='Event' — fire-and-forget, returns 202 immediately.
     """
-    import boto3  # lazy — only imported when HOSTING_PROVIDER=aws
+    import boto3
+    from botocore.config import Config
 
     from app.config import settings
 
-    client = boto3.client("lambda", region_name=settings.aws_region)
+    client = boto3.client(
+        "lambda",
+        region_name=settings.aws_region,
+        config=Config(
+            connect_timeout=2,
+            read_timeout=3,
+            retries={"max_attempts": 2},
+        ),
+    )
     resp = client.invoke(
         FunctionName=function_name,
         InvocationType="Event",  # async, returns 202 immediately
@@ -285,6 +333,7 @@ def _invoke_lambda_async(function_name: str, payload: bytes) -> None:
             status,
             function_name,
         )
+        raise RuntimeError("Lambda async invocation was not accepted")
 
 
 # ---------------------------------------------------------------------------

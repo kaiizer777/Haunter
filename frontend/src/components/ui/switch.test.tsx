@@ -128,4 +128,17 @@ describe("switch.tsx", () => {
 
     expect(ref.current).toBeInstanceOf(HTMLButtonElement);
   });
+
+  it("applies id attribute to the switch button when id is provided", () => {
+    render(
+      <Switch
+        id="test-switch"
+        checked={false}
+        onCheckedChange={vi.fn()}
+      />
+    );
+
+    const switchBtn = screen.getByRole("switch");
+    expect(switchBtn).toHaveAttribute("id", "test-switch");
+  });
 });

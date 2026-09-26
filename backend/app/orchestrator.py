@@ -27,12 +27,14 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import async_session_maker
 from app.models import Repo, Run, RunStep
+from app.services import feature_enforcement
+from app.services.repo_settings import get_repo_settings
 from app.subagents.context_gatherer import gather_context
 from sqlalchemy.exc import InterfaceError, OperationalError
 
@@ -381,6 +383,29 @@ async def _orchestrator_pipeline_body(
     from app.models import RunStep, Attempt
     from sqlalchemy.orm import selectinload as _selectinload
 
+    repo_settings = await get_repo_settings(db, repo.id)
+
+    # Phase 6.3 Feature Enforcement: Auto-Fix Guard
+    auto_fix_decision = feature_enforcement.is_auto_fix_allowed(repo_settings.enable_auto_fix)
+    if not auto_fix_decision.allowed:
+        logger.info(
+            "orchestrator: run=%s %s — skipping fix generation and PR creation",
+            run_id,
+            auto_fix_decision.reason,
+        )
+        state["decisions"].append("auto_fix_disabled")
+        await _persist_failure_reason(
+            db=db,
+            run=run,
+            reason=auto_fix_decision.reason,
+        )
+        if run.status == RunStatus.pending.value:
+            try:
+                await _transition(run, RunStatus.error, db)
+            except InvalidTransitionError:
+                pass
+        return
+
     # ----------------------------------------------------------------
     # pending → context_gathering
     # ----------------------------------------------------------------
@@ -508,13 +533,19 @@ async def _orchestrator_pipeline_body(
                         "Fix generation aborted — quarantine suggested."
                     )
                     comment_body = _redact_secrets(raw_comment)
-                    await post_commit_comment(
-                        owner=repo.owner,
-                        repo=repo.name,
-                        sha=run.head_sha,
-                        body=comment_body,
-                        token=github_token,
-                    )
+                    if repo_settings.enable_pr_comments:
+                        await post_commit_comment(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            sha=run.head_sha,
+                            body=comment_body,
+                            token=github_token,
+                        )
+                    else:
+                        logger.info(
+                            "orchestrator: run=%s PR comments disabled by repo settings — suppressing flaky commit comment",
+                            run_id,
+                        )
                 except Exception as comment_exc:
                     logger.warning(
                         "orchestrator: run=%s failed to post flaky commit comment: %s",
@@ -567,6 +598,7 @@ async def _orchestrator_pipeline_body(
     prior_attempt: Optional[Attempt] = None
     prior_failure_reason_tail: Optional[str] = None
     skip_to_fallback_reason: Optional[str] = None
+    cost_ceiling_failure_reason: Optional[str] = None
 
     for iteration in range(max_attempts):
         # ---- Per-iteration session (BLOCKER-1 fix) ----
@@ -615,6 +647,32 @@ async def _orchestrator_pipeline_body(
                         iteration + 1,
                     )
                     return
+
+                # Phase 6.3 Feature Enforcement: Cost Ceiling Check
+                cost_stmt = select(func.coalesce(func.sum(RunStep.cost_estimate), 0.0)).where(
+                    RunStep.run_id == run.id
+                )
+                total_cost_dollars = (await attempt_db.scalar(cost_stmt)) or 0.0
+                total_cost_cents = total_cost_dollars * 100.0
+
+                cost_decision = feature_enforcement.check_cost_ceiling(
+                    total_cost_cents, repo_settings.max_cost_per_run_cents
+                )
+                if not cost_decision.allowed:
+                    logger.warning(
+                        "orchestrator: run=%s %s — aborting fix attempts to fallback",
+                        run_id,
+                        cost_decision.reason,
+                    )
+                    skip_to_fallback_reason = "cost_ceiling_exceeded"
+                    cost_ceiling_failure_reason = cost_decision.reason
+                    state["decisions"].append("cost_ceiling_exceeded")
+                    await _persist_failure_reason(
+                        db=attempt_db,
+                        run=run,
+                        reason=cost_decision.reason,
+                    )
+                    break
 
                 # ---- Generate fix ----
                 try:
@@ -728,12 +786,33 @@ async def _orchestrator_pipeline_body(
                     await _transition(run, RunStatus.verification, attempt_db)
                     state["step"] = RunStatus.verification.value
 
-                # ---- Verify in sandbox (provider selected via SANDBOX_PROVIDER env) ----
-                verify_result = await sandbox_verify(
-                    attempt=attempt,
-                    run=run,
-                    repo=repo,
+                # Phase 6.3 Feature Enforcement: Sandbox Verification Bypass
+                sandbox_decision = feature_enforcement.is_sandbox_verification_allowed(
+                    repo_settings.enable_sandbox_verification
                 )
+                if not sandbox_decision.allowed:
+                    logger.info(
+                        "orchestrator: run=%s %s — bypassing CI sandbox verification",
+                        run_id,
+                        sandbox_decision.reason,
+                    )
+                    verify_result = {
+                        "status": "pass",
+                        "failure_reason": None,
+                        "build_duration_ms": 0,
+                    }
+                    attempt.strategy_notes = (
+                        (attempt.strategy_notes or "")
+                        + " [sandbox verification bypassed by repo settings]"
+                    )
+                    state["decisions"].append("sandbox_verification_skipped")
+                else:
+                    # ---- Verify in sandbox (provider selected via SANDBOX_PROVIDER env) ----
+                    verify_result = await sandbox_verify(
+                        attempt=attempt,
+                        run=run,
+                        repo=repo,
+                    )
 
                 # Persist verification result
                 v_status: str = verify_result["status"]        # "pass" | "fail"
@@ -785,13 +864,19 @@ async def _orchestrator_pipeline_body(
                                 "- Verified in sandbox CI."
                             )
                             if pr_number:
-                                await post_pr_comment(
-                                    owner=repo.owner,
-                                    repo=repo.name,
-                                    pr_number=pr_number,
-                                    body=confirmation_comment,
-                                    token=token,
-                                )
+                                if repo_settings.enable_pr_comments:
+                                    await post_pr_comment(
+                                        owner=repo.owner,
+                                        repo=repo.name,
+                                        pr_number=pr_number,
+                                        body=confirmation_comment,
+                                        token=token,
+                                    )
+                                else:
+                                    logger.info(
+                                        "orchestrator: run=%s PR comments disabled by repo settings — suppressing refinement comment",
+                                        run_id,
+                                    )
 
                             run.updated_at = datetime.now(timezone.utc)
                             attempt_db.add(run)
@@ -1002,6 +1087,13 @@ async def _orchestrator_pipeline_body(
                 return
 
             try:
+                if skip_to_fallback_reason == "cost_ceiling_exceeded":
+                    await _persist_failure_reason(
+                        db=fb_db,
+                        run=run,
+                        reason=cost_ceiling_failure_reason or "Cost ceiling exceeded",
+                    )
+
                 await _transition(run, RunStatus.fallback, fb_db)
                 state["step"] = RunStatus.fallback.value
 
@@ -1018,28 +1110,34 @@ async def _orchestrator_pipeline_body(
                 from app.github.pr import get_installation_token
                 github_token = await get_installation_token(repo)
 
-                # Feature 1: If interactive PR refinement, post diagnostic comment to PR
-                if run.parent_run_id is not None and run.pr_number:
-                    from app.github_client import post_pr_comment
-                    pr_fallback_body = (
-                        "⚠️ @haunter was unable to verify the requested adjustments in sandbox CI:\n\n"
-                        f"{fallback_body}"
-                    )
-                    await post_pr_comment(
-                        owner=repo.owner,
-                        repo=repo.name,
-                        pr_number=run.pr_number,
-                        body=pr_fallback_body,
-                        token=github_token,
-                    )
+                if repo_settings.enable_pr_comments:
+                    # Feature 1: If interactive PR refinement, post diagnostic comment to PR
+                    if run.parent_run_id is not None and run.pr_number:
+                        from app.github_client import post_pr_comment
+                        pr_fallback_body = (
+                            "⚠️ @haunter was unable to verify the requested adjustments in sandbox CI:\n\n"
+                            f"{fallback_body}"
+                        )
+                        await post_pr_comment(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            pr_number=run.pr_number,
+                            body=pr_fallback_body,
+                            token=github_token,
+                        )
+                    else:
+                        from app.github_client import post_commit_comment
+                        await post_commit_comment(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            sha=run.head_sha,
+                            body=fallback_body,
+                            token=github_token,
+                        )
                 else:
-                    from app.github_client import post_commit_comment
-                    await post_commit_comment(
-                        owner=repo.owner,
-                        repo=repo.name,
-                        sha=run.head_sha,
-                        body=fallback_body,
-                        token=github_token,
+                    logger.info(
+                        "orchestrator: run=%s PR comments disabled by repo settings — suppressing fallback comment",
+                        run_id,
                     )
                 await _transition(run, RunStatus.fallback_commented, fb_db)
                 state["step"] = RunStatus.fallback_commented.value

@@ -24,10 +24,12 @@ import respx
 from app.config import settings
 from app.github_client import (
     GITHUB_API_BASE,
+    GitHubArchiveError,
     GitHubAuthError,
     GitHubClientError,
     GitHubRateLimitError,
     GitHubResourceNotFoundError,
+    GitHubResponseLimitError,
     _build_headers,
     fetch_commit_metadata,
     fetch_diff,
@@ -39,13 +41,28 @@ from app.github_client import (
 fetch_workflow_logs = fetch_workflow_run_logs
 
 
-def _create_zip_bytes(files: dict[str, str]) -> bytes:
+def _create_zip_bytes(
+    files: dict[str, str],
+    compression: int = zipfile.ZIP_STORED,
+) -> bytes:
     """Helper to build an in-memory zip archive with given {filename: content}."""
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
+    with zipfile.ZipFile(buf, "w", compression=compression) as zf:
         for fname, content in files.items():
             zf.writestr(fname, content.encode("utf-8"))
     return buf.getvalue()
+
+
+class _ChunkedBody(httpx.AsyncByteStream):
+    def __init__(self, chunks: tuple[bytes, ...]) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self) -> None:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +294,113 @@ async def test_fetch_workflow_logs_follows_redirects():
     assert r2.called
     assert "=== File: test.txt ===" in result
     assert "Redirected test log content" in result
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_rejects_oversized_content_length_before_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("app.github_client.MAX_TEXT_RESPONSE_BYTES", 8)
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/commits/sha"
+    route = respx.get(url).respond(
+        status_code=200,
+        content=b"123456789",
+        headers={"Content-Length": "9"},
+    )
+
+    with pytest.raises(GitHubResponseLimitError):
+        await fetch_diff(owner="owner", repo="repo", sha="sha")
+
+    assert route.called
+    assert route.calls.last.request.method == "GET"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_download_rejects_streamed_body_when_content_length_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("app.github_client.MAX_TEXT_RESPONSE_BYTES", 8)
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/commits/sha"
+    respx.get(url).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"Transfer-Encoding": "chunked"},
+            stream=_ChunkedBody((b"1234", b"5678", b"9")),
+        )
+    )
+
+    with pytest.raises(GitHubResponseLimitError):
+        await fetch_diff(owner="owner", repo="repo", sha="sha")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_log_archive_rejects_compressed_download_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    monkeypatch.setattr("app.github_client.MAX_LOG_ARCHIVE_BYTES", 8)
+    secret = "gsk_" + "S" * 40
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/actions/runs/12345/logs"
+    respx.get(url).respond(status_code=200, content=secret.encode())
+
+    with pytest.raises(GitHubResponseLimitError):
+        await fetch_workflow_logs(owner="owner", repo="repo", run_id=12345)
+
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_log_archive_rejects_too_many_entries(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("app.github_client.MAX_ZIP_ENTRIES", 1)
+    archive = _create_zip_bytes({"one.txt": "one", "two.txt": "two"})
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/actions/runs/12345/logs"
+    respx.get(url).respond(status_code=200, content=archive)
+
+    with pytest.raises(GitHubArchiveError, match="too many entries"):
+        await fetch_workflow_logs(owner="owner", repo="repo", run_id=12345)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_log_archive_rejects_per_entry_and_total_expansion_caps(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/actions/runs/12345/logs"
+    per_entry_archive = _create_zip_bytes({"large.txt": "123456"})
+    respx.get(url).respond(status_code=200, content=per_entry_archive)
+    monkeypatch.setattr("app.github_client.MAX_ZIP_ENTRY_BYTES", 5)
+    with pytest.raises(GitHubResponseLimitError, match="entry is too large"):
+        await fetch_workflow_logs(owner="owner", repo="repo", run_id=12345)
+
+    monkeypatch.setattr("app.github_client.MAX_ZIP_ENTRY_BYTES", 10)
+    monkeypatch.setattr("app.github_client.MAX_ZIP_TOTAL_BYTES", 5)
+    total_archive = _create_zip_bytes({"one.txt": "123", "two.txt": "456"})
+    respx.get(url).respond(status_code=200, content=total_archive)
+    with pytest.raises(GitHubResponseLimitError, match="expands beyond"):
+        await fetch_workflow_logs(owner="owner", repo="repo", run_id=12345)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_log_archive_rejects_unsafe_compression_ratio(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("app.github_client.MAX_ZIP_COMPRESSION_RATIO", 2.0)
+    archive = _create_zip_bytes(
+        {"bomb.txt": "0" * 100_000},
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/actions/runs/12345/logs"
+    respx.get(url).respond(status_code=200, content=archive)
+
+    with pytest.raises(GitHubArchiveError, match="compression ratio"):
+        await fetch_workflow_logs(owner="owner", repo="repo", run_id=12345)
 
 
 # ---------------------------------------------------------------------------

@@ -5,11 +5,11 @@ Supports reading and updating active model configurations globally and per-repo.
 All endpoints are gated by get_current_user and strictly validated with Pydantic allowlists.
 
 Security invariants:
-- base_url is derived server-side from allowlist map (_PROVIDER_BASE_URLS) — never accepted
+- base_url is derived server-side from the provider allowlist map (settings-driven) — never accepted
   from client to prevent SSRF and endpoint hijacking.
 - Per-repo updates enforce tenant ownership: returns 404 (not 403) on non-owned repos to
   prevent existence oracle leakage.
-- Global model config switcher is restricted to ADMIN_USER_ID if configured.
+- Global model config switcher is open to any authenticated user (Phase 3.2 Issue 2).
 - SQL queries use parameterised SQLAlchemy ORM constructs.
 """
 
@@ -25,7 +25,7 @@ from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
 from app.llm.discovery import get_dynamic_free_models
-from app.models import ModelConfig, Repo, User
+from app.models import ModelConfig, ModelConfigScope, Repo, User
 from app.schemas import (
     AvailableModelItem,
     AvailableModelsOut,
@@ -37,13 +37,22 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/config/model", tags=["model_config"])
 
-# Server-derived base URLs — prevents SSRF / redirect to malicious endpoints
-_PROVIDER_BASE_URLS: dict[str, str] = {
-    "opencode_zen": "https://opencode.ai/zen/v1",
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com/v1",
-    "groq": "https://api.groq.com/openai/v1",
-}
+# Server-derived base URLs — prevents SSRF / redirect to malicious endpoints.
+# Resolved live from settings (Phase 3.2 Issue 5) so env overrides apply;
+# never accepted from the client.
+def _base_url_for_provider(provider: str) -> str | None:
+    """Return the configured base URL for an allowlisted provider, or None."""
+    return {
+        "opencode_zen": settings.opencode_zen_base_url,
+        "openai": settings.openai_base_url,
+        "anthropic": settings.anthropic_base_url,
+        "groq": settings.groq_base_url,
+    }.get(provider)
+
+
+def _default_base_url() -> str:
+    """Fallback base URL derived from settings.default_provider (Phase 3.2 Issue 5)."""
+    return _base_url_for_provider(settings.default_provider) or settings.opencode_zen_base_url
 
 
 @router.get("", response_model=ModelConfigOut)
@@ -65,18 +74,44 @@ async def get_active_model_config_endpoint(
         if repo is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found")
 
+        # 1a. Direct repo-scoped lookup (mirrors LLM runtime _resolve_from_db):
+        # newest active scope='repo' row pinned to this repo. Works even when
+        # repos.active_model_config_id is NULL.
+        scoped_result = await db.execute(
+            select(ModelConfig)
+            .where(
+                ModelConfig.is_active == True,  # noqa: E712
+                ModelConfig.scope == ModelConfigScope.REPO.value,
+                ModelConfig.repo_id == repo_id,
+            )
+            .order_by(ModelConfig.created_at.desc())
+            .limit(1)
+        )
+        scoped_cfg = scoped_result.scalar_one_or_none()
+        if scoped_cfg is not None:
+            return ModelConfigOut.model_validate(scoped_cfg)
+
+        # 1b. Legacy linkage fallback: repos.active_model_config_id pointing
+        # at an active row. Inactive linked rows fall through to global.
         if repo.active_model_config_id is not None:
             config_result = await db.execute(
-                select(ModelConfig).where(ModelConfig.id == repo.active_model_config_id)
+                select(ModelConfig).where(
+                    ModelConfig.id == repo.active_model_config_id,
+                    ModelConfig.is_active == True,  # noqa: E712
+                )
             )
             config = config_result.scalar_one_or_none()
             if config is not None:
                 return ModelConfigOut.model_validate(config)
 
-    # Global active config lookup
+    # Global active config lookup — strictly global scope so repo overrides
+    # are never surfaced as the platform default.
     global_result = await db.execute(
         select(ModelConfig)
-        .where(ModelConfig.is_active == True)  # noqa: E712
+        .where(
+            ModelConfig.is_active == True,  # noqa: E712
+            ModelConfig.scope == ModelConfigScope.GLOBAL.value,
+        )
         .order_by(ModelConfig.created_at.desc())
         .limit(1)
     )
@@ -85,13 +120,16 @@ async def get_active_model_config_endpoint(
     if active_config is not None:
         return ModelConfigOut.model_validate(active_config)
 
-    # Fallback to default configuration
+    # Fallback to default configuration (base_url follows settings.default_provider).
     return ModelConfigOut(
         id=uuid.uuid4(),
         provider=settings.default_provider,
         model_name=settings.default_model,
-        base_url=settings.opencode_zen_base_url,
+        base_url=_default_base_url(),
         is_active=True,
+        scope=ModelConfigScope.GLOBAL.value,
+        repo_id=None,
+        user_id=None,
     )
 
 
@@ -102,11 +140,11 @@ async def update_model_config_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ModelConfigOut:
     """
-    Update active model configuration.
+    Update active model configuration. Open to any authenticated user (Phase 3.2 Issue 2).
     - If body.repo_id is supplied: updates model config for that repo (enforces ownership).
-    - If body.repo_id is null: updates global active model config (admin-restricted if ADMIN_USER_ID is set).
+    - If body.repo_id is null: updates global active model config.
     """
-    base_url = _PROVIDER_BASE_URLS.get(body.provider)
+    base_url = _base_url_for_provider(body.provider)
     if not base_url:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid provider")
 
@@ -127,18 +165,28 @@ async def update_model_config_endpoint(
         else:
             existing_cfg = None
 
-        if existing_cfg is not None:
+        if existing_cfg is not None and existing_cfg.scope != ModelConfigScope.GLOBAL.value:
             existing_cfg.provider = body.provider
             existing_cfg.model_name = body.model_name
             existing_cfg.base_url = base_url
             existing_cfg.is_active = True
+            # Stamp legacy rows into repo scope so global queries never pick
+            # them up and global deactivation never touches them.
+            existing_cfg.scope = ModelConfigScope.REPO.value
+            existing_cfg.repo_id = repo.id
+            existing_cfg.user_id = current_user.id
             config = existing_cfg
         else:
+            # existing_cfg is None, or is a shared GLOBAL row: create a new
+            # repo-scoped row instead of mutating the platform default.
             config = ModelConfig(
                 provider=body.provider,
                 model_name=body.model_name,
                 base_url=base_url,
                 is_active=True,
+                scope=ModelConfigScope.REPO.value,
+                repo_id=repo.id,
+                user_id=current_user.id,
             )
             db.add(config)
             await db.flush()
@@ -155,23 +203,16 @@ async def update_model_config_endpoint(
         )
         return ModelConfigOut.model_validate(config)
 
-    # 2. Global model config update
-    is_admin = current_user.is_admin or bool(
-        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
-    )
-    if not is_admin:
-        logger.warning(
-            "Non-admin user %s attempted to update global model config", current_user.id
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin permissions required to update global model config",
-        )
-
-    # Deactivate currently active global configs
+    # 2. Global model config update — open to any authenticated user
+    # (Phase 3.2 Issue 2: admin gate removed; auth is enforced by get_current_user).
+    # Deactivate currently active global configs only — repo overrides
+    # (scope='repo') must survive global switches.
     await db.execute(
         update(ModelConfig)
-        .where(ModelConfig.is_active == True)  # noqa: E712
+        .where(
+            ModelConfig.is_active == True,  # noqa: E712
+            ModelConfig.scope == ModelConfigScope.GLOBAL.value,
+        )
         .values(is_active=False)
     )
 
@@ -180,6 +221,9 @@ async def update_model_config_endpoint(
         model_name=body.model_name,
         base_url=base_url,
         is_active=True,
+        scope=ModelConfigScope.GLOBAL.value,
+        repo_id=None,
+        user_id=None,
     )
     db.add(new_config)
     await db.commit()

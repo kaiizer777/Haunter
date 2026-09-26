@@ -53,6 +53,14 @@ from app.services.session_tools.checkpoints import (
     tool_checkpoint_restore,
     tool_scan_security_vulnerabilities,
 )
+from app.services.session_tools.audit import (
+    TOOL_RUN_AUDIT_SCAN,
+    AuditSlashCommand,
+    execute_audit_scan,
+    handle_slash_command,
+    parse_slash_command,
+    tool_run_audit_scan,
+)
 
 __all__ = [
     # recon
@@ -99,4 +107,11 @@ __all__ = [
     "create_checkpoint",
     "tool_checkpoint_restore",
     "tool_scan_security_vulnerabilities",
+    # session audits & slash commands (Phase 7.1)
+    "TOOL_RUN_AUDIT_SCAN",
+    "tool_run_audit_scan",
+    "parse_slash_command",
+    "handle_slash_command",
+    "execute_audit_scan",
+    "AuditSlashCommand",
 ]

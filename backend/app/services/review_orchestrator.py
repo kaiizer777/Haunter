@@ -29,6 +29,7 @@ from app.github_client import (
     fetch_pull_request_diff,
 )
 from app.models import CodeReview
+from app.services.repo_settings import get_repo_settings
 from app.subagents.code_reviewer import (
     analyze_diff,
     format_github_suggestion,
@@ -167,8 +168,15 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
         )
 
         # 5. Submit review to GitHub
+        repo_settings = await get_repo_settings(session, repo.id)
         risk_badge = _build_risk_badge(review.risk_score)
-        if review.pr_number:
+        if not repo_settings.enable_pr_comments:
+            logger.info(
+                "review_orchestrator: PR comments disabled by repo settings — suppressing review comment on %s/%s",
+                repo.owner,
+                repo.name,
+            )
+        elif review.pr_number:
             # PR Review: comments array + overall event
             comments: list[dict[str, Any]] = []
             for f in result.output.findings:
