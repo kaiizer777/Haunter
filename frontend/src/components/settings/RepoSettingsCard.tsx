@@ -16,18 +16,13 @@ import {
   AlertCircle,
   RotateCcw,
   Save,
-  Check,
   GitBranch,
   DollarSign,
   Gauge,
-  SlidersHorizontal,
   Workflow,
-  Sparkles,
-  Info,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { SelectDropdown, SelectOption } from "@/components/ui/select-dropdown";
 import {
@@ -127,8 +122,13 @@ const ILLEGAL_BRANCH_REGEX = /[\s~^:\\]|@{|\.\./;
 
 export function RepoSettingsCard({
   settings: initialSettings,
-  repoFullName,
-  repoId,
+  // `repoFullName` + `repoId` are part of the public props for future
+  // per-repo branding wiring; currently unused inside the card so we
+  // suppress the lint flag rather than break the parent contract.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  repoFullName: _repoFullName,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  repoId: _repoId,
   onSave,
   onApplyPreset,
   isSaving = false,

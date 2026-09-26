@@ -2,14 +2,12 @@
 
 import { useState } from "react";
 import {
-  FileText,
   AlertTriangle,
   Bug,
   FileCode,
   Check,
   Copy,
   FolderGit2,
-  Terminal,
   ChevronDown,
   ChevronUp,
   Sparkles,

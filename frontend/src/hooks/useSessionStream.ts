@@ -15,7 +15,7 @@
  *   sendChatMessage - Submit a user message and start streaming
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { API_BASE, CheckpointOut, PlanTask, WaitingInput } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
@@ -212,8 +212,11 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
   const abortRef = useRef<AbortController | null>(null);
 
   // Stable ref for optional subagent callbacks so sendChatMessage stays referentially stable.
+  // Keep the ref-write inside an effect (not the render body) to satisfy react-hooks/refs.
   const optionsRef = useRef<UseSessionStreamOptions | undefined>(options);
-  optionsRef.current = options;
+  useEffect(() => {
+    optionsRef.current = options;
+  }, [options]);
 
   const sendChatMessage = useCallback(
     async (

@@ -20,17 +20,10 @@ import {
   ShieldCheck,
   Zap,
   DollarSign,
-  Layers,
   AlertCircle,
   RefreshCw,
   FolderGit2,
-  ExternalLink,
   Sliders,
-  Sparkles,
-  Bot,
-  TerminalSquare,
-  Wrench,
-  CheckCircle2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
