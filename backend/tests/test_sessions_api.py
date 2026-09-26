@@ -38,7 +38,9 @@ def _auth_client(make_auth_client, user: User) -> httpx.AsyncClient:
     return make_auth_client(user.id)
 
 
-async def _seed_user_and_repo(db: AsyncSession, *, github_id: int = 11111) -> tuple[User, Repo]:
+async def _seed_user_and_repo(
+    db: AsyncSession, *, github_id: int = 11111
+) -> tuple[User, Repo]:
     user = User(
         github_id=github_id,
         github_username=f"user-{github_id}",
@@ -101,13 +103,25 @@ async def test_create_session_success(
     fake_sha = "b" * 40
 
     with (
-        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="mock-gh-token"),
-        patch("app.routers.sessions.fetch_branch_sha", new_callable=AsyncMock, return_value=fake_sha),
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="mock-gh-token",
+        ),
+        patch(
+            "app.routers.sessions.fetch_branch_sha",
+            new_callable=AsyncMock,
+            return_value=fake_sha,
+        ),
     ):
         async with _auth_client(make_auth_client, user) as ac:
             resp = await ac.post(
                 "/sessions",
-                json={"repo_id": str(repo.id), "branch_name": "main", "title": "My Session"},
+                json={
+                    "repo_id": str(repo.id),
+                    "branch_name": "main",
+                    "title": "My Session",
+                },
             )
 
     assert resp.status_code == 201, resp.text
@@ -149,8 +163,16 @@ async def test_create_session_concurrency_limit(
     await _seed_active_session(db, user, repo, title="Session 2", sha="d" * 40)
 
     with (
-        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="tok"),
-        patch("app.routers.sessions.fetch_branch_sha", new_callable=AsyncMock, return_value="e" * 40),
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.routers.sessions.fetch_branch_sha",
+            new_callable=AsyncMock,
+            return_value="e" * 40,
+        ),
     ):
         async with _auth_client(make_auth_client, user) as ac:
             resp = await ac.post(
@@ -232,19 +254,35 @@ async def test_get_session_tree(
     mock_tree_response: dict[str, Any] = {
         "sha": session.base_sha,
         "tree": [
-            {"type": "tree", "path": "src", "sha": "tree1"},                         # non-blob — excluded
-            {"type": "blob", "path": "src/main.py", "sha": "blob1"},                # included
-            {"type": "blob", "path": "node_modules/lodash/index.js", "sha": "b2"}, # excluded
-            {"type": "blob", "path": "README.md", "sha": "blob3"},                  # included
-            {"type": "blob", "path": "__pycache__/app.cpython-311.pyc", "sha": "b4"}, # excluded
-            {"type": "blob", "path": ".git/config", "sha": "b5"},                   # excluded
-            {"type": "blob", "path": "backend/app/models.py", "sha": "b6"},         # included
+            {"type": "tree", "path": "src", "sha": "tree1"},  # non-blob — excluded
+            {"type": "blob", "path": "src/main.py", "sha": "blob1"},  # included
+            {
+                "type": "blob",
+                "path": "node_modules/lodash/index.js",
+                "sha": "b2",
+            },  # excluded
+            {"type": "blob", "path": "README.md", "sha": "blob3"},  # included
+            {
+                "type": "blob",
+                "path": "__pycache__/app.cpython-311.pyc",
+                "sha": "b4",
+            },  # excluded
+            {"type": "blob", "path": ".git/config", "sha": "b5"},  # excluded
+            {"type": "blob", "path": "backend/app/models.py", "sha": "b6"},  # included
         ],
     }
 
     with (
-        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="tok"),
-        patch("app.routers.sessions.fetch_git_tree", new_callable=AsyncMock, return_value=mock_tree_response),
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.routers.sessions.fetch_git_tree",
+            new_callable=AsyncMock,
+            return_value=mock_tree_response,
+        ),
     ):
         async with _auth_client(make_auth_client, user) as ac:
             resp = await ac.get(f"/sessions/{session.id}/tree")
@@ -294,8 +332,16 @@ async def test_close_session(
     # Now user should be able to create a new session (only 1 active remains).
     fake_sha = "3" * 40
     with (
-        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="tok"),
-        patch("app.routers.sessions.fetch_branch_sha", new_callable=AsyncMock, return_value=fake_sha),
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.routers.sessions.fetch_branch_sha",
+            new_callable=AsyncMock,
+            return_value=fake_sha,
+        ),
     ):
         async with _auth_client(make_auth_client, user) as ac:
             create_resp = await ac.post(

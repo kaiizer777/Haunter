@@ -77,7 +77,9 @@ class CodeReviewListOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _map_review_to_out(review: CodeReview, repo: Optional[Repo] = None) -> CodeReviewOut:
+def _map_review_to_out(
+    review: CodeReview, repo: Optional[Repo] = None
+) -> CodeReviewOut:
     owner = repo.owner if repo else (review.repo.owner if review.repo else None)
     name = repo.name if repo else (review.repo.name if review.repo else None)
 
@@ -136,10 +138,16 @@ async def get_repo_reviews(
     repo_res = await db.execute(repo_stmt)
     repo = repo_res.scalars().first()
     if not repo:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found"
+        )
 
     base_query = select(CodeReview).where(CodeReview.repo_id == repo_id)
-    count_query = select(func.count()).select_from(CodeReview).where(CodeReview.repo_id == repo_id)
+    count_query = (
+        select(func.count())
+        .select_from(CodeReview)
+        .where(CodeReview.repo_id == repo_id)
+    )
 
     if min_risk is not None:
         base_query = base_query.where(CodeReview.risk_score >= min_risk)
@@ -161,7 +169,9 @@ async def get_repo_reviews(
     if severity:
         sev_lower = severity.lower()
         mapped_reviews = [
-            r for r in mapped_reviews if any(f.severity.lower() == sev_lower for f in r.findings)
+            r
+            for r in mapped_reviews
+            if any(f.severity.lower() == sev_lower for f in r.findings)
         ]
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
@@ -189,7 +199,11 @@ async def list_all_reviews(
         return CodeReviewListOut(reviews=[], total=0)
 
     base_query = select(CodeReview).where(CodeReview.repo_id.in_(user_repo_ids))
-    count_query = select(func.count()).select_from(CodeReview).where(CodeReview.repo_id.in_(user_repo_ids))
+    count_query = (
+        select(func.count())
+        .select_from(CodeReview)
+        .where(CodeReview.repo_id.in_(user_repo_ids))
+    )
 
     if repo_id is not None:
         if repo_id not in user_repo_ids:
@@ -217,7 +231,9 @@ async def list_all_reviews(
     if severity:
         sev_lower = severity.lower()
         mapped_reviews = [
-            r for r in mapped_reviews if any(f.severity.lower() == sev_lower for f in r.findings)
+            r
+            for r in mapped_reviews
+            if any(f.severity.lower() == sev_lower for f in r.findings)
         ]
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
@@ -242,6 +258,8 @@ async def get_review_detail(
     review = res.scalars().first()
 
     if not review:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code review not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Code review not found"
+        )
 
     return _map_review_to_out(review)

@@ -255,7 +255,9 @@ async def test_delete_branch_ref_success_204() -> None:
     repo_full = "test-org/haunter-sandbox-runner"
     branch = "sandbox/run-abc-att-1"
     with respx.mock(base_url="https://api.github.com") as rx:
-        del_route = rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(204)
+        del_route = rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(
+            204
+        )
         async with httpx.AsyncClient() as client:
             await _delete_branch_ref(client, repo_full, branch, token="tok_123")
         assert del_route.called
@@ -267,7 +269,9 @@ async def test_delete_branch_ref_already_gone_404() -> None:
     repo_full = "test-org/haunter-sandbox-runner"
     branch = "sandbox/run-xyz-att-2"
     with respx.mock(base_url="https://api.github.com") as rx:
-        del_route = rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(404)
+        del_route = rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(
+            404
+        )
         async with httpx.AsyncClient() as client:
             await _delete_branch_ref(client, repo_full, branch, token="tok_123")
         assert del_route.called
@@ -279,7 +283,9 @@ async def test_delete_branch_ref_already_gone_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_orphan_branch_and_finally_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_verify_orphan_branch_and_finally_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """verify() targets universal repo, creates orphan commit, and always calls _delete_branch_ref in finally."""
     monkeypatch.setattr(settings, "github_sandbox_app_id", "app_123")
     monkeypatch.setattr(settings, "github_sandbox_installation_id", "inst_123")
@@ -318,7 +324,9 @@ async def test_verify_orphan_branch_and_finally_cleanup(monkeypatch: pytest.Monk
                 ]
             },
         )
-        del_route = rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(204)
+        del_route = rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(
+            204
+        )
 
         runner = GitHubActionsSandboxRunner()
         inp = SandboxInput(
@@ -346,7 +354,10 @@ async def test_verify_orphan_branch_and_finally_cleanup(monkeypatch: pytest.Monk
 
         # d) Branch deletion API call is invoked in finally
         assert del_route.called
-        assert del_route.calls.last.request.url.path == f"/repos/{repo_full}/git/refs/heads/{branch}"
+        assert (
+            del_route.calls.last.request.url.path
+            == f"/repos/{repo_full}/git/refs/heads/{branch}"
+        )
 
 
 @pytest.mark.asyncio
@@ -403,7 +414,9 @@ async def test_verify_branch_cleanup_on_failure_in_finally(
                 ]
             },
         )
-        del_route = rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(204)
+        del_route = rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(
+            204
+        )
 
         runner = GitHubActionsSandboxRunner()
         inp = SandboxInput(
@@ -443,6 +456,7 @@ async def test_push_patch_to_mirror_prunes_deletions() -> None:
     recorded_tree_entries: list[dict] = []
 
     with respx.mock(base_url="https://api.github.com") as rx:
+
         def tree_side_effect(request: httpx.Request) -> httpx.Response:
             payload = json.loads(request.content.decode("utf-8"))
             recorded_tree_entries.extend(payload.get("tree", []))
@@ -493,7 +507,9 @@ async def test_get_or_create_test_mirror_concurrent_422_recovery() -> None:
         # Org probe
         rx.get("/orgs/org").respond(200, json={"login": "org"})
         # POST repo -> 422 (race condition: another worker created it)
-        rx.post("/orgs/org/repos").respond(422, json={"message": "Repository creation failed."})
+        rx.post("/orgs/org/repos").respond(
+            422, json={"message": "Repository creation failed."}
+        )
 
         async with httpx.AsyncClient() as client:
             repo = await get_or_create_test_mirror(client, "org", token="tok")
@@ -523,9 +539,15 @@ async def test_verify_multi_run_evaluation_fails_if_any_run_fails(
 
     with respx.mock(base_url="https://api.github.com") as rx:
         rx.get(f"/repos/{repo_full}").respond(200, json={"full_name": repo_full})
-        rx.post(f"/repos/{repo_full}/git/trees").respond(201, json={"sha": "tree_multi"})
-        rx.post(f"/repos/{repo_full}/git/commits").respond(201, json={"sha": "commit_multi"})
-        rx.post(f"/repos/{repo_full}/git/refs").respond(201, json={"ref": f"refs/heads/{branch}", "sha": "commit_multi"})
+        rx.post(f"/repos/{repo_full}/git/trees").respond(
+            201, json={"sha": "tree_multi"}
+        )
+        rx.post(f"/repos/{repo_full}/git/commits").respond(
+            201, json={"sha": "commit_multi"}
+        )
+        rx.post(f"/repos/{repo_full}/git/refs").respond(
+            201, json={"ref": f"refs/heads/{branch}", "sha": "commit_multi"}
+        )
 
         # Return 2 completed runs: first is success, second is failure
         rx.get(f"/repos/{repo_full}/actions/runs").respond(
@@ -596,9 +618,15 @@ async def test_verify_optional_user_github_id(
 
     with respx.mock(base_url="https://api.github.com") as rx:
         rx.get(f"/repos/{repo_full}").respond(200, json={"full_name": repo_full})
-        rx.post(f"/repos/{repo_full}/git/trees").respond(201, json={"sha": "tree_none_id"})
-        rx.post(f"/repos/{repo_full}/git/commits").respond(201, json={"sha": "commit_none_id"})
-        rx.post(f"/repos/{repo_full}/git/refs").respond(201, json={"ref": f"refs/heads/{branch}", "sha": "commit_none_id"})
+        rx.post(f"/repos/{repo_full}/git/trees").respond(
+            201, json={"sha": "tree_none_id"}
+        )
+        rx.post(f"/repos/{repo_full}/git/commits").respond(
+            201, json={"sha": "commit_none_id"}
+        )
+        rx.post(f"/repos/{repo_full}/git/refs").respond(
+            201, json={"ref": f"refs/heads/{branch}", "sha": "commit_none_id"}
+        )
         rx.get(f"/repos/{repo_full}/actions/runs").respond(
             200,
             json={
@@ -622,4 +650,3 @@ async def test_verify_optional_user_github_id(
 
         assert result["passed"] is True
         assert result["reason"] is None
-

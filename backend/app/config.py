@@ -145,7 +145,9 @@ class Settings(BaseSettings):
     github_sandbox_repo: str = "haunter-sandbox-runner"
     github_sandbox_app_id: Optional[str] = None
     github_sandbox_installation_id: Optional[str] = None
-    github_sandbox_app_private_key_ssm_path: str = "/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY"
+    github_sandbox_app_private_key_ssm_path: str = (
+        "/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY"
+    )
     github_sandbox_poll_interval_seconds: float = 10.0
     github_sandbox_poll_timeout_seconds: float = 120.0
     github_sandbox_workflow_filename_py: str = "haunter-test-py.yml"
@@ -187,7 +189,6 @@ class Settings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
 
     @property
     def async_database_url(self) -> str:

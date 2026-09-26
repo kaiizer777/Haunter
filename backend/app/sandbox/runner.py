@@ -42,16 +42,28 @@ _OVERALL_TIMEOUT_SECONDS: float = 900.0
 # Order matters: more specific first.
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Private keys
-    (re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----.*?-----END [A-Z ]+PRIVATE KEY-----", re.DOTALL), "[REDACTED_PRIVATE_KEY]"),
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]+PRIVATE KEY-----.*?-----END [A-Z ]+PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+        "[REDACTED_PRIVATE_KEY]",
+    ),
     # API key prefixes — extended to include common token shapes
     (re.compile(r"\bsk-[A-Za-z0-9_\-]{10,}"), "[REDACTED]"),
     (re.compile(r"\bghp_[A-Za-z0-9]{10,}"), "[REDACTED]"),
     (re.compile(r"\bnpg_[A-Za-z0-9_]{8,}"), "[REDACTED]"),
     (re.compile(r"\bghr_[A-Za-z0-9_]{10,}"), "[REDACTED]"),
     # DATABASE_URL / connection strings
-    (re.compile(r"(?:DATABASE_URL|postgresql://|postgres://)[^\s\"']+"), "[REDACTED_DB_URL]"),
+    (
+        re.compile(r"(?:DATABASE_URL|postgresql://|postgres://)[^\s\"']+"),
+        "[REDACTED_DB_URL]",
+    ),
     # Generic Bearer / Authorization tokens
-    (re.compile(r"(?i)(?:bearer|authorization:?\s*bearer)\s+[A-Za-z0-9._\-/+]{20,}"), "[REDACTED_TOKEN]"),
+    (
+        re.compile(r"(?i)(?:bearer|authorization:?\s*bearer)\s+[A-Za-z0-9._\-/+]{20,}"),
+        "[REDACTED_TOKEN]",
+    ),
 ]
 
 _MAX_FAILURE_REASON_CHARS: int = 10_000_000
@@ -69,10 +81,10 @@ _REPO_REF_RE: re.Pattern[str] = re.compile(
 
 # Banned substrings within repo_ref that an allowlist regex alone won't catch.
 _REPO_REF_BANNED: tuple[str, ...] = (
-    "..",        # path traversal
-    ".git/",     # git internals
+    "..",  # path traversal
+    ".git/",  # git internals
     ".github/",  # CI workflow injection
-    "//",        # double-slash abuse
+    "//",  # double-slash abuse
 )
 
 
@@ -139,14 +151,10 @@ class SandboxInput(BaseModel):
                 f"repo_ref too long ({len(v)} chars > {_MAX_REPO_REF_CHARS})"
             )
         if v.startswith("/"):
-            raise ValueError(
-                f"repo_ref {v!r} must not start with '/'"
-            )
+            raise ValueError(f"repo_ref {v!r} must not start with '/'")
         for banned in _REPO_REF_BANNED:
             if banned in v:
-                raise ValueError(
-                    f"repo_ref contains disallowed substring: {banned!r}"
-                )
+                raise ValueError(f"repo_ref contains disallowed substring: {banned!r}")
         if not _REPO_REF_RE.fullmatch(v):
             raise ValueError(
                 f"repo_ref {v!r} contains characters outside the allowed set "

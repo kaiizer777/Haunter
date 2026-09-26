@@ -92,12 +92,12 @@ def test_parse_tar_filters_skip_prefixes_and_max_file_bytes() -> None:
 def test_parse_tar_priority_tier_ordering_and_cap() -> None:
     """Tier 0, 1, 2 files are prioritized over general source files when capped."""
     files_input: dict[str, bytes | int] = {
-        "src/util_a.py": b"# util a",          # Tier 3
-        "pytest.ini": b"[pytest]\n",            # Tier 0
-        "src/util_b.py": b"# util b",          # Tier 3
-        "requirements.txt": b"fastapi\n",      # Tier 1
+        "src/util_a.py": b"# util a",  # Tier 3
+        "pytest.ini": b"[pytest]\n",  # Tier 0
+        "src/util_b.py": b"# util b",  # Tier 3
+        "requirements.txt": b"fastapi\n",  # Tier 1
         "tests/test_main.py": b"def test():pass",  # Tier 2
-        "src/util_c.py": b"# util c",          # Tier 3
+        "src/util_c.py": b"# util c",  # Tier 3
     }
     tar_bytes = _build_tar(files_input)
 
@@ -260,7 +260,9 @@ async def test_fetch_user_repo_tarball_403_fallback_pat() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_user_repo_tarball_max_tarball_bytes_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fetch_user_repo_tarball_max_tarball_bytes_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Mock streaming response exceeding MAX_TARBALL_BYTES raises HTTPStatusError."""
     # Monkeypatch cap to small value to avoid memory allocation
     monkeypatch.setattr("app.sandbox._seed_tarball.MAX_TARBALL_BYTES", 50)

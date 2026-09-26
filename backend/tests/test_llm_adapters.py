@@ -57,7 +57,9 @@ async def test_openai_adapter_success():
 
     try:
         provider = OpenAIAdapter()
-        res = await provider.complete(messages=[{"role": "user", "content": "hello openai"}])
+        res = await provider.complete(
+            messages=[{"role": "user", "content": "hello openai"}]
+        )
         assert res["content"] == "Fix generated via OpenAI"
         assert res["usage"] == {"input_tokens": 120, "output_tokens": 45}
         assert res["latency_ms"] >= 0
@@ -126,7 +128,10 @@ async def test_anthropic_adapter_tool_use_normalization():
             "function": {
                 "name": "trigger_sandbox_build",
                 "description": "Trigger a sandbox build",
-                "parameters": {"type": "object", "properties": {"patch": {"type": "string"}}},
+                "parameters": {
+                    "type": "object",
+                    "properties": {"patch": {"type": "string"}},
+                },
             },
         }
     ]
@@ -147,7 +152,9 @@ async def test_anthropic_adapter_tool_use_normalization():
         assert tool_call["id"] == "toolu_sandbox_1"
         assert tool_call["type"] == "function"
         assert tool_call["function"]["name"] == "trigger_sandbox_build"
-        assert json.loads(tool_call["function"]["arguments"]) == {"patch": "diff --git a/file.py"}
+        assert json.loads(tool_call["function"]["arguments"]) == {
+            "patch": "diff --git a/file.py"
+        }
 
         assert route.called
         headers = route.calls.last.request.headers

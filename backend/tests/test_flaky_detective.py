@@ -45,7 +45,9 @@ async def _create_test_user(db: AsyncSession, username: str = "flaky-user") -> U
     return user
 
 
-async def _create_test_repo(db: AsyncSession, user: User, name: str = "flaky-repo") -> Repo:
+async def _create_test_repo(
+    db: AsyncSession, user: User, name: str = "flaky-repo"
+) -> Repo:
     repo = Repo(
         user_id=user.id,
         owner="flaky-org",
@@ -130,7 +132,10 @@ def test_extract_failing_test_target_jest_fail():
 def test_extract_failing_test_target_empty():
     assert extract_failing_test_target("") is None
     assert extract_failing_test_target(None) is None
-    assert extract_failing_test_target("Build failed due to syntax error in main.py") is None
+    assert (
+        extract_failing_test_target("Build failed due to syntax error in main.py")
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +144,17 @@ def test_extract_failing_test_target_empty():
 
 
 def test_allowed_transitions_table():
-    assert RunStatus.flake_verification in _ALLOWED_TRANSITIONS[RunStatus.context_gathering]
+    assert (
+        RunStatus.flake_verification
+        in _ALLOWED_TRANSITIONS[RunStatus.context_gathering]
+    )
     assert RunStatus.fix_generation in _ALLOWED_TRANSITIONS[RunStatus.context_gathering]
-    assert RunStatus.flaky_detected in _ALLOWED_TRANSITIONS[RunStatus.flake_verification]
-    assert RunStatus.fix_generation in _ALLOWED_TRANSITIONS[RunStatus.flake_verification]
+    assert (
+        RunStatus.flaky_detected in _ALLOWED_TRANSITIONS[RunStatus.flake_verification]
+    )
+    assert (
+        RunStatus.fix_generation in _ALLOWED_TRANSITIONS[RunStatus.flake_verification]
+    )
     assert _ALLOWED_TRANSITIONS[RunStatus.flaky_detected] == set()
 
 
@@ -207,7 +219,10 @@ async def test_flaky_test_detected_quarantines_and_aborts(db: AsyncSession) -> N
         patch("app.sandbox.verify_determinism", mock_verify_determinism),
         patch("app.subagents.fix_generator.generate_fix", mock_generate_fix),
         patch("app.github_client.post_commit_comment", mock_post_commit_comment),
-        patch("app.github.pr.get_installation_token", AsyncMock(return_value="fake_gh_token")),
+        patch(
+            "app.github.pr.get_installation_token",
+            AsyncMock(return_value="fake_gh_token"),
+        ),
     ):
         await handle_failed_run(run_id)
 
@@ -218,7 +233,9 @@ async def test_flaky_test_detected_quarantines_and_aborts(db: AsyncSession) -> N
     assert fresh_run is not None
     assert fresh_run.status == RunStatus.flaky_detected.value
     assert fresh_run.conclusion == "flaky_test"
-    assert "Flaky test detected in tests/test_async_timer.py::test_timing_anomaly" in (fresh_run.failure_reason or "")
+    assert "Flaky test detected in tests/test_async_timer.py::test_timing_anomaly" in (
+        fresh_run.failure_reason or ""
+    )
     assert "passed 2/2 consecutive clean runs" in (fresh_run.failure_reason or "")
 
     # 2. Assert Zero Token Leak
@@ -230,11 +247,21 @@ async def test_flaky_test_detected_quarantines_and_aborts(db: AsyncSession) -> N
     assert comment_kwargs["owner"] == repo_owner
     assert comment_kwargs["repo"] == repo_name
     assert comment_kwargs["sha"] == head_sha
-    assert "⚠️ Flaky test detected in `tests/test_async_timer.py::test_timing_anomaly`." in comment_kwargs["body"]
-    assert "Passed 2/2 clean runs in sandbox. Fix generation aborted — quarantine suggested." in comment_kwargs["body"]
+    assert (
+        "⚠️ Flaky test detected in `tests/test_async_timer.py::test_timing_anomaly`."
+        in comment_kwargs["body"]
+    )
+    assert (
+        "Passed 2/2 clean runs in sandbox. Fix generation aborted — quarantine suggested."
+        in comment_kwargs["body"]
+    )
 
     # 4. Assert RunStep recorded for flake_verification with 0 tokens
-    steps = (await db.execute(select(RunStep).where(RunStep.run_id == run_id))).scalars().all()
+    steps = (
+        (await db.execute(select(RunStep).where(RunStep.run_id == run_id)))
+        .scalars()
+        .all()
+    )
     step_names = [s.step_name for s in steps]
     assert "context_gatherer" in step_names
     assert "flake_verification" in step_names
@@ -250,7 +277,9 @@ async def test_flaky_test_detected_quarantines_and_aborts(db: AsyncSession) -> N
 
 
 @pytest.mark.anyio
-async def test_consistently_failing_test_proceeds_to_fix_generation(db: AsyncSession) -> None:
+async def test_consistently_failing_test_proceeds_to_fix_generation(
+    db: AsyncSession,
+) -> None:
     """
     When clean rerun fails (test is deterministic bug):
       - State transitions: flake_verification -> fix_generation.
@@ -269,7 +298,12 @@ async def test_consistently_failing_test_proceeds_to_fix_generation(db: AsyncSes
         is_flaky=False,
         consecutive_passes=0,
         iteration_results=[
-            {"iteration": 1, "passed": False, "duration_ms": 1000, "logs": "failed again"},
+            {
+                "iteration": 1,
+                "passed": False,
+                "duration_ms": 1000,
+                "logs": "failed again",
+            },
         ],
     )
 
@@ -281,6 +315,7 @@ async def test_consistently_failing_test_proceeds_to_fix_generation(db: AsyncSes
 
     # Throw LowConfidenceSkip to terminate cleanly at fallback
     from app.subagents.fix_generator import LowConfidenceSkip
+
     mock_generate_fix = AsyncMock(side_effect=LowConfidenceSkip("cannot fix"))
 
     with (
@@ -288,7 +323,10 @@ async def test_consistently_failing_test_proceeds_to_fix_generation(db: AsyncSes
         patch("app.sandbox.verify_determinism", mock_verify_determinism),
         patch("app.subagents.fix_generator.generate_fix", mock_generate_fix),
         patch("app.github_client.post_commit_comment", mock_post_commit_comment),
-        patch("app.github.pr.get_installation_token", AsyncMock(return_value="fake_gh_token")),
+        patch(
+            "app.github.pr.get_installation_token",
+            AsyncMock(return_value="fake_gh_token"),
+        ),
     ):
         await handle_failed_run(run_id)
 
@@ -296,7 +334,9 @@ async def test_consistently_failing_test_proceeds_to_fix_generation(db: AsyncSes
     mock_generate_fix.assert_called_once()
     # Flaky commit comment was NOT posted
     mock_post_commit_comment.assert_called_once()  # Called only for fallback comment
-    assert "⚠️ Flaky test detected" not in mock_post_commit_comment.call_args.kwargs["body"]
+    assert (
+        "⚠️ Flaky test detected" not in mock_post_commit_comment.call_args.kwargs["body"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +345,9 @@ async def test_consistently_failing_test_proceeds_to_fix_generation(db: AsyncSes
 
 
 @pytest.mark.anyio
-async def test_no_test_target_proceeds_directly_to_fix_generation(db: AsyncSession) -> None:
+async def test_no_test_target_proceeds_directly_to_fix_generation(
+    db: AsyncSession,
+) -> None:
     """
     When summary contains no identifiable test target:
       - Transitions context_gathering -> fix_generation directly.
@@ -324,6 +366,7 @@ async def test_no_test_target_proceeds_directly_to_fix_generation(db: AsyncSessi
 
     mock_verify_determinism = AsyncMock()
     from app.subagents.fix_generator import LowConfidenceSkip
+
     mock_generate_fix = AsyncMock(side_effect=LowConfidenceSkip("general error"))
 
     with (
@@ -347,7 +390,9 @@ async def test_no_test_target_proceeds_directly_to_fix_generation(db: AsyncSessi
 
 
 @pytest.mark.anyio
-async def test_verify_determinism_exception_falls_through_to_fix_generation(db: AsyncSession) -> None:
+async def test_verify_determinism_exception_falls_through_to_fix_generation(
+    db: AsyncSession,
+) -> None:
     """
     When verify_determinism raises a network/API exception:
       - Catches exception safely.
@@ -365,8 +410,11 @@ async def test_verify_determinism_exception_falls_through_to_fix_generation(db: 
     async def mock_gather_context(run, repo, db):
         return mock_summary
 
-    mock_verify_determinism = AsyncMock(side_effect=RuntimeError("GitHub API outage 503"))
+    mock_verify_determinism = AsyncMock(
+        side_effect=RuntimeError("GitHub API outage 503")
+    )
     from app.subagents.fix_generator import LowConfidenceSkip
+
     mock_generate_fix = AsyncMock(side_effect=LowConfidenceSkip("outage fallback"))
 
     with (

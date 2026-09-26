@@ -44,8 +44,16 @@ GOLDEN_CASES: list[dict[str, Any]] = [
         ],
         "trace_keywords": [["SyntaxError"], ["AssertionError"]],
         "fixes": [
-            {"path": "src/app.py", "old_str": "def parse_payload(:", "new_str": "def parse_payload():"},
-            {"path": "src/app.py", "old_str": "    return {}", "new_str": '    return {"id": 1}'},
+            {
+                "path": "src/app.py",
+                "old_str": "def parse_payload(:",
+                "new_str": "def parse_payload():",
+            },
+            {
+                "path": "src/app.py",
+                "old_str": "    return {}",
+                "new_str": '    return {"id": 1}',
+            },
         ],
         "pass_log": "All tests passed (src/app.py)",
     },
@@ -60,7 +68,11 @@ GOLDEN_CASES: list[dict[str, Any]] = [
         ],
         "trace_keywords": [["AssertionError"], ["TypeError"]],
         "fixes": [
-            {"path": "src/calc.py", "old_str": "    return a - b", "new_str": "    return a + b"},
+            {
+                "path": "src/calc.py",
+                "old_str": "    return a - b",
+                "new_str": "    return a + b",
+            },
             {
                 "path": "src/calc.py",
                 "old_str": "def add(a, b):\n    return a + b",
@@ -193,14 +205,16 @@ async def _run_self_healing_loop(
                     "inspected": inspected,
                     "final_result": result,
                 }
-            assert "FAILED" in result, f"attempt {attempt}: expected FAILED, got: {result[:200]}"
+            assert (
+                "FAILED" in result
+            ), f"attempt {attempt}: expected FAILED, got: {result[:200]}"
 
             # Agent inspects the traceback before fixing: the expected
             # keyword for this failure must be present in the tool result.
             keywords = trace_keywords[min(attempt - 1, len(trace_keywords) - 1)]
-            assert any(kw in result for kw in keywords), (
-                f"attempt {attempt}: expected one of {keywords} in CI logs, got: {result[:300]}"
-            )
+            assert any(
+                kw in result for kw in keywords
+            ), f"attempt {attempt}: expected one of {keywords} in CI logs, got: {result[:300]}"
             inspected.append(True)
 
             if attempt == max_attempts:
@@ -209,7 +223,11 @@ async def _run_self_healing_loop(
             fix = fixes[fix_calls]
             fix_result = await orch._dispatch_tool(
                 tool_name="str_replace",
-                args={"path": fix["path"], "old_str": fix["old_str"], "new_str": fix["new_str"]},
+                args={
+                    "path": fix["path"],
+                    "old_str": fix["old_str"],
+                    "new_str": fix["new_str"],
+                },
                 repo_owner="test-org",
                 repo_name="test-repo",
                 base_sha="a" * 40,
@@ -218,9 +236,9 @@ async def _run_self_healing_loop(
                 session=session,
             )
             fix_calls += 1
-            assert fix_result.startswith("Successfully"), (
-                f"attempt {attempt}: str_replace failed: {fix_result}"
-            )
+            assert fix_result.startswith(
+                "Successfully"
+            ), f"attempt {attempt}: str_replace failed: {fix_result}"
 
     return {
         "complete": False,
@@ -248,7 +266,11 @@ def test_system_prompt_contains_self_healing_loop() -> None:
     from app.services.session_orchestrator import _build_system_prompt
 
     prompt = _build_system_prompt(
-        repo_owner="o", repo_name="r", branch_name="b", base_sha="a" * 40, staged_patches={}
+        repo_owner="o",
+        repo_name="r",
+        branch_name="b",
+        base_sha="a" * 40,
+        staged_patches={},
     )
     assert "verify_in_ci_sandbox" in prompt
     assert "FAILED" in prompt
@@ -263,9 +285,21 @@ def test_golden_cases_shape() -> None:
     assert len(ids) == len(set(ids)), "duplicate golden case ids"
     assert len(GOLDEN_CASES) >= 3
     for case in GOLDEN_CASES:
-        for key in ("id", "category", "file", "broken_content", "fail_logs", "fixes", "pass_log"):
+        for key in (
+            "id",
+            "category",
+            "file",
+            "broken_content",
+            "fail_logs",
+            "fixes",
+            "pass_log",
+        ):
             assert key in case, f"case {case.get('id')} missing {key!r}"
-        assert case["category"] in {"syntax_error", "failing_assertion", "missing_import"}
+        assert case["category"] in {
+            "syntax_error",
+            "failing_assertion",
+            "missing_import",
+        }
         assert len(case["fail_logs"]) == 2
         assert len(case["fixes"]) == 2
         for fix in case["fixes"]:
@@ -302,7 +336,9 @@ async def test_self_healing_fail_fail_pass(case_id: str) -> None:
         )
 
     assert outcome["complete"] is True
-    assert outcome["verify_calls"] == 3, "agent must verify, fix, re-verify up to 3 CI runs"
+    assert (
+        outcome["verify_calls"] == 3
+    ), "agent must verify, fix, re-verify up to 3 CI runs"
     assert outcome["fix_calls"] == 2
     assert outcome["attempts"] == 3
     assert outcome["inspected"] == [True, True], "traceback inspected before every fix"

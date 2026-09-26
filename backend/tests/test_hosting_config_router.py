@@ -86,10 +86,12 @@ async def test_get_hosting_config_source_db(
 
     # Insert DB overrides
     now = datetime.now(timezone.utc)
-    db.add_all([
-        SystemConfig(key="hosting_provider", value="aws", updated_at=now),
-        SystemConfig(key="sandbox_provider", value="aws", updated_at=now),
-    ])
+    db.add_all(
+        [
+            SystemConfig(key="hosting_provider", value="aws", updated_at=now),
+            SystemConfig(key="sandbox_provider", value="aws", updated_at=now),
+        ]
+    )
     await db.commit()
 
     async with client:

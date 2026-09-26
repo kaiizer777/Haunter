@@ -16,7 +16,15 @@ from pathlib import PurePosixPath
 from typing import Any, Literal, Mapping, Optional, Sequence
 
 import httpx
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import LLMClient
@@ -69,20 +77,21 @@ FALLBACK_ENGINE_LABEL = "haunter-auditor"
 
 AuditSeverity = Literal["BLOCKER", "WARNING", "NOTE"]
 _SEVERITY_RANK: dict[AuditSeverity, int] = {"BLOCKER": 0, "WARNING": 1, "NOTE": 2}
-_PERSPECTIVE_RANK: dict[str, int] = {name: index for index, name in enumerate(PERSPECTIVES)}
+_PERSPECTIVE_RANK: dict[str, int] = {
+    name: index for index, name in enumerate(PERSPECTIVES)
+}
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
-_HUNK_RE = re.compile(
-    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$"
-)
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$")
 _NEW_SYMBOL_RE = re.compile(
     r"^\+\s*(?:async\s+def\s+|def\s+|class\s+|export\s+(?:default\s+)?(?:async\s+)?function\s+|function\s+|(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=)"
 )
 _REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,255}$", re.ASCII)
 _AUDIT_ID_RE = re.compile(r"^audit-[0-9a-f]{12}$", re.ASCII)
 _AUDIT_TYPE_RE = re.compile(
-    r"^(?:pr_audit|ci_failure_audit|ci_success_audit|manual_audit|session_audit|security_scan)$", re.ASCII
+    r"^(?:pr_audit|ci_failure_audit|ci_success_audit|manual_audit|session_audit|security_scan)$",
+    re.ASCII,
 )
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$", re.ASCII)
 _ENGINE_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,160}$", re.ASCII)
@@ -109,7 +118,9 @@ _RULE_PRESCREEN: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ),
     (
         "unsafe-execution-or-deserialization",
-        re.compile(r"\b(?:eval|exec)\s*\(|shell\s*=\s*True|pickle\.loads?\s*\(|yaml\.load\s*\("),
+        re.compile(
+            r"\b(?:eval|exec)\s*\(|shell\s*=\s*True|pickle\.loads?\s*\(|yaml\.load\s*\("
+        ),
         "Confirm untrusted input can reach the unsafe operation",
     ),
     (
@@ -119,7 +130,9 @@ _RULE_PRESCREEN: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ),
     (
         "outbound-url-fetch",
-        re.compile(r"(?i)(?:requests\.(?:get|post)|httpx\.(?:get|post|request)|urllib\.request)"),
+        re.compile(
+            r"(?i)(?:requests\.(?:get|post)|httpx\.(?:get|post|request)|urllib\.request)"
+        ),
         "Check SSRF controls, redirect handling, and resolved-address pinning",
     ),
     (
@@ -134,7 +147,9 @@ _RULE_PRESCREEN: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ),
     (
         "new-handler",
-        re.compile(r"^\+.*@(?:app|router)\.(?:get|post|put|patch|delete)\s*\(|^\+.*(?:async\s+)?def\s+\w+"),
+        re.compile(
+            r"^\+.*@(?:app|router)\.(?:get|post|put|patch|delete)\s*\(|^\+.*(?:async\s+)?def\s+\w+"
+        ),
         "Check authentication, object authorization, and strict schema validation",
     ),
 )
@@ -147,7 +162,7 @@ def _redact_audit_secrets(value: str) -> str:
 def _clip(value: str, maximum: int, marker: str = "\n[TRUNCATED]") -> str:
     if len(value) <= maximum:
         return value
-    suffix = marker[:max(0, maximum)]
+    suffix = marker[: max(0, maximum)]
     return value[: max(0, maximum - len(suffix))] + suffix
 
 
@@ -155,7 +170,9 @@ def _clean_generated_text(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     redacted = _redact_audit_secrets(value)
-    return _CONTROL_RE.sub("", redacted).replace("\r\n", "\n").replace("\r", "\n").strip()
+    return (
+        _CONTROL_RE.sub("", redacted).replace("\r\n", "\n").replace("\r", "\n").strip()
+    )
 
 
 def _safe_int(value: Any, minimum: int, maximum: int, fallback: int) -> int:
@@ -169,7 +186,9 @@ def _safe_int(value: Any, minimum: int, maximum: int, fallback: int) -> int:
 def _validate_repo_coordinates(owner: Any, repo: Any) -> tuple[str, str]:
     if not isinstance(owner, str) or not isinstance(repo, str):
         raise ValueError("GitHub owner and repository must be strings")
-    if not _REPO_COMPONENT_RE.fullmatch(owner) or not _REPO_COMPONENT_RE.fullmatch(repo):
+    if not _REPO_COMPONENT_RE.fullmatch(owner) or not _REPO_COMPONENT_RE.fullmatch(
+        repo
+    ):
         raise ValueError("GitHub owner or repository is invalid")
     return owner, repo
 
@@ -204,7 +223,11 @@ def _validate_sha(value: Optional[str]) -> Optional[str]:
 def _validate_pr_number(value: Optional[int]) -> Optional[int]:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2_147_483_647:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= 2_147_483_647
+    ):
         raise ValueError("pull request number is invalid")
     return value
 
@@ -219,7 +242,10 @@ def _normalize_repo_path(value: str) -> str:
 def _validate_repo_path(value: Any) -> Any:
     if not isinstance(value, str):
         return value
-    if any(character.isspace() or unicodedata.category(character).startswith("C") for character in value):
+    if any(
+        character.isspace() or unicodedata.category(character).startswith("C")
+        for character in value
+    ):
         raise ValueError("file_path contains whitespace or control characters")
     normalized = _normalize_repo_path(value)
     if normalized in ("", ".") or len(normalized) > 512:
@@ -247,7 +273,9 @@ class PerspectiveFinding(BaseModel):
         max_length=1_200,
         validation_alias=AliasChoices("description", "impact"),
     )
-    suggested_fix: Optional[str] = Field(default=None, max_length=MAX_SUGGESTED_FIX_CHARS)
+    suggested_fix: Optional[str] = Field(
+        default=None, max_length=MAX_SUGGESTED_FIX_CHARS
+    )
     confidence: int = Field(ge=0, le=100)
 
     @field_validator("file_path", mode="before")
@@ -690,8 +718,7 @@ def build_diff_grounding(
                     hunk.removed += 1
             elif line.startswith(" "):
                 valid_line = (
-                    hunk.old_seen < hunk.old_count
-                    and hunk.new_seen < hunk.new_count
+                    hunk.old_seen < hunk.old_count and hunk.new_seen < hunk.new_count
                 )
                 if valid_line:
                     hunk.lines.add(hunk.next_new)
@@ -736,7 +763,11 @@ def build_diff_grounding(
             continue
         if line.startswith("+++ "):
             new_dev_null, new_path = _diff_header_path(line, "+++ ")
-            if new_dev_null or new_path is None or (not old_dev_null and old_path is None):
+            if (
+                new_dev_null
+                or new_path is None
+                or (not old_dev_null and old_path is None)
+            ):
                 # A deleted file (`+++ /dev/null`), an unusable header, or a
                 # new-side header with no old-side counterpart has no new-file
                 # line for a finding to be grounded on.
@@ -893,9 +924,13 @@ def _build_ast_diff_summary_sync(
         if len(files) > 50:
             parts.append(f"{len(files) - 50} additional touched files omitted")
     else:
-        parts.append("No complete valid text hunks were available for grounded analysis.")
+        parts.append(
+            "No complete valid text hunks were available for grounded analysis."
+        )
     if clipped or grounding.truncated_ranges:
-        parts.append("Diff or hunk truncation was detected; affected line ranges are untrusted.")
+        parts.append(
+            "Diff or hunk truncation was detected; affected line ranges are untrusted."
+        )
     if grounding.rejected_paths:
         parts.append(
             "Rejected non-text or malformed paths: "
@@ -930,7 +965,9 @@ def _build_ast_diff_summary_sync(
             selected_line = min(grounding.line_index[path])
             for line_number in sorted(grounding.line_index[path]):
                 try:
-                    candidate = extract_python_ast_context_from_index(parsed, line_number)
+                    candidate = extract_python_ast_context_from_index(
+                        parsed, line_number
+                    )
                 except ValueError:
                     continue
                 context = candidate
@@ -940,9 +977,7 @@ def _build_ast_diff_summary_sync(
             if context is not None:
                 frame = StackFrame(file_path=path, line_number=selected_line)
                 parsed_contexts.append(
-                    _redact_preserving_line_anchors(
-                        format_ast_context(frame, context)
-                    )
+                    _redact_preserving_line_anchors(format_ast_context(frame, context))
                 )
         elif PurePosixPath(path).suffix in (".ts", ".tsx", ".js", ".jsx"):
             structural_contexts.append(
@@ -960,7 +995,9 @@ def _build_ast_diff_summary_sync(
             + "\n\n".join(parsed_contexts[:MAX_AST_SOURCE_FILES])
         )
     else:
-        parts.append("No complete bounded Python source was available for parser-backed AST analysis.")
+        parts.append(
+            "No complete bounded Python source was available for parser-backed AST analysis."
+        )
     if structural_contexts:
         parts.append(
             "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
@@ -977,7 +1014,11 @@ def _build_ast_diff_summary_sync(
             "New symbol declarations observed (untrusted regex metadata, not AST):\n"
             + "\n".join(f"- {symbol}" for symbol in symbols[:50])
         )
-    hits = [f"- {name}: {hint}" for name, pattern, hint in _RULE_PRESCREEN if pattern.search(text)]
+    hits = [
+        f"- {name}: {hint}"
+        for name, pattern, hint in _RULE_PRESCREEN
+        if pattern.search(text)
+    ]
     if hits:
         parts.append(
             "UNCONFIRMED deterministic leads; verify each against changed lines before reporting:\n"
@@ -1031,7 +1072,9 @@ def _strip_markdown_fences(content: str) -> str:
 
 def _validation_feedback(error: ValidationError) -> str:
     parts: list[str] = []
-    for item in error.errors(include_url=False, include_context=False, include_input=False)[:8]:
+    for item in error.errors(
+        include_url=False, include_context=False, include_input=False
+    )[:8]:
         location = ".".join(str(part) for part in item.get("loc", ())) or "root"
         message = str(item.get("msg", "invalid value"))[:120]
         parts.append(f"{location}: {message}")
@@ -1120,7 +1163,10 @@ async def _run_single_perspective(
         retry_messages = list(messages)
         retry_messages.extend(
             [
-                {"role": "assistant", "content": "The previous response failed schema validation."},
+                {
+                    "role": "assistant",
+                    "content": "The previous response failed schema validation.",
+                },
                 {
                     "role": "user",
                     "content": (
@@ -1255,7 +1301,10 @@ def _is_grounded(
     grounding: DiffGrounding,
 ) -> bool:
     observed_lines = grounding.line_index.get(finding.file_path)
-    if not observed_lines or finding.line_end - finding.line_start >= MAX_GROUNDING_SPAN:
+    if (
+        not observed_lines
+        or finding.line_end - finding.line_start >= MAX_GROUNDING_SPAN
+    ):
         return False
     if not all(
         line_number in observed_lines
@@ -1379,7 +1428,10 @@ def _synthesize_executive_summary(
         text += " No actionable findings were confirmed."
     if failed:
         text += f" {failed} perspective(s) failed and were excluded from actionable conclusions."
-    return _clip(text.strip() or "No reliable perspective verdict was available.", MAX_EXECUTIVE_SUMMARY_CHARS)
+    return _clip(
+        text.strip() or "No reliable perspective verdict was available.",
+        MAX_EXECUTIVE_SUMMARY_CHARS,
+    )
 
 
 def _target_label(
@@ -1492,7 +1544,11 @@ async def fetch_audit_ci_context(
     first returns text and the second raises.
     """
     owner, repo = _validate_repo_coordinates(owner, repo)
-    if isinstance(run_id, bool) or not isinstance(run_id, int) or not 1 <= run_id <= 9_223_372_036_854_775_807:
+    if (
+        isinstance(run_id, bool)
+        or not isinstance(run_id, int)
+        or not 1 <= run_id <= 9_223_372_036_854_775_807
+    ):
         raise ValueError("workflow run id is invalid")
     from app import github_client as github
 
@@ -1627,9 +1683,7 @@ async def run_audit(
     """Run four fixed, bounded perspectives and return a synthesized read-only report."""
     started = time.monotonic()
     resolved_audit_type = _validate_audit_type(audit_type)
-    resolved_audit_id = _validate_audit_id(
-        audit_id or f"audit-{uuid.uuid4().hex[:12]}"
-    )
+    resolved_audit_id = _validate_audit_id(audit_id or f"audit-{uuid.uuid4().hex[:12]}")
     if repo_full_name:
         repo_full_name = _validate_repo_full_name(repo_full_name)
     resolved_pr_number = _validate_pr_number(pr_number)
@@ -1639,7 +1693,10 @@ async def run_audit(
     if ref is not None and (
         not isinstance(ref, str)
         or len(ref) > 255
-        or any(character.isspace() or unicodedata.category(character).startswith("C") for character in ref)
+        or any(
+            character.isspace() or unicodedata.category(character).startswith("C")
+            for character in ref
+        )
     ):
         raise ValueError("ref is invalid")
     raw_diff = str(diff_text or "")
@@ -1716,7 +1773,8 @@ async def run_audit(
         )
     if was_truncated:
         ast_summary = _clip(
-            ast_summary + f"\nInput was truncated to {AUDIT_MAX_DIFF_CHARS} characters.",
+            ast_summary
+            + f"\nInput was truncated to {AUDIT_MAX_DIFF_CHARS} characters.",
             MAX_AST_CONTEXT_CHARS,
         )
     clean_repo_context = _clip(
@@ -1770,7 +1828,9 @@ async def run_audit(
     if not active_perspectives:
         active_perspectives = list(PERSPECTIVES)
 
-    completed = await asyncio.gather(*(run_one(perspective) for perspective in active_perspectives))
+    completed = await asyncio.gather(
+        *(run_one(perspective) for perspective in active_perspectives)
+    )
     executed_perspectives = [res for res, _ in completed]
     if not any(res.succeeded for res in executed_perspectives):
         raise AuditAnalysisError("All audit perspectives failed; nothing to synthesize")
@@ -1794,10 +1854,16 @@ async def run_audit(
         counts.get("WARNING", 0),
         overall_confidence,
     )
-    executive_summary = _synthesize_executive_summary(executed_perspectives, len(findings))
+    executive_summary = _synthesize_executive_summary(
+        executed_perspectives, len(findings)
+    )
     remediation_diff = build_remediation_diff(findings)
     models = [res.model for res in executed_perspectives if res.model]
-    resolved_engine = Counter(models).most_common(1)[0][0] if models else (engine or FALLBACK_ENGINE_LABEL)
+    resolved_engine = (
+        Counter(models).most_common(1)[0][0]
+        if models
+        else (engine or FALLBACK_ENGINE_LABEL)
+    )
     if not _ENGINE_RE.fullmatch(resolved_engine):
         resolved_engine = engine or FALLBACK_ENGINE_LABEL
     publish_allowed = overall_confidence >= INFORMATIONAL_CONFIDENCE_THRESHOLD

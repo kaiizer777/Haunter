@@ -107,7 +107,9 @@ def test_extract_stack_frames_ignores_third_party_and_stdlib():
 
 def test_extract_stack_frames_rate_limit_guard():
     # Verify capping at max_frames = 5
-    logs = "\n".join(f'  File "app/file_{i}.py", line {i*10}, in func_{i}' for i in range(10))
+    logs = "\n".join(
+        f'  File "app/file_{i}.py", line {i*10}, in func_{i}' for i in range(10)
+    )
     repo_paths = [f"app/file_{i}.py" for i in range(10)]
     frames = extract_stack_frames(logs, repo_paths, max_frames=5)
     assert len(frames) == 5
@@ -128,7 +130,10 @@ def calculate_fee(base_amount: float, rate: float = 0.05, currency: str = "USD")
     assert context is not None
     assert context["enclosing_symbol"] == "calculate_fee"
     assert context["enclosing_class"] is None
-    assert "def calculate_fee(base_amount: float, rate: float = 0.05, currency: str = 'USD') -> float:" in context["signature"]
+    assert (
+        "def calculate_fee(base_amount: float, rate: float = 0.05, currency: str = 'USD') -> float:"
+        in context["signature"]
+    )
     assert "import os" in context["imports"]
     assert "from typing import Optional" in context["imports"]
     assert context["start_line"] == 4
@@ -153,7 +158,10 @@ class PaymentEngine:
     assert context is not None
     assert context["enclosing_class"] == "PaymentEngine"
     assert context["enclosing_symbol"] == "charge"
-    assert "async def charge(self, user_id: str, amount_cents: int) -> bool:" in context["signature"]
+    assert (
+        "async def charge(self, user_id: str, amount_cents: int) -> bool:"
+        in context["signature"]
+    )
     assert context["start_line"] == 7
     assert context["end_line"] == 10
 
@@ -173,7 +181,9 @@ export async function queryUser(userId: string, active: boolean = true): Promise
     return result.rows[0];
 }
 """
-    context = extract_generic_symbol_context(ts_source, line_number=5, symbol_name="queryUser")
+    context = extract_generic_symbol_context(
+        ts_source, line_number=5, symbol_name="queryUser"
+    )
     assert context is not None
     assert context["enclosing_symbol"] == "queryUser"
     assert "queryUser" in (context["signature"] or "")
@@ -181,7 +191,9 @@ export async function queryUser(userId: string, active: boolean = true): Promise
 
 
 def test_format_ast_context_markdown():
-    frame = StackFrame(file_path="backend/app/auth.py", line_number=45, symbol_name="verify_token")
+    frame = StackFrame(
+        file_path="backend/app/auth.py", line_number=45, symbol_name="verify_token"
+    )
     context = {
         "enclosing_class": "SecurityManager",
         "enclosing_symbol": "verify_token",
@@ -195,7 +207,10 @@ def test_format_ast_context_markdown():
     formatted = format_ast_context(frame, context)
     assert "### `backend/app/auth.py` (Line 45, in `verify_token`)" in formatted
     assert "**Enclosing Class:** `SecurityManager`" in formatted
-    assert "**Signature:** `def verify_token(token: str, secret: str = 'default') -> bool:`" in formatted
+    assert (
+        "**Signature:** `def verify_token(token: str, secret: str = 'default') -> bool:`"
+        in formatted
+    )
     assert "**Module Imports:**" in formatted
     assert "import jwt" in formatted
     assert "payload = jwt.decode(token, secret)" in formatted

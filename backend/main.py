@@ -2,9 +2,8 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -32,6 +31,7 @@ from app.webhooks import router as webhooks_router
 logging.basicConfig(level=logging.INFO, force=True)
 
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Rate limiter (slowapi = express-rate-limit equivalent for FastAPI)
@@ -63,9 +63,13 @@ app.add_middleware(SlowAPIMiddleware)
 # ---------------------------------------------------------------------------
 cors_origins = [settings.frontend_url.rstrip("/")]
 if "://localhost" in settings.frontend_url:
-    cors_origins.append(settings.frontend_url.replace("://localhost", "://127.0.0.1").rstrip("/"))
+    cors_origins.append(
+        settings.frontend_url.replace("://localhost", "://127.0.0.1").rstrip("/")
+    )
 elif "://127.0.0.1" in settings.frontend_url:
-    cors_origins.append(settings.frontend_url.replace("://127.0.0.1", "://localhost").rstrip("/"))
+    cors_origins.append(
+        settings.frontend_url.replace("://127.0.0.1", "://localhost").rstrip("/")
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -113,7 +117,9 @@ async def sandbox_health() -> dict:
           }
         }
     """
-    provider: str = getattr(settings, "sandbox_provider", "github_actions").lower().strip()
+    provider: str = (
+        getattr(settings, "sandbox_provider", "github_actions").lower().strip()
+    )
     detail: dict = {}
 
     if provider == "github_actions":

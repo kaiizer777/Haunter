@@ -66,7 +66,9 @@ async def test_post_repo_valid(db: AsyncSession, user_factory, make_auth_client)
 
 
 @pytest.mark.asyncio
-async def test_post_repo_duplicate_own(db: AsyncSession, user_factory, make_auth_client):
+async def test_post_repo_duplicate_own(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """POST /repos for same repo twice by same user returns 409."""
     await truncate_all(db)
     user = await user_factory(github_id=702, username="dup_user")
@@ -83,7 +85,9 @@ async def test_post_repo_duplicate_own(db: AsyncSession, user_factory, make_auth
 
 
 @pytest.mark.asyncio
-async def test_post_repo_same_owner_name_different_user(db: AsyncSession, user_factory, make_auth_client):
+async def test_post_repo_same_owner_name_different_user(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """POST /repos with same (owner, name) by two distinct users succeeds (multi-tenancy)."""
     await truncate_all(db)
     user_a = await user_factory(github_id=703, username="user_a")
@@ -95,17 +99,23 @@ async def test_post_repo_same_owner_name_different_user(db: AsyncSession, user_f
     client_b = make_auth_client(user_b_id)
 
     async with client_a:
-        resp_a = await client_a.post("/repos", json={"owner": "shared-org", "name": "shared-repo"})
+        resp_a = await client_a.post(
+            "/repos", json={"owner": "shared-org", "name": "shared-repo"}
+        )
         assert resp_a.status_code == 201
 
     async with client_b:
-        resp_b = await client_b.post("/repos", json={"owner": "shared-org", "name": "shared-repo"})
+        resp_b = await client_b.post(
+            "/repos", json={"owner": "shared-org", "name": "shared-repo"}
+        )
         assert resp_b.status_code == 201
         assert resp_b.json()["id"] != resp_a.json()["id"]
 
 
 @pytest.mark.asyncio
-async def test_post_repo_missing_required_fields(db: AsyncSession, user_factory, make_auth_client):
+async def test_post_repo_missing_required_fields(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """POST /repos missing required owner or name returns 422."""
     await truncate_all(db)
     user = await user_factory(github_id=705, username="validation_user")
@@ -123,7 +133,9 @@ async def test_post_repo_missing_required_fields(db: AsyncSession, user_factory,
 
 
 @pytest.mark.asyncio
-async def test_get_repos_tenant_isolation(db: AsyncSession, user_factory, make_auth_client):
+async def test_get_repos_tenant_isolation(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """GET /repos returns only repos owned by the calling tenant (User A sees 2, B sees 1)."""
     await truncate_all(db)
     user_a = await user_factory(github_id=706, username="user_iso_a")
@@ -235,7 +247,9 @@ async def test_delete_repo_not_found(db: AsyncSession, user_factory, make_auth_c
 
 
 @pytest.mark.asyncio
-async def test_concurrent_post_same_repo(db: AsyncSession, user_factory, make_auth_client):
+async def test_concurrent_post_same_repo(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """4 concurrent POSTs for same repo result in exactly 1 DB row and 1x 201 + 3x 409."""
     await truncate_all(db)
     user = await user_factory(github_id=713, username="concurrent_user")
@@ -244,22 +258,30 @@ async def test_concurrent_post_same_repo(db: AsyncSession, user_factory, make_au
     async def _send_post():
         client = make_auth_client(user_id)
         async with client:
-            return await client.post("/repos", json={"owner": "race-org", "name": "race-repo"})
+            return await client.post(
+                "/repos", json={"owner": "race-org", "name": "race-repo"}
+            )
 
     results = await asyncio.gather(*[_send_post() for _ in range(4)])
     status_codes = [r.status_code for r in results]
 
-    assert status_codes.count(201) == 1, f"Expected exactly 1 201 Created, got {status_codes}"
+    assert (
+        status_codes.count(201) == 1
+    ), f"Expected exactly 1 201 Created, got {status_codes}"
     assert status_codes.count(409) == 3, f"Expected 3 409 Conflicts, got {status_codes}"
 
     # Verify exactly 1 row in DB
-    res = await db.execute(select(Repo).where(Repo.user_id == user_id, Repo.name == "race-repo"))
+    res = await db.execute(
+        select(Repo).where(Repo.user_id == user_id, Repo.name == "race-repo")
+    )
     rows = res.scalars().all()
     assert len(rows) == 1
 
 
 @pytest.mark.asyncio
-async def test_model_config_get_global_and_repo(db: AsyncSession, user_factory, make_auth_client):
+async def test_model_config_get_global_and_repo(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """GET /config/model returns global config; GET with non-owned repo_id returns 404."""
     await truncate_all(db)
     user = await user_factory(github_id=714, username="cfg_user")
@@ -281,7 +303,9 @@ async def test_model_config_get_global_and_repo(db: AsyncSession, user_factory, 
 
 
 @pytest.mark.asyncio
-async def test_put_model_config_valid_and_validation(db: AsyncSession, user_factory, make_auth_client):
+async def test_put_model_config_valid_and_validation(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """PUT /config/model validates provider/model allowlist, derives base_url server-side, ignores client base_url."""
     await truncate_all(db)
     user = await user_factory(github_id=715, username="put_cfg_user", role="admin")
@@ -328,7 +352,9 @@ async def test_put_model_config_valid_and_validation(db: AsyncSession, user_fact
 
 
 @pytest.mark.asyncio
-async def test_put_model_config_per_repo_and_non_owned(db: AsyncSession, user_factory, make_auth_client):
+async def test_put_model_config_per_repo_and_non_owned(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """PUT /config/model/{repo_id} updates per-repo config; returns 404 on unowned repo."""
     await truncate_all(db)
     user_a = await user_factory(github_id=716, username="user_repo_cfg_a")

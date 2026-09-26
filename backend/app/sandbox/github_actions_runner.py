@@ -365,7 +365,9 @@ async def _push_workflow_file(
     # ------------------------------------------------------------------
     # 2. PUT the workflow file.
     # ------------------------------------------------------------------
-    encoded_content = _base64.b64encode(workflow_content.encode("utf-8")).decode("ascii")
+    encoded_content = _base64.b64encode(workflow_content.encode("utf-8")).decode(
+        "ascii"
+    )
     put_payload: dict = {
         "message": f"haunter: add {workflow_filename}",
         "content": encoded_content,
@@ -456,7 +458,12 @@ def _extract_relevant_failure_log(raw_log: str, max_chars: int = 3500) -> str:
         log_content = log_content[:node_dep_idx].rstrip()
 
     # Look for pytest failure sections (prioritize FAILURES and summary)
-    markers = ["=== FAILURES ===", "=== short test summary info ===", "FAILED ", "##[error]Process completed with exit code"]
+    markers = [
+        "=== FAILURES ===",
+        "=== short test summary info ===",
+        "FAILED ",
+        "##[error]Process completed with exit code",
+    ]
     for m in markers:
         idx = log_content.find(m)
         if idx != -1:
@@ -505,9 +512,7 @@ async def _get_workflow_run_log_tail(
         lines: list[str] = []
         failed_job_id: Optional[int] = None
         for job in jobs:
-            job_name = sanitize_log_value(
-                job.get("name", f"job#{job.get('id')}"), 200
-            )
+            job_name = sanitize_log_value(job.get("name", f"job#{job.get('id')}"), 200)
             conclusion = job.get("conclusion") or "unknown"
             lines.append(f"Job '{job_name}': {conclusion}")
             if conclusion == "failure" and failed_job_id is None:
@@ -532,13 +537,15 @@ async def _get_workflow_run_log_tail(
                     tail_chars = _extract_relevant_failure_log(raw_log, max_chars=3500)
                     lines.append(f"\n--- Test Failure Log ---\n{tail_chars}")
             except Exception as log_err:
-                logger.debug("github_actions_runner: failed to fetch failed job log tail: %s", log_err)
+                logger.debug(
+                    "github_actions_runner: failed to fetch failed job log tail: %s",
+                    log_err,
+                )
 
         summary = "\n".join(lines)
         return summary[-max_bytes:] if len(summary) > max_bytes else summary
     except Exception as exc:
         return f"Workflow run #{run_id}: log fetch failed ({type(exc).__name__}: {str(exc)[:200]})"
-
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +567,7 @@ async def _delete_branch_ref(
     Gracefully handles 204 (deleted) and 404 (already gone).
     """
     clean_branch = (
-        branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
+        branch[len("refs/heads/") :] if branch.startswith("refs/heads/") else branch
     )
     url = f"{_GITHUB_API_BASE}/repos/{repo_full}/git/refs/heads/{clean_branch}"
     headers = _auth_headers(token)
@@ -821,9 +828,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
         # "GITHUB_SANDBOX_* not configured" reason rather than the
         # less-helpful "user_github_id is not set" reason.
         # ----------------------------------------------------------------
-        org: str = (
-            getattr(settings, "github_sandbox_org", None) or "haunter-sandboxes"
-        )
+        org: str = getattr(settings, "github_sandbox_org", None) or "haunter-sandboxes"
         app_id: Optional[str] = getattr(settings, "github_sandbox_app_id", None)
         installation_id: Optional[str] = getattr(
             settings, "github_sandbox_installation_id", None
@@ -860,8 +865,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             return make_result(
                 passed=False,
                 reason=(
-                    "[non-retryable] GITHUB_SANDBOX_INSTALLATION_ID not "
-                    "configured."
+                    "[non-retryable] GITHUB_SANDBOX_INSTALLATION_ID not " "configured."
                 ),
                 duration_ms=int((time.monotonic() - t_start) * 1000),
             )
@@ -938,7 +942,11 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         user_repo_full = inp.repo_ref.split("@", 1)[0]
                         try:
                             tar_bytes, used_token = await fetch_user_repo_tarball(
-                                client, user_repo_full, inp.head_sha, token, fallback_token
+                                client,
+                                user_repo_full,
+                                inp.head_sha,
+                                token,
+                                fallback_token,
                             )
                             seed_files = parse_tar_to_files(
                                 tar_bytes, max_files=settings.seed_max_files
@@ -968,7 +976,9 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         file_paths = list(seed_files.keys())
                     language = detect_language(file_paths)
                     workflow_filename = (
-                        workflow_filename_py if language == "py" else workflow_filename_ts
+                        workflow_filename_py
+                        if language == "py"
+                        else workflow_filename_ts
                     )
                     try:
                         workflow_content = _load_workflow_template(workflow_filename)
@@ -1042,7 +1052,9 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                                 ),
                                 runs[0],
                             )
-                            conclusion = (failed_run.get("conclusion") or "unknown").lower()
+                            conclusion = (
+                                failed_run.get("conclusion") or "unknown"
+                            ).lower()
                             log_tail = await _get_workflow_run_log_tail(
                                 client, repo_full, failed_run["id"], token=token
                             )
@@ -1051,9 +1063,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                                 reason=_sanitize_failure_reason(
                                     f"Workflow run concluded '{conclusion}': {log_tail}"
                                 ),
-                                duration_ms=int(
-                                    (time.monotonic() - t_start) * 1000
-                                ),
+                                duration_ms=int((time.monotonic() - t_start) * 1000),
                             )
 
                     # Deadline reached without a terminal status.
@@ -1132,31 +1142,45 @@ class GitHubActionsSandboxRunner(SandboxRunner):
         t_overall_start = time.monotonic()
         org: str = getattr(settings, "github_sandbox_org", None) or "haunter-sandboxes"
         app_id: Optional[str] = getattr(settings, "github_sandbox_app_id", None)
-        installation_id: Optional[str] = getattr(settings, "github_sandbox_installation_id", None)
+        installation_id: Optional[str] = getattr(
+            settings, "github_sandbox_installation_id", None
+        )
         ssm_path: str = getattr(
             settings,
             "github_sandbox_app_private_key_ssm_path",
             "/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY",
         )
-        poll_interval: float = float(getattr(settings, "github_sandbox_poll_interval_seconds", 10.0) or 10.0)
-        poll_timeout: float = float(getattr(settings, "github_sandbox_poll_timeout_seconds", 120.0) or 120.0)
-        workflow_filename_py: str = getattr(settings, "github_sandbox_workflow_filename_py", "haunter-test-py.yml")
-        workflow_filename_ts: str = getattr(settings, "github_sandbox_workflow_filename_ts", "haunter-test-ts.yml")
+        poll_interval: float = float(
+            getattr(settings, "github_sandbox_poll_interval_seconds", 10.0) or 10.0
+        )
+        poll_timeout: float = float(
+            getattr(settings, "github_sandbox_poll_timeout_seconds", 120.0) or 120.0
+        )
+        workflow_filename_py: str = getattr(
+            settings, "github_sandbox_workflow_filename_py", "haunter-test-py.yml"
+        )
+        workflow_filename_ts: str = getattr(
+            settings, "github_sandbox_workflow_filename_ts", "haunter-test-ts.yml"
+        )
 
         iteration_results: list[dict[str, Any]] = []
         consecutive_passes = 0
 
         if not app_id or not installation_id:
-            logger.warning("verify_determinism: GITHUB_SANDBOX_APP_ID or INSTALLATION_ID not configured")
+            logger.warning(
+                "verify_determinism: GITHUB_SANDBOX_APP_ID or INSTALLATION_ID not configured"
+            )
             return DeterminismResult(
                 is_flaky=False,
                 consecutive_passes=0,
-                iteration_results=[{
-                    "iteration": 1,
-                    "passed": False,
-                    "duration_ms": 0,
-                    "logs": "Sandbox credentials not configured",
-                }],
+                iteration_results=[
+                    {
+                        "iteration": 1,
+                        "passed": False,
+                        "duration_ms": 0,
+                        "logs": "Sandbox credentials not configured",
+                    }
+                ],
             )
 
         try:
@@ -1166,22 +1190,30 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                 ssm_path=ssm_path,
             )
         except Exception as exc:
-            logger.warning("verify_determinism: token mint failed (%s: %s)", type(exc).__name__, exc)
+            logger.warning(
+                "verify_determinism: token mint failed (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
             return DeterminismResult(
                 is_flaky=False,
                 consecutive_passes=0,
-                iteration_results=[{
-                    "iteration": 1,
-                    "passed": False,
-                    "duration_ms": int((time.monotonic() - t_overall_start) * 1000),
-                    "logs": f"Token mint failed: {exc}",
-                }],
+                iteration_results=[
+                    {
+                        "iteration": 1,
+                        "passed": False,
+                        "duration_ms": int((time.monotonic() - t_overall_start) * 1000),
+                        "logs": f"Token mint failed: {exc}",
+                    }
+                ],
             )
 
         fallback_token: Optional[str] = getattr(settings, "github_token", None)
         repo_full = get_universal_sandbox_repo(org)
         user_repo_full = f"{repo.owner}/{repo.name}"
-        head_sha = getattr(run, "head_sha", None) or getattr(repo, "default_branch", "main")
+        head_sha = getattr(run, "head_sha", None) or getattr(
+            repo, "default_branch", "main"
+        )
 
         try:
             async with httpx.AsyncClient(timeout=_API_TIMEOUT_SECONDS) as client:
@@ -1199,6 +1231,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         fetch_user_repo_tarball,
                         parse_tar_to_files,
                     )
+
                     try:
                         tar_bytes, used_token = await fetch_user_repo_tarball(
                             client, user_repo_full, head_sha, token, fallback_token
@@ -1214,11 +1247,17 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         )
 
                 language = detect_language(list(seed_files.keys()))
-                workflow_filename = workflow_filename_py if language == "py" else workflow_filename_ts
+                workflow_filename = (
+                    workflow_filename_py if language == "py" else workflow_filename_ts
+                )
                 try:
                     workflow_content = _load_workflow_template(workflow_filename)
                 except FileNotFoundError as exc:
-                    logger.warning("verify_determinism: workflow template %s not found: %s", workflow_filename, exc)
+                    logger.warning(
+                        "verify_determinism: workflow template %s not found: %s",
+                        workflow_filename,
+                        exc,
+                    )
                     return DeterminismResult(
                         is_flaky=False,
                         consecutive_passes=0,
@@ -1250,7 +1289,9 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         deadline = time.monotonic() + poll_timeout
                         while time.monotonic() < deadline:
                             await asyncio.sleep(poll_interval)
-                            wf_runs = await _list_workflow_runs(client, repo_full, iter_head_sha, token=token)
+                            wf_runs = await _list_workflow_runs(
+                                client, repo_full, iter_head_sha, token=token
+                            )
                             if not wf_runs:
                                 continue
                             if all(r.get("status") == "completed" for r in wf_runs):
@@ -1260,7 +1301,12 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                                 )
                                 if not iter_passed:
                                     failed_run = next(
-                                        (r for r in wf_runs if (r.get("conclusion") or "").lower() != "success"),
+                                        (
+                                            r
+                                            for r in wf_runs
+                                            if (r.get("conclusion") or "").lower()
+                                            != "success"
+                                        ),
                                         wf_runs[0],
                                     )
                                     iter_logs = await _get_workflow_run_log_tail(
@@ -1286,12 +1332,14 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         )
 
                     iter_duration_ms = int((time.monotonic() - t_iter_start) * 1000)
-                    iteration_results.append({
-                        "iteration": i,
-                        "passed": iter_passed,
-                        "duration_ms": iter_duration_ms,
-                        "logs": iter_logs,
-                    })
+                    iteration_results.append(
+                        {
+                            "iteration": i,
+                            "passed": iter_passed,
+                            "duration_ms": iter_duration_ms,
+                            "logs": iter_logs,
+                        }
+                    )
 
                     if iter_passed:
                         consecutive_passes += 1
@@ -1299,7 +1347,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         # Deterministic failure reproduced on clean code
                         break
 
-            is_flaky = (consecutive_passes == runs_count)
+            is_flaky = consecutive_passes == runs_count
             return DeterminismResult(
                 is_flaky=is_flaky,
                 consecutive_passes=consecutive_passes,

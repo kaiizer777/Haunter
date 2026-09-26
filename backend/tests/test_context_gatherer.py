@@ -45,6 +45,7 @@ from tests.conftest import truncate_all
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 async def _create_user(db: AsyncSession) -> User:
     user = User(
         github_id=int(uuid.uuid4().int % 1_000_000_000 + 100_000_000),
@@ -93,6 +94,7 @@ async def _create_run(
 # ---------------------------------------------------------------------------
 # 1. _redact_secrets parametrization
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "secret_input,expected_sub",
@@ -204,6 +206,7 @@ def test_redact_secrets_multiline_mixed_case() -> None:
 # 2. False-positive checks: normal text must NOT be redacted
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "safe_text",
     [
@@ -231,6 +234,7 @@ def test_redact_secrets_preserves_innocent_text(safe_text: str) -> None:
 # 3. _truncate_and_redact
 # ---------------------------------------------------------------------------
 
+
 def test_truncate_and_redact_under_cap() -> None:
     """Input under cap is unchanged when no secrets are present."""
     text = "Short log message from pytest runner."
@@ -247,7 +251,9 @@ def test_truncate_and_redact_over_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(result) < 80
 
 
-def test_truncate_and_redact_removes_secrets_in_head_and_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_truncate_and_redact_removes_secrets_in_head_and_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Secrets in head are redacted; secrets in tail are discarded by truncation."""
     monkeypatch.setattr("app.subagents.context_gatherer.CAP_CHARS", 60)
     head_secret = "sk-12345678901234567890"
@@ -264,6 +270,7 @@ def test_truncate_and_redact_removes_secrets_in_head_and_tail(monkeypatch: pytes
 # ---------------------------------------------------------------------------
 # 4. _extract_file_paths_from_diff
 # ---------------------------------------------------------------------------
+
 
 def test_extract_file_paths_from_diff() -> None:
     """Extracts touched file paths, deduplicates, skips /dev/null, and respects cap."""
@@ -292,6 +299,7 @@ def test_extract_file_paths_empty() -> None:
 # 5. gather_context happy path (unit)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_gather_context_happy_path(db: AsyncSession) -> None:
     """gather_context calls LLMClient.complete, persists run_steps row, appends file list."""
@@ -312,10 +320,26 @@ async def test_gather_context_happy_path(db: AsyncSession) -> None:
     }
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock, return_value=fixture_logs),
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock, return_value=fixture_diff),
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock, return_value=fixture_meta),
-        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock, return_value=mock_llm_response) as mock_complete,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+            return_value=fixture_logs,
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value=fixture_diff,
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value=fixture_meta,
+        ),
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete",
+            new_callable=AsyncMock,
+            return_value=mock_llm_response,
+        ) as mock_complete,
     ):
         summary = await gather_context(run=run, repo=repo, db=db)
 
@@ -334,22 +358,31 @@ async def test_gather_context_happy_path(db: AsyncSession) -> None:
     assert "FAILED tests/test_db.py" in messages[1]["content"]
 
     # 3. run_steps row persisted with accurate metrics
-    steps = (await db.execute(select(RunStep).where(RunStep.run_id == run.id))).scalars().all()
+    steps = (
+        (await db.execute(select(RunStep).where(RunStep.run_id == run.id)))
+        .scalars()
+        .all()
+    )
     assert len(steps) == 1
     step = steps[0]
     assert step.step_name == "context_gatherer"
     assert step.input_tokens == 120
     assert step.output_tokens == 40
     assert step.latency_ms == 280
-    assert step.cost_estimate == pytest.approx((120 * 0.001 / 1000) + (40 * 0.002 / 1000), abs=1e-8)
+    assert step.cost_estimate == pytest.approx(
+        (120 * 0.001 / 1000) + (40 * 0.002 / 1000), abs=1e-8
+    )
 
 
 # ---------------------------------------------------------------------------
 # 6. Status advancement: pending → context_gathering → fix_generation
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
-async def test_gather_context_advances_status_and_stores_summary(db: AsyncSession) -> None:
+async def test_gather_context_advances_status_and_stores_summary(
+    db: AsyncSession,
+) -> None:
     """Orchestrator advances status pending → context_gathering → fix_generation, stores diagnosis_summary."""
     await truncate_all(db)
     user = await _create_user(db)
@@ -368,9 +401,21 @@ async def test_gather_context_advances_status_and_stores_summary(db: AsyncSessio
         raise RuntimeError("stop_after_context_gathered")
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock, return_value="SyntaxError at main.py:12"),
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock, return_value="--- a/backend/app/main.py\n+++ b/backend/app/main.py\n@@ -12,1 +12,1 @@\n"),
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock, return_value={"sha": run.head_sha}),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+            return_value="SyntaxError at main.py:12",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="--- a/backend/app/main.py\n+++ b/backend/app/main.py\n@@ -12,1 +12,1 @@\n",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value={"sha": run.head_sha},
+        ),
         patch(
             "app.subagents.context_gatherer.LLMClient.complete",
             new_callable=AsyncMock,
@@ -381,7 +426,9 @@ async def test_gather_context_advances_status_and_stores_summary(db: AsyncSessio
                 "model": "nemotron-3.5-lightning-free",
             },
         ),
-        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
     ):
         await handle_failed_run(run_id)
 
@@ -402,8 +449,11 @@ async def test_gather_context_advances_status_and_stores_summary(db: AsyncSessio
 # 7. Failure paths
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
-async def test_gather_context_llm_timeout_raises_and_sets_error_status(db: AsyncSession) -> None:
+async def test_gather_context_llm_timeout_raises_and_sets_error_status(
+    db: AsyncSession,
+) -> None:
     """LLM timeout during gather_context raises TimeoutError and orchestrator transitions to error."""
     await truncate_all(db)
     user = await _create_user(db)
@@ -412,10 +462,26 @@ async def test_gather_context_llm_timeout_raises_and_sets_error_status(db: Async
     run_id = run.id
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock, return_value="logs"),
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock, return_value="diff"),
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock, return_value={}),
-        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock, side_effect=asyncio.TimeoutError),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+            return_value="logs",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="diff",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete",
+            new_callable=AsyncMock,
+            side_effect=asyncio.TimeoutError,
+        ),
     ):
         # Direct call raises TimeoutError
         with pytest.raises(TimeoutError):
@@ -428,11 +494,24 @@ async def test_gather_context_llm_timeout_raises_and_sets_error_status(db: Async
     failed_run = (await db.execute(select(Run).where(Run.id == run_id))).scalar_one()
     assert failed_run.status == "error"
     assert failed_run.failure_reason is not None
-    assert "orchestrator" in failed_run.failure_reason or "context_gathering" in failed_run.failure_reason or "TimeoutError" in failed_run.failure_reason
+    assert (
+        "orchestrator" in failed_run.failure_reason
+        or "context_gathering" in failed_run.failure_reason
+        or "TimeoutError" in failed_run.failure_reason
+    )
 
     # Confirm error step was logged
-    steps = (await db.execute(select(RunStep).where(RunStep.run_id == run_id))).scalars().all()
-    assert any(s.step_name in ("orchestrator_timeout", "context_gatherer_error", "context_gathering_error") or "error" in s.step_name for s in steps)
+    steps = (
+        (await db.execute(select(RunStep).where(RunStep.run_id == run_id)))
+        .scalars()
+        .all()
+    )
+    assert any(
+        s.step_name
+        in ("orchestrator_timeout", "context_gatherer_error", "context_gathering_error")
+        or "error" in s.step_name
+        for s in steps
+    )
 
 
 @pytest.mark.anyio
@@ -459,9 +538,21 @@ async def test_gather_context_empty_response_retry_flow(db: AsyncSession) -> Non
     mock_complete = AsyncMock(side_effect=[empty_response, valid_response])
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock, return_value="TypeError"),
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock, return_value=""),
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock, return_value={}),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+            return_value="TypeError",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
         patch("app.subagents.context_gatherer.LLMClient.complete", mock_complete),
     ):
         summary = await gather_context(run=run, repo=repo, db=db)
@@ -470,13 +561,17 @@ async def test_gather_context_empty_response_retry_flow(db: AsyncSession) -> Non
     assert "TypeError: unsupported operand" in summary
 
     # Aggregated token counts persisted
-    step = (await db.execute(select(RunStep).where(RunStep.run_id == run.id))).scalar_one()
+    step = (
+        await db.execute(select(RunStep).where(RunStep.run_id == run.id))
+    ).scalar_one()
     assert step.input_tokens == 110  # 50 + 60
     assert step.output_tokens == 30  # 5 + 25
 
 
 @pytest.mark.anyio
-async def test_gather_context_both_attempts_empty_raises_value_error(db: AsyncSession) -> None:
+async def test_gather_context_both_attempts_empty_raises_value_error(
+    db: AsyncSession,
+) -> None:
     """Both LLM attempts return empty → persists context_gatherer_error step and raises ValueError."""
     await truncate_all(db)
     user = await _create_user(db)
@@ -491,15 +586,33 @@ async def test_gather_context_both_attempts_empty_raises_value_error(db: AsyncSe
     }
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock, return_value="logs"),
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock, return_value=""),
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock, return_value={}),
-        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock, return_value=empty_response),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+            return_value="logs",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete",
+            new_callable=AsyncMock,
+            return_value=empty_response,
+        ),
         pytest.raises(ValueError, match="empty summary"),
     ):
         await gather_context(run=run, repo=repo, db=db)
 
-    step = (await db.execute(select(RunStep).where(RunStep.run_id == run.id))).scalar_one()
+    step = (
+        await db.execute(select(RunStep).where(RunStep.run_id == run.id))
+    ).scalar_one()
     assert step.step_name == "context_gatherer_error"
     assert step.input_tokens == 80  # 40 + 40
 
@@ -518,8 +631,16 @@ async def test_gather_context_github_404_handled(db: AsyncSession) -> None:
             new_callable=AsyncMock,
             side_effect=GitHubResourceNotFoundError("Logs not found (404)"),
         ),
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock, return_value=""),
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock, return_value={}),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
         patch(
             "app.subagents.context_gatherer.LLMClient.complete",
             new_callable=AsyncMock,
@@ -540,8 +661,11 @@ async def test_gather_context_github_404_handled(db: AsyncSession) -> None:
 # 8. Security contract: assert no sk- pattern reaches mocked LLM call
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
-async def test_security_contract_no_secret_reaches_llm_payload(db: AsyncSession) -> None:
+async def test_security_contract_no_secret_reaches_llm_payload(
+    db: AsyncSession,
+) -> None:
     """Secrets in CI logs/diff/meta MUST NOT reach the payload sent to LLMClient.complete."""
     await truncate_all(db)
     user = await _create_user(db)
@@ -555,7 +679,9 @@ async def test_security_contract_no_secret_reaches_llm_payload(db: AsyncSession)
     leaked_conn = "postgres://admin:supersecretpass@db.neon.tech/prod"
     leaked_pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3V...\n-----END RSA PRIVATE KEY-----"
 
-    tainted_logs = f"Error: auth failed with {leaked_openai} and {leaked_ghp} and {leaked_ghr}"
+    tainted_logs = (
+        f"Error: auth failed with {leaked_openai} and {leaked_ghp} and {leaked_ghr}"
+    )
     tainted_diff = f"--- a/config.py\n+++ b/config.py\n@@ -1,1 +1,1 @@\n-DATABASE_URL={leaked_conn}\n+{leaked_npg}\n"
     tainted_meta = {"commit": {"message": f"fixed key {leaked_pem}"}}
 
@@ -571,10 +697,25 @@ async def test_security_contract_no_secret_reaches_llm_payload(db: AsyncSession)
         }
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock, return_value=tainted_logs),
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock, return_value=tainted_diff),
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock, return_value=tainted_meta),
-        patch("app.subagents.context_gatherer.LLMClient.complete", side_effect=capture_complete),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+            return_value=tainted_logs,
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value=tainted_diff,
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value=tainted_meta,
+        ),
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete",
+            side_effect=capture_complete,
+        ),
     ):
         await gather_context(run=run, repo=repo, db=db)
 
@@ -587,7 +728,9 @@ async def test_security_contract_no_secret_reaches_llm_payload(db: AsyncSession)
     assert leaked_npg not in full_llm_input, "Neon npg_ key leaked to LLM!"
     assert leaked_ghr not in full_llm_input, "GitHub runner ghr_ token leaked to LLM!"
     assert "supersecretpass" not in full_llm_input, "Database password leaked to LLM!"
-    assert "BEGIN RSA PRIVATE KEY" not in full_llm_input, "PEM private key leaked to LLM!"
+    assert (
+        "BEGIN RSA PRIVATE KEY" not in full_llm_input
+    ), "PEM private key leaked to LLM!"
 
     # Assert redaction placeholders were substituted
     assert "[REDACTED]" in full_llm_input

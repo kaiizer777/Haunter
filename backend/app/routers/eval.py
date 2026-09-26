@@ -118,14 +118,18 @@ class EvalResultOut(BaseModel):
             if isinstance(item, dict) and "fixture_id" in item
         }
         all_fids = sorted(set(cg_scores.keys()) | set(fg_scores.keys()))
-        fixture_scores = [
-            {
-                "fixture_id": fid,
-                "context_score": cg_scores.get(fid, 0.0),
-                "fix_score": fg_scores.get(fid, 0.0),
-            }
-            for fid in all_fids
-        ] if all_fids else None
+        fixture_scores = (
+            [
+                {
+                    "fixture_id": fid,
+                    "context_score": cg_scores.get(fid, 0.0),
+                    "fix_score": fg_scores.get(fid, 0.0),
+                }
+                for fid in all_fids
+            ]
+            if all_fids
+            else None
+        )
 
         return cls(
             id=er.id,
@@ -152,11 +156,13 @@ class EvalResultOut(BaseModel):
 # Request schema for POST /eval/run
 # ---------------------------------------------------------------------------
 
+
 # Load allowlist at module init — prevents late failures and makes the schema stable.
 def _load_fixture_allowlist() -> list[str]:
     """Return all fixture IDs from the server-side allowlist file."""
     from pathlib import Path
     import json
+
     # Primary path (from routers/eval.py → backend/eval/fixtures)
     candidates = [
         Path(__file__).parent.parent.parent / "eval" / "fixtures" / "golden_cases.json",
@@ -168,9 +174,15 @@ def _load_fixture_allowlist() -> list[str]:
             if fixtures_path.exists():
                 with fixtures_path.open() as f:
                     data = json.load(f)
-                return [item["id"] for item in data if isinstance(item, dict) and "id" in item]
+                return [
+                    item["id"]
+                    for item in data
+                    if isinstance(item, dict) and "id" in item
+                ]
         except Exception:  # noqa: BLE001
-            logger.exception("Failed to load eval fixture allowlist from %s", fixtures_path)
+            logger.exception(
+                "Failed to load eval fixture allowlist from %s", fixtures_path
+            )
             continue
     logger.error("No golden_cases.json found in any candidate path: %s", candidates)
     return []
@@ -219,7 +231,9 @@ class EvalRunRequest(BaseModel):
             return
         unknown = [fid for fid in self.fixture_ids if fid not in _FIXTURE_ALLOWLIST]
         if unknown:
-            raise ValueError(f"Unknown fixture IDs (not in server allowlist): {unknown!r}")
+            raise ValueError(
+                f"Unknown fixture IDs (not in server allowlist): {unknown!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +268,9 @@ async def list_eval_results(
             mc_map[mc.id] = mc
 
     return [
-        EvalResultOut.from_orm_safe(row, mc_map.get(row.model_config_id) if row.model_config_id else None)
+        EvalResultOut.from_orm_safe(
+            row, mc_map.get(row.model_config_id) if row.model_config_id else None
+        )
         for row in rows
     ]
 
@@ -274,7 +290,9 @@ async def get_eval_result(
     result = await db.execute(select(EvalResult).where(EvalResult.id == eval_id))
     row = result.scalar_one_or_none()
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Eval result not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Eval result not found"
+        )
 
     mc = None
     if row.model_config_id is not None:
@@ -286,7 +304,9 @@ async def get_eval_result(
     return EvalResultOut.from_orm_safe(row, mc)
 
 
-@router.post("/eval/run", response_model=EvalResultOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/eval/run", response_model=EvalResultOut, status_code=status.HTTP_201_CREATED
+)
 @limiter.limit("5/minute")
 async def trigger_eval_run(
     request: Request,
@@ -319,7 +339,9 @@ async def trigger_eval_run(
             detail=str(exc),
         ) from exc
 
-    from eval.runner import run_eval  # local import — avoids heavy startup at module load
+    from eval.runner import (
+        run_eval,
+    )  # local import — avoids heavy startup at module load
 
     # Demo mode pins: removes fixture-set and model-flicker as variables so a
     # demo shows a single-shot pass on a known-good case. The canonical fixture
@@ -451,9 +473,7 @@ async def get_user_eval_metrics(
     if healed_runs > 0:
         avg_secs = (
             await db.execute(
-                select(
-                    func.avg(func.extract("epoch", Run.updated_at - Run.created_at))
-                )
+                select(func.avg(func.extract("epoch", Run.updated_at - Run.created_at)))
                 .select_from(Run)
                 .join(Repo, Run.repo_id == Repo.id)
                 .where(*user_filter, Run.status.in_(healed_statuses))

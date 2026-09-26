@@ -33,7 +33,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.auth as auth_module
-from app.auth import _SESSION_MAX_AGE, _STATE_MAX_AGE, _sign_state, _sign_user_id, _verify_session_cookie
+from app.auth import (
+    _SESSION_MAX_AGE,
+    _STATE_MAX_AGE,
+    _sign_state,
+    _sign_user_id,
+    _verify_session_cookie,
+)
 from app.config import settings
 from app.limiter import limiter
 from app.models import User
@@ -48,7 +54,11 @@ async def test_login_redirect_and_state_cookie_attrs(client: httpx.AsyncClient):
     location = resp.headers.get("location", "")
     assert location.startswith("https://github.com/login/oauth/authorize")
     assert f"client_id={settings.github_client_id}" in location
-    assert "scope=read%3Auser+repo" in location or "scope=read%3Auser%20repo" in location or "scope=read:user repo" in location
+    assert (
+        "scope=read%3Auser+repo" in location
+        or "scope=read%3Auser%20repo" in location
+        or "scope=read:user repo" in location
+    )
     assert "state=" in location
 
     # Verify state cookie attributes
@@ -56,8 +66,13 @@ async def test_login_redirect_and_state_cookie_attrs(client: httpx.AsyncClient):
     assert "haunter_oauth_state=" in set_cookie
     assert "HttpOnly" in set_cookie or "httponly" in set_cookie
     assert "Secure" in set_cookie or "secure" in set_cookie
-    assert "SameSite=none" in set_cookie.lower() or "samesite=none" in set_cookie.lower()
-    assert f"Max-Age={_STATE_MAX_AGE}" in set_cookie or f"max-age={_STATE_MAX_AGE}" in set_cookie
+    assert (
+        "SameSite=none" in set_cookie.lower() or "samesite=none" in set_cookie.lower()
+    )
+    assert (
+        f"Max-Age={_STATE_MAX_AGE}" in set_cookie
+        or f"max-age={_STATE_MAX_AGE}" in set_cookie
+    )
 
 
 @pytest.mark.asyncio
@@ -66,7 +81,11 @@ async def test_login_redirect_includes_repo_scope(client: httpx.AsyncClient):
     resp = await client.get("/auth/login")
     assert resp.status_code == 302
     location = resp.headers.get("location", "")
-    assert "scope=read%3Auser+repo" in location or "scope=read%3Auser%20repo" in location or "scope=read:user repo" in location
+    assert (
+        "scope=read%3Auser+repo" in location
+        or "scope=read%3Auser%20repo" in location
+        or "scope=read:user repo" in location
+    )
 
 
 @pytest.mark.asyncio
@@ -81,7 +100,9 @@ async def test_callback_missing_state_cookie(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_callback_missing_state_param(client: httpx.AsyncClient, signed_state_factory):
+async def test_callback_missing_state_param(
+    client: httpx.AsyncClient, signed_state_factory
+):
     """Callback with missing state query parameter returns 400 and clears cookie."""
     signed_state = signed_state_factory("valid_raw_state")
     resp = await client.get(
@@ -126,7 +147,9 @@ async def test_callback_expired_state(client: httpx.AsyncClient, signed_state_fa
 
 
 @pytest.mark.asyncio
-async def test_callback_valid_state_missing_code(client: httpx.AsyncClient, signed_state_factory):
+async def test_callback_valid_state_missing_code(
+    client: httpx.AsyncClient, signed_state_factory
+):
     """Valid state signature but missing code query parameter returns 400."""
     raw_state = "valid_state_no_code"
     signed_state = signed_state_factory(raw_state)
@@ -158,7 +181,10 @@ async def test_callback_valid_full_flow(
     respx.post("https://github.com/login/oauth/access_token").mock(
         return_value=httpx.Response(
             200,
-            json={"access_token": "gho_mock_access_token_xyz999", "token_type": "bearer"},
+            json={
+                "access_token": "gho_mock_access_token_xyz999",
+                "token_type": "bearer",
+            },
         )
     )
 
@@ -188,7 +214,10 @@ async def test_callback_valid_full_flow(
     cookies_header = resp.headers.get_list("set-cookie")
     cookies_str = " ; ".join(cookies_header)
     assert "haunter_session=" in cookies_str
-    assert f"Max-Age={_SESSION_MAX_AGE}" in cookies_str or f"max-age={_SESSION_MAX_AGE}" in cookies_str
+    assert (
+        f"Max-Age={_SESSION_MAX_AGE}" in cookies_str
+        or f"max-age={_SESSION_MAX_AGE}" in cookies_str
+    )
     assert "haunter_oauth_state=" in cookies_str  # state cookie cleared
 
     # 3. User persisted in DB
@@ -201,7 +230,9 @@ async def test_callback_valid_full_flow(
 
 
 @pytest.mark.asyncio
-async def test_callback_replay_same_state(client: httpx.AsyncClient, signed_state_factory):
+async def test_callback_replay_same_state(
+    client: httpx.AsyncClient, signed_state_factory
+):
     """Replaying an OAuth callback without state cookie fails immediately."""
     raw_state = "replayed_state_token"
     # State cookie is not provided (simulates single-use after client cleared it or attacker replaying)
@@ -268,7 +299,9 @@ async def test_me_valid_user(
 ):
     """GET /auth/me with valid session cookie returns authenticated profile."""
     await truncate_all(db)
-    user = await user_factory(github_id=602, username="valid_user", avatar_url="https://avatar.url")
+    user = await user_factory(
+        github_id=602, username="valid_user", avatar_url="https://avatar.url"
+    )
     cookie = signed_session_factory(user.id)
 
     resp = await client.get("/auth/me", cookies={"haunter_session": cookie})
@@ -282,7 +315,9 @@ async def test_me_valid_user(
 @pytest.mark.asyncio
 async def test_logout_clears_cookie_and_idempotent(client: httpx.AsyncClient):
     """POST /auth/logout clears session cookie with identical attributes; idempotent."""
-    resp = await client.post("/auth/logout", cookies={"haunter_session": "active_session"})
+    resp = await client.post(
+        "/auth/logout", cookies={"haunter_session": "active_session"}
+    )
     assert resp.status_code == 200
     assert resp.json() == {"detail": "Logged out"}
 
@@ -316,7 +351,9 @@ async def test_key_rotation_fallback(db: AsyncSession, user_factory):
         assert verified_id == user.id
 
         # 2. Sign with current key
-        new_cookie = TimestampSigner(settings.session_secret_key).sign(str(user.id)).decode()
+        new_cookie = (
+            TimestampSigner(settings.session_secret_key).sign(str(user.id)).decode()
+        )
         verified_id_new = _verify_session_cookie(new_cookie)
         assert verified_id_new == user.id
 
@@ -351,9 +388,9 @@ async def test_rate_limiting_auth_routes(client: httpx.AsyncClient):
 
     # The (per_minute + 1)th must trip the limit and return 429.
     resp_blocked = await client.post("/auth/logout")
-    assert resp_blocked.status_code == 429, (
-        f"expected 429 after {per_minute + 1} requests, got {resp_blocked.status_code}"
-    )
+    assert (
+        resp_blocked.status_code == 429
+    ), f"expected 429 after {per_minute + 1} requests, got {resp_blocked.status_code}"
     limiter.reset()
 
 
@@ -363,12 +400,19 @@ async def test_cors_configuration(client: httpx.AsyncClient):
     # 1. Legit origin request
     resp_legit = await client.get("/health", headers={"Origin": settings.frontend_url})
     assert resp_legit.status_code == 200
-    assert resp_legit.headers.get("access-control-allow-origin") == settings.frontend_url
+    assert (
+        resp_legit.headers.get("access-control-allow-origin") == settings.frontend_url
+    )
     assert resp_legit.headers.get("access-control-allow-credentials") == "true"
 
     # 2. Evil origin request
-    resp_evil = await client.get("/health", headers={"Origin": "https://evil-attacker.com"})
-    assert resp_evil.headers.get("access-control-allow-origin") != "https://evil-attacker.com"
+    resp_evil = await client.get(
+        "/health", headers={"Origin": "https://evil-attacker.com"}
+    )
+    assert (
+        resp_evil.headers.get("access-control-allow-origin")
+        != "https://evil-attacker.com"
+    )
 
     # 3. Preflight OPTIONS request
     resp_opt = await client.options(
@@ -420,7 +464,9 @@ def test_encryption_required_raises():
     def mock_dotenv_call(self):
         vals = real_dotenv_call(self)
         if isinstance(vals, dict):
-            vals = {k: v for k, v in vals.items() if k.lower() != "token_encryption_key"}
+            vals = {
+                k: v for k, v in vals.items() if k.lower() != "token_encryption_key"
+            }
         return vals
 
     try:
@@ -428,7 +474,9 @@ def test_encryption_required_raises():
         original_key = os.environ.pop("TOKEN_ENCRYPTION_KEY", None)
         try:
             with patch.object(DotEnvSettingsSource, "__call__", mock_dotenv_call):
-                with pytest.raises(RuntimeError, match="TOKEN_ENCRYPTION_KEY must be set"):
+                with pytest.raises(
+                    RuntimeError, match="TOKEN_ENCRYPTION_KEY must be set"
+                ):
                     importlib.import_module("app.config")
         finally:
             if original_key is not None:
@@ -442,7 +490,9 @@ def test_encryption_required_raises():
 
 
 @pytest.mark.asyncio
-async def test_me_endpoint_returns_user_role(db: AsyncSession, user_factory, make_auth_client):
+async def test_me_endpoint_returns_user_role(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """GET /auth/me returns role='user' and is_admin=False for standard user."""
     user = await user_factory(username="standard-user", role="user")
     client = make_auth_client(user.id)
@@ -455,7 +505,9 @@ async def test_me_endpoint_returns_user_role(db: AsyncSession, user_factory, mak
 
 
 @pytest.mark.asyncio
-async def test_me_endpoint_returns_admin_role(db: AsyncSession, user_factory, make_auth_client):
+async def test_me_endpoint_returns_admin_role(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """GET /auth/me returns role='admin' and is_admin=True for admin user."""
     admin_user = await user_factory(username="admin-user", role="admin")
     client = make_auth_client(admin_user.id)
@@ -468,13 +520,17 @@ async def test_me_endpoint_returns_admin_role(db: AsyncSession, user_factory, ma
 
 
 @pytest.mark.asyncio
-async def test_patch_user_role_by_admin(db: AsyncSession, user_factory, make_auth_client):
+async def test_patch_user_role_by_admin(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """Admin can update another user's role via PATCH /auth/users/{user_id}/role."""
     admin = await user_factory(username="admin-updater", role="admin")
     target = await user_factory(username="target-member", role="user")
 
     admin_client = make_auth_client(admin.id)
-    resp = await admin_client.patch(f"/auth/users/{target.id}/role", json={"role": "admin"})
+    resp = await admin_client.patch(
+        f"/auth/users/{target.id}/role", json={"role": "admin"}
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["role"] == "admin"
@@ -487,7 +543,9 @@ async def test_patch_user_role_by_admin(db: AsyncSession, user_factory, make_aut
 
 
 @pytest.mark.asyncio
-async def test_patch_user_role_non_admin_forbidden(db: AsyncSession, user_factory, make_auth_client):
+async def test_patch_user_role_non_admin_forbidden(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """Non-admin user gets 403 when trying to update roles."""
     regular = await user_factory(username="regular-user", role="user")
     target = await user_factory(username="target-user", role="user")
@@ -499,13 +557,17 @@ async def test_patch_user_role_non_admin_forbidden(db: AsyncSession, user_factor
 
 
 @pytest.mark.asyncio
-async def test_patch_user_role_invalid_enum_rejected(db: AsyncSession, user_factory, make_auth_client):
+async def test_patch_user_role_invalid_enum_rejected(
+    db: AsyncSession, user_factory, make_auth_client
+):
     """PATCH with an invalid role outside UserRole enum returns 422."""
     admin = await user_factory(username="admin-validator", role="admin")
     target = await user_factory(username="target-val", role="user")
 
     admin_client = make_auth_client(admin.id)
-    resp = await admin_client.patch(f"/auth/users/{target.id}/role", json={"role": "superadmin"})
+    resp = await admin_client.patch(
+        f"/auth/users/{target.id}/role", json={"role": "superadmin"}
+    )
     assert resp.status_code == 422
 
 
@@ -523,5 +585,3 @@ async def test_db_check_constraint_rejects_invalid_role(db: AsyncSession):
     with pytest.raises(IntegrityError):
         await db.commit()
     await db.rollback()
-
-

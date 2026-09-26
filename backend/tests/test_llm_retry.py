@@ -39,7 +39,9 @@ from app.llm.retry import (
 def _make_http_status_error(status_code: int, text: str = "") -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "https://example.com/v1/chat/completions")
     response = httpx.Response(status_code=status_code, text=text, request=request)
-    return httpx.HTTPStatusError(message=f"HTTP {status_code}", request=request, response=response)
+    return httpx.HTTPStatusError(
+        message=f"HTTP {status_code}", request=request, response=response
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +51,9 @@ def _make_http_status_error(status_code: int, text: str = "") -> httpx.HTTPStatu
 
 @pytest.mark.parametrize("phrase", _PER_MODEL_REJECTION_PHRASES)
 @pytest.mark.parametrize("status_code", [400, 401, 403, 404])
-def test_is_per_model_rejection_all_phrases_and_statuses(phrase: str, status_code: int) -> None:
+def test_is_per_model_rejection_all_phrases_and_statuses(
+    phrase: str, status_code: int
+) -> None:
     body = f"Provider rejection detail: {phrase} on tier"
     assert _is_per_model_rejection(status_code, body) is True
 
@@ -255,7 +259,9 @@ async def test_execute_with_retry_per_model_rejection_fails_immediately() -> Non
     async def fail_per_model() -> dict[str, Any]:
         nonlocal call_count
         call_count += 1
-        raise _make_http_status_error(400, "model 'foo' is not supported on this endpoint")
+        raise _make_http_status_error(
+            400, "model 'foo' is not supported on this endpoint"
+        )
 
     with pytest.raises(LLMError) as exc_info:
         await execute_with_retry(fail_per_model, max_attempts=3)
@@ -441,10 +447,12 @@ async def test_execute_with_retry_exponential_backoff_timing_and_jitter() -> Non
     assert len(sleep_durations) == 3
 
     for attempt_idx, slept in enumerate(sleep_durations, start=1):
-        expected_base = min(initial_delay * (backoff_factor ** (attempt_idx - 1)), max_delay)
+        expected_base = min(
+            initial_delay * (backoff_factor ** (attempt_idx - 1)), max_delay
+        )
         # jitter is random.uniform(0.1, 0.5)
         min_expected = expected_base + 0.1
         max_expected = expected_base + 0.5
-        assert min_expected <= slept <= max_expected, (
-            f"Attempt {attempt_idx} sleep {slept:.3f}s outside bounds [{min_expected:.3f}, {max_expected:.3f}]"
-        )
+        assert (
+            min_expected <= slept <= max_expected
+        ), f"Attempt {attempt_idx} sleep {slept:.3f}s outside bounds [{min_expected:.3f}, {max_expected:.3f}]"

@@ -41,7 +41,9 @@ async def test_sandbox_health_default_github_actions(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_sandbox_health_aws_provider(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch):
+async def test_sandbox_health_aws_provider(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
     """GET /health/sandbox with provider=aws returns empty detail dict."""
     monkeypatch.setattr(settings, "sandbox_provider", "aws")
     response = await client.get("/health/sandbox")
@@ -74,11 +76,16 @@ async def test_cors_disallowed_origin(client: httpx.AsyncClient):
         "Access-Control-Request-Method": "GET",
     }
     response = await client.options("/repos", headers=headers)
-    assert response.headers.get("access-control-allow-origin") != "https://attacker.example.com"
+    assert (
+        response.headers.get("access-control-allow-origin")
+        != "https://attacker.example.com"
+    )
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_middleware_exceeded(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch):
+async def test_rate_limit_middleware_exceeded(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
     """11 rapid requests to /auth/login with cap lowered to 3 triggers RateLimitExceeded (429)."""
     monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "3")
     monkeypatch.setattr(settings, "rate_limit_per_minute", 3)

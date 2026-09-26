@@ -45,6 +45,7 @@ from app.subagents.auditor import AuditAnalysisError, AuditFinding, AuditResult
 # Fixtures and Mock Helpers
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def mock_session() -> AgentSession:
     sess = MagicMock(spec=AgentSession)
@@ -73,23 +74,25 @@ def _make_perspective_llm_response(
     confidence: int = 90,
 ) -> dict[str, Any]:
     return {
-        "content": json.dumps({
-            "summary": f"{perspective.capitalize()} analysis completed successfully.",
-            "confidence": confidence,
-            "findings": [
-                {
-                    "file_path": "backend/app/auth.py",
-                    "line_start": 84,
-                    "line_end": 85,
-                    "severity": severity,
-                    "category": f"{perspective}_check",
-                    "title": title,
-                    "description": f"Detailed description for {perspective} issue.",
-                    "suggested_fix": "import hmac\nif not hmac.compare_digest(token, stored): raise Unauthorized()",
-                    "confidence": confidence,
-                }
-            ],
-        }),
+        "content": json.dumps(
+            {
+                "summary": f"{perspective.capitalize()} analysis completed successfully.",
+                "confidence": confidence,
+                "findings": [
+                    {
+                        "file_path": "backend/app/auth.py",
+                        "line_start": 84,
+                        "line_end": 85,
+                        "severity": severity,
+                        "category": f"{perspective}_check",
+                        "title": title,
+                        "description": f"Detailed description for {perspective} issue.",
+                        "suggested_fix": "import hmac\nif not hmac.compare_digest(token, stored): raise Unauthorized()",
+                        "confidence": confidence,
+                    }
+                ],
+            }
+        ),
         "model": "zen-free",
         "usage": {"input_tokens": 120, "output_tokens": 85},
     }
@@ -119,6 +122,7 @@ index 3333333..4444444 100644
 # 1. Tool Declaration and JSON Schema Validity
 # ---------------------------------------------------------------------------
 
+
 def test_tool_declaration_schema():
     assert TOOL_RUN_AUDIT_SCAN["type"] == "function"
     fn = TOOL_RUN_AUDIT_SCAN["function"]
@@ -145,6 +149,7 @@ def test_tool_declaration_schema():
 # 2. Slash Command Parser Tests
 # ---------------------------------------------------------------------------
 
+
 def test_parse_slash_command_security_scan_defaults():
     cmd = parse_slash_command("/security-scan")
     assert cmd is not None
@@ -166,7 +171,9 @@ def test_parse_slash_command_security_scan_with_positional_path():
 
 
 def test_parse_slash_command_security_scan_with_flags():
-    cmd = parse_slash_command("/security-scan --path=src/auth.py --target=diff --branch=main")
+    cmd = parse_slash_command(
+        "/security-scan --path=src/auth.py --target=diff --branch=main"
+    )
     assert cmd is not None
     assert cmd.path_filter == "src/auth.py"
     assert cmd.target_type == "diff"
@@ -202,7 +209,9 @@ def test_parse_slash_command_repo_audit_strict_flag():
 
 
 def test_parse_slash_command_repo_audit_custom_perspectives():
-    cmd = parse_slash_command("/repo-audit --perspectives=security,architecture --path=backend/")
+    cmd = parse_slash_command(
+        "/repo-audit --perspectives=security,architecture --path=backend/"
+    )
     assert cmd is not None
     assert cmd.perspectives == ["security", "architecture"]
     assert cmd.path_filter == "backend/"
@@ -219,6 +228,7 @@ def test_parse_slash_command_non_command_returns_none():
 # ---------------------------------------------------------------------------
 # 3. Path Filtering and Diff Slicing
 # ---------------------------------------------------------------------------
+
 
 def test_matches_path_filter():
     assert matches_path_filter("backend/app/auth.py", None) is True
@@ -248,6 +258,7 @@ def test_filter_diff_by_path():
 # ---------------------------------------------------------------------------
 # 4. /security-scan Command Execution (Only Security Perspective)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_security_scan_runs_only_security_perspective(mock_session):
@@ -315,6 +326,7 @@ async def test_security_scan_runs_only_security_perspective(mock_session):
 # 5. /repo-audit Command Execution (All 4 Perspectives)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_repo_audit_runs_all_four_perspectives(mock_session):
     staged = {
@@ -368,6 +380,7 @@ async def test_repo_audit_runs_all_four_perspectives(mock_session):
 # 6. Empty Workspace and Empty Diff Handling
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_empty_workspace_and_diff_handling(mock_session):
     mock_llm = MagicMock(spec=LLMClient)
@@ -419,6 +432,7 @@ async def test_path_filter_matches_nothing(mock_session):
 # ---------------------------------------------------------------------------
 # 7. Failure Resilience (LLM Error, Invalid Arguments)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_tool_failure_resilience_llm_error(mock_session):
@@ -480,6 +494,7 @@ async def test_handle_slash_command_catches_errors(mock_session):
 # 8. Orchestrator Integration (Slash Command Interception & Tool Dispatch)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_orchestrator_intercepts_security_scan_command(mock_session):
     orchestrator = SessionOrchestrator(
@@ -504,7 +519,9 @@ async def test_orchestrator_intercepts_security_scan_command(mock_session):
 
     # Verify session conversation history was appended with user command + assistant audit report
     assert len(mock_session.conversation_history) == 2
-    assert mock_session.conversation_history[0]["content"] == "/security-scan backend/app"
+    assert (
+        mock_session.conversation_history[0]["content"] == "/security-scan backend/app"
+    )
     assert "Repository Security Scan" in mock_session.conversation_history[1]["content"]
 
     # Verify persistence was called

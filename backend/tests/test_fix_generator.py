@@ -95,7 +95,9 @@ async def _create_repo(db: AsyncSession, user: User) -> Repo:
     return repo
 
 
-async def _create_run(db: AsyncSession, repo: Repo, status: str = "fix_generation") -> Run:
+async def _create_run(
+    db: AsyncSession, repo: Repo, status: str = "fix_generation"
+) -> Run:
     run = Run(
         repo_id=repo.id,
         github_run_id=int(uuid.uuid4().int % 1_000_000_000),
@@ -223,14 +225,30 @@ async def test_orchestrator_advances_to_pending_pr(db: AsyncSession) -> None:
         patch(
             "app.sandbox.verify",
             new_callable=AsyncMock,
-            return_value={"status": "pass", "failure_reason": None, "build_duration_ms": 1234},
+            return_value={
+                "status": "pass",
+                "failure_reason": None,
+                "build_duration_ms": 1234,
+            },
         ),
         # Phase 8 additions: mock PR opening flow
-        patch("app.subagents.pr_writer.generate_pr_text", new_callable=AsyncMock, return_value={"title": "t", "body": "b"}),
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock, return_value="token"),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            new_callable=AsyncMock,
+            return_value={"title": "t", "body": "b"},
+        ),
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="token",
+        ),
         patch("app.github.pr.create_branch", new_callable=AsyncMock),
         patch("app.github.pr.commit_patch", new_callable=AsyncMock),
-        patch("app.github.pr.open_pr", new_callable=AsyncMock, return_value={"html_url": "url", "number": 1}),
+        patch(
+            "app.github.pr.open_pr",
+            new_callable=AsyncMock,
+            return_value={"html_url": "url", "number": 1},
+        ),
     ):
         from app.orchestrator import handle_failed_run
 
@@ -352,14 +370,18 @@ async def test_github_workflows_patch_rejected(db: AsyncSession) -> None:
 
 
 @pytest.mark.anyio
-async def test_confidence_out_of_range_raises_fix_generation_error(db: AsyncSession) -> None:
+async def test_confidence_out_of_range_raises_fix_generation_error(
+    db: AsyncSession,
+) -> None:
     """LLM returns confidence=150 → rejected via Pydantic, retried, still invalid → FixGenerationError."""
     await truncate_all(db)
     user = await _create_user(db)
     repo = await _create_repo(db, user)
     run = await _create_run(db, repo)
 
-    bad_content = json.dumps({"patch": _VALID_PATCH, "confidence": 150, "strategy_notes": None})
+    bad_content = json.dumps(
+        {"patch": _VALID_PATCH, "confidence": 150, "strategy_notes": None}
+    )
     bad_response = {**_VALID_LLM_RESPONSE, "content": bad_content}
 
     # Both initial and retry return the same bad content
@@ -393,7 +415,9 @@ def test_fix_output_strict_rejects_string_confidence() -> None:
     """FixOutput with strict=True must reject confidence='78' (no int coercion)."""
     with pytest.raises(ValidationError) as exc_info:
         FixOutput.model_validate_json(
-            json.dumps({"patch": _VALID_PATCH, "confidence": "78", "strategy_notes": None})
+            json.dumps(
+                {"patch": _VALID_PATCH, "confidence": "78", "strategy_notes": None}
+            )
         )
     errors = exc_info.value.errors()
     assert any(e["loc"] == ("confidence",) for e in errors)
@@ -403,7 +427,9 @@ def test_fix_output_strict_rejects_float_confidence() -> None:
     """FixOutput with strict=True must reject confidence=78.5 (no float→int coercion)."""
     with pytest.raises(ValidationError) as exc_info:
         FixOutput.model_validate_json(
-            json.dumps({"patch": _VALID_PATCH, "confidence": 78.5, "strategy_notes": None})
+            json.dumps(
+                {"patch": _VALID_PATCH, "confidence": 78.5, "strategy_notes": None}
+            )
         )
     errors = exc_info.value.errors()
     assert any(e["loc"] == ("confidence",) for e in errors)
@@ -542,7 +568,9 @@ async def test_workflow_patch_still_hard_rejected(db: AsyncSession) -> None:
 
 
 @pytest.mark.anyio
-async def test_zero_confidence_noop_triggers_low_confidence_skip(db: AsyncSession) -> None:
+async def test_zero_confidence_noop_triggers_low_confidence_skip(
+    db: AsyncSession,
+) -> None:
     """
     LLM returns {"patch": "", "confidence": 0, "strategy_notes": "insufficient data"}
     → LowConfidenceSkip raised (not PatchRejected, not FixGenerationError).
@@ -593,7 +621,9 @@ async def test_zero_confidence_noop_triggers_low_confidence_skip(db: AsyncSessio
 
 
 @pytest.mark.anyio
-async def test_low_confidence_patch_triggers_low_confidence_skip(db: AsyncSession) -> None:
+async def test_low_confidence_patch_triggers_low_confidence_skip(
+    db: AsyncSession,
+) -> None:
     """
     LLM returns a syntactically valid patch with confidence < LOW_CONFIDENCE_THRESHOLD.
     → LowConfidenceSkip raised. No Attempt row inserted.
@@ -733,7 +763,9 @@ async def test_generate_fix_format_retry_recovers(db: AsyncSession) -> None:
         ),
     }
 
-    mock_complete = AsyncMock(side_effect=[invalid_format_response, valid_format_response])
+    mock_complete = AsyncMock(
+        side_effect=[invalid_format_response, valid_format_response]
+    )
 
     with patch("app.subagents.fix_generator.LLMClient.complete", mock_complete):
         attempt = await generate_fix(
@@ -753,7 +785,9 @@ async def test_generate_fix_format_retry_recovers(db: AsyncSession) -> None:
 
 
 @pytest.mark.anyio
-async def test_generate_fix_format_retry_exhausted_raises_soft(db: AsyncSession) -> None:
+async def test_generate_fix_format_retry_exhausted_raises_soft(
+    db: AsyncSession,
+) -> None:
     """Both LLM calls return patch without diff markers. Assert
     PatchFormatRetryExhausted is raised, NOT PatchRejected."""
     await truncate_all(db)
@@ -869,7 +903,9 @@ def test_strip_markdown_fences_helper_unit() -> None:
 
 
 @pytest.mark.anyio
-async def test_generate_fix_strips_markdown_fences_first_attempt(db: AsyncSession) -> None:
+async def test_generate_fix_strips_markdown_fences_first_attempt(
+    db: AsyncSession,
+) -> None:
     """LLM wraps JSON in markdown fences on attempt 1. Stripped and accepted without retry."""
     await truncate_all(db)
     user = await _create_user(db)
@@ -934,7 +970,9 @@ async def test_generate_fix_strips_markdown_fences_retry(db: AsyncSession) -> No
 
 
 @pytest.mark.anyio
-async def test_generate_fix_still_raises_on_unparseable_after_strip(db: AsyncSession) -> None:
+async def test_generate_fix_still_raises_on_unparseable_after_strip(
+    db: AsyncSession,
+) -> None:
     """Both calls return fence-wrapped but malformed JSON.
     Assert FixGenerationError is raised and call_count == 2."""
     await truncate_all(db)
@@ -990,7 +1028,9 @@ async def test_deterministic_path_not_used_on_retry(db: AsyncSession) -> None:
 
     # Simulate Attempt 1 (deterministic conftest shim, already failed verification).
     prior = await _insert_attempt(
-        db, run, number=1,
+        db,
+        run,
+        number=1,
         patch_text=(
             "--- /dev/null\n"
             "+++ b/conftest.py\n"
@@ -1013,13 +1053,13 @@ async def test_deterministic_path_not_used_on_retry(db: AsyncSession) -> None:
         )
 
     # LLM must have been invoked — deterministic path must NOT fire on retry.
-    assert llm_mock.call_count >= 1, (
-        "LLM must be called on Attempt 2 when prior_attempt is not None"
-    )
+    assert (
+        llm_mock.call_count >= 1
+    ), "LLM must be called on Attempt 2 when prior_attempt is not None"
     assert attempt2.attempt_number == 2
-    assert attempt2.strategy_notes != "deterministic conftest.py sys.path shim", (
-        "Attempt 2 must not use the deterministic strategy on retry"
-    )
+    assert (
+        attempt2.strategy_notes != "deterministic conftest.py sys.path shim"
+    ), "Attempt 2 must not use the deterministic strategy on retry"
 
 
 @pytest.mark.anyio
@@ -1043,7 +1083,9 @@ async def test_deterministic_path_used_on_first_attempt(db: AsyncSession) -> Non
             db=db,
         )
 
-    assert llm_mock.call_count == 0, "LLM must NOT be called on deterministic first attempt"
+    assert (
+        llm_mock.call_count == 0
+    ), "LLM must NOT be called on deterministic first attempt"
     assert attempt1.strategy_notes == "deterministic conftest.py sys.path shim"
     assert attempt1.attempt_number == 1
 
@@ -1078,7 +1120,9 @@ def test_strip_fences_prose_prefix_extracted() -> None:
 def test_strip_fences_acknowledgement_prefix_extracted() -> None:
     """Conversational acknowledgement before JSON is stripped."""
     payload = '{"patch": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-a\\n+b\\n", "confidence": 80, "strategy_notes": "ok"}'
-    prose_input = f"Acknowledged, I will ensure the response is pure JSON.\n{payload}\n// end"
+    prose_input = (
+        f"Acknowledged, I will ensure the response is pure JSON.\n{payload}\n// end"
+    )
     result = _strip_markdown_fences(prose_input)
     assert result == payload
 
@@ -1107,24 +1151,31 @@ def test_strip_fences_trailing_comment_stripped() -> None:
 
 
 @pytest.mark.anyio
-async def test_generate_fix_recovers_from_prose_prefixed_response(db: AsyncSession) -> None:
+async def test_generate_fix_recovers_from_prose_prefixed_response(
+    db: AsyncSession,
+) -> None:
     """End-to-end: LLM returns prose-prefixed JSON; generate_fix parses it successfully."""
     await truncate_all(db)
     user = await _create_user(db)
     repo = await _create_repo(db, user)
     run = await _create_run(db, repo)
 
-    json_payload = json.dumps({
-        "patch": _VALID_PATCH,
-        "confidence": 72,
-        "strategy_notes": "fixed import path",
-    })
+    json_payload = json.dumps(
+        {
+            "patch": _VALID_PATCH,
+            "confidence": 72,
+            "strategy_notes": "fixed import path",
+        }
+    )
     prose_response = {
         **_VALID_LLM_RESPONSE,
         "content": f"## Analysis\nThe root cause is a missing import.\n\n{json_payload}",
     }
 
-    with patch("app.subagents.fix_generator.LLMClient.complete", AsyncMock(return_value=prose_response)):
+    with patch(
+        "app.subagents.fix_generator.LLMClient.complete",
+        AsyncMock(return_value=prose_response),
+    ):
         attempt = await generate_fix(
             run=run,
             diagnosis_summary="ImportError: cannot import foo in app/models.py:10",
@@ -1156,7 +1207,10 @@ async def test_generate_fix_creates_run_step_row(db: AsyncSession) -> None:
         "latency_ms": 450,
     }
 
-    with patch("app.subagents.fix_generator.LLMClient.complete", AsyncMock(return_value=response)):
+    with patch(
+        "app.subagents.fix_generator.LLMClient.complete",
+        AsyncMock(return_value=response),
+    ):
         await generate_fix(
             run=run,
             diagnosis_summary="AssertionError in app/test.py:10",
@@ -1164,7 +1218,11 @@ async def test_generate_fix_creates_run_step_row(db: AsyncSession) -> None:
             db=db,
         )
 
-    steps = (await db.execute(select(RunStep).where(RunStep.run_id == run.id))).scalars().all()
+    steps = (
+        (await db.execute(select(RunStep).where(RunStep.run_id == run.id)))
+        .scalars()
+        .all()
+    )
     assert len(steps) == 1
     step = steps[0]
     assert step.step_name == "fix_generator"
@@ -1196,14 +1254,19 @@ async def test_generate_fix_patch_parsed_by_parse_patch_files(db: AsyncSession) 
 
     response = {
         **_VALID_LLM_RESPONSE,
-        "content": json.dumps({
-            "patch": multi_file_patch,
-            "confidence": 85,
-            "strategy_notes": "multi-file fix",
-        }),
+        "content": json.dumps(
+            {
+                "patch": multi_file_patch,
+                "confidence": 85,
+                "strategy_notes": "multi-file fix",
+            }
+        ),
     }
 
-    with patch("app.subagents.fix_generator.LLMClient.complete", AsyncMock(return_value=response)):
+    with patch(
+        "app.subagents.fix_generator.LLMClient.complete",
+        AsyncMock(return_value=response),
+    ):
         attempt = await generate_fix(
             run=run,
             diagnosis_summary="AssertionError across two files",
@@ -1217,7 +1280,9 @@ async def test_generate_fix_patch_parsed_by_parse_patch_files(db: AsyncSession) 
 
 
 @pytest.mark.anyio
-async def test_generate_fix_invalid_json_retries_and_raises_error(db: AsyncSession) -> None:
+async def test_generate_fix_invalid_json_retries_and_raises_error(
+    db: AsyncSession,
+) -> None:
     """When LLM returns invalid JSON, retry once. On second invalid JSON, raise FixGenerationError."""
     await truncate_all(db)
     user = await _create_user(db)
@@ -1242,7 +1307,11 @@ async def test_generate_fix_invalid_json_retries_and_raises_error(db: AsyncSessi
     assert mock_complete.call_count == 2
 
     # Assert no attempt row persisted
-    attempts = (await db.execute(select(Attempt).where(Attempt.run_id == run.id))).scalars().all()
+    attempts = (
+        (await db.execute(select(Attempt).where(Attempt.run_id == run.id)))
+        .scalars()
+        .all()
+    )
     assert len(attempts) == 0
 
 
@@ -1271,7 +1340,9 @@ async def test_generate_fix_invalid_json_retry_succeeds(db: AsyncSession) -> Non
 
 
 @pytest.mark.anyio
-async def test_generate_fix_includes_prior_strategy_notes_in_prompt(db: AsyncSession) -> None:
+async def test_generate_fix_includes_prior_strategy_notes_in_prompt(
+    db: AsyncSession,
+) -> None:
     """strategy_notes from a prior failed attempt is included in the prompt on retry."""
     await truncate_all(db)
     user = await _create_user(db)
@@ -1296,7 +1367,9 @@ async def test_generate_fix_includes_prior_strategy_notes_in_prompt(db: AsyncSes
         captured_messages.append(messages)
         return _VALID_LLM_RESPONSE
 
-    with patch("app.subagents.fix_generator.LLMClient.complete", side_effect=capture_complete):
+    with patch(
+        "app.subagents.fix_generator.LLMClient.complete", side_effect=capture_complete
+    ):
         attempt = await generate_fix(
             run=run,
             diagnosis_summary="AssertionError: Expected 42 got 0",

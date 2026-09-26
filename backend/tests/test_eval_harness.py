@@ -67,12 +67,14 @@ def test_fixtures_no_tenant_repos() -> None:
     for f in fixtures:
         repo_ref = f["repo_ref"].lower()
         for blocked in blocked_patterns:
-            assert blocked not in repo_ref, (
-                f"Fixture {f['id']} repo_ref {f['repo_ref']!r} contains blocked pattern {blocked!r}"
-            )
+            assert (
+                blocked not in repo_ref
+            ), f"Fixture {f['id']} repo_ref {f['repo_ref']!r} contains blocked pattern {blocked!r}"
         # Must be owner/repo format
         parts = f["repo_ref"].split("/")
-        assert len(parts) == 2, f"Fixture {f['id']} repo_ref must be 'owner/repo': {f['repo_ref']!r}"
+        assert (
+            len(parts) == 2
+        ), f"Fixture {f['id']} repo_ref must be 'owner/repo': {f['repo_ref']!r}"
 
 
 def test_fixture_failure_types_valid() -> None:
@@ -80,9 +82,9 @@ def test_fixture_failure_types_valid() -> None:
     fixtures = _load_fixtures()
     allowed = {"import_error", "type_error", "assertion", "dependency"}
     for f in fixtures:
-        assert f["failure_type"] in allowed, (
-            f"Fixture {f['id']} has invalid failure_type: {f['failure_type']!r}"
-        )
+        assert (
+            f["failure_type"] in allowed
+        ), f"Fixture {f['id']} has invalid failure_type: {f['failure_type']!r}"
 
 
 def test_fixture_ids_unique() -> None:
@@ -141,9 +143,7 @@ def test_stub_fix_output_meets_confidence() -> None:
 
 def test_score_context_full_match() -> None:
     """All keywords present → score 1.0."""
-    fixture = {
-        "expected_root_cause_keywords": ["ImportError", "module", "missing"]
-    }
+    fixture = {"expected_root_cause_keywords": ["ImportError", "module", "missing"]}
     ctx = {"diagnosis_summary": "ImportError: module missing from path"}
     result = _score_context(fixture, ctx)
     assert result["score"] == 1.0
@@ -249,7 +249,9 @@ async def test_run_eval_invalid_fixture_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_eval_with_valid_model_config_id(db: AsyncSession, user_factory) -> None:
+async def test_run_eval_with_valid_model_config_id(
+    db: AsyncSession, user_factory
+) -> None:
     """Passing a valid model_config_id links it in EvalResult."""
     config = ModelConfig(
         provider="opencode_zen",
@@ -299,7 +301,12 @@ def _make_eval_result(
         per_subagent_scores={
             "context_gatherer": {"average_score": ctx_avg},
             "fix_generator": {"average_score": fix_avg},
-            "overall": {"pass_rate": pass_rate, "total_fixtures": 5, "passed": int(pass_rate * 5), "failed": 0},
+            "overall": {
+                "pass_rate": pass_rate,
+                "total_fixtures": 5,
+                "passed": int(pass_rate * 5),
+                "failed": 0,
+            },
             "mode": "DRY-RUN",
         },
     )

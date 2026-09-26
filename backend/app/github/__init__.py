@@ -10,6 +10,7 @@ Exposes:
 All functions validate owner/repo/branch against _REPO_IDENT_RE / _BRANCH_RE before
 making any HTTP call. force=false is always enforced. No token is ever logged or stored.
 """
+
 from app.github.pr import (
     GitHubPRError,
     commit_patch,

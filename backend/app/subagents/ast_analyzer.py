@@ -135,7 +135,16 @@ def extract_stack_frames(
             return _match_repo_path(path_str, repo_paths)
         # Fallback if repo_paths not supplied: use normalized relative path
         norm = _normalize_path(path_str)
-        if any(ign in norm for ign in ("site-packages", "dist-packages", "node_modules", "hostedtoolcache", "lib/python")):
+        if any(
+            ign in norm
+            for ign in (
+                "site-packages",
+                "dist-packages",
+                "node_modules",
+                "hostedtoolcache",
+                "lib/python",
+            )
+        ):
             return None
         # Strip leading slashes
         return norm.lstrip("/")
@@ -147,7 +156,11 @@ def extract_stack_frames(
         symbol = (match.group("symbol") or "").strip() or None
 
         # Ignore standard library and external virtualenvs
-        if "site-packages" in raw_path or "dist-packages" in raw_path or "lib/python" in raw_path:
+        if (
+            "site-packages" in raw_path
+            or "dist-packages" in raw_path
+            or "lib/python" in raw_path
+        ):
             continue
 
         matched_repo_file = _resolve_repo_file(raw_path)
@@ -160,7 +173,13 @@ def extract_stack_frames(
             key = (matched_repo_file, line_no)
             if key not in seen:
                 seen.add(key)
-                found_frames.append(StackFrame(file_path=matched_repo_file, line_number=line_no, symbol_name=symbol))
+                found_frames.append(
+                    StackFrame(
+                        file_path=matched_repo_file,
+                        line_number=line_no,
+                        symbol_name=symbol,
+                    )
+                )
                 if len(found_frames) >= max_frames:
                     return found_frames
 
@@ -180,7 +199,13 @@ def extract_stack_frames(
             key = (matched_repo_file, line_no)
             if key not in seen:
                 seen.add(key)
-                found_frames.append(StackFrame(file_path=matched_repo_file, line_number=line_no, symbol_name=symbol))
+                found_frames.append(
+                    StackFrame(
+                        file_path=matched_repo_file,
+                        line_number=line_no,
+                        symbol_name=symbol,
+                    )
+                )
                 if len(found_frames) >= max_frames:
                     return found_frames
 
@@ -203,7 +228,13 @@ def extract_stack_frames(
             key = (matched_repo_file, line_no)
             if key not in seen:
                 seen.add(key)
-                found_frames.append(StackFrame(file_path=matched_repo_file, line_number=line_no, symbol_name=symbol))
+                found_frames.append(
+                    StackFrame(
+                        file_path=matched_repo_file,
+                        line_number=line_no,
+                        symbol_name=symbol,
+                    )
+                )
                 if len(found_frames) >= max_frames:
                     return found_frames
 
@@ -226,7 +257,13 @@ def extract_stack_frames(
                 key = (matched_repo_file, line_no)
                 if key not in seen:
                     seen.add(key)
-                    found_frames.append(StackFrame(file_path=matched_repo_file, line_number=line_no, symbol_name=None))
+                    found_frames.append(
+                        StackFrame(
+                            file_path=matched_repo_file,
+                            line_number=line_no,
+                            symbol_name=None,
+                        )
+                    )
                     if len(found_frames) >= max_frames:
                         return found_frames
 
@@ -382,12 +419,18 @@ def extract_python_ast_context_from_index(
     functions = [scope for scope in containing if scope.is_function]
     classes = [scope for scope in containing if not scope.is_function]
     function_scope = (
-        min(functions, key=lambda scope: (scope.end_line - scope.start_line, -scope.start_line))
+        min(
+            functions,
+            key=lambda scope: (scope.end_line - scope.start_line, -scope.start_line),
+        )
         if functions
         else None
     )
     class_scope = (
-        min(classes, key=lambda scope: (scope.end_line - scope.start_line, -scope.start_line))
+        min(
+            classes,
+            key=lambda scope: (scope.end_line - scope.start_line, -scope.start_line),
+        )
         if classes
         else None
     )
@@ -405,7 +448,9 @@ def extract_python_ast_context_from_index(
         signature = None
     if end_line - start_line > 60:
         end_line = min(len(parsed.lines), start_line + 60)
-        snippet = "\n".join(parsed.lines[start_line - 1 : end_line]) + "\n... (truncated)"
+        snippet = (
+            "\n".join(parsed.lines[start_line - 1 : end_line]) + "\n... (truncated)"
+        )
     else:
         snippet = "\n".join(parsed.lines[start_line - 1 : end_line])
     return {
@@ -420,7 +465,9 @@ def extract_python_ast_context_from_index(
     }
 
 
-def extract_python_ast_context(source_code: str, line_number: int) -> Optional[dict[str, Any]]:
+def extract_python_ast_context(
+    source_code: str, line_number: int
+) -> Optional[dict[str, Any]]:
     parsed = parse_python_source(source_code)
     if parsed is None:
         return None
@@ -502,7 +549,9 @@ def format_ast_context(frame: StackFrame, context: dict[str, Any]) -> str:
     """
     parts: list[str] = []
     symbol_display = frame.symbol_name or context.get("enclosing_symbol") or "unknown"
-    header = f"### `{frame.file_path}` (Line {frame.line_number}, in `{symbol_display}`)"
+    header = (
+        f"### `{frame.file_path}` (Line {frame.line_number}, in `{symbol_display}`)"
+    )
     parts.append(header)
 
     class_name = context.get("enclosing_class")
@@ -525,6 +574,8 @@ def format_ast_context(frame: StackFrame, context: dict[str, Any]) -> str:
         lang = ext if ext in ("ts", "js", "tsx", "jsx", "go", "rs", "java") else "text"
 
     if snippet:
-        parts.append(f"**Enclosing Scope (Lines {context.get('start_line')}-{context.get('end_line')}):**\n```{lang}\n{snippet}\n```")
+        parts.append(
+            f"**Enclosing Scope (Lines {context.get('start_line')}-{context.get('end_line')}):**\n```{lang}\n{snippet}\n```"
+        )
 
     return "\n".join(parts)

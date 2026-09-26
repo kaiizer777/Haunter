@@ -87,7 +87,9 @@ async def _create_test_user(db: AsyncSession, username: str = "pipe-user") -> Us
     return user
 
 
-async def _create_test_repo(db: AsyncSession, user: User, name: str = "pipe-repo") -> Repo:
+async def _create_test_repo(
+    db: AsyncSession, user: User, name: str = "pipe-repo"
+) -> Repo:
     repo = Repo(
         user_id=user.id,
         owner="pipe-org",
@@ -177,7 +179,9 @@ async def test_pipeline_happy_path_full_flow(db: AsyncSession) -> None:
         await db.commit()
         return mock_summary
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
         attempt = _make_mock_attempt(run.id, 1, strategy_notes="add missing import")
         db.add(attempt)
         step = RunStep(
@@ -210,20 +214,36 @@ async def test_pipeline_happy_path_full_flow(db: AsyncSession) -> None:
 
     with (
         patch("app.orchestrator.gather_context", side_effect=mock_gather_context),
-        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
         patch(
             "app.sandbox.verify",
             new_callable=AsyncMock,
-            return_value={"status": "pass", "failure_reason": None, "build_duration_ms": 1450},
+            return_value={
+                "status": "pass",
+                "failure_reason": None,
+                "build_duration_ms": 1450,
+            },
         ),
-        patch("app.subagents.pr_writer.generate_pr_text", side_effect=mock_generate_pr_text),
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock, return_value="ghs_install_tok"),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            side_effect=mock_generate_pr_text,
+        ),
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="ghs_install_tok",
+        ),
         patch("app.github.pr.create_branch", new_callable=AsyncMock, return_value=None),
         patch("app.github.pr.commit_patch", new_callable=AsyncMock, return_value=None),
         patch(
             "app.github.pr.open_pr",
             new_callable=AsyncMock,
-            return_value={"html_url": "https://github.com/pipe-org/pipe-repo/pull/42", "number": 42},
+            return_value={
+                "html_url": "https://github.com/pipe-org/pipe-repo/pull/42",
+                "number": 42,
+            },
         ),
     ):
         await handle_failed_run(run_id)
@@ -279,7 +299,9 @@ async def test_pipeline_retry_sandbox_fail_then_pass(db: AsyncSession) -> None:
 
     prior_attempts_received: list[Optional[Attempt]] = []
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
         prior_attempts_received.append(prior_attempt)
         attempt_num = len(prior_attempts_received)
         attempt = _make_mock_attempt(
@@ -302,19 +324,41 @@ async def test_pipeline_retry_sandbox_fail_then_pass(db: AsyncSession) -> None:
 
     # Sandbox: attempt 1 fails, attempt 2 passes
     sandbox_results = [
-        {"status": "fail", "failure_reason": "AssertionError in tests/test_foo.py: expected 1 got 2", "build_duration_ms": 1200},
+        {
+            "status": "fail",
+            "failure_reason": "AssertionError in tests/test_foo.py: expected 1 got 2",
+            "build_duration_ms": 1200,
+        },
         {"status": "pass", "failure_reason": None, "build_duration_ms": 1100},
     ]
 
     with (
-        patch("app.orchestrator.gather_context", AsyncMock(return_value="Initial diagnosis")),
-        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
+        patch(
+            "app.orchestrator.gather_context",
+            AsyncMock(return_value="Initial diagnosis"),
+        ),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
         patch("app.sandbox.verify", AsyncMock(side_effect=sandbox_results)),
-        patch("app.subagents.pr_writer.generate_pr_text", AsyncMock(return_value={"title": "Fix bug", "body": "Fixed on retry"})),
-        patch("app.github.pr.get_installation_token", AsyncMock(return_value="ghs_tok")),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            AsyncMock(return_value={"title": "Fix bug", "body": "Fixed on retry"}),
+        ),
+        patch(
+            "app.github.pr.get_installation_token", AsyncMock(return_value="ghs_tok")
+        ),
         patch("app.github.pr.create_branch", AsyncMock(return_value=None)),
         patch("app.github.pr.commit_patch", AsyncMock(return_value=None)),
-        patch("app.github.pr.open_pr", AsyncMock(return_value={"html_url": "https://github.com/pipe-org/pipe-repo/pull/55", "number": 55})),
+        patch(
+            "app.github.pr.open_pr",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/pipe-org/pipe-repo/pull/55",
+                    "number": 55,
+                }
+            ),
+        ),
     ):
         await handle_failed_run(run_id)
 
@@ -334,7 +378,9 @@ async def test_pipeline_retry_sandbox_fail_then_pass(db: AsyncSession) -> None:
     assert prior_attempts_received[1].strategy_notes == "strategy_attempt_1"
 
     # Assert 2 attempts persisted in DB with correct verification statuses
-    att_res = await db.execute(select(Attempt).where(Attempt.run_id == run_id).order_by(Attempt.attempt_number))
+    att_res = await db.execute(
+        select(Attempt).where(Attempt.run_id == run_id).order_by(Attempt.attempt_number)
+    )
     attempts = att_res.scalars().all()
     assert len(attempts) == 2
     assert attempts[0].verification_status == "fail"
@@ -349,12 +395,14 @@ async def test_pipeline_retry_sandbox_fail_then_pass(db: AsyncSession) -> None:
 
 
 @pytest.mark.anyio
-async def test_pipeline_exhausted_retries_posts_diagnosis_comment(db: AsyncSession) -> None:
+async def test_pipeline_exhausted_retries_posts_diagnosis_comment(
+    db: AsyncSession,
+) -> None:
     """When all attempts fail sandbox verification:
-      - Status transitions to fallback -> fallback_commented.
-      - post_commit_comment is called once.
-      - Comment body contains 'Haunter AI Diagnosis'.
-      - All attempts in DB have verification_status == 'fail'.
+    - Status transitions to fallback -> fallback_commented.
+    - post_commit_comment is called once.
+    - Comment body contains 'Haunter AI Diagnosis'.
+    - All attempts in DB have verification_status == 'fail'.
     """
     await truncate_all(db)
     user = await _create_test_user(db)
@@ -364,7 +412,9 @@ async def test_pipeline_exhausted_retries_posts_diagnosis_comment(db: AsyncSessi
 
     attempt_counter = 0
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
         nonlocal attempt_counter
         attempt_counter += 1
         attempt = _make_mock_attempt(
@@ -380,7 +430,8 @@ async def test_pipeline_exhausted_retries_posts_diagnosis_comment(db: AsyncSessi
     fail_results = [
         {
             "status": "fail",
-            "failure_reason": f"Fail reason tail distinct #{i} " + chr(ord("A") + i) * 200,
+            "failure_reason": f"Fail reason tail distinct #{i} "
+            + chr(ord("A") + i) * 200,
             "build_duration_ms": 500,
         }
         for i in range(1, settings.max_attempts + 1)
@@ -392,11 +443,21 @@ async def test_pipeline_exhausted_retries_posts_diagnosis_comment(db: AsyncSessi
     head_sha = run.head_sha
 
     with (
-        patch("app.orchestrator.gather_context", AsyncMock(return_value="Distilled root cause summary")),
-        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
+        patch(
+            "app.orchestrator.gather_context",
+            AsyncMock(return_value="Distilled root cause summary"),
+        ),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
         patch("app.sandbox.verify", AsyncMock(side_effect=fail_results)),
-        patch("app.github.pr.get_installation_token", AsyncMock(return_value="ghs_install_tok")),
-        patch("app.github_client.post_commit_comment", new_callable=AsyncMock) as mock_comment,
+        patch(
+            "app.github.pr.get_installation_token",
+            AsyncMock(return_value="ghs_install_tok"),
+        ),
+        patch(
+            "app.github_client.post_commit_comment", new_callable=AsyncMock
+        ) as mock_comment,
     ):
         await handle_failed_run(run_id)
 
@@ -440,7 +501,9 @@ async def test_pipeline_fast_fail_repeated_sandbox_failure(db: AsyncSession) -> 
 
     attempt_counter = 0
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
         nonlocal attempt_counter
         attempt_counter += 1
         attempt = _make_mock_attempt(run.id, attempt_counter)
@@ -449,21 +512,43 @@ async def test_pipeline_fast_fail_repeated_sandbox_failure(db: AsyncSession) -> 
         return attempt
 
     # Identical trailing 200 chars
-    identical_tail = "pytest: TypeError: NoneType object is not callable in tests/test_core.py:42"
+    identical_tail = (
+        "pytest: TypeError: NoneType object is not callable in tests/test_core.py:42"
+    )
     identical_tail = identical_tail.ljust(200, "-")
 
     fail_results = [
-        {"status": "fail", "failure_reason": "attempt_1_prefix_" + identical_tail, "build_duration_ms": 600},
-        {"status": "fail", "failure_reason": "attempt_2_prefix_" + identical_tail, "build_duration_ms": 600},
-        {"status": "fail", "failure_reason": "should_never_run_attempt_3", "build_duration_ms": 600},
+        {
+            "status": "fail",
+            "failure_reason": "attempt_1_prefix_" + identical_tail,
+            "build_duration_ms": 600,
+        },
+        {
+            "status": "fail",
+            "failure_reason": "attempt_2_prefix_" + identical_tail,
+            "build_duration_ms": 600,
+        },
+        {
+            "status": "fail",
+            "failure_reason": "should_never_run_attempt_3",
+            "build_duration_ms": 600,
+        },
     ]
 
     with (
-        patch("app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis text")),
-        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
+        patch(
+            "app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis text")
+        ),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
         patch("app.sandbox.verify", AsyncMock(side_effect=fail_results)),
-        patch("app.github.pr.get_installation_token", AsyncMock(return_value="ghs_tok")),
-        patch("app.github_client.post_commit_comment", new_callable=AsyncMock) as mock_comment,
+        patch(
+            "app.github.pr.get_installation_token", AsyncMock(return_value="ghs_tok")
+        ),
+        patch(
+            "app.github_client.post_commit_comment", new_callable=AsyncMock
+        ) as mock_comment,
     ):
         await handle_failed_run(run_id)
 
@@ -478,7 +563,9 @@ async def test_pipeline_fast_fail_repeated_sandbox_failure(db: AsyncSession) -> 
     # Crucial assertion: exactly 2 attempts were executed, NOT 3
     att_res = await db.execute(select(Attempt).where(Attempt.run_id == run_id))
     attempts = att_res.scalars().all()
-    assert len(attempts) == 2, f"Expected 2 attempts from fast-fail, got {len(attempts)}"
+    assert (
+        len(attempts) == 2
+    ), f"Expected 2 attempts from fast-fail, got {len(attempts)}"
 
 
 # ---------------------------------------------------------------------------
@@ -487,12 +574,14 @@ async def test_pipeline_fast_fail_repeated_sandbox_failure(db: AsyncSession) -> 
 
 
 @pytest.mark.anyio
-async def test_pipeline_wall_clock_timeout(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_pipeline_wall_clock_timeout(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """When orchestrator body exceeds ORCHESTRATOR_TIMEOUT_S:
-      - asyncio.TimeoutError is caught.
-      - runs.status transitions to 'error'.
-      - runs.failure_reason == 'orchestrator wall-clock timeout'.
-      - RunStep 'orchestrator_timeout' is recorded.
+    - asyncio.TimeoutError is caught.
+    - runs.status transitions to 'error'.
+    - runs.failure_reason == 'orchestrator wall-clock timeout'.
+    - RunStep 'orchestrator_timeout' is recorded.
     """
     await truncate_all(db)
     user = await _create_test_user(db)
@@ -530,9 +619,9 @@ async def test_pipeline_wall_clock_timeout(db: AsyncSession, monkeypatch: pytest
 @pytest.mark.anyio
 async def test_pipeline_context_gatherer_crash_sets_error(db: AsyncSession) -> None:
     """When context_gatherer raises an unhandled exception:
-      - runs.status ends in 'error'.
-      - runs.failure_reason contains stage and exception message.
-      - synthetic context_gathering_error step recorded in run_steps.
+    - runs.status ends in 'error'.
+    - runs.failure_reason contains stage and exception message.
+    - synthetic context_gathering_error step recorded in run_steps.
     """
     await truncate_all(db)
     user = await _create_test_user(db)
@@ -564,8 +653,8 @@ async def test_pipeline_context_gatherer_crash_sets_error(db: AsyncSession) -> N
 @pytest.mark.anyio
 async def test_pipeline_fix_generator_timeout_crash(db: AsyncSession) -> None:
     """When generate_fix raises FixGenerationError:
-      - runs.status ends in 'error'.
-      - runs.failure_reason is persisted with fix_generator stage prefix.
+    - runs.status ends in 'error'.
+    - runs.failure_reason is persisted with fix_generator stage prefix.
     """
     await truncate_all(db)
     user = await _create_test_user(db)
@@ -574,10 +663,16 @@ async def test_pipeline_fix_generator_timeout_crash(db: AsyncSession) -> None:
     run_id = run.id
 
     with (
-        patch("app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis ready")),
+        patch(
+            "app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis ready")
+        ),
         patch(
             "app.subagents.fix_generator.generate_fix",
-            AsyncMock(side_effect=FixGenerationError("LLM output failed schema validation on both attempts")),
+            AsyncMock(
+                side_effect=FixGenerationError(
+                    "LLM output failed schema validation on both attempts"
+                )
+            ),
         ),
     ):
         await handle_failed_run(run_id)
@@ -595,9 +690,9 @@ async def test_pipeline_fix_generator_timeout_crash(db: AsyncSession) -> None:
 @pytest.mark.anyio
 async def test_pipeline_sandbox_crash_sets_error(db: AsyncSession) -> None:
     """When sandbox_verify raises an unexpected runtime exception:
-      - runs.status transitions to 'error'.
-      - runs.failure_reason is recorded with verification prefix.
-      - verification_error step recorded in run_steps.
+    - runs.status transitions to 'error'.
+    - runs.failure_reason is recorded with verification prefix.
+    - verification_error step recorded in run_steps.
     """
     await truncate_all(db)
     user = await _create_test_user(db)
@@ -605,7 +700,9 @@ async def test_pipeline_sandbox_crash_sets_error(db: AsyncSession) -> None:
     run = await _create_test_run(db, repo, status="pending")
     run_id = run.id
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
         attempt = _make_mock_attempt(run.id, 1)
         db.add(attempt)
         await db.commit()
@@ -613,10 +710,14 @@ async def test_pipeline_sandbox_crash_sets_error(db: AsyncSession) -> None:
 
     with (
         patch("app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis")),
-        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
         patch(
             "app.sandbox.verify",
-            AsyncMock(side_effect=RuntimeError("CodeBuild container provisioning failed")),
+            AsyncMock(
+                side_effect=RuntimeError("CodeBuild container provisioning failed")
+            ),
         ),
     ):
         await handle_failed_run(run_id)
@@ -638,8 +739,8 @@ async def test_pipeline_sandbox_crash_sets_error(db: AsyncSession) -> None:
 @pytest.mark.anyio
 async def test_pipeline_pr_writer_crash_sets_error(db: AsyncSession) -> None:
     """When PR creation (e.g. open_pr) fails with an exception:
-      - runs.status moves to 'error'.
-      - runs.failure_reason records pr_writer stage error.
+    - runs.status moves to 'error'.
+    - runs.failure_reason records pr_writer stage error.
     """
     await truncate_all(db)
     user = await _create_test_user(db)
@@ -647,7 +748,9 @@ async def test_pipeline_pr_writer_crash_sets_error(db: AsyncSession) -> None:
     run = await _create_test_run(db, repo, status="pending")
     run_id = run.id
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
         attempt = _make_mock_attempt(run.id, 1)
         db.add(attempt)
         await db.commit()
@@ -655,13 +758,30 @@ async def test_pipeline_pr_writer_crash_sets_error(db: AsyncSession) -> None:
 
     with (
         patch("app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis")),
-        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
-        patch("app.sandbox.verify", AsyncMock(return_value={"status": "pass", "failure_reason": None, "build_duration_ms": 1000})),
-        patch("app.subagents.pr_writer.generate_pr_text", AsyncMock(return_value={"title": "PR Title", "body": "PR Body"})),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
+        patch(
+            "app.sandbox.verify",
+            AsyncMock(
+                return_value={
+                    "status": "pass",
+                    "failure_reason": None,
+                    "build_duration_ms": 1000,
+                }
+            ),
+        ),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            AsyncMock(return_value={"title": "PR Title", "body": "PR Body"}),
+        ),
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
         patch("app.github.pr.create_branch", AsyncMock(return_value=None)),
         patch("app.github.pr.commit_patch", AsyncMock(return_value=None)),
-        patch("app.github.pr.open_pr", AsyncMock(side_effect=RuntimeError("GitHub API 403: branch protection"))),
+        patch(
+            "app.github.pr.open_pr",
+            AsyncMock(side_effect=RuntimeError("GitHub API 403: branch protection")),
+        ),
     ):
         await handle_failed_run(run_id)
 
@@ -678,8 +798,8 @@ async def test_pipeline_pr_writer_crash_sets_error(db: AsyncSession) -> None:
 @pytest.mark.anyio
 async def test_pipeline_fallback_comment_crash_sets_error(db: AsyncSession) -> None:
     """When posting fallback comment fails:
-      - runs.status moves to 'error'.
-      - runs.failure_reason records fallback_comment error.
+    - runs.status moves to 'error'.
+    - runs.failure_reason records fallback_comment error.
     """
     await truncate_all(db)
     user = await _create_test_user(db)
@@ -689,7 +809,9 @@ async def test_pipeline_fallback_comment_crash_sets_error(db: AsyncSession) -> N
 
     attempt_counter = 0
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
         nonlocal attempt_counter
         attempt_counter += 1
         attempt = _make_mock_attempt(run.id, attempt_counter)
@@ -708,10 +830,15 @@ async def test_pipeline_fallback_comment_crash_sets_error(db: AsyncSession) -> N
 
     with (
         patch("app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis")),
-        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
         patch("app.sandbox.verify", AsyncMock(side_effect=fail_results)),
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
-        patch("app.github_client.post_commit_comment", AsyncMock(side_effect=RuntimeError("GitHub comment API down 500"))),
+        patch(
+            "app.github_client.post_commit_comment",
+            AsyncMock(side_effect=RuntimeError("GitHub comment API down 500")),
+        ),
     ):
         await handle_failed_run(run_id)
 
@@ -731,11 +858,13 @@ async def test_pipeline_fallback_comment_crash_sets_error(db: AsyncSession) -> N
 
 
 @pytest.mark.anyio
-async def test_pipeline_token_key_rotation_does_not_leak_ciphertext(db: AsyncSession) -> None:
+async def test_pipeline_token_key_rotation_does_not_leak_ciphertext(
+    db: AsyncSession,
+) -> None:
     """When token decryption fails mid-run due to key rotation:
-      - runs.status transitions to 'error'.
-      - failure_reason contains 'ValueError: Token decryption failed'.
-      - Raw ciphertext or secret tokens NEVER leak into failure_reason, trace steps, or logs.
+    - runs.status transitions to 'error'.
+    - failure_reason contains 'ValueError: Token decryption failed'.
+    - Raw ciphertext or secret tokens NEVER leak into failure_reason, trace steps, or logs.
     """
     await truncate_all(db)
     user = await _create_test_user(db)
@@ -749,7 +878,9 @@ async def test_pipeline_token_key_rotation_does_not_leak_ciphertext(db: AsyncSes
         # Simulate token decryption error caused by key rotation
         raise ValueError("Token decryption failed")
 
-    with patch("app.orchestrator.gather_context", side_effect=gather_with_token_failure):
+    with patch(
+        "app.orchestrator.gather_context", side_effect=gather_with_token_failure
+    ):
         await handle_failed_run(run_id)
 
     db.expire_all()
@@ -774,7 +905,9 @@ async def test_pipeline_token_key_rotation_does_not_leak_ciphertext(db: AsyncSes
 
 
 @pytest.mark.anyio
-async def test_pipeline_idempotent_reentry_from_fix_generation(db: AsyncSession) -> None:
+async def test_pipeline_idempotent_reentry_from_fix_generation(
+    db: AsyncSession,
+) -> None:
     """If handle_failed_run is re-invoked on a run already at 'fix_generation'
     (e.g. SQS redelivery or background task resume):
       - Skips pending -> context_gathering transition without error.
@@ -788,21 +921,48 @@ async def test_pipeline_idempotent_reentry_from_fix_generation(db: AsyncSession)
     )
     run_id = run.id
 
-    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
         attempt = _make_mock_attempt(run.id, 1)
         db.add(attempt)
         await db.commit()
         return attempt
 
     with (
-        patch("app.orchestrator.gather_context", AsyncMock(return_value="Prior gathered context")),
-        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
-        patch("app.sandbox.verify", AsyncMock(return_value={"status": "pass", "failure_reason": None, "build_duration_ms": 1000})),
-        patch("app.subagents.pr_writer.generate_pr_text", AsyncMock(return_value={"title": "Fix", "body": "Fixed"})),
+        patch(
+            "app.orchestrator.gather_context",
+            AsyncMock(return_value="Prior gathered context"),
+        ),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
+        patch(
+            "app.sandbox.verify",
+            AsyncMock(
+                return_value={
+                    "status": "pass",
+                    "failure_reason": None,
+                    "build_duration_ms": 1000,
+                }
+            ),
+        ),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            AsyncMock(return_value={"title": "Fix", "body": "Fixed"}),
+        ),
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
         patch("app.github.pr.create_branch", AsyncMock(return_value=None)),
         patch("app.github.pr.commit_patch", AsyncMock(return_value=None)),
-        patch("app.github.pr.open_pr", AsyncMock(return_value={"html_url": "https://github.com/pipe-org/pipe-repo/pull/77", "number": 77})),
+        patch(
+            "app.github.pr.open_pr",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/pipe-org/pipe-repo/pull/77",
+                    "number": 77,
+                }
+            ),
+        ),
     ):
         await handle_failed_run(run_id)
 
@@ -845,7 +1005,10 @@ async def test_webhook_delivery_idempotency_no_duplicate_run(
         },
     }
     raw_body = json.dumps(payload).encode("utf-8")
-    sig = "sha256=" + hmac.new(webhook_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    sig = (
+        "sha256="
+        + hmac.new(webhook_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    )
 
     headers = {
         "X-GitHub-Event": "workflow_run",
@@ -854,7 +1017,10 @@ async def test_webhook_delivery_idempotency_no_duplicate_run(
         "Content-Type": "application/json",
     }
 
-    with patch("app.adapters.hosting.AWSHostingAdapter.schedule_pipeline", new_callable=AsyncMock):
+    with patch(
+        "app.adapters.hosting.AWSHostingAdapter.schedule_pipeline",
+        new_callable=AsyncMock,
+    ):
         # First delivery -> queued
         resp1 = await client.post("/webhooks/github", headers=headers, content=raw_body)
         assert resp1.status_code == 200
@@ -866,7 +1032,11 @@ async def test_webhook_delivery_idempotency_no_duplicate_run(
         assert resp2.json()["status"] == "duplicate"
 
     # Exactly 1 run row in DB
-    runs_count = await db.execute(select(func.count()).select_from(Run).where(Run.github_delivery_id == delivery_id))
+    runs_count = await db.execute(
+        select(func.count())
+        .select_from(Run)
+        .where(Run.github_delivery_id == delivery_id)
+    )
     assert runs_count.scalar() == 1
 
 
@@ -894,10 +1064,10 @@ def test_format_failure_reason_none_exception() -> None:
 
 def test_sanitize_fallback_comprehensive() -> None:
     """_sanitize_fallback:
-      - None/empty summary defaults to '(no diagnosis available)'
-      - HTML/XSS strings escaped
-      - sk- secrets redacted
-      - Raw patches from attempts never included in the comment output
+    - None/empty summary defaults to '(no diagnosis available)'
+    - HTML/XSS strings escaped
+    - sk- secrets redacted
+    - Raw patches from attempts never included in the comment output
     """
     # 1. Empty summary default
     out_empty = _sanitize_fallback(None, [])

@@ -333,9 +333,9 @@ async def test_attempt_2_session_failure_recovers_to_terminal_state(
     # DB error on attempt #2 forces a recovery before the comparison
     # happens. The post-loop fallback comment is the expected
     # terminal state for this scenario.
-    assert db_run.status == "fallback_commented", (
-        f"expected fallback_commented (sandbox always fails), got {db_run.status!r}"
-    )
+    assert (
+        db_run.status == "fallback_commented"
+    ), f"expected fallback_commented (sandbox always fails), got {db_run.status!r}"
 
     # Sanity check: the fallback comment was posted exactly once.
     mock_post_comment.assert_called_once()

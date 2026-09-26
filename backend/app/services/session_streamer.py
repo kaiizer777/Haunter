@@ -88,7 +88,9 @@ def format_sse_event(event: str, data: dict[str, Any]) -> str:
     try:
         data_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     except (TypeError, ValueError) as exc:
-        logger.error("format_sse_event: failed to serialise data for event=%s: %s", event, exc)
+        logger.error(
+            "format_sse_event: failed to serialise data for event=%s: %s", event, exc
+        )
         raise
 
     return f"event: {event}\ndata: {data_str}\n\n"
@@ -148,7 +150,9 @@ class SseQueue:
         """
         if action not in {"modify", "create", "delete"}:
             raise ValueError(f"put_file_diff: invalid action {action!r}")
-        await self.put_event("file_diff", {"path": path, "diff": diff, "action": action})
+        await self.put_event(
+            "file_diff", {"path": path, "diff": diff, "action": action}
+        )
 
     async def put_sandbox_status(self, status: str, logs: str = "") -> None:
         """
@@ -198,16 +202,25 @@ class SseQueue:
     async def put_plan_update(self, tasks: list[dict[str, Any]]) -> None:
         await self.put_event("plan_update", {"tasks": tasks})
 
-    async def put_clarification_requested(self, question: str, options: list[str]) -> None:
-        await self.put_event("clarification_requested", {"question": question, "options": options})
+    async def put_clarification_requested(
+        self, question: str, options: list[str]
+    ) -> None:
+        await self.put_event(
+            "clarification_requested", {"question": question, "options": options}
+        )
 
     async def put_checkpoint_created(self, checkpoint: dict[str, Any]) -> None:
         """Emit checkpoint_created event with the new checkpoint metadata."""
         await self.put_event("checkpoint_created", checkpoint)
 
-    async def put_checkpoint_restored(self, checkpoint_id: str, staged_patches: dict[str, str]) -> None:
+    async def put_checkpoint_restored(
+        self, checkpoint_id: str, staged_patches: dict[str, str]
+    ) -> None:
         """Emit checkpoint_restored event to sync Monaco editor buffers."""
-        await self.put_event("checkpoint_restored", {"checkpoint_id": checkpoint_id, "staged_patches": staged_patches})
+        await self.put_event(
+            "checkpoint_restored",
+            {"checkpoint_id": checkpoint_id, "staged_patches": staged_patches},
+        )
 
     async def put_subagent_start(self, role: str, task: str) -> None:
         """Emit subagent_start event when a subagent begins execution."""
@@ -220,11 +233,14 @@ class SseQueue:
         patches_modified: list[str],
     ) -> None:
         """Emit subagent_done event when a subagent finishes."""
-        await self.put_event("subagent_done", {
-            "role": role,
-            "summary": summary,
-            "patches_modified": patches_modified,
-        })
+        await self.put_event(
+            "subagent_done",
+            {
+                "role": role,
+                "summary": summary,
+                "patches_modified": patches_modified,
+            },
+        )
 
     async def put_audit_scan_start(
         self,
@@ -286,12 +302,17 @@ class SseQueue:
     async def put_error(self, error: str, code: str) -> None:
         await self.put_event("error", {"error": error, "code": code})
 
-    async def put_done(self, session_id: str, staged_files_count: int, model_used: str = "") -> None:
-        await self.put_event("done", {
-            "session_id": session_id,
-            "staged_files_count": staged_files_count,
-            "model_used": model_used,
-        })
+    async def put_done(
+        self, session_id: str, staged_files_count: int, model_used: str = ""
+    ) -> None:
+        await self.put_event(
+            "done",
+            {
+                "session_id": session_id,
+                "staged_files_count": staged_files_count,
+                "model_used": model_used,
+            },
+        )
         await self.close()
 
     # ------------------------------------------------------------------

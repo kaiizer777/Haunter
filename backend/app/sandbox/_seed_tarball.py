@@ -110,7 +110,10 @@ def _is_plain_tar(tar_bytes: bytes) -> bool:
     """
     if not tar_bytes:
         return True
-    if len(tar_bytes) >= 262 and tar_bytes[257:262] in (b"ustar", b"\x00\x00\x00\x00\x00"):
+    if len(tar_bytes) >= 262 and tar_bytes[257:262] in (
+        b"ustar",
+        b"\x00\x00\x00\x00\x00",
+    ):
         return True
     if tar_bytes.startswith(b"\x00" * 512):
         return True
@@ -132,15 +135,24 @@ def _file_priority_tier(rel_path: str) -> int:
     """
     name = rel_path.split("/")[-1]  # basename only
 
-    _TIER0_NAMES: frozenset[str] = frozenset({
-        "pytest.ini", "pyproject.toml", "setup.cfg", "setup.py",
-        "tox.ini", "conftest.py", ".python-version",
-    })
+    _TIER0_NAMES: frozenset[str] = frozenset(
+        {
+            "pytest.ini",
+            "pyproject.toml",
+            "setup.cfg",
+            "setup.py",
+            "tox.ini",
+            "conftest.py",
+            ".python-version",
+        }
+    )
     if name in _TIER0_NAMES:
         return 0
 
     _TIER1_GLOBS: tuple[str, ...] = (
-        "requirements", "Pipfile", "poetry.lock",
+        "requirements",
+        "Pipfile",
+        "poetry.lock",
     )
     if any(name.startswith(g) for g in _TIER1_GLOBS) or name in ("Pipfile.lock",):
         return 1
@@ -214,7 +226,9 @@ def parse_tar_to_files(
             if member.size > MAX_FILE_BYTES:
                 logger.info(
                     "seed_tarball: skipping %s (%d bytes > %d)",
-                    rel_path, member.size, MAX_FILE_BYTES,
+                    rel_path,
+                    member.size,
+                    MAX_FILE_BYTES,
                 )
                 continue
             tier = _file_priority_tier(rel_path)
@@ -249,8 +263,6 @@ def parse_tar_to_files(
             files[rel_path] = f.read()
 
     return files
-
-
 
 
 async def seed_mirror_via_content(
@@ -292,19 +304,21 @@ async def seed_mirror_via_content(
         if len(content) < 50_000:
             try:
                 text_content = content.decode("utf-8")
-                tree_entries.append({
-                    "path": path,
-                    "mode": "100644",
-                    "type": "blob",
-                    "content": text_content,
-                })
+                tree_entries.append(
+                    {
+                        "path": path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "content": text_content,
+                    }
+                )
                 continue
             except UnicodeDecodeError:
                 pass
         blobs_to_create.append((path, content))
 
     for i in range(0, len(blobs_to_create), BLOB_BATCH_SIZE):
-        batch = blobs_to_create[i:i + BLOB_BATCH_SIZE]
+        batch = blobs_to_create[i : i + BLOB_BATCH_SIZE]
         results = await asyncio.gather(*(create_blob(p, c) for p, c in batch))
         for p, s in results:
             tree_entries.append({"path": p, "mode": "100644", "type": "blob", "sha": s})

@@ -339,7 +339,9 @@ async def fetch_workflow_run_logs(
     )
     headers = _build_headers(token=token, allow_global_token=allow_global_token)
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -348,11 +350,20 @@ async def fetch_workflow_run_logs(
                 max_bytes=MAX_LOG_ARCHIVE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.error("Network error fetching workflow logs for %s/%s run %s", owner, repo, run_id)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error fetching workflow logs for %s/%s run %s",
+                owner,
+                repo,
+                run_id,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Workflow run logs not found for {owner}/{repo} run {run_id}")
+        raise GitHubResourceNotFoundError(
+            f"Workflow run logs not found for {owner}/{repo} run {run_id}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -391,7 +402,9 @@ async def fetch_diff(
         allow_global_token=allow_global_token,
     )
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -401,10 +414,14 @@ async def fetch_diff(
             )
         except httpx.RequestError as exc:
             logger.error("Network error fetching diff for %s/%s @ %s", owner, repo, sha)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Commit/diff not found for {owner}/{repo} @ {sha}")
+        raise GitHubResourceNotFoundError(
+            f"Commit/diff not found for {owner}/{repo} @ {sha}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -430,7 +447,9 @@ async def fetch_commit_metadata(
     )
     headers = _build_headers(token=token, accept="application/vnd.github+json")
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -439,11 +458,20 @@ async def fetch_commit_metadata(
                 max_bytes=MAX_API_RESPONSE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.error("Network error fetching commit metadata for %s/%s @ %s", owner, repo, sha)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error fetching commit metadata for %s/%s @ %s",
+                owner,
+                repo,
+                sha,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Commit not found for {owner}/{repo} @ {sha}")
+        raise GitHubResourceNotFoundError(
+            f"Commit not found for {owner}/{repo} @ {sha}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -486,15 +514,23 @@ async def post_commit_comment(
     if line is not None:
         payload["line"] = line
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
-            logger.error("Network error posting commit comment for %s/%s @ %s", owner, repo, sha)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error posting commit comment for %s/%s @ %s", owner, repo, sha
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Commit not found for {owner}/{repo} @ {sha} to post comment")
+        raise GitHubResourceNotFoundError(
+            f"Commit not found for {owner}/{repo} @ {sha} to post comment"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -520,7 +556,9 @@ async def fetch_repo_tree_paths(
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"
     headers = _build_headers(token=token, accept="application/vnd.github+json")
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -529,11 +567,23 @@ async def fetch_repo_tree_paths(
                 max_bytes=MAX_API_RESPONSE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.error("Network error fetching git tree for %s/%s @ %s: %s", owner, repo, sha, exc)
+            logger.error(
+                "Network error fetching git tree for %s/%s @ %s: %s",
+                owner,
+                repo,
+                sha,
+                exc,
+            )
             return []
 
     if response.is_error:
-        logger.warning("GitHub API error fetching git tree for %s/%s @ %s: %s", owner, repo, sha, response.status_code)
+        logger.warning(
+            "GitHub API error fetching git tree for %s/%s @ %s: %s",
+            owner,
+            repo,
+            sha,
+            response.status_code,
+        )
         return []
 
     data = response.json()
@@ -605,7 +655,9 @@ async def fetch_file_content(
         allow_global_token=allow_global_token,
     )
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -615,7 +667,14 @@ async def fetch_file_content(
                 max_bytes=MAX_TEXT_RESPONSE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.warning("Network error fetching file %s for %s/%s @ %s: %s", path, owner, repo, sha, exc)
+            logger.warning(
+                "Network error fetching file %s for %s/%s @ %s: %s",
+                path,
+                owner,
+                repo,
+                sha,
+                exc,
+            )
             return None
 
     if response.status_code == 404:
@@ -648,7 +707,9 @@ async def fetch_pr_comments(
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/comments"
     headers = _build_headers(token=token, accept="application/vnd.github+json")
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -657,11 +718,20 @@ async def fetch_pr_comments(
                 max_bytes=MAX_API_RESPONSE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.error("Network error fetching PR comments for %s/%s PR #%s", owner, repo, pr_number)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error fetching PR comments for %s/%s PR #%s",
+                owner,
+                repo,
+                pr_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"PR comments not found for {owner}/{repo} PR #{pr_number}")
+        raise GitHubResourceNotFoundError(
+            f"PR comments not found for {owner}/{repo} PR #{pr_number}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -686,15 +756,26 @@ async def post_pr_comment(
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/comments"
     headers = _build_headers(token=token, accept="application/vnd.github+json")
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await client.post(url, headers=headers, json={"body": body})
         except httpx.RequestError as exc:
-            logger.error("Network error posting PR comment for %s/%s PR #%s", owner, repo, pr_number)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error posting PR comment for %s/%s PR #%s",
+                owner,
+                repo,
+                pr_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"PR not found for {owner}/{repo} PR #{pr_number} to post comment")
+        raise GitHubResourceNotFoundError(
+            f"PR not found for {owner}/{repo} PR #{pr_number} to post comment"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -726,7 +807,9 @@ async def fetch_pull_request(
         allow_global_token=allow_global_token,
     )
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -735,11 +818,20 @@ async def fetch_pull_request(
                 max_bytes=MAX_API_RESPONSE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.error("Network error fetching pull request %s/%s PR #%s", owner, repo, pr_number)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error fetching pull request %s/%s PR #%s",
+                owner,
+                repo,
+                pr_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Pull request not found for {owner}/{repo} PR #{pr_number}")
+        raise GitHubResourceNotFoundError(
+            f"Pull request not found for {owner}/{repo} PR #{pr_number}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -782,22 +874,39 @@ async def create_pr_review(
     if comments is not None:
         payload["comments"] = comments
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
-            logger.error("Network error submitting PR review for %s/%s PR #%s", owner, repo, pr_number)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error submitting PR review for %s/%s PR #%s",
+                owner,
+                repo,
+                pr_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"PR not found for {owner}/{repo} PR #{pr_number} to submit review")
+        raise GitHubResourceNotFoundError(
+            f"PR not found for {owner}/{repo} PR #{pr_number} to submit review"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
         raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
     if response.is_error:
-        logger.error("GitHub API error %d submitting review: %s", response.status_code, response.text)
-        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text}")
+        logger.error(
+            "GitHub API error %d submitting review: %s",
+            response.status_code,
+            response.text,
+        )
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text}"
+        )
 
     return response.json()
 
@@ -870,7 +979,9 @@ async def fetch_pull_request_diff(
     )
     headers = _build_headers(token=token, accept="application/vnd.github.v3.diff")
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -879,11 +990,20 @@ async def fetch_pull_request_diff(
                 max_bytes=MAX_TEXT_RESPONSE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.error("Network error fetching PR diff for %s/%s PR #%s", owner, repo, pr_number)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error fetching PR diff for %s/%s PR #%s",
+                owner,
+                repo,
+                pr_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Pull request diff not found for {owner}/{repo} PR #{pr_number}")
+        raise GitHubResourceNotFoundError(
+            f"Pull request diff not found for {owner}/{repo} PR #{pr_number}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -917,7 +1037,9 @@ async def fetch_commits(
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits"
     headers = _build_headers(token=token, accept="application/vnd.github+json")
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -927,11 +1049,17 @@ async def fetch_commits(
                 max_bytes=MAX_API_RESPONSE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.error("Network error fetching commits for %s/%s: %s", owner, repo, exc)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error fetching commits for %s/%s: %s", owner, repo, exc
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Commits not found for {owner}/{repo} @ {sha}")
+        raise GitHubResourceNotFoundError(
+            f"Commits not found for {owner}/{repo} @ {sha}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -1015,22 +1143,36 @@ query Blame($owner: String!, $repo: String!, $ref: String!, $path: String!) {
                 "https://api.github.com/graphql", headers=gql_headers, json=payload
             )
         except httpx.RequestError as exc:
-            logger.warning("Network error fetching blame for %s/%s %s: %s", owner, repo, path, exc)
+            logger.warning(
+                "Network error fetching blame for %s/%s %s: %s", owner, repo, path, exc
+            )
             return []
 
     if response.is_error:
-        logger.warning("GitHub GraphQL error %s fetching blame for %s/%s %s", response.status_code, owner, repo, path)
+        logger.warning(
+            "GitHub GraphQL error %s fetching blame for %s/%s %s",
+            response.status_code,
+            owner,
+            repo,
+            path,
+        )
         return []
 
     data = response.json()
     if data.get("errors"):
-        logger.warning("GitHub GraphQL blame errors for %s/%s %s: %s", owner, repo, path, data["errors"])
+        logger.warning(
+            "GitHub GraphQL blame errors for %s/%s %s: %s",
+            owner,
+            repo,
+            path,
+            data["errors"],
+        )
         return []
 
     try:
-        ranges_raw: list[dict[str, Any]] = (
-            data["data"]["repository"]["object"]["blame"]["ranges"]
-        )
+        ranges_raw: list[dict[str, Any]] = data["data"]["repository"]["object"][
+            "blame"
+        ]["ranges"]
     except (KeyError, TypeError):
         return []
 
@@ -1044,7 +1186,9 @@ query Blame($owner: String!, $repo: String!, $ref: String!, $path: String!) {
         age_days: Optional[int] = None
         if committed_date_str:
             try:
-                committed_dt = _dt.datetime.fromisoformat(committed_date_str.replace("Z", "+00:00"))
+                committed_dt = _dt.datetime.fromisoformat(
+                    committed_date_str.replace("Z", "+00:00")
+                )
                 age_days = (now - committed_dt).days
             except ValueError:
                 pass
@@ -1060,7 +1204,6 @@ query Blame($owner: String!, $repo: String!, $ref: String!, $path: String!) {
             }
         )
     return result
-
 
 
 async def fetch_git_tree(
@@ -1088,7 +1231,9 @@ async def fetch_git_tree(
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{tree_sha}{params}"
     headers = _build_headers(token=token, accept="application/vnd.github+json")
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -1097,11 +1242,17 @@ async def fetch_git_tree(
                 max_bytes=MAX_API_RESPONSE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.error("Network error fetching git tree for %s/%s @ %s", owner, repo, tree_sha)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error fetching git tree for %s/%s @ %s", owner, repo, tree_sha
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Git tree not found for {owner}/{repo} @ {tree_sha}")
+        raise GitHubResourceNotFoundError(
+            f"Git tree not found for {owner}/{repo} @ {tree_sha}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -1136,7 +1287,9 @@ async def fetch_branch_sha(
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/branches/{branch}"
     headers = _build_headers(token=token, accept="application/vnd.github+json")
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await _bounded_get(
                 client,
@@ -1145,11 +1298,20 @@ async def fetch_branch_sha(
                 max_bytes=MAX_API_RESPONSE_BYTES,
             )
         except httpx.RequestError as exc:
-            logger.error("Network error fetching branch SHA for %s/%s branch %s", owner, repo, branch)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error fetching branch SHA for %s/%s branch %s",
+                owner,
+                repo,
+                branch,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Branch '{branch}' not found for {owner}/{repo}")
+        raise GitHubResourceNotFoundError(
+            f"Branch '{branch}' not found for {owner}/{repo}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -1194,15 +1356,21 @@ async def create_blob(
         GitHubClientError: Network errors or unexpected API failures.
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/blobs"
-    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
     payload = {"content": content, "encoding": encoding}
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
             logger.error("Network error creating blob for %s/%s", owner, repo)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
@@ -1211,7 +1379,9 @@ async def create_blob(
     if response.status_code == 429:
         raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
     if response.is_error:
-        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
 
     data = response.json()
     sha: str = data["sha"]
@@ -1237,17 +1407,23 @@ async def create_git_tree(
         GitHubAuthError, GitHubRateLimitError, GitHubClientError.
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees"
-    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
     payload = {"tree": tree}
     if base_tree is not None:
         payload["base_tree"] = base_tree
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
             logger.error("Network error creating git tree for %s/%s", owner, repo)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
@@ -1256,7 +1432,9 @@ async def create_git_tree(
     if response.status_code == 429:
         raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
     if response.is_error:
-        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
 
     data = response.json()
     sha: str = data["sha"]
@@ -1281,15 +1459,21 @@ async def create_git_commit(
         GitHubAuthError, GitHubRateLimitError, GitHubClientError.
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/commits"
-    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
     payload = {"message": message, "tree": tree_sha, "parents": parents}
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
             logger.error("Network error creating git commit for %s/%s", owner, repo)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
@@ -1298,7 +1482,9 @@ async def create_git_commit(
     if response.status_code == 429:
         raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
     if response.is_error:
-        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
 
     data = response.json()
     sha: str = data["sha"]
@@ -1323,18 +1509,31 @@ async def update_branch_ref(
         GitHubAuthError, GitHubRateLimitError, GitHubClientError.
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{branch}"
-    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
     payload = {"sha": commit_sha, "force": force}
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await client.patch(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
-            logger.error("Network error updating branch ref for %s/%s branch %s", owner, repo, branch)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            logger.error(
+                "Network error updating branch ref for %s/%s branch %s",
+                owner,
+                repo,
+                branch,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code == 404:
-        raise GitHubResourceNotFoundError(f"Branch ref not found: {owner}/{repo}/heads/{branch}")
+        raise GitHubResourceNotFoundError(
+            f"Branch ref not found: {owner}/{repo}/heads/{branch}"
+        )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -1342,7 +1541,9 @@ async def update_branch_ref(
     if response.status_code == 429:
         raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
     if response.is_error:
-        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
 
 
 async def create_pull_request(
@@ -1364,17 +1565,23 @@ async def create_pull_request(
         GitHubAuthError, GitHubRateLimitError, GitHubClientError.
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
-    headers = _build_headers(token=installation_token, accept="application/vnd.github+json")
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
     payload: dict = {"title": title, "head": head, "base": base}
     if body is not None:
         payload["body"] = body
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
         try:
             response = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
             logger.error("Network error creating pull request for %s/%s", owner, repo)
-            raise GitHubNetworkError(f"Network error connecting to GitHub: {exc.__class__.__name__}") from exc
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
 
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
@@ -1383,6 +1590,8 @@ async def create_pull_request(
     if response.status_code == 429:
         raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
     if response.is_error:
-        raise GitHubClientError(f"GitHub API returned error {response.status_code}: {response.text[:200]}")
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
 
     return response.json()

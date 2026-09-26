@@ -579,9 +579,15 @@ class RepoSettingsOut(BaseModel):
             elif "enable_auto_fixer" in data and "enable_auto_fix" not in data:
                 data["enable_auto_fix"] = data["enable_auto_fixer"]
 
-            if "enable_sandbox_verification" in data and "enable_ci_sandbox" not in data:
+            if (
+                "enable_sandbox_verification" in data
+                and "enable_ci_sandbox" not in data
+            ):
                 data["enable_ci_sandbox"] = data["enable_sandbox_verification"]
-            elif "enable_ci_sandbox" in data and "enable_sandbox_verification" not in data:
+            elif (
+                "enable_ci_sandbox" in data
+                and "enable_sandbox_verification" not in data
+            ):
                 data["enable_sandbox_verification"] = data["enable_ci_sandbox"]
 
             if "allowed_branches" in data and "monitored_branches" not in data:
@@ -666,24 +672,40 @@ class RepoSettingsUpdate(BaseModel):
             out["preset"] = out["preset_profile"]
         if "enable_auto_fixer" in out and out.get("enable_auto_fix") is None:
             out["enable_auto_fix"] = out["enable_auto_fixer"]
-        if "enable_ci_sandbox" in out and out.get("enable_sandbox_verification") is None:
+        if (
+            "enable_ci_sandbox" in out
+            and out.get("enable_sandbox_verification") is None
+        ):
             out["enable_sandbox_verification"] = out["enable_ci_sandbox"]
         if "monitored_branches" in out and out.get("allowed_branches") is None:
             out["allowed_branches"] = out["monitored_branches"]
 
         # Bounds validation
-        if "max_cost_per_run_cents" in out and out["max_cost_per_run_cents"] is not None:
+        if (
+            "max_cost_per_run_cents" in out
+            and out["max_cost_per_run_cents"] is not None
+        ):
             cost = out["max_cost_per_run_cents"]
             if not isinstance(cost, int) or isinstance(cost, bool) or cost < 0:
-                raise ValueError("max_cost_per_run_cents must be a non-negative integer.")
+                raise ValueError(
+                    "max_cost_per_run_cents must be a non-negative integer."
+                )
 
-        if "min_confidence_threshold" in out and out["min_confidence_threshold"] is not None:
+        if (
+            "min_confidence_threshold" in out
+            and out["min_confidence_threshold"] is not None
+        ):
             thresh = out["min_confidence_threshold"]
-            if not isinstance(thresh, int) or isinstance(thresh, bool) or not (0 <= thresh <= 100):
+            if (
+                not isinstance(thresh, int)
+                or isinstance(thresh, bool)
+                or not (0 <= thresh <= 100)
+            ):
                 raise ValueError("min_confidence_threshold must be between 0 and 100.")
 
         if "preset" in out and out["preset"] is not None:
             from app.services.repo_settings import normalize_preset_name
+
             try:
                 out["preset"] = normalize_preset_name(out["preset"])
             except ValueError as exc:
@@ -691,6 +713,7 @@ class RepoSettingsUpdate(BaseModel):
 
         if "allowed_branches" in out and out["allowed_branches"] is not None:
             from app.services.repo_settings import validate_branches
+
             try:
                 out["allowed_branches"] = validate_branches(out["allowed_branches"])
             except ValueError as exc:
@@ -708,6 +731,7 @@ class PresetApplyIn(BaseModel):
     @classmethod
     def validate_preset_field(cls, v: str) -> str:
         from app.services.repo_settings import normalize_preset_name
+
         return normalize_preset_name(v)
 
 
@@ -730,4 +754,3 @@ class RepoWithSettingsOut(BaseModel):
         if isinstance(v, dict) and "on_manual_mention" not in v:
             v["on_manual_mention"] = True
         return v
-

@@ -159,7 +159,9 @@ def validate_branch_name(branch: str) -> str:
         raise ValueError(f"Branch name '{branch}' contains ASCII control characters.")
     clean = branch.strip()
     if len(clean) > 255:
-        raise ValueError(f"Branch name '{clean}' exceeds maximum length of 255 characters.")
+        raise ValueError(
+            f"Branch name '{clean}' exceeds maximum length of 255 characters."
+        )
     if clean.startswith("/") or clean.endswith("/"):
         raise ValueError(f"Branch name '{clean}' cannot begin or end with '/'.")
     if clean.startswith(".") or clean.endswith("."):
@@ -188,7 +190,9 @@ def validate_cost_bounds(cost_cents: int) -> int:
     if cost_cents < 0:
         raise ValueError(f"Max cost per run cannot be negative (got {cost_cents}).")
     if cost_cents > 10_000_000:
-        raise ValueError(f"Max cost per run exceeds maximum ceiling of 10,000,000 cents (got {cost_cents}).")
+        raise ValueError(
+            f"Max cost per run exceeds maximum ceiling of 10,000,000 cents (got {cost_cents})."
+        )
     return cost_cents
 
 
@@ -197,7 +201,9 @@ def validate_confidence_threshold(threshold: int) -> int:
     if not isinstance(threshold, int) or isinstance(threshold, bool):
         raise ValueError("Confidence threshold must be an integer.")
     if not (0 <= threshold <= 100):
-        raise ValueError(f"Confidence threshold must be between 0 and 100 (got {threshold}).")
+        raise ValueError(
+            f"Confidence threshold must be between 0 and 100 (got {threshold})."
+        )
     return threshold
 
 
@@ -223,7 +229,9 @@ def create_default_repo_settings(
         audit_trigger_on_pr=cfg.get("audit_trigger_on_pr", True),
         audit_trigger_on_ci_failure=cfg.get("audit_trigger_on_ci_failure", True),
         audit_trigger_on_ci_success=cfg.get("audit_trigger_on_ci_success", False),
-        audit_trigger_on_manual_mention=cfg.get("audit_trigger_on_manual_mention", True),
+        audit_trigger_on_manual_mention=cfg.get(
+            "audit_trigger_on_manual_mention", True
+        ),
         allowed_branches=["main", "master"],
         ignore_draft_prs=cfg.get("ignore_draft_prs", True),
         min_confidence_threshold=cfg.get("min_confidence_threshold", 80),
@@ -248,9 +256,7 @@ async def get_repo_settings(
     - If auto_create=True, instantiates default settings, persists to DB, and returns it.
     - If auto_create=False, returns an in-memory default fallback instance.
     """
-    row = await db.scalar(
-        select(RepoSettings).where(RepoSettings.repo_id == repo_id)
-    )
+    row = await db.scalar(select(RepoSettings).where(RepoSettings.repo_id == repo_id))
     if row is not None:
         return row
 
@@ -259,7 +265,11 @@ async def get_repo_settings(
         db.add(default_settings)
         await db.commit()
         await db.refresh(default_settings)
-        logger.info("Created default repo settings: repo_id=%s preset=%s", repo_id, default_settings.preset)
+        logger.info(
+            "Created default repo settings: repo_id=%s preset=%s",
+            repo_id,
+            default_settings.preset,
+        )
         return default_settings
 
     return default_settings
@@ -284,7 +294,12 @@ def apply_preset(
 
     settings.settings_version += 1
     settings.updated_at = datetime.now(timezone.utc)
-    logger.info("Applied preset '%s' to settings for repo_id=%s version=%d", canonical, settings.repo_id, settings.settings_version)
+    logger.info(
+        "Applied preset '%s' to settings for repo_id=%s version=%d",
+        canonical,
+        settings.repo_id,
+        settings.settings_version,
+    )
     return settings
 
 
@@ -317,7 +332,9 @@ async def update_repo_settings(
     preset_applied = False
 
     # If preset is updated and not "custom", apply preset configuration first
-    preset_val = updates.get("preset") if "preset" in updates else updates.get("preset_profile")
+    preset_val = (
+        updates.get("preset") if "preset" in updates else updates.get("preset_profile")
+    )
     if preset_val is not None:
         canonical = normalize_preset_name(preset_val)
         if canonical != "custom":
@@ -402,4 +419,3 @@ __all__ = [
     "validate_confidence_threshold",
     "validate_cost_bounds",
 ]
-

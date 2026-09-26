@@ -47,7 +47,9 @@ def _build_read_only_jwt(app_id: str, private_key: str) -> str:
     from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 
     now = int(time.time())
-    header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    header = _b64url(
+        json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode()
+    )
     payload = _b64url(
         json.dumps(
             {"iat": now - 60, "exp": now + 600, "iss": app_id},
@@ -148,7 +150,11 @@ async def get_auditor_installation_token(repo: Any) -> str:
     install_id = getattr(repo, "auditor_github_install_id", None)
     app_id = settings.github_auditor_app_id
     private_key = settings.github_auditor_app_private_key
-    if isinstance(install_id, bool) or not isinstance(install_id, int) or install_id <= 0:
+    if (
+        isinstance(install_id, bool)
+        or not isinstance(install_id, int)
+        or install_id <= 0
+    ):
         raise AuditorCredentialError("repository has no auditor GitHub installation")
     # A whitespace-only value is an unset secret, not a usable one: it passes a
     # bare truthiness check and then fails deep inside the JWT signer with a
@@ -187,7 +193,9 @@ async def get_auditor_installation_token(repo: Any) -> str:
     try:
         data = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        raise AuditorCredentialError("auditor credential response was malformed") from exc
+        raise AuditorCredentialError(
+            "auditor credential response was malformed"
+        ) from exc
     if not isinstance(data, dict):
         raise AuditorCredentialError("auditor credential response was malformed")
     token = data.get("token")

@@ -16,15 +16,20 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-import sys
-import os
+# Imports below are intentionally placed AFTER fileConfig() so Alembic's logging
+# is fully configured before app code (which may log during import) runs.
+# Each noqa marks the documented Alembic env.py pattern (see Alembic docs §"Using Asyncio").
+import sys  # noqa: E402
+import os  # noqa: E402
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv()
 
-from app.models import Base
-from app.config import settings
+from app.models import Base  # noqa: E402
+from app.config import settings  # noqa: E402
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -103,8 +108,6 @@ async def run_async_migrations() -> None:
         await connection.run_sync(do_run_migrations)
 
     await connectable.dispose()
-
-
 
 
 def run_migrations_online() -> None:

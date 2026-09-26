@@ -92,7 +92,11 @@ async def _resolve_current_content(
         # Fetch base to apply the patch on top of it.
         try:
             base = await fetch_file_content(
-                owner=repo_owner, repo=repo_name, path=path, sha=base_sha, token=gh_token
+                owner=repo_owner,
+                repo=repo_name,
+                path=path,
+                sha=base_sha,
+                token=gh_token,
             )
         except GitHubClientError:
             base = None
@@ -192,7 +196,9 @@ async def tool_str_replace(
     try:
         await queue.put_file_diff(path=path, diff=diff, action="modify")
     except Exception as exc:
-        logger.error("editor: failed to emit file_diff for str_replace on %r: %s", path, exc)
+        logger.error(
+            "editor: failed to emit file_diff for str_replace on %r: %s", path, exc
+        )
 
     return f"Successfully replaced code in '{path}'."
 
@@ -233,7 +239,9 @@ async def tool_create_file(
     try:
         await queue.put_file_diff(path=path, diff=diff, action="create")
     except Exception as exc:
-        logger.error("editor: failed to emit file_diff for create_file on %r: %s", path, exc)
+        logger.error(
+            "editor: failed to emit file_diff for create_file on %r: %s", path, exc
+        )
 
     return f"Successfully staged new file '{path}'."
 
@@ -290,7 +298,9 @@ async def tool_delete_file(
     try:
         await queue.put_file_diff(path=path, diff=diff, action="delete")
     except Exception as exc:
-        logger.error("editor: failed to emit file_diff for delete_file on %r: %s", path, exc)
+        logger.error(
+            "editor: failed to emit file_diff for delete_file on %r: %s", path, exc
+        )
 
     return f"Successfully staged deletion of '{path}'."
 
@@ -409,7 +419,9 @@ async def tool_apply_multi_patch(
                 committed_paths.append((path, "create"))
             else:
                 # Overwrite existing action with create for this path.
-                committed_paths = [(p, "create" if p == path else a) for p, a in committed_paths]
+                committed_paths = [
+                    (p, "create" if p == path else a) for p, a in committed_paths
+                ]
 
         elif op_type == "delete_file":
             path = str(entry.get("path", ""))
@@ -435,7 +447,9 @@ async def tool_apply_multi_patch(
             if path not in [p for p, _ in committed_paths]:
                 committed_paths.append((path, "delete"))
             else:
-                committed_paths = [(p, "delete" if p == path else a) for p, a in committed_paths]
+                committed_paths = [
+                    (p, "delete" if p == path else a) for p, a in committed_paths
+                ]
 
         else:
             return (
@@ -487,7 +501,9 @@ async def tool_apply_multi_patch(
             await queue.put_file_diff(path=path, diff=diff, action=action)
         except Exception as exc:
             logger.error(
-                "editor: failed to emit file_diff for apply_multi_patch on %r: %s", path, exc
+                "editor: failed to emit file_diff for apply_multi_patch on %r: %s",
+                path,
+                exc,
             )
 
     n = len(patches)

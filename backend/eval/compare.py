@@ -24,7 +24,6 @@ import uuid
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import async_session_maker
 from app.models import EvalResult
@@ -65,9 +64,7 @@ def _diff_scores(
     }
 
 
-def _extract_subagent_avg(
-    eval_result: EvalResult, subagent: str
-) -> float | None:
+def _extract_subagent_avg(eval_result: EvalResult, subagent: str) -> float | None:
     """Extract average_score for a given subagent from per_subagent_scores JSONB."""
     scores = eval_result.per_subagent_scores or {}
     sub = scores.get(subagent, {})
@@ -159,12 +156,16 @@ async def compare_eval(
         ValueError: If either eval_id is not found in DB.
     """
     async with async_session_maker() as db:
-        a_result = await db.execute(select(EvalResult).where(EvalResult.id == eval_id_a))
+        a_result = await db.execute(
+            select(EvalResult).where(EvalResult.id == eval_id_a)
+        )
         eval_a = a_result.scalar_one_or_none()
         if eval_a is None:
             raise ValueError(f"EvalResult {eval_id_a} not found")
 
-        b_result = await db.execute(select(EvalResult).where(EvalResult.id == eval_id_b))
+        b_result = await db.execute(
+            select(EvalResult).where(EvalResult.id == eval_id_b)
+        )
         eval_b = b_result.scalar_one_or_none()
         if eval_b is None:
             raise ValueError(f"EvalResult {eval_id_b} not found")
@@ -174,7 +175,8 @@ async def compare_eval(
     if report["any_regression"]:
         logger.warning(
             "Regression detected: eval_a=%s eval_b=%s regressions=%s",
-            eval_id_a, eval_id_b,
+            eval_id_a,
+            eval_id_b,
             [r["label"] for r in report["regressions"]],
         )
     else:
@@ -194,10 +196,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Compare two Haunter EvalResult rows for regression.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  uv run python -m eval.compare <uuid_a> <uuid_b>\n"
-        ),
+        epilog=("Examples:\n" "  uv run python -m eval.compare <uuid_a> <uuid_b>\n"),
     )
     p.add_argument("eval_id_a", type=uuid.UUID, help="Baseline EvalResult ID")
     p.add_argument("eval_id_b", type=uuid.UUID, help="Candidate EvalResult ID")
@@ -214,6 +213,7 @@ async def _main() -> None:
 
     # Exit code 1 if regression detected — useful in CI pipelines
     import sys
+
     sys.exit(1 if report["any_regression"] else 0)
 
 

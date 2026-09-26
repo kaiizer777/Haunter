@@ -91,7 +91,9 @@ def reset_module_caches() -> None:
 
 
 @pytest.mark.asyncio
-async def test_load_pem_from_ssm_caching(rsa_keys: tuple[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_load_pem_from_ssm_caching(
+    rsa_keys: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """_load_pem_from_ssm caches PEM; second call returns cached value without boto3."""
     priv_pem, _ = rsa_keys
     mock_client = MagicMock()
@@ -115,6 +117,7 @@ async def test_load_pem_from_ssm_caching(rsa_keys: tuple[str, str], monkeypatch:
 @pytest.mark.asyncio
 async def test_load_pem_from_ssm_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """SSM asyncio.TimeoutError raises RuntimeError."""
+
     async def _mock_wait_for(coro, timeout):
         try:
             coro.close()
@@ -128,7 +131,9 @@ async def test_load_pem_from_ssm_timeout(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_load_pem_from_ssm_boto3_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_load_pem_from_ssm_boto3_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """SSM boto3 exception raises RuntimeError with wrapped error."""
     mock_client = MagicMock()
     mock_client.get_parameter.side_effect = Exception("SSM ParameterNotFound")
@@ -243,9 +248,9 @@ def test_non_retryable_phrases_classification() -> None:
         exc = httpx.HTTPStatusError("Forbidden", request=req, response=resp)
 
         reason = _non_retryable_reason(exc, prefix="GitHub API")
-        assert reason.startswith("[non-retryable] GitHub API:"), (
-            f"Phrase {phrase!r} failed to produce [non-retryable] prefix"
-        )
+        assert reason.startswith(
+            "[non-retryable] GitHub API:"
+        ), f"Phrase {phrase!r} failed to produce [non-retryable] prefix"
 
 
 def test_unrelated_error_not_marked_non_retryable() -> None:
@@ -261,7 +266,7 @@ def test_unrelated_error_not_marked_non_retryable() -> None:
 
 def test_non_retryable_reason_truncation_and_newlines() -> None:
     """_non_retryable_reason truncates body at 300 chars and replaces newlines with space."""
-    long_body = ("line1\nline2\nline3 " + ("x" * 400))
+    long_body = "line1\nline2\nline3 " + ("x" * 400)
     req = httpx.Request("POST", "https://api.github.com/test")
     resp = httpx.Response(400, request=req, text=long_body)
     exc = httpx.HTTPStatusError("Bad Request", request=req, response=resp)
@@ -283,7 +288,9 @@ async def test_push_workflow_file_first_put_success() -> None:
     """_push_workflow_file returns new commit SHA on 200 OK."""
     with respx.mock(base_url="https://api.github.com") as respx_mock:
         # GET contents: file does not exist yet (404)
-        respx_mock.get("/repos/owner/repo/contents/.github/workflows/ci.yml").respond(404)
+        respx_mock.get("/repos/owner/repo/contents/.github/workflows/ci.yml").respond(
+            404
+        )
         # PUT contents: creates file (201/200)
         respx_mock.put("/repos/owner/repo/contents/.github/workflows/ci.yml").respond(
             200,
@@ -317,7 +324,9 @@ async def test_push_workflow_file_403_fallback_to_pat() -> None:
             "/repos/owner/repo/contents/.github/workflows/ci.yml"
         )
         put_route.side_effect = [
-            httpx.Response(403, json={"message": "Resource not accessible by integration"}),
+            httpx.Response(
+                403, json={"message": "Resource not accessible by integration"}
+            ),
             httpx.Response(200, json={"commit": {"sha": "sha_pat_commit_456"}}),
         ]
 
@@ -343,7 +352,9 @@ async def test_push_workflow_file_403_fallback_to_pat() -> None:
 async def test_push_workflow_file_403_without_fallback_raises() -> None:
     """_push_workflow_file raises HTTPStatusError when 403 occurs without fallback_token."""
     with respx.mock(base_url="https://api.github.com") as respx_mock:
-        respx_mock.get("/repos/owner/repo/contents/.github/workflows/ci.yml").respond(404)
+        respx_mock.get("/repos/owner/repo/contents/.github/workflows/ci.yml").respond(
+            404
+        )
         respx_mock.put("/repos/owner/repo/contents/.github/workflows/ci.yml").respond(
             403, json={"message": "Forbidden"}
         )
@@ -372,7 +383,9 @@ async def test_list_workflow_runs() -> None:
     with respx.mock(base_url="https://api.github.com") as respx_mock:
         route = respx_mock.get("/repos/owner/repo/actions/runs").side_effect = [
             httpx.Response(200, json={"workflow_runs": []}),
-            httpx.Response(200, json={"workflow_runs": [{"id": 1001, "status": "completed"}]}),
+            httpx.Response(
+                200, json={"workflow_runs": [{"id": 1001, "status": "completed"}]}
+            ),
         ]
 
         async with httpx.AsyncClient() as client:
@@ -420,17 +433,23 @@ async def test_get_workflow_run_log_tail_success_and_failures() -> None:
 
         async with httpx.AsyncClient() as client:
             # 1. Failed steps summary
-            summary1 = await _get_workflow_run_log_tail(client, "owner/repo", 1, token="tok")
+            summary1 = await _get_workflow_run_log_tail(
+                client, "owner/repo", 1, token="tok"
+            )
             assert "Job 'build-job': failure" in summary1
             assert "Step 'run pytest': failure" in summary1
             assert "checkout" not in summary1
 
             # 2. Empty jobs
-            summary2 = await _get_workflow_run_log_tail(client, "owner/repo", 2, token="tok")
+            summary2 = await _get_workflow_run_log_tail(
+                client, "owner/repo", 2, token="tok"
+            )
             assert summary2 == "Workflow run #2: no job details available."
 
             # 3. Exception path: truncated error message
-            summary3 = await _get_workflow_run_log_tail(client, "owner/repo", 3, token="tok")
+            summary3 = await _get_workflow_run_log_tail(
+                client, "owner/repo", 3, token="tok"
+            )
             assert "Workflow run #3: log fetch failed (" in summary3
 
 
@@ -622,7 +641,10 @@ async def test_verify_fast_fail_missing_installation_id(
     )
     result = await runner.verify(inp)
     assert result["passed"] is False
-    assert "[non-retryable] GITHUB_SANDBOX_INSTALLATION_ID not configured." in result["reason"]
+    assert (
+        "[non-retryable] GITHUB_SANDBOX_INSTALLATION_ID not configured."
+        in result["reason"]
+    )
 
 
 @pytest.mark.asyncio
@@ -636,7 +658,9 @@ async def test_verify_fast_fail_token_mint_raises(
     monkeypatch.setattr(settings, "github_sandbox_installation_id", "inst_123")
 
     # Mock mint_installation_token to raise a 401 Bad credentials error
-    req = httpx.Request("POST", "https://api.github.com/app/installations/123/access_tokens")
+    req = httpx.Request(
+        "POST", "https://api.github.com/app/installations/123/access_tokens"
+    )
     resp = httpx.Response(401, request=req, text='{"message": "Bad credentials"}')
     status_error = httpx.HTTPStatusError("Bad credentials", request=req, response=resp)
 

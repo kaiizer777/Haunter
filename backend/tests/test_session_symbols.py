@@ -66,8 +66,10 @@ def test_python_outline_extraction() -> None:
     assert '"""Manages user CRUD operations."""' in outline
 
     # Regular method
-    assert "def get_user(self, user_id: str) -> 'User':" in outline or \
-           "def get_user(" in outline  # ast.unparse quote style may vary
+    assert (
+        "def get_user(self, user_id: str) -> 'User':" in outline
+        or "def get_user(" in outline
+    )  # ast.unparse quote style may vary
 
     # Async method
     assert "async def create_user(" in outline
@@ -95,7 +97,7 @@ def test_python_outline_syntax_error() -> None:
 # 2. TypeScript/TSX outline extraction
 # ---------------------------------------------------------------------------
 
-TS_SOURCE = '''\
+TS_SOURCE = """\
 export interface UserProfile {
   id: string;
   name: string;
@@ -125,7 +127,7 @@ export function transformUser(raw: unknown): UserProfile {
 export const fetchUsers = async (page: number) => {
   return [];
 };
-'''
+"""
 
 
 def test_typescript_outline_extraction() -> None:
@@ -157,6 +159,7 @@ def test_typescript_outline_empty_file() -> None:
 # ---------------------------------------------------------------------------
 # 3. find_py_defs and find_ts_defs — by name and kind
 # ---------------------------------------------------------------------------
+
 
 def test_find_symbol_python_function() -> None:
     results = _find_py_defs(PYTHON_SOURCE, "get_user", "function")
@@ -225,13 +228,13 @@ def test_find_symbol_ts_type() -> None:
 # 4. find_references word-boundary correctness
 # ---------------------------------------------------------------------------
 
-_REFERENCES_SOURCE = '''\
+_REFERENCES_SOURCE = """\
 user = get_user(user_id)
 username = "admin"
 print(user.name)
 create_user(user)
 update_username(username)
-'''
+"""
 
 import re
 
@@ -239,9 +242,7 @@ import re
 def test_find_references_word_boundary_matches_user() -> None:
     pattern = re.compile(r"\b" + re.escape("user") + r"\b")
     matched_lines = [
-        ln.strip()
-        for ln in _REFERENCES_SOURCE.splitlines()
-        if pattern.search(ln)
+        ln.strip() for ln in _REFERENCES_SOURCE.splitlines() if pattern.search(ln)
     ]
     # "user = get_user(user_id)" — has standalone "user"
     # "user.name" — "user" followed by "." is still a word boundary on the left
@@ -267,6 +268,7 @@ def test_find_references_word_boundary_does_not_match_prefix() -> None:
 # ---------------------------------------------------------------------------
 # 5. Invalid identifier rejection
 # ---------------------------------------------------------------------------
+
 
 def test_invalid_identifier_shell_injection() -> None:
     """Symbols like 'user;rm -rf' must be rejected cleanly."""
@@ -336,6 +338,7 @@ def test_invalid_kind_rejected() -> None:
 # ---------------------------------------------------------------------------
 # 6. Path traversal blocked
 # ---------------------------------------------------------------------------
+
 
 def test_path_traversal_double_dot() -> None:
     with pytest.raises(ValueError, match="Directory traversal rejected"):

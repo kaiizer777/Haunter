@@ -62,11 +62,13 @@ async def tool_update_plan(
                 f"Allowed: {sorted(_VALID_TASK_STATUSES)}"
             )
 
-        validated_tasks.append({
-            "id": task_id,
-            "title": title,
-            "status": status,
-        })
+        validated_tasks.append(
+            {
+                "id": task_id,
+                "title": title,
+                "status": status,
+            }
+        )
 
     session.plan = validated_tasks
     await queue.put_plan_update(validated_tasks)
@@ -99,7 +101,9 @@ async def tool_ask_user_clarification(
     if not isinstance(options, list) or not options:
         return "Error: options must be a non-empty list of strings."
 
-    cleaned_options: list[str] = [str(opt).strip() for opt in options if str(opt).strip()]
+    cleaned_options: list[str] = [
+        str(opt).strip() for opt in options if str(opt).strip()
+    ]
     if not cleaned_options:
         return "Error: options must contain at least one non-empty string choice."
 

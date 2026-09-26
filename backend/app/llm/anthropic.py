@@ -34,7 +34,9 @@ ANTHROPIC_DEFAULT_MAX_TOKENS: int = 4096
 ANTHROPIC_MAX_OUTPUT_TOKENS: int = 8192
 
 
-def _to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
+def _to_anthropic_messages(
+    messages: list[dict[str, Any]],
+) -> tuple[str | None, list[dict[str, Any]]]:
     """Convert OpenAI-style messages to Anthropic native (system, messages).
 
     - ``role="system"`` entries are hoisted into the top-level ``system`` string.
@@ -161,7 +163,9 @@ class AnthropicAdapter:
             }
         """
         if not self._api_key:
-            raise LLMAuthenticationError("ANTHROPIC_API_KEY is not configured in settings or environment")
+            raise LLMAuthenticationError(
+                "ANTHROPIC_API_KEY is not configured in settings or environment"
+            )
 
         target_model = model or self.default_model
         endpoint = urljoin(self.base_url, "messages")
@@ -228,7 +232,9 @@ class AnthropicAdapter:
                 elif btype == "tool_use":
                     tool_input = block.get("input", {})
                     try:
-                        arguments = json.dumps(tool_input if isinstance(tool_input, dict) else {})
+                        arguments = json.dumps(
+                            tool_input if isinstance(tool_input, dict) else {}
+                        )
                     except (TypeError, ValueError):
                         arguments = "{}"
                     tool_calls.append(
@@ -244,7 +250,9 @@ class AnthropicAdapter:
 
             content = "\n".join(text_parts) if text_parts else None
 
-            usage_data = data.get("usage", {}) if isinstance(data.get("usage"), dict) else {}
+            usage_data = (
+                data.get("usage", {}) if isinstance(data.get("usage"), dict) else {}
+            )
             input_tokens = usage_data.get("input_tokens", 0)
             output_tokens = usage_data.get("output_tokens", 0)
             returned_model = data.get("model", target_model)

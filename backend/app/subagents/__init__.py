@@ -43,4 +43,3 @@ __all__ = [
     "analyze_diff",
     "format_github_suggestion",
 ]
-

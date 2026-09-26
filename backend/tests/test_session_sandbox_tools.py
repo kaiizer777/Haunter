@@ -65,7 +65,7 @@ def test_sanitize_command_blocked() -> None:
         "rm -rf / --no-preserve-root",
         "mkfs.ext4 /dev/sda",
         "mkfs -t ext4 /dev/sdb",
-        ":(){ :|:& };:",          # fork bomb
+        ":(){ :|:& };:",  # fork bomb
         "shutdown -h now",
         "reboot",
         "halt",
@@ -178,6 +178,7 @@ async def test_run_terminal_command_timeout() -> None:
 def test_run_terminal_command_timeout_clamping() -> None:
     """timeout_sec must be clamped to [1, 300] — never 0 or > 300."""
     from app.services.session_tools.sandbox import _MIN_TIMEOUT, _MAX_TIMEOUT
+
     assert _MIN_TIMEOUT == 1
     assert _MAX_TIMEOUT == 300
 
@@ -323,6 +324,7 @@ def test_sse_terminal_output_event_format() -> None:
 def test_sse_terminal_output_allowed() -> None:
     """terminal_output must be in _ALLOWED_EVENTS — not raise ValueError."""
     from app.services.session_streamer import _ALLOWED_EVENTS
+
     assert "terminal_output" in _ALLOWED_EVENTS
 
 
@@ -440,10 +442,28 @@ def test_prepare_cmd_argv_resolution() -> None:
     import sys
     from app.services.session_tools.sandbox import _prepare_cmd_argv
 
-    assert _prepare_cmd_argv(["python", "app/main.py"]) == [sys.executable, "app/main.py"]
-    assert _prepare_cmd_argv(["python3", "app/main.py"]) == [sys.executable, "app/main.py"]
-    assert _prepare_cmd_argv(["pytest", "-v", "tests/"]) == [sys.executable, "-m", "pytest", "-v", "tests/"]
-    assert _prepare_cmd_argv(["ruff", "check", "app/"]) == [sys.executable, "-m", "ruff", "check", "app/"]
+    assert _prepare_cmd_argv(["python", "app/main.py"]) == [
+        sys.executable,
+        "app/main.py",
+    ]
+    assert _prepare_cmd_argv(["python3", "app/main.py"]) == [
+        sys.executable,
+        "app/main.py",
+    ]
+    assert _prepare_cmd_argv(["pytest", "-v", "tests/"]) == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-v",
+        "tests/",
+    ]
+    assert _prepare_cmd_argv(["ruff", "check", "app/"]) == [
+        sys.executable,
+        "-m",
+        "ruff",
+        "check",
+        "app/",
+    ]
 
 
 def test_loop_supports_subprocesses_selector_check() -> None:
@@ -453,6 +473,7 @@ def test_loop_supports_subprocesses_selector_check() -> None:
 
     class FakeSelectorLoop:
         pass
+
     FakeSelectorLoop.__name__ = "_WindowsSelectorEventLoop"
 
     if sys.platform == "win32":
@@ -491,5 +512,3 @@ async def test_subprocess_error_formatting_never_empty() -> None:
         )
         assert code == -1
         assert "Subprocess error (NotImplementedError)" in stderr
-
-

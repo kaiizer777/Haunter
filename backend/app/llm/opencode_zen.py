@@ -57,7 +57,9 @@ class OpenCodeZenProvider:
             }
         """
         if not self._api_key:
-            raise LLMAuthenticationError("OPENCODE_ZEN_API_KEY is not configured in settings or environment")
+            raise LLMAuthenticationError(
+                "OPENCODE_ZEN_API_KEY is not configured in settings or environment"
+            )
 
         endpoint = urljoin(self.base_url, "chat/completions")
         session_id = kwargs.pop("session_id", None) or self.session_id

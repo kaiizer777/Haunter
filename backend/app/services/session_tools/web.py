@@ -36,15 +36,15 @@ _MAX_CONTENT_CHARS = 40_000
 
 # RFC 1918, loopback, link-local (including AWS instance metadata 169.254.169.254)
 _BLOCKED_NETWORKS = [
-    ipaddress.ip_network("127.0.0.0/8"),       # loopback
-    ipaddress.ip_network("::1/128"),            # IPv6 loopback
-    ipaddress.ip_network("0.0.0.0/8"),          # unspecified
-    ipaddress.ip_network("10.0.0.0/8"),         # RFC 1918 class A
-    ipaddress.ip_network("172.16.0.0/12"),      # RFC 1918 class B (172.16-172.31)
-    ipaddress.ip_network("192.168.0.0/16"),     # RFC 1918 class C
-    ipaddress.ip_network("169.254.0.0/16"),     # link-local / AWS metadata
-    ipaddress.ip_network("fc00::/7"),           # IPv6 unique local
-    ipaddress.ip_network("fe80::/10"),          # IPv6 link-local
+    ipaddress.ip_network("127.0.0.0/8"),  # loopback
+    ipaddress.ip_network("::1/128"),  # IPv6 loopback
+    ipaddress.ip_network("0.0.0.0/8"),  # unspecified
+    ipaddress.ip_network("10.0.0.0/8"),  # RFC 1918 class A
+    ipaddress.ip_network("172.16.0.0/12"),  # RFC 1918 class B (172.16-172.31)
+    ipaddress.ip_network("192.168.0.0/16"),  # RFC 1918 class C
+    ipaddress.ip_network("169.254.0.0/16"),  # link-local / AWS metadata
+    ipaddress.ip_network("fc00::/7"),  # IPv6 unique local
+    ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
 ]
 
 # Hostname-level blocklist (no DNS resolution needed for these well-known names).
@@ -78,7 +78,9 @@ def _validate_external_url(url: str) -> str:
 
     # Reject well-known internal hostnames without DNS resolution.
     if host.lower() in _BLOCKED_HOSTNAMES:
-        raise ValueError(f"URL host {host!r} is not allowed (internal/loopback hostname).")
+        raise ValueError(
+            f"URL host {host!r} is not allowed (internal/loopback hostname)."
+        )
 
     # Attempt IP parse — reject private/internal ranges directly.
     try:
@@ -91,7 +93,11 @@ def _validate_external_url(url: str) -> str:
     except ValueError as exc:
         # If it's our explicit SSRF rejection, re-raise; otherwise it was a
         # domain name (not an IP literal) — that's fine, pass through.
-        if "SSRF protection" in str(exc) or "internal/loopback" in str(exc) or "not allowed" in str(exc):
+        if (
+            "SSRF protection" in str(exc)
+            or "internal/loopback" in str(exc)
+            or "not allowed" in str(exc)
+        ):
             raise
 
     return url
@@ -131,7 +137,9 @@ async def tool_search_web_docs(
         if clean_domain:
             params["include_domains"] = clean_domain
 
-    search_url = getattr(settings, "tinyfish_search_url", "https://api.search.tinyfish.ai")
+    search_url = getattr(
+        settings, "tinyfish_search_url", "https://api.search.tinyfish.ai"
+    )
     headers = {
         "X-API-Key": settings.tinyfish_api_key,
         "Authorization": f"Bearer {settings.tinyfish_api_key}",
@@ -236,8 +244,14 @@ async def tool_fetch_web_content(
     except Exception:
         return "Error: could not parse TinyFish fetch response."
 
-    results: list[dict[str, Any]] = data.get("results", []) if isinstance(data, dict) else []
-    first = results[0] if results and isinstance(results[0], dict) else (data if isinstance(data, dict) else {})
+    results: list[dict[str, Any]] = (
+        data.get("results", []) if isinstance(data, dict) else []
+    )
+    first = (
+        results[0]
+        if results and isinstance(results[0], dict)
+        else (data if isinstance(data, dict) else {})
+    )
     content: str = (
         first.get("text")
         or first.get("content")
@@ -250,7 +264,10 @@ async def tool_fetch_web_content(
         return f"No content returned for URL: {url}"
 
     if len(content) > _MAX_CONTENT_CHARS:
-        content = content[:_MAX_CONTENT_CHARS] + f"\n\n[...truncated at {_MAX_CONTENT_CHARS} chars]"
+        content = (
+            content[:_MAX_CONTENT_CHARS]
+            + f"\n\n[...truncated at {_MAX_CONTENT_CHARS} chars]"
+        )
 
     return content
 
@@ -293,7 +310,9 @@ async def _fetch_pypi_metadata(package_name: str) -> str:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url)
     except httpx.HTTPError as exc:
-        logger.warning("tool_fetch_package_metadata: PyPI HTTP error for %s: %s", package_name, exc)
+        logger.warning(
+            "tool_fetch_package_metadata: PyPI HTTP error for %s: %s", package_name, exc
+        )
         return f"Error: PyPI request failed — {exc}"
 
     if response.status_code == 404:
@@ -337,7 +356,9 @@ async def _fetch_npm_metadata(package_name: str) -> str:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url)
     except httpx.HTTPError as exc:
-        logger.warning("tool_fetch_package_metadata: npm HTTP error for %s: %s", package_name, exc)
+        logger.warning(
+            "tool_fetch_package_metadata: npm HTTP error for %s: %s", package_name, exc
+        )
         return f"Error: npm registry request failed — {exc}"
 
     if response.status_code == 404:

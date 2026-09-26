@@ -73,13 +73,15 @@ def _tool_call(
 def test_role_config_tool_allowlist() -> None:
     from app.services.session_orchestrator import _TOOLS
 
-    assert VALID_ROLES == frozenset({
-        "repo_navigator",
-        "feature_architect",
-        "bug_hunter",
-        "sandbox_verifier",
-        "code_guardian",
-    })
+    assert VALID_ROLES == frozenset(
+        {
+            "repo_navigator",
+            "feature_architect",
+            "bug_hunter",
+            "sandbox_verifier",
+            "code_guardian",
+        }
+    )
     assert set(ROLE_CONFIGS.keys()) == set(VALID_ROLES)
 
     parent_names = {t["function"]["name"] for t in _TOOLS}
@@ -91,7 +93,10 @@ def test_role_config_tool_allowlist() -> None:
 
     # code_guardian is read-only by design — no editor tools.
     guardian_tools = set(ROLE_CONFIGS["code_guardian"].allowed_tools)
-    assert not (guardian_tools & {"str_replace", "create_file", "delete_file", "apply_multi_patch"})
+    assert not (
+        guardian_tools
+        & {"str_replace", "create_file", "delete_file", "apply_multi_patch"}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +125,10 @@ async def test_repo_navigator_blocks_editor_tools() -> None:
 async def test_subagent_runner_emits_sse_events() -> None:
     # format_sse_event must accept the two new event names.
     format_sse_event("subagent_start", {"role": "repo_navigator", "task": "t"})
-    format_sse_event("subagent_done", {"role": "repo_navigator", "summary": "s", "patches_modified": []})
+    format_sse_event(
+        "subagent_done",
+        {"role": "repo_navigator", "summary": "s", "patches_modified": []},
+    )
 
     runner, queue, _llm, _patches = _make_runner(
         role="repo_navigator",
@@ -155,7 +163,9 @@ async def test_subagent_runner_emits_sse_events() -> None:
 async def test_subagent_runner_blocks_recursive_invoke() -> None:
     first = {
         "content": None,
-        "tool_calls": [_tool_call("invoke_subagent", {"role": "repo_navigator", "task": "recurse"})],
+        "tool_calls": [
+            _tool_call("invoke_subagent", {"role": "repo_navigator", "task": "recurse"})
+        ],
         "usage": {},
         "latency_ms": 10,
         "model": "test-model",
@@ -186,7 +196,9 @@ async def test_subagent_runner_blocks_recursive_invoke() -> None:
 @pytest.mark.asyncio
 async def test_subagent_runner_respects_max_iterations() -> None:
     max_iters = ROLE_CONFIGS["sandbox_verifier"].max_iterations
-    runner, queue, llm, _patches = _make_runner(role="sandbox_verifier", task="Run all checks.")
+    runner, queue, llm, _patches = _make_runner(
+        role="sandbox_verifier", task="Run all checks."
+    )
     llm.complete.return_value = {
         "content": None,
         "tool_calls": [_tool_call("glob_files", {"pattern": "**/*.py"})],
@@ -227,10 +239,12 @@ async def test_staged_patches_shared_ref() -> None:
 
     first = {
         "content": None,
-        "tool_calls": [_tool_call(
-            "str_replace",
-            {"path": "src/auth.py", "old_str": "old", "new_str": "new"},
-        )],
+        "tool_calls": [
+            _tool_call(
+                "str_replace",
+                {"path": "src/auth.py", "old_str": "old", "new_str": "new"},
+            )
+        ],
         "usage": {},
         "latency_ms": 10,
         "model": "test-model",
@@ -272,7 +286,7 @@ def test_exec_scan_security_syncs_distinct_session_dict() -> None:
     Without the sync, the scanner would see an empty session dict and pass.
     """
     turn_local: dict[str, str] = {
-        "src/auth.py": "@@ -0,0 +1 @@\n+api_key = \"AKIAIOSFODNN7EXAMPLE\"\n",
+        "src/auth.py": '@@ -0,0 +1 @@\n+api_key = "AKIAIOSFODNN7EXAMPLE"\n',
     }
     runner, _queue, _llm, _patches = _make_runner(
         role="feature_architect",
@@ -308,9 +322,7 @@ async def test_subagent_telemetry_logged() -> None:
             "model": "test-model",
         },
     )
-    with patch(
-        "app.services.session_tools.subagents.logger.info"
-    ) as mock_info:
+    with patch("app.services.session_tools.subagents.logger.info") as mock_info:
         summary = await runner.run()
 
     assert "Exploration complete" in summary

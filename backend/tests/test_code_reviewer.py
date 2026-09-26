@@ -120,13 +120,11 @@ def test_strip_markdown_fences():
     fenced = '```json\n{"risk_score": 10, "summary": "Looks good", "findings": []}\n```'
     assert json.loads(_strip_markdown_fences(fenced))["risk_score"] == 10
 
-    preamble = (
-        'Here is the analysis:\n```\n{"risk_score": 25, "summary": "Edge case in regex", "findings": []}\n```'
-    )
+    preamble = 'Here is the analysis:\n```\n{"risk_score": 25, "summary": "Edge case in regex", "findings": []}\n```'
     assert json.loads(_strip_markdown_fences(preamble))["risk_score"] == 25
 
     conversational = (
-        'Certainly! Below is the requested code review in JSON format:\n\n'
+        "Certainly! Below is the requested code review in JSON format:\n\n"
         '{"risk_score": 40, "summary": "Unhandled null pointer", "findings": []}'
     )
     assert json.loads(_strip_markdown_fences(conversational))["risk_score"] == 40
@@ -146,7 +144,9 @@ def test_format_github_suggestion():
     formatted = format_github_suggestion(with_patch)
     assert "**[SECURITY] [CRITICAL]**" in formatted
     assert "```suggestion" in formatted
-    assert "cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))" in formatted
+    assert (
+        "cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))" in formatted
+    )
 
     without_patch = ReviewFinding(
         file_path="main.py",
@@ -175,21 +175,23 @@ async def test_analyze_diff_empty():
 async def test_analyze_diff_success():
     """Mock LLM response parses successfully on first try."""
     mock_llm_response = {
-        "content": json.dumps({
-            "risk_score": 45,
-            "summary": "Minor unhandled exception on network timeout.",
-            "findings": [
-                {
-                    "file_path": "backend/app/client.py",
-                    "line_start": 25,
-                    "line_end": 28,
-                    "category": "logic",
-                    "severity": "medium",
-                    "critique": "httpx.TimeoutException not caught.",
-                    "suggested_patch": "except (httpx.RequestError, httpx.TimeoutException) as exc:",
-                }
-            ],
-        }),
+        "content": json.dumps(
+            {
+                "risk_score": 45,
+                "summary": "Minor unhandled exception on network timeout.",
+                "findings": [
+                    {
+                        "file_path": "backend/app/client.py",
+                        "line_start": 25,
+                        "line_end": 28,
+                        "category": "logic",
+                        "severity": "medium",
+                        "critique": "httpx.TimeoutException not caught.",
+                        "suggested_patch": "except (httpx.RequestError, httpx.TimeoutException) as exc:",
+                    }
+                ],
+            }
+        ),
         "usage": {"input_tokens": 500, "output_tokens": 150},
         "latency_ms": 320,
         "model": "test-model",
@@ -215,17 +217,21 @@ async def test_analyze_diff_retry_and_recover():
         "usage": {"input_tokens": 400, "output_tokens": 50},
     }
     good_second_response = {
-        "content": json.dumps({
-            "risk_score": 60,
-            "summary": "Corrected score and findings.",
-            "findings": [],
-        }),
+        "content": json.dumps(
+            {
+                "risk_score": 60,
+                "summary": "Corrected score and findings.",
+                "findings": [],
+            }
+        ),
         "usage": {"input_tokens": 450, "output_tokens": 60},
     }
 
     with patch("app.subagents.code_reviewer.LLMClient") as mock_client_cls:
         instance = mock_client_cls.return_value
-        instance.complete = AsyncMock(side_effect=[bad_first_response, good_second_response])
+        instance.complete = AsyncMock(
+            side_effect=[bad_first_response, good_second_response]
+        )
 
         res = await analyze_diff(diff_text="diff --git a/test.py ...")
         assert res.output.risk_score == 60

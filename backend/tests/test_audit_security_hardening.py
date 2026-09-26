@@ -238,7 +238,9 @@ def test_handler_rejects_tokens_minted_for_another_invocation_kind() -> None:
     }
 
 
-def test_handler_accepts_only_correctly_signed_pipeline_and_review_invocations() -> None:
+def test_handler_accepts_only_correctly_signed_pipeline_and_review_invocations() -> (
+    None
+):
     """Positive control: a valid signature is still honoured end to end."""
     import lambda_handler
 
@@ -246,9 +248,7 @@ def test_handler_accepts_only_correctly_signed_pipeline_and_review_invocations()
     review_id = str(uuid.uuid4())
     with (
         patch("app.config.settings.audit_self_invoke_secret", SELF_INVOKE_SECRET),
-        patch(
-            "lambda_handler._run_pipeline", new_callable=AsyncMock
-        ) as run_pipeline,
+        patch("lambda_handler._run_pipeline", new_callable=AsyncMock) as run_pipeline,
         patch(
             "lambda_handler._run_review_pipeline", new_callable=AsyncMock
         ) as run_review,
@@ -361,7 +361,9 @@ def test_public_handler_has_no_unsigned_dispatch_branch() -> None:
         patch("lambda_handler._run_audit", new_callable=AsyncMock) as run_audit,
         patch("lambda_handler._run_pipeline", new_callable=AsyncMock) as run_pipeline,
     ):
-        bare = lambda_handler.handler({"operation": "dispatch_audits"}, SimpleNamespace())
+        bare = lambda_handler.handler(
+            {"operation": "dispatch_audits"}, SimpleNamespace()
+        )
         signed = lambda_handler.handler(
             {"operation": "dispatch_audits", "token": valid_audit_token},
             SimpleNamespace(),
@@ -402,7 +404,11 @@ def test_public_handler_rejects_non_dict_and_malformed_audit_identifiers() -> No
         )
         malformed = [
             lambda_handler.handler(
-                {"audit_id": candidate, "dispatch_fence_token": FENCE, "token": "0" * 64},
+                {
+                    "audit_id": candidate,
+                    "dispatch_fence_token": FENCE,
+                    "token": "0" * 64,
+                },
                 SimpleNamespace(),
             )
             for candidate in (
@@ -568,7 +574,9 @@ def test_self_invocation_helpers_refuse_to_mint_or_verify_without_a_secret() -> 
             audit_pipeline.audit_child_invocation_token(AUDIT_ID, FENCE)
         with pytest.raises(SelfInvocationError):
             audit_pipeline.audit_dispatch_fence_token(AUDIT_ID, 1)
-        assert not audit_pipeline.verify_audit_self_invocation(AUDIT_ID, FENCE, "0" * 64)
+        assert not audit_pipeline.verify_audit_self_invocation(
+            AUDIT_ID, FENCE, "0" * 64
+        )
         assert not audit_pipeline.verify_audit_dispatch_fence(AUDIT_ID, 1, "0" * 64)
 
 
@@ -622,7 +630,12 @@ def test_auditor_installation_permissions_reject_every_non_read_only_scope() -> 
                 {"permissions": permissions}
             )
 
-    for malformed in ({}, {"permissions": {}}, {"permissions": "read"}, {"permissions": None}):
+    for malformed in (
+        {},
+        {"permissions": {}},
+        {"permissions": "read"},
+        {"permissions": None},
+    ):
         with pytest.raises(auditor_credentials.AuditorCredentialError):
             auditor_credentials._validate_read_only_permissions(malformed)
 
@@ -666,9 +679,7 @@ class CredentialStreamClient:
         headers: dict[str, str] | None = None,
     ) -> None:
         self.chunks = CountingChunks(payload, CREDENTIAL_CHUNK_BYTES)
-        self._response = MagicMock(
-            status_code=status_code, is_error=status_code >= 400
-        )
+        self._response = MagicMock(status_code=status_code, is_error=status_code >= 400)
         self._response.headers = dict(headers or {})
         self._response.aiter_bytes = MagicMock(return_value=self.chunks)
         self._stream = MagicMock()
@@ -718,7 +729,9 @@ def _configured_credential_client(client: CredentialStreamClient) -> Any:
     return _CredentialPatches(client)
 
 
-def _credential_body(token: str = "read-only-installation-token", padding: int = 0) -> bytes:
+def _credential_body(
+    token: str = "read-only-installation-token", padding: int = 0
+) -> bytes:
     return json.dumps(
         {
             "token": token,
@@ -772,7 +785,9 @@ def test_auditor_reads_never_fall_back_to_the_global_personal_access_token() -> 
 
 
 @pytest.mark.asyncio
-async def test_auditor_read_helpers_issue_no_request_without_a_read_only_token() -> None:
+async def test_auditor_read_helpers_issue_no_request_without_a_read_only_token() -> (
+    None
+):
     """Every auditor read path must fail before touching the network.
 
     The flag is asserted behaviourally rather than by reading source: a call
@@ -786,7 +801,9 @@ async def test_auditor_read_helpers_issue_no_request_without_a_read_only_token()
     resolved: list[tuple[str, bool, Any]] = []
     real_build_headers = inspect.unwrap(_build_headers)
 
-    def recording_build_headers(token=None, accept="application/vnd.github+json", allow_global_token=True):
+    def recording_build_headers(
+        token=None, accept="application/vnd.github+json", allow_global_token=True
+    ):
         resolved.append((inspect.stack()[0].function, allow_global_token, token))
         return real_build_headers(
             token=token, accept=accept, allow_global_token=allow_global_token
@@ -825,7 +842,9 @@ async def test_auditor_read_helpers_issue_no_request_without_a_read_only_token()
 
     # Every audited read path refused the global fallback rather than using it.
     assert resolved, "expected the auditor read paths to build request headers"
-    assert all(allow_global is False for _caller, allow_global, _t in resolved), resolved
+    assert all(
+        allow_global is False for _caller, allow_global, _t in resolved
+    ), resolved
     assert all(token is None for _caller, _a, token in resolved), resolved
     # `deny_external_http` turns any request that escaped into an AssertionError,
     # so reaching this line proves not one outbound call was attempted.
@@ -861,7 +880,8 @@ async def test_auditor_credential_provider_fails_closed_without_configuration() 
         with (
             patch("app.github.auditor.settings.github_auditor_app_id", app_id),
             patch(
-                "app.github.auditor.settings.github_auditor_app_private_key", private_key
+                "app.github.auditor.settings.github_auditor_app_private_key",
+                private_key,
             ),
             patch(
                 "app.github.auditor.httpx.AsyncClient",
@@ -918,13 +938,13 @@ async def test_oversized_credential_response_is_rejected_before_json_parsing() -
 
 
 @pytest.mark.asyncio
-async def test_declared_oversized_credential_response_is_rejected_before_reading() -> None:
+async def test_declared_oversized_credential_response_is_rejected_before_reading() -> (
+    None
+):
     client = CredentialStreamClient(
         _credential_body(),
         headers={
-            "content-length": str(
-                auditor_credentials.MAX_CREDENTIAL_RESPONSE_BYTES + 1
-            )
+            "content-length": str(auditor_credentials.MAX_CREDENTIAL_RESPONSE_BYTES + 1)
         },
     )
     with (
@@ -950,9 +970,7 @@ async def test_response_just_under_the_cap_still_parses_and_validates() -> None:
             SimpleNamespace(auditor_github_install_id=55)
         )
         assert token == "read-only-installation-token"
-        assert (
-            auditor_credentials._TOKEN_CACHE[55][0] == "read-only-installation-token"
-        )
+        assert auditor_credentials._TOKEN_CACHE[55][0] == "read-only-installation-token"
 
 
 # ---------------------------------------------------------------------------
@@ -1065,9 +1083,7 @@ async def test_webhook_body_limit_boundary_is_exact() -> None:
                 yield chunk
 
     limit = webhooks.MAX_PAYLOAD_SIZE_BYTES
-    at_limit = await webhooks._read_limited_body(
-        cast(Any, FakeRequest(b"a" * limit))
-    )
+    at_limit = await webhooks._read_limited_body(cast(Any, FakeRequest(b"a" * limit)))
     assert len(at_limit) == limit
 
     with pytest.raises(HTTPException) as excinfo:

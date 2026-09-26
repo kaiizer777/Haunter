@@ -36,6 +36,7 @@ from app.services.session_tools.recon import (
 # Path Traversal Protection
 # ---------------------------------------------------------------------------
 
+
 def test_validate_file_path_rejects_traversal() -> None:
     """Directory traversal and absolute paths must be rejected with ValueError."""
     with pytest.raises(ValueError, match="Directory traversal rejected"):
@@ -52,7 +53,10 @@ def test_validate_file_path_rejects_traversal() -> None:
 
     # Valid paths must pass unchanged
     assert _validate_file_path("src/main.py") == "src/main.py"
-    assert _validate_file_path("backend/app/services/recon.py") == "backend/app/services/recon.py"
+    assert (
+        _validate_file_path("backend/app/services/recon.py")
+        == "backend/app/services/recon.py"
+    )
     assert _validate_file_path(".") == "."
 
 
@@ -60,12 +64,15 @@ def test_validate_file_path_rejects_traversal() -> None:
 # read_file_slice Tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_read_file_slice_indexing_and_bounds() -> None:
     """read_file_slice must return 1-based line-numbered slices."""
     file_content = "line 1\nline 2\nline 3\nline 4\nline 5"
 
-    with patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock) as mock_fetch:
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock
+    ) as mock_fetch:
         mock_fetch.return_value = file_content
 
         # Slice lines 2 to 4
@@ -107,7 +114,9 @@ async def test_read_file_slice_validation_errors() -> None:
     """read_file_slice must raise ValueError on start > end, start < 1, or start > total."""
     file_content = "alpha\nbeta\ngamma"
 
-    with patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock) as mock_fetch:
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock
+    ) as mock_fetch:
         mock_fetch.return_value = file_content
 
         # start_line > end_line
@@ -158,7 +167,9 @@ async def test_read_file_slice_validation_errors() -> None:
 @pytest.mark.asyncio
 async def test_read_file_slice_file_not_found() -> None:
     """read_file_slice must return descriptive message when file does not exist."""
-    with patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock) as mock_fetch:
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock
+    ) as mock_fetch:
         mock_fetch.return_value = None
 
         result = await read_file_slice(
@@ -176,6 +187,7 @@ async def test_read_file_slice_file_not_found() -> None:
 # glob_files Tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_glob_files_wildcards() -> None:
     """glob_files must match paths using git-style recursive wildcards."""
@@ -192,7 +204,9 @@ async def test_glob_files_wildcards() -> None:
         ]
     }
 
-    with patch("app.services.session_tools.recon.fetch_git_tree", new_callable=AsyncMock) as mock_tree_fetch:
+    with patch(
+        "app.services.session_tools.recon.fetch_git_tree", new_callable=AsyncMock
+    ) as mock_tree_fetch:
         mock_tree_fetch.return_value = mock_tree
 
         # Match all auth files anywhere
@@ -211,7 +225,10 @@ async def test_glob_files_wildcards() -> None:
             repo="repo",
             base_sha="sha1",
         )
-        assert comp_matches == ["src/components/button.tsx", "src/components/ui/input.tsx"]
+        assert comp_matches == [
+            "src/components/button.tsx",
+            "src/components/ui/input.tsx",
+        ]
 
         # Exclude hidden by default
         all_hidden_excluded = await tool_glob_files(
@@ -250,6 +267,7 @@ async def test_glob_files_wildcards() -> None:
 # grep_search Tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_grep_search_regex_and_substring() -> None:
     """grep_search must support substring and regex matching with case sensitivity."""
@@ -280,8 +298,13 @@ async def test_grep_search_regex_and_substring() -> None:
         return files.get(path)
 
     with (
-        patch("app.services.session_tools.recon.fetch_git_tree", new_callable=AsyncMock) as mock_tree_fetch,
-        patch("app.services.session_tools.recon.fetch_file_content", side_effect=_mock_content),
+        patch(
+            "app.services.session_tools.recon.fetch_git_tree", new_callable=AsyncMock
+        ) as mock_tree_fetch,
+        patch(
+            "app.services.session_tools.recon.fetch_file_content",
+            side_effect=_mock_content,
+        ),
     ):
         mock_tree_fetch.return_value = mock_tree
 
@@ -361,6 +384,7 @@ async def test_grep_search_regex_and_substring() -> None:
 # list_directory Tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_list_directory_depth_limiting() -> None:
     """list_directory must respect hierarchical depth limits."""
@@ -374,7 +398,9 @@ async def test_list_directory_depth_limiting() -> None:
         ]
     }
 
-    with patch("app.services.session_tools.recon.fetch_git_tree", new_callable=AsyncMock) as mock_tree_fetch:
+    with patch(
+        "app.services.session_tools.recon.fetch_git_tree", new_callable=AsyncMock
+    ) as mock_tree_fetch:
         mock_tree_fetch.return_value = mock_tree
 
         # Root listing with depth 1
@@ -448,6 +474,7 @@ async def test_list_directory_depth_limiting() -> None:
 # Orchestrator Dispatch Tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_orchestrator_dispatch_recon_tools() -> None:
     """SessionOrchestrator._dispatch_tool routes recon tools cleanly without raising unhandled errors."""
@@ -460,7 +487,9 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
     mock_queue = AsyncMock(spec=SseQueue)
 
     # 1. read_file_slice dispatch
-    with patch("app.services.session_orchestrator.tool_read_file_slice", new_callable=AsyncMock) as m:
+    with patch(
+        "app.services.session_orchestrator.tool_read_file_slice", new_callable=AsyncMock
+    ) as m:
         m.return_value = "1: print('hello')"
         res = await orchestrator._dispatch_tool(
             tool_name="read_file_slice",
@@ -483,7 +512,9 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
         )
 
     # 2. grep_search dispatch
-    with patch("app.services.session_orchestrator.tool_grep_search", new_callable=AsyncMock) as m:
+    with patch(
+        "app.services.session_orchestrator.tool_grep_search", new_callable=AsyncMock
+    ) as m:
         m.return_value = "src/main.py:10: def foo():"
         res = await orchestrator._dispatch_tool(
             tool_name="grep_search",
@@ -507,7 +538,9 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
         )
 
     # 3. glob_files dispatch
-    with patch("app.services.session_orchestrator.tool_glob_files", new_callable=AsyncMock) as m:
+    with patch(
+        "app.services.session_orchestrator.tool_glob_files", new_callable=AsyncMock
+    ) as m:
         m.return_value = ["src/a.py", "src/b.py"]
         res = await orchestrator._dispatch_tool(
             tool_name="glob_files",
@@ -521,7 +554,9 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
         assert res == "src/a.py\nsrc/b.py"
 
     # 4. list_directory dispatch
-    with patch("app.services.session_orchestrator.tool_list_directory", new_callable=AsyncMock) as m:
+    with patch(
+        "app.services.session_orchestrator.tool_list_directory", new_callable=AsyncMock
+    ) as m:
         m.return_value = ["app/", "main.py"]
         res = await orchestrator._dispatch_tool(
             tool_name="list_directory",
@@ -535,7 +570,10 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
         assert res == "app/\nmain.py"
 
     # 5. Error containment (e.g. ValueError or GitHubClientError returns error string)
-    with patch("app.services.session_orchestrator.tool_read_file_slice", side_effect=ValueError("Invalid range")):
+    with patch(
+        "app.services.session_orchestrator.tool_read_file_slice",
+        side_effect=ValueError("Invalid range"),
+    ):
         res = await orchestrator._dispatch_tool(
             tool_name="read_file_slice",
             args={"path": "src/main.py", "start_line": 5, "end_line": 1},

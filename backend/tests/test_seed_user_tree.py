@@ -99,9 +99,7 @@ def _make_gzipped_tarball(
 
 def _mock_mirror_seed_endpoints(rx: respx.MockRouter) -> None:
     """Mock the standard mirror endpoints called after tarball parsing."""
-    rx.get(f"/repos/{_MIRROR_REPO}").mock(
-        return_value=_ok({"default_branch": "main"})
-    )
+    rx.get(f"/repos/{_MIRROR_REPO}").mock(return_value=_ok({"default_branch": "main"}))
     rx.get(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(
         return_value=_ok({"object": {"sha": _PARENT_SHA}})
     )
@@ -120,9 +118,7 @@ def _mock_mirror_seed_endpoints(rx: respx.MockRouter) -> None:
     rx.post(f"/repos/{_MIRROR_REPO}/git/commits").mock(
         return_value=_ok({"sha": _NEW_COMMIT_SHA}, status=201)
     )
-    rx.patch(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(
-        return_value=_ok({})
-    )
+    rx.patch(f"/repos/{_MIRROR_REPO}/git/refs/heads/main").mock(return_value=_ok({}))
 
 
 # ---------------------------------------------------------------------------
@@ -134,11 +130,13 @@ def _mock_mirror_seed_endpoints(rx: respx.MockRouter) -> None:
 async def test_seed_success_path(caplog: pytest.LogCaptureFixture) -> None:
     """All GitHub API calls succeed; the function returns True."""
     caplog.set_level(logging.INFO, logger="app.sandbox.github_actions_runner")
-    tar_bytes = _make_tarball({
-        "src/main.py": b"print('main')",
-        ".github/workflows/haunter-test-py.yml": b"name: CI",
-        "tests/test_main.py": b"assert True",
-    })
+    tar_bytes = _make_tarball(
+        {
+            "src/main.py": b"print('main')",
+            ".github/workflows/haunter-test-py.yml": b"name: CI",
+            "tests/test_main.py": b"assert True",
+        }
+    )
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
@@ -160,7 +158,8 @@ async def test_seed_success_path(caplog: pytest.LogCaptureFixture) -> None:
     assert ok is True, "happy path must return True"
 
     seeded_logs = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "seeded" in r.getMessage() and _MIRROR_REPO in r.getMessage()
     ]
     assert seeded_logs, "expected a 'seeded' INFO log on the happy path"
@@ -172,11 +171,13 @@ async def test_seed_success_path(caplog: pytest.LogCaptureFixture) -> None:
 async def test_seed_pat_fallback_on_403(caplog: pytest.LogCaptureFixture) -> None:
     """App 403 on tarball fetch transparently falls back to PAT; function still succeeds."""
     caplog.set_level(logging.INFO)
-    tar_bytes = _make_tarball({
-        "src/main.py": b"print('main')",
-        ".github/workflows/haunter-test-py.yml": b"name: CI",
-        "tests/test_main.py": b"assert True",
-    })
+    tar_bytes = _make_tarball(
+        {
+            "src/main.py": b"print('main')",
+            ".github/workflows/haunter-test-py.yml": b"name: CI",
+            "tests/test_main.py": b"assert True",
+        }
+    )
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         tarball_route = rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
@@ -207,7 +208,8 @@ async def test_seed_pat_fallback_on_403(caplog: pytest.LogCaptureFixture) -> Non
     assert second_auth == f"Bearer {_PAT_TOKEN}"
 
     fallback_logs = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "PAT" in r.getMessage() and "GET /tarball 403" in r.getMessage()
     ]
     assert fallback_logs, "expected a PAT-fallback WARNING on 403"
@@ -219,9 +221,11 @@ async def test_seed_empty_tree_returns_true_no_commit(
 ) -> None:
     """Tarball contains no files or only filtered files; function returns True without writing."""
     caplog.set_level(logging.INFO, logger="app.sandbox.github_actions_runner")
-    tar_bytes = _make_tarball({
-        ".github/workflows/ci.yml": b"name: ci",
-    })
+    tar_bytes = _make_tarball(
+        {
+            ".github/workflows/ci.yml": b"name: ci",
+        }
+    )
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
@@ -239,14 +243,16 @@ async def test_seed_empty_tree_returns_true_no_commit(
                 max_files=50,
             )
         commit_calls = [
-            c for c in rx.calls
+            c
+            for c in rx.calls
             if c.request.method == "POST"
             and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/commits"
         ]
 
     assert ok is True, "empty tree must return True (early-return branch)"
     empty_logs = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "nothing to seed" in r.getMessage() and _MIRROR_REPO in r.getMessage()
     ]
     assert empty_logs, "expected a 'nothing to seed' INFO log on empty tree"
@@ -263,10 +269,12 @@ async def test_seed_via_tarball_happy_path(caplog: pytest.LogCaptureFixture) -> 
     """Mock GET /tarball/{sha} -> real tarball; assert blobs/tree/commit/ref
     sequence is called with the mirror's local blob SHAs (not user's)."""
     caplog.set_level(logging.INFO, logger="app.sandbox.github_actions_runner")
-    tar_bytes = _make_tarball({
-        "src/app.py": b"x = 1\n",
-        "tests/test_app.py": b"def test_app(): pass\n",
-    })
+    tar_bytes = _make_tarball(
+        {
+            "src/app.py": b"x = 1\n",
+            "tests/test_app.py": b"def test_app(): pass\n",
+        }
+    )
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
@@ -286,20 +294,28 @@ async def test_seed_via_tarball_happy_path(caplog: pytest.LogCaptureFixture) -> 
             )
 
         blob_calls = [
-            c for c in rx.calls
-            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+            c
+            for c in rx.calls
+            if c.request.method == "POST"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
         ]
         tree_calls = [
-            c for c in rx.calls
-            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/trees"
+            c
+            for c in rx.calls
+            if c.request.method == "POST"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/trees"
         ]
         commit_calls = [
-            c for c in rx.calls
-            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/commits"
+            c
+            for c in rx.calls
+            if c.request.method == "POST"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/commits"
         ]
         ref_calls = [
-            c for c in rx.calls
-            if c.request.method == "PATCH" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/refs/heads/main"
+            c
+            for c in rx.calls
+            if c.request.method == "PATCH"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/refs/heads/main"
         ]
 
     assert ok is True
@@ -312,7 +328,8 @@ async def test_seed_via_tarball_happy_path(caplog: pytest.LogCaptureFixture) -> 
     assert len(ref_calls) == 1
 
     seeded_logs = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "seeded" in r.getMessage() and "via tarball" in r.getMessage()
     ]
     assert seeded_logs, "expected 'via tarball' in seed log line"
@@ -322,11 +339,13 @@ async def test_seed_via_tarball_happy_path(caplog: pytest.LogCaptureFixture) -> 
 async def test_seed_via_tarball_blocks_dot_git_and_workflows() -> None:
     """Tarball includes .git/HEAD and .github/workflows/x.yml; assert those
     are filtered before blob creation."""
-    tar_bytes = _make_tarball({
-        "src/main.py": b"print(1)",
-        ".git/HEAD": b"ref: refs/heads/main",
-        ".github/workflows/x.yml": b"name: x",
-    })
+    tar_bytes = _make_tarball(
+        {
+            "src/main.py": b"print(1)",
+            ".git/HEAD": b"ref: refs/heads/main",
+            ".github/workflows/x.yml": b"name: x",
+        }
+    )
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
@@ -346,8 +365,10 @@ async def test_seed_via_tarball_blocks_dot_git_and_workflows() -> None:
             )
 
         blob_calls = [
-            c for c in rx.calls
-            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+            c
+            for c in rx.calls
+            if c.request.method == "POST"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
         ]
 
     assert ok is True
@@ -357,10 +378,12 @@ async def test_seed_via_tarball_blocks_dot_git_and_workflows() -> None:
 @pytest.mark.asyncio
 async def test_seed_via_tarball_binary_file_filtered() -> None:
     """Tarball includes an oversized file (> 5 MB); assert it's filtered (not 422'd)."""
-    tar_bytes = _make_tarball({
-        "src/main.py": b"print(1)",
-        "assets/large.png": b"PNG" + b"\x00" * (6 * 1024 * 1024),
-    })
+    tar_bytes = _make_tarball(
+        {
+            "src/main.py": b"print(1)",
+            "assets/large.png": b"PNG" + b"\x00" * (6 * 1024 * 1024),
+        }
+    )
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
@@ -380,8 +403,10 @@ async def test_seed_via_tarball_binary_file_filtered() -> None:
             )
 
         blob_calls = [
-            c for c in rx.calls
-            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+            c
+            for c in rx.calls
+            if c.request.method == "POST"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
         ]
 
     assert ok is True
@@ -414,8 +439,10 @@ async def test_seed_via_tarball_symlink_filtered() -> None:
             )
 
         blob_calls = [
-            c for c in rx.calls
-            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+            c
+            for c in rx.calls
+            if c.request.method == "POST"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
         ]
 
     assert ok is True
@@ -425,10 +452,9 @@ async def test_seed_via_tarball_symlink_filtered() -> None:
 @pytest.mark.asyncio
 async def test_seed_via_tarball_cap_respected() -> None:
     """Tarball has 10 files; seed_max_files=5; assert only 5 blobs created."""
-    tar_bytes = _make_tarball({
-        f"file{i}.py": f"print({i})".encode()
-        for i in range(10)
-    })
+    tar_bytes = _make_tarball(
+        {f"file{i}.py": f"print({i})".encode() for i in range(10)}
+    )
 
     with respx.mock(base_url=_GITHUB_API, assert_all_called=False) as rx:
         rx.get(f"/repos/{_USER_REPO}/tarball/{_USER_SHA}").mock(
@@ -448,8 +474,10 @@ async def test_seed_via_tarball_cap_respected() -> None:
             )
 
         blob_calls = [
-            c for c in rx.calls
-            if c.request.method == "POST" and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
+            c
+            for c in rx.calls
+            if c.request.method == "POST"
+            and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/blobs"
         ]
 
     assert ok is True
@@ -489,7 +517,8 @@ async def test_seed_via_tarball_size_cap_rejects_oversized(
 
     assert ok is False
     fail_logs = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "failed to seed" in r.getMessage() and "HTTPStatusError" in r.getMessage()
     ]
     assert fail_logs, "expected HTTPStatusError in warning log"
@@ -519,14 +548,16 @@ async def test_seed_via_tarball_404_continues_with_fresh_mirror(
                 max_files=50,
             )
         commit_calls = [
-            c for c in rx.calls
+            c
+            for c in rx.calls
             if c.request.method == "POST"
             and c.request.url.path == f"/repos/{_MIRROR_REPO}/git/commits"
         ]
 
     assert ok is False, "tarball 404 must return False"
     fail_logs = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "failed to seed" in r.getMessage() and _MIRROR_REPO in r.getMessage()
     ]
     assert fail_logs, "expected 'failed to seed' WARNING log on 404"
@@ -583,13 +614,13 @@ async def test_seed_via_gzipped_tarball_happy_path(
     assert ok is True, "gzipped tarball seed must return True"
 
     seeded_logs = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "seeded" in r.getMessage() and _MIRROR_REPO in r.getMessage()
     ]
     assert seeded_logs, "expected a 'seeded' INFO log on gzipped happy path"
     assert "2 file(s)" in seeded_logs[0].getMessage()
     assert "via tarball" in seeded_logs[0].getMessage()
-
 
 
 # ---------------------------------------------------------------------------
@@ -630,8 +661,8 @@ def test_file_priority_tier_test_files() -> None:
     assert _file_priority_tier("tests/test_foo.py") == 2
     assert _file_priority_tier("test/test_bar.py") == 2
     assert _file_priority_tier("tests/unit/test_baz.py") == 2
-    assert _file_priority_tier("test_models.py") == 2   # root-level test_ prefix
-    assert _file_priority_tier("models_test.py") == 2   # *_test.py suffix
+    assert _file_priority_tier("test_models.py") == 2  # root-level test_ prefix
+    assert _file_priority_tier("models_test.py") == 2  # *_test.py suffix
 
 
 def test_file_priority_tier_source_files() -> None:
@@ -756,7 +787,8 @@ async def test_seed_priority_files_seeded_on_large_repo() -> None:
 
         # Verify blob count is exactly 50 (the cap), using rx.calls (scoped to this mock).
         blob_calls = [
-            c for c in rx.calls
+            c
+            for c in rx.calls
             if c.request.method == "POST"
             and f"/repos/{_MIRROR_REPO}/git/blobs" in str(c.request.url)
         ]

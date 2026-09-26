@@ -65,7 +65,9 @@ class OpenAIAdapter:
             }
         """
         if not self._api_key:
-            raise LLMAuthenticationError("OPENAI_API_KEY is not configured in settings or environment")
+            raise LLMAuthenticationError(
+                "OPENAI_API_KEY is not configured in settings or environment"
+            )
 
         target_model = model or self.default_model
         endpoint = urljoin(self.base_url, "chat/completions")
@@ -77,7 +79,10 @@ class OpenAIAdapter:
         # Clamp max_tokens to the OpenAI output budget if inflated test values are passed.
         if "max_tokens" in kwargs:
             requested = kwargs["max_tokens"]
-            if isinstance(requested, (int, float)) and requested > OPENAI_MAX_OUTPUT_TOKENS:
+            if (
+                isinstance(requested, (int, float))
+                and requested > OPENAI_MAX_OUTPUT_TOKENS
+            ):
                 logger.debug(
                     "openai: clamping max_tokens %d -> %d",
                     requested,

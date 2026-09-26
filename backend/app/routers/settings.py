@@ -71,7 +71,11 @@ async def _get_user_repo_or_404(
 
 
 @router.get("/repos/{repo_id}/settings", response_model=RepoSettingsOut)
-@router.get("/api/repos/{repo_id}/settings", response_model=RepoSettingsOut, include_in_schema=False)
+@router.get(
+    "/api/repos/{repo_id}/settings",
+    response_model=RepoSettingsOut,
+    include_in_schema=False,
+)
 async def get_settings(
     repo_id: uuid.UUID,
     current_user: Annotated[User, Depends(get_current_user)],
@@ -87,7 +91,11 @@ async def get_settings(
 
 
 @router.patch("/repos/{repo_id}/settings", response_model=RepoSettingsOut)
-@router.patch("/api/repos/{repo_id}/settings", response_model=RepoSettingsOut, include_in_schema=False)
+@router.patch(
+    "/api/repos/{repo_id}/settings",
+    response_model=RepoSettingsOut,
+    include_in_schema=False,
+)
 async def patch_settings(
     repo_id: uuid.UUID,
     body: RepoSettingsUpdate,
@@ -104,12 +112,21 @@ async def patch_settings(
     updates.pop("audit_triggers", None)
 
     updated = await update_repo_settings(db, repo_id, updates)
-    logger.info("Updated repo settings: repo_id=%s user=%s version=%d", repo_id, current_user.id, updated.settings_version)
+    logger.info(
+        "Updated repo settings: repo_id=%s user=%s version=%d",
+        repo_id,
+        current_user.id,
+        updated.settings_version,
+    )
     return RepoSettingsOut.model_validate(updated)
 
 
 @router.post("/repos/{repo_id}/settings/preset", response_model=RepoSettingsOut)
-@router.post("/api/repos/{repo_id}/settings/preset", response_model=RepoSettingsOut, include_in_schema=False)
+@router.post(
+    "/api/repos/{repo_id}/settings/preset",
+    response_model=RepoSettingsOut,
+    include_in_schema=False,
+)
 async def post_preset(
     repo_id: uuid.UUID,
     body: PresetApplyIn,
@@ -124,12 +141,23 @@ async def post_preset(
     apply_preset(settings, body.preset)
     await db.commit()
     await db.refresh(settings)
-    logger.info("Applied preset '%s' to repo_id=%s by user=%s", body.preset, repo_id, current_user.id)
+    logger.info(
+        "Applied preset '%s' to repo_id=%s by user=%s",
+        body.preset,
+        repo_id,
+        current_user.id,
+    )
     return RepoSettingsOut.model_validate(settings)
 
 
-@router.post("/repos/{repo_id}/settings/preset/{preset_name}", response_model=RepoSettingsOut)
-@router.post("/api/repos/{repo_id}/settings/preset/{preset_name}", response_model=RepoSettingsOut, include_in_schema=False)
+@router.post(
+    "/repos/{repo_id}/settings/preset/{preset_name}", response_model=RepoSettingsOut
+)
+@router.post(
+    "/api/repos/{repo_id}/settings/preset/{preset_name}",
+    response_model=RepoSettingsOut,
+    include_in_schema=False,
+)
 async def post_preset_path(
     repo_id: uuid.UUID,
     preset_name: str,
@@ -152,7 +180,12 @@ async def post_preset_path(
     apply_preset(settings, canonical)
     await db.commit()
     await db.refresh(settings)
-    logger.info("Applied preset '%s' via path to repo_id=%s by user=%s", canonical, repo_id, current_user.id)
+    logger.info(
+        "Applied preset '%s' via path to repo_id=%s by user=%s",
+        canonical,
+        repo_id,
+        current_user.id,
+    )
     return RepoSettingsOut.model_validate(settings)
 
 
@@ -162,7 +195,9 @@ async def post_preset_path(
 
 
 @router.get("/api/settings/repos", response_model=list[RepoWithSettingsOut])
-@router.get("/settings/repos", response_model=list[RepoWithSettingsOut], include_in_schema=False)
+@router.get(
+    "/settings/repos", response_model=list[RepoWithSettingsOut], include_in_schema=False
+)
 async def list_repos_with_settings(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -210,7 +245,9 @@ async def list_repos_with_settings(
 
 
 @router.patch("/api/settings/repos/{repo_id}", response_model=RepoSettingsOut)
-@router.patch("/settings/repos/{repo_id}", response_model=RepoSettingsOut, include_in_schema=False)
+@router.patch(
+    "/settings/repos/{repo_id}", response_model=RepoSettingsOut, include_in_schema=False
+)
 async def patch_settings_legacy_path(
     repo_id: uuid.UUID,
     body: RepoSettingsUpdate,
@@ -221,8 +258,14 @@ async def patch_settings_legacy_path(
     return await patch_settings(repo_id, body, current_user, db)
 
 
-@router.post("/api/settings/repos/{repo_id}/preset/{preset_name}", response_model=RepoSettingsOut)
-@router.post("/settings/repos/{repo_id}/preset/{preset_name}", response_model=RepoSettingsOut, include_in_schema=False)
+@router.post(
+    "/api/settings/repos/{repo_id}/preset/{preset_name}", response_model=RepoSettingsOut
+)
+@router.post(
+    "/settings/repos/{repo_id}/preset/{preset_name}",
+    response_model=RepoSettingsOut,
+    include_in_schema=False,
+)
 async def post_preset_legacy_path(
     repo_id: uuid.UUID,
     preset_name: str,

@@ -96,12 +96,14 @@ async def _get_provider_config(key: str, env_default: str) -> str:
 async def get_active_hosting_provider() -> str:
     """Return the active HOSTING_PROVIDER (aws), hot-switchable via DB."""
     from app.config import settings
+
     return await _get_provider_config("hosting_provider", settings.hosting_provider)
 
 
 async def get_active_sandbox_provider() -> str:
     """Return the active SANDBOX_PROVIDER (aws), hot-switchable via DB."""
     from app.config import settings
+
     return await _get_provider_config("sandbox_provider", settings.sandbox_provider)
 
 
@@ -200,6 +202,7 @@ class AWSHostingAdapter(HostingAdapter):
                 "falling back to in-process BackgroundTasks — pipeline may not execute on Lambda"
             )
             from app.orchestrator import handle_failed_run
+
             background_tasks.add_task(handle_failed_run, run_id)
             return
 
@@ -244,6 +247,7 @@ class AWSHostingAdapter(HostingAdapter):
                 "using in-process BackgroundTasks for code review"
             )
             from app.services.review_orchestrator import run_code_review_pipeline
+
             background_tasks.add_task(run_code_review_pipeline, review_id)
             return
 
@@ -349,4 +353,3 @@ async def get_hosting_adapter(provider: str | None = None) -> AWSHostingAdapter:
     if provider is None:
         await _get_provider_config("HOSTING_PROVIDER", "aws")
     return AWSHostingAdapter()
-

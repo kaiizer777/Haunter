@@ -29,7 +29,6 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -86,7 +85,7 @@ def _pearson_correlation(confidences: list[int], passed: list[int]) -> float | N
     num = 0.0
     sum_sq_c = 0.0
     sum_sq_p = 0.0
-    for c, p in zip(confidences, passed):
+    for c, p in zip(confidences, passed, strict=False):
         dc = c - mean_c
         dp = p - mean_p
         num += dc * dp
@@ -229,7 +228,7 @@ async def _live_fix_output(
                 "You are an expert Python engineer. Given a CI failure diagnosis, "
                 "produce a confidence score (0-100) for how confident you are that "
                 "the root cause is correctly identified. Respond ONLY with JSON: "
-                "{\"confidence\": <int>, \"strategy_notes\": \"<string>\"}"
+                '{"confidence": <int>, "strategy_notes": "<string>"}'
             ),
         },
         {
@@ -255,6 +254,7 @@ async def _live_fix_output(
     except (json.JSONDecodeError, ValueError, TypeError):
         # LLM returned non-JSON — extract first integer found
         import re
+
         match = re.search(r"\b(\d{1,3})\b", content)
         confidence = int(match.group(1)) if match else 50
         strategy_notes = content[:200]
@@ -296,7 +296,9 @@ def _score_context(
 
     Returns {score (0.0-1.0), matched_keywords, total_keywords}.
     """
-    expected_kws = [kw.lower() for kw in fixture.get("expected_root_cause_keywords", [])]
+    expected_kws = [
+        kw.lower() for kw in fixture.get("expected_root_cause_keywords", [])
+    ]
     summary_lower = (context_result.get("diagnosis_summary") or "").lower()
 
     matched = [kw for kw in expected_kws if kw in summary_lower]
@@ -306,13 +308,13 @@ def _score_context(
         "score": round(score, 4),
         "matched_keywords": matched,
         "total_keywords": len(expected_kws),
-        "diagnosis_summary_snippet": (context_result.get("diagnosis_summary") or "")[:200],
+        "diagnosis_summary_snippet": (context_result.get("diagnosis_summary") or "")[
+            :200
+        ],
     }
 
 
-def _score_fix(
-    fixture: dict[str, Any], fix_result: dict[str, Any]
-) -> dict[str, Any]:
+def _score_fix(fixture: dict[str, Any], fix_result: dict[str, Any]) -> dict[str, Any]:
     """
     Compute fix_generator score for one fixture.
 
@@ -374,7 +376,9 @@ async def run_eval(
     mode_label = "DRY-RUN" if dry_run else "LIVE"
     logger.info(
         "Starting eval run: mode=%s fixtures=%d model_config_id=%s",
-        mode_label, len(selected), model_config_id,
+        mode_label,
+        len(selected),
+        model_config_id,
     )
 
     per_fixture_results: list[dict[str, Any]] = []
@@ -393,7 +397,9 @@ async def run_eval(
 
         for fixture in selected:
             fixture_id = fixture["id"]
-            logger.info("Evaluating fixture %s (%s)", fixture_id, fixture["failure_type"])
+            logger.info(
+                "Evaluating fixture %s (%s)", fixture_id, fixture["failure_type"]
+            )
 
             try:
                 # --- Context Gatherer evaluation ---
@@ -435,7 +441,9 @@ async def run_eval(
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "Fixture %s evaluation failed: %s: %s",
-                    fixture_id, type(exc).__name__, exc,
+                    fixture_id,
+                    type(exc).__name__,
+                    exc,
                 )
                 context_scores.append(0.0)
                 fix_scores.append(0.0)
@@ -483,14 +491,20 @@ async def run_eval(
             "context_gatherer": {
                 "average_score": round(avg_context, 4),
                 "scores_per_fixture": [
-                    {"fixture_id": r["fixture_id"], "score": r["context_gatherer"]["score"]}
+                    {
+                        "fixture_id": r["fixture_id"],
+                        "score": r["context_gatherer"]["score"],
+                    }
                     for r in per_fixture_results
                 ],
             },
             "fix_generator": {
                 "average_score": round(avg_fix, 4),
                 "scores_per_fixture": [
-                    {"fixture_id": r["fixture_id"], "score": r["fix_generator"]["score"]}
+                    {
+                        "fixture_id": r["fixture_id"],
+                        "score": r["fix_generator"]["score"],
+                    }
                     for r in per_fixture_results
                 ],
             },
@@ -521,7 +535,11 @@ async def run_eval(
 
     logger.info(
         "Eval complete: id=%s accuracy=%.4f passed=%d/%d mode=%s",
-        eval_result.id, eval_result.overall_accuracy, passed_count, n, mode_label,
+        eval_result.id,
+        eval_result.overall_accuracy,
+        passed_count,
+        n,
+        mode_label,
     )
     return eval_result
 
@@ -543,8 +561,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--dry-run", action="store_true", help="Use stubs — no LLM/Build calls")
-    mode.add_argument("--live", action="store_true", help="Real LLM; Build still mocked")
+    mode.add_argument(
+        "--dry-run", action="store_true", help="Use stubs — no LLM/Build calls"
+    )
+    mode.add_argument(
+        "--live", action="store_true", help="Real LLM; Build still mocked"
+    )
     p.add_argument(
         "--ids",
         nargs="*",
@@ -577,10 +599,16 @@ async def _main() -> None:
         "eval_result_id": str(result.id),
         "overall_accuracy": result.overall_accuracy,
         "created_at": result.created_at.isoformat(),
-        "model_config_id": str(result.model_config_id) if result.model_config_id else None,
+        "model_config_id": str(result.model_config_id)
+        if result.model_config_id
+        else None,
         "per_subagent_scores": {
-            "context_gatherer_avg": result.per_subagent_scores["context_gatherer"]["average_score"],
-            "fix_generator_avg": result.per_subagent_scores["fix_generator"]["average_score"],
+            "context_gatherer_avg": result.per_subagent_scores["context_gatherer"][
+                "average_score"
+            ],
+            "fix_generator_avg": result.per_subagent_scores["fix_generator"][
+                "average_score"
+            ],
             "overall": result.per_subagent_scores["overall"],
         },
     }

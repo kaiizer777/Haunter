@@ -51,7 +51,9 @@ def test_parse_next_link_with_cursor():
     cursor_url = "https://api.github.com/user/repos?per_page=100&after=cursor_xyz123"
     resp = httpx.Response(
         200,
-        headers={"link": f'<{cursor_url}>; rel="next", <https://api.github.com/user/repos?page=5>; rel="last"'},
+        headers={
+            "link": f'<{cursor_url}>; rel="next", <https://api.github.com/user/repos?page=5>; rel="last"'
+        },
     )
     assert _parse_next_link(resp) == cursor_url
 
@@ -91,7 +93,9 @@ async def test_list_available_repos_user_corrupted_token(
 ):
     """User with un-decryptable access_token returns 401."""
     await truncate_all(db)
-    user = await user_factory(github_id=902, username="user_badtoken", access_token="initial")
+    user = await user_factory(
+        github_id=902, username="user_badtoken", access_token="initial"
+    )
     # Manually corrupt encrypted token in DB
     user.access_token = "corrupted_non_fernet_token"
     await db.commit()
@@ -263,7 +267,9 @@ async def test_list_available_repos_handles_insufficient_scope(
 ):
     """GitHub returning 401 maps to 401 with re-login prompt."""
     await truncate_all(db)
-    user = await user_factory(github_id=906, username="user_expired", access_token="expired_token")
+    user = await user_factory(
+        github_id=906, username="user_expired", access_token="expired_token"
+    )
     client = make_auth_client(user.id)
 
     with respx.mock(base_url="https://api.github.com") as rx:

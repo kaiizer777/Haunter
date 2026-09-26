@@ -123,7 +123,10 @@ class TestLLMExhaustedFreeTierError:
         err = LLMExhaustedFreeTierError([("m1", 1, "boom")])
         assert err.status_code == 502
         assert err.attempts == [("m1", 1, "boom")]
-        assert "All 1 free-tier models exhausted (1 attempts). Last errors: m1: boom" == err.message
+        assert (
+            "All 1 free-tier models exhausted (1 attempts). Last errors: m1: boom"
+            == err.message
+        )
 
     def test_long_error_truncated_at_cap(self) -> None:
         max_chars = LLMExhaustedFreeTierError._PER_MODEL_ERR_MAX_CHARS
@@ -144,7 +147,10 @@ class TestLLMExhaustedFreeTierError:
         err = LLMExhaustedFreeTierError(attempts)
         assert "first error" not in err.message
         assert "final error" in err.message
-        assert "All 1 free-tier models exhausted (2 attempts). Last errors: nemotron-3.5: final error" == err.message
+        assert (
+            "All 1 free-tier models exhausted (2 attempts). Last errors: nemotron-3.5: final error"
+            == err.message
+        )
 
     @pytest.mark.parametrize(
         ("model_order", "expected_body"),

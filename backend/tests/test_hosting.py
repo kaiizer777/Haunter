@@ -96,9 +96,7 @@ async def test_aws_adapter_invokes_lambda_async():
     )
     payload = json.loads(call_kwargs.kwargs["Payload"])
     assert payload["run_id"] == str(run_id)
-    assert payload["token"] == self_invocation_token(
-        KIND_PIPELINE, str(run_id), secret
-    )
+    assert payload["token"] == self_invocation_token(KIND_PIPELINE, str(run_id), secret)
 
     # Should NOT have added anything to background_tasks
     assert len(bg.tasks) == 0
@@ -121,6 +119,7 @@ async def test_aws_adapter_fallback_on_missing_function_name():
         with patch.dict("os.environ", {}, clear=False):
             # Remove AWS_LAMBDA_FUNCTION_NAME if set
             import os
+
             os.environ.pop("AWS_LAMBDA_FUNCTION_NAME", None)
 
             adapter = AWSHostingAdapter()
@@ -212,7 +211,9 @@ async def test_put_hosting_config_admin_valid(make_auth_client, db, user_factory
 
 
 @pytest.mark.asyncio
-async def test_put_hosting_config_non_admin_forbidden(make_auth_client, db, user_factory):
+async def test_put_hosting_config_non_admin_forbidden(
+    make_auth_client, db, user_factory
+):
     """PUT /config/hosting with ADMIN_USER_ID set to different user -> 403."""
     await truncate_all(db)
     user = await user_factory()
@@ -234,7 +235,9 @@ async def test_put_hosting_config_non_admin_forbidden(make_auth_client, db, user
 
 
 @pytest.mark.asyncio
-async def test_put_hosting_config_evil_hosting_provider(make_auth_client, db, user_factory):
+async def test_put_hosting_config_evil_hosting_provider(
+    make_auth_client, db, user_factory
+):
     """PUT /config/hosting with hosting_provider='evil' must be rejected with 422."""
     await truncate_all(db)
     user = await user_factory()
@@ -255,7 +258,9 @@ async def test_put_hosting_config_evil_hosting_provider(make_auth_client, db, us
 
 
 @pytest.mark.asyncio
-async def test_put_hosting_config_evil_sandbox_provider(make_auth_client, db, user_factory):
+async def test_put_hosting_config_evil_sandbox_provider(
+    make_auth_client, db, user_factory
+):
     """PUT /config/hosting with sandbox_provider='malicious' must be rejected with 422."""
     await truncate_all(db)
     user = await user_factory()
@@ -358,7 +363,10 @@ async def test_get_provider_config_invalid_db_value_fallback_and_logs(caplog):
             result = await _get_provider_config("hosting_provider", "aws")
 
     assert result == "aws"
-    assert "invalid provider 'gcp' for key=hosting_provider, falling back to 'aws'" in caplog.text
+    assert (
+        "invalid provider 'gcp' for key=hosting_provider, falling back to 'aws'"
+        in caplog.text
+    )
 
 
 @pytest.mark.asyncio
@@ -419,7 +427,9 @@ async def test_get_active_hosting_provider_reads_from_settings(monkeypatch):
     """get_active_hosting_provider reads from settings.hosting_provider."""
     invalidate_provider_cache()
     monkeypatch.setattr("app.config.settings.hosting_provider", "aws")
-    with patch("app.adapters.hosting._get_provider_config", new_callable=AsyncMock) as mock_get_cfg:
+    with patch(
+        "app.adapters.hosting._get_provider_config", new_callable=AsyncMock
+    ) as mock_get_cfg:
         mock_get_cfg.return_value = "aws"
         res = await get_active_hosting_provider()
         assert res == "aws"
@@ -431,9 +441,10 @@ async def test_get_active_sandbox_provider_reads_from_settings(monkeypatch):
     """get_active_sandbox_provider reads from settings.sandbox_provider."""
     invalidate_provider_cache()
     monkeypatch.setattr("app.config.settings.sandbox_provider", "github_actions")
-    with patch("app.adapters.hosting._get_provider_config", new_callable=AsyncMock) as mock_get_cfg:
+    with patch(
+        "app.adapters.hosting._get_provider_config", new_callable=AsyncMock
+    ) as mock_get_cfg:
         mock_get_cfg.return_value = "github_actions"
         res = await get_active_sandbox_provider()
         assert res == "github_actions"
         mock_get_cfg.assert_awaited_once_with("sandbox_provider", "github_actions")
-

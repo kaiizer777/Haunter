@@ -97,7 +97,9 @@ def test_build_headers_falls_back_to_settings_token(monkeypatch: pytest.MonkeyPa
     assert headers["Authorization"] == "Bearer env_secret_token"
 
 
-def test_build_headers_explicit_token_overrides_settings(monkeypatch: pytest.MonkeyPatch):
+def test_build_headers_explicit_token_overrides_settings(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Explicit token takes precedence over settings.github_token."""
     monkeypatch.setattr(settings, "github_token", "env_secret_token")
     headers = _build_headers("override_token")
@@ -122,10 +124,12 @@ def test_build_headers_custom_accept():
 @respx.mock
 async def test_fetch_workflow_logs_success_zip():
     """200 response with valid zip of 2 .txt files concatenates and includes filenames."""
-    zip_data = _create_zip_bytes({
-        "0_setup.txt": "Setting up runner...\nDone.\n",
-        "1_test.txt": "pytest tests/ -v\nFAILED test_foo\n",
-    })
+    zip_data = _create_zip_bytes(
+        {
+            "0_setup.txt": "Setting up runner...\nDone.\n",
+            "1_test.txt": "pytest tests/ -v\nFAILED test_foo\n",
+        }
+    )
     url = f"{GITHUB_API_BASE}/repos/owner/repo/actions/runs/12345/logs"
     respx.get(url).respond(
         status_code=200,
@@ -145,10 +149,12 @@ async def test_fetch_workflow_logs_success_zip():
 @respx.mock
 async def test_fetch_workflow_logs_success_zip_ignores_non_txt():
     """Zip extraction includes only .txt files, sorted by name."""
-    zip_data = _create_zip_bytes({
-        "manifest.json": '{"jobs": 1}',
-        "build.txt": "Compiling assets...",
-    })
+    zip_data = _create_zip_bytes(
+        {
+            "manifest.json": '{"jobs": 1}',
+            "build.txt": "Compiling assets...",
+        }
+    )
     url = f"{GITHUB_API_BASE}/repos/owner/repo/actions/runs/12345/logs"
     respx.get(url).respond(status_code=200, content=zip_data)
 
@@ -414,7 +420,9 @@ async def test_fetch_diff_single_commit():
     """base_sha=None hits /repos/.../commits/{sha} with diff accept header."""
     sha = "1111222233334444555566667777888899990000"
     url = f"{GITHUB_API_BASE}/repos/owner/repo/commits/{sha}"
-    diff_text = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+    diff_text = (
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
 
     route = respx.get(url).respond(
         status_code=200,
@@ -425,7 +433,10 @@ async def test_fetch_diff_single_commit():
     result = await fetch_diff(owner="owner", repo="repo", sha=sha, base_sha=None)
 
     assert route.called
-    assert route.calls.last.request.headers.get("accept") == "application/vnd.github.v3.diff"
+    assert (
+        route.calls.last.request.headers.get("accept")
+        == "application/vnd.github.v3.diff"
+    )
     assert result == diff_text
 
 
@@ -444,10 +455,15 @@ async def test_fetch_diff_compare_base_sha():
         headers={"Content-Type": "text/plain"},
     )
 
-    result = await fetch_diff(owner="owner", repo="repo", sha=head_sha, base_sha=base_sha)
+    result = await fetch_diff(
+        owner="owner", repo="repo", sha=head_sha, base_sha=base_sha
+    )
 
     assert route.called
-    assert route.calls.last.request.headers.get("accept") == "application/vnd.github.v3.diff"
+    assert (
+        route.calls.last.request.headers.get("accept")
+        == "application/vnd.github.v3.diff"
+    )
     assert result == diff_text
 
 

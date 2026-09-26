@@ -34,9 +34,14 @@ from app.services.session_tools.web import (
 
 def test_validate_external_url_valid() -> None:
     """Valid public HTTP and HTTPS URLs must pass through unchanged."""
-    assert _validate_external_url("https://nextjs.org/docs") == "https://nextjs.org/docs"
+    assert (
+        _validate_external_url("https://nextjs.org/docs") == "https://nextjs.org/docs"
+    )
     assert _validate_external_url("http://python.org") == "http://python.org"
-    assert _validate_external_url("https://github.com/fastapi/fastapi/issues/123") == "https://github.com/fastapi/fastapi/issues/123"
+    assert (
+        _validate_external_url("https://github.com/fastapi/fastapi/issues/123")
+        == "https://github.com/fastapi/fastapi/issues/123"
+    )
 
 
 def test_validate_external_url_empty() -> None:
@@ -122,9 +127,13 @@ async def test_search_web_docs_success() -> None:
     }
     route = respx.get(search_url).respond(status_code=200, json=mock_results)
 
-    with patch.object(settings, "tinyfish_api_key", "test-key"), \
-         patch.object(settings, "tinyfish_search_url", search_url):
-        output = await tool_search_web_docs(query="Next.js", domain="nextjs.org", max_results=5)
+    with (
+        patch.object(settings, "tinyfish_api_key", "test-key"),
+        patch.object(settings, "tinyfish_search_url", search_url),
+    ):
+        output = await tool_search_web_docs(
+            query="Next.js", domain="nextjs.org", max_results=5
+        )
 
     assert route.called
     req = route.calls.last.request
@@ -144,8 +153,10 @@ async def test_search_web_docs_domain_cleaning() -> None:
     search_url = "https://api.search.tinyfish.ai"
     route = respx.get(search_url).respond(status_code=200, json={"results": []})
 
-    with patch.object(settings, "tinyfish_api_key", "test-key"), \
-         patch.object(settings, "tinyfish_search_url", search_url):
+    with (
+        patch.object(settings, "tinyfish_api_key", "test-key"),
+        patch.object(settings, "tinyfish_search_url", search_url),
+    ):
         await tool_search_web_docs(query="test", domain="https://docs.python.org/3/")
 
     assert route.called
@@ -160,14 +171,20 @@ async def test_search_web_docs_max_results_slicing() -> None:
     search_url = "https://api.search.tinyfish.ai"
     mock_results = {
         "results": [
-            {"title": f"Result {i}", "url": f"https://example.com/{i}", "snippet": f"Snippet {i}"}
+            {
+                "title": f"Result {i}",
+                "url": f"https://example.com/{i}",
+                "snippet": f"Snippet {i}",
+            }
             for i in range(10)
         ]
     }
     respx.get(search_url).respond(status_code=200, json=mock_results)
 
-    with patch.object(settings, "tinyfish_api_key", "test-key"), \
-         patch.object(settings, "tinyfish_search_url", search_url):
+    with (
+        patch.object(settings, "tinyfish_api_key", "test-key"),
+        patch.object(settings, "tinyfish_search_url", search_url),
+    ):
         output = await tool_search_web_docs(query="test", max_results=3)
 
     assert output.count("### [Result") == 3
@@ -180,8 +197,10 @@ async def test_search_web_docs_empty_results() -> None:
     search_url = "https://api.search.tinyfish.ai"
     respx.get(search_url).respond(status_code=200, json={"results": []})
 
-    with patch.object(settings, "tinyfish_api_key", "test-key"), \
-         patch.object(settings, "tinyfish_search_url", search_url):
+    with (
+        patch.object(settings, "tinyfish_api_key", "test-key"),
+        patch.object(settings, "tinyfish_search_url", search_url),
+    ):
         output = await tool_search_web_docs(query="nonexistent term 12345")
 
     assert "No relevant documentation found for 'nonexistent term 12345'" in output
@@ -195,22 +214,28 @@ async def test_search_web_docs_errors() -> None:
 
     # 429
     respx.get(search_url).respond(status_code=429)
-    with patch.object(settings, "tinyfish_api_key", "test-key"), \
-         patch.object(settings, "tinyfish_search_url", search_url):
+    with (
+        patch.object(settings, "tinyfish_api_key", "test-key"),
+        patch.object(settings, "tinyfish_search_url", search_url),
+    ):
         r429 = await tool_search_web_docs("query")
     assert "rate limit exceeded" in r429
 
     # 500
     respx.get(search_url).respond(status_code=500)
-    with patch.object(settings, "tinyfish_api_key", "test-key"), \
-         patch.object(settings, "tinyfish_search_url", search_url):
+    with (
+        patch.object(settings, "tinyfish_api_key", "test-key"),
+        patch.object(settings, "tinyfish_search_url", search_url),
+    ):
         r500 = await tool_search_web_docs("query")
     assert "search service returned 500" in r500
 
     # Network exception
     respx.get(search_url).mock(side_effect=httpx.ConnectError("Connection refused"))
-    with patch.object(settings, "tinyfish_api_key", "test-key"), \
-         patch.object(settings, "tinyfish_search_url", search_url):
+    with (
+        patch.object(settings, "tinyfish_api_key", "test-key"),
+        patch.object(settings, "tinyfish_search_url", search_url),
+    ):
         r_err = await tool_search_web_docs("query")
     assert "web search request failed" in r_err
 
@@ -252,8 +277,10 @@ async def test_fetch_web_content_success() -> None:
     }
     route = respx.post(fetch_url).respond(status_code=200, json=mock_response)
 
-    with patch.object(settings, "tinyfish_api_key", "test-key"), \
-         patch.object(settings, "tinyfish_fetch_url", fetch_url):
+    with (
+        patch.object(settings, "tinyfish_api_key", "test-key"),
+        patch.object(settings, "tinyfish_fetch_url", fetch_url),
+    ):
         content = await tool_fetch_web_content("https://nextjs.org/docs")
 
     assert route.called
@@ -269,10 +296,14 @@ async def test_fetch_web_content_truncation() -> None:
     """Large content over 40,000 characters is truncated with notice."""
     fetch_url = "https://api.fetch.tinyfish.ai"
     huge_text = "A" * 50_000
-    respx.post(fetch_url).respond(status_code=200, json={"results": [{"text": huge_text}]})
+    respx.post(fetch_url).respond(
+        status_code=200, json={"results": [{"text": huge_text}]}
+    )
 
-    with patch.object(settings, "tinyfish_api_key", "test-key"), \
-         patch.object(settings, "tinyfish_fetch_url", fetch_url):
+    with (
+        patch.object(settings, "tinyfish_api_key", "test-key"),
+        patch.object(settings, "tinyfish_fetch_url", fetch_url),
+    ):
         content = await tool_fetch_web_content("https://example.com/huge")
 
     assert len(content) > 40_000
@@ -336,9 +367,7 @@ async def test_fetch_package_metadata_npm_success() -> None:
             "description": "The React Framework",
             "license": "MIT",
             "versions": {
-                "15.0.0": {
-                    "dependencies": {"react": "^19.0.0", "react-dom": "^19.0.0"}
-                }
+                "15.0.0": {"dependencies": {"react": "^19.0.0", "react-dom": "^19.0.0"}}
             },
             "homepage": "https://nextjs.org",
         },
@@ -382,10 +411,20 @@ async def test_orchestrator_web_tools_dispatch() -> None:
     orch = SessionOrchestrator(session_id="test-session-id", db=db_mock)
     queue = SseQueue()
 
-    with patch("app.services.session_orchestrator.tool_search_web_docs", new_callable=AsyncMock) as mock_search, \
-         patch("app.services.session_orchestrator.tool_fetch_web_content", new_callable=AsyncMock) as mock_fetch, \
-         patch("app.services.session_orchestrator.tool_fetch_package_metadata", new_callable=AsyncMock) as mock_pkg:
-
+    with (
+        patch(
+            "app.services.session_orchestrator.tool_search_web_docs",
+            new_callable=AsyncMock,
+        ) as mock_search,
+        patch(
+            "app.services.session_orchestrator.tool_fetch_web_content",
+            new_callable=AsyncMock,
+        ) as mock_fetch,
+        patch(
+            "app.services.session_orchestrator.tool_fetch_package_metadata",
+            new_callable=AsyncMock,
+        ) as mock_pkg,
+    ):
         mock_search.return_value = "Search Results Mock"
         mock_fetch.return_value = "Fetch Content Mock"
         mock_pkg.return_value = "Package Metadata Mock"
@@ -400,7 +439,9 @@ async def test_orchestrator_web_tools_dispatch() -> None:
             queue=queue,
         )
         assert res_search == "Search Results Mock"
-        mock_search.assert_called_once_with(query="FastAPI", domain="tiangolo.com", max_results=3)
+        mock_search.assert_called_once_with(
+            query="FastAPI", domain="tiangolo.com", max_results=3
+        )
 
         res_fetch = await orch._dispatch_tool(
             tool_name="fetch_web_content",
@@ -412,7 +453,9 @@ async def test_orchestrator_web_tools_dispatch() -> None:
             queue=queue,
         )
         assert res_fetch == "Fetch Content Mock"
-        mock_fetch.assert_called_once_with(url="https://example.com/doc", format="markdown")
+        mock_fetch.assert_called_once_with(
+            url="https://example.com/doc", format="markdown"
+        )
 
         res_pkg = await orch._dispatch_tool(
             tool_name="fetch_package_metadata",
@@ -425,4 +468,3 @@ async def test_orchestrator_web_tools_dispatch() -> None:
         )
         assert res_pkg == "Package Metadata Mock"
         mock_pkg.assert_called_once_with(ecosystem="pypi", package_name="httpx")
-

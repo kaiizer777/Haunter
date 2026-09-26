@@ -37,6 +37,7 @@ from app.traces.classify import classify_failure
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _run(
     status: str = "fallback",
     failure_reason: Optional[str] = None,
@@ -76,6 +77,7 @@ def _attempt(
 # 1. Non-terminal / Happy pass states → None
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "status",
     [
@@ -100,9 +102,13 @@ def test_classify_non_terminal_statuses_return_none(status: str) -> None:
 # 2. Orchestrator failure_reason deferral
 # ---------------------------------------------------------------------------
 
+
 def test_classify_defers_to_orchestrator_failure_reason() -> None:
     """When run.failure_reason is set (truthy), classify_failure returns None."""
-    run = _run(status="error", failure_reason="context_gatherer: TimeoutError: request timed out")
+    run = _run(
+        status="error",
+        failure_reason="context_gatherer: TimeoutError: request timed out",
+    )
     steps = [_step("context_gatherer_error")]
     attempts: list[Attempt] = []
     assert classify_failure(run, steps, attempts) is None
@@ -110,7 +116,9 @@ def test_classify_defers_to_orchestrator_failure_reason() -> None:
 
 def test_classify_defers_to_auth_failure_reason() -> None:
     """Auth failures recorded in failure_reason return None."""
-    run = _run(status="error", failure_reason="github: GitHubAuthError: Bad credentials (401)")
+    run = _run(
+        status="error", failure_reason="github: GitHubAuthError: Bad credentials (401)"
+    )
     assert classify_failure(run, [], []) is None
 
 
@@ -136,6 +144,7 @@ def test_classify_missing_failure_reason_attribute() -> None:
 # ---------------------------------------------------------------------------
 # 3. sandbox_error branches
 # ---------------------------------------------------------------------------
+
 
 def test_classify_sandbox_error_prefix_in_failure_reason() -> None:
     """attempt.failure_reason starting with '[SANDBOX]' returns sandbox_error."""
@@ -182,8 +191,8 @@ def test_classify_sandbox_error_infra_status_in_failure_reason_first_line(
 @pytest.mark.parametrize(
     "status_str",
     [
-        "TIMEOUT",       # uppercase per test.md
-        "expired",       # lowercase per test.md
+        "TIMEOUT",  # uppercase per test.md
+        "expired",  # lowercase per test.md
         "CANCELLED",
         "INTERNAL_ERROR",
         "timeout",
@@ -192,7 +201,9 @@ def test_classify_sandbox_error_infra_status_in_failure_reason_first_line(
         "internal_error",
     ],
 )
-def test_classify_sandbox_error_verification_status_infra_status(status_str: str) -> None:
+def test_classify_sandbox_error_verification_status_infra_status(
+    status_str: str,
+) -> None:
     """attempt.verification_status carrying infra status (upper or lower case) returns sandbox_error."""
     run = _run(status="fallback")
     attempts = [_attempt(number=1, verification_status=status_str)]
@@ -202,6 +213,7 @@ def test_classify_sandbox_error_verification_status_infra_status(status_str: str
 # ---------------------------------------------------------------------------
 # 4. wrong_diagnosis branches
 # ---------------------------------------------------------------------------
+
 
 def test_classify_wrong_diagnosis_no_attempts() -> None:
     """Failed run with 0 attempts returns wrong_diagnosis."""
@@ -220,7 +232,9 @@ def test_classify_wrong_diagnosis_gather_error_without_success() -> None:
     assert classify_failure(run, steps, attempts) == "wrong_diagnosis"
 
 
-def test_classify_gather_error_recovered_by_success_does_not_trigger_wrong_diagnosis() -> None:
+def test_classify_gather_error_recovered_by_success_does_not_trigger_wrong_diagnosis() -> (
+    None
+):
     """context_gatherer_error step present BUT context_gatherer OK step also present does NOT trigger wrong_diagnosis."""
     run = _run(status="fallback")
     steps = [_step("context_gatherer_error"), _step("context_gatherer")]
@@ -232,6 +246,7 @@ def test_classify_gather_error_recovered_by_success_does_not_trigger_wrong_diagn
 # ---------------------------------------------------------------------------
 # 5. wrong_fix branches
 # ---------------------------------------------------------------------------
+
 
 def test_classify_wrong_fix_attempts_with_verification_status_none() -> None:
     """Attempts exist but all have verification_status=None (rejected before sandbox) returns wrong_fix."""
@@ -247,6 +262,7 @@ def test_classify_wrong_fix_attempts_with_verification_status_none() -> None:
 # ---------------------------------------------------------------------------
 # 6. tests_still_failing branches
 # ---------------------------------------------------------------------------
+
 
 def test_classify_tests_still_failing_all_fail() -> None:
     """All sandbox-reached attempts have verification_status='fail' returns tests_still_failing."""
@@ -275,6 +291,7 @@ def test_classify_tests_still_failing_mix_of_fail_and_none() -> None:
 # ---------------------------------------------------------------------------
 # 7. Ambiguous / Partial / Unknown case
 # ---------------------------------------------------------------------------
+
 
 def test_classify_ambiguous_partial_pass_in_fallback_returns_none() -> None:
     """An unexpected mix (e.g. one passed attempt in a fallback run) guards with None."""

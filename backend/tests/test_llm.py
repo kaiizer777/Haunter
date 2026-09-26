@@ -92,7 +92,9 @@ async def test_llm_client_complete_mocked_200():
 
     try:
         res = await client.complete(messages=messages)
-        assert res["content"] == "Root cause: SyntaxError in backend/app/auth.py line 42"
+        assert (
+            res["content"] == "Root cause: SyntaxError in backend/app/auth.py line 42"
+        )
         assert res["usage"] == {"input_tokens": 150, "output_tokens": 35}
         assert res["latency_ms"] >= 0
         assert res["model"] == "nemotron-3.5-lightning-free"
@@ -171,7 +173,10 @@ async def test_llm_client_complete_with_tools():
             "type": "function",
             "function": {
                 "name": "trigger_sandbox_build",
-                "parameters": {"type": "object", "properties": {"patch": {"type": "string"}}},
+                "parameters": {
+                    "type": "object",
+                    "properties": {"patch": {"type": "string"}},
+                },
             },
         }
     ]
@@ -180,7 +185,9 @@ async def test_llm_client_complete_with_tools():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        res = await client.complete(messages=[{"role": "user", "content": "run fix"}], tools=tools)
+        res = await client.complete(
+            messages=[{"role": "user", "content": "run fix"}], tools=tools
+        )
         assert res["content"] is None
         assert res["tool_calls"] is not None
         assert len(res["tool_calls"]) == 1
@@ -276,7 +283,11 @@ async def test_get_active_model_config_db_empty_fallback_env(db: AsyncSession):
 async def test_get_active_model_config_multiple_active_picks_latest(db: AsyncSession):
     """When multiple active ModelConfigs exist in DB, returns the newest by created_at."""
     await truncate_all(db)
-    cfg1 = ModelConfig(provider="opencode_zen", model_name="nemotron-3.5-lightning-free", is_active=True)
+    cfg1 = ModelConfig(
+        provider="opencode_zen",
+        model_name="nemotron-3.5-lightning-free",
+        is_active=True,
+    )
     db.add(cfg1)
     await db.commit()
 
@@ -352,11 +363,16 @@ async def test_put_model_config_validation_errors(
 
     async with client:
         # Invalid provider
-        resp1 = await client.put("/config/model", json={"provider": "unknown_llm", "model_name": "gpt-4o"})
+        resp1 = await client.put(
+            "/config/model", json={"provider": "unknown_llm", "model_name": "gpt-4o"}
+        )
         assert resp1.status_code == 422
 
         # Invalid model
-        resp2 = await client.put("/config/model", json={"provider": "openai", "model_name": "unapproved-model"})
+        resp2 = await client.put(
+            "/config/model",
+            json={"provider": "openai", "model_name": "unapproved-model"},
+        )
         assert resp2.status_code == 422
 
 
@@ -383,7 +399,10 @@ async def test_put_model_config_non_owner_repo(
     async with client_b:
         resp = await client_b.put(
             f"/config/model/{repo_a_id}",
-            json={"provider": "opencode_zen", "model_name": "nemotron-3.5-lightning-free"},
+            json={
+                "provider": "opencode_zen",
+                "model_name": "nemotron-3.5-lightning-free",
+            },
         )
         assert resp.status_code == 404
         assert resp.json() == {"detail": "Repo not found"}
@@ -412,7 +431,9 @@ async def test_llm_retry_429_success_second_try():
 
     try:
         with patch("asyncio.sleep", return_value=None):
-            res = await client.complete(messages=[{"role": "user", "content": "retry test"}])
+            res = await client.complete(
+                messages=[{"role": "user", "content": "retry test"}]
+            )
             assert res["content"] == "Recovered on attempt 2"
             assert route.call_count == 2
     finally:
@@ -441,9 +462,13 @@ async def test_llm_retry_500_exhausts_and_caps():
     try:
         with patch("asyncio.sleep", return_value=None):
             with pytest.raises(LLMExhaustedFreeTierError) as exc_info:
-                await client.complete(messages=[{"role": "user", "content": "fail test"}])
+                await client.complete(
+                    messages=[{"role": "user", "content": "fail test"}]
+                )
             assert "exhausted" in str(exc_info.value).lower()
-            assert "500" in str(exc_info.value) or "error" in str(exc_info.value).lower()
+            assert (
+                "500" in str(exc_info.value) or "error" in str(exc_info.value).lower()
+            )
             assert "super_secret_opencode_key_9999" not in str(exc_info.value)
             # The chain hit every model in FREE_TIER_FALLBACK_ORDER, with
             # ATTEMPTS_PER_MODEL attempts on each. The HTTP layer is the
@@ -477,12 +502,16 @@ async def test_llm_timeout_generic_error():
     try:
         with patch("asyncio.sleep", return_value=None):
             with pytest.raises(LLMExhaustedFreeTierError) as exc_info:
-                await client.complete(messages=[{"role": "user", "content": "timeout test"}])
+                await client.complete(
+                    messages=[{"role": "user", "content": "timeout test"}]
+                )
             # The exhaustion message itself does not contain the
             # "timed out" phrase (per-model errors are truncated to
             # 32 chars in the LLMExhaustedFreeTierError message), but
             # the per-model last error inside attempts does.
-            assert any("timed out" in err.lower() for _m, _i, err in exc_info.value.attempts)
+            assert any(
+                "timed out" in err.lower() for _m, _i, err in exc_info.value.attempts
+            )
     finally:
         settings.opencode_zen_api_key = orig_key
 
@@ -509,7 +538,9 @@ async def test_llm_api_key_not_in_logs_or_response(caplog):
 
     try:
         with caplog.at_level(logging.DEBUG):
-            res = await client.complete(messages=[{"role": "user", "content": "secure test"}])
+            res = await client.complete(
+                messages=[{"role": "user", "content": "secure test"}]
+            )
             assert secret_key not in caplog.text
             assert secret_key not in str(res)
     finally:
@@ -537,7 +568,9 @@ async def test_llm_response_not_evaled():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        res = await client.complete(messages=[{"role": "user", "content": "untrusted payload"}])
+        res = await client.complete(
+            messages=[{"role": "user", "content": "untrusted payload"}]
+        )
         assert res["content"] == payload_str
         assert isinstance(res["content"], str)
     finally:
@@ -585,7 +618,9 @@ async def test_llm_client_walks_fallback_order_on_rate_limit():
             200,
             json={
                 "model": "nemotron-3-ultra-free",
-                "choices": [{"message": {"content": "recovered on nemotron-3-ultra-free"}}],
+                "choices": [
+                    {"message": {"content": "recovered on nemotron-3-ultra-free"}}
+                ],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 7},
             },
         )
@@ -603,9 +638,14 @@ async def test_llm_client_walks_fallback_order_on_rate_limit():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("app.llm.client.get_dynamic_free_models", AsyncMock(return_value=["nemotron-3-ultra-free"])), \
-             patch("asyncio.sleep", side_effect=fake_sleep):
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch(
+                "app.llm.client.get_dynamic_free_models",
+                AsyncMock(return_value=["nemotron-3-ultra-free"]),
+            ),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
             res = await client.complete(
                 messages=[{"role": "user", "content": "fallback test"}],
             )
@@ -650,9 +690,14 @@ async def test_llm_client_gives_up_after_all_models_exhausted():
     chain_models = [seed.model_name] + fallback_models
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("app.llm.client.get_dynamic_free_models", AsyncMock(return_value=fallback_models)), \
-             patch("asyncio.sleep", side_effect=fake_sleep):
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch(
+                "app.llm.client.get_dynamic_free_models",
+                AsyncMock(return_value=fallback_models),
+            ),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
             with pytest.raises(LLMExhaustedFreeTierError) as exc_info:
                 await client.complete(
                     messages=[{"role": "user", "content": "all fail"}],
@@ -708,8 +753,10 @@ async def test_llm_client_propagates_auth_error_immediately():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("asyncio.sleep", side_effect=fake_sleep):
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
             with pytest.raises(LLMAuthenticationError):
                 await client.complete(
                     messages=[{"role": "user", "content": "auth fail"}],
@@ -743,7 +790,9 @@ async def test_llm_client_returns_first_success():
             200,
             json={
                 "model": "ling-3-free",
-                "choices": [{"message": {"content": "   \n  "}}],  # whitespace only -> fails on attempt 1
+                "choices": [
+                    {"message": {"content": "   \n  "}}
+                ],  # whitespace only -> fails on attempt 1
                 "usage": {"prompt_tokens": 10, "completion_tokens": 0},
             },
         ),
@@ -767,9 +816,14 @@ async def test_llm_client_returns_first_success():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("app.llm.client.get_dynamic_free_models", AsyncMock(return_value=["fallback-success-free"])), \
-             patch("asyncio.sleep", side_effect=fake_sleep):
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch(
+                "app.llm.client.get_dynamic_free_models",
+                AsyncMock(return_value=["fallback-success-free"]),
+            ),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
             res = await client.complete(
                 messages=[{"role": "user", "content": "first success"}],
             )
@@ -800,6 +854,7 @@ async def test_llm_client_inter_model_delay():
     seed_async = AsyncMock(return_value=seed)
 
     route = respx.post(OPENCODE_ZEN_ENDPOINT)
+
     # Use a callable that always returns 429 so the inner retry never
     # recovers — every attempt on every model fails, the chain exhausts,
     # and LLMExhaustedFreeTierError is raised. (A list side_effect would
@@ -807,6 +862,7 @@ async def test_llm_client_inter_model_delay():
     # premature success.)
     def always_429(request):
         return httpx.Response(429, json={"error": "rate limit"})
+
     route.side_effect = always_429
 
     sleep_calls: list[float] = []
@@ -819,8 +875,10 @@ async def test_llm_client_inter_model_delay():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("asyncio.sleep", side_effect=fake_sleep):
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch("asyncio.sleep", side_effect=fake_sleep),
+        ):
             with pytest.raises(LLMExhaustedFreeTierError):
                 await client.complete(
                     messages=[{"role": "user", "content": "inter-model sleep"}],
@@ -828,9 +886,9 @@ async def test_llm_client_inter_model_delay():
         # At least one inter-model sleep with the exact INTER_MODEL_SLEEP_S
         # value. The inner execute_with_retry backoff (1, 2, 4, 8, 16, 30,
         # 30) can also exceed INTER_MODEL_SLEEP_S, so we use exact equality.
-        assert any(d == INTER_MODEL_SLEEP_S for d in sleep_calls), (
-            f"expected at least one sleep == {INTER_MODEL_SLEEP_S}s, got {sleep_calls}"
-        )
+        assert any(
+            d == INTER_MODEL_SLEEP_S for d in sleep_calls
+        ), f"expected at least one sleep == {INTER_MODEL_SLEEP_S}s, got {sleep_calls}"
     finally:
         settings.opencode_zen_api_key = orig_key
 
@@ -948,7 +1006,11 @@ async def test_dynamic_fallback_chain_construction():
             assert res["content"] == "ok"
             assert res["model"] == "laguna-s-2.1-free"
             # Verify chain order: seed first, then others de-duplicated
-            assert called_models == ["custom-seed-free", "ling-3.0-flash-fin-free", "laguna-s-2.1-free"]
+            assert called_models == [
+                "custom-seed-free",
+                "ling-3.0-flash-fin-free",
+                "laguna-s-2.1-free",
+            ]
     finally:
         settings.opencode_zen_api_key = orig_key
 
@@ -997,9 +1059,13 @@ async def test_retry_policy_rate_limit_429_retries_and_switches():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("asyncio.sleep", return_value=None):
-            res = await client.complete(messages=[{"role": "user", "content": "rate limit test"}])
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch("asyncio.sleep", return_value=None),
+        ):
+            res = await client.complete(
+                messages=[{"role": "user", "content": "rate limit test"}]
+            )
             assert res["content"] == "fallback success"
             assert res["model"] == "fallback-model-free"
             # 5 calls to seed-model-free, then 1 call to fallback-model-free
@@ -1052,9 +1118,13 @@ async def test_retry_policy_outage_500_fails_on_attempt_1():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("asyncio.sleep", return_value=None):
-            res = await client.complete(messages=[{"role": "user", "content": "outage test"}])
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch("asyncio.sleep", return_value=None),
+        ):
+            res = await client.complete(
+                messages=[{"role": "user", "content": "outage test"}]
+            )
             assert res["content"] == "healthy recovered"
             assert res["model"] == "healthy-model-free"
             # Exactly 1 attempt on dead model!
@@ -1106,9 +1176,13 @@ async def test_retry_policy_timeout_fails_on_attempt_1():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("asyncio.sleep", return_value=None):
-            res = await client.complete(messages=[{"role": "user", "content": "timeout test"}])
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch("asyncio.sleep", return_value=None),
+        ):
+            res = await client.complete(
+                messages=[{"role": "user", "content": "timeout test"}]
+            )
             assert res["content"] == "fast recovered"
             # Exactly 1 attempt on timeout model!
             assert call_history == ["timeout-model-free", "fast-model-free"]
@@ -1133,7 +1207,12 @@ async def test_retry_policy_model_not_supported_fails_on_attempt_1():
     respx.get(OPENCODE_ZEN_MODELS_ENDPOINT).mock(
         return_value=httpx.Response(
             200,
-            json={"data": [{"id": "unsupported-model-free"}, {"id": "supported-model-free"}]},
+            json={
+                "data": [
+                    {"id": "unsupported-model-free"},
+                    {"id": "supported-model-free"},
+                ]
+            },
         )
     )
 
@@ -1143,7 +1222,9 @@ async def test_retry_policy_model_not_supported_fails_on_attempt_1():
         body = json.loads(request.content)
         call_history.append(body["model"])
         if body["model"] == "unsupported-model-free":
-            return httpx.Response(401, json={"error": "Model is not supported on this account"})
+            return httpx.Response(
+                401, json={"error": "Model is not supported on this account"}
+            )
         return httpx.Response(
             200,
             json={
@@ -1159,9 +1240,13 @@ async def test_retry_policy_model_not_supported_fails_on_attempt_1():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("asyncio.sleep", return_value=None):
-            res = await client.complete(messages=[{"role": "user", "content": "unsupported test"}])
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch("asyncio.sleep", return_value=None),
+        ):
+            res = await client.complete(
+                messages=[{"role": "user", "content": "unsupported test"}]
+            )
             assert res["content"] == "supported recovered"
             # Exactly 1 attempt on unsupported model!
             assert call_history == ["unsupported-model-free", "supported-model-free"]
@@ -1198,7 +1283,12 @@ async def test_retry_policy_upstream_400_switches_model():
         if body["model"] == "context-limit-free":
             return httpx.Response(
                 400,
-                json={"error": {"message": "Upstream provider error: max context length exceeded", "type": "model_error"}},
+                json={
+                    "error": {
+                        "message": "Upstream provider error: max context length exceeded",
+                        "type": "model_error",
+                    }
+                },
             )
         return httpx.Response(
             200,
@@ -1215,9 +1305,13 @@ async def test_retry_policy_upstream_400_switches_model():
     settings.opencode_zen_api_key = "test_zen_key_123"
 
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("asyncio.sleep", return_value=None):
-            res = await client.complete(messages=[{"role": "user", "content": "upstream 400 test"}])
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch("asyncio.sleep", return_value=None),
+        ):
+            res = await client.complete(
+                messages=[{"role": "user", "content": "upstream 400 test"}]
+            )
             assert res["content"] == "high context recovered"
             # Exactly 1 attempt on upstream 400 model, then recovered on fallback!
             assert call_history == ["context-limit-free", "high-context-free"]
@@ -1240,7 +1334,9 @@ async def test_retry_policy_global_401_aborts_immediately():
     try:
         with patch("asyncio.sleep", return_value=None):
             with pytest.raises(LLMAuthenticationError):
-                await client.complete(messages=[{"role": "user", "content": "auth test"}])
+                await client.complete(
+                    messages=[{"role": "user", "content": "auth test"}]
+                )
     finally:
         settings.opencode_zen_api_key = orig_key
 
@@ -1260,7 +1356,10 @@ async def test_put_model_config_allows_dynamic_free_models(
         # Valid new dynamic -free model
         resp = await client.put(
             "/config/model",
-            json={"provider": "opencode_zen", "model_name": "newly-discovered-model-free"},
+            json={
+                "provider": "opencode_zen",
+                "model_name": "newly-discovered-model-free",
+            },
         )
         assert resp.status_code == 200
         assert resp.json()["model_name"] == "newly-discovered-model-free"
@@ -1315,13 +1414,17 @@ def test_model_config_update_schema_validation():
     from pydantic import ValidationError
 
     # Valid opencode_zen free models
-    m1 = ModelConfigUpdate(provider="opencode_zen", model_name="nemotron-3.5-lightning-free")
+    m1 = ModelConfigUpdate(
+        provider="opencode_zen", model_name="nemotron-3.5-lightning-free"
+    )
     assert m1.model_name == "nemotron-3.5-lightning-free"
 
     m2 = ModelConfigUpdate(provider="opencode_zen", model_name="laguna-s-2.1-free")
     assert m2.model_name == "laguna-s-2.1-free"
 
-    m3 = ModelConfigUpdate(provider="opencode_zen", model_name="brand-new-rotational-model-free")
+    m3 = ModelConfigUpdate(
+        provider="opencode_zen", model_name="brand-new-rotational-model-free"
+    )
     assert m3.model_name == "brand-new-rotational-model-free"
 
     # Invalid opencode_zen model (not ending in -free)
@@ -1414,7 +1517,9 @@ async def test_groq_provider_success():
 
     try:
         provider = GroqProvider()
-        res = await provider.complete(messages=[{"role": "user", "content": "hello groq"}])
+        res = await provider.complete(
+            messages=[{"role": "user", "content": "hello groq"}]
+        )
         assert res["content"] == "Fix generated via Groq"
         assert res["usage"] == {"input_tokens": 120, "output_tokens": 45}
         assert res["latency_ms"] >= 0
@@ -1447,7 +1552,9 @@ async def test_opencode_zen_fallback_to_groq_on_free_tier_error():
     settings.groq_model_name = "llama-3.3-70b-versatile"
 
     zen_route = respx.post(OPENCODE_ZEN_ENDPOINT).mock(
-        return_value=httpx.Response(403, text="FreeTierError: Free tier access restricted")
+        return_value=httpx.Response(
+            403, text="FreeTierError: Free tier access restricted"
+        )
     )
     groq_endpoint = f"{settings.groq_base_url.rstrip('/')}/chat/completions"
     groq_route = respx.post(groq_endpoint).mock(
@@ -1455,7 +1562,9 @@ async def test_opencode_zen_fallback_to_groq_on_free_tier_error():
             200,
             json={
                 "model": "llama-3.3-70b-versatile",
-                "choices": [{"message": {"role": "assistant", "content": "Fixed via Groq"}}],
+                "choices": [
+                    {"message": {"role": "assistant", "content": "Fixed via Groq"}}
+                ],
                 "usage": {"prompt_tokens": 50, "completion_tokens": 20},
             },
         )
@@ -1463,7 +1572,9 @@ async def test_opencode_zen_fallback_to_groq_on_free_tier_error():
 
     client = LLMClient()
     try:
-        res = await client.complete(messages=[{"role": "user", "content": "diagnose failure"}])
+        res = await client.complete(
+            messages=[{"role": "user", "content": "diagnose failure"}]
+        )
         assert res["content"] == "Fixed via Groq"
         assert res["model"] == "llama-3.3-70b-versatile"
         assert zen_route.called
@@ -1508,7 +1619,14 @@ async def test_opencode_zen_fallback_to_groq_on_model_exhaustion():
             200,
             json={
                 "model": "openai/gpt-oss-120b",
-                "choices": [{"message": {"role": "assistant", "content": "Exhaustion resolved via Groq"}}],
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Exhaustion resolved via Groq",
+                        }
+                    }
+                ],
                 "usage": {"prompt_tokens": 40, "completion_tokens": 15},
             },
         )
@@ -1516,10 +1634,17 @@ async def test_opencode_zen_fallback_to_groq_on_model_exhaustion():
 
     client = LLMClient()
     try:
-        with patch("app.llm.client.get_active_model_config", seed_async), \
-             patch("app.llm.client.get_dynamic_free_models", AsyncMock(return_value=["nemotron-3-ultra-free"])), \
-             patch("asyncio.sleep", return_value=None):
-            res = await client.complete(messages=[{"role": "user", "content": "exhaustion test"}])
+        with (
+            patch("app.llm.client.get_active_model_config", seed_async),
+            patch(
+                "app.llm.client.get_dynamic_free_models",
+                AsyncMock(return_value=["nemotron-3-ultra-free"]),
+            ),
+            patch("asyncio.sleep", return_value=None),
+        ):
+            res = await client.complete(
+                messages=[{"role": "user", "content": "exhaustion test"}]
+            )
             assert res["content"] == "Exhaustion resolved via Groq"
             assert res["model"] == "openai/gpt-oss-120b"
             assert zen_route.called
@@ -1545,7 +1670,9 @@ async def test_groq_direct_provider_call():
             200,
             json={
                 "model": "openai/gpt-oss-120b",
-                "choices": [{"message": {"role": "assistant", "content": "Direct Groq call ok"}}],
+                "choices": [
+                    {"message": {"role": "assistant", "content": "Direct Groq call ok"}}
+                ],
                 "usage": {"prompt_tokens": 30, "completion_tokens": 10},
             },
         )
@@ -1579,4 +1706,3 @@ async def test_groq_provider_missing_api_key_raises_auth_error():
         assert "GROQ_API_KEY is not configured" in str(exc_info.value)
     finally:
         settings.groq_api_key = orig_key
-

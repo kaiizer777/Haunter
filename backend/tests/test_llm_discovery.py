@@ -47,7 +47,9 @@ def test_clear_model_cache_resets_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_dynamic_free_models_no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_dynamic_free_models_no_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings, "opencode_zen_api_key", "")
     result = await get_dynamic_free_models(api_key=None)
     assert result == BOOTSTRAP_FREE_MODELS
@@ -95,7 +97,9 @@ async def test_get_dynamic_free_models_supports_alternative_payload_shapes() -> 
             },
         )
     )
-    res1 = await get_dynamic_free_models(base_url="https://custom.ai/zen/v1", api_key="key1")
+    res1 = await get_dynamic_free_models(
+        base_url="https://custom.ai/zen/v1", api_key="key1"
+    )
     assert res1 == ["alpha-free"]
 
     clear_model_cache()
@@ -112,7 +116,9 @@ async def test_get_dynamic_free_models_supports_alternative_payload_shapes() -> 
             ],
         )
     )
-    res2 = await get_dynamic_free_models(base_url="https://custom2.ai/zen/v1", api_key="key2")
+    res2 = await get_dynamic_free_models(
+        base_url="https://custom2.ai/zen/v1", api_key="key2"
+    )
     assert res2 == ["gamma-free", "delta-free"]
 
 

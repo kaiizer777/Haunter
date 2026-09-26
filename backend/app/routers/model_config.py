@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/config/model", tags=["model_config"])
 
+
 # Server-derived base URLs — prevents SSRF / redirect to malicious endpoints.
 # Resolved live from settings (Phase 3.2 Issue 5) so env overrides apply;
 # never accepted from the client.
@@ -52,14 +53,20 @@ def _base_url_for_provider(provider: str) -> str | None:
 
 def _default_base_url() -> str:
     """Fallback base URL derived from settings.default_provider (Phase 3.2 Issue 5)."""
-    return _base_url_for_provider(settings.default_provider) or settings.opencode_zen_base_url
+    return (
+        _base_url_for_provider(settings.default_provider)
+        or settings.opencode_zen_base_url
+    )
 
 
 @router.get("", response_model=ModelConfigOut)
 async def get_active_model_config_endpoint(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    repo_id: Annotated[Optional[uuid.UUID], Query(description="Optional repo ID for repo-specific config")] = None,
+    repo_id: Annotated[
+        Optional[uuid.UUID],
+        Query(description="Optional repo ID for repo-specific config"),
+    ] = None,
 ) -> ModelConfigOut:
     """
     Get the currently active model configuration.
@@ -72,7 +79,9 @@ async def get_active_model_config_endpoint(
         )
         repo = repo_result.scalar_one_or_none()
         if repo is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
+            )
 
         # 1a. Direct repo-scoped lookup (mirrors LLM runtime _resolve_from_db):
         # newest active scope='repo' row pinned to this repo. Works even when
@@ -146,7 +155,9 @@ async def update_model_config_endpoint(
     """
     base_url = _base_url_for_provider(body.provider)
     if not base_url:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid provider")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid provider"
+        )
 
     # 1. Per-repo model config update
     if body.repo_id is not None:
@@ -155,7 +166,9 @@ async def update_model_config_endpoint(
         )
         repo = repo_result.scalar_one_or_none()
         if repo is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
+            )
 
         if repo.active_model_config_id is not None:
             cfg_res = await db.execute(
@@ -165,7 +178,10 @@ async def update_model_config_endpoint(
         else:
             existing_cfg = None
 
-        if existing_cfg is not None and existing_cfg.scope != ModelConfigScope.GLOBAL.value:
+        if (
+            existing_cfg is not None
+            and existing_cfg.scope != ModelConfigScope.GLOBAL.value
+        ):
             existing_cfg.provider = body.provider
             existing_cfg.model_name = body.model_name
             existing_cfg.base_url = base_url
@@ -275,14 +291,28 @@ async def get_available_models_endpoint(
     ]
 
     anthropic_items = [
-        AvailableModelItem(id="claude-sonnet-4-5", name="Claude Sonnet 4.5", tag="SOTA Fixes"),
-        AvailableModelItem(id="claude-haiku-3-5", name="Claude Haiku 3.5", tag="Low Latency"),
+        AvailableModelItem(
+            id="claude-sonnet-4-5", name="Claude Sonnet 4.5", tag="SOTA Fixes"
+        ),
+        AvailableModelItem(
+            id="claude-haiku-3-5", name="Claude Haiku 3.5", tag="Low Latency"
+        ),
     ]
 
     groq_items = [
-        AvailableModelItem(id="openai/gpt-oss-120b", name="GPT-OSS 120B", tag="High Reasoning · Fallback"),
-        AvailableModelItem(id="llama-3.3-70b-versatile", name="Llama 3.3 70B Versatile", tag="Fast · Production"),
-        AvailableModelItem(id="llama-3.1-8b-instant", name="Llama 3.1 8B Instant", tag="Ultra Fast"),
+        AvailableModelItem(
+            id="openai/gpt-oss-120b",
+            name="GPT-OSS 120B",
+            tag="High Reasoning · Fallback",
+        ),
+        AvailableModelItem(
+            id="llama-3.3-70b-versatile",
+            name="Llama 3.3 70B Versatile",
+            tag="Fast · Production",
+        ),
+        AvailableModelItem(
+            id="llama-3.1-8b-instant", name="Llama 3.1 8B Instant", tag="Ultra Fast"
+        ),
     ]
 
     return AvailableModelsOut(

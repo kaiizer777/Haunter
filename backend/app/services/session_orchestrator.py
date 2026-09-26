@@ -696,7 +696,12 @@ _TOOLS: list[dict[str, Any]] = [
                                 },
                                 "status": {
                                     "type": "string",
-                                    "enum": ["pending", "in_progress", "completed", "failed"],
+                                    "enum": [
+                                        "pending",
+                                        "in_progress",
+                                        "completed",
+                                        "failed",
+                                    ],
                                     "description": "Current status of the task.",
                                 },
                             },
@@ -939,6 +944,7 @@ _TOOLS: list[dict[str, Any]] = [
 # System prompt builder
 # ------------------------------------------------------------------
 
+
 def _build_system_prompt(
     repo_owner: str,
     repo_name: str,
@@ -1087,6 +1093,7 @@ def _prune_conversation_history(
 # Concurrent-session guard error
 # ------------------------------------------------------------------
 
+
 class SessionBusyError(Exception):
     """Raised when a concurrent prompt is already in flight for this session."""
 
@@ -1094,6 +1101,7 @@ class SessionBusyError(Exception):
 # ------------------------------------------------------------------
 # Main orchestrator
 # ------------------------------------------------------------------
+
 
 class SessionOrchestrator:
     """
@@ -1148,7 +1156,9 @@ class SessionOrchestrator:
             await queue.close()
         except Exception as exc:
             logger.exception(
-                "session_orchestrator: unhandled error in session=%s: %s", self.session_id, exc
+                "session_orchestrator: unhandled error in session=%s: %s",
+                self.session_id,
+                exc,
             )
             await queue.put_error(
                 "An internal error occurred while processing your request.",
@@ -1171,7 +1181,9 @@ class SessionOrchestrator:
         # 1. Load session from DB — re-validate ownership at the data layer.
         session = await self._load_session()
         if session is None:
-            await queue.put_error("Session not found or already closed.", "SESSION_NOT_FOUND")
+            await queue.put_error(
+                "Session not found or already closed.", "SESSION_NOT_FOUND"
+            )
             await queue.close()
             return
 
@@ -1210,7 +1222,9 @@ class SessionOrchestrator:
             return
 
         # 2. Build messages: system prompt + history + new user message.
-        conversation_history: list[dict[str, Any]] = list(session.conversation_history or [])
+        conversation_history: list[dict[str, Any]] = list(
+            session.conversation_history or []
+        )
         staged_patches: dict[str, str] = dict(session.staged_patches or {})
 
         system_msg: dict[str, Any] = {
@@ -1256,9 +1270,13 @@ class SessionOrchestrator:
             except LLMError as exc:
                 logger.error(
                     "session_orchestrator: LLM error in session=%s iteration=%d: %s",
-                    self.session_id, iteration, exc,
+                    self.session_id,
+                    iteration,
+                    exc,
                 )
-                await queue.put_error("LLM request failed. Please try again.", "LLM_ERROR")
+                await queue.put_error(
+                    "LLM request failed. Please try again.", "LLM_ERROR"
+                )
                 await queue.close()
                 return
 
@@ -1271,7 +1289,10 @@ class SessionOrchestrator:
             if content:
                 await queue.put_thought(content)
 
-            assistant_entry: dict[str, Any] = {"role": "assistant", "content": content or ""}
+            assistant_entry: dict[str, Any] = {
+                "role": "assistant",
+                "content": content or "",
+            }
             if tool_calls:
                 assistant_entry["tool_calls"] = tool_calls
 
@@ -1310,32 +1331,56 @@ class SessionOrchestrator:
 
                 # Populate match_count / file_count / symbol_count on args for frontend UI chips.
                 if tool_name == "grep_search":
-                    if not tool_result.startswith("Error") and not tool_result.startswith("No matches"):
-                        args["match_count"] = len([line for line in tool_result.splitlines() if line.strip()])
+                    if not tool_result.startswith(
+                        "Error"
+                    ) and not tool_result.startswith("No matches"):
+                        args["match_count"] = len(
+                            [line for line in tool_result.splitlines() if line.strip()]
+                        )
                     else:
                         args["match_count"] = 0
                 elif tool_name == "glob_files":
-                    if not tool_result.startswith("Error") and not tool_result.startswith("No files"):
-                        args["file_count"] = len([line for line in tool_result.splitlines() if line.strip()])
+                    if not tool_result.startswith(
+                        "Error"
+                    ) and not tool_result.startswith("No files"):
+                        args["file_count"] = len(
+                            [line for line in tool_result.splitlines() if line.strip()]
+                        )
                     else:
                         args["file_count"] = 0
                 elif tool_name == "find_symbol":
-                    if not tool_result.startswith("Error") and not tool_result.startswith("No definitions"):
+                    if not tool_result.startswith(
+                        "Error"
+                    ) and not tool_result.startswith("No definitions"):
                         # First line is the header "Found N definition(s)…"
-                        data_lines = [line for line in tool_result.splitlines()[1:] if line.strip()]
+                        data_lines = [
+                            line
+                            for line in tool_result.splitlines()[1:]
+                            if line.strip()
+                        ]
                         args["symbol_count"] = len(data_lines)
                     else:
                         args["symbol_count"] = 0
                 elif tool_name == "find_references":
-                    if not tool_result.startswith("Error") and not tool_result.startswith("No references"):
-                        data_lines = [line for line in tool_result.splitlines()[1:] if line.strip()]
+                    if not tool_result.startswith(
+                        "Error"
+                    ) and not tool_result.startswith("No references"):
+                        data_lines = [
+                            line
+                            for line in tool_result.splitlines()[1:]
+                            if line.strip()
+                        ]
                         args["match_count"] = len(data_lines)
                     else:
                         args["match_count"] = 0
                 elif tool_name == "update_plan":
                     tasks = args.get("tasks", [])
                     if isinstance(tasks, list):
-                        completed = sum(1 for t in tasks if isinstance(t, dict) and t.get("status") == "completed")
+                        completed = sum(
+                            1
+                            for t in tasks
+                            if isinstance(t, dict) and t.get("status") == "completed"
+                        )
                         args["completed_count"] = completed
                         args["total_count"] = len(tasks)
 
@@ -1363,7 +1408,8 @@ class SessionOrchestrator:
             # Exceeded MAX_ITERATIONS — soft stop, not an error.
             logger.warning(
                 "session_orchestrator: session=%s reached max iterations (%d)",
-                self.session_id, MAX_ITERATIONS,
+                self.session_id,
+                MAX_ITERATIONS,
             )
 
         # 5. Persist updated state to DB atomically.
@@ -1383,7 +1429,8 @@ class SessionOrchestrator:
                 await queue.put_checkpoint_created(cp)
             except Exception as cp_exc:
                 logger.warning(
-                    "session_orchestrator: failed to emit checkpoint_created event: %s", cp_exc
+                    "session_orchestrator: failed to emit checkpoint_created event: %s",
+                    cp_exc,
                 )
 
         await self._persist(session, updated_history, staged_patches)
@@ -1552,11 +1599,15 @@ class SessionOrchestrator:
         elif tool_name == "ask_user_clarification":
             if session is None:
                 return "Error: Session context is required to request clarification."
-            return await self._tool_ask_user_clarification(args=args, session=session, queue=queue)
+            return await self._tool_ask_user_clarification(
+                args=args, session=session, queue=queue
+            )
         elif tool_name == "checkpoint_restore":
             if session is None:
                 return "Error: Session context is required for checkpoint_restore."
-            return await self._tool_checkpoint_restore(args=args, session=session, queue=queue)
+            return await self._tool_checkpoint_restore(
+                args=args, session=session, queue=queue
+            )
         elif tool_name == "scan_security_vulnerabilities":
             if session is None:
                 return "Error: Session context is required for scan_security_vulnerabilities."
@@ -1620,7 +1671,8 @@ class SessionOrchestrator:
         else:
             logger.warning(
                 "session_orchestrator: unknown tool_name=%r in session=%s",
-                tool_name, self.session_id,
+                tool_name,
+                self.session_id,
             )
             return f"Unknown tool: {tool_name!r}"
 
@@ -1647,7 +1699,9 @@ class SessionOrchestrator:
             )
         except GitHubClientError as exc:
             logger.warning(
-                "session_orchestrator: read_file GitHub error for path=%s: %s", path, exc
+                "session_orchestrator: read_file GitHub error for path=%s: %s",
+                path,
+                exc,
             )
             return f"Error reading file: {exc}"
 
@@ -1657,7 +1711,10 @@ class SessionOrchestrator:
         # Truncate very large files to avoid bloating the context window.
         MAX_CONTENT_CHARS = 50_000
         if len(content) > MAX_CONTENT_CHARS:
-            content = content[:MAX_CONTENT_CHARS] + f"\n\n[...truncated at {MAX_CONTENT_CHARS} chars]"
+            content = (
+                content[:MAX_CONTENT_CHARS]
+                + f"\n\n[...truncated at {MAX_CONTENT_CHARS} chars]"
+            )
 
         return content
 
@@ -1697,7 +1754,11 @@ class SessionOrchestrator:
         try:
             await queue.put_file_diff(path=path, diff=diff, action=action)
         except Exception as exc:
-            logger.error("session_orchestrator: failed to emit file_diff for path=%s: %s", path, exc)
+            logger.error(
+                "session_orchestrator: failed to emit file_diff for path=%s: %s",
+                path,
+                exc,
+            )
 
         return f"Patch staged for {path!r} (action={action})."
 
@@ -1764,7 +1825,11 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 token=self.gh_token,
             )
-            return "\n".join(matching) if matching else f"No files matched pattern: {pattern!r}"
+            return (
+                "\n".join(matching)
+                if matching
+                else f"No files matched pattern: {pattern!r}"
+            )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
 
@@ -1817,7 +1882,11 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 token=self.gh_token,
             )
-            return "\n".join(entries) if entries else f"Directory empty or not found: {path!r}"
+            return (
+                "\n".join(entries)
+                if entries
+                else f"Directory empty or not found: {path!r}"
+            )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
 
@@ -2006,7 +2075,9 @@ class SessionOrchestrator:
         queue: SseQueue,
     ) -> str:
         tasks = args.get("tasks", [])
-        return await tool_update_plan(tasks=tasks, session=session, queue=queue, db=self.db)
+        return await tool_update_plan(
+            tasks=tasks, session=session, queue=queue, db=self.db
+        )
 
     async def _tool_ask_user_clarification(
         self,
@@ -2016,7 +2087,9 @@ class SessionOrchestrator:
     ) -> str:
         question = str(args.get("question", ""))
         raw_options = args.get("options", [])
-        options = [str(opt) for opt in raw_options] if isinstance(raw_options, list) else []
+        options = (
+            [str(opt) for opt in raw_options] if isinstance(raw_options, list) else []
+        )
         return await tool_ask_user_clarification(
             question=question,
             options=options,
@@ -2050,7 +2123,9 @@ class SessionOrchestrator:
         base_sha: str,
     ) -> str:
         raw_paths = args.get("paths", [])
-        paths: list[str] = [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
+        paths: list[str] = (
+            [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
+        )
         return tool_scan_security_vulnerabilities(
             paths=paths,
             session=session,
@@ -2097,7 +2172,9 @@ class SessionOrchestrator:
         queue: SseQueue,
     ) -> str:
         raw_paths = args.get("paths", [])
-        paths: list[str] = [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
+        paths: list[str] = (
+            [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
+        )
         linter: str = str(args.get("linter", "auto"))
         cwd: str | None = args.get("cwd")
         if cwd is not None:
@@ -2302,7 +2379,9 @@ class SessionOrchestrator:
         except SubagentError as exc:
             logger.error(
                 "session_orchestrator: subagent role=%s failed in session=%s: %s",
-                role, self.session_id, exc.message,
+                role,
+                self.session_id,
+                exc.message,
             )
             return (
                 f"Subagent '{role}' failed: {exc.message}. "
@@ -2333,7 +2412,6 @@ class SessionOrchestrator:
         )
 
     async def _load_session(self) -> AgentSession | None:
-
         """
         Load the AgentSession with its repo relationship.
 

@@ -64,6 +64,7 @@ from tests.fake_audit_db import (  # noqa: F401
 @pytest.fixture
 def make_fake_auth_client():
     """Factory to create an authenticated AsyncClient with cookie for fake user."""
+
     def _make(user_id: uuid.UUID) -> AsyncClient:
         transport = ASGITransport(app=app)
         return AsyncClient(
@@ -71,6 +72,7 @@ def make_fake_auth_client():
             base_url="http://testserver",
             cookies={"haunter_session": _sign_user_id(user_id)},
         )
+
     return _make
 
 
@@ -157,7 +159,9 @@ async def test_get_settings_without_api_prefix(seeded_env, make_fake_auth_client
 
 
 @pytest.mark.asyncio
-async def test_get_settings_persisted_row(fake_audit_db, seeded_env, make_fake_auth_client):
+async def test_get_settings_persisted_row(
+    fake_audit_db, seeded_env, make_fake_auth_client
+):
     """When repo has a persisted settings row, GET returns the stored values."""
     user_a, _, repo_a, _ = seeded_env
 
@@ -252,7 +256,9 @@ async def test_patch_settings_flat_fields(seeded_env, make_fake_auth_client):
             "min_confidence_threshold": 88,
             "allowed_branches": ["main", "staging"],
         }
-        resp = await client.patch(f"/api/repos/{repo_a.id}/settings", json=patch_payload)
+        resp = await client.patch(
+            f"/api/repos/{repo_a.id}/settings", json=patch_payload
+        )
         assert resp.status_code == 200, resp.text
         data = resp.json()
 
@@ -265,7 +271,9 @@ async def test_patch_settings_flat_fields(seeded_env, make_fake_auth_client):
 
 
 @pytest.mark.asyncio
-async def test_patch_settings_nested_future02_payload(seeded_env, make_fake_auth_client):
+async def test_patch_settings_nested_future02_payload(
+    seeded_env, make_fake_auth_client
+):
     """PATCH accepts future02.md Section 2.3 nested payload structure."""
     user_a, _, repo_a, _ = seeded_env
     client = make_fake_auth_client(user_a.id)
@@ -284,7 +292,9 @@ async def test_patch_settings_nested_future02_payload(seeded_env, make_fake_auth
             },
             "monitored_branches": ["develop"],
         }
-        resp = await client.patch(f"/api/repos/{repo_a.id}/settings", json=nested_payload)
+        resp = await client.patch(
+            f"/api/repos/{repo_a.id}/settings", json=nested_payload
+        )
         assert resp.status_code == 200, resp.text
         data = resp.json()
 
@@ -318,7 +328,9 @@ async def test_patch_settings_with_preset_profile(seeded_env, make_fake_auth_cli
 
 
 @pytest.mark.asyncio
-async def test_patch_settings_with_preset_and_explicit_override(seeded_env, make_fake_auth_client):
+async def test_patch_settings_with_preset_and_explicit_override(
+    seeded_env, make_fake_auth_client
+):
     """PATCH with preset profile honours explicit granular overrides specified alongside it."""
     user_a, _, repo_a, _ = seeded_env
     client = make_fake_auth_client(user_a.id)
@@ -355,7 +367,9 @@ async def test_patch_settings_negative_cost_fails(seeded_env, make_fake_auth_cli
 
 
 @pytest.mark.asyncio
-async def test_patch_settings_confidence_bounds_fails(seeded_env, make_fake_auth_client):
+async def test_patch_settings_confidence_bounds_fails(
+    seeded_env, make_fake_auth_client
+):
     """PATCH with out-of-bounds confidence threshold returns 422."""
     user_a, _, repo_a, _ = seeded_env
     client = make_fake_auth_client(user_a.id)
@@ -389,7 +403,9 @@ async def test_patch_settings_invalid_preset_fails(seeded_env, make_fake_auth_cl
 
 
 @pytest.mark.asyncio
-async def test_patch_settings_invalid_branch_name_fails(seeded_env, make_fake_auth_client):
+async def test_patch_settings_invalid_branch_name_fails(
+    seeded_env, make_fake_auth_client
+):
     """PATCH with illegal git branch names returns 422."""
     user_a, _, repo_a, _ = seeded_env
     client = make_fake_auth_client(user_a.id)
@@ -548,7 +564,9 @@ async def test_list_repos_with_settings(seeded_env, make_fake_auth_client):
 
 
 @pytest.mark.asyncio
-async def test_list_repos_with_settings_eager_load_persisted(seeded_env, make_fake_auth_client):
+async def test_list_repos_with_settings_eager_load_persisted(
+    seeded_env, make_fake_auth_client
+):
     """GET /api/settings/repos eagerly loads updated persisted settings."""
     user_a, _, repo_a, _ = seeded_env
     client = make_fake_auth_client(user_a.id)
@@ -647,7 +665,14 @@ def test_service_preset_normalization():
     """Preset normalization maps aliases to canonical names and raises on invalid ones."""
     for p in ALLOWED_PRESETS:
         canonical = normalize_preset_name(p)
-        assert canonical in {"autonomous", "conservative", "standard", "audit_only", "live_studio_only", "custom"}
+        assert canonical in {
+            "autonomous",
+            "conservative",
+            "standard",
+            "audit_only",
+            "live_studio_only",
+            "custom",
+        }
 
     assert normalize_preset_name("full_autonomous") == "autonomous"
     assert normalize_preset_name("auditor_only") == "audit_only"
