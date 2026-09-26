@@ -18,7 +18,6 @@ import {
   GitBranch,
   Plus,
   X,
-  ExternalLink,
   ChevronRight,
   Circle,
   CheckCircle2,

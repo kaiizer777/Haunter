@@ -26,7 +26,6 @@ import {
   RefreshCw,
   Clock,
   Filter,
-  Activity,
   Layers,
   RotateCcw,
 } from "lucide-react";

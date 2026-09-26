@@ -24,7 +24,6 @@ import {
   X,
   CheckCircle2,
   XCircle,
-  Circle,
   Loader2,
   FileCode2,
   ChevronDown,
@@ -62,7 +61,6 @@ import {
   HelpCircle,
   Clock,
   Undo2,
-  History,
   ShieldAlert,
   GitBranch,
 } from "lucide-react";
@@ -74,8 +72,6 @@ import {
   SubagentStartEvent,
   SubagentDoneEvent,
   AuditFinding,
-  AuditCardState,
-  AuditReportEvent,
 } from "@/hooks/useSessionStream";
 import { AuditReportCard } from "@/components/workspace/AuditReportCard";
 import { AppLayout } from "@/components/layout/app-layout";
@@ -106,31 +102,43 @@ const MonacoDiffEditor = dynamic(
 
 const FALLBACK_MODELS = {
   opencode_zen: [
-    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Free" },
-    { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Free" },
-    { id: "deepseek-r1-0528-free", name: "DeepSeek R1 0528", tag: "Free" },
+    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Free", context_window: 131072 },
+    { id: "space-bunny-free", name: "Space Bunny", tag: "1M · Free", context_window: 1048576 },
+    { id: "longcat-2.5-preview-free", name: "Longcat 2.5 Preview", tag: "1M · Free", context_window: 1048576 },
+    { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash", tag: "1M · Free", context_window: 1048576 },
+    { id: "mimo-v2.6-flash-free", name: "MiMo 2.6 Flash", tag: "256k · Free", context_window: 262144 },
+    { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Free", context_window: 131072 },
+    { id: "deepseek-r1-0528-free", name: "DeepSeek R1 0528", tag: "Free", context_window: 65536 },
   ],
   groq: [
-    { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B Versatile", tag: "Fast" },
-    { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B Instant", tag: "Fast" },
-    { id: "openai/gpt-oss-120b", name: "GPT OSS 120B (Groq)", tag: "Fast" },
-    { id: "deepseek-r1-distill-llama-70b", name: "DeepSeek R1 Llama 70B", tag: "Fast" },
-    { id: "gemma2-9b-it", name: "Gemma 2 9B", tag: "Fast" },
+    { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B Versatile", tag: "Fast", context_window: 131072 },
+    { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B Instant", tag: "Fast", context_window: 131072 },
+    { id: "openai/gpt-oss-120b", name: "GPT OSS 120B (Groq)", tag: "Fast", context_window: 131072 },
+    { id: "deepseek-r1-distill-llama-70b", name: "DeepSeek R1 Llama 70B", tag: "Fast", context_window: 131072 },
+    { id: "gemma2-9b-it", name: "Gemma 2 9B", tag: "Fast", context_window: 8192 },
   ],
   anthropic: [
-    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", tag: "SOTA" },
-    { id: "claude-haiku-3-5", name: "Claude Haiku 3.5", tag: "SOTA" },
+    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", tag: "SOTA", context_window: 200000 },
+    { id: "claude-haiku-3-5", name: "Claude Haiku 3.5", tag: "SOTA", context_window: 200000 },
   ],
   openai: [
-    { id: "gpt-4o", name: "GPT-4o", tag: "GPT" },
-    { id: "gpt-4o-mini", name: "GPT-4o Mini", tag: "GPT" },
+    { id: "gpt-4o", name: "GPT-4o", tag: "GPT", context_window: 128000 },
+    { id: "gpt-4o-mini", name: "GPT-4o Mini", tag: "GPT", context_window: 128000 },
   ],
-} as const satisfies Record<string, { id: string; name: string; tag: string }[]>;
+} as const satisfies Record<string, { id: string; name: string; tag: string; context_window?: number }[]>;
 
 const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "space-bunny-free": 1048576,
+  "longcat-2.5-preview-free": 1048576,
+  "ling-3.0-flash-fin-free": 1048576,
+  "mimo-v2.5-free": 262144,
+  "mimo-v2.6-flash-free": 262144,
+  "muse-spark-1.2-contributor-free": 131072,
+  "muse-spark-1.3-contributor-free": 131072,
+  "nemotron-3-ultra-free": 131072,
   "nemotron-3.5-lightning-free": 131072,
+  "jev-1.13-free": 131072,
   "laguna-s-2.1-free": 131072,
-  "space-bunny-free": 131072,
   "deepseek-r1-0528-free": 65536,
   "llama-3.3-70b-versatile": 131072,
   "llama-3.1-8b-instant": 131072,
@@ -147,6 +155,9 @@ const MODEL_SHORT_NAMES: Record<string, string> = {
   "nemotron-3.5-lightning-free": "Nemotron 3.5",
   "laguna-s-2.1-free": "Laguna 2.1",
   "space-bunny-free": "Space Bunny",
+  "longcat-2.5-preview-free": "Longcat 2.5",
+  "ling-3.0-flash-fin-free": "Ling 3.0",
+  "mimo-v2.6-flash-free": "MiMo 2.6",
   "deepseek-r1-0528-free": "DeepSeek R1",
   "llama-3.3-70b-versatile": "Llama 3.3 70B",
   "llama-3.1-8b-instant": "Llama 3.1 8B",
@@ -160,54 +171,16 @@ const MODEL_SHORT_NAMES: Record<string, string> = {
 };
 
 function formatTokens(count: number): string {
-  if (count >= 1000000) return `${(count / 1000000).toFixed(1)}M`;
+  if (count >= 1000000) {
+    const m = count / 1000000;
+    return m >= 1 && m < 1.05 ? "1M" : `${m.toFixed(1)}M`;
+  }
   if (count >= 1000) return `${(count / 1000).toFixed(count >= 10000 ? 0 : 1)}k`;
   return `${count}`;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers & Sub-components
-// ---------------------------------------------------------------------------
-
-function StatusChip({ status }: { status: string }) {
-  if (status === "active") {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border-t border-t-emerald-400/40 border-x border-x-emerald-500/30 border-b border-b-emerald-600/20 bg-gradient-to-b from-emerald-500/15 to-emerald-500/5 px-2.5 py-0.5 text-[11px] font-mono font-medium text-emerald-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)]">
-        <span className="relative flex h-1.5 w-1.5">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60" />
-          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
-        </span>
-        active
-      </span>
-    );
-  }
-  if (status === "awaiting_clarification") {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border-t border-t-amber-400/50 border-x border-x-amber-500/35 border-b border-b-amber-600/25 bg-gradient-to-b from-amber-500/20 to-amber-500/5 px-2.5 py-0.5 text-[11px] font-mono font-medium text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]">
-        <span className="relative flex h-1.5 w-1.5">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60" />
-          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.8)]" />
-        </span>
-        awaiting clarification
-      </span>
-    );
-  }
-  if (status === "completed") {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border-t border-t-violet-400/40 border-x border-x-violet-500/30 border-b border-b-violet-600/20 bg-gradient-to-b from-violet-500/15 to-violet-500/5 px-2.5 py-0.5 text-[11px] font-mono font-medium text-violet-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)]">
-        <CheckCircle2 className="h-3 w-3" />
-        completed
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border-t border-t-zinc-650/50 border-x border-x-zinc-750/50 border-b border-b-zinc-850 bg-gradient-to-b from-zinc-800/80 to-zinc-900/80 px-2.5 py-0.5 text-[11px] font-mono font-medium text-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-      <Circle className="h-3 w-3" />
-      {status}
-    </span>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Code Block with Copy Button
 // ---------------------------------------------------------------------------
@@ -1784,6 +1757,15 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   });
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
 
+  const allKnownModels = useMemo(() => {
+    return [
+      ...availableModels.opencode_zen,
+      ...availableModels.groq,
+      ...availableModels.openai,
+      ...availableModels.anthropic,
+    ];
+  }, [availableModels]);
+
   // Subagent progress cards (Phase 1.3) — fed by subagent_start/done SSE events.
   const [subagents, setSubagents] = useState<SubagentCardState[]>([]);
 
@@ -1817,8 +1799,6 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     terminalLogs,
     plan,
     pendingClarification,
-    checkpoints,
-    auditScans,
     activeAudit,
     sendChatMessage,
     stopStreaming,
@@ -1828,8 +1808,6 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     setPlan,
     setPendingClarification,
     setCheckpoints,
-    setAuditScans,
-    setActiveAudit,
   } = useSessionStream(sessionId, {
     onSubagentStart: handleSubagentStart,
     onSubagentDone: handleSubagentDone,
@@ -1933,10 +1911,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
   const [chatInput, setChatInput] = useState("");
   const [showPlanSidebar, setShowPlanSidebar] = useState(true);
-  const [showTimeMachine, setShowTimeMachine] = useState(false);
-  const [timeMachineRestoring, setTimeMachineRestoring] = useState<string | null>(null);
   const [securityViolations, setSecurityViolations] = useState<string | null>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const initialScrolledRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // -------------------------------------------------------------------------
@@ -1971,6 +1949,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   // -------------------------------------------------------------------------
 
   useEffect(() => {
+    initialScrolledRef.current = false;
     if (!sessionId) {
       router.replace("/sessions");
       return;
@@ -2013,11 +1992,28 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
         setPageError(msg);
       })
       .finally(() => setPageLoading(false));
-  }, [sessionId, setStagedPatches, setMessages, setPlan, setPendingClarification, setCheckpoints]);
+  }, [sessionId, setStagedPatches, setMessages, setPlan, setPendingClarification, setCheckpoints, router]);
 
-  // Auto-scroll chat to bottom on new messages
+  // Auto-scroll chat to bottom on new messages.
+  // Performs instant jump on initial page load / session hydration so user immediately
+  // lands on the latest chat without an animated scroll down from top.
   useEffect(() => {
-    chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (messages.length === 0) return;
+    if (!initialScrolledRef.current) {
+      if (chatContainerRef.current) {
+        chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+      }
+      chatBottomRef.current?.scrollIntoView({ behavior: "auto" });
+      initialScrolledRef.current = true;
+      requestAnimationFrame(() => {
+        if (chatContainerRef.current) {
+          chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+        chatBottomRef.current?.scrollIntoView({ behavior: "auto" });
+      });
+    } else {
+      chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages, isStreaming]);
 
   // When new patches arrive from SSE, select the first one if none selected
@@ -2141,26 +2137,6 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     }
   };
 
-  const handleRestoreCheckpoint = async (checkpointId: string) => {
-    if (timeMachineRestoring) return;
-    setTimeMachineRestoring(checkpointId);
-    setActionError(null);
-    try {
-      const updated = await api.restoreCheckpoint(sessionId, checkpointId);
-      // Sync staged patches to restored state (SSE handles Monaco buffers for live sessions,
-      // but for REST restore we update state directly).
-      setStagedPatches(updated.staged_patches);
-      setCheckpoints((updated.checkpoints ?? []) as CheckpointOut[]);
-      setSession(updated);
-      setShowTimeMachine(false);
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : "Failed to restore checkpoint.";
-      setActionError(msg);
-    } finally {
-      setTimeMachineRestoring(null);
-    }
-  };
-
   const handleViewDiffForFile = (filePath: string) => {
     setActiveFile(filePath);
     setViewMode("diffs");
@@ -2205,7 +2181,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
   if (pageLoading) {
     return (
-      <AppLayout title="Session" subtitle="Loading workspace…">
+      <AppLayout title="Workspace">
         <div className="flex h-[80vh] items-center justify-center bg-[#09090b]">
           <Loader2 className="h-7 w-7 animate-spin text-amber-400" />
         </div>
@@ -2232,8 +2208,19 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   const isActive = session.status === "active";
 
   const activeModelKey = selectedModelId || "nemotron-3.5-lightning-free";
-  const contextWindow = MODEL_CONTEXT_WINDOWS[activeModelKey] || 131072;
-  const modelDisplayName = MODEL_SHORT_NAMES[activeModelKey] || activeModelKey.split("-")[0] || "AI Model";
+  const matchedModel = allKnownModels.find((m) => m.id === activeModelKey);
+  const contextWindow =
+    matchedModel?.context_window ||
+    MODEL_CONTEXT_WINDOWS[activeModelKey] ||
+    (activeModelKey.includes("space-bunny") || activeModelKey.includes("longcat") || activeModelKey.includes("ling-3.0") || activeModelKey.includes("1m") ? 1048576 : 131072);
+  const modelDisplayName =
+    matchedModel?.name ||
+    MODEL_SHORT_NAMES[activeModelKey] ||
+    activeModelKey
+      .replace(/-free$/, "")
+      .split("-")
+      .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+      .join(" ");
   const tokenPercent = Math.min(100, Math.max(0, (calculatedTokens / contextWindow) * 100));
 
   // Topbar actions: View switchers, Verify, Commit PR, Close
@@ -2365,71 +2352,6 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
         <CiStatusChip phase="running" stepName="verifying" />
       )}
 
-      {/* Time Machine — checkpoint rewind control */}
-      {isActive && checkpoints.length > 0 && (
-        <div className="relative">
-          <button
-            onClick={() => setShowTimeMachine((prev) => !prev)}
-            className={`flex items-center gap-1.5 rounded-xl border-t border-x border-b px-2.5 py-1.5 text-xs font-mono transition-all active:translate-y-[0.5px] ${
-              showTimeMachine
-                ? "border-t-violet-400/50 border-x-violet-500/35 border-b-violet-600/30 bg-gradient-to-b from-violet-500/20 to-violet-500/10 text-violet-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.3)]"
-                : "border-t-zinc-700/60 border-x-zinc-800/60 border-b-zinc-950 bg-gradient-to-b from-zinc-800/80 to-zinc-900/90 text-zinc-400 hover:text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
-            }`}
-            title="Session Time Machine — view and restore checkpoints"
-          >
-            <History className="h-3.5 w-3.5" />
-            <span>History</span>
-            <span className="rounded-full bg-violet-500/20 px-1.5 py-0.2 text-[10px] text-violet-300">
-              {checkpoints.length}
-            </span>
-          </button>
-
-          {showTimeMachine && (
-            <div className="absolute right-0 top-full mt-1.5 z-40 w-80 rounded-2xl border-t border-t-zinc-700/80 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#121217]/98 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_16px_48px_rgba(0,0,0,0.8)] backdrop-blur-2xl overflow-hidden">
-              <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-800">
-                <div className="flex items-center gap-2 text-xs font-semibold text-zinc-200">
-                  <History className="h-3.5 w-3.5 text-violet-400" />
-                  Session Time Machine
-                </div>
-                <button
-                  onClick={() => setShowTimeMachine(false)}
-                  className="text-zinc-500 hover:text-zinc-300 transition-colors"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="max-h-64 overflow-y-auto">
-                {[...checkpoints].reverse().map((cp) => (
-                  <div
-                    key={cp.checkpoint_id}
-                    className="flex items-center justify-between gap-2 px-3.5 py-2.5 border-b border-zinc-800/60 hover:bg-zinc-800/40 transition-colors"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-mono text-zinc-200 truncate">{cp.description}</p>
-                      <p className="text-[10px] text-zinc-500 mt-0.5 font-mono">
-                        Turn {cp.turn} · {Object.keys(cp.staged_patches).length} file{Object.keys(cp.staged_patches).length !== 1 ? "s" : ""} · {new Date(cp.timestamp).toLocaleTimeString()}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => handleRestoreCheckpoint(cp.checkpoint_id)}
-                      disabled={timeMachineRestoring === cp.checkpoint_id}
-                      className="shrink-0 flex items-center gap-1 rounded-lg border-t border-t-violet-400/50 border-x border-x-violet-500/30 border-b border-b-violet-900 bg-gradient-to-b from-violet-500/20 to-violet-600/10 px-2 py-0.5 text-[10px] font-mono text-violet-300 hover:text-violet-100 hover:border-t-violet-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_2px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {timeMachineRestoring === cp.checkpoint_id ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Undo2 className="h-3 w-3" />
-                      )}
-                      Restore
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Commit & PR button with Security Badge */}
       {isActive && (
         <div className="relative flex items-center gap-1.5">
@@ -2471,8 +2393,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
   return (
     <AppLayout
-      title={session.title}
-      subtitle={`${session.repo_owner}/${session.repo_name} · ${session.branch_name}`}
+      title={session.repo_name || session.title || "Workspace"}
       actions={topbarActions}
       noPadding
     >
@@ -2575,7 +2496,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
               />
 
               {/* Scrollable Conversation Stream */}
-              <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 relative z-10">
+              <div ref={chatContainerRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-6 relative z-10">
                 <div className="mx-auto max-w-3xl w-full">
                   {/* Empty state / Welcome */}
                   {messages.length === 0 && (

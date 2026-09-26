@@ -28,10 +28,7 @@ import {
   Layers,
   RotateCcw,
   FolderGit2,
-  Server,
-  Terminal,
   Workflow,
-  Shield,
   Bot,
 } from "lucide-react";
 

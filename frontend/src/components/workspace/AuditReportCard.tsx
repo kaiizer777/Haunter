@@ -16,7 +16,6 @@
 import React, { useState, useMemo } from "react";
 import {
   ShieldAlert,
-  ShieldCheck,
   AlertTriangle,
   Info,
   CheckCircle2,
@@ -34,7 +33,6 @@ import {
 import type {
   AuditCardState,
   AuditFinding,
-  AuditReportEvent,
 } from "@/hooks/useSessionStream";
 
 export interface AuditReportCardProps {
@@ -407,7 +405,10 @@ export function AuditReportCard({
   const report = scan.report;
 
   // Calculate counts
-  const findings = report?.findings || [];
+  // Memoize findings so the outer `useMemo(filteredFindings)` does not
+  // recompute every render (otherwise `findings = a || []` allocates a fresh
+  // array identity each render and silently invalidates the memo dep).
+  const findings = useMemo(() => report?.findings ?? [], [report?.findings]);
   const blockerCount = findings.filter(
     (f) => normalizeSeverity(f.severity) === "BLOCKER"
   ).length;

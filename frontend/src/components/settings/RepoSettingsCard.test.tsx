@@ -1,9 +1,8 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { RepoSettingsCard } from "./RepoSettingsCard";
-import { RepoSettingsOut, RepoSettingsUpdate } from "@/lib/api";
+import { RepoSettingsOut } from "@/lib/api";
 
 describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
   const mockSettings: RepoSettingsOut = {

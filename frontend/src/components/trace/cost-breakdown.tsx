@@ -1,6 +1,6 @@
 import { TraceOut } from "@/lib/api";
 import { formatCost, formatLatency, formatNumber } from "@/lib/utils";
-import { DollarSign, Clock, Layers, Cpu, ArrowUpRight, CheckCircle2 } from "lucide-react";
+import { DollarSign, Clock, Layers, Cpu, CheckCircle2 } from "lucide-react";
 
 interface CostBreakdownProps {
   trace: TraceOut;

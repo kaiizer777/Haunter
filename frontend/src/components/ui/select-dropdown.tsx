@@ -72,7 +72,7 @@ export function SelectDropdown({
         setTimeout(() => searchInputRef.current?.focus(), 40);
       }
     }
-  }, [isOpen]);
+  }, [isOpen, filteredOptions, isSearchEnabled, value]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent | TouchEvent) => {
