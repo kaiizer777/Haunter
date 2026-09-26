@@ -204,7 +204,8 @@ async def test_webhook_chunked_body_oversized(client: httpx.AsyncClient):
 async def test_webhook_exact_2mb_passes(client: httpx.AsyncClient):
     """Payload of exact 2MB (2,097,152 bytes) passes the size threshold check."""
     # 2MB of valid JSON padding
-    exact_body = b'{"action":"ping","pad":"' + (b"x" * (2 * 1024 * 1024 - 30)) + b'"}'
+    exact_body = b'{"action":"ping","pad":"' + (b"x" * (2 * 1024 * 1024 - 26)) + b'"}'
+    assert len(exact_body) == 2 * 1024 * 1024
     sig = sign_payload(TEST_SECRET, exact_body)
     resp = await client.post(
         "/webhooks/github",

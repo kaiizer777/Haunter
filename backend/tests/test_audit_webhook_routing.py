@@ -411,8 +411,13 @@ def test_audit_verify_signature_uses_compare_digest():
     )
     assert audit_pipeline.verify_github_signature(body, good, None) is False
     assert (
-        audit_pipeline.verify_github_signature("not-bytes", good, TEST_SECRET) is False
-    )  # type: ignore[arg-type]
+        audit_pipeline.verify_github_signature(
+            "not-bytes",  # type: ignore[arg-type]
+            good,
+            TEST_SECRET,
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize(
