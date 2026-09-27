@@ -763,6 +763,7 @@ class SubagentRunner:
             return f"Error: {exc}"
 
     async def _exec_run_terminal_command(self, args: dict[str, Any]) -> str:
+        """Subagent tool runner for terminal commands scoped to the session repository."""
         command: str = str(args.get("command", ""))
         cwd = args.get("cwd")
         cwd_str: str | None = str(cwd) if cwd is not None else None
@@ -780,6 +781,7 @@ class SubagentRunner:
         )
 
     async def _exec_run_linter(self, args: dict[str, Any]) -> str:
+        """Subagent tool runner for static code analysis scoped to the session repository."""
         raw_paths = args.get("paths", [])
         paths: list[str] = (
             [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
@@ -802,6 +804,7 @@ class SubagentRunner:
         )
 
     async def _exec_run_targeted_tests(self, args: dict[str, Any]) -> str:
+        """Subagent tool runner for test execution scoped to the session repository."""
         raw_targets = args.get("test_targets", [])
         test_targets: list[str] = (
             [str(t) for t in raw_targets] if isinstance(raw_targets, list) else []

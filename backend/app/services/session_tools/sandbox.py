@@ -149,6 +149,25 @@ def _find_repo_python(cwd: str | None = None) -> str | None:
     return None
 
 
+def _has_runner(python_bin: str, runner_name: str) -> bool:
+    """Check if a tool runner (e.g. 'pytest' or 'ruff') exists in the python environment."""
+    bin_dir = os.path.dirname(python_bin)
+    cand = os.path.join(
+        bin_dir, f"{runner_name}.exe" if sys.platform == "win32" else runner_name
+    )
+    if os.path.isfile(cand):
+        return True
+    parent_dir = os.path.dirname(bin_dir)
+    for site_sub in (
+        os.path.join("Lib", "site-packages"),
+        os.path.join("lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"),
+        "site-packages",
+    ):
+        if os.path.isdir(os.path.join(parent_dir, site_sub, runner_name)):
+            return True
+    return False
+
+
 def _prepare_cmd_argv(argv: list[str], cwd: str | None = None) -> list[str]:
     """Resolve Python, pytest, ruff, and binaries for reliable cross-platform execution."""
     cmd_argv = list(argv)
@@ -160,6 +179,11 @@ def _prepare_cmd_argv(argv: list[str], cwd: str | None = None) -> list[str]:
     if sys.platform == "win32" and bin_name in (
         "dir", "del", "copy", "type", "cls", "mkdir", "md", "rmdir", "rd", "move"
     ):
+        for arg in cmd_argv[1:]:
+            if any(char in arg for char in ("&", "|", "<", ">", "^", "%")):
+                raise ValueError(
+                    f"Shell metacharacters are not permitted in arguments for Windows built-in '{bin_name}'"
+                )
         return ["cmd", "/c"] + cmd_argv
 
     repo_python = _find_repo_python(cwd)
@@ -167,10 +191,13 @@ def _prepare_cmd_argv(argv: list[str], cwd: str | None = None) -> list[str]:
 
     if bin_name in ("python", "python3"):
         cmd_argv[0] = effective_python
-    elif bin_name == "pytest":
-        cmd_argv = [effective_python, "-m", "pytest"] + cmd_argv[1:]
-    elif bin_name == "ruff":
-        cmd_argv = [effective_python, "-m", "ruff"] + cmd_argv[1:]
+    elif bin_name in ("pytest", "ruff"):
+        runner_python = (
+            repo_python
+            if (repo_python and _has_runner(repo_python, bin_name))
+            else sys.executable
+        )
+        cmd_argv = [runner_python, "-m", bin_name] + cmd_argv[1:]
     else:
         cmd_argv[0] = _resolve_binary(cmd_argv[0])
     return cmd_argv
@@ -215,7 +242,11 @@ def _run_subprocess_sync(
     if path_dirs:
         env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{env.get('PATH', '')}"
 
-    cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)
+    try:
+        cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)
+    except ValueError as exc:
+        duration = time.monotonic() - t_start
+        return 1, "", f"Error: {exc}", duration
 
     try:
         proc = subprocess.Popen(
@@ -341,7 +372,11 @@ async def _run_subprocess(
     if path_dirs:
         env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{env.get('PATH', '')}"
 
-    cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)
+    try:
+        cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)
+    except ValueError as exc:
+        duration = time.monotonic() - t_start
+        return 1, "", f"Error: {exc}", duration
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -467,6 +502,92 @@ def parse_command_chain(command: str) -> list[tuple[list[str], str]]:
     return subcommands
 
 
+_SAFE_REPO_COMPONENT_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
+
+
+def _is_safe_repo_component(val: str) -> bool:
+    """Check that a repository or owner component contains no path traversal characters."""
+    if not val or ".." in val or "/" in val or "\\" in val:
+        return False
+    return bool(_SAFE_REPO_COMPONENT_RE.match(val))
+
+
+def _get_git_remote_url(repo_root: str) -> str | None:
+    """
+    Extract the origin remote URL from a local git repository without running subprocesses.
+
+    Reads .git/config directly or follows gitdir links for submodules and worktrees.
+    """
+    git_dir = os.path.join(repo_root, ".git")
+    config_file: str | None = None
+    if os.path.isdir(git_dir):
+        config_file = os.path.join(git_dir, "config")
+    elif os.path.isfile(git_dir):
+        try:
+            with open(git_dir, "r", encoding="utf-8", errors="ignore") as f:
+                first_line = f.readline().strip()
+                if first_line.startswith("gitdir:"):
+                    gd = first_line.split(":", 1)[1].strip()
+                    cand_config = (
+                        gd if os.path.isabs(gd) else os.path.join(repo_root, gd, "config")
+                    )
+                    if os.path.isfile(cand_config):
+                        config_file = cand_config
+        except Exception:
+            pass
+
+    if config_file and os.path.isfile(config_file):
+        try:
+            with open(config_file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            match = re.search(
+                r'\[remote\s+["\']?origin["\']?\][^\[]*?url\s*=\s*([^\r\n]+)',
+                content,
+                re.IGNORECASE,
+            )
+            if match:
+                return match.group(1).strip()
+            match_any = re.search(
+                r'\[remote\s+[^\]]+\][^\[]*?url\s*=\s*([^\r\n]+)',
+                content,
+                re.IGNORECASE,
+            )
+            if match_any:
+                return match_any.group(1).strip()
+        except Exception:
+            pass
+
+    return None
+
+
+def _candidate_matches_owner(candidate_dir: str, repo_owner: str | None) -> bool:
+    """
+    Verify that an existing checkout candidate matches the expected repository owner.
+
+    If repo_owner is not specified, accepts any candidate.
+    If repo_owner is specified:
+      - Validates the Git origin URL against repo_owner.
+      - If no remote is configured, checks whether the candidate directory is nested under an owner folder.
+      - Skips candidate directories that belong to a different owner.
+    """
+    if not repo_owner or not repo_owner.strip():
+        return True
+
+    owner_lower = repo_owner.strip().lower()
+    remote_url = _get_git_remote_url(candidate_dir)
+    if remote_url:
+        norm_url = remote_url.lower().replace("\\", "/")
+        if f"/{owner_lower}/" in norm_url or f":{owner_lower}/" in norm_url:
+            return True
+        return False
+
+    parent_basename = os.path.basename(os.path.dirname(os.path.abspath(candidate_dir))).lower()
+    if parent_basename == owner_lower:
+        return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Repository Working Directory Resolver
 # ---------------------------------------------------------------------------
@@ -490,20 +611,26 @@ def resolve_repo_dir(
       (None, error_message) if repo_name is provided but cannot be found locally.
     """
     if not repo_name or not repo_name.strip():
-        base_dir = os.getcwd()
+        base_dir = os.path.realpath(os.getcwd())
         if cwd and cwd.strip():
             stripped = cwd.strip()
-            effective = (
-                stripped
-                if os.path.isabs(stripped)
-                else os.path.normpath(os.path.join(base_dir, stripped))
+            target_candidate = (
+                stripped if os.path.isabs(stripped) else os.path.join(base_dir, stripped)
             )
-            return effective, None
+            return os.path.realpath(target_candidate), None
         return base_dir, None
 
     clean_repo = repo_name.strip()
     if clean_repo.endswith(".git"):
         clean_repo = clean_repo[:-4]
+
+    clean_owner = repo_owner.strip() if repo_owner and repo_owner.strip() else None
+
+    # Defense-in-depth: Validate components to reject directory traversal
+    if not _is_safe_repo_component(clean_repo):
+        return None, f"Error: Invalid repository name {repo_name!r}."
+    if clean_owner and not _is_safe_repo_component(clean_owner):
+        return None, f"Error: Invalid repository owner {repo_owner!r}."
 
     candidates: list[str] = []
 
@@ -511,9 +638,9 @@ def resolve_repo_dir(
     for env_var in ("LOCAL_REPOS_DIR", "REPOS_DIR", "WORKSPACE_DIR", "PROJECTS_DIR"):
         val = os.getenv(env_var)
         if val and os.path.isdir(val):
+            if clean_owner:
+                candidates.append(os.path.join(val, clean_owner, clean_repo))
             candidates.append(os.path.join(val, clean_repo))
-            if repo_owner:
-                candidates.append(os.path.join(val, repo_owner, clean_repo))
 
     # 2. Traversal up from current working directory (e.g. backend/ -> Haunter/ -> Desktop/)
     curr = os.path.abspath(os.getcwd())
@@ -521,7 +648,11 @@ def resolve_repo_dir(
         if os.path.basename(curr).lower() == clean_repo.lower():
             candidates.append(curr)
         candidates.append(os.path.join(curr, clean_repo))
+        if clean_owner:
+            candidates.append(os.path.join(curr, clean_owner, clean_repo))
         for sub in ("projects", "repos", "workspace", "src"):
+            if clean_owner:
+                candidates.append(os.path.join(curr, sub, clean_owner, clean_repo))
             candidates.append(os.path.join(curr, sub, clean_repo))
         parent = os.path.dirname(curr)
         if parent == curr:
@@ -539,6 +670,8 @@ def resolve_repo_dir(
         os.path.join(home, "source", "repos"),
         os.path.join(home, "src"),
     ):
+        if clean_owner:
+            candidates.append(os.path.join(base, clean_owner, clean_repo))
         candidates.append(os.path.join(base, clean_repo))
 
     resolved_repo_root: str | None = None
@@ -548,31 +681,43 @@ def resolve_repo_dir(
         if norm in seen:
             continue
         seen.add(norm)
-        if os.path.isdir(norm):
+        if os.path.isdir(norm) and _candidate_matches_owner(norm, clean_owner):
             resolved_repo_root = norm
             break
 
     if not resolved_repo_root:
-        repo_desc = f"{repo_owner}/{clean_repo}" if repo_owner else clean_repo
+        repo_desc = f"{clean_owner}/{clean_repo}" if clean_owner else clean_repo
         return None, (
             f"Error: Local checkout for repository {repo_desc!r} was not found on this machine. "
             "Local terminal commands and test runners require a local clone of the repository. "
             "To verify staged patches in an isolated cloud environment, use 'verify_in_ci_sandbox'."
         )
 
+    root_real = os.path.realpath(resolved_repo_root)
+
     if cwd and cwd.strip():
         stripped_cwd = cwd.strip()
-        if os.path.isabs(stripped_cwd):
-            norm_cwd = os.path.normpath(stripped_cwd)
-            if norm_cwd.lower().startswith(resolved_repo_root.lower()):
-                return norm_cwd, None
+        target_candidate = (
+            stripped_cwd
+            if os.path.isabs(stripped_cwd)
+            else os.path.join(root_real, stripped_cwd)
+        )
+        target_real = os.path.realpath(target_candidate)
+        try:
+            inside = (
+                os.path.normcase(os.path.commonpath([root_real, target_real]))
+                == os.path.normcase(root_real)
+            )
+        except ValueError:
+            inside = False
+
+        if not inside:
             return None, (
                 f"Error: Working directory {cwd!r} is outside repository root {resolved_repo_root!r}."
             )
-        target_cwd = os.path.normpath(os.path.join(resolved_repo_root, stripped_cwd))
-        return target_cwd, None
+        return target_real, None
 
-    return resolved_repo_root, None
+    return root_real, None
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +783,8 @@ async def tool_run_terminal_command(
     )
     if err:
         return err
-    current_cwd = resolved_cwd or os.getcwd()
+    current_cwd = resolved_cwd or os.path.realpath(os.getcwd())
+    repo_boundary_root = os.path.realpath(resolved_cwd) if (repo_name and resolved_cwd) else None
     all_stdout: list[str] = []
     all_stderr: list[str] = []
     total_duration = 0.0
@@ -670,7 +816,25 @@ async def tool_run_terminal_command(
                         candidate = backend_cand
 
             if os.path.isdir(candidate):
-                current_cwd = candidate
+                cand_real = os.path.realpath(candidate)
+                if repo_boundary_root:
+                    try:
+                        inside = (
+                            os.path.normcase(os.path.commonpath([repo_boundary_root, cand_real]))
+                            == os.path.normcase(repo_boundary_root)
+                        )
+                    except ValueError:
+                        inside = False
+                    if not inside:
+                        final_exit_code = 1
+                        all_stderr.append(
+                            f"cd: target directory {target!r} is outside repository root {repo_boundary_root!r}\n"
+                        )
+                        if op == "&&":
+                            break
+                        continue
+
+                current_cwd = cand_real
                 final_exit_code = 0
             else:
                 final_exit_code = 1
@@ -953,6 +1117,8 @@ async def tool_verify_ci_sandbox(
     repo: Any | None = None,
     staged_patches: dict[str, str] | None = None,
     gh_token: str | None = None,
+    repo_owner: str | None = None,
+    repo_name: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -972,6 +1138,8 @@ async def tool_verify_ci_sandbox(
         staged_patches: dict of {path: unified_diff}. Falls back to
                         session.staged_patches when omitted.
         gh_token:       Optional GitHub installation token.
+        repo_owner:     Optional repository owner (e.g. 'kaiizer777').
+        repo_name:      Optional repository name (e.g. 'UpGrade').
         **_kwargs:      Accepts and ignores cwd and other orchestrator extras
                         for signature consistency.
 
@@ -1048,11 +1216,27 @@ async def tool_verify_ci_sandbox(
                 )
             except Exception as exc:  # pragma: no cover
                 logger.warning("tool_verify_ci_sandbox: SSE emit failed: %s", exc)
+
+        effective_owner = (
+            repo_owner
+            or getattr(repo, "owner", None)
+            or getattr(session, "repo_owner", None)
+            or _kwargs.get("repo_owner")
+        )
+        effective_name = (
+            repo_name
+            or getattr(repo, "name", None)
+            or getattr(session, "repo_name", None)
+            or _kwargs.get("repo_name")
+        )
+
         # NOTE: effective local cap is 300 via tool_run_targeted_tests (pre-existing); 600s timeout is clamped downstream.
         local_result = await tool_run_targeted_tests(
             test_targets=test_targets,
             timeout_sec=timeout_sec,
             queue=queue,
+            repo_owner=effective_owner,
+            repo_name=effective_name,
         )
         return (
             f"CI sandbox verification (provider=local, workflow={workflow_label}):\n"

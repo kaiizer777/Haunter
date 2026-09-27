@@ -1591,6 +1591,8 @@ class SessionOrchestrator:
                 staged_patches=staged_patches,
                 session=session,
                 queue=queue,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
             )
         elif tool_name == "search_web_docs":
             return await self._tool_search_web_docs(args=args)
@@ -2152,6 +2154,7 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
     ) -> str:
+        """Execute a terminal command with session context, SSE streaming, and repository routing."""
         command: str = str(args.get("command", ""))
         cwd: str | None = args.get("cwd")
         if cwd is not None:
@@ -2183,6 +2186,7 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
     ) -> str:
+        """Run code linting with session context, SSE streaming, and repository routing."""
         raw_paths = args.get("paths", [])
         paths: list[str] = (
             [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
@@ -2215,6 +2219,7 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
     ) -> str:
+        """Execute targeted test runners with session context, SSE streaming, and repository routing."""
         raw_targets = args.get("test_targets", [])
         test_targets: list[str] = (
             [str(t) for t in raw_targets] if isinstance(raw_targets, list) else []
@@ -2244,6 +2249,8 @@ class SessionOrchestrator:
         staged_patches: dict[str, str],
         session: AgentSession,
         queue: SseQueue,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
         """
         Dispatch staged patches to the isolated CI sandbox (Phase 4.1).
@@ -2272,6 +2279,8 @@ class SessionOrchestrator:
             repo=repo,
             staged_patches=staged_patches,
             gh_token=self.gh_token,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         # Populate workflow label for frontend chip counters.
         args["workflow_file"] = workflow_file or "auto"
