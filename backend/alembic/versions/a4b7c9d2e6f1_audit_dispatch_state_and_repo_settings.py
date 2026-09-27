@@ -126,11 +126,39 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Guard: refuse on any populated database — this downgrade destroys every
+    # repo_settings row and all audit_jobs dispatch state irreversibly.
+    # CI always runs on a fresh empty database and passes the check below.
+    conn = op.get_bind()
+    row = conn.execute(
+        sa.text(
+            "SELECT (SELECT COUNT(*) FROM repo_settings) + "
+            "(SELECT COUNT(*) FROM audit_jobs) AS total"
+        )
+    ).scalar()
+    if row:
+        raise RuntimeError(
+            "refusing to downgrade a4b7c9d2e6f1: database contains "
+            f"{row} row(s) across repo_settings / audit_jobs. "
+            "Dropping these tables and columns would destroy every repository's "
+            "auditor trigger configuration and all in-flight dispatch state with "
+            "no recovery path. Roll forward, or export the affected rows first."
+        )
+
     op.drop_index("ix_audit_jobs_lease_expires_at", table_name="audit_jobs")
     op.drop_index("ix_audit_jobs_dispatch_queue", table_name="audit_jobs")
     op.drop_constraint("ck_audit_jobs_dispatch_attempts", "audit_jobs", type_="check")
     op.drop_constraint("ck_audit_jobs_attempts", "audit_jobs", type_="check")
     op.drop_constraint("ck_audit_jobs_status", "audit_jobs", type_="check")
+
+    # Requeue any dispatching rows before restoring the old constraint, which
+    # does not include 'dispatching'. On a guarded-empty DB this is a no-op.
+    op.execute(
+        sa.text(
+            "UPDATE audit_jobs SET status = 'queued' WHERE status = 'dispatching'"
+        )
+    )
+
     op.create_check_constraint(
         "ck_audit_jobs_status",
         "audit_jobs",
@@ -145,3 +173,4 @@ def downgrade() -> None:
     op.drop_index("ix_repo_settings_repo_id", table_name="repo_settings")
     op.drop_table("repo_settings")
     op.drop_column("repos", "auditor_github_install_id")
+
