@@ -3662,8 +3662,31 @@ class _OpRecorder:
     form rather than assuming one of them.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, row_count: int = 1) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        self._row_count = row_count
+
+    def get_bind(self) -> Any:
+        class _MockConnection:
+            def __init__(self, count: int) -> None:
+                self._count = count
+
+            def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+                sql = str(statement)
+                assert any(
+                    table in sql for table in ("audit_jobs", "repo_settings", "repos")
+                ), f"guard query did not reference expected tables: {sql}"
+
+                class _ScalarResult:
+                    def __init__(self, value: int) -> None:
+                        self._value = value
+
+                    def scalar(self) -> int:
+                        return self._value
+
+                return _ScalarResult(self._count)
+
+        return _MockConnection(self._row_count)
 
     def __getattr__(self, name: str) -> Any:
         def _record(*args: Any, **kwargs: Any) -> None:
@@ -3782,6 +3805,35 @@ def test_destructive_audit_migration_downgrades_are_refused_and_valid_one_is_a_n
     assert head.downgrade() is None
     assert recorder.calls == []
     assert head.downgrade.__doc__ is not None
+
+    # On an empty database (such as a fresh CI environment), the downgrades
+    # proceed with DDL reversal safely without raising.
+    empty_b6 = _audit_migration("b6d8f0a2c4e6")
+    recorder_b6 = _OpRecorder(row_count=0)
+    monkeypatch.setattr(empty_b6, "op", recorder_b6)
+    empty_b6.downgrade()
+    assert len(recorder_b6.calls) > 0
+    recorder_b6.index_of("drop_column", "base_sha")
+    b6_status = recorder_b6.index_of(
+        "create_check_constraint", "ck_audit_jobs_status"
+    )
+    assert "'skipped_no_diff'" not in " ".join(
+        str(arg) for arg in recorder_b6.calls[b6_status][1]
+    )
+
+    empty_a4 = _audit_migration("a4b7c9d2e6f1")
+    recorder_a4 = _OpRecorder(row_count=0)
+    monkeypatch.setattr(empty_a4, "op", recorder_a4)
+    empty_a4.downgrade()
+    assert len(recorder_a4.calls) > 0
+    recorder_a4.index_of("drop_table", "repo_settings")
+    recorder_a4.index_of("drop_column", "auditor_github_install_id")
+    a4_status = recorder_a4.index_of(
+        "create_check_constraint", "ck_audit_jobs_status"
+    )
+    assert "'dispatching'" not in " ".join(
+        str(arg) for arg in recorder_a4.calls[a4_status][1]
+    )
 
 
 # ---------------------------------------------------------------------------
