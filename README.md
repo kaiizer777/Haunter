@@ -12,6 +12,7 @@
 [![Sandbox](https://img.shields.io/badge/Sandbox-GitHub%20Actions%20CI-181717?style=flat-square&logo=githubactions)](https://github.com/features/actions)
 [![Runtime Preview](https://img.shields.io/badge/In--Browser%20Preview-StackBlitz%20WebContainer-1389FD?style=flat-square)](https://webcontainers.io/)
 [![Multi--Model](https://img.shields.io/badge/LLM-OpenCode%20Zen%20%7C%20OpenAI%20%7C%20Anthropic-7C3AED?style=flat-square)](https://opencode.ai/zen/v1)
+[![License](https://img.shields.io/badge/License-Business%20Source%201.1-yellow?style=flat-square)](LICENSE)
 
 </div>
 
@@ -375,3 +376,38 @@ npx wrangler deploy
 - [future02.md](file:///C:/Users/bari2/Desktop/Haunter/future02.md): Specification for Auditor Mode, per-repo settings, and slash commands.
 - [aws.md](file:///C:/Users/bari2/Desktop/Haunter/aws.md): AWS Lambda deployment runbook, Terraform configuration, and gotchas.
 - [github.md](file:///C:/Users/bari2/Desktop/Haunter/github.md): GitHub Actions sandbox runner implementation and mirror lifecycle.
+
+---
+
+## License
+
+Haunter is licensed under the **Business Source License 1.1** (`BUSL-1.1`) — a source-available license, not an OSI-approved open source license.
+
+Copyright © 2026 MD Sufiyan Bari.
+
+### What this means in practice
+
+**You may:**
+- Read, study, and audit the entire codebase — it is public and transparent by design.
+- Fork it, modify it, and run it for yourself, including in production.
+- Use it internally within your own organization or for evaluation and research.
+
+**You may not, without purchasing a commercial license from the Licensor:**
+- Host, operate, or resell Haunter as a service.
+- Offer it as a managed, white-labelled, or rebranded product.
+- Include it in any product, platform, or service offered to third parties —
+  whether or not Haunter is the primary component, and whether or not the
+  portion containing it is separately identified, priced, or marketed.
+
+### Conversion
+
+On **2030-09-27**, this code is automatically converted to the **GNU General Public License v3.0 or later**. From that date onward, commercial use is permitted provided that any derivative work is also released under the GPL and its source is published. Until then, commercial licensing is available directly from the Licensor.
+
+The Change Date applies per version. Versions released after 2030-09-27 carry their own Change Date.
+
+### Why this license
+
+The source is published in full so it can be read, verified, and trusted. The commercial terms exist so that the work cannot simply be taken and resold as someone else's product.
+
+Full license text: [LICENSE](LICENSE)
+
