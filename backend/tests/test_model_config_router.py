@@ -69,6 +69,8 @@ async def test_get_available_models_returns_all_three_buckets(
     zen_discovery_payload = {
         "data": [
             {"id": "nemotron-3.5-lightning-free"},
+            {"id": "deepseek-r1-0528-free"},
+            {"id": "space-bunny-free"},
             {"id": "deepseek-r1-distill-free"},
             {"id": "gpt-4o-paid"},  # non-free model should be filtered out
         ]
@@ -91,6 +93,9 @@ async def test_get_available_models_returns_all_three_buckets(
 
     zen_ids = [m["id"] for m in data["opencode_zen"]]
     assert "nemotron-3.5-lightning-free" in zen_ids
+    assert "deepseek-r1-0528-free" in zen_ids
+    assert "space-bunny-free" in zen_ids
+    assert "deepseek-r1-distill-free" in zen_ids
     assert "gpt-4o-paid" not in zen_ids
 
     openai_ids = [m["id"] for m in data["openai"]]
@@ -100,6 +105,26 @@ async def test_get_available_models_returns_all_three_buckets(
     anthropic_ids = [m["id"] for m in data["anthropic"]]
     assert "claude-sonnet-4-5" in anthropic_ids
     assert "claude-haiku-3-5" in anthropic_ids
+
+    # Verify context_window presence and correctness
+    gpt4o_item = next(m for m in data["openai"] if m["id"] == "gpt-4o")
+    assert gpt4o_item["context_window"] == 128000
+
+    claude_item = next(m for m in data["anthropic"] if m["id"] == "claude-sonnet-4-5")
+    assert claude_item["context_window"] == 200000
+
+    zen_item = next(m for m in data["opencode_zen"] if m["id"] == "nemotron-3.5-lightning-free")
+    assert zen_item["context_window"] == 131072
+
+    deepseek_item = next(m for m in data["opencode_zen"] if m["id"] == "deepseek-r1-0528-free")
+    assert deepseek_item["context_window"] == 65536
+
+    space_bunny_item = next(m for m in data["opencode_zen"] if m["id"] == "space-bunny-free")
+    assert space_bunny_item["context_window"] == 1048576
+
+    unmapped_item = next(m for m in data["opencode_zen"] if m["id"] == "deepseek-r1-distill-free")
+    assert unmapped_item["context_window"] is None
+
 
 
 # ---------------------------------------------------------------------------
