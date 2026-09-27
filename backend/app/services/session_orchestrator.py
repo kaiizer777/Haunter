@@ -1566,16 +1566,22 @@ class SessionOrchestrator:
             return await self._tool_run_terminal_command(
                 args=args,
                 queue=queue,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
             )
         elif tool_name == "run_linter":
             return await self._tool_run_linter(
                 args=args,
                 queue=queue,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
             )
         elif tool_name == "run_targeted_tests":
             return await self._tool_run_targeted_tests(
                 args=args,
                 queue=queue,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
             )
         elif tool_name == "verify_in_ci_sandbox":
             if session is None:
@@ -1585,6 +1591,8 @@ class SessionOrchestrator:
                 staged_patches=staged_patches,
                 session=session,
                 queue=queue,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
             )
         elif tool_name == "search_web_docs":
             return await self._tool_search_web_docs(args=args)
@@ -2143,7 +2151,10 @@ class SessionOrchestrator:
         self,
         args: dict[str, Any],
         queue: SseQueue,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
+        """Execute a terminal command with session context, SSE streaming, and repository routing."""
         command: str = str(args.get("command", ""))
         cwd: str | None = args.get("cwd")
         if cwd is not None:
@@ -2157,6 +2168,8 @@ class SessionOrchestrator:
             timeout_sec=timeout_sec,
             queue=queue,
             cwd=cwd,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         # Populate exit_code on args for frontend chip counters.
         first_line = result.splitlines()[0] if result else ""
@@ -2170,7 +2183,10 @@ class SessionOrchestrator:
         self,
         args: dict[str, Any],
         queue: SseQueue,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
+        """Run code linting with session context, SSE streaming, and repository routing."""
         raw_paths = args.get("paths", [])
         paths: list[str] = (
             [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
@@ -2189,6 +2205,8 @@ class SessionOrchestrator:
             timeout_sec=timeout_sec,
             queue=queue,
             cwd=cwd,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         # Populate file_count for frontend chip.
         args["file_count"] = len(paths)
@@ -2198,7 +2216,10 @@ class SessionOrchestrator:
         self,
         args: dict[str, Any],
         queue: SseQueue,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
+        """Execute targeted test runners with session context, SSE streaming, and repository routing."""
         raw_targets = args.get("test_targets", [])
         test_targets: list[str] = (
             [str(t) for t in raw_targets] if isinstance(raw_targets, list) else []
@@ -2215,6 +2236,8 @@ class SessionOrchestrator:
             timeout_sec=timeout_sec,
             queue=queue,
             cwd=cwd,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         # Populate target_count for frontend chip.
         args["target_count"] = len(test_targets)
@@ -2226,6 +2249,8 @@ class SessionOrchestrator:
         staged_patches: dict[str, str],
         session: AgentSession,
         queue: SseQueue,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
         """
         Dispatch staged patches to the isolated CI sandbox (Phase 4.1).
@@ -2254,6 +2279,8 @@ class SessionOrchestrator:
             repo=repo,
             staged_patches=staged_patches,
             gh_token=self.gh_token,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
         )
         # Populate workflow label for frontend chip counters.
         args["workflow_file"] = workflow_file or "auto"

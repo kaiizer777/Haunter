@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -512,3 +513,416 @@ async def test_subprocess_error_formatting_never_empty() -> None:
         )
         assert code == -1
         assert "Subprocess error (NotImplementedError)" in stderr
+
+
+# ---------------------------------------------------------------------------
+# 11. resolve_repo_dir and repo-aware execution routing
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_repo_dir_none_fallback() -> None:
+    """When repo_name is None, resolve_repo_dir defaults to cwd or os.getcwd()."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+    import os
+
+    res, err = resolve_repo_dir(None)
+    assert err is None
+    assert res == os.getcwd()
+
+    res_cwd, err_cwd = resolve_repo_dir(None, cwd="subdir")
+    assert err_cwd is None
+    assert res_cwd == os.path.normpath(os.path.join(os.getcwd(), "subdir"))
+
+
+def test_resolve_repo_dir_not_found() -> None:
+    """When repo_name cannot be found on disk, returns informative error pointing to verify_in_ci_sandbox."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    res, err = resolve_repo_dir(
+        repo_name="completely_nonexistent_repo_xyz_123",
+        repo_owner="testowner",
+    )
+    assert res is None
+    assert err is not None
+    assert "Local checkout for repository 'testowner/completely_nonexistent_repo_xyz_123' was not found" in err
+    assert "verify_in_ci_sandbox" in err
+
+
+def test_resolve_repo_dir_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir discovers repositories via LOCAL_REPOS_DIR environment variable."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    repo_dir = tmp_path / "MySpecialRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    res, err = resolve_repo_dir(repo_name="MySpecialRepo")
+    assert err is None
+    assert res == str(repo_dir)
+
+
+def test_resolve_repo_dir_relative_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir joins relative cwd to resolved repository directory."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    repo_dir = tmp_path / "MySpecialRepo"
+    sub_dir = repo_dir / "backend"
+    sub_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    res, err = resolve_repo_dir(repo_name="MySpecialRepo", cwd="backend")
+    assert err is None
+    assert res == str(sub_dir)
+
+
+def test_resolve_repo_dir_outside_cwd_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir rejects absolute cwd outside the resolved repository root."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    repo_dir = tmp_path / "MySpecialRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    outside_dir = tmp_path / "OtherPlace"
+    outside_dir.mkdir()
+
+    res, err = resolve_repo_dir(repo_name="MySpecialRepo", cwd=str(outside_dir))
+    assert res is None
+    assert err is not None
+    assert "is outside repository root" in err
+
+
+def test_resolve_repo_dir_relative_outside_cwd_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir rejects relative traversal cwd outside the resolved repository root."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    repo_dir = tmp_path / "MySpecialRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    res, err = resolve_repo_dir(repo_name="MySpecialRepo", cwd="../escaped")
+    assert res is None
+    assert err is not None
+    assert "is outside repository root" in err
+
+
+def test_resolve_repo_dir_shared_prefix_sibling_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir rejects sibling paths sharing prefix with repo root."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    repo_dir = tmp_path / "MySpecialRepo"
+    repo_dir.mkdir()
+    sibling_dir = tmp_path / "MySpecialRepo2"
+    sibling_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    res, err = resolve_repo_dir(repo_name="MySpecialRepo", cwd=str(sibling_dir))
+    assert res is None
+    assert err is not None
+    assert "is outside repository root" in err
+
+
+def test_resolve_repo_dir_invalid_component() -> None:
+    """resolve_repo_dir rejects path traversal in repository name or owner."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    res, err = resolve_repo_dir(repo_name="../bad_repo")
+    assert res is None
+    assert err is not None
+    assert "Invalid repository name" in err
+
+    res2, err2 = resolve_repo_dir(repo_name="valid_repo", repo_owner="../../bad_owner")
+    assert res2 is None
+    assert err2 is not None
+    assert "Invalid repository owner" in err2
+
+
+def test_resolve_repo_dir_owner_mismatch_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir skips existing checkouts whose git remote origin belongs to a different owner."""
+    import subprocess
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    # Create wrong owner candidate
+    wrong_dir = tmp_path / "TestProject"
+    wrong_dir.mkdir()
+    subprocess.run(["git", "-C", str(wrong_dir), "init"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wrong_dir), "remote", "add", "origin", "https://github.com/alice/TestProject.git"],
+        check=True,
+        capture_output=True,
+    )
+
+    # Create correct owner candidate in owner-scoped path
+    right_owner_dir = tmp_path / "kaiizer777" / "TestProject"
+    right_owner_dir.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(right_owner_dir), "init"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(right_owner_dir), "remote", "add", "origin", "https://github.com/kaiizer777/TestProject.git"],
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    res, err = resolve_repo_dir(repo_name="TestProject", repo_owner="kaiizer777")
+    assert err is None
+    assert res == str(right_owner_dir)
+
+
+@pytest.mark.asyncio
+async def test_tool_run_terminal_command_repo_not_found() -> None:
+    """tool_run_terminal_command returns error when repo is specified but not found locally."""
+    result = await tool_run_terminal_command(
+        command="git status",
+        repo_owner="fake_owner",
+        repo_name="fake_repo_xyz_999",
+    )
+    assert "Error: Local checkout for repository 'fake_owner/fake_repo_xyz_999' was not found" in result
+    assert "verify_in_ci_sandbox" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_run_linter_repo_not_found() -> None:
+    """tool_run_linter returns error when repo is specified but not found locally."""
+    result = await tool_run_linter(
+        paths=["app/main.py"],
+        repo_owner="fake_owner",
+        repo_name="fake_repo_xyz_999",
+    )
+    assert "Error: Local checkout for repository 'fake_owner/fake_repo_xyz_999' was not found" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_run_targeted_tests_repo_not_found() -> None:
+    """tool_run_targeted_tests returns error when repo is specified but not found locally."""
+    result = await tool_run_targeted_tests(
+        test_targets=["tests/test_foo.py"],
+        repo_owner="fake_owner",
+        repo_name="fake_repo_xyz_999",
+    )
+    assert "Error: Local checkout for repository 'fake_owner/fake_repo_xyz_999' was not found" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_run_terminal_command_resolves_upgrade_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When repo_name='UpGrade' is passed, terminal executes inside the resolved repository."""
+    import subprocess
+
+    upgrade_path = tmp_path / "UpGrade"
+    upgrade_path.mkdir()
+    subprocess.run(
+        ["git", "-C", str(upgrade_path), "init"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(upgrade_path),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/kaiizer777/UpGrade.git",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    res = await tool_run_terminal_command(
+        command="git remote -v",
+        repo_owner="kaiizer777",
+        repo_name="UpGrade",
+    )
+    assert "kaiizer777/UpGrade" in res
+    assert "Haunter" not in res
+
+
+@pytest.mark.asyncio
+async def test_tool_run_terminal_command_cd_escape_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When running inside a repository, cd is constrained within the repository root."""
+    import subprocess
+
+    repo_dir = tmp_path / "MySpecialRepo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "-C", str(repo_dir), "init"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "remote", "add", "origin", "https://github.com/test/MySpecialRepo.git"],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    res = await tool_run_terminal_command(
+        command="cd .. && git status",
+        repo_owner="test",
+        repo_name="MySpecialRepo",
+    )
+    assert "outside repository root" in res
+    assert "Exit code: 1" in res
+
+
+def test_prepare_cmd_argv_windows_builtins_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, safe shell builtins like 'dir' are wrapped with ['cmd', '/c']."""
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    argv = _prepare_cmd_argv(["dir", "C:\\Users"])
+    assert argv[:2] == ["cmd", "/c"]
+    assert argv[2:] == ["dir", "C:\\Users"]
+
+
+def test_prepare_cmd_argv_windows_builtins_metacharacters_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, shell metacharacters in builtins are rejected to prevent command injection."""
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(ValueError, match="Shell metacharacters are not permitted"):
+        _prepare_cmd_argv(["dir", ". & del secret.txt"])
+
+    with pytest.raises(ValueError, match="Shell metacharacters are not permitted"):
+        _prepare_cmd_argv(["del", "foo | bar"])
+
+
+def test_prepare_cmd_argv_runner_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """If repository venv lacks pytest runner, falls back to sys.executable."""
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    fake_venv = tmp_path / ".venv"
+    if sys.platform == "win32":
+        scripts_dir = fake_venv / "Scripts"
+        scripts_dir.mkdir(parents=True)
+        fake_python = scripts_dir / "python.exe"
+        fake_python.write_text("")
+    else:
+        bin_dir = fake_venv / "bin"
+        bin_dir.mkdir(parents=True)
+        fake_python = bin_dir / "python"
+        fake_python.write_text("")
+
+    argv = _prepare_cmd_argv(["pytest", "tests/"], cwd=str(tmp_path))
+    # Since fake_venv does not contain pytest runner, fallback to sys.executable
+    assert argv[0] == sys.executable
+    assert argv[1:3] == ["-m", "pytest"]
+
+
+@pytest.mark.asyncio
+async def test_tool_verify_ci_sandbox_local_passes_repo_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When provider=local, tool_verify_ci_sandbox forwards repo_owner and repo_name to test runner."""
+    from app.config import settings
+    from app.services.session_tools.sandbox import tool_verify_ci_sandbox
+
+    monkeypatch.setattr(settings, "sandbox_provider", "local")
+
+    called_kwargs: dict[str, Any] = {}
+
+    async def mock_run_tests(**kwargs: Any) -> str:
+        called_kwargs.update(kwargs)
+        return "Test runner: pytest\nStatus: PASSED\nExit code: 0"
+
+    with patch(
+        "app.services.session_tools.sandbox.tool_run_targeted_tests",
+        side_effect=mock_run_tests,
+    ):
+        res = await tool_verify_ci_sandbox(
+            staged_patches={"tests/test_a.py": "--- a\n+++ b\n"},
+            repo_owner="test_owner",
+            repo_name="test_repo",
+        )
+        assert "provider=local" in res
+        assert called_kwargs.get("repo_owner") == "test_owner"
+        assert called_kwargs.get("repo_name") == "test_repo"
+        assert called_kwargs.get("test_targets") == ["tests/test_a.py"]
+
+
+def test_get_git_remote_url_linked_worktree(tmp_path: Path) -> None:
+    """_get_git_remote_url correctly extracts remote URL from linked worktree using commondir."""
+    from app.services.session_tools.sandbox import _get_git_remote_url
+
+    # Set up main repository .git directory with config
+    main_repo = tmp_path / "main_repo"
+    main_git = main_repo / ".git"
+    main_git.mkdir(parents=True)
+    main_config = main_git / "config"
+    main_config.write_text(
+        '[remote "origin"]\n\turl = https://github.com/kaiizer777/WorktreeProject.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
+        encoding="utf-8",
+    )
+
+    # Worktree metadata directory under main_repo/.git/worktrees/wt1
+    wt_meta = main_git / "worktrees" / "wt1"
+    wt_meta.mkdir(parents=True)
+    commondir = wt_meta / "commondir"
+    commondir.write_text("../..\n", encoding="utf-8")
+
+    # Linked worktree directory containing .git file
+    wt_dir = tmp_path / "worktree_checkout"
+    wt_dir.mkdir(parents=True)
+    wt_git_file = wt_dir / ".git"
+    wt_git_file.write_text(f"gitdir: {wt_meta}\n", encoding="utf-8")
+
+    remote = _get_git_remote_url(str(wt_dir))
+    assert remote == "https://github.com/kaiizer777/WorktreeProject.git"
+
+
+@pytest.mark.asyncio
+async def test_tool_run_terminal_command_cd_from_subfolder_to_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When cwd is a subfolder, cd .. navigates to repo root successfully and is not rejected."""
+    import subprocess
+    from app.services.session_tools.sandbox import tool_run_terminal_command
+
+    repo_dir = tmp_path / "SubfolderRepo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "-C", str(repo_dir), "init"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "remote", "add", "origin", "https://github.com/test/SubfolderRepo.git"],
+        check=True,
+        capture_output=True,
+    )
+    sub = repo_dir / "backend"
+    sub.mkdir()
+    (sub / "test.txt").write_text("hello subfolder", encoding="utf-8")
+    (repo_dir / "root.txt").write_text("hello root", encoding="utf-8")
+
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    # cd .. from backend/ to repo root should succeed
+    res = await tool_run_terminal_command(
+        command="cd ..",
+        cwd="backend",
+        repo_owner="test",
+        repo_name="SubfolderRepo",
+    )
+    assert "Exit code: 0" in res
+
+    # cd ../.. from backend/ tries to escape repo root and should be rejected
+    res_escape = await tool_run_terminal_command(
+        command="cd ../..",
+        cwd="backend",
+        repo_owner="test",
+        repo_name="SubfolderRepo",
+    )
+    assert "is outside repository root" in res_escape
+
+
+def test_prepare_cmd_argv_windows_builtins_percent_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, percent signs in builtins (environment variables like %TEMP%) are permitted."""
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    argv = _prepare_cmd_argv(["dir", "%TEMP%"])
+    assert argv == ["cmd", "/c", "dir", "%TEMP%"]
+
+    argv_user = _prepare_cmd_argv(["type", r"%USERPROFILE%\notes.txt"])
+    assert argv_user == ["cmd", "/c", "type", r"%USERPROFILE%\notes.txt"]
