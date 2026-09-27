@@ -395,15 +395,21 @@ Copyright © 2026 MD Sufiyan Bari.
 **You may not, without purchasing a commercial license from the Licensor:**
 - Host, operate, or resell Haunter as a service.
 - Offer it as a managed, white-labelled, or rebranded product.
-- Include it in any product, platform, or service offered to third parties —
-  whether or not Haunter is the primary component, and whether or not the
-  portion containing it is separately identified, priced, or marketed.
+- Operate any product, platform, or service for third parties that incorporates
+  Haunter — whether or not Haunter is the primary component, and whether or not
+  the portion containing it is separately identified, priced, or marketed.
+
+Publishing a modified copy — a public fork — is redistribution, and the license permits it. Operating software on behalf of third parties is what the commercial terms restrict.
 
 ### Conversion
 
-On **2030-09-27**, this code is automatically converted to the **GNU General Public License v3.0 or later**. From that date onward, commercial use is permitted provided that any derivative work is also released under the GPL and its source is published. Until then, commercial licensing is available directly from the Licensor.
+For each version, the rights change on **2030-09-27**, or on the fourth anniversary of that version's first publicly available distribution, whichever comes first, under the **GNU General Public License v3.0 or later**.
 
-The Change Date applies per version. Versions released after 2030-09-27 carry their own Change Date.
+This Change Date governs the versions licensed under the current `LICENSE` file. A later version carries a different Change Date only if the Licensor specifies one for it; if these terms are reused unchanged, the existing date continues to apply.
+
+After conversion, use is governed by the GPL's own terms. The GPL's source-sharing obligations are triggered by distributing or conveying the software, not by private internal use — modifications kept inside your own organization carry no publication requirement.
+
+Until the Change Date, commercial licensing is available directly from the Licensor.
 
 ### Why this license
 
