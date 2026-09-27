@@ -5,13 +5,17 @@ Haunter is an autonomous CI failure diagnosis and fix agent. On `workflow_run` f
 
 ## Spinning up dev servers
 
-Run `npm run dev` for frontend and `.\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000` for backend.
+From repository root:
+- **Frontend**: `cd frontend && npm run dev` (runs Next.js on port 3011).
+- **Backend**: `cd backend && python -m uvicorn main:app --reload --port 8000` (or `.\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000` on Windows).
 
 ## Running Tests
 
-- **Fast Dev Suite (Default)**: Run `pytest` inside `backend/` (runs all unit/hermetic tests, finishes in seconds).
-- **Full / Deep Suite**: Run `pytest --all` inside `backend/` (runs remote DB, slow E2E, and eval suites).
-- **Targeted Module**: Run `pytest tests/test_auth.py` for focused unit testing.
+From `backend/`:
+- **Fast Dev Suite (Default)**: Run `pytest` (runs hermetic unit/logic tests with zero external I/O in seconds).
+- **Targeted Module / Test**: Run `pytest tests/test_auth.py` or `pytest tests/test_auth.py::test_me_valid_user` (executes all tests in that target without auto-deselection).
+- **Full / Deep Suite**: Set `TEST_DATABASE_URL` (pointing to a local Postgres or non-production test DB) and run `pytest --all` (runs DB tables, heavy E2E, and eval suites).
+- **By Marker**: Run `pytest -m fast` (hermetic), `pytest -m db` (database integration), `pytest -m eval` (eval harness), or `pytest -m slow`.
 
 ## Instructions for AI Agents Working on This Repo
 

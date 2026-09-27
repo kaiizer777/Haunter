@@ -32,17 +32,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Refuse: dropping `base_sha` re-opens the unpinned PR audit path.
-
-    This migration is the point at which a stored PR audit stops being able to
-    resolve which commits it was scheduled for, and a downgrade would silently
-    discard that binding for every historical row. Rolling past this revision
-    is a data-loss operation, so it is rejected with an explicit error rather
-    than executed.
-    """
-    raise RuntimeError(
-        "refusing to downgrade b6d8f0a2c4e6: dropping audit_jobs.base_sha would "
-        "destroy the pinned comparison endpoints of existing audit jobs and "
-        "re-enable unpinned PR audits. Roll forward, or manually resolve the "
-        "affected rows before attempting a downgrade."
+    op.drop_constraint("ck_audit_jobs_status", "audit_jobs", type_="check")
+    op.create_check_constraint(
+        "ck_audit_jobs_status",
+        "audit_jobs",
+        "status IN ('queued', 'dispatching', 'running', 'completed', 'failed')",
     )
+    op.drop_column("audit_jobs", "base_sha")

@@ -275,6 +275,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
@@ -283,11 +284,12 @@ def pytest_collection_modifyitems(
 
     - Any test utilizing the `db`, `user_factory`, or `repo_factory` fixture is auto-marked `db`.
     - Any eval harness or heavy multi-turn sleep suite is auto-marked `slow` / `eval`.
-    - If `--all` or an explicit `-m` expression is passed, all matching tests run.
-    - Otherwise, slow/db/eval tests are deselected by default for lightning-fast dev cycles.
+    - Hermetic, fast tests are auto-marked `fast`.
+    - If `--all`, `-m`, `-k`, or explicit target file/node arguments are passed, no tests are deselected.
+    - On full default suite runs, slow/db/eval tests are deselected for rapid iteration.
     """
     slow_patterns = (
-        "test_eval",
+        "test_eval_harness",
         "test_llm_retry",
         "test_orchestrator_pipeline",
         "test_session_sandbox_tools",
@@ -298,27 +300,39 @@ def pytest_collection_modifyitems(
         "test_sandbox_mirror",
         "test_sandbox_dispatch",
         "test_audit_webhook_routing",
-        "test_audit_security_hardening",
     )
+
+    db_fixtures = {"db", "user_factory", "repo_factory", "fake_db"}
 
     for item in items:
         # Auto-mark database tests
-        db_fixtures = {"db", "user_factory", "repo_factory", "fake_db"}
         if any(f in item.fixturenames for f in db_fixtures):
             item.add_marker(pytest.mark.db)
 
         # Auto-mark eval and heavy integration suites
-        if "test_eval" in item.nodeid:
+        if "test_eval_harness" in item.nodeid:
             item.add_marker(pytest.mark.eval)
 
         if any(p in item.nodeid for p in slow_patterns):
             item.add_marker(pytest.mark.slow)
 
-    # If the caller asked for --all or passed an explicit marker filter (-m), respect it
-    if config.getoption("--all") or config.option.markexpr:
+        # Tag hermetic fast tests
+        markers = {m.name for m in item.iter_markers()}
+        if not (markers & {"db", "slow", "eval"}):
+            item.add_marker(pytest.mark.fast)
+
+    # If in CI (CI=true / GITHUB_ACTIONS=true), or if --all / -m / -k / explicit target file passed:
+    is_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+    if (
+        is_ci
+        or config.getoption("--all")
+        or config.option.markexpr
+        or config.option.keyword
+        or has_explicit_target
+    ):
         return
 
-    # Default fast mode: deselect db, slow, and eval tests
+    # Default full-suite run: deselect db, slow, and eval tests
     selected: list[pytest.Item] = []
     deselected: list[pytest.Item] = []
     for item in items:
