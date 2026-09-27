@@ -144,11 +144,19 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "deepseek-r1-distill-llama-70b": 131072,
 };
 
-function formatContextWindow(tokens?: number): string {
+export function formatContextWindow(tokens?: number): string {
   if (!tokens) return "128k Context";
-  if (tokens >= 1000000) {
-    const m = tokens / 1000000;
-    return m === 1 ? "1M Context" : `${m.toFixed(1)}M Context`;
+  if (tokens >= 1048576 && tokens % 1048576 === 0) {
+    return `${tokens / 1048576}M Context`;
+  }
+  if (tokens >= 1000000 && tokens % 1000000 === 0) {
+    return `${tokens / 1000000}M Context`;
+  }
+  if (tokens % 1000 === 0) {
+    return `${tokens / 1000}k Context`;
+  }
+  if (tokens % 1024 === 0) {
+    return `${tokens / 1024}k Context`;
   }
   if (tokens >= 1000) {
     return `${Math.round(tokens / 1000)}k Context`;
