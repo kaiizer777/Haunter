@@ -180,7 +180,7 @@ def _prepare_cmd_argv(argv: list[str], cwd: str | None = None) -> list[str]:
         "dir", "del", "copy", "type", "cls", "mkdir", "md", "rmdir", "rd", "move"
     ):
         for arg in cmd_argv[1:]:
-            if any(char in arg for char in ("&", "|", "<", ">", "^", "%")):
+            if any(char in arg for char in ("&", "|", "<", ">", "^")):
                 raise ValueError(
                     f"Shell metacharacters are not permitted in arguments for Windows built-in '{bin_name}'"
                 )
@@ -528,9 +528,16 @@ def _get_git_remote_url(repo_root: str) -> str | None:
                 first_line = f.readline().strip()
                 if first_line.startswith("gitdir:"):
                     gd = first_line.split(":", 1)[1].strip()
-                    cand_config = (
-                        gd if os.path.isabs(gd) else os.path.join(repo_root, gd, "config")
-                    )
+                    gd_abs = gd if os.path.isabs(gd) else os.path.join(repo_root, gd)
+                    common = os.path.join(gd_abs, "commondir")
+                    if os.path.isfile(common):
+                        try:
+                            with open(common, "r", encoding="utf-8", errors="ignore") as cf:
+                                cd = cf.read().strip()
+                            gd_abs = cd if os.path.isabs(cd) else os.path.join(gd_abs, cd)
+                        except Exception:
+                            pass
+                    cand_config = os.path.join(gd_abs, "config")
                     if os.path.isfile(cand_config):
                         config_file = cand_config
         except Exception:
@@ -784,7 +791,16 @@ async def tool_run_terminal_command(
     if err:
         return err
     current_cwd = resolved_cwd or os.path.realpath(os.getcwd())
-    repo_boundary_root = os.path.realpath(resolved_cwd) if (repo_name and resolved_cwd) else None
+
+    repo_boundary_root: str | None = None
+    if repo_name and repo_name.strip():
+        if cwd and cwd.strip():
+            root_dir, _ = resolve_repo_dir(
+                repo_name=repo_name, repo_owner=repo_owner, cwd=None
+            )
+            repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
+        elif resolved_cwd:
+            repo_boundary_root = os.path.realpath(resolved_cwd)
     all_stdout: list[str] = []
     all_stderr: list[str] = []
     total_duration = 0.0

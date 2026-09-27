@@ -843,5 +843,86 @@ async def test_tool_verify_ci_sandbox_local_passes_repo_identity(monkeypatch: py
         assert called_kwargs.get("test_targets") == ["tests/test_a.py"]
 
 
+def test_get_git_remote_url_linked_worktree(tmp_path: Path) -> None:
+    """_get_git_remote_url correctly extracts remote URL from linked worktree using commondir."""
+    from app.services.session_tools.sandbox import _get_git_remote_url
+
+    # Set up main repository .git directory with config
+    main_repo = tmp_path / "main_repo"
+    main_git = main_repo / ".git"
+    main_git.mkdir(parents=True)
+    main_config = main_git / "config"
+    main_config.write_text(
+        '[remote "origin"]\n\turl = https://github.com/kaiizer777/WorktreeProject.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
+        encoding="utf-8",
+    )
+
+    # Worktree metadata directory under main_repo/.git/worktrees/wt1
+    wt_meta = main_git / "worktrees" / "wt1"
+    wt_meta.mkdir(parents=True)
+    commondir = wt_meta / "commondir"
+    commondir.write_text("../..\n", encoding="utf-8")
+
+    # Linked worktree directory containing .git file
+    wt_dir = tmp_path / "worktree_checkout"
+    wt_dir.mkdir(parents=True)
+    wt_git_file = wt_dir / ".git"
+    wt_git_file.write_text(f"gitdir: {wt_meta}\n", encoding="utf-8")
+
+    remote = _get_git_remote_url(str(wt_dir))
+    assert remote == "https://github.com/kaiizer777/WorktreeProject.git"
 
 
+@pytest.mark.asyncio
+async def test_tool_run_terminal_command_cd_from_subfolder_to_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When cwd is a subfolder, cd .. navigates to repo root successfully and is not rejected."""
+    import subprocess
+    from app.services.session_tools.sandbox import tool_run_terminal_command
+
+    repo_dir = tmp_path / "SubfolderRepo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "-C", str(repo_dir), "init"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "remote", "add", "origin", "https://github.com/test/SubfolderRepo.git"],
+        check=True,
+        capture_output=True,
+    )
+    sub = repo_dir / "backend"
+    sub.mkdir()
+    (sub / "test.txt").write_text("hello subfolder", encoding="utf-8")
+    (repo_dir / "root.txt").write_text("hello root", encoding="utf-8")
+
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    # cd .. from backend/ to repo root should succeed
+    res = await tool_run_terminal_command(
+        command="cd ..",
+        cwd="backend",
+        repo_owner="test",
+        repo_name="SubfolderRepo",
+    )
+    assert "Exit code: 0" in res
+
+    # cd ../.. from backend/ tries to escape repo root and should be rejected
+    res_escape = await tool_run_terminal_command(
+        command="cd ../..",
+        cwd="backend",
+        repo_owner="test",
+        repo_name="SubfolderRepo",
+    )
+    assert "is outside repository root" in res_escape
+
+
+def test_prepare_cmd_argv_windows_builtins_percent_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, percent signs in builtins (environment variables like %TEMP%) are permitted."""
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    argv = _prepare_cmd_argv(["dir", "%TEMP%"])
+    assert argv == ["cmd", "/c", "dir", "%TEMP%"]
+
+    argv_user = _prepare_cmd_argv(["type", r"%USERPROFILE%\notes.txt"])
+    assert argv_user == ["cmd", "/c", "type", r"%USERPROFILE%\notes.txt"]
