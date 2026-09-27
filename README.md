@@ -395,11 +395,13 @@ Copyright © 2026 MD Sufiyan Bari.
 **You may not, without purchasing a commercial license from the Licensor:**
 - Host, operate, or resell Haunter as a service.
 - Offer it as a managed, white-labelled, or rebranded product.
-- Operate any product, platform, or service for third parties that incorporates
-  Haunter — whether or not Haunter is the primary component, and whether or not
-  the portion containing it is separately identified, priced, or marketed.
+- Make it available to third parties as part of any product, platform, or
+  service — whether or not Haunter is the primary component, and whether or not
+  the portion containing it is separately identified, priced, enabled, or
+  marketed. Bundling, embedding, or reselling it as part of a larger offering is
+  covered even if you never operate it on the purchaser's behalf.
 
-Publishing a modified copy — a public fork — is redistribution, and the license permits it. Operating software on behalf of third parties is what the commercial terms restrict.
+Publishing a modified copy as a public source fork is permitted redistribution. The restriction attaches to offering Haunter, or a derivative of it, as a product, platform, or service to third parties.
 
 ### Conversion
 
