@@ -119,7 +119,7 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://haunter_prod:haunter_prod@ep-prod.neon.tech:5432/haunter_prod?sslmode=require
           DATABASE_URL_UNPOOLED: postgresql://haunter_prod:haunter_prod@ep-prod.neon.tech:5432/haunter_prod?sslmode=require
         run: |
-          pytest -v --tb=short --maxfail=10
+          pytest --all -v --tb=short --maxfail=10
         timeout-minutes: 30
 
   # ---------------------------------------------------------------------------
