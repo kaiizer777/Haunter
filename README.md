@@ -401,7 +401,7 @@ Copyright © 2026 MD Sufiyan Bari.
   marketed. Bundling, embedding, or reselling it as part of a larger offering is
   covered even if you never operate it on the purchaser's behalf.
 
-Publishing a modified copy as a public source fork is permitted redistribution. The restriction attaches to offering Haunter, or a derivative of it, as a product, platform, or service to third parties.
+Publishing a modified copy as a public source fork is permitted redistribution. The restriction attaches to offering Haunter, or a derivative of it, as a product, platform, or service to third parties. The Competitive Offering definition in the `LICENSE` file is the controlling text; it also reaches substantially similar offerings and the offering of any individual Haunter feature or capability.
 
 ### Conversion
 
