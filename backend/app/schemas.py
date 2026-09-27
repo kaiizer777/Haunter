@@ -131,6 +131,7 @@ class AvailableModelItem(BaseModel):
     id: str
     name: str
     tag: str
+    context_window: Optional[int] = None
 
 
 class AvailableModelsOut(BaseModel):

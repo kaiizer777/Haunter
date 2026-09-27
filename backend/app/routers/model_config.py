@@ -209,7 +209,10 @@ async def update_model_config_endpoint(
             repo.active_model_config_id = config.id
 
         await db.commit()
-        await db.refresh(config)
+        try:
+            await db.refresh(config)
+        except Exception:
+            pass
         logger.info(
             "Repo model config updated: user=%s repo=%s provider=%s model=%s",
             current_user.id,
@@ -242,8 +245,12 @@ async def update_model_config_endpoint(
         user_id=None,
     )
     db.add(new_config)
+    await db.flush()
     await db.commit()
-    await db.refresh(new_config)
+    try:
+        await db.refresh(new_config)
+    except Exception:
+        pass
 
     logger.info(
         "Global model config switched: user=%s provider=%s model=%s",
@@ -263,6 +270,36 @@ def _format_model_name(model_id: str) -> str:
     return " ".join(part.capitalize() for part in parts)
 
 
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # OpenCode Zen Free Models
+    "space-bunny-free": 1048576,
+    "longcat-2.5-preview-free": 1048576,
+    "ling-3.0-flash-fin-free": 1048576,
+    "mimo-v2.6-flash-free": 262144,
+    "mimo-v2.5-free": 262144,
+    "claude-sonnet-4-5": 200000,
+    "claude-haiku-3-5": 200000,
+    "laguna-s-2.1-free": 65536,
+    "deepseek-r1-0528-free": 65536,
+    "gemma2-9b-it": 8192,
+    "nemotron-3.5-lightning-free": 131072,
+    "nemotron-3-ultra-free": 131072,
+    "jev-1.13-free": 131072,
+    "deepseek-v4-flash-free": 131072,
+    "muse-spark-1.3-contributor-free": 131072,
+    "muse-spark-1.2-contributor-free": 131072,
+    "qwen-2.5-coder-32b-instruct-free": 131072,
+    "deepseek-r1-distill-qwen-32b-free": 131072,
+    "llama-3.3-70b-instruct-free": 131072,
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "openai/gpt-oss-120b": 131072,
+    "llama-3.3-70b-versatile": 131072,
+    "llama-3.1-8b-instant": 131072,
+    "deepseek-r1-distill-llama-70b": 131072,
+}
+
+
 @router.get("/available", response_model=AvailableModelsOut)
 async def get_available_models_endpoint(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -270,32 +307,50 @@ async def get_available_models_endpoint(
     """
     Get live list of available models per provider.
     For opencode_zen: dynamically queries /models with TTL caching, filtered to '-free'.
-    For openai and anthropic: returns approved production models.
+    For openai, anthropic, and groq: returns approved production models with context window metadata.
     """
     dynamic_zen_models = await get_dynamic_free_models()
 
     zen_items: list[AvailableModelItem] = []
     for mid in dynamic_zen_models:
         tag = "Default · Free" if mid == settings.default_model else "Free"
+        ctx = MODEL_CONTEXT_WINDOWS.get(mid, 131072)
         zen_items.append(
             AvailableModelItem(
                 id=mid,
                 name=_format_model_name(mid),
                 tag=tag,
+                context_window=ctx,
             )
         )
 
     openai_items = [
-        AvailableModelItem(id="gpt-4o", name="GPT-4o", tag="Flagship"),
-        AvailableModelItem(id="gpt-4o-mini", name="GPT-4o Mini", tag="Fast"),
+        AvailableModelItem(
+            id="gpt-4o",
+            name="GPT-4o",
+            tag="Flagship",
+            context_window=MODEL_CONTEXT_WINDOWS.get("gpt-4o", 128000),
+        ),
+        AvailableModelItem(
+            id="gpt-4o-mini",
+            name="GPT-4o Mini",
+            tag="Fast",
+            context_window=MODEL_CONTEXT_WINDOWS.get("gpt-4o-mini", 128000),
+        ),
     ]
 
     anthropic_items = [
         AvailableModelItem(
-            id="claude-sonnet-4-5", name="Claude Sonnet 4.5", tag="SOTA Fixes"
+            id="claude-sonnet-4-5",
+            name="Claude Sonnet 4.5",
+            tag="SOTA Fixes",
+            context_window=MODEL_CONTEXT_WINDOWS.get("claude-sonnet-4-5", 200000),
         ),
         AvailableModelItem(
-            id="claude-haiku-3-5", name="Claude Haiku 3.5", tag="Low Latency"
+            id="claude-haiku-3-5",
+            name="Claude Haiku 3.5",
+            tag="Low Latency",
+            context_window=MODEL_CONTEXT_WINDOWS.get("claude-haiku-3-5", 200000),
         ),
     ]
 
@@ -304,14 +359,19 @@ async def get_available_models_endpoint(
             id="openai/gpt-oss-120b",
             name="GPT-OSS 120B",
             tag="High Reasoning · Fallback",
+            context_window=MODEL_CONTEXT_WINDOWS.get("openai/gpt-oss-120b", 131072),
         ),
         AvailableModelItem(
             id="llama-3.3-70b-versatile",
             name="Llama 3.3 70B Versatile",
             tag="Fast · Production",
+            context_window=MODEL_CONTEXT_WINDOWS.get("llama-3.3-70b-versatile", 131072),
         ),
         AvailableModelItem(
-            id="llama-3.1-8b-instant", name="Llama 3.1 8B Instant", tag="Ultra Fast"
+            id="llama-3.1-8b-instant",
+            name="Llama 3.1 8B Instant",
+            tag="Ultra Fast",
+            context_window=MODEL_CONTEXT_WINDOWS.get("llama-3.1-8b-instant", 131072),
         ),
     ]
 

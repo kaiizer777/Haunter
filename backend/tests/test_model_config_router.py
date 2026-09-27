@@ -101,6 +101,17 @@ async def test_get_available_models_returns_all_three_buckets(
     assert "claude-sonnet-4-5" in anthropic_ids
     assert "claude-haiku-3-5" in anthropic_ids
 
+    # Verify context_window presence and correctness
+    gpt4o_item = next(m for m in data["openai"] if m["id"] == "gpt-4o")
+    assert gpt4o_item["context_window"] == 128000
+
+    claude_item = next(m for m in data["anthropic"] if m["id"] == "claude-sonnet-4-5")
+    assert claude_item["context_window"] == 200000
+
+    zen_item = next(m for m in data["opencode_zen"] if m["id"] == "nemotron-3.5-lightning-free")
+    assert zen_item["context_window"] == 131072
+
+
 
 # ---------------------------------------------------------------------------
 # PUT /config/model (Global Model Config Switcher)

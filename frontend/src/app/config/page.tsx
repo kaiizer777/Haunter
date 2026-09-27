@@ -40,24 +40,24 @@ const PROVIDER_OPTIONS = [
   { id: "groq", name: "Groq", defaultModel: "openai/gpt-oss-120b" },
 ];
 
-const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string }[]> = {
+const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string; context_window?: number }[]> = {
   opencode_zen: [
-    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Default · Free" },
-    { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Fast · Free" },
-    { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "Free" },
+    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Default · Free", context_window: 131072 },
+    { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Fast · Free", context_window: 65536 },
+    { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "1M · Free", context_window: 1048576 },
   ],
   openai: [
-    { id: "gpt-4o", name: "GPT-4o", tag: "Flagship" },
-    { id: "gpt-4o-mini", name: "GPT-4o Mini", tag: "Fast" },
+    { id: "gpt-4o", name: "GPT-4o", tag: "Flagship", context_window: 128000 },
+    { id: "gpt-4o-mini", name: "GPT-4o Mini", tag: "Fast", context_window: 128000 },
   ],
   anthropic: [
-    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", tag: "SOTA Fixes" },
-    { id: "claude-haiku-3-5", name: "Claude Haiku 3.5", tag: "Low Latency" },
+    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", tag: "SOTA Fixes", context_window: 200000 },
+    { id: "claude-haiku-3-5", name: "Claude Haiku 3.5", tag: "Low Latency", context_window: 200000 },
   ],
   groq: [
-    { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B", tag: "High Reasoning · Fallback" },
-    { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B Versatile", tag: "Fast · Production" },
-    { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B Instant", tag: "Ultra Fast" },
+    { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B", tag: "High Reasoning · Fallback", context_window: 131072 },
+    { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B Versatile", tag: "Fast · Production", context_window: 131072 },
+    { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B Instant", tag: "Ultra Fast", context_window: 131072 },
   ],
 };
 
@@ -116,6 +116,46 @@ const PROVIDER_METADATA: Record<
   },
 };
 
+const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "space-bunny-free": 1048576,
+  "longcat-2.5-preview-free": 1048576,
+  "ling-3.0-flash-fin-free": 1048576,
+  "mimo-v2.6-flash-free": 262144,
+  "mimo-v2.5-free": 262144,
+  "claude-sonnet-4-5": 200000,
+  "claude-haiku-3-5": 200000,
+  "laguna-s-2.1-free": 65536,
+  "deepseek-r1-0528-free": 65536,
+  "gemma2-9b-it": 8192,
+  "nemotron-3.5-lightning-free": 131072,
+  "nemotron-3-ultra-free": 131072,
+  "jev-1.13-free": 131072,
+  "deepseek-v4-flash-free": 131072,
+  "muse-spark-1.3-contributor-free": 131072,
+  "muse-spark-1.2-contributor-free": 131072,
+  "qwen-2.5-coder-32b-instruct-free": 131072,
+  "deepseek-r1-distill-qwen-32b-free": 131072,
+  "llama-3.3-70b-instruct-free": 131072,
+  "gpt-4o": 128000,
+  "gpt-4o-mini": 128000,
+  "openai/gpt-oss-120b": 131072,
+  "llama-3.3-70b-versatile": 131072,
+  "llama-3.1-8b-instant": 131072,
+  "deepseek-r1-distill-llama-70b": 131072,
+};
+
+function formatContextWindow(tokens?: number): string {
+  if (!tokens) return "128k Context";
+  if (tokens >= 1000000) {
+    const m = tokens / 1000000;
+    return m === 1 ? "1M Context" : `${m.toFixed(1)}M Context`;
+  }
+  if (tokens >= 1000) {
+    return `${Math.round(tokens / 1000)}k Context`;
+  }
+  return `${tokens} Context`;
+}
+
 interface ModelSpec {
   contextWindow: string;
   specialty: string;
@@ -128,12 +168,72 @@ interface ModelSpec {
 }
 
 const MODEL_SPECS: Record<string, ModelSpec> = {
+  "space-bunny-free": {
+    contextWindow: "1M Context",
+    specialty: "High-Capacity Ultra-Long Context CI Analysis",
+    latencyRating: "~330ms TTFT",
+    latencyMs: 330,
+    recommendedRole: "1M Free Tier",
+    tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
+    speedCategory: "standard",
+    isFree: true,
+  },
+  "longcat-2.5-preview-free": {
+    contextWindow: "1M Context",
+    specialty: "Massive Context & Whole-Repository Trace Analysis",
+    latencyRating: "~350ms TTFT",
+    latencyMs: 350,
+    recommendedRole: "1M Long-Context",
+    tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
+    speedCategory: "standard",
+    isFree: true,
+  },
+  "ling-3.0-flash-fin-free": {
+    contextWindow: "1M Context",
+    specialty: "Multi-Language Syntax & Long-Context AST Repair",
+    latencyRating: "~390ms TTFT",
+    latencyMs: 390,
+    recommendedRole: "1M AST Specialist",
+    tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
+    speedCategory: "standard",
+    isFree: true,
+  },
+  "mimo-v2.6-flash-free": {
+    contextWindow: "256k Context",
+    specialty: "High-Throughput Fast Triage & Syntax Healing",
+    latencyRating: "~220ms TTFT",
+    latencyMs: 220,
+    recommendedRole: "High-Throughput Healing",
+    tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
+    speedCategory: "fast",
+    isFree: true,
+  },
+  "mimo-v2.5-free": {
+    contextWindow: "256k Context",
+    specialty: "Fast CI Log Analysis & Patch Repair",
+    latencyRating: "~240ms TTFT",
+    latencyMs: 240,
+    recommendedRole: "Fast Healing",
+    tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
+    speedCategory: "fast",
+    isFree: true,
+  },
   "nemotron-3.5-lightning-free": {
     contextWindow: "128k Context",
     specialty: "CI Diagnostics & Root-Cause Synthesis",
     latencyRating: "~320ms TTFT",
     latencyMs: 320,
     recommendedRole: "Default Engine",
+    tagColor: "bg-amber-950/60 border-amber-700/60 text-amber-300",
+    speedCategory: "standard",
+    isFree: true,
+  },
+  "nemotron-3-ultra-free": {
+    contextWindow: "128k Context",
+    specialty: "High-Parameter Multi-Step CI Reasoning",
+    latencyRating: "~360ms TTFT",
+    latencyMs: 360,
+    recommendedRole: "Deep Reasoning",
     tagColor: "bg-amber-950/60 border-amber-700/60 text-amber-300",
     speedCategory: "standard",
     isFree: true,
@@ -148,14 +248,14 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     speedCategory: "fast",
     isFree: true,
   },
-  "ling-3.0-flash-fin-free": {
-    contextWindow: "128k Context",
-    specialty: "Multi-Language Syntax & AST Repair",
-    latencyRating: "~390ms TTFT",
-    latencyMs: 390,
-    recommendedRole: "Type & AST Specialist",
-    tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
-    speedCategory: "standard",
+  "deepseek-r1-0528-free": {
+    contextWindow: "64k Context",
+    specialty: "Chain-of-Thought Reasoning & Deep Flaky CI Debugging",
+    latencyRating: "~490ms TTFT",
+    latencyMs: 490,
+    recommendedRole: "Deep CoT Reasoning",
+    tagColor: "bg-purple-950/60 border-purple-700/60 text-purple-300",
+    speedCategory: "reasoning",
     isFree: true,
   },
   "deepseek-v4-flash-free": {
@@ -168,11 +268,31 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     speedCategory: "fast",
     isFree: true,
   },
+  "jev-1.13-free": {
+    contextWindow: "128k Context",
+    specialty: "Free Inference & Quick Patch Synthesis",
+    latencyRating: "~330ms TTFT",
+    latencyMs: 330,
+    recommendedRole: "Free Tier Verified",
+    tagColor: "bg-amber-950/60 border-amber-700/60 text-amber-300",
+    speedCategory: "standard",
+    isFree: true,
+  },
   "muse-spark-1.3-contributor-free": {
     contextWindow: "128k Context",
     specialty: "Open-Source Benchmark Synthesis & Verification",
     latencyRating: "~310ms TTFT",
     latencyMs: 310,
+    recommendedRole: "Community Benchmark",
+    tagColor: "bg-violet-950/60 border-violet-700/60 text-violet-300",
+    speedCategory: "standard",
+    isFree: true,
+  },
+  "muse-spark-1.2-contributor-free": {
+    contextWindow: "128k Context",
+    specialty: "Open-Source Benchmark Synthesis & Verification",
+    latencyRating: "~330ms TTFT",
+    latencyMs: 330,
     recommendedRole: "Community Benchmark",
     tagColor: "bg-violet-950/60 border-violet-700/60 text-violet-300",
     speedCategory: "standard",
@@ -278,6 +398,16 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     speedCategory: "fast",
     isFree: false,
   },
+  "gemma2-9b-it": {
+    contextWindow: "8k Context",
+    specialty: "Lightweight High-Speed Gate & Lint Filtering",
+    latencyRating: "~140ms TTFT",
+    latencyMs: 140,
+    recommendedRole: "Ultra-Fast Gating",
+    tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
+    speedCategory: "fast",
+    isFree: false,
+  },
 };
 
 /**
@@ -290,12 +420,18 @@ function formatModelDisplayName(id: string, rawName?: string): string {
 
   const KNOWN_NAMES: Record<string, string> = {
     "nemotron-3.5-lightning-free": "Nemotron 3.5 Lightning",
+    "nemotron-3-ultra-free": "Nemotron 3 Ultra",
     "laguna-s-2.1-free": "Laguna S 2.1",
     "ling-3.0-flash-fin-free": "Ling 3.0 Flash Fin",
     "deepseek-v4-flash-free": "DeepSeek V4 Flash",
     "muse-spark-1.3-contributor-free": "Muse Spark 1.3 Contributor",
     "muse-spark-1.2-contributor-free": "Muse Spark 1.2 Contributor",
+    "mimo-v2.6-flash-free": "MiMo V2.6 Flash",
     "mimo-v2.5-free": "Mimo V2.5",
+    "space-bunny-free": "Space Bunny",
+    "longcat-2.5-preview-free": "Longcat 2.5 Preview",
+    "jev-1.13-free": "Jev 1.13",
+    "deepseek-r1-0528-free": "DeepSeek R1 0528",
     "qwen-2.5-coder-32b-instruct-free": "Qwen 2.5 Coder 32B",
     "deepseek-r1-distill-qwen-32b-free": "DeepSeek R1 Distill Qwen",
     "llama-3.3-70b-instruct-free": "Llama 3.3 70B Instruct",
@@ -306,6 +442,7 @@ function formatModelDisplayName(id: string, rawName?: string): string {
     "openai/gpt-oss-120b": "GPT-OSS 120B",
     "llama-3.3-70b-versatile": "Llama 3.3 70B Versatile",
     "llama-3.1-8b-instant": "Llama 3.1 8B Instant",
+    "gemma2-9b-it": "Gemma 2 9B",
   };
 
   if (KNOWN_NAMES[id]) return KNOWN_NAMES[id];
@@ -326,8 +463,17 @@ function formatModelDisplayName(id: string, rawName?: string): string {
 /**
  * Resolve spec metadata with intelligent heuristics for dynamic models.
  */
-function getModelSpec(modelId: string, tag?: string): ModelSpec {
-  if (MODEL_SPECS[modelId]) return MODEL_SPECS[modelId];
+function getModelSpec(modelId: string, tag?: string, contextWindowTokens?: number): ModelSpec {
+  const ctxTokens = contextWindowTokens ?? MODEL_CONTEXT_WINDOWS[modelId];
+  const formattedCtx = ctxTokens ? formatContextWindow(ctxTokens) : undefined;
+
+  if (MODEL_SPECS[modelId]) {
+    const spec = MODEL_SPECS[modelId];
+    if (formattedCtx && spec.contextWindow !== formattedCtx) {
+      return { ...spec, contextWindow: formattedCtx };
+    }
+    return spec;
+  }
 
   const idLower = modelId.toLowerCase();
   const isFlash =
@@ -336,8 +482,23 @@ function getModelSpec(modelId: string, tag?: string): ModelSpec {
     idLower.includes("r1") || idLower.includes("reason") || idLower.includes("70b") || idLower.includes("thought");
   const isFree = idLower.endsWith("-free");
 
+  let fallbackCtx = "128k Context";
+  if (formattedCtx) {
+    fallbackCtx = formattedCtx;
+  } else if (idLower.includes("1m") || idLower.includes("bunny") || idLower.includes("longcat") || idLower.includes("ling")) {
+    fallbackCtx = "1M Context";
+  } else if (idLower.includes("256k") || idLower.includes("mimo")) {
+    fallbackCtx = "256k Context";
+  } else if (idLower.includes("200k") || idLower.includes("claude")) {
+    fallbackCtx = "200k Context";
+  } else if (idLower.includes("64k") || idLower.includes("laguna")) {
+    fallbackCtx = "64k Context";
+  } else if (idLower.includes("8k") || idLower.includes("gemma")) {
+    fallbackCtx = "8k Context";
+  }
+
   return {
-    contextWindow: idLower.includes("200k") ? "200k Context" : "128k Context",
+    contextWindow: fallbackCtx,
     specialty: isFlash
       ? "High-Throughput Fast Triage & Syntax Healing"
       : isReasoning
@@ -366,7 +527,7 @@ export default function ModelConfigPage() {
   const [selectedProvider, setSelectedProvider] = useState<string>("opencode_zen");
   const [selectedModel, setSelectedModel] = useState<string>("nemotron-3.5-lightning-free");
   const [modelOptionsByProvider, setModelOptionsByProvider] = useState<
-    Record<string, { id: string; name: string; tag: string }[]>
+    Record<string, { id: string; name: string; tag: string; context_window?: number }[]>
   >(DEFAULT_MODEL_OPTIONS_BY_PROVIDER);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -613,7 +774,7 @@ export default function ModelConfigPage() {
   // Filter by query and speed category
   const currentModels = useMemo(() => {
     return allProviderModels.filter((m) => {
-      const spec = getModelSpec(m.id, m.tag);
+      const spec = getModelSpec(m.id, m.tag, m.context_window);
       const friendlyName = formatModelDisplayName(m.id, m.name).toLowerCase();
       const q = searchQuery.toLowerCase().trim();
 
@@ -1132,7 +1293,7 @@ export default function ModelConfigPage() {
                 {currentModels.map((m) => {
                   const isSelected = m.id === selectedModel;
                   const isLive = activeConfig?.model_name === m.id;
-                  const spec = getModelSpec(m.id, m.tag);
+                  const spec = getModelSpec(m.id, m.tag, m.context_window);
                   const displayName = formatModelDisplayName(m.id, m.name);
 
                   // Calculate glass chip styling based on tag/free status
