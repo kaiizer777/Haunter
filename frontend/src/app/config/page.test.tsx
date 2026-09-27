@@ -39,12 +39,12 @@ describe("formatContextWindow (frontend/src/app/config/page.tsx)", () => {
   });
 
   describe("Fallback and falsy values", () => {
-    it("returns 128k Context for undefined", () => {
-      expect(formatContextWindow(undefined)).toBe("128k Context");
+    it("returns Unknown Context for undefined", () => {
+      expect(formatContextWindow(undefined)).toBe("Unknown Context");
     });
 
-    it("returns 128k Context for 0", () => {
-      expect(formatContextWindow(0)).toBe("128k Context");
+    it("returns Unknown Context for 0", () => {
+      expect(formatContextWindow(0)).toBe("Unknown Context");
     });
   });
 });

@@ -145,7 +145,7 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 };
 
 export function formatContextWindow(tokens?: number): string {
-  if (!tokens) return "128k Context";
+  if (!tokens) return "Unknown Context";
   if (tokens >= 1048576 && tokens % 1048576 === 0) {
     return `${tokens / 1048576}M Context`;
   }
@@ -490,7 +490,7 @@ function getModelSpec(modelId: string, tag?: string, contextWindowTokens?: numbe
     idLower.includes("r1") || idLower.includes("reason") || idLower.includes("70b") || idLower.includes("thought");
   const isFree = idLower.endsWith("-free");
 
-  let fallbackCtx = "128k Context";
+  let fallbackCtx = "Unknown Context";
   if (formattedCtx) {
     fallbackCtx = formattedCtx;
   } else if (idLower.includes("1m") || idLower.includes("bunny") || idLower.includes("longcat") || idLower.includes("ling")) {
