@@ -32,10 +32,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Guard: refuse on any populated database — this downgrade drops base_sha,
-    # destroying pinned comparison endpoints for all existing audit jobs.
-    # CI always runs on a fresh empty database and passes the check below.
     conn = op.get_bind()
+    if conn is None:
+        return
+
+    conn.execute(sa.text("LOCK TABLE audit_jobs IN EXCLUSIVE MODE"))
+
     row = conn.execute(
         sa.text("SELECT COUNT(*) FROM audit_jobs")
     ).scalar()
@@ -49,9 +51,13 @@ def downgrade() -> None:
         )
 
     # ck_audit_jobs_pr_endpoints (added by c7a1b2c3d4e5) references base_sha;
-    # PostgreSQL would drop it implicitly via DROP COLUMN cascade. Make the
-    # removal explicit so the intent is clear and auditable.
-    op.drop_constraint("ck_audit_jobs_pr_endpoints", "audit_jobs", type_="check")
+    # PostgreSQL would drop it implicitly via DROP COLUMN cascade. Drop IF EXISTS
+    # so a direct downgrade from b6d8f0a2c4e6 does not fail when c7 was never applied.
+    op.execute(
+        sa.text(
+            "ALTER TABLE audit_jobs DROP CONSTRAINT IF EXISTS ck_audit_jobs_pr_endpoints"
+        )
+    )
 
     op.drop_column("audit_jobs", "base_sha")
 

@@ -126,10 +126,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Guard: refuse on any populated database — this downgrade destroys every
-    # repo_settings row and all audit_jobs dispatch state irreversibly.
-    # CI always runs on a fresh empty database and passes the check below.
     conn = op.get_bind()
+    if conn is None:
+        return
+
+    conn.execute(sa.text("LOCK TABLE repos, repo_settings, audit_jobs IN EXCLUSIVE MODE"))
+
     row = conn.execute(
         sa.text(
             "SELECT (SELECT COUNT(*) FROM repo_settings) + "
