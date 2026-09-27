@@ -197,6 +197,7 @@ def user_factory(db: AsyncSession):
         if github_id is None:
             github_id = int(uuid.uuid4().int % 1_000_000_000 + 100_000_000)
         user = User(
+            id=uuid.uuid4(),
             github_id=github_id,
             github_username=username,
             access_token=_encrypt_token(access_token) if access_token else None,
@@ -262,3 +263,85 @@ def _restore_settings_singleton():
                     and s.__class__.__module__ == "app.config"
                 ):
                     mod.settings = _ORIGINAL_SETTINGS
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add --all CLI option to pytest."""
+    parser.addoption(
+        "--all",
+        action="store_true",
+        default=False,
+        help="Run all tests including slow, remote DB, and eval tests (by default, only fast hermetic tests run).",
+    )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """
+    Auto-tag test items and enforce fast test execution by default.
+
+    - Any test utilizing the `db`, `user_factory`, or `repo_factory` fixture is auto-marked `db`.
+    - Any eval harness or heavy multi-turn sleep suite is auto-marked `slow` / `eval`.
+    - Hermetic, fast tests are auto-marked `fast`.
+    - If `--all`, `-m`, `-k`, or explicit target file/node arguments are passed, no tests are deselected.
+    - On full default suite runs, slow/db/eval tests are deselected for rapid iteration.
+    """
+    slow_patterns = (
+        "test_eval_harness",
+        "test_llm_retry",
+        "test_orchestrator_pipeline",
+        "test_session_sandbox_tools",
+        "test_session_ci_sandbox",
+        "test_session_ci_selfhealing",
+        "test_auditor_core",
+        "test_github_actions_runner",
+        "test_sandbox_mirror",
+        "test_sandbox_dispatch",
+        "test_audit_webhook_routing",
+    )
+
+    db_fixtures = {"db", "user_factory", "repo_factory", "fake_db"}
+
+    for item in items:
+        # Auto-mark database tests
+        if any(f in item.fixturenames for f in db_fixtures):
+            item.add_marker(pytest.mark.db)
+
+        # Auto-mark eval and heavy integration suites
+        if "test_eval_harness" in item.nodeid:
+            item.add_marker(pytest.mark.eval)
+
+        if any(p in item.nodeid for p in slow_patterns):
+            item.add_marker(pytest.mark.slow)
+
+        # Tag hermetic fast tests
+        markers = {m.name for m in item.iter_markers()}
+        if not (markers & {"db", "slow", "eval"}):
+            item.add_marker(pytest.mark.fast)
+
+    # If in CI (CI=true / GITHUB_ACTIONS=true), or if --all / -m / -k / explicit target file passed:
+    is_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+    if (
+        is_ci
+        or config.getoption("--all")
+        or config.option.markexpr
+        or config.option.keyword
+        or has_explicit_target
+    ):
+        return
+
+    # Default full-suite run: deselect db, slow, and eval tests
+    selected: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        markers = {m.name for m in item.iter_markers()}
+        if markers & {"db", "slow", "eval"}:
+            deselected.append(item)
+        else:
+            selected.append(item)
+
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected

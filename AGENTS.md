@@ -3,6 +3,20 @@
 ## Project Description
 Haunter is an autonomous CI failure diagnosis and fix agent. On `workflow_run` failure (GitHub Actions), a FastAPI orchestrator on AWS Lambda (via Mangum & Function URL) wakes via webhook, delegates to subagents (Context Gatherer → Fix Generator → Sandbox Verifier via GitHub Actions (via isolated mirror repo) → PR Writer), verifies fixes in an isolated sandbox, opens a PR with fix+explanation or posts a diagnosis-only comment on exhaust. Every step (tokens, latency, cost, confidence, attempts) is logged to Neon Postgres and surfaced on a Cloudflare Workers dashboard with run history, per-run trace, eval harness (20 golden cases), and live model/provider switcher (OpenCode Zen, default `nemotron-3.5-lightning-free` at `https://opencode.ai/zen/v1`). Multi-repo, GitHub OAuth gated, auditable. See `HAUNTER.md` and `WORK.md`.
 
+## Spinning up dev servers
+
+From repository root:
+- **Frontend**: `cd frontend && npm run dev` (runs Next.js on port 3011).
+- **Backend**: `cd backend && python -m uvicorn main:app --reload --port 8000` (or `.\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000` on Windows).
+
+## Running Tests
+
+From `backend/`:
+- **Fast Dev Suite (Default)**: Run `pytest` (runs hermetic unit/logic tests with zero external I/O in seconds).
+- **Targeted Module / Test**: Run `pytest tests/test_auth.py` or `pytest tests/test_auth.py::test_me_valid_user` (executes all tests in that target without auto-deselection).
+- **Full / Deep Suite**: Set `TEST_DATABASE_URL` (pointing to a local Postgres or non-production test DB) and run `pytest --all` (runs DB tables, heavy E2E, and eval suites).
+- **By Marker**: Run `pytest -m fast` (hermetic), `pytest -m db` (database integration), `pytest -m eval` (eval harness), or `pytest -m slow`.
+
 ## Instructions for AI Agents Working on This Repo
 
 This is a **production-grade, user-facing system** — not a side project, demo, or prototype. Real repos, real CI, real PRs. Code quality must be shippable. Treat every change as if it will run in production tomorrow.
