@@ -126,24 +126,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Refuse: this downgrade is a data-loss operation.
-
-    Dropping `repo_settings` deletes every repository's auditor configuration —
-    the per-repo kill switch, the four trigger toggles and their settings
-    version — with no other copy anywhere. Dropping the `audit_jobs` dispatch
-    columns discards the durable outbox state, so a job that was mid-dispatch
-    becomes indistinguishable from one that never started, and a half-rolled-back
-    deployment would leave the dispatcher claiming jobs it can no longer fence.
-
-    A downgrade that silently discards operator configuration and in-flight work
-    is refused with an explicit error rather than executed. Roll forward, or
-    archive the affected rows by hand before attempting a downgrade.
-    """
-    raise RuntimeError(
-        "refusing to downgrade a4b7c9d2e6f1: dropping repo_settings would destroy "
-        "every repository's auditor trigger configuration (including the per-repo "
-        "kill switch) and dropping the audit_jobs dispatch columns would discard "
-        "the durable outbox state for in-flight jobs. Roll forward, or export the "
-        "affected rows before attempting a downgrade."
+    op.drop_index("ix_audit_jobs_lease_expires_at", table_name="audit_jobs")
+    op.drop_index("ix_audit_jobs_dispatch_queue", table_name="audit_jobs")
+    op.drop_constraint("ck_audit_jobs_dispatch_attempts", "audit_jobs", type_="check")
+    op.drop_constraint("ck_audit_jobs_attempts", "audit_jobs", type_="check")
+    op.drop_constraint("ck_audit_jobs_status", "audit_jobs", type_="check")
+    op.create_check_constraint(
+        "ck_audit_jobs_status",
+        "audit_jobs",
+        "status IN ('queued', 'running', 'completed', 'failed')",
     )
+    op.drop_column("audit_jobs", "last_error")
+    op.drop_column("audit_jobs", "lease_expires_at")
+    op.drop_column("audit_jobs", "next_attempt_at")
+    op.drop_column("audit_jobs", "dispatch_attempts")
+    op.drop_column("audit_jobs", "attempts")
 
+    op.drop_index("ix_repo_settings_repo_id", table_name="repo_settings")
+    op.drop_table("repo_settings")
+    op.drop_column("repos", "auditor_github_install_id")
