@@ -3665,16 +3665,24 @@ class _OpRecorder:
     def __init__(self, *, row_count: int = 1) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self._row_count = row_count
+        self.executed_statements: list[str] = []
 
     def get_bind(self) -> Any:
+        recorder = self
+
         class _MockConnection:
             def __init__(self, count: int) -> None:
                 self._count = count
+                self.executed_statements = recorder.executed_statements
 
             def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
                 sql = str(statement)
-                assert any(
-                    table in sql for table in ("audit_jobs", "repo_settings", "repos")
+                self.executed_statements.append(sql)
+                assert (
+                    "lock_timeout" in sql
+                    or any(
+                        table in sql for table in ("audit_jobs", "repo_settings", "repos")
+                    )
                 ), f"guard query did not reference expected tables: {sql}"
 
                 class _ScalarResult:
@@ -3779,9 +3787,24 @@ def test_destructive_audit_migration_downgrades_are_refused_and_valid_one_is_a_n
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A downgrade that would destroy data is refused, not silently executed."""
-    for revision, expected in (
-        ("a4b7c9d2e6f1", "repo_settings"),
-        ("b6d8f0a2c4e6", "base_sha"),
+    monkeypatch.setattr("alembic.context.is_offline_mode", lambda: False)
+    for revision, expected, expected_lock, expected_count in (
+        (
+            "a4b7c9d2e6f1",
+            "repo_settings",
+            "LOCK TABLE repos, repo_settings, audit_jobs IN EXCLUSIVE MODE",
+            (
+                "SELECT (SELECT COUNT(*) FROM repo_settings) + "
+                "(SELECT COUNT(*) FROM audit_jobs) + "
+                "(SELECT COUNT(*) FROM repos WHERE auditor_github_install_id IS NOT NULL) AS total"
+            ),
+        ),
+        (
+            "b6d8f0a2c4e6",
+            "base_sha",
+            "LOCK TABLE audit_jobs IN EXCLUSIVE MODE",
+            "SELECT COUNT(*) FROM audit_jobs",
+        ),
     ):
         module = _audit_migration(revision)
         recorder = _OpRecorder()
@@ -3795,6 +3818,20 @@ def test_destructive_audit_migration_downgrades_are_refused_and_valid_one_is_a_n
         assert expected in message
         # Nothing was dropped on the way to the error.
         assert recorder.calls == []
+        # Assert that lock timeout, table locks, and row count checks were executed on the connection.
+        assert len(recorder.executed_statements) == 3
+        assert recorder.executed_statements[0] == "SET LOCAL lock_timeout = '5s'"
+        assert recorder.executed_statements[1] == expected_lock
+        assert recorder.executed_statements[2] == expected_count
+        if revision == "a4b7c9d2e6f1":
+            assert "repo_settings" in recorder.executed_statements[2]
+            assert "audit_jobs" in recorder.executed_statements[2]
+            assert (
+                "repos WHERE auditor_github_install_id IS NOT NULL"
+                in recorder.executed_statements[2]
+            )
+        elif revision == "b6d8f0a2c4e6":
+            assert recorder.executed_statements[2] == "SELECT COUNT(*) FROM audit_jobs"
 
     # The newest revision's downgrade is the safe direction: it keeps the added
     # columns and constraints, so rolling back to the previous code revision
@@ -3813,6 +3850,9 @@ def test_destructive_audit_migration_downgrades_are_refused_and_valid_one_is_a_n
     monkeypatch.setattr(empty_b6, "op", recorder_b6)
     empty_b6.downgrade()
     assert len(recorder_b6.calls) > 0
+    assert recorder_b6.executed_statements[0] == "SET LOCAL lock_timeout = '5s'"
+    assert recorder_b6.executed_statements[1] == "LOCK TABLE audit_jobs IN EXCLUSIVE MODE"
+    assert recorder_b6.executed_statements[2] == "SELECT COUNT(*) FROM audit_jobs"
     recorder_b6.index_of("drop_column", "base_sha")
     b6_status = recorder_b6.index_of(
         "create_check_constraint", "ck_audit_jobs_status"
@@ -3826,6 +3866,17 @@ def test_destructive_audit_migration_downgrades_are_refused_and_valid_one_is_a_n
     monkeypatch.setattr(empty_a4, "op", recorder_a4)
     empty_a4.downgrade()
     assert len(recorder_a4.calls) > 0
+    assert recorder_a4.executed_statements[0] == "SET LOCAL lock_timeout = '5s'"
+    assert (
+        recorder_a4.executed_statements[1]
+        == "LOCK TABLE repos, repo_settings, audit_jobs IN EXCLUSIVE MODE"
+    )
+    assert "repo_settings" in recorder_a4.executed_statements[2]
+    assert "audit_jobs" in recorder_a4.executed_statements[2]
+    assert (
+        "repos WHERE auditor_github_install_id IS NOT NULL"
+        in recorder_a4.executed_statements[2]
+    )
     recorder_a4.index_of("drop_table", "repo_settings")
     recorder_a4.index_of("drop_column", "auditor_github_install_id")
     a4_status = recorder_a4.index_of(
@@ -3834,6 +3885,40 @@ def test_destructive_audit_migration_downgrades_are_refused_and_valid_one_is_a_n
     assert "'dispatching'" not in " ".join(
         str(arg) for arg in recorder_a4.calls[a4_status][1]
     )
+
+
+def test_audit_migration_downgrades_reject_offline_mode(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Offline downgrade is rejected because database row counts cannot be verified offline."""
+    monkeypatch.setattr("alembic.context.is_offline_mode", lambda: True)
+    for revision in ("a4b7c9d2e6f1", "b6d8f0a2c4e6"):
+        module = _audit_migration(revision)
+        recorder = _OpRecorder()
+        monkeypatch.setattr(module, "op", recorder)
+        with pytest.raises(
+            RuntimeError, match="offline downgrade is not supported"
+        ):
+            module.downgrade()
+        assert recorder.calls == []
+        assert recorder.executed_statements == []
+
+
+def test_audit_migration_downgrades_reject_missing_connection(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Downgrade verification requires an active database connection."""
+    monkeypatch.setattr("alembic.context.is_offline_mode", lambda: False)
+    for revision in ("a4b7c9d2e6f1", "b6d8f0a2c4e6"):
+        module = _audit_migration(revision)
+        recorder = MagicMock()
+        recorder.get_bind.return_value = None
+        monkeypatch.setattr(module, "op", recorder)
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot obtain database connection for downgrade verification",
+        ):
+            module.downgrade()
 
 
 # ---------------------------------------------------------------------------

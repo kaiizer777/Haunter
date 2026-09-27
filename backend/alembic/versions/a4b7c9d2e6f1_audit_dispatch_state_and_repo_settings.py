@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Sequence, Union
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision: str = "a4b7c9d2e6f1"
 down_revision: Union[str, Sequence[str], None] = "f2a9c4e7b1d3"
@@ -126,10 +126,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        raise RuntimeError(
+            "offline downgrade is not supported because database row counts "
+            "cannot be verified offline"
+        )
+
     conn = op.get_bind()
     if conn is None:
-        return
+        raise RuntimeError(
+            "Cannot obtain database connection for downgrade verification"
+        )
 
+    conn.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
     conn.execute(sa.text("LOCK TABLE repos, repo_settings, audit_jobs IN EXCLUSIVE MODE"))
 
     row = conn.execute(

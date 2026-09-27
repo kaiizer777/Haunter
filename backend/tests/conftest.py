@@ -325,7 +325,7 @@ def pytest_collection_modifyitems(
     is_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
     has_explicit_target = bool(
         getattr(config.option, "pyargs", False)
-        or config.args
+        or [arg for arg in (config.args or []) if arg not in ("tests", "tests/")]
     )
     if (
         is_ci
