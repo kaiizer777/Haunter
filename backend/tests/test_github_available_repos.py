@@ -31,8 +31,12 @@ async def test_list_available_repos_own_repos_only(
     for User B. Verify User A sees already_connected=True for Repo 1 and False for Repo 2.
     """
     await truncate_all(db)
-    user_a = await user_factory(github_id=801, username="user_a", access_token="token_a")
-    user_b = await user_factory(github_id=802, username="user_b", access_token="token_b")
+    user_a = await user_factory(
+        github_id=801, username="user_a", access_token="token_a"
+    )
+    user_b = await user_factory(
+        github_id=802, username="user_b", access_token="token_b"
+    )
 
     # User A connects owner-a/repo-1
     repo_a = Repo(
@@ -79,9 +83,7 @@ async def test_list_available_repos_own_repos_only(
     client_a = make_auth_client(user_a.id)
 
     with respx.mock(base_url="https://api.github.com") as rx:
-        rx.get("/user/repos").mock(
-            return_value=httpx.Response(200, json=gh_payload)
-        )
+        rx.get("/user/repos").mock(return_value=httpx.Response(200, json=gh_payload))
         async with client_a:
             resp = await client_a.get("/github/available-repos")
 
@@ -115,7 +117,9 @@ async def test_list_available_repos_handles_insufficient_scope(
 ):
     """GitHub returning 401 (e.g. invalid/revoked/expired token) maps to 401 with re-login detail."""
     await truncate_all(db)
-    user = await user_factory(github_id=803, username="user_expired", access_token="expired_token")
+    user = await user_factory(
+        github_id=803, username="user_expired", access_token="expired_token"
+    )
     client = make_auth_client(user.id)
 
     with respx.mock(base_url="https://api.github.com") as rx:
@@ -166,9 +170,7 @@ async def test_cross_tenant_cannot_see_other_users_repos_via_filter(
     client_b = make_auth_client(user_b.id)
 
     with respx.mock(base_url="https://api.github.com") as rx:
-        rx.get("/user/repos").mock(
-            return_value=httpx.Response(200, json=gh_payload)
-        )
+        rx.get("/user/repos").mock(return_value=httpx.Response(200, json=gh_payload))
         async with client_b:
             resp = await client_b.get("/github/available-repos")
 
@@ -222,9 +224,7 @@ async def test_list_available_repos_filters_non_push_repos(
     ]
 
     with respx.mock(base_url="https://api.github.com") as rx:
-        rx.get("/user/repos").mock(
-            return_value=httpx.Response(200, json=gh_payload)
-        )
+        rx.get("/user/repos").mock(return_value=httpx.Response(200, json=gh_payload))
         async with client:
             resp = await client.get("/github/available-repos")
 
@@ -274,9 +274,7 @@ async def test_list_available_repos_pagination(
     page2_url = "https://api.github.com/user/repos?per_page=100&page=2"
 
     with respx.mock(base_url="https://api.github.com") as rx:
-        rx.get(page2_url).mock(
-            return_value=httpx.Response(200, json=page2_payload)
-        )
+        rx.get(page2_url).mock(return_value=httpx.Response(200, json=page2_payload))
         rx.get("/user/repos").mock(
             return_value=httpx.Response(
                 200,

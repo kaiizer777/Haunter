@@ -417,7 +417,9 @@ async def test_put_global_preserves_repo_overrides(
 
     # Global switch — must not touch the repo override.
     async with client:
-        resp = await client.put("/config/model", json={"provider": "openai", "model_name": "gpt-4o-mini"})
+        resp = await client.put(
+            "/config/model", json={"provider": "openai", "model_name": "gpt-4o-mini"}
+        )
 
     assert resp.status_code == 200
     assert resp.json()["scope"] == "global"
@@ -477,7 +479,9 @@ async def test_put_repo_stamps_repo_scope(
     assert data["user_id"] == str(user.id)
 
     db.expire_all()
-    row = (await db.execute(select(ModelConfig).where(ModelConfig.id == data["id"]))).scalar_one()
+    row = (
+        await db.execute(select(ModelConfig).where(ModelConfig.id == data["id"]))
+    ).scalar_one()
     assert row.scope == "repo"
     assert row.repo_id == repo.id
     assert row.is_active is True

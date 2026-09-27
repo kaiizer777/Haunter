@@ -42,5 +42,5 @@ def test_charge_large_value():
 def test_charge_large_negative_raises_value_error():
     """charge with large negative value raises ValueError."""
     with pytest.raises(ValueError) as exc_info:
-        charge(-10**9)
+        charge(-(10**9))
     assert "amount must be non-negative" in str(exc_info.value)

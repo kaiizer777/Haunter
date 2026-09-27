@@ -85,9 +85,7 @@ def _make_attempt(
 
 
 @pytest.mark.asyncio
-async def test_trace_own_run_200(
-    db: AsyncSession, user_factory, make_auth_client
-):
+async def test_trace_own_run_200(db: AsyncSession, user_factory, make_auth_client):
     """GET /runs/{run_id}/trace for own run returns 200 with timeline."""
     await truncate_all(db)
 
@@ -153,9 +151,7 @@ async def test_trace_other_user_run_404(
 
 
 @pytest.mark.asyncio
-async def test_list_runs_own(
-    db: AsyncSession, user_factory, make_auth_client
-):
+async def test_list_runs_own(db: AsyncSession, user_factory, make_auth_client):
     """GET /runs returns only the caller's runs with correct total."""
     await truncate_all(db)
 
@@ -188,9 +184,7 @@ async def test_list_runs_own(
 
 
 @pytest.mark.asyncio
-async def test_list_runs_isolation(
-    db: AsyncSession, user_factory, make_auth_client
-):
+async def test_list_runs_isolation(db: AsyncSession, user_factory, make_auth_client):
     """GET /runs with attacker cookie never includes victim's runs."""
     await truncate_all(db)
 
@@ -269,9 +263,7 @@ async def test_list_runs_invalid_status_422(
 
 
 @pytest.mark.asyncio
-async def test_repo_stats_own(
-    db: AsyncSession, user_factory, make_auth_client
-):
+async def test_repo_stats_own(db: AsyncSession, user_factory, make_auth_client):
     """GET /repos/{repo_id}/stats → correct aggregates for own repo."""
     await truncate_all(db)
 
@@ -349,9 +341,7 @@ async def test_classify_wrong_diagnosis_no_attempts(
 
 
 @pytest.mark.asyncio
-async def test_classify_wrong_fix(
-    db: AsyncSession, user_factory, make_auth_client
-):
+async def test_classify_wrong_fix(db: AsyncSession, user_factory, make_auth_client):
     """failure_classification = wrong_fix when attempts exist but none reached sandbox."""
     await truncate_all(db)
 
@@ -408,9 +398,7 @@ async def test_classify_tests_still_failing(
 
 
 @pytest.mark.asyncio
-async def test_classify_sandbox_error(
-    db: AsyncSession, user_factory, make_auth_client
-):
+async def test_classify_sandbox_error(db: AsyncSession, user_factory, make_auth_client):
     """failure_classification = sandbox_error when Cloud Build TIMEOUT in failure_reason."""
     await truncate_all(db)
 

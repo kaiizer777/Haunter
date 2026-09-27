@@ -8,10 +8,12 @@ from app.subagents.context_gatherer import _discover_candidate_files_to_inspect
 @pytest.mark.asyncio
 async def test_fetch_file_content_success():
     with respx.mock(base_url="https://api.github.com") as rx:
-        rx.get("/repos/owner/repo/contents/backend/app/core/analytics.py?ref=sha123").respond(
-            200, text="def get_tool_stats(): pass"
+        rx.get(
+            "/repos/owner/repo/contents/backend/app/core/analytics.py?ref=sha123"
+        ).respond(200, text="def get_tool_stats(): pass")
+        content = await fetch_file_content(
+            "owner", "repo", "backend/app/core/analytics.py", "sha123"
         )
-        content = await fetch_file_content("owner", "repo", "backend/app/core/analytics.py", "sha123")
         assert content == "def get_tool_stats(): pass"
 
 
@@ -49,7 +51,6 @@ def test_discover_candidate_files_prioritizes_core_over_router():
     ]
     candidates, _ = _discover_candidate_files_to_inspect(logs, repo_paths)
     assert candidates[0] == "backend/app/core/analytics.py"
-
 
 
 def test_discover_candidate_files_from_traceback_lines():

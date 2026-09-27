@@ -46,9 +46,14 @@ logger = logging.getLogger(__name__)
 # _sanitize_command() to raise ValueError — no subprocess is created.
 _BANNED_PATTERNS: list[re.Pattern[str]] = [
     # Recursive deletion targeting / or root-level paths  (rm -rf /, rm -Rf /, etc.)
-    re.compile(r"\brm\b[^|;&\n]*-[a-zA-Z]*r[a-zA-Z]*[^|;&\n]*/(?:\s|$|/)", re.IGNORECASE),
+    re.compile(
+        r"\brm\b[^|;&\n]*-[a-zA-Z]*r[a-zA-Z]*[^|;&\n]*/(?:\s|$|/)", re.IGNORECASE
+    ),
     # Also catch rm -rf without trailing slash (e.g. rm -rf /)
-    re.compile(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+/\s*$|-[a-zA-Z]*r[a-zA-Z]*\s+/$)", re.IGNORECASE | re.MULTILINE),
+    re.compile(
+        r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+/\s*$|-[a-zA-Z]*r[a-zA-Z]*\s+/$)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
     # Broader rm -rf / catch: flag before slash root
     re.compile(r"\brm\b.*?-[a-zA-Z]*r[a-zA-Z]*\s+/(?:\s|$)", re.IGNORECASE),
     # mkfs / disk format
@@ -104,11 +109,16 @@ def _sanitize_command(command: str) -> str:
 # Low-level subprocess execution (async + threaded fallback for SelectorEventLoop)
 # ---------------------------------------------------------------------------
 
+
 def _resolve_binary(name: str) -> str:
     """Resolve an executable binary with proper Windows extension prioritization (.exe, .cmd, .bat)."""
     if sys.platform == "win32":
         for ext in (".exe", ".cmd", ".bat"):
-            cand = shutil.which(f"{name}{ext}") if not name.lower().endswith(ext) else shutil.which(name)
+            cand = (
+                shutil.which(f"{name}{ext}")
+                if not name.lower().endswith(ext)
+                else shutil.which(name)
+            )
             if cand:
                 return cand
     cand = shutil.which(name)
@@ -138,7 +148,9 @@ def _loop_supports_subprocesses(loop: asyncio.AbstractEventLoop) -> bool:
         cls_name = type(loop).__name__
         if "Selector" in cls_name:
             return False
-    return hasattr(loop, "subprocess_exec") or hasattr(loop, "_make_subprocess_transport")
+    return hasattr(loop, "subprocess_exec") or hasattr(
+        loop, "_make_subprocess_transport"
+    )
 
 
 def _run_subprocess_sync(
@@ -369,7 +381,9 @@ async def _call_subprocess_compat(
 ) -> tuple[int, str, str, float]:
     """Call _run_subprocess supporting both 4-argument and 3-argument (mocked) signatures."""
     try:
-        return await _run_subprocess(argv=argv, timeout_sec=timeout_sec, queue=queue, cwd=cwd)
+        return await _run_subprocess(
+            argv=argv, timeout_sec=timeout_sec, queue=queue, cwd=cwd
+        )
     except TypeError:
         return await _run_subprocess(argv=argv, timeout_sec=timeout_sec, queue=queue)
 
@@ -392,7 +406,8 @@ def parse_command_chain(command: str) -> list[tuple[list[str], str]]:
             if current_argv:
                 cleaned = [
                     t[1:-1]
-                    if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'"))
+                    if (t.startswith('"') and t.endswith('"'))
+                    or (t.startswith("'") and t.endswith("'"))
                     else t
                     for t in current_argv
                 ]
@@ -404,7 +419,8 @@ def parse_command_chain(command: str) -> list[tuple[list[str], str]]:
     if current_argv:
         cleaned = [
             t[1:-1]
-            if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'"))
+            if (t.startswith('"') and t.endswith('"'))
+            or (t.startswith("'") and t.endswith("'"))
             else t
             for t in current_argv
         ]
@@ -492,7 +508,9 @@ async def tool_run_terminal_command(
                     candidate = parent_cand
                 else:
                     # Try under backend/ if currently in repo root
-                    backend_cand = os.path.normpath(os.path.join(current_cwd, "backend", target))
+                    backend_cand = os.path.normpath(
+                        os.path.join(current_cwd, "backend", target)
+                    )
                     if os.path.isdir(backend_cand):
                         candidate = backend_cand
 
@@ -539,6 +557,7 @@ async def tool_run_terminal_command(
 # ---------------------------------------------------------------------------
 # Tool: run_linter
 # ---------------------------------------------------------------------------
+
 
 def _select_linter(paths: list[str], linter: str = "auto") -> tuple[str, list[str]]:
     """
@@ -605,7 +624,9 @@ async def tool_run_linter(
     for p in paths:
         stripped = p.strip()
         if ".." in stripped or stripped.startswith("/"):
-            return f"Error: Path rejected — traversal or absolute path not allowed: {p!r}"
+            return (
+                f"Error: Path rejected — traversal or absolute path not allowed: {p!r}"
+            )
         cleaned.append(stripped)
 
     linter_name, argv_prefix = _select_linter(cleaned, linter)
@@ -642,6 +663,7 @@ async def tool_run_linter(
 # Tool: run_targeted_tests
 # ---------------------------------------------------------------------------
 
+
 def _select_test_framework(targets: list[str]) -> tuple[str, list[str]]:
     """
     Infer the test runner from target file extensions.
@@ -652,8 +674,11 @@ def _select_test_framework(targets: list[str]) -> tuple[str, list[str]]:
     for t in targets:
         lower = t.lower()
         # Vitest targets: .ts/.tsx/.js or spec.*/test.* patterns
-        if any(lower.endswith(e) for e in (".ts", ".tsx", ".js", ".jsx")) or \
-                ".spec." in lower or ".test." in lower:
+        if (
+            any(lower.endswith(e) for e in (".ts", ".tsx", ".js", ".jsx"))
+            or ".spec." in lower
+            or ".test." in lower
+        ):
             return "vitest", ["npx", "vitest", "run"]
 
     # Default: pytest for .py and anything unknown.
@@ -801,14 +826,18 @@ async def tool_verify_ci_sandbox(
 
     # Defense-in-depth: validate staged patch paths before sorted()/combined
     # patch construction — skip invalid entries with a warning, never crash.
-    from app.services.session_tools.recon import _validate_file_path as _validate_ci_path
+    from app.services.session_tools.recon import (
+        _validate_file_path as _validate_ci_path,
+    )
 
     _valid_patches: dict[str, str] = {}
     for _p, _d in patches.items():
         try:
             _validate_ci_path(_p)
         except Exception as exc:
-            logger.warning("tool_verify_ci_sandbox: skipping invalid patch path %r: %s", _p, exc)
+            logger.warning(
+                "tool_verify_ci_sandbox: skipping invalid patch path %r: %s", _p, exc
+            )
             continue
         _valid_patches[_p] = _d
     patches = _valid_patches
@@ -820,7 +849,9 @@ async def tool_verify_ci_sandbox(
     if workflow_file is not None:
         workflow_file = workflow_file.strip() or None
 
-    provider = str(getattr(settings, "sandbox_provider", "github_actions") or "github_actions")
+    provider = str(
+        getattr(settings, "sandbox_provider", "github_actions") or "github_actions"
+    )
     provider = provider.lower().strip()
 
     # ---- Local fast path: run staged files through the local test runner.
@@ -868,7 +899,9 @@ async def tool_verify_ci_sandbox(
     # when the verifier is mocked in tests.
     if queue is not None:
         try:
-            await queue.put_sandbox_queued(run_url="pending", workflow_name=workflow_label)
+            await queue.put_sandbox_queued(
+                run_url="pending", workflow_name=workflow_label
+            )
         except Exception as exc:  # pragma: no cover
             logger.warning("tool_verify_ci_sandbox: SSE emit failed: %s", exc)
         try:

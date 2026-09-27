@@ -210,7 +210,9 @@ def handler(event: dict, context) -> dict:
                 run_id_str,
             )
             return {"error": "unauthorized pipeline invocation", "run_id": run_id_str}
-        logger.info("lambda_handler: received pipeline invocation for run_id=%s", run_id_str)
+        logger.info(
+            "lambda_handler: received pipeline invocation for run_id=%s", run_id_str
+        )
         try:
             asyncio.run(_run_pipeline(run_id_str))
         except Exception as exc:
@@ -229,7 +231,10 @@ def handler(event: dict, context) -> dict:
                 "lambda_handler: rejected unauthenticated review invoke for review_id=%s",
                 review_id_str,
             )
-            return {"error": "unauthorized review invocation", "review_id": review_id_str}
+            return {
+                "error": "unauthorized review invocation",
+                "review_id": review_id_str,
+            }
         logger.info(
             "lambda_handler: received review invocation for review_id=%s", review_id_str
         )
@@ -246,4 +251,3 @@ def handler(event: dict, context) -> dict:
 
     # HTTP invocation: API Gateway HTTP API v2 or Lambda Function URL
     return _get_mangum_handler()(event, context)
-

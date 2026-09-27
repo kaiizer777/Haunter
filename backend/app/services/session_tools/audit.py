@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 # Enums and Types
 # ---------------------------------------------------------------------------
 
+
 class AuditTargetType(StrEnum):
     WORKSPACE = "workspace"
     BRANCH = "branch"
@@ -93,7 +94,12 @@ TOOL_RUN_AUDIT_SCAN: dict[str, Any] = {
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": ["security", "correctness", "performance", "architecture"],
+                        "enum": [
+                            "security",
+                            "correctness",
+                            "performance",
+                            "architecture",
+                        ],
                     },
                     "description": (
                         "Optional list of audit perspectives to execute. Defaults to all 4 for a full audit, "
@@ -133,6 +139,7 @@ TOOL_RUN_AUDIT_SCAN: dict[str, Any] = {
 # Slash Command Dataclass and Parser
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class AuditSlashCommand:
     command: Literal["/security-scan", "/repo-audit"]
@@ -154,7 +161,9 @@ def matches_path_filter(file_path: str, path_filter: str | None) -> bool:
 
     if clean_path == clean_filter or clean_path.startswith(clean_filter + "/"):
         return True
-    if fnmatch.fnmatch(clean_path, clean_filter) or fnmatch.fnmatch(clean_path, f"*{clean_filter}*"):
+    if fnmatch.fnmatch(clean_path, clean_filter) or fnmatch.fnmatch(
+        clean_path, f"*{clean_filter}*"
+    ):
         return True
     return False
 
@@ -175,7 +184,9 @@ def filter_diff_by_path(diff_text: str, path_filter: str | None) -> str:
         match = re.match(r"^diff --git a/(.+?) b/(.+)$", first_line)
         if match:
             path_a, path_b = match.group(1), match.group(2)
-            if matches_path_filter(path_b, clean_filter) or matches_path_filter(path_a, clean_filter):
+            if matches_path_filter(path_b, clean_filter) or matches_path_filter(
+                path_a, clean_filter
+            ):
                 matched_chunks.append(chunk)
         elif matches_path_filter(first_line, clean_filter):
             matched_chunks.append(chunk)
@@ -248,7 +259,9 @@ def parse_slash_command(text: str) -> Optional[AuditSlashCommand]:
             scan_profile_override = token.split("=", 1)[1].strip().lower()
         elif token.startswith("--perspectives="):
             raw_p = token.split("=", 1)[1].strip()
-            explicit_perspectives = [p.strip().lower() for p in raw_p.split(",") if p.strip()]
+            explicit_perspectives = [
+                p.strip().lower() for p in raw_p.split(",") if p.strip()
+            ]
         elif not token.startswith("-") and path_filter is None:
             # Positional target or filter
             path_filter = token.strip()
@@ -283,6 +296,7 @@ def parse_slash_command(text: str) -> Optional[AuditSlashCommand]:
 # Core Audit Scan Execution
 # ---------------------------------------------------------------------------
 
+
 async def execute_audit_scan(
     *,
     target_type: str = "diff",
@@ -311,7 +325,9 @@ async def execute_audit_scan(
         resolved_perspectives = ["security"]
     elif perspectives is not None:
         resolved_perspectives = [
-            p for p in perspectives if p in ALL_PERSPECTIVES  # type: ignore[misc]
+            p
+            for p in perspectives
+            if p in ALL_PERSPECTIVES  # type: ignore[misc]
         ] or list(ALL_PERSPECTIVES)
     elif scan_profile in ("full", "strict"):
         resolved_perspectives = list(ALL_PERSPECTIVES)
@@ -319,9 +335,7 @@ async def execute_audit_scan(
         resolved_perspectives = list(ALL_PERSPECTIVES)
 
     scan_type_label = (
-        "security_scan"
-        if resolved_perspectives == ["security"]
-        else "repo_audit"
+        "security_scan" if resolved_perspectives == ["security"] else "repo_audit"
     )
 
     # 2. Gather code diff based on target_type
@@ -360,7 +374,9 @@ async def execute_audit_scan(
                     if match:
                         scanned_files.append(match.group(2))
         except GitHubClientError as exc:
-            logger.warning("Failed to fetch branch diff for %s/%s: %s", repo_owner, repo_name, exc)
+            logger.warning(
+                "Failed to fetch branch diff for %s/%s: %s", repo_owner, repo_name, exc
+            )
             diff_text = ""
 
     elif target_type_clean == "workspace":
@@ -391,7 +407,9 @@ async def execute_audit_scan(
                         if match:
                             scanned_files.append(match.group(2))
             except Exception as exc:
-                logger.debug("Workspace branch comparison fallback produced no diff: %s", exc)
+                logger.debug(
+                    "Workspace branch comparison fallback produced no diff: %s", exc
+                )
                 diff_text = ""
 
     # 3. Emit SSE audit_scan_start
@@ -454,6 +472,7 @@ async def execute_audit_scan(
 # ---------------------------------------------------------------------------
 # Tool and Command Adapters
 # ---------------------------------------------------------------------------
+
 
 async def tool_run_audit_scan(
     args: dict[str, Any],
@@ -578,7 +597,11 @@ async def handle_slash_command(
         )
         return empty_result, empty_result.report_markdown
 
-    header = "🛡️ **Repository Security Scan**" if cmd.command == "/security-scan" else "🔍 **Codebase Multi-Perspective Audit**"
+    header = (
+        "🛡️ **Repository Security Scan**"
+        if cmd.command == "/security-scan"
+        else "🔍 **Codebase Multi-Perspective Audit**"
+    )
     scope_desc = f"Target Scope: `{cmd.path_filter or cmd.target_type}`"
     score_desc = f"Health Score: **{result.confidence}/100** ({result.status})"
 

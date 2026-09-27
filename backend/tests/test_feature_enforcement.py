@@ -220,7 +220,10 @@ def test_is_auto_fix_allowed():
 
 def test_is_sandbox_verification_allowed():
     """enable_sandbox_verification flag gate."""
-    assert is_sandbox_verification_allowed(enable_sandbox_verification=True).allowed is True
+    assert (
+        is_sandbox_verification_allowed(enable_sandbox_verification=True).allowed
+        is True
+    )
     dec = is_sandbox_verification_allowed(enable_sandbox_verification=False)
     assert dec.allowed is False
     assert "sandbox verification disabled" in dec.reason
@@ -237,19 +240,36 @@ def test_is_pr_comments_allowed():
 def test_check_cost_ceiling():
     """check_cost_ceiling bounds execution by max_cost_per_run_cents."""
     # Within budget
-    assert check_cost_ceiling(current_cost_cents=25.0, max_cost_per_run_cents=100).allowed is True
-    assert check_cost_ceiling(current_cost_cents=99.9, max_cost_per_run_cents=100).allowed is True
+    assert (
+        check_cost_ceiling(current_cost_cents=25.0, max_cost_per_run_cents=100).allowed
+        is True
+    )
+    assert (
+        check_cost_ceiling(current_cost_cents=99.9, max_cost_per_run_cents=100).allowed
+        is True
+    )
 
     # At or above budget
-    assert check_cost_ceiling(current_cost_cents=100.0, max_cost_per_run_cents=100).allowed is False
-    assert check_cost_ceiling(current_cost_cents=125.0, max_cost_per_run_cents=100).allowed is False
+    assert (
+        check_cost_ceiling(current_cost_cents=100.0, max_cost_per_run_cents=100).allowed
+        is False
+    )
+    assert (
+        check_cost_ceiling(current_cost_cents=125.0, max_cost_per_run_cents=100).allowed
+        is False
+    )
 
     # 0 cents implies unlimited budget
-    assert check_cost_ceiling(current_cost_cents=500.0, max_cost_per_run_cents=0).allowed is True
+    assert (
+        check_cost_ceiling(current_cost_cents=500.0, max_cost_per_run_cents=0).allowed
+        is True
+    )
 
 
 @pytest.mark.asyncio
-async def test_composite_check_feature_enforcement(fake_audit_db: FakeAsyncSession, fake_audit_user_factory):
+async def test_composite_check_feature_enforcement(
+    fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
     """check_feature_enforcement evaluates rules in sequence and halts on first rejection."""
     _, repo = await seed_test_repo(fake_audit_db, fake_audit_user_factory)
     settings_row = RepoSettings(
@@ -300,9 +320,13 @@ async def test_composite_check_feature_enforcement(fake_audit_db: FakeAsyncSessi
 
 
 @pytest.mark.asyncio
-async def test_webhook_workflow_run_branch_filtering(client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory):
+async def test_webhook_workflow_run_branch_filtering(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
     """workflow_run skips cleanly when head_branch is not in allowed_branches."""
-    _, repo = await seed_test_repo(fake_audit_db, fake_audit_user_factory, "branch-org", "branch-repo")
+    _, repo = await seed_test_repo(
+        fake_audit_db, fake_audit_user_factory, "branch-org", "branch-repo"
+    )
     settings_row = RepoSettings(
         repo_id=repo.id,
         allowed_branches=["main", "release/*"],
@@ -333,7 +357,9 @@ async def test_webhook_workflow_run_branch_filtering(client: httpx.AsyncClient, 
     assert "not in allowed branches" in resp.json()["reason"]
 
     # No Run created
-    runs_count = await fake_audit_db.scalar(select(func.count()).select_from(Run).where(Run.repo_id == repo.id))
+    runs_count = await fake_audit_db.scalar(
+        select(func.count()).select_from(Run).where(Run.repo_id == repo.id)
+    )
     assert runs_count == 0
 
     # 2. Allowed wildcard branch: release/v2.1 -> queued
@@ -352,7 +378,9 @@ async def test_webhook_workflow_run_branch_filtering(client: httpx.AsyncClient, 
             "owner": {"login": repo.owner},
         },
     }
-    with patch("app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock) as mock_get:
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+    ) as mock_get:
         mock_adapter = MagicMock()
         mock_adapter.schedule_pipeline = AsyncMock()
         mock_get.return_value = mock_adapter
@@ -364,9 +392,13 @@ async def test_webhook_workflow_run_branch_filtering(client: httpx.AsyncClient, 
 
 
 @pytest.mark.asyncio
-async def test_webhook_workflow_run_empty_branches_allows_all(client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory):
+async def test_webhook_workflow_run_empty_branches_allows_all(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
     """Empty allowed_branches list permits any branch to proceed."""
-    _, repo = await seed_test_repo(fake_audit_db, fake_audit_user_factory, "open-org", "open-repo")
+    _, repo = await seed_test_repo(
+        fake_audit_db, fake_audit_user_factory, "open-org", "open-repo"
+    )
     settings_row = RepoSettings(
         repo_id=repo.id,
         allowed_branches=[],
@@ -390,7 +422,9 @@ async def test_webhook_workflow_run_empty_branches_allows_all(client: httpx.Asyn
             "owner": {"login": repo.owner},
         },
     }
-    with patch("app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock) as mock_get:
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+    ) as mock_get:
         mock_adapter = MagicMock()
         mock_adapter.schedule_pipeline = AsyncMock()
         mock_get.return_value = mock_adapter
@@ -401,9 +435,13 @@ async def test_webhook_workflow_run_empty_branches_allows_all(client: httpx.Asyn
 
 
 @pytest.mark.asyncio
-async def test_webhook_workflow_run_enable_auto_fix_false_skips(client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory):
+async def test_webhook_workflow_run_enable_auto_fix_false_skips(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
     """workflow_run skips queuing autonomous fix Run when enable_auto_fix=False."""
-    _, repo = await seed_test_repo(fake_audit_db, fake_audit_user_factory, "nofix-org", "nofix-repo")
+    _, repo = await seed_test_repo(
+        fake_audit_db, fake_audit_user_factory, "nofix-org", "nofix-repo"
+    )
     settings_row = RepoSettings(
         repo_id=repo.id,
         enable_auto_fix=False,
@@ -433,14 +471,20 @@ async def test_webhook_workflow_run_enable_auto_fix_false_skips(client: httpx.As
     assert "auto_fix disabled" in resp.json()["reason"]
 
     # Verify no Run row persisted in DB
-    runs_count = await fake_audit_db.scalar(select(func.count()).select_from(Run).where(Run.repo_id == repo.id))
+    runs_count = await fake_audit_db.scalar(
+        select(func.count()).select_from(Run).where(Run.repo_id == repo.id)
+    )
     assert runs_count == 0
 
 
 @pytest.mark.asyncio
-async def test_webhook_pull_request_draft_filtering(client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory):
+async def test_webhook_pull_request_draft_filtering(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
     """pull_request honors ignore_draft_prs setting."""
-    _, repo = await seed_test_repo(fake_audit_db, fake_audit_user_factory, "draft-org", "draft-repo")
+    _, repo = await seed_test_repo(
+        fake_audit_db, fake_audit_user_factory, "draft-org", "draft-repo"
+    )
     settings_row = RepoSettings(
         repo_id=repo.id,
         ignore_draft_prs=True,
@@ -473,7 +517,9 @@ async def test_webhook_pull_request_draft_filtering(client: httpx.AsyncClient, f
     settings_row.ignore_draft_prs = False
     await fake_audit_db.commit()
 
-    with patch("app.adapters.hosting.AWSHostingAdapter.schedule_review", new_callable=AsyncMock) as mock_sched:
+    with patch(
+        "app.adapters.hosting.AWSHostingAdapter.schedule_review", new_callable=AsyncMock
+    ) as mock_sched:
         resp2 = await post_signed(client, "pull_request", payload_draft)
         assert resp2.status_code == 200
         assert resp2.json()["status"] == "queued"
@@ -481,9 +527,13 @@ async def test_webhook_pull_request_draft_filtering(client: httpx.AsyncClient, f
 
 
 @pytest.mark.asyncio
-async def test_webhook_pull_request_branch_filtering(client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory):
+async def test_webhook_pull_request_branch_filtering(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
     """pull_request skips when neither target nor head branch is in allowed_branches."""
-    _, repo = await seed_test_repo(fake_audit_db, fake_audit_user_factory, "prbranch-org", "prbranch-repo")
+    _, repo = await seed_test_repo(
+        fake_audit_db, fake_audit_user_factory, "prbranch-org", "prbranch-repo"
+    )
     settings_row = RepoSettings(
         repo_id=repo.id,
         allowed_branches=["main", "release/*"],
@@ -518,9 +568,13 @@ async def test_webhook_pull_request_branch_filtering(client: httpx.AsyncClient, 
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_auto_fix_disabled_terminates_pipeline(fake_audit_db: FakeAsyncSession, fake_audit_user_factory):
+async def test_orchestrator_auto_fix_disabled_terminates_pipeline(
+    fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
     """Orchestrator immediately aborts fix generation when enable_auto_fix=False."""
-    user, repo = await seed_test_repo(fake_audit_db, fake_audit_user_factory, "orch-org", "orch-repo")
+    user, repo = await seed_test_repo(
+        fake_audit_db, fake_audit_user_factory, "orch-org", "orch-repo"
+    )
     settings_row = RepoSettings(
         repo_id=repo.id,
         enable_auto_fix=False,
@@ -562,8 +616,14 @@ async def test_orchestrator_sandbox_verification_disabled_bypasses_sandbox(
     records bypass in decisions and attempt strategy notes, sets verification_status=pass,
     and proceeds to PR creation."""
     # Unit assertion
-    assert is_sandbox_verification_allowed(enable_sandbox_verification=True).allowed is True
-    assert is_sandbox_verification_allowed(enable_sandbox_verification=False).allowed is False
+    assert (
+        is_sandbox_verification_allowed(enable_sandbox_verification=True).allowed
+        is True
+    )
+    assert (
+        is_sandbox_verification_allowed(enable_sandbox_verification=False).allowed
+        is False
+    )
 
     # Behavioral pipeline execution
     user, repo = await seed_test_repo(
@@ -602,10 +662,16 @@ async def test_orchestrator_sandbox_verification_disabled_bypasses_sandbox(
 
     with (
         patch("app.orchestrator.gather_context", new_callable=AsyncMock) as mock_gather,
-        patch("app.subagents.fix_generator.generate_fix", new_callable=AsyncMock) as mock_generate_fix,
+        patch(
+            "app.subagents.fix_generator.generate_fix", new_callable=AsyncMock
+        ) as mock_generate_fix,
         patch("app.sandbox.verify", new_callable=AsyncMock) as mock_sandbox_verify,
-        patch("app.subagents.pr_writer.generate_pr_text", new_callable=AsyncMock) as mock_gen_pr,
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_token,
+        patch(
+            "app.subagents.pr_writer.generate_pr_text", new_callable=AsyncMock
+        ) as mock_gen_pr,
+        patch(
+            "app.github.pr.get_installation_token", new_callable=AsyncMock
+        ) as mock_token,
         patch("app.github.pr.create_branch", new_callable=AsyncMock),
         patch("app.github.pr.commit_patch", new_callable=AsyncMock),
         patch("app.github.pr.open_pr", new_callable=AsyncMock) as mock_open_pr,
@@ -639,7 +705,9 @@ async def test_orchestrator_sandbox_verification_disabled_bypasses_sandbox(
 
     # Attempt updated to pass with bypass notes
     assert generated_attempt.verification_status == "pass"
-    assert "[sandbox verification bypassed by repo settings]" in (generated_attempt.strategy_notes or "")
+    assert "[sandbox verification bypassed by repo settings]" in (
+        generated_attempt.strategy_notes or ""
+    )
 
     # Progressed to pr_opened
     assert run.status == RunStatus.pr_opened.value
@@ -695,11 +763,19 @@ async def test_orchestrator_pr_comments_disabled_suppresses_comments(
     with (
         patch.object(settings, "max_attempts", 1),
         patch("app.orchestrator.gather_context", new_callable=AsyncMock) as mock_gather,
-        patch("app.subagents.fix_generator.generate_fix", new_callable=AsyncMock) as mock_generate_fix,
+        patch(
+            "app.subagents.fix_generator.generate_fix", new_callable=AsyncMock
+        ) as mock_generate_fix,
         patch("app.sandbox.verify", new_callable=AsyncMock) as mock_verify,
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_token,
-        patch("app.github_client.post_commit_comment", new_callable=AsyncMock) as mock_post_commit_comment,
-        patch("app.github_client.post_pr_comment", new_callable=AsyncMock) as mock_post_pr_comment,
+        patch(
+            "app.github.pr.get_installation_token", new_callable=AsyncMock
+        ) as mock_token,
+        patch(
+            "app.github_client.post_commit_comment", new_callable=AsyncMock
+        ) as mock_post_commit_comment,
+        patch(
+            "app.github_client.post_pr_comment", new_callable=AsyncMock
+        ) as mock_post_pr_comment,
     ):
         mock_gather.return_value = "diagnosis: cannot fix"
         mock_generate_fix.return_value = attempt_1
@@ -754,11 +830,19 @@ async def test_orchestrator_pr_comments_disabled_suppresses_comments(
     with (
         patch.object(settings, "max_attempts", 1),
         patch("app.orchestrator.gather_context", new_callable=AsyncMock) as mock_gather,
-        patch("app.subagents.fix_generator.generate_fix", new_callable=AsyncMock) as mock_generate_fix,
+        patch(
+            "app.subagents.fix_generator.generate_fix", new_callable=AsyncMock
+        ) as mock_generate_fix,
         patch("app.sandbox.verify", new_callable=AsyncMock) as mock_verify,
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_token,
-        patch("app.github_client.post_commit_comment", new_callable=AsyncMock) as mock_post_commit_comment,
-        patch("app.github_client.post_pr_comment", new_callable=AsyncMock) as mock_post_pr_comment,
+        patch(
+            "app.github.pr.get_installation_token", new_callable=AsyncMock
+        ) as mock_token,
+        patch(
+            "app.github_client.post_commit_comment", new_callable=AsyncMock
+        ) as mock_post_commit_comment,
+        patch(
+            "app.github_client.post_pr_comment", new_callable=AsyncMock
+        ) as mock_post_pr_comment,
     ):
         mock_gather.return_value = "diagnosis: cannot fix"
         mock_generate_fix.return_value = attempt_2
@@ -788,9 +872,18 @@ async def test_orchestrator_cost_ceiling_enforcement_logic(
     """When accumulated step cost reaches or exceeds max_cost_per_run_cents,
     orchestrator aborts fix attempts, breaks out to fallback, and persists failure_reason."""
     # Unit assertions
-    assert check_cost_ceiling(current_cost_cents=45.0, max_cost_per_run_cents=50).allowed is True
-    assert check_cost_ceiling(current_cost_cents=50.0, max_cost_per_run_cents=50).allowed is False
-    assert check_cost_ceiling(current_cost_cents=75.5, max_cost_per_run_cents=50).allowed is False
+    assert (
+        check_cost_ceiling(current_cost_cents=45.0, max_cost_per_run_cents=50).allowed
+        is True
+    )
+    assert (
+        check_cost_ceiling(current_cost_cents=50.0, max_cost_per_run_cents=50).allowed
+        is False
+    )
+    assert (
+        check_cost_ceiling(current_cost_cents=75.5, max_cost_per_run_cents=50).allowed
+        is False
+    )
 
     # Behavioral pipeline execution
     user, repo = await seed_test_repo(
@@ -829,8 +922,12 @@ async def test_orchestrator_cost_ceiling_enforcement_logic(
 
     with (
         patch("app.orchestrator.gather_context", new_callable=AsyncMock) as mock_gather,
-        patch("app.subagents.fix_generator.generate_fix", new_callable=AsyncMock) as mock_generate_fix,
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_token,
+        patch(
+            "app.subagents.fix_generator.generate_fix", new_callable=AsyncMock
+        ) as mock_generate_fix,
+        patch(
+            "app.github.pr.get_installation_token", new_callable=AsyncMock
+        ) as mock_token,
         patch("app.github_client.post_commit_comment", new_callable=AsyncMock),
     ):
         mock_gather.return_value = "diagnosis: generic failure"
@@ -907,7 +1004,9 @@ async def test_webhook_push_branch_filtering(
         },
         "sender": {"login": "developer", "type": "User"},
     }
-    with patch("app.adapters.hosting.AWSHostingAdapter.schedule_review", new_callable=AsyncMock) as mock_sched:
+    with patch(
+        "app.adapters.hosting.AWSHostingAdapter.schedule_review", new_callable=AsyncMock
+    ) as mock_sched:
         resp2 = await post_signed(client, "push", payload_allowed)
         assert resp2.status_code == 200
         assert resp2.json()["status"] == "queued"
@@ -985,7 +1084,9 @@ async def test_webhook_issue_comment_refinement_rate_limit_comment_suppressed(
         },
     }
 
-    with patch("app.github_client.post_pr_comment", new_callable=AsyncMock) as mock_pr_comment:
+    with patch(
+        "app.github_client.post_pr_comment", new_callable=AsyncMock
+    ) as mock_pr_comment:
         resp = await post_signed(client, "issue_comment", payload)
         assert resp.status_code == 200
         assert resp.json()["status"] == "ignored"
@@ -998,8 +1099,12 @@ async def test_webhook_issue_comment_refinement_rate_limit_comment_suppressed(
     await fake_audit_db.commit()
 
     with (
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_token,
-        patch("app.github_client.post_pr_comment", new_callable=AsyncMock) as mock_pr_comment,
+        patch(
+            "app.github.pr.get_installation_token", new_callable=AsyncMock
+        ) as mock_token,
+        patch(
+            "app.github_client.post_pr_comment", new_callable=AsyncMock
+        ) as mock_pr_comment,
     ):
         mock_token.return_value = "ghs_token_abc"
         resp = await post_signed(client, "issue_comment", payload)

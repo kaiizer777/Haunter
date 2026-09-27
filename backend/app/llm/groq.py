@@ -57,7 +57,9 @@ class GroqProvider:
             }
         """
         if not self._api_key:
-            raise LLMAuthenticationError("GROQ_API_KEY is not configured in settings or environment")
+            raise LLMAuthenticationError(
+                "GROQ_API_KEY is not configured in settings or environment"
+            )
 
         target_model = model or self.default_model
         endpoint = urljoin(self.base_url, "chat/completions")

@@ -108,7 +108,11 @@ async def test_update_plan_valid(db: AsyncSession) -> None:
     queue = SseQueue()
     tasks = [
         {"id": "1", "title": "Locate auth handler", "status": "completed"},
-        {"id": "2", "title": "Apply surgical patch with str_replace", "status": "in_progress"},
+        {
+            "id": "2",
+            "title": "Apply surgical patch with str_replace",
+            "status": "in_progress",
+        },
         {"id": "3", "title": "Run pytest verification", "status": "pending"},
     ]
 
@@ -136,7 +140,9 @@ async def test_update_plan_valid(db: AsyncSession) -> None:
 async def test_update_plan_invalid_status(db: AsyncSession) -> None:
     """Rejects invalid task status with a descriptive error and preserves prior plan."""
     user, repo = await _seed_user_and_repo(db, github_id=60002)
-    session = await _seed_session(db, user, repo, plan=[{"id": "0", "title": "Initial", "status": "pending"}])
+    session = await _seed_session(
+        db, user, repo, plan=[{"id": "0", "title": "Initial", "status": "pending"}]
+    )
 
     queue = SseQueue()
     invalid_tasks = [
@@ -199,7 +205,10 @@ async def test_clarify_endpoint_success(
         user,
         repo,
         status="awaiting_clarification",
-        waiting_input={"question": "Pick an architecture", "options": ["Option A", "Option B"]},
+        waiting_input={
+            "question": "Pick an architecture",
+            "options": ["Option A", "Option B"],
+        },
     )
 
     async with _auth_client(make_auth_client, user) as ac:
@@ -298,10 +307,13 @@ async def test_sse_plan_update_and_clarification_events() -> None:
     assert data["tasks"] == tasks
 
     # format_sse_event for clarification_requested
-    clarify_chunk = format_sse_event("clarification_requested", {
-        "question": "Use Redis?",
-        "options": ["Yes", "No"],
-    })
+    clarify_chunk = format_sse_event(
+        "clarification_requested",
+        {
+            "question": "Use Redis?",
+            "options": ["Yes", "No"],
+        },
+    )
     assert clarify_chunk.startswith("event: clarification_requested\n")
     assert clarify_chunk.endswith("\n\n")
     data2 = json.loads(clarify_chunk.split("data: ", 1)[1].strip())

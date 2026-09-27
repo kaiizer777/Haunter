@@ -25,7 +25,16 @@ load_dotenv()
 from app.auth import _encrypt_token, _sign_state, _sign_user_id
 from app.config import settings
 from app.db import async_session_maker as _prod_session_maker
-from app.models import AgentSession, Attempt, EvalResult, ModelConfig, Repo, Run, RunStep, User
+from app.models import (
+    AgentSession,
+    Attempt,
+    EvalResult,
+    ModelConfig,
+    Repo,
+    Run,
+    RunStep,
+    User,
+)
 from main import app
 
 # ---------------------------------------------------------------------------
@@ -46,11 +55,16 @@ def _is_prod_url(url: str) -> bool:
 if _TEST_DB_URL:
     _raw_url = _TEST_DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
     _parsed = urlparse(_raw_url)
-    _clean_params = [(k, v) for k, v in parse_qsl(_parsed.query) if k not in ("sslmode", "channel_binding")]
+    _clean_params = [
+        (k, v)
+        for k, v in parse_qsl(_parsed.query)
+        if k not in ("sslmode", "channel_binding")
+    ]
     _test_url = urlunparse(_parsed._replace(query=urlencode(_clean_params)))
     _test_engine = create_async_engine(
         _test_url, poolclass=NullPool, echo=False, connect_args={"ssl": True}
     )
+
     class TestAsyncSession(AsyncSession):
         def expire_all(self) -> None:
             """Expire non-primary-key attributes so reloads work without MissingGreenlet on PK access."""
@@ -58,7 +72,9 @@ if _TEST_DB_URL:
                 obj = state.obj()
                 if obj is not None and getattr(state, "mapper", None) is not None:
                     pk_keys = {c.key for c in state.mapper.primary_key}
-                    attrs = [k for k in state.mapper.column_attrs.keys() if k not in pk_keys]
+                    attrs = [
+                        k for k in state.mapper.column_attrs.keys() if k not in pk_keys
+                    ]
                     self.sync_session.expire(obj, attribute_names=attrs)
 
     async_session_maker = async_sessionmaker(
@@ -67,6 +83,7 @@ if _TEST_DB_URL:
         expire_on_commit=False,
     )
     from app import db as db_module
+
     db_module.engine = _test_engine
     db_module.async_session_maker = async_session_maker
 
@@ -111,6 +128,7 @@ async def truncate_all(db: AsyncSession) -> None:
         await db.execute(text(stmt))
     await db.commit()
     from app.adapters.hosting import invalidate_provider_cache
+
     invalidate_provider_cache()
 
 
@@ -143,13 +161,16 @@ async def db() -> AsyncGenerator[AsyncSession, None]:
 async def client() -> AsyncGenerator[httpx.AsyncClient, None]:
     """Provide an unauthenticated httpx.AsyncClient bound to the FastAPI ASGI app."""
     transport = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as ac:
         yield ac
 
 
 @pytest.fixture
 def make_auth_client():
     """Factory to create an authenticated httpx.AsyncClient for a specific user UUID."""
+
     def _make(user_id: uuid.UUID) -> httpx.AsyncClient:
         cookie = _sign_user_id(user_id)
         transport = ASGITransport(app=app)
@@ -158,12 +179,14 @@ def make_auth_client():
             base_url="http://testserver",
             cookies={"haunter_session": cookie},
         )
+
     return _make
 
 
 @pytest.fixture
 def user_factory(db: AsyncSession):
     """Factory fixture to create and persist a test User."""
+
     async def _create(
         github_id: int | None = None,
         username: str = "test-user",
@@ -190,25 +213,31 @@ def user_factory(db: AsyncSession):
         db.expunge(user)
         # Re-attach a fresh copy (needed if caller does db.add on related objs)
         from sqlalchemy import select
+
         result = await db.execute(select(User).where(User.id == user_id))
         fresh = result.scalar_one()
         return fresh
+
     return _create
 
 
 @pytest.fixture
 def signed_state_factory():
     """Helper to generate signed OAuth state cookie values."""
+
     def _sign(raw_state: str) -> str:
         return _sign_state(raw_state)
+
     return _sign
 
 
 @pytest.fixture
 def signed_session_factory():
     """Helper to generate signed session cookie values."""
+
     def _sign(user_id: uuid.UUID) -> str:
         return _sign_user_id(user_id)
+
     return _sign
 
 
@@ -221,13 +250,15 @@ def _restore_settings_singleton():
     yield
     import sys
     import app.config
+
     app.config.settings = _ORIGINAL_SETTINGS
     _ORIGINAL_SETTINGS.admin_user_id = None
     for name, mod in list(sys.modules.items()):
         if name.startswith(("app", "tests", "main")):
             s = getattr(mod, "settings", None)
             if s is not None and s is not _ORIGINAL_SETTINGS:
-                if s.__class__.__name__ == "Settings" and s.__class__.__module__ == "app.config":
+                if (
+                    s.__class__.__name__ == "Settings"
+                    and s.__class__.__module__ == "app.config"
+                ):
                     mod.settings = _ORIGINAL_SETTINGS
-
-

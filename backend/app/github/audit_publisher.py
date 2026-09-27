@@ -100,10 +100,7 @@ def validate_finding_coordinates(
     }
 
     # If this is a multi-line finding and start_line is also in the diff hunk
-    if (
-        finding.line_start < target_line
-        and finding.line_start in lines_in_diff
-    ):
+    if finding.line_start < target_line and finding.line_start in lines_in_diff:
         coords["start_line"] = finding.line_start
         coords["start_side"] = "RIGHT"
 
@@ -128,12 +125,16 @@ def format_inline_comment_body(
 
     lines: list[str] = []
     if is_informational or finding.informational_only:
-        lines.append(f"> ℹ️ **[INFORMATIONAL NOTE]** (Confidence: `{finding.confidence}%`)")
+        lines.append(
+            f"> ℹ️ **[INFORMATIONAL NOTE]** (Confidence: `{finding.confidence}%`)"
+        )
         lines.append(f"### {severity_icon} [{finding.severity}] {title}")
         lines.append(f"**Category:** {category}")
     else:
         lines.append(f"### {severity_icon} [{finding.severity}] {title}")
-        lines.append(f"**Category:** {category} | **Confidence:** `{finding.confidence}%`")
+        lines.append(
+            f"**Category:** {category} | **Confidence:** `{finding.confidence}%`"
+        )
 
     lines.append("")
     lines.append(description)
@@ -299,7 +300,8 @@ async def publish_audit_review(
             # Determine review event: COMMENT vs REQUEST_CHANGES
             if effective_allowed and request_changes_on_blocker:
                 has_confident_blocker = any(
-                    f.severity == "BLOCKER" and f.confidence >= INFORMATIONAL_CONFIDENCE_THRESHOLD
+                    f.severity == "BLOCKER"
+                    and f.confidence >= INFORMATIONAL_CONFIDENCE_THRESHOLD
                     for f in result.findings
                 )
                 event = "REQUEST_CHANGES" if has_confident_blocker else "COMMENT"
@@ -374,7 +376,9 @@ async def publish_audit_review(
             logger.info(
                 "audit commit_comment_published audit_id=%s sha=%s",
                 result.audit_id,
-                resolved_head_sha[:10] if len(resolved_head_sha) >= 10 else resolved_head_sha,
+                resolved_head_sha[:10]
+                if len(resolved_head_sha) >= 10
+                else resolved_head_sha,
             )
             return PublishResult(
                 published=True,

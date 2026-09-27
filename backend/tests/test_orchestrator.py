@@ -221,14 +221,29 @@ async def test_gather_context_creates_run_step(db: AsyncSession) -> None:
     )
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
-        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+        ) as mock_logs,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock
+        ) as mock_diff,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+        ) as mock_meta,
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock
+        ) as mock_llm,
     ):
-        mock_logs.return_value = "2024-01-01T00:00:00Z ImportError: No module named 'httpx'"
+        mock_logs.return_value = (
+            "2024-01-01T00:00:00Z ImportError: No module named 'httpx'"
+        )
         mock_diff.return_value = "-httpx==0.24.0\n"
-        mock_meta.return_value = {"sha": "abc123", "commit": {"message": "remove httpx"}}
+        mock_meta.return_value = {
+            "sha": "abc123",
+            "commit": {"message": "remove httpx"},
+        }
         mock_llm.return_value = {
             "content": mock_summary,
             "usage": {"input_tokens": 150, "output_tokens": 45},
@@ -286,10 +301,21 @@ async def test_gather_context_redacts_secrets_before_llm(db: AsyncSession) -> No
         }
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
-        patch("app.subagents.context_gatherer.LLMClient.complete", side_effect=capture_complete),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+        ) as mock_logs,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock
+        ) as mock_diff,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+        ) as mock_meta,
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete",
+            side_effect=capture_complete,
+        ),
     ):
         mock_logs.return_value = secret_log
         mock_diff.return_value = ""
@@ -331,10 +357,20 @@ async def test_github_fetch_timeout_does_not_stall(db: AsyncSession) -> None:
         return "slow log output"
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
-        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+        ) as mock_logs,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock
+        ) as mock_diff,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+        ) as mock_meta,
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock
+        ) as mock_llm,
         # Simulate timeout on the logs fetch only
         patch(
             "app.subagents.context_gatherer.asyncio.wait_for",
@@ -388,10 +424,20 @@ async def test_handle_failed_run_github_404_sets_error(db: AsyncSession) -> None
     from app.github_client import GitHubResourceNotFoundError
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
-        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+        ) as mock_logs,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock
+        ) as mock_diff,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+        ) as mock_meta,
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock
+        ) as mock_llm,
     ):
         # All fetches fail with 404 — _safe_fetch returns "" for each
         mock_logs.side_effect = GitHubResourceNotFoundError("not found")
@@ -428,8 +474,11 @@ async def test_handle_failed_run_github_404_sets_error(db: AsyncSession) -> None
 # Test 10: Phase 8 Fallback logic
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
-async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSession) -> None:
+async def test_handle_failed_run_exhausts_attempts_and_falls_back(
+    db: AsyncSession,
+) -> None:
     """If 3 attempts all fail verification, orchestrator transitions to fallback_commented and posts a comment."""
     await truncate_all(db)
     user = await _create_user(db)
@@ -486,7 +535,11 @@ async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSessi
         patch(
             "app.sandbox.runner.verify_patch",
             new_callable=AsyncMock,
-            return_value={"status": "fail", "failure_reason": "failed tests", "build_duration_ms": 500},
+            return_value={
+                "status": "fail",
+                "failure_reason": "failed tests",
+                "build_duration_ms": 500,
+            },
         ),
         # Phase 8: get_installation_token now fetches the write token
         patch(
@@ -500,6 +553,7 @@ async def test_handle_failed_run_exhausts_attempts_and_falls_back(db: AsyncSessi
         ) as mock_post_comment,
     ):
         from app.orchestrator import handle_failed_run
+
         await handle_failed_run(run_id)
 
     db.expire_all()
@@ -664,10 +718,20 @@ async def test_gather_context_empty_content_raises(db: AsyncSession) -> None:
     run = await _create_run(db, repo, status="context_gathering")
 
     with (
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs", new_callable=AsyncMock) as mock_logs,
-        patch("app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock) as mock_diff,
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata", new_callable=AsyncMock) as mock_meta,
-        patch("app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+        ) as mock_logs,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff", new_callable=AsyncMock
+        ) as mock_diff,
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+        ) as mock_meta,
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete", new_callable=AsyncMock
+        ) as mock_llm,
     ):
         mock_logs.return_value = "Error: ImportError"
         mock_diff.return_value = ""
@@ -722,17 +786,21 @@ async def test_orchestrator_format_exhausted_routes_to_fallback(
     # diagnosis so the deterministic ModuleNotFoundError fast-path
     # does NOT short-circuit the LLM path.
     run = await _create_run(
-        db, repo, status="fix_generation",
+        db,
+        repo,
+        status="fix_generation",
         diagnosis_summary="SyntaxError: invalid syntax (line 42)",
     )
 
     # Format-broken response: no diff markers at all
     broken_response = {
-        "content": json.dumps({
-            "patch": "def fixed():\n    return 42\n",
-            "confidence": 80,
-            "strategy_notes": "no diff markers",
-        }),
+        "content": json.dumps(
+            {
+                "patch": "def fixed():\n    return 42\n",
+                "confidence": 80,
+                "strategy_notes": "no diff markers",
+            }
+        ),
         "usage": {"input_tokens": 100, "output_tokens": 50},
         "latency_ms": 200,
         "model": "nemotron-3.5-lightning-free",
@@ -763,15 +831,13 @@ async def test_orchestrator_format_exhausted_routes_to_fallback(
     db.expire_all()
     refreshed = await db.execute(select(Run).where(Run.id == run.id))
     run = refreshed.scalar_one()
-    assert run.status == "fallback_commented", (
-        f"expected fallback_commented, got {run.status}"
-    )
+    assert (
+        run.status == "fallback_commented"
+    ), f"expected fallback_commented, got {run.status}"
     # The diagnosis comment was posted
     assert mock_comment.called, "fallback comment was not posted"
     # A fix_generator_format_exhausted step was recorded
-    steps = await db.execute(
-        select(RunStep).where(RunStep.run_id == run.id)
-    )
+    steps = await db.execute(select(RunStep).where(RunStep.run_id == run.id))
     step_names = {s.step_name for s in steps.scalars().all()}
     assert "fix_generator_format_exhausted" in step_names
 
@@ -789,7 +855,9 @@ async def test_orchestrator_path_traversal_still_errors(
     user = await _create_user(db)
     repo = await _create_repo(db, user)
     run = await _create_run(
-        db, repo, status="fix_generation",
+        db,
+        repo,
+        status="fix_generation",
         diagnosis_summary="Error in etc/passwd",
     )
 
@@ -801,11 +869,13 @@ async def test_orchestrator_path_traversal_still_errors(
         "+malicious:root:0:0\n"
     )
     traversal_response = {
-        "content": json.dumps({
-            "patch": traversal_patch,
-            "confidence": 90,
-            "strategy_notes": "evil",
-        }),
+        "content": json.dumps(
+            {
+                "patch": traversal_patch,
+                "confidence": 90,
+                "strategy_notes": "evil",
+            }
+        ),
         "usage": {"input_tokens": 100, "output_tokens": 50},
         "latency_ms": 200,
         "model": "nemotron-3.5-lightning-free",
@@ -835,13 +905,11 @@ async def test_orchestrator_path_traversal_still_errors(
     refreshed = await db.execute(select(Run).where(Run.id == run.id))
     run = refreshed.scalar_one()
     # Security boundary: NOT fallback_commented
-    assert run.status == "error", (
-        f"expected error, got {run.status}"
-    )
+    assert run.status == "error", f"expected error, got {run.status}"
     # No fallback comment was posted
-    assert not mock_comment.called, (
-        "fallback comment MUST NOT be posted on security violation"
-    )
+    assert (
+        not mock_comment.called
+    ), "fallback comment MUST NOT be posted on security violation"
     # failure_reason mentions the path traversal
     assert "path traversal" in (run.failure_reason or "").lower()
 
@@ -916,4 +984,3 @@ def test_fast_fail_does_not_trigger_on_repeated_context_gatherer_failure(
     assert reason == "non_llm_repeat"
     log_messages = [r.getMessage() for r in caplog.records]
     assert not any("fast-failing" in m for m in log_messages)
-

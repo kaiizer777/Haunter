@@ -55,6 +55,7 @@ _MAX_REFERENCES = 50
 # Python AST outline extraction
 # ---------------------------------------------------------------------------
 
+
 def _python_outline(source: str) -> str:
     """
     Parse Python source with ast and return a clean indented outline.
@@ -71,12 +72,10 @@ def _python_outline(source: str) -> str:
 
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.ClassDef):
-            bases = (
-                ", ".join(ast.unparse(b) for b in node.bases)
-                if node.bases
-                else ""
+            bases = ", ".join(ast.unparse(b) for b in node.bases) if node.bases else ""
+            class_sig = (
+                f"class {node.name}({bases}):" if bases else f"class {node.name}:"
             )
-            class_sig = f"class {node.name}({bases}):" if bases else f"class {node.name}:"
             lines.append(class_sig)
 
             doc = ast.get_docstring(node)
@@ -86,7 +85,11 @@ def _python_outline(source: str) -> str:
 
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    prefix = "async def" if isinstance(child, ast.AsyncFunctionDef) else "def"
+                    prefix = (
+                        "async def"
+                        if isinstance(child, ast.AsyncFunctionDef)
+                        else "def"
+                    )
                     try:
                         args_str = ast.unparse(child.args)
                     except Exception:
@@ -171,7 +174,9 @@ _TS_ENUM_RE = re.compile(
     re.MULTILINE,
 )
 
-_TS_SKIP_KEYWORDS = frozenset({"if", "for", "while", "switch", "catch", "return", "new"})
+_TS_SKIP_KEYWORDS = frozenset(
+    {"if", "for", "while", "switch", "catch", "return", "new"}
+)
 
 
 def _ts_outline(source: str) -> str:
@@ -245,6 +250,7 @@ def _ts_outline(source: str) -> str:
 # Shared file content resolver
 # ---------------------------------------------------------------------------
 
+
 async def _resolve_file_content(
     path: str,
     repo_owner: str,
@@ -275,6 +281,7 @@ async def _resolve_file_content(
 # ---------------------------------------------------------------------------
 # tool_get_file_outline
 # ---------------------------------------------------------------------------
+
 
 async def tool_get_file_outline(
     path: str,
@@ -322,6 +329,7 @@ async def tool_get_file_outline(
 # Python AST definition search
 # ---------------------------------------------------------------------------
 
+
 def _find_py_recursive(
     node: ast.AST,
     name: str,
@@ -333,7 +341,9 @@ def _find_py_recursive(
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if child.name == name and (kind is None or kind == "function"):  # type: ignore[attr-defined]
                 lineno = getattr(child, "lineno", 0)
-                prefix = "async def" if isinstance(child, ast.AsyncFunctionDef) else "def"
+                prefix = (
+                    "async def" if isinstance(child, ast.AsyncFunctionDef) else "def"
+                )
                 try:
                     args_str = ast.unparse(child.args)  # type: ignore[attr-defined]
                 except Exception:
@@ -373,6 +383,7 @@ def _find_py_defs(source: str, name: str, kind: str | None) -> list[tuple[int, s
 # TypeScript/JS definition search
 # ---------------------------------------------------------------------------
 
+
 def _find_ts_defs(source: str, name: str, kind: str | None) -> list[tuple[int, str]]:
     """
     Search TS/JS source for declarations of `name` matching optional `kind`.
@@ -393,47 +404,57 @@ def _find_ts_defs(source: str, name: str, kind: str | None) -> list[tuple[int, s
     patterns: list[tuple[str, re.Pattern[str]]] = []
 
     if kind is None or kind == "function":
-        patterns.append((
-            "function",
-            re.compile(
-                rf"(?:export\s+)?(?:async\s+)?function\s+{escaped}\s*(?:<[^>]*>)?\s*\(",
-                re.MULTILINE,
-            ),
-        ))
-        patterns.append((
-            "function",
-            re.compile(
-                rf"export\s+const\s+{escaped}\s*(?::\s*[\w<>\[\]|&\s,]+)?\s*=\s*(?:async\s+)?(?:\([^)]*\)|\w+)\s*=>",
-                re.MULTILINE,
-            ),
-        ))
+        patterns.append(
+            (
+                "function",
+                re.compile(
+                    rf"(?:export\s+)?(?:async\s+)?function\s+{escaped}\s*(?:<[^>]*>)?\s*\(",
+                    re.MULTILINE,
+                ),
+            )
+        )
+        patterns.append(
+            (
+                "function",
+                re.compile(
+                    rf"export\s+const\s+{escaped}\s*(?::\s*[\w<>\[\]|&\s,]+)?\s*=\s*(?:async\s+)?(?:\([^)]*\)|\w+)\s*=>",
+                    re.MULTILINE,
+                ),
+            )
+        )
 
     if kind is None or kind == "class":
-        patterns.append((
-            "class",
-            re.compile(
-                rf"(?:export\s+)?(?:abstract\s+)?class\s+{escaped}\b",
-                re.MULTILINE,
-            ),
-        ))
+        patterns.append(
+            (
+                "class",
+                re.compile(
+                    rf"(?:export\s+)?(?:abstract\s+)?class\s+{escaped}\b",
+                    re.MULTILINE,
+                ),
+            )
+        )
 
     if kind is None or kind == "interface":
-        patterns.append((
-            "interface",
-            re.compile(
-                rf"(?:export\s+)?interface\s+{escaped}\b",
-                re.MULTILINE,
-            ),
-        ))
+        patterns.append(
+            (
+                "interface",
+                re.compile(
+                    rf"(?:export\s+)?interface\s+{escaped}\b",
+                    re.MULTILINE,
+                ),
+            )
+        )
 
     if kind is None or kind == "type":
-        patterns.append((
-            "type",
-            re.compile(
-                rf"(?:export\s+)?type\s+{escaped}\b",
-                re.MULTILINE,
-            ),
-        ))
+        patterns.append(
+            (
+                "type",
+                re.compile(
+                    rf"(?:export\s+)?type\s+{escaped}\b",
+                    re.MULTILINE,
+                ),
+            )
+        )
 
     results: list[tuple[int, str]] = []
     seen_lines: set[int] = set()
@@ -450,6 +471,7 @@ def _find_ts_defs(source: str, name: str, kind: str | None) -> list[tuple[int, s
 # ---------------------------------------------------------------------------
 # tool_find_symbol
 # ---------------------------------------------------------------------------
+
 
 async def tool_find_symbol(
     name: str,
@@ -482,7 +504,11 @@ async def tool_find_symbol(
 
     try:
         tree_data = await fetch_git_tree(
-            owner=repo_owner, repo=repo_name, tree_sha=base_sha, recursive=True, token=gh_token
+            owner=repo_owner,
+            repo=repo_name,
+            tree_sha=base_sha,
+            recursive=True,
+            token=gh_token,
         )
     except GitHubClientError as exc:
         return f"Error fetching repository tree: {exc}"
@@ -503,7 +529,11 @@ async def tool_find_symbol(
     matches: list[str] = []
     for file_path in candidate_files:
         content = await fetch_file_content(
-            owner=repo_owner, repo=repo_name, path=file_path, sha=base_sha, token=gh_token
+            owner=repo_owner,
+            repo=repo_name,
+            path=file_path,
+            sha=base_sha,
+            token=gh_token,
         )
         if not content:
             continue
@@ -530,6 +560,7 @@ async def tool_find_symbol(
 # ---------------------------------------------------------------------------
 # tool_find_references
 # ---------------------------------------------------------------------------
+
 
 async def tool_find_references(
     symbol: str,
@@ -568,7 +599,11 @@ async def tool_find_references(
 
     try:
         tree_data = await fetch_git_tree(
-            owner=repo_owner, repo=repo_name, tree_sha=base_sha, recursive=True, token=gh_token
+            owner=repo_owner,
+            repo=repo_name,
+            tree_sha=base_sha,
+            recursive=True,
+            token=gh_token,
         )
     except GitHubClientError as exc:
         return f"Error fetching repository tree: {exc}"
@@ -594,7 +629,11 @@ async def tool_find_references(
         if len(matches) >= _MAX_REFERENCES:
             break
         content = await fetch_file_content(
-            owner=repo_owner, repo=repo_name, path=file_path, sha=base_sha, token=gh_token
+            owner=repo_owner,
+            repo=repo_name,
+            path=file_path,
+            sha=base_sha,
+            token=gh_token,
         )
         if not content:
             continue
@@ -612,9 +651,8 @@ async def tool_find_references(
 
     capped = len(matches) >= _MAX_REFERENCES
     suffix = "+ (capped at 50)" if capped else ""
-    return (
-        f"Found {len(matches)}{suffix} reference(s) for {symbol!r}:\n"
-        + "\n".join(matches)
+    return f"Found {len(matches)}{suffix} reference(s) for {symbol!r}:\n" + "\n".join(
+        matches
     )
 
 

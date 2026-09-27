@@ -80,6 +80,7 @@ from app.subagents.auditor import (
     synthesize_findings,
 )
 
+
 @pytest.fixture(autouse=True)
 def deny_external_http(monkeypatch: pytest.MonkeyPatch) -> None:
     original_send = httpx.AsyncClient.send
@@ -87,7 +88,9 @@ def deny_external_http(monkeypatch: pytest.MonkeyPatch) -> None:
     async def guarded_send(self, request, **kwargs):
         if isinstance(self._transport, httpx.ASGITransport):
             return await original_send(self, request, **kwargs)
-        raise AssertionError(f"external HTTP blocked in audit tests: {request.url.host}")
+        raise AssertionError(
+            f"external HTTP blocked in audit tests: {request.url.host}"
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "send", guarded_send)
 
@@ -176,7 +179,13 @@ def _four_perspective_router(confidences: dict[str, int] | None = None):
             _perspective_payload(
                 f"{perspective} verdict.",
                 conf,
-                [_finding(title=f"{title} ({perspective})", severity=severity, confidence=conf)],
+                [
+                    _finding(
+                        title=f"{title} ({perspective})",
+                        severity=severity,
+                        confidence=conf,
+                    )
+                ],
             )
         )
 
@@ -252,8 +261,13 @@ async def test_severity_aggregation_orders_blocker_first():
     assert severities == ["BLOCKER", "WARNING", "WARNING", "NOTE"]
     assert result.severity_counts == {"BLOCKER": 1, "WARNING": 2, "NOTE": 1}
     assert len({finding.id for finding in result.findings}) == 4
-    assert all(re.fullmatch(r"AUD-[0-9A-F]{12}", finding.id) for finding in result.findings)
-    assert all(finding.description and finding.to_dict()["description"] for finding in result.findings)
+    assert all(
+        re.fullmatch(r"AUD-[0-9A-F]{12}", finding.id) for finding in result.findings
+    )
+    assert all(
+        finding.description and finding.to_dict()["description"]
+        for finding in result.findings
+    )
     assert "Blockers Found" in result.status
     assert "(1 Blockers, 2 Warnings)" in result.status
     assert "Informational Only" not in result.status
@@ -416,9 +430,9 @@ def test_read_only_no_write_api_references(module_path: Path):
         source = Path(*module_path.parts[1:]).read_text(encoding="utf-8")
     lowered = source.lower()
     for token in _READ_ONLY_FORBIDDEN_TOKENS:
-        assert token.lower() not in lowered, (
-            f"{module_path}: read-only violation — references {token!r}"
-        )
+        assert (
+            token.lower() not in lowered
+        ), f"{module_path}: read-only violation — references {token!r}"
 
 
 def test_audit_queue_adapter_path_has_no_repository_write_apis():
@@ -500,15 +514,21 @@ def test_audit_dispatch_fence_is_bound_to_the_dispatch_attempt():
     first = audit_pipeline.audit_dispatch_fence_token(audit_id, 1, "audit-secret")
     second = audit_pipeline.audit_dispatch_fence_token(audit_id, 2, "audit-secret")
     assert first != second
-    assert audit_pipeline.verify_audit_dispatch_fence(audit_id, 1, first, "audit-secret")
+    assert audit_pipeline.verify_audit_dispatch_fence(
+        audit_id, 1, first, "audit-secret"
+    )
     assert not audit_pipeline.verify_audit_dispatch_fence(
         audit_id, 2, first, "audit-secret"
     )
     assert not audit_pipeline.verify_audit_dispatch_fence(
         audit_id, 1, first, "wrong-secret"
     )
-    assert not audit_pipeline.verify_audit_dispatch_fence(audit_id, 1, None, "audit-secret")
-    assert not audit_pipeline.verify_audit_dispatch_fence("audit-bbbbbbbbbbbb", 1, first, "audit-secret")
+    assert not audit_pipeline.verify_audit_dispatch_fence(
+        audit_id, 1, None, "audit-secret"
+    )
+    assert not audit_pipeline.verify_audit_dispatch_fence(
+        "audit-bbbbbbbbbbbb", 1, first, "audit-secret"
+    )
     for bad_attempt in (0, -1, 1001, True, "1"):
         with pytest.raises(ValueError):
             audit_pipeline.audit_dispatch_fence_token(
@@ -569,9 +589,7 @@ def test_self_invocation_tokens_are_domain_separated_by_kind():
     for kind, token in tokens.items():
         for other_kind in tokens:
             if other_kind == kind:
-                assert verify_self_invocation(
-                    kind, identifier, token, "audit-secret"
-                )
+                assert verify_self_invocation(kind, identifier, token, "audit-secret")
             else:
                 assert not verify_self_invocation(
                     other_kind, identifier, token, "audit-secret"
@@ -609,9 +627,9 @@ def test_self_invocation_secret_has_one_shared_fail_closed_resolver():
         self_invocation_token,
     )
 
-    assert not hasattr(audit_pipeline, "_self_invoke_secret"), (
-        "audit_pipeline must not keep a second copy of the secret rule"
-    )
+    assert not hasattr(
+        audit_pipeline, "_self_invoke_secret"
+    ), "audit_pipeline must not keep a second copy of the secret rule"
 
     with patch("app.config.settings.audit_self_invoke_secret", "configured-secret"):
         assert resolve_self_invocation_secret() == "configured-secret"
@@ -725,9 +743,7 @@ async def test_lambda_handler_rejects_unauthenticated_pipeline_and_review_invoca
         ) as run_review,
     ):
         pipeline = lambda_handler.handler({"run_id": run_id}, SimpleNamespace())
-        review = lambda_handler.handler(
-            {"review_id": review_id}, SimpleNamespace()
-        )
+        review = lambda_handler.handler({"review_id": review_id}, SimpleNamespace())
     run_pipeline.assert_not_awaited()
     run_review.assert_not_awaited()
     assert pipeline == {
@@ -779,9 +795,7 @@ def test_lambda_handler_audit_self_invocation_is_strictly_authenticated():
             return_value=True,
         ) as run_audit,
     ):
-        missing = lambda_handler.handler(
-            {"audit_id": audit_id}, SimpleNamespace()
-        )
+        missing = lambda_handler.handler({"audit_id": audit_id}, SimpleNamespace())
         missing_fence = lambda_handler.handler(
             {"audit_id": audit_id, "token": valid_token}, SimpleNamespace()
         )
@@ -866,9 +880,7 @@ def test_lambda_handler_rejects_pipeline_and_review_signed_with_the_wrong_key():
         review = lambda_handler.handler(
             {
                 "review_id": review_id,
-                "token": self_invocation_token(
-                    KIND_REVIEW, review_id, rotated_secret
-                ),
+                "token": self_invocation_token(KIND_REVIEW, review_id, rotated_secret),
             },
             SimpleNamespace(),
         )
@@ -911,18 +923,14 @@ def test_lambda_handler_accepts_only_correctly_signed_pipeline_and_review_invoca
         pipeline = lambda_handler.handler(
             {
                 "run_id": run_id,
-                "token": self_invocation_token(
-                    KIND_PIPELINE, run_id, "audit-secret"
-                ),
+                "token": self_invocation_token(KIND_PIPELINE, run_id, "audit-secret"),
             },
             SimpleNamespace(),
         )
         review = lambda_handler.handler(
             {
                 "review_id": review_id,
-                "token": self_invocation_token(
-                    KIND_REVIEW, review_id, "audit-secret"
-                ),
+                "token": self_invocation_token(KIND_REVIEW, review_id, "audit-secret"),
             },
             SimpleNamespace(),
         )
@@ -995,7 +1003,9 @@ def test_iam_only_audit_dispatcher_rejects_public_and_unknown_events():
             {"operation": "something_else"}, SimpleNamespace()
         )
         empty_event = audit_dispatcher_handler.handler({}, SimpleNamespace())
-        not_a_dict = audit_dispatcher_handler.handler(cast(Any, None), SimpleNamespace())
+        not_a_dict = audit_dispatcher_handler.handler(
+            cast(Any, None), SimpleNamespace()
+        )
     dispatch.assert_not_awaited()
     assert public_event == {"error": "unsupported invocation"}
     assert unknown == {"error": "unsupported invocation"}
@@ -1235,12 +1245,15 @@ async def test_audit_github_paths_are_url_encoded_at_client_boundary():
         new_callable=AsyncMock,
         return_value=response,
     ) as mock_get:
-        assert await github_client.fetch_file_content(
-            owner="owner name",
-            repo="repo/name",
-            path="dir/a b#c.py",
-            sha="a" * 40,
-        ) == "content"
+        assert (
+            await github_client.fetch_file_content(
+                owner="owner name",
+                repo="repo/name",
+                path="dir/a b#c.py",
+                sha="a" * 40,
+            )
+            == "content"
+        )
 
     request = mock_get.await_args
     assert request is not None
@@ -1321,11 +1334,7 @@ def test_diff_grounding_rejects_non_actionable_file_shapes():
         "index 111..222 100644\n"
         "Binary files a/app.bin and b/app.bin differ\n"
     )
-    mode_only = (
-        "diff --git a/app.py b/app.py\n"
-        "old mode 100644\n"
-        "new mode 100755\n"
-    )
+    mode_only = "diff --git a/app.py b/app.py\n" "old mode 100644\n" "new mode 100755\n"
     header_only = "--- a/app.py\n+++ b/app.py\n"
     deleted = (
         "diff --git a/app.py b/app.py\n"
@@ -1433,8 +1442,7 @@ def test_ast_diff_summary_uses_parser_backed_changed_file_context():
 def test_ast_summary_redacts_before_its_own_truncation_boundary():
     secret = "sk-ant-api03-" + "Q" * 80
     source = "\n".join(
-        ["# " + ("x" * 600) for _ in range(20)]
-        + [f"password = '{secret}'"]
+        ["# " + ("x" * 600) for _ in range(20)] + [f"password = '{secret}'"]
     )
     diff = (
         "diff --git a/app.py b/app.py\n"
@@ -1743,7 +1751,9 @@ async def test_worker_resolves_auditor_credentials_only_through_read_only_provid
         patch(
             "app.github.pr.get_installation_token",
             new_callable=AsyncMock,
-            side_effect=AssertionError("write-capable credential provider must not be used"),
+            side_effect=AssertionError(
+                "write-capable credential provider must not be used"
+            ),
         ) as write_credentials,
         patch(
             "app.services.audit_pipeline.execute_audit_job",
@@ -2073,7 +2083,9 @@ def test_synthesis_filters_ungrounded_duplicates_and_assigns_stable_ids():
     wrong_file = finding.model_copy(
         update={"file_path": "backend/app/not_touched.py", "title": "Wrong file"}
     )
-    wrong_line = finding.model_copy(update={"line_start": 500, "line_end": 500, "title": "Wrong line"})
+    wrong_line = finding.model_copy(
+        update={"line_start": 500, "line_end": 500, "title": "Wrong line"}
+    )
     perspectives = [
         PerspectiveResult(
             perspective="security",
@@ -2090,7 +2102,9 @@ def test_synthesis_filters_ungrounded_duplicates_and_assigns_stable_ids():
     ]
 
     first = synthesize_findings(perspectives, SAMPLE_DIFF, overall_confidence=90)
-    second = synthesize_findings(list(reversed(perspectives)), SAMPLE_DIFF, overall_confidence=90)
+    second = synthesize_findings(
+        list(reversed(perspectives)), SAMPLE_DIFF, overall_confidence=90
+    )
 
     assert len(first) == len(second) == 1
     assert first[0].id == second[0].id
@@ -2158,9 +2172,7 @@ def test_confidence_dedup_keeps_high_confidence_duplicate_in_either_input_order(
             1,
         ),
         (
-            "diff --git a/app.py b/app.py\n"
-            "--- a/app.py\n"
-            "+++ b/app.py\n",
+            "diff --git a/app.py b/app.py\n" "--- a/app.py\n" "+++ b/app.py\n",
             1,
         ),
         (
@@ -2389,14 +2401,19 @@ async def test_prompt_inputs_are_bounded_redacted_and_explicitly_truncated():
     result = await run_audit(
         diff_text=tainted_diff,
         ast_context=f"{leaked_auth}\n" + ("a" * audit_prompts.MAX_AST_CONTEXT_CHARS),
-        repo_context=f"{leaked_connection}\n" + ("r" * audit_prompts.MAX_REPO_CONTEXT_CHARS),
+        repo_context=f"{leaked_connection}\n"
+        + ("r" * audit_prompts.MAX_REPO_CONTEXT_CHARS),
         llm_client=_mock_llm_client(AsyncMock(side_effect=_complete)),
     )
     serialized_prompts = json.dumps(captured)
 
     assert len(captured) == 4
-    assert all(len(messages[0]["content"]) <= MAX_SYSTEM_PROMPT_CHARS for messages in captured)
-    assert all(len(messages[1]["content"]) <= MAX_USER_PROMPT_CHARS for messages in captured)
+    assert all(
+        len(messages[0]["content"]) <= MAX_SYSTEM_PROMPT_CHARS for messages in captured
+    )
+    assert all(
+        len(messages[1]["content"]) <= MAX_USER_PROMPT_CHARS for messages in captured
+    )
     assert "TRUNCATED" in captured[0][1]["content"]
     assert leaked_openai not in serialized_prompts
     assert leaked_connection not in serialized_prompts
@@ -2495,9 +2512,7 @@ async def test_read_only_auditor_provider_rejects_oversized_response_stream():
         ),
         patch("app.github.auditor.httpx.AsyncClient", return_value=client),
         patch.dict(auditor_credentials._TOKEN_CACHE, {}, clear=True),
-        pytest.raises(
-            auditor_credentials.AuditorCredentialResponseTooLargeError
-        ),
+        pytest.raises(auditor_credentials.AuditorCredentialResponseTooLargeError),
     ):
         await auditor_credentials.get_auditor_installation_token(repo)
 
@@ -2526,9 +2541,7 @@ async def test_read_only_auditor_provider_rejects_oversized_declared_content_len
         ),
         patch("app.github.auditor.httpx.AsyncClient", return_value=client),
         patch.dict(auditor_credentials._TOKEN_CACHE, {}, clear=True),
-        pytest.raises(
-            auditor_credentials.AuditorCredentialResponseTooLargeError
-        ),
+        pytest.raises(auditor_credentials.AuditorCredentialResponseTooLargeError),
     ):
         await auditor_credentials.get_auditor_installation_token(repo)
 
@@ -2553,7 +2566,13 @@ def test_read_only_permission_allowlist_is_closed():
         {"permissions": {**read_only, "metadata": "admin"}},
         {"permissions": {**read_only, "contents": None}},
         {"permissions": {"contents": "read", "metadata": "read"}},
-        {"permissions": {"contents": "none", "pull_requests": "read", "metadata": "read"}},
+        {
+            "permissions": {
+                "contents": "none",
+                "pull_requests": "read",
+                "metadata": "read",
+            }
+        },
         {"permissions": {}},
         {"permissions": "read"},
         {},
@@ -2595,9 +2614,8 @@ def test_auditor_fetch_helpers_disable_global_token_fallback():
 
     from app.services import audit_pipeline
 
-    assert (
-        "allow_global_token=False"
-        in _inspect.getsource(audit_pipeline._fetch_pr_target)
+    assert "allow_global_token=False" in _inspect.getsource(
+        audit_pipeline._fetch_pr_target
     )
 
 
@@ -2682,9 +2700,7 @@ async def test_auditor_installation_token_must_be_non_blank():
 
 @pytest.mark.asyncio
 async def test_oversized_llm_output_is_rejected_without_unbounded_retry():
-    complete = AsyncMock(
-        return_value=_llm_response("x" * (MAX_LLM_RESPONSE_CHARS + 1))
-    )
+    complete = AsyncMock(return_value=_llm_response("x" * (MAX_LLM_RESPONSE_CHARS + 1)))
     with pytest.raises(AuditAnalysisError):
         await run_audit(
             diff_text=SAMPLE_DIFF,
@@ -2748,10 +2764,7 @@ async def test_generated_groq_findings_and_summaries_are_redacted_everywhere(
     assert secret[:12] not in serialized
     assert secret not in caplog.text
     assert all(secret not in item.summary for item in result.perspectives)
-    assert all(
-        secret not in json.dumps(item.to_dict())
-        for item in result.findings
-    )
+    assert all(secret not in json.dumps(item.to_dict()) for item in result.findings)
 
 
 @pytest.mark.asyncio
@@ -2788,7 +2801,7 @@ def test_final_report_redacts_groq_and_opaque_authorization_values():
         findings=[
             {
                 **_finding(
-                        title=f"title Authorization: {authorization_secret}",
+                    title=f"title Authorization: {authorization_secret}",
                     suggested_fix=f"Authorization: {authorization_secret}",
                 ),
                 "description": f"description {groq_secret}",
@@ -2924,7 +2937,9 @@ def test_delivery_fingerprint_is_deterministic_and_field_sensitive():
         ("workflow_run_id", 99),
         ("settings_version", 2),
     ):
-        assert pipeline.audit_delivery_fingerprint(**{**base, field: value}) != reference
+        assert (
+            pipeline.audit_delivery_fingerprint(**{**base, field: value}) != reference
+        )
 
 
 @pytest.mark.asyncio
@@ -3090,6 +3105,7 @@ def test_webhook_ingress_streams_the_body_rather_than_buffering_it():
     assert "await request.body()" not in source
     assert "_read_limited_body(request)" in source
 
+
 # ---------------------------------------------------------------------------
 # 9. Output-boundary sanitization of AuditFinding / AuditResult
 # ---------------------------------------------------------------------------
@@ -3171,14 +3187,17 @@ def test_output_boundary_rejects_paths_that_are_not_repo_relative():
     assert hostile.to_dict()["suggested_fix"] is None
     # An absent repository stays absent rather than becoming the renderer's
     # "unknown" sentinel: a caller reading JSON must be able to tell them apart.
-    assert AuditResult(
-        audit_id="audit-bbbbbbbbbbbb",
-        audit_type="pr_audit",
-        repo_full_name="",
-        target_label="Unified diff",
-        engine="test-engine",
-        executive_summary="clean",
-    ).to_dict()["repo_full_name"] == ""
+    assert (
+        AuditResult(
+            audit_id="audit-bbbbbbbbbbbb",
+            audit_type="pr_audit",
+            repo_full_name="",
+            target_label="Unified diff",
+            engine="test-engine",
+            executive_summary="clean",
+        ).to_dict()["repo_full_name"]
+        == ""
+    )
 
 
 def test_report_projection_is_unescaped_so_the_renderer_does_not_double_escape():
@@ -3209,7 +3228,7 @@ def test_redaction_preserves_line_count_for_line_anchored_snippets():
         'KEY = """-----BEGIN RSA PRIVATE KEY-----\n'
         "AAAABBBBCCCCDDDD\n"
         "EEEEFFFFGGGGHHHH\n"
-        "-----END RSA PRIVATE KEY-----\"\"\"\n"
+        '-----END RSA PRIVATE KEY-----"""\n'
         "trailing = 1\n"
     )
     collapsed = audit_prompts.redact_sensitive_text(pem)
@@ -3228,10 +3247,9 @@ def test_redaction_preserves_line_count_for_line_anchored_snippets():
     assert preserved.splitlines()[0].count("REDACTED_PRIVATE_KEY") == 1
     # A single-line secret is byte-identical between the two redactors.
     single = "password = 'hunter2-long-enough-value'\n"
-    assert (
-        audit_prompts.redact_sensitive_text_preserving_lines(single)
-        == audit_prompts.redact_sensitive_text(single)
-    )
+    assert audit_prompts.redact_sensitive_text_preserving_lines(
+        single
+    ) == audit_prompts.redact_sensitive_text(single)
 
 
 def test_ast_context_is_parsed_from_raw_source_and_redacted_line_preserving():
@@ -3264,8 +3282,13 @@ def test_ast_context_is_parsed_from_raw_source_and_redacted_line_preserving():
     summary = build_ast_diff_summary(SAMPLE_DIFF, {"backend/app/auth.py": source})
 
     # Structure came from the raw file, so the anchors address the real lines.
-    assert f"### `backend/app/auth.py` (Line {function_line}, in `sign_payload`)" in summary
-    assert f"**Enclosing Scope (Lines {function_line}-{function_line + 5}):**" in summary
+    assert (
+        f"### `backend/app/auth.py` (Line {function_line}, in `sign_payload`)"
+        in summary
+    )
+    assert (
+        f"**Enclosing Scope (Lines {function_line}-{function_line + 5}):**" in summary
+    )
     # The rendered scope is exactly as wide as the range it is labelled with, and
     # its first and last lines are the real source lines at that range. The four
     # lines the key occupied come back as four empty lines rather than vanishing.
@@ -3279,7 +3302,13 @@ def test_ast_context_is_parsed_from_raw_source_and_redacted_line_preserving():
     # still land on the source line they were on.
     assert scope_lines[1] == '    key = """[REDACTED_PRIVATE_KEY]'
     assert scope_lines[2:5] == ["", "", '"""']
-    for leaked in ("AAAABBBB", "CCCCDDDD", "EEEEFFFF", "GGGGHHHH", "BEGIN RSA PRIVATE KEY"):
+    for leaked in (
+        "AAAABBBB",
+        "CCCCDDDD",
+        "EEEEFFFF",
+        "GGGGHHHH",
+        "BEGIN RSA PRIVATE KEY",
+    ):
         assert leaked not in summary
 
 
@@ -3317,10 +3346,10 @@ def _hunk_body_lines(diff_body: str) -> list[str]:
     line. Returns the body lines only, so a caller can map a body position to a
     new-file line number.
     """
-    header = next(
-        line for line in diff_body.splitlines() if line.startswith("@@ ")
+    header = next(line for line in diff_body.splitlines() if line.startswith("@@ "))
+    declared = int(
+        re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", header).group(2) or 1
     )
-    declared = int(re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", header).group(2) or 1)
     body: list[str] = []
     for line in diff_body.splitlines()[diff_body.splitlines().index(header) + 1 :]:
         if line.startswith(("diff --git ", "@@ ")):
@@ -3330,7 +3359,9 @@ def _hunk_body_lines(diff_body: str) -> list[str]:
         if len(body) >= declared:
             break
         body.append(line)
-    assert len(body) == declared, f"visible hunk body contradicts its own header: {header}"
+    assert (
+        len(body) == declared
+    ), f"visible hunk body contradicts its own header: {header}"
     return body
 
 
@@ -3355,7 +3386,11 @@ async def test_the_diff_handed_to_the_model_keeps_raw_line_numbering():
         seen.append(body)
         cited = _hunk_body_lines(body).index("+time.sleep(5)") + 1
         perspective = next(
-            (p for p in ("security", "correctness", "performance", "architecture") if f"## Perspective\n{p}" in user_content),
+            (
+                p
+                for p in ("security", "correctness", "performance", "architecture")
+                if f"## Perspective\n{p}" in user_content
+            ),
             str(len(seen)),
         )
         return _llm_response(
@@ -3409,8 +3444,6 @@ async def test_the_diff_handed_to_the_model_keeps_raw_line_numbering():
         if line.startswith(("+", " ")) and not line.startswith("+++")
     ]
     assert raw_new_lines[PEM_DEFECT_LINE - 1] == "time.sleep(5)"
-
-
 
 
 def test_source_context_is_returned_verbatim_so_the_parser_sees_real_lines():
@@ -3500,8 +3533,9 @@ def test_archive_entry_names_are_sanitized_before_they_reach_a_log_line(
         archive.writestr(hostile_name, "a" * 4_096)
     payload = buffer.getvalue()
 
-    with caplog.at_level(logging.DEBUG), patch.object(
-        github_client, "MAX_ZIP_ENTRY_BYTES", 1
+    with (
+        caplog.at_level(logging.DEBUG),
+        patch.object(github_client, "MAX_ZIP_ENTRY_BYTES", 1),
     ):
         with pytest.raises(github_client.GitHubResponseLimitError):
             github_client._extract_log_archive(payload)
@@ -3515,7 +3549,6 @@ def test_archive_entry_names_are_sanitized_before_they_reach_a_log_line(
     assert "0_x.txt WARN github forged=1" in caplog.text
     assert re.search(r"A{20,}", caplog.text) is not None
     assert re.search(r"A{201,}", caplog.text) is None
-
 
 
 def test_archive_entry_names_in_extracted_log_text_are_sanitized():
@@ -3532,7 +3565,6 @@ def test_archive_entry_names_in_extracted_log_text_are_sanitized():
 
     assert "=== File: 2_run.txt === injected ===.txt ===\nboom" in extracted
     assert f"=== File: {hostile_name} ===" not in extracted
-
 
 
 def test_webhook_repo_names_reach_logs_only_through_the_sanitizer():
@@ -3592,7 +3624,6 @@ def test_ci_job_and_step_names_are_sanitized_before_reaching_failure_reason():
     assert "\u200b" not in summary
 
 
-
 def test_auditor_log_helper_is_the_single_canonical_log_sanitizer():
     from app.log_hygiene import MAX_LOG_VALUE_CHARS, sanitize_log_value
 
@@ -3601,9 +3632,13 @@ def test_auditor_log_helper_is_the_single_canonical_log_sanitizer():
     # than a second copy of it.
     assert auditor._safe_metadata("a\nb", 100) == sanitize_log_value("a\nb", 100)
     assert auditor._safe_metadata("x" * 4_000, 64) == "x" * 61 + "..."
-    assert len(auditor._safe_metadata("x" * 4_000, MAX_LOG_VALUE_CHARS)) == MAX_LOG_VALUE_CHARS
-    assert auditor._safe_metadata("ghp_" + "D" * 36, 200).startswith("[REDACTED_GITHUB_TOKEN]")
-
+    assert (
+        len(auditor._safe_metadata("x" * 4_000, MAX_LOG_VALUE_CHARS))
+        == MAX_LOG_VALUE_CHARS
+    )
+    assert auditor._safe_metadata("ghp_" + "D" * 36, 200).startswith(
+        "[REDACTED_GITHUB_TOKEN]"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3715,7 +3750,6 @@ def test_audit_migrations_resolve_legacy_rows_before_the_constraints_apply(
     # Every statement resolves legacy state on `audit_jobs`; none of them can
     # run against a table that has not been migrated.
     assert all("audit_jobs" in statement for statement in statements)
-
 
 
 def test_destructive_audit_migration_downgrades_are_refused_and_valid_one_is_a_noop(
@@ -3941,7 +3975,9 @@ def test_deletion_only_hunk_is_excluded_from_ast_contexts_instead_of_raising():
         ),
     ],
 )
-def test_non_actionable_file_shapes_are_rejected_and_count_nothing(name: str, diff: str):
+def test_non_actionable_file_shapes_are_rejected_and_count_nothing(
+    name: str, diff: str
+):
     grounding = build_diff_grounding(diff)
 
     assert grounding.line_index == {}, name
@@ -4096,7 +4132,10 @@ CI_FETCH_FAILURES = (
         lambda: GitHubResourceNotFoundError("logs not found"),
         auditor.AuditRemoteFailureReason.PRIVATE_OR_MISSING,
     ),
-    (lambda: GitHubNetworkError("connection reset"), auditor.AuditRemoteFailureReason.NETWORK),
+    (
+        lambda: GitHubNetworkError("connection reset"),
+        auditor.AuditRemoteFailureReason.NETWORK,
+    ),
     (lambda: httpx.ConnectError("no route"), auditor.AuditRemoteFailureReason.NETWORK),
     (lambda: httpx.ReadTimeout("too slow"), auditor.AuditRemoteFailureReason.TIMEOUT),
 )
@@ -4258,10 +4297,14 @@ async def test_only_a_verified_empty_diff_reaches_skipped_no_diff():
     )
 
     # Verified: GitHub answered 2xx with an empty body.
-    with base_patches[0], base_patches[1], patch(
-        "app.subagents.auditor.fetch_audit_diff",
-        new_callable=AsyncMock,
-        return_value="  \n\t\n",
+    with (
+        base_patches[0],
+        base_patches[1],
+        patch(
+            "app.subagents.auditor.fetch_audit_diff",
+            new_callable=AsyncMock,
+            return_value="  \n\t\n",
+        ),
     ):
         outcome = await audit_pipeline.execute_audit_job(
             audit_id="audit-999999999999",
@@ -4278,10 +4321,14 @@ async def test_only_a_verified_empty_diff_reaches_skipped_no_diff():
 
     # Unverified: a client that answered a diff request with a non-text body has
     # not reported that the commit has no changes.
-    with base_patches[0], base_patches[1], patch(
-        "app.subagents.auditor.fetch_audit_diff",
-        new_callable=AsyncMock,
-        return_value=None,
+    with (
+        base_patches[0],
+        base_patches[1],
+        patch(
+            "app.subagents.auditor.fetch_audit_diff",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
     ):
         with pytest.raises(auditor.AuditDiffFetchError) as excinfo:
             await audit_pipeline.execute_audit_job(
@@ -4341,9 +4388,10 @@ async def test_a_failed_ci_log_fetch_is_recorded_as_a_failure_and_not_completed(
             return_value=False,
         ) as retry,
     ):
-        assert await audit_pipeline.process_audit_job(
-            "audit-aaaaaaaaaaaa", "0" * 64
-        ) is False
+        assert (
+            await audit_pipeline.process_audit_job("audit-aaaaaaaaaaaa", "0" * 64)
+            is False
+        )
     complete.assert_not_called()
     skip.assert_not_called()
     retry.assert_awaited_once()
@@ -4393,7 +4441,8 @@ def test_a_report_below_the_threshold_never_renders_an_actionable_remediation_di
     terminal = [
         line
         for line in report.splitlines()
-        if line.startswith("### ") and "Executive Summary" not in line
+        if line.startswith("### ")
+        and "Executive Summary" not in line
         and "Findings & Recommendations" not in line
     ]
     assert terminal == ["### ℹ️ Informational Audit Result"]
@@ -4454,7 +4503,9 @@ def test_a_finding_informational_status_is_derived_from_its_own_confidence(
         executive_summary="A report whose own confidence is publishable.",
         findings=[
             {
-                **_finding(confidence=confidence, suggested_fix="hmac.compare_digest(a, b)"),
+                **_finding(
+                    confidence=confidence, suggested_fix="hmac.compare_digest(a, b)"
+                ),
                 "id": "AUD-1",
                 "perspective": "security",
                 "informational_only": informational_only,
@@ -4667,8 +4718,12 @@ def test_users_role_constraint_matches_the_migration(monkeypatch: pytest.MonkeyP
         if call == "drop_constraint"
     ]
     assert len(dropped) == 1
-    assert (dropped[0][0][0] if dropped[0][0] else dropped[0][1]["constraint_name"]) == name
-    assert (dropped[0][0][1] if len(dropped[0][0]) > 1 else dropped[0][1]["table_name"]) == table
+    assert (
+        dropped[0][0][0] if dropped[0][0] else dropped[0][1]["constraint_name"]
+    ) == name
+    assert (
+        dropped[0][0][1] if len(dropped[0][0]) > 1 else dropped[0][1]["table_name"]
+    ) == table
 
     model_constraints = _model_check_constraints()
     assert name in model_constraints, sorted(model_constraints)
@@ -4801,12 +4856,11 @@ async def test_both_resolvers_agree_including_the_environment_fallback(
     lambda_client.invoke.return_value = {"StatusCode": 202}
     # Not clear=True: botocore still needs a real environment to be imported, and
     # only AWS_LAMBDA_FUNCTION_NAME is part of the rule under test.
-    with patch.dict("os.environ", environment), patch(
-        "app.config.settings.aws_lambda_function_name", configured
-    ), patch(
-        "app.config.settings.audit_self_invoke_secret", "audit-secret"
-    ), patch(
-        "boto3.client", return_value=lambda_client
+    with (
+        patch.dict("os.environ", environment),
+        patch("app.config.settings.aws_lambda_function_name", configured),
+        patch("app.config.settings.audit_self_invoke_secret", "audit-secret"),
+        patch("boto3.client", return_value=lambda_client),
     ):
         if "AWS_LAMBDA_FUNCTION_NAME" not in environment:
             os.environ.pop("AWS_LAMBDA_FUNCTION_NAME", None)
@@ -4820,9 +4874,7 @@ async def test_both_resolvers_agree_including_the_environment_fallback(
             # The adapter independently resolved the same name from the same
             # inputs, through the one shared resolver.
             await AWSHostingAdapter().schedule_audit("audit-abcdef123456", fence)
-            assert (
-                lambda_client.invoke.call_args.kwargs["FunctionName"] == expected
-            )
+            assert lambda_client.invoke.call_args.kwargs["FunctionName"] == expected
     if expected is None:
         lambda_client.invoke.assert_not_called()
 
@@ -4883,4 +4935,3 @@ async def test_a_lambda_like_runtime_refuses_to_execute_audit_jobs_in_process():
     assert summary.scheduled == 1
     in_process.assert_not_called()
     adapter.schedule_audit.assert_awaited_once_with("audit-aaaaaaaaaaaa", "0" * 64)
-

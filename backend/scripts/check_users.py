@@ -1,4 +1,5 @@
 """Verify the users table was created correctly in Neon."""
+
 import asyncio
 from sqlalchemy import text
 from app.db import engine

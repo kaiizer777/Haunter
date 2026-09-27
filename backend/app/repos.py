@@ -75,7 +75,9 @@ async def add_repo(
         await db.rollback()
         raise HTTPException(status_code=409, detail="Repo already connected")
 
-    logger.info("Repo added: user=%s repo=%s/%s", current_user.id, body.owner, body.name)
+    logger.info(
+        "Repo added: user=%s repo=%s/%s", current_user.id, body.owner, body.name
+    )
     return RepoOut.model_validate(repo)
 
 
@@ -89,7 +91,9 @@ async def list_repos(
     Scoped strictly to WHERE user_id = current_user.id — no cross-tenant leakage.
     """
     result = await db.execute(
-        select(Repo).where(Repo.user_id == current_user.id).order_by(Repo.created_at.desc())
+        select(Repo)
+        .where(Repo.user_id == current_user.id)
+        .order_by(Repo.created_at.desc())
     )
     repos = result.scalars().all()
     return [RepoOut.model_validate(r) for r in repos]

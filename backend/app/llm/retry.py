@@ -133,7 +133,9 @@ async def execute_with_retry(
 
             # Global auth failure (401, 403): Policy 3 -> fail fast across all models
             if last_status in (401, 403):
-                logger.error("Global LLM authentication failed with status %d", last_status)
+                logger.error(
+                    "Global LLM authentication failed with status %d", last_status
+                )
                 raise LLMAuthenticationError(
                     f"LLM authentication failed with status {last_status}: {response_body[:200]!r}"
                 ) from None
@@ -151,16 +153,28 @@ async def execute_with_retry(
 
             # Genuine client invalid request (400, 422): fail immediately
             if last_status in (400, 422):
-                logger.error("LLM request rejected with status %d: %s", last_status, response_body[:200])
-                raise LLMInvalidRequestError(f"Invalid LLM request payload (HTTP {last_status})") from None
+                logger.error(
+                    "LLM request rejected with status %d: %s",
+                    last_status,
+                    response_body[:200],
+                )
+                raise LLMInvalidRequestError(
+                    f"Invalid LLM request payload (HTTP {last_status})"
+                ) from None
 
             # 404 model / endpoint not found: Policy 2 -> attempt count = 1, switch model
             if last_status == 404:
-                raise LLMError(f"LLM model or endpoint not found (404): {response_body[:200]!r}", status_code=404) from None
+                raise LLMError(
+                    f"LLM model or endpoint not found (404): {response_body[:200]!r}",
+                    status_code=404,
+                ) from None
 
             # 5xx Server Error: Policy 2 -> attempt count = 1, do NOT retry on dead model, switch immediately
             if 500 <= last_status <= 599:
-                logger.warning("LLM provider server error HTTP %d (attempt 1) — failing immediately for model fallback", last_status)
+                logger.warning(
+                    "LLM provider server error HTTP %d (attempt 1) — failing immediately for model fallback",
+                    last_status,
+                )
                 raise LLMError(
                     f"LLM provider error ({last_status}): {response_body[:200]!r}",
                     status_code=last_status,
@@ -169,19 +183,25 @@ async def execute_with_retry(
             # 429 Rate Limit: Policy 1 -> retry up to max_attempts with backoff + jitter
             if last_status == 429:
                 if attempt >= max_attempts:
-                    logger.warning("LLM rate limit (429) persisted after %d attempts", max_attempts)
+                    logger.warning(
+                        "LLM rate limit (429) persisted after %d attempts", max_attempts
+                    )
                     raise LLMRateLimitError(
                         f"LLM rate limit (429) persisted after {max_attempts} attempts",
                         attempts=attempt,
                     ) from None
 
                 # Calculate backoff delay with jitter
-                delay = min(initial_delay * (backoff_factor ** (attempt - 1)), max_delay)
+                delay = min(
+                    initial_delay * (backoff_factor ** (attempt - 1)), max_delay
+                )
                 jitter = random.uniform(0.1, 0.5)
                 total_delay = delay + jitter
 
                 if time.monotonic() - start_time + total_delay >= max_total_time:
-                    raise LLMTimeoutError("LLM total time budget exceeded during rate limit backoff")
+                    raise LLMTimeoutError(
+                        "LLM total time budget exceeded during rate limit backoff"
+                    )
 
                 logger.info(
                     "LLM 429 on attempt %d/%d, retrying in %.2fs...",
@@ -193,16 +213,28 @@ async def execute_with_retry(
                 continue
 
             # Fallthrough for any unexpected status
-            raise LLMError(f"LLM provider error ({last_status})", status_code=last_status) from None
+            raise LLMError(
+                f"LLM provider error ({last_status})", status_code=last_status
+            ) from None
 
-        except (httpx.TimeoutException, asyncio.TimeoutError, httpx.ConnectError) as exc:
+        except (
+            httpx.TimeoutException,
+            asyncio.TimeoutError,
+            httpx.ConnectError,
+        ) as exc:
             # Policy 2: Network timeout -> attempt count = 1, fail immediately for fallback
-            logger.warning("LLM call timed out on attempt 1 — failing immediately for model fallback: %s", exc)
+            logger.warning(
+                "LLM call timed out on attempt 1 — failing immediately for model fallback: %s",
+                exc,
+            )
             raise LLMTimeoutError(f"LLM request timed out: {exc}") from None
 
         except httpx.TransportError as exc:
             # Policy 2: Connection drop -> attempt count = 1, fail immediately for fallback
-            logger.warning("LLM transport error on attempt 1 — failing immediately for model fallback: %s", exc)
+            logger.warning(
+                "LLM transport error on attempt 1 — failing immediately for model fallback: %s",
+                exc,
+            )
             raise LLMError(f"LLM network transport error: {exc}") from None
 
     if last_status == 429:

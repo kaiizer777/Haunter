@@ -117,7 +117,9 @@ def test_create_checkpoint() -> None:
     repo = MagicMock(spec=Repo)
 
     session = MagicMock(spec=AgentSession)
-    session.staged_patches = {"src/auth.py": "--- a/src/auth.py\n+++ b/src/auth.py\n@@ -1 +1 @@\n-old\n+new\n"}
+    session.staged_patches = {
+        "src/auth.py": "--- a/src/auth.py\n+++ b/src/auth.py\n@@ -1 +1 @@\n-old\n+new\n"
+    }
     session.conversation_history = [{"role": "user", "content": "fix auth"}] * 5
     session.checkpoints = []
 
@@ -250,9 +252,7 @@ def test_security_scan_detects_aws_key() -> None:
     """tool_scan_security_vulnerabilities flags fake AWS access key."""
     session = MagicMock(spec=AgentSession)
     fake_key = "AKIAIOSFODNN7EXAMPLE"
-    session.staged_patches = {
-        "config.py": f"+AWS_ACCESS_KEY = '{fake_key}'\n"
-    }
+    session.staged_patches = {"config.py": f"+AWS_ACCESS_KEY = '{fake_key}'\n"}
 
     result = tool_scan_security_vulnerabilities(
         paths=["config.py"],
@@ -277,9 +277,7 @@ def test_security_scan_detects_github_pat() -> None:
     """tool_scan_security_vulnerabilities flags fake GitHub PAT."""
     session = MagicMock(spec=AgentSession)
     fake_pat = "ghp_0123456789abcdef0123456789abcdef0123"
-    session.staged_patches = {
-        "deploy.py": f"+TOKEN = '{fake_pat}'\n"
-    }
+    session.staged_patches = {"deploy.py": f"+TOKEN = '{fake_pat}'\n"}
 
     result = tool_scan_security_vulnerabilities(
         paths=["deploy.py"],
@@ -303,7 +301,7 @@ def test_security_scan_detects_sql_injection() -> None:
     """tool_scan_security_vulnerabilities flags SQL f-string injection pattern."""
     session = MagicMock(spec=AgentSession)
     session.staged_patches = {
-        "db.py": "+    cursor.execute(f\"SELECT * FROM users WHERE id = {user_id}\")\n"
+        "db.py": '+    cursor.execute(f"SELECT * FROM users WHERE id = {user_id}")\n'
     }
 
     result = tool_scan_security_vulnerabilities(
@@ -356,8 +354,13 @@ async def test_restore_endpoint_success(
     user, repo = await _seed_user_and_repo(db, github_id=90001)
 
     cp_id = "cp_test1234"
-    original_patches = {"src/main.py": "--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-old\n+original\n"}
-    later_patches = {"src/main.py": "--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-old\n+later\n", "new_file.py": "+new file"}
+    original_patches = {
+        "src/main.py": "--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-old\n+original\n"
+    }
+    later_patches = {
+        "src/main.py": "--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-old\n+later\n",
+        "new_file.py": "+new file",
+    }
 
     session = await _seed_session(
         db,

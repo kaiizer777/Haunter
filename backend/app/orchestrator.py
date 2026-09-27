@@ -61,13 +61,15 @@ _FAILURE_REASON_TAIL_CHARS: int = 200
 # Run statuses considered terminal — no transition allowed out of these.
 # Defined as raw strings (not RunStatus enum members) so the constant
 # block at the top of the file doesn't depend on the class definition below.
-_TERMINAL_STATUSES: frozenset[str] = frozenset({
-    "pr_opened",
-    "fallback_commented",
-    "flaky_detected",
-    "completed",
-    "error",
-})
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        "pr_opened",
+        "fallback_commented",
+        "flaky_detected",
+        "completed",
+        "error",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,38 +88,59 @@ class RunStatus(str, Enum):
     pending_pr = "pending_pr"
     fallback = "fallback"
     # Phase 8 & Feature 2 terminal statuses
-    pr_opened = "pr_opened"             # PR successfully created on GitHub
-    fallback_commented = "fallback_commented"  # diagnosis comment posted (all attempts exhausted)
-    flaky_detected = "flaky_detected"   # quarantined flaky test (passed 2/2 clean runs)
-    completed = "completed"             # legacy — kept for backward compatibility
+    pr_opened = "pr_opened"  # PR successfully created on GitHub
+    fallback_commented = (
+        "fallback_commented"  # diagnosis comment posted (all attempts exhausted)
+    )
+    flaky_detected = "flaky_detected"  # quarantined flaky test (passed 2/2 clean runs)
+    completed = "completed"  # legacy — kept for backward compatibility
     error = "error"
 
 
 # Steps eligible for the fast-fail repeated-failure heuristic.
 # Only LLM-driven steps (producing or sandbox-verifying a fix) are eligible.
 # Deterministic non-LLM steps (like mirror seeding or context gathering) are excluded.
-_FAST_FAIL_ELIGIBLE_STEPS: frozenset[str] = frozenset({
-    RunStatus.fix_generation.value,    # LLM produces the fix
-    RunStatus.verification.value,      # same fix fails the test again
-})
+_FAST_FAIL_ELIGIBLE_STEPS: frozenset[str] = frozenset(
+    {
+        RunStatus.fix_generation.value,  # LLM produces the fix
+        RunStatus.verification.value,  # same fix fails the test again
+    }
+)
 
 
 # Forward-only valid transitions. Any pair not listed here is rejected.
 # error is reachable from every non-terminal state.
 _ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
-    RunStatus.pending:              {RunStatus.context_gathering, RunStatus.error},
-    RunStatus.context_gathering:    {RunStatus.flake_verification, RunStatus.fix_generation, RunStatus.error},
-    RunStatus.flake_verification:   {RunStatus.flaky_detected, RunStatus.fix_generation, RunStatus.error},
-    RunStatus.fix_generation:       {RunStatus.verification, RunStatus.fallback, RunStatus.error},
-    RunStatus.verification:         {RunStatus.pending_pr, RunStatus.fallback, RunStatus.fix_generation, RunStatus.error},
-    RunStatus.pending_pr:           {RunStatus.pr_opened, RunStatus.error},
-    RunStatus.fallback:             {RunStatus.fallback_commented, RunStatus.error},
+    RunStatus.pending: {RunStatus.context_gathering, RunStatus.error},
+    RunStatus.context_gathering: {
+        RunStatus.flake_verification,
+        RunStatus.fix_generation,
+        RunStatus.error,
+    },
+    RunStatus.flake_verification: {
+        RunStatus.flaky_detected,
+        RunStatus.fix_generation,
+        RunStatus.error,
+    },
+    RunStatus.fix_generation: {
+        RunStatus.verification,
+        RunStatus.fallback,
+        RunStatus.error,
+    },
+    RunStatus.verification: {
+        RunStatus.pending_pr,
+        RunStatus.fallback,
+        RunStatus.fix_generation,
+        RunStatus.error,
+    },
+    RunStatus.pending_pr: {RunStatus.pr_opened, RunStatus.error},
+    RunStatus.fallback: {RunStatus.fallback_commented, RunStatus.error},
     # Terminal states — no transitions out
-    RunStatus.pr_opened:            set(),
-    RunStatus.fallback_commented:   set(),
-    RunStatus.flaky_detected:       set(),
-    RunStatus.completed:            set(),
-    RunStatus.error:                set(),
+    RunStatus.pr_opened: set(),
+    RunStatus.fallback_commented: set(),
+    RunStatus.flaky_detected: set(),
+    RunStatus.completed: set(),
+    RunStatus.error: set(),
 }
 
 
@@ -386,7 +409,9 @@ async def _orchestrator_pipeline_body(
     repo_settings = await get_repo_settings(db, repo.id)
 
     # Phase 6.3 Feature Enforcement: Auto-Fix Guard
-    auto_fix_decision = feature_enforcement.is_auto_fix_allowed(repo_settings.enable_auto_fix)
+    auto_fix_decision = feature_enforcement.is_auto_fix_allowed(
+        repo_settings.enable_auto_fix
+    )
     if not auto_fix_decision.allowed:
         logger.info(
             "orchestrator: run=%s %s — skipping fix generation and PR creation",
@@ -421,7 +446,8 @@ async def _orchestrator_pipeline_body(
         logger.info(
             "orchestrator: run=%s already past pending (status=%s) "
             "— resuming without re-entering context_gathering",
-            run_id, run.status,
+            run_id,
+            run.status,
         )
         state["step"] = run.status
 
@@ -588,7 +614,8 @@ async def _orchestrator_pipeline_body(
         logger.info(
             "orchestrator: run=%s status=%s (not context_gathering) "
             "— skipping fix_generation transition",
-            run_id, run.status,
+            run_id,
+            run.status,
         )
 
     # ----------------------------------------------------------------
@@ -622,7 +649,8 @@ async def _orchestrator_pipeline_body(
                 if run is None:
                     logger.error(
                         "orchestrator: run %s not found in attempt #%d — aborting",
-                        run_id, iteration + 1,
+                        run_id,
+                        iteration + 1,
                     )
                     return
 
@@ -636,7 +664,8 @@ async def _orchestrator_pipeline_body(
                 if repo is None:
                     logger.error(
                         "orchestrator: repo %s not found in attempt #%d — aborting",
-                        run.repo_id, iteration + 1,
+                        run.repo_id,
+                        iteration + 1,
                     )
                     return
 
@@ -649,9 +678,9 @@ async def _orchestrator_pipeline_body(
                     return
 
                 # Phase 6.3 Feature Enforcement: Cost Ceiling Check
-                cost_stmt = select(func.coalesce(func.sum(RunStep.cost_estimate), 0.0)).where(
-                    RunStep.run_id == run.id
-                )
+                cost_stmt = select(
+                    func.coalesce(func.sum(RunStep.cost_estimate), 0.0)
+                ).where(RunStep.run_id == run.id)
                 total_cost_dollars = (await attempt_db.scalar(cost_stmt)) or 0.0
                 total_cost_cents = total_cost_dollars * 100.0
 
@@ -678,8 +707,13 @@ async def _orchestrator_pipeline_body(
                 try:
                     review_feedback: Optional[str] = None
                     if run.parent_run_id is not None:
-                        from app.subagents.context_gatherer import extract_reviewer_feedback
-                        review_feedback = extract_reviewer_feedback(run.diagnosis_summary or "")
+                        from app.subagents.context_gatherer import (
+                            extract_reviewer_feedback,
+                        )
+
+                        review_feedback = extract_reviewer_feedback(
+                            run.diagnosis_summary or ""
+                        )
 
                     attempt = await generate_fix(
                         run=run,
@@ -703,7 +737,8 @@ async def _orchestrator_pipeline_body(
                     # fallback comment path (no error).
                     logger.info(
                         "orchestrator: run=%s low-confidence skip → fallback (%s)",
-                        run_id, skip_err,
+                        run_id,
+                        skip_err,
                     )
                     error_step = RunStep(
                         run_id=run.id,
@@ -725,11 +760,15 @@ async def _orchestrator_pipeline_body(
                     value."""
                     logger.info(
                         "orchestrator: run=%s patch format retry exhausted → fallback (%s)",
-                        run_id, fmt_err,
+                        run_id,
+                        fmt_err,
                     )
                     error_step = RunStep(
-                        run_id=run.id, step_name="fix_generator_format_exhausted",
-                        input_tokens=0, output_tokens=0, latency_ms=0,
+                        run_id=run.id,
+                        step_name="fix_generator_format_exhausted",
+                        input_tokens=0,
+                        output_tokens=0,
+                        latency_ms=0,
                         cost_estimate=0.0,
                     )
                     attempt_db.add(error_step)
@@ -737,7 +776,11 @@ async def _orchestrator_pipeline_body(
                     skip_to_fallback_reason = "format_exhausted"
                     break
 
-                except (AttemptCapExceeded, PatchRejected, FixGenerationError) as fix_err:
+                except (
+                    AttemptCapExceeded,
+                    PatchRejected,
+                    FixGenerationError,
+                ) as fix_err:
                     # R-02: skip the noise RunStep when there's no signal to show.
                     # The exception did not surface real token/latency data, so a
                     # 0-token 0-ms row is just clutter on the dashboard. The run
@@ -768,7 +811,9 @@ async def _orchestrator_pipeline_body(
 
                     logger.error(
                         "orchestrator: run=%s fix_generator failed (%s: %s)",
-                        run_id, type(fix_err).__name__, fix_err,
+                        run_id,
+                        type(fix_err).__name__,
+                        fix_err,
                     )
                     await _persist_failure_reason(
                         db=attempt_db,
@@ -802,9 +847,8 @@ async def _orchestrator_pipeline_body(
                         "build_duration_ms": 0,
                     }
                     attempt.strategy_notes = (
-                        (attempt.strategy_notes or "")
-                        + " [sandbox verification bypassed by repo settings]"
-                    )
+                        attempt.strategy_notes or ""
+                    ) + " [sandbox verification bypassed by repo settings]"
                     state["decisions"].append("sandbox_verification_skipped")
                 else:
                     # ---- Verify in sandbox (provider selected via SANDBOX_PROVIDER env) ----
@@ -815,7 +859,7 @@ async def _orchestrator_pipeline_body(
                     )
 
                 # Persist verification result
-                v_status: str = verify_result["status"]        # "pass" | "fail"
+                v_status: str = verify_result["status"]  # "pass" | "fail"
                 failure_reason: Optional[str] = verify_result["failure_reason"]
                 build_duration_ms: int = verify_result["build_duration_ms"]
 
@@ -842,7 +886,10 @@ async def _orchestrator_pipeline_body(
                     # Feature 1: Refinement run on existing PR branch
                     if run.parent_run_id is not None:
                         try:
-                            from app.github.pr import commit_patch, get_installation_token
+                            from app.github.pr import (
+                                commit_patch,
+                                get_installation_token,
+                            )
                             from app.github_client import post_pr_comment
 
                             token = await get_installation_token(repo)
@@ -975,12 +1022,16 @@ async def _orchestrator_pipeline_body(
                         state["step"] = RunStatus.pr_opened.value
                         logger.info(
                             "orchestrator: run=%s PR #%s opened %s",
-                            run_id, pr["number"], pr["html_url"],
+                            run_id,
+                            pr["number"],
+                            pr["html_url"],
                         )
                     except Exception as pr_err:
                         logger.error(
                             "orchestrator: run=%s PR creation failed (%s: %s)",
-                            run_id, type(pr_err).__name__, pr_err,
+                            run_id,
+                            type(pr_err).__name__,
+                            pr_err,
                         )
                         await _persist_failure_reason(
                             db=attempt_db,
@@ -1015,7 +1066,9 @@ async def _orchestrator_pipeline_body(
                     current_step=state.get("step"),
                     run_id=run_id,
                     attempt_number=attempt.attempt_number,
-                    prior_attempt_number=prior_attempt.attempt_number if prior_attempt else 0,
+                    prior_attempt_number=prior_attempt.attempt_number
+                    if prior_attempt
+                    else 0,
                 )
                 if fast_fail:
                     skip_to_fallback_reason = ff_reason
@@ -1048,7 +1101,10 @@ async def _orchestrator_pipeline_body(
             logger.warning(
                 "orchestrator: run=%s attempt #%d transient DB error (%s: %s) "
                 "— continuing with fresh session",
-                run_id, iteration + 1, type(db_err).__name__, db_err,
+                run_id,
+                iteration + 1,
+                type(db_err).__name__,
+                db_err,
             )
             skip_to_fallback_reason = "db_error"
             if iteration + 1 >= max_attempts:
@@ -1062,9 +1118,7 @@ async def _orchestrator_pipeline_body(
     # ------------------------------------------------------------------
     if skip_to_fallback_reason is not None:
         async with async_session_maker() as fb_db:
-            run_result = await fb_db.execute(
-                select(Run).where(Run.id == run_id)
-            )
+            run_result = await fb_db.execute(select(Run).where(Run.id == run_id))
             run = run_result.scalar_one_or_none()
             if run is None:
                 logger.error(
@@ -1099,6 +1153,7 @@ async def _orchestrator_pipeline_body(
 
                 from app.models import Attempt as AttemptModel
                 from sqlalchemy import select as sa_select
+
                 attempts_result = await fb_db.execute(
                     sa_select(AttemptModel).where(AttemptModel.run_id == run.id)
                 )
@@ -1108,12 +1163,14 @@ async def _orchestrator_pipeline_body(
                 )
 
                 from app.github.pr import get_installation_token
+
                 github_token = await get_installation_token(repo)
 
                 if repo_settings.enable_pr_comments:
                     # Feature 1: If interactive PR refinement, post diagnostic comment to PR
                     if run.parent_run_id is not None and run.pr_number:
                         from app.github_client import post_pr_comment
+
                         pr_fallback_body = (
                             "⚠️ @haunter was unable to verify the requested adjustments in sandbox CI:\n\n"
                             f"{fallback_body}"
@@ -1127,6 +1184,7 @@ async def _orchestrator_pipeline_body(
                         )
                     else:
                         from app.github_client import post_commit_comment
+
                         await post_commit_comment(
                             owner=repo.owner,
                             repo=repo.name,
@@ -1144,7 +1202,8 @@ async def _orchestrator_pipeline_body(
             except Exception as e:
                 logger.error(
                     "orchestrator: run=%s failed to post fallback comment: %s",
-                    run_id, e,
+                    run_id,
+                    e,
                 )
                 try:
                     await _persist_failure_reason(
@@ -1158,7 +1217,9 @@ async def _orchestrator_pipeline_body(
 
             logger.info(
                 "orchestrator: run=%s → fallback_commented (skip_to_fallback=%s, attempts=%d)",
-                run_id, skip_to_fallback_reason, len(all_attempts),
+                run_id,
+                skip_to_fallback_reason,
+                len(all_attempts),
             )
 
 
@@ -1195,6 +1256,7 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
             return
 
         from sqlalchemy.orm import selectinload
+
         repo_result = await db.execute(
             select(Repo)
             .where(Repo.id == run.repo_id)
@@ -1203,7 +1265,11 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
         )
         repo = repo_result.scalar_one_or_none()
         if repo is None:
-            logger.error("orchestrator: repo %s for run %s not found — aborting", run.repo_id, run_id)
+            logger.error(
+                "orchestrator: repo %s for run %s not found — aborting",
+                run.repo_id,
+                run_id,
+            )
             return
 
         # ----------------------------------------------------------------
@@ -1220,7 +1286,8 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
         if repo.id != run.repo_id:
             logger.error(
                 "orchestrator: run.repo_id mismatch (run=%s repo=%s) — aborting",
-                run_id, repo.id,
+                run_id,
+                repo.id,
             )
             return
 
@@ -1258,7 +1325,8 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
         except asyncio.TimeoutError:
             logger.error(
                 "orchestrator: run=%s wall-clock timeout after %.0fs — forcing error state",
-                run_id, ORCHESTRATOR_TIMEOUT_S,
+                run_id,
+                ORCHESTRATOR_TIMEOUT_S,
             )
             # Open a fresh session for the error path because the outer
             # `db` may be in a state the cancellation broke (e.g. mid-commit,
@@ -1289,7 +1357,9 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
             except Exception as inner_exc:
                 logger.error(
                     "orchestrator: failed to persist timeout state for run=%s (%s: %s)",
-                    run_id, type(inner_exc).__name__, inner_exc,
+                    run_id,
+                    type(inner_exc).__name__,
+                    inner_exc,
                 )
             return
 
@@ -1316,7 +1386,10 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
             try:
                 async with async_session_maker() as error_db:
                     fresh_run = await error_db.get(Run, run_id)
-                    if fresh_run is not None and fresh_run.status not in _TERMINAL_STATUSES:
+                    if (
+                        fresh_run is not None
+                        and fresh_run.status not in _TERMINAL_STATUSES
+                    ):
                         # Persist a trace step so the timeline shows why we gave up,
                         # then write the failure_reason, then transition to error.
                         # Each commits independently so a partial-failure still
@@ -1397,4 +1470,3 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                     type(inner_exc).__name__,
                     inner_exc,
                 )
-

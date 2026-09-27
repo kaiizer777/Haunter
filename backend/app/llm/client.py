@@ -103,7 +103,9 @@ class LLMClient:
             raise LLMError(f"Unsupported LLM provider: {target_provider}")
 
         if target_provider == "groq":
-            groq_model = explicit_model or settings.groq_model_name or "openai/gpt-oss-120b"
+            groq_model = (
+                explicit_model or settings.groq_model_name or "openai/gpt-oss-120b"
+            )
             provider = GroqProvider(
                 base_url=settings.groq_base_url,
                 api_key=settings.groq_api_key,
@@ -228,7 +230,9 @@ class LLMClient:
                 # Record all attempts in attempts_log and switch to next model.
                 att_count = getattr(exc, "attempts", RATE_LIMIT_ATTEMPTS_PER_MODEL)
                 for att_i in range(1, att_count + 1):
-                    attempts_log.append((model_name, att_i, f"LLMRateLimitError: {exc.message}"))
+                    attempts_log.append(
+                        (model_name, att_i, f"LLMRateLimitError: {exc.message}")
+                    )
                 logger.warning(
                     "llm_client: model=%s rate-limited after %d attempts — switching to next model",
                     model_name,
@@ -240,7 +244,9 @@ class LLMClient:
             except (LLMError, LLMTimeoutError) as exc:
                 # Policy 2 (Outage / Unsupported): 5xx, timeout, transport drop, per-model rejection, upstream 400.
                 # Attempt count is exactly 1 per model.
-                attempts_log.append((model_name, 1, f"{type(exc).__name__}: {exc.message}"))
+                attempts_log.append(
+                    (model_name, 1, f"{type(exc).__name__}: {exc.message}")
+                )
                 logger.warning(
                     "llm_client: model=%s failed on attempt 1: %s — switching to next model",
                     model_name,

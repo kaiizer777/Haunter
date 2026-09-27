@@ -269,7 +269,9 @@ def test_verify_state_cookie_mismatch_state_raises_400() -> None:
 
     signed_cookie = _sign_state(raw_state_cookie)
 
-    with patch("hmac.compare_digest", wraps=__import__("hmac").compare_digest) as mock_compare:
+    with patch(
+        "hmac.compare_digest", wraps=__import__("hmac").compare_digest
+    ) as mock_compare:
         with pytest.raises(HTTPException) as exc_info:
             _verify_state_cookie(signed_cookie, incoming_request_state)
         assert exc_info.value.status_code == 400
@@ -325,7 +327,10 @@ def test_invalid_fernet_key_raises_and_logs(caplog: pytest.LogCaptureFixture) ->
             with pytest.raises(Exception):
                 _get_fernet()
 
-        assert any("TOKEN_ENCRYPTION_KEY is set but invalid" in r.message for r in caplog.records)
+        assert any(
+            "TOKEN_ENCRYPTION_KEY is set but invalid" in r.message
+            for r in caplog.records
+        )
     finally:
         settings.token_encryption_key = orig_key
 
@@ -379,9 +384,9 @@ def test_session_cookie_attributes_identical_set_and_clear() -> None:
 
     # Security attributes must match exactly
     for attr in ("path", "samesite", "secure", "httponly"):
-        assert set_kwargs[attr] == clear_kwargs[attr], (
-            f"Mismatched cookie attribute '{attr}': set={set_kwargs[attr]} vs clear={clear_kwargs[attr]}"
-        )
+        assert (
+            set_kwargs[attr] == clear_kwargs[attr]
+        ), f"Mismatched cookie attribute '{attr}': set={set_kwargs[attr]} vs clear={clear_kwargs[attr]}"
 
     assert set_kwargs["httponly"] is True
     assert set_kwargs["secure"] is True
@@ -404,9 +409,9 @@ def test_state_cookie_attributes_identical_set_and_clear() -> None:
     assert clear_kwargs["key"] == _STATE_COOKIE_NAME
 
     for attr in ("path", "samesite", "secure", "httponly"):
-        assert set_kwargs[attr] == clear_kwargs[attr], (
-            f"Mismatched cookie attribute '{attr}': set={set_kwargs[attr]} vs clear={clear_kwargs[attr]}"
-        )
+        assert (
+            set_kwargs[attr] == clear_kwargs[attr]
+        ), f"Mismatched cookie attribute '{attr}': set={set_kwargs[attr]} vs clear={clear_kwargs[attr]}"
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +453,9 @@ async def test_auth_me_endpoint_with_rotated_session_cookie(
 
         # Step 2: Clear previous key -> /auth/me now rejects with 401
         settings.session_secret_key_previous = None
-        resp_expired_rotation = await client.get("/auth/me", cookies={"haunter_session": old_cookie})
+        resp_expired_rotation = await client.get(
+            "/auth/me", cookies={"haunter_session": old_cookie}
+        )
         assert resp_expired_rotation.status_code == 401
         assert resp_expired_rotation.json() == {"detail": "Invalid or expired session"}
     finally:

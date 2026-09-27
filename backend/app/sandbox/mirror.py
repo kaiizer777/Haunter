@@ -200,7 +200,9 @@ async def get_or_create_test_mirror(
     """
     from app.config import settings
 
-    target_repo = repo_name or getattr(settings, "github_sandbox_repo", "haunter-sandbox-runner")
+    target_repo = repo_name or getattr(
+        settings, "github_sandbox_repo", "haunter-sandbox-runner"
+    )
     full = f"{org}/{target_repo}"
     headers = _auth_headers(token)
 
@@ -242,7 +244,9 @@ async def get_or_create_test_mirror(
     if create_resp.status_code == 422:
         resp = await gh.get(f"{_GITHUB_API_BASE}/repos/{full}", headers=headers)
         if resp.status_code == 200:
-            logger.info("mirror: universal sandbox mirror created concurrently: %s", full)
+            logger.info(
+                "mirror: universal sandbox mirror created concurrently: %s", full
+            )
             return full
 
     # On 403, retry once with fallback PAT.
@@ -259,7 +263,9 @@ async def get_or_create_test_mirror(
         if create_resp.status_code == 422:
             resp = await gh.get(f"{_GITHUB_API_BASE}/repos/{full}", headers=headers)
             if resp.status_code == 200:
-                logger.info("mirror: universal sandbox mirror created concurrently: %s", full)
+                logger.info(
+                    "mirror: universal sandbox mirror created concurrently: %s", full
+                )
                 return full
 
     create_resp.raise_for_status()
@@ -267,7 +273,13 @@ async def get_or_create_test_mirror(
         "mirror: created universal sandbox mirror: %s (via %s endpoint, token=%s)",
         full,
         "orgs" if is_org else "user",
-        "fallback_pat" if (fallback_token and create_resp.request.headers.get("Authorization") == f"Bearer {fallback_token}") else "app_token",
+        "fallback_pat"
+        if (
+            fallback_token
+            and create_resp.request.headers.get("Authorization")
+            == f"Bearer {fallback_token}"
+        )
+        else "app_token",
     )
     return full
 
@@ -305,7 +317,9 @@ async def get_or_create_test_repo(
 _FILE_HEADER_RE: re.Pattern[str] = re.compile(r"^(?:---|\+\+\+)\s+(?:[ab]/)?(\S+)")
 
 
-_HUNK_HEADER_RE: re.Pattern[str] = re.compile(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@")
+_HUNK_HEADER_RE: re.Pattern[str] = re.compile(
+    r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@"
+)
 
 
 def resolve_file_path(target_path: str, existing_paths: Iterable[str]) -> str:
@@ -354,7 +368,9 @@ def _split_patch_by_file(patch_text: str) -> tuple[dict[str, str], list[str]]:
     old_path: Optional[str] = None
 
     for line in patch_text.splitlines():
-        if (line.startswith("---") or line.startswith("+++")) and _FILE_HEADER_RE.match(line):
+        if (line.startswith("---") or line.startswith("+++")) and _FILE_HEADER_RE.match(
+            line
+        ):
             m = _FILE_HEADER_RE.match(line)
             assert m is not None
             raw_path = m.group(1).strip()
@@ -462,7 +478,10 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
             for delta in range(1, 51):
                 for candidate in (expected_idx - delta, expected_idx + delta):
                     if 0 <= candidate <= len(base_lines) - len(old_lines):
-                        if base_lines[candidate : candidate + len(old_lines)] == old_lines:
+                        if (
+                            base_lines[candidate : candidate + len(old_lines)]
+                            == old_lines
+                        ):
                             match_idx = candidate
                             break
                 if match_idx is not None:
@@ -480,7 +499,9 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
         else:
             clean_old = [ln.strip() for ln in old_lines]
             for idx in range(len(base_lines) - len(old_lines) + 1):
-                if [b.strip() for b in base_lines[idx : idx + len(old_lines)]] == clean_old:
+                if [
+                    b.strip() for b in base_lines[idx : idx + len(old_lines)]
+                ] == clean_old:
                     match_idx = idx
                     base_lines[match_idx : match_idx + len(old_lines)] = new_lines
                     offset += len(new_lines) - len(old_lines)
@@ -493,13 +514,17 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
             if to_remove:
                 clean_rem = [ln.strip() for ln in to_remove]
                 candidates = [
-                    idx for idx in range(len(base_lines) - len(to_remove) + 1)
-                    if [b.strip() for b in base_lines[idx : idx + len(to_remove)]] == clean_rem
+                    idx
+                    for idx in range(len(base_lines) - len(to_remove) + 1)
+                    if [b.strip() for b in base_lines[idx : idx + len(to_remove)]]
+                    == clean_rem
                 ]
                 if candidates:
                     best_cand = min(candidates, key=lambda c: abs(c - expected_idx))
                     # Check indentation of target base line
-                    target_indent = len(base_lines[best_cand]) - len(base_lines[best_cand].lstrip())
+                    target_indent = len(base_lines[best_cand]) - len(
+                        base_lines[best_cand].lstrip()
+                    )
                     if to_add and to_add[0].strip():
                         add_indent = len(to_add[0]) - len(to_add[0].lstrip())
                         indent_diff = target_indent - add_indent
@@ -510,7 +535,9 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
                                     if indent_diff > 0:
                                         adjusted_add.append(" " * indent_diff + al)
                                     else:
-                                        strip_count = min(len(al) - len(al.lstrip()), -indent_diff)
+                                        strip_count = min(
+                                            len(al) - len(al.lstrip()), -indent_diff
+                                        )
                                         adjusted_add.append(al[strip_count:])
                                 else:
                                     adjusted_add.append("")
@@ -519,10 +546,17 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
                     base_lines[best_cand : best_cand + len(to_remove)] = to_add
                     offset += len(to_add) - len(to_remove)
                     match_idx = best_cand
-                    logger.info("mirror: tier-3 targeted match applied at line %d", best_cand + 1)
+                    logger.info(
+                        "mirror: tier-3 targeted match applied at line %d",
+                        best_cand + 1,
+                    )
             elif to_add:
                 # Pure insertion without deletion: match non-empty context anchor
-                non_empty_ctx = [ln[1:].strip() for ln in h["lines"] if ln.startswith(" ") and ln[1:].strip()]
+                non_empty_ctx = [
+                    ln[1:].strip()
+                    for ln in h["lines"]
+                    if ln.startswith(" ") and ln[1:].strip()
+                ]
                 if non_empty_ctx:
                     anchor = non_empty_ctx[0]
                     for idx, bl in enumerate(base_lines):
@@ -531,7 +565,10 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
                             base_lines[insert_at:insert_at] = to_add
                             offset += len(to_add)
                             match_idx = insert_at
-                            logger.info("mirror: tier-3 anchor insertion applied at line %d", insert_at + 1)
+                            logger.info(
+                                "mirror: tier-3 anchor insertion applied at line %d",
+                                insert_at + 1,
+                            )
                             break
 
         if match_idx is None:
@@ -540,7 +577,6 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
                 h.get("old_start", 0),
                 len(base_lines),
             )
-
 
     res = "\n".join(base_lines)
     if base_content.endswith("\n") and not res.endswith("\n"):
@@ -567,7 +603,9 @@ def _parse_patch(patch_text: str) -> tuple[dict[str, str], list[str]]:
         # ------------------------------------------------------------
         # File header line (--- a/path or +++ b/path, optional a/b prefix)
         # ------------------------------------------------------------
-        if (line.startswith("---") or line.startswith("+++")) and _FILE_HEADER_RE.match(line):
+        if (line.startswith("---") or line.startswith("+++")) and _FILE_HEADER_RE.match(
+            line
+        ):
             m = _FILE_HEADER_RE.match(line)
             assert m is not None  # narrowed by the match() guard above
             raw_path = m.group(1).strip()
@@ -613,7 +651,9 @@ def _parse_patch(patch_text: str) -> tuple[dict[str, str], list[str]]:
         # diff formats omit the "+" prefix on the very first line).
         files.setdefault(current_path, []).append(line)
 
-    files_dict = {path: "\n".join(content_lines) for path, content_lines in files.items()}
+    files_dict = {
+        path: "\n".join(content_lines) for path, content_lines in files.items()
+    }
     return files_dict, deleted_paths
 
 
@@ -673,7 +713,9 @@ async def push_patch_to_mirror(
         combined_deleted = set(deleted_paths) | set(split_deleted)
 
         if not files and not combined_deleted:
-            raise ValueError("push_patch_to_mirror: patch did not parse to any file changes")
+            raise ValueError(
+                "push_patch_to_mirror: patch did not parse to any file changes"
+            )
 
         # MVP guardrail — surface large patches as a clear ValueError so the
         # runner can mark the attempt as a config issue rather than burning
@@ -691,7 +733,9 @@ async def push_patch_to_mirror(
             )
     else:
         if not seed_files and not (workflow_filename and workflow_content):
-            raise ValueError("push_patch_to_mirror: patch_text is empty and no seed_files or workflow provided")
+            raise ValueError(
+                "push_patch_to_mirror: patch_text is empty and no seed_files or workflow provided"
+            )
 
     headers = _auth_headers(token)
 
@@ -703,7 +747,9 @@ async def push_patch_to_mirror(
     for del_p in combined_deleted:
         resolved_del = resolve_file_path(del_p, all_files.keys())
         if resolved_del != del_p:
-            logger.info("mirror: auto-resolved deleted path '%s' -> '%s'", del_p, resolved_del)
+            logger.info(
+                "mirror: auto-resolved deleted path '%s' -> '%s'", del_p, resolved_del
+            )
         all_files.pop(resolved_del, None)
 
     # b) .github/workflows/{workflow_filename}
@@ -749,18 +795,21 @@ async def push_patch_to_mirror(
         if len(content_bytes) < 10_000:
             try:
                 text_content = content_bytes.decode("utf-8")
-                tree_entries.append({
-                    "path": path,
-                    "mode": "100644",
-                    "type": "blob",
-                    "content": text_content,
-                })
+                tree_entries.append(
+                    {
+                        "path": path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "content": text_content,
+                    }
+                )
                 continue
             except UnicodeDecodeError:
                 pass
         blobs_to_create.append((path, content_bytes))
 
     if blobs_to_create:
+
         async def _create_blob(p: str, c: bytes) -> tuple[str, str]:
             encoded = base64.b64encode(c).decode("ascii")
             resp = await gh.post(
@@ -775,7 +824,9 @@ async def push_patch_to_mirror(
             batch = blobs_to_create[i : i + 16]
             results = await asyncio.gather(*(_create_blob(p, c) for p, c in batch))
             for p, s in results:
-                tree_entries.append({"path": p, "mode": "100644", "type": "blob", "sha": s})
+                tree_entries.append(
+                    {"path": p, "mode": "100644", "type": "blob", "sha": s}
+                )
             if i + 16 < len(blobs_to_create):
                 await asyncio.sleep(0.5)
 
@@ -803,7 +854,7 @@ async def push_patch_to_mirror(
 
     # 5. Create (or update) the branch ref pointing to refs/heads/{branch}
     clean_branch = (
-        branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
+        branch[len("refs/heads/") :] if branch.startswith("refs/heads/") else branch
     )
     ref = f"refs/heads/{clean_branch}"
     ref_resp = await gh.post(

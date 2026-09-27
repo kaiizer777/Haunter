@@ -135,7 +135,9 @@ async def get_active_model_config(
                 if config:
                     return config
     except Exception as exc:
-        logger.warning("Failed to query model_configs from DB (%s), using env defaults", exc)
+        logger.warning(
+            "Failed to query model_configs from DB (%s), using env defaults", exc
+        )
 
     # Fallback to environment defaults — base_url resolves dynamically from
     # settings.default_provider (Phase 3.2 Issue 5), not a hardcoded Zen URL.

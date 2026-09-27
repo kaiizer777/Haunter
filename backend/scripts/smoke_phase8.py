@@ -81,7 +81,9 @@ _MOCK_PR_JSON = (
 
 def _is_live_mode() -> bool:
     """True when GitHub App credentials are available in env."""
-    return bool(os.environ.get("GITHUB_APP_ID") and os.environ.get("GITHUB_APP_PRIVATE_KEY"))
+    return bool(
+        os.environ.get("GITHUB_APP_ID") and os.environ.get("GITHUB_APP_PRIVATE_KEY")
+    )
 
 
 async def _get_or_create_smoke_run(
@@ -121,7 +123,10 @@ async def _get_or_create_smoke_run(
 
             logger.info(
                 "Found existing run=%s repo=%s/%s status=%s",
-                run.id, repo.owner, repo.name, run.status,
+                run.id,
+                repo.owner,
+                repo.name,
+                run.status,
             )
             return run, repo, run.id
 
@@ -170,7 +175,9 @@ async def _get_or_create_smoke_run(
 
         logger.info(
             "Created smoke run=%s repo=%s/%s (status=pending)",
-            run.id, repo.owner, repo.name,
+            run.id,
+            repo.owner,
+            repo.name,
         )
         return run, repo, run.id
 
@@ -202,32 +209,52 @@ def _build_happy_path_patches() -> list:
     }
 
     return [
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
-              new_callable=AsyncMock,
-              return_value="2024-01-01T00:00:00Z ImportError: No module named 'foo'"),
-        patch("app.subagents.context_gatherer.gh.fetch_diff",
-              new_callable=AsyncMock,
-              return_value="-import foo\n"),
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata",
-              new_callable=AsyncMock,
-              return_value={"sha": "a" * 40, "commit": {"message": "remove foo"}}),
-        patch("app.subagents.context_gatherer.LLMClient.complete",
-              new_callable=AsyncMock,
-              side_effect=[_gather_response, _fix_response, _pr_response]),
-        patch("app.sandbox.runner.verify_patch",
-              new_callable=AsyncMock,
-              return_value={"status": "pass", "failure_reason": None, "build_duration_ms": 1234}),
-        patch("app.github.pr.get_installation_token",
-              new_callable=AsyncMock,
-              return_value=_MOCK_INSTALL_TOKEN),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+            return_value="2024-01-01T00:00:00Z ImportError: No module named 'foo'",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="-import foo\n",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value={"sha": "a" * 40, "commit": {"message": "remove foo"}},
+        ),
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete",
+            new_callable=AsyncMock,
+            side_effect=[_gather_response, _fix_response, _pr_response],
+        ),
+        patch(
+            "app.sandbox.runner.verify_patch",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "pass",
+                "failure_reason": None,
+                "build_duration_ms": 1234,
+            },
+        ),
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value=_MOCK_INSTALL_TOKEN,
+        ),
         patch("app.github.pr.create_branch", new_callable=AsyncMock),
-        patch("app.github.pr.commit_patch", new_callable=AsyncMock, return_value="b" * 40),
-        patch("app.github.pr.open_pr",
-              new_callable=AsyncMock,
-              return_value={
-                  "html_url": "https://github.com/smoke-org/smoke-repo/pull/42",
-                  "number": 42,
-              }),
+        patch(
+            "app.github.pr.commit_patch", new_callable=AsyncMock, return_value="b" * 40
+        ),
+        patch(
+            "app.github.pr.open_pr",
+            new_callable=AsyncMock,
+            return_value={
+                "html_url": "https://github.com/smoke-org/smoke-repo/pull/42",
+                "number": 42,
+            },
+        ),
         patch("app.github_client.post_commit_comment", new_callable=AsyncMock),
     ]
 
@@ -248,20 +275,40 @@ def _build_fallback_patches() -> list:
     }
 
     return [
-        patch("app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
-              new_callable=AsyncMock,
-              return_value="ImportError: No module named 'foo'"),
-        patch("app.subagents.context_gatherer.gh.fetch_diff",
-              new_callable=AsyncMock, return_value="-import foo\n"),
-        patch("app.subagents.context_gatherer.gh.fetch_commit_metadata",
-              new_callable=AsyncMock, return_value={"sha": "a" * 40}),
-        patch("app.subagents.context_gatherer.LLMClient.complete",
-              new_callable=AsyncMock, side_effect=[_gather_response, _fix_response, _fix_response, _fix_response]),
-        patch("app.sandbox.runner.verify_patch",
-              new_callable=AsyncMock,
-              return_value={"status": "fail", "failure_reason": "smoke forced fail", "build_duration_ms": 200}),
-        patch("app.github.pr.get_installation_token",
-              new_callable=AsyncMock, return_value=_MOCK_INSTALL_TOKEN),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_workflow_run_logs",
+            new_callable=AsyncMock,
+            return_value="ImportError: No module named 'foo'",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="-import foo\n",
+        ),
+        patch(
+            "app.subagents.context_gatherer.gh.fetch_commit_metadata",
+            new_callable=AsyncMock,
+            return_value={"sha": "a" * 40},
+        ),
+        patch(
+            "app.subagents.context_gatherer.LLMClient.complete",
+            new_callable=AsyncMock,
+            side_effect=[_gather_response, _fix_response, _fix_response, _fix_response],
+        ),
+        patch(
+            "app.sandbox.runner.verify_patch",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "fail",
+                "failure_reason": "smoke forced fail",
+                "build_duration_ms": 200,
+            },
+        ),
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value=_MOCK_INSTALL_TOKEN,
+        ),
         patch("app.github_client.post_commit_comment", new_callable=AsyncMock),
     ]
 
@@ -285,7 +332,9 @@ async def run_smoke(
     print("=" * 64)
     print("  Haunter Phase 8 -- Smoke Test")
     print("=" * 64)
-    print(f"  Mode:   {'LIVE (real GitHub API)' if live else 'MOCK (stubbed GitHub + LLM)'}")
+    print(
+        f"  Mode:   {'LIVE (real GitHub API)' if live else 'MOCK (stubbed GitHub + LLM)'}"
+    )
     print(f"  Repo:   {repo_owner}/{repo_name}")
     if force_fallback:
         print("  Path:   FORCED FALLBACK (verifier always fails)")
@@ -297,13 +346,17 @@ async def run_smoke(
             "        GITHUB_INSTALL_ID set in env. Running mock smoke instead.\n"
         )
 
-    run, repo, run_id = await _get_or_create_smoke_run(repo_owner, repo_name, run_id_arg)
+    run, repo, run_id = await _get_or_create_smoke_run(
+        repo_owner, repo_name, run_id_arg
+    )
 
     if live:
         logger.info("LIVE MODE: invoking handle_failed_run with real credentials.")
         await handle_failed_run(run_id)
     else:
-        patches = _build_fallback_patches() if force_fallback else _build_happy_path_patches()
+        patches = (
+            _build_fallback_patches() if force_fallback else _build_happy_path_patches()
+        )
         with ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
@@ -330,16 +383,22 @@ async def run_smoke(
             print("  LIVE SMOKE PASSED -- real PR opened on GitHub.")
         else:
             print("  MOCK SMOKE PASSED -- pr_opened state reached (mock mode).")
-            print("  Set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_INSTALL_ID for live smoke.")
+            print(
+                "  Set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_INSTALL_ID for live smoke."
+            )
 
     elif status == "fallback_commented":
         print()
         if force_fallback:
-            print("  MOCK SMOKE PASSED (fallback path) -- fallback_commented state reached.")
+            print(
+                "  MOCK SMOKE PASSED (fallback path) -- fallback_commented state reached."
+            )
         else:
             print("  SMOKE PASSED -- fallback_commented state reached.")
         if not live:
-            print("  Set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_INSTALL_ID for live smoke.")
+            print(
+                "  Set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_INSTALL_ID for live smoke."
+            )
 
     elif status == "error":
         print()

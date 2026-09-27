@@ -43,7 +43,19 @@ EXCLUDE_REQUIREMENTS = {
 }
 
 # Excluded paths inside the staging dir (relative to staging root).
-EXCLUDE_DIR_NAMES = {".venv", "__pycache__", "tests", ".pytest_cache", "node_modules", "scripts", "build", "bin", "lib", "include", "share"}
+EXCLUDE_DIR_NAMES = {
+    ".venv",
+    "__pycache__",
+    "tests",
+    ".pytest_cache",
+    "node_modules",
+    "scripts",
+    "build",
+    "bin",
+    "lib",
+    "include",
+    "share",
+}
 EXCLUDE_FILE_SUFFIXES = {".pyc", ".pyo"}
 EXCLUDE_FILE_NAMES = {"rebuild_lambda_zip.py"}
 
@@ -74,7 +86,9 @@ def main() -> int:
         return 1
 
     runtime_reqs = read_runtime_requirements()
-    print(f"Installing {len(runtime_reqs)} runtime packages (excluding {sorted(EXCLUDE_REQUIREMENTS)}):")
+    print(
+        f"Installing {len(runtime_reqs)} runtime packages (excluding {sorted(EXCLUDE_REQUIREMENTS)}):"
+    )
     for r in runtime_reqs:
         print(f"  - {r}")
 
@@ -84,11 +98,17 @@ def main() -> int:
         # 1. pip install with manylinux wheels so the bundle runs on
         #    Lambda's Linux x86_64 Python 3.11 runtime.
         cmd = [
-            sys.executable, "-m", "pip", "install",
-            "--target", str(staging_path),
-            "--platform", "manylinux2014_x86_64",
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--target",
+            str(staging_path),
+            "--platform",
+            "manylinux2014_x86_64",
             "--only-binary=:all:",
-            "--python-version", "3.11",
+            "--python-version",
+            "3.11",
             "--upgrade",
             "--no-cache-dir",
             *runtime_reqs,
@@ -122,7 +142,9 @@ def main() -> int:
         if tmp_target.exists():
             tmp_target.unlink()
         count = 0
-        with zipfile.ZipFile(tmp_target, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        with zipfile.ZipFile(
+            tmp_target, "w", zipfile.ZIP_DEFLATED, compresslevel=6
+        ) as zf:
             for path in sorted(staging_path.rglob("*")):
                 if not path.is_file():
                     continue

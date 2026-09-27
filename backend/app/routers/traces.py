@@ -189,7 +189,9 @@ async def get_run_trace(
     )
     run = run_result.scalar_one_or_none()
     if run is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Run not found"
+        )
 
     # Fetch steps ordered ASC by created_at (chronological pipeline timeline).
     steps_result = await db.execute(
@@ -265,10 +267,18 @@ async def list_runs(
     if params.status is not None:
         filters.append(Run.status == params.status)
     if params.from_ is not None:
-        from_utc = params.from_.replace(tzinfo=timezone.utc) if params.from_.tzinfo is None else params.from_
+        from_utc = (
+            params.from_.replace(tzinfo=timezone.utc)
+            if params.from_.tzinfo is None
+            else params.from_
+        )
         filters.append(Run.created_at >= from_utc)
     if params.to is not None:
-        to_utc = params.to.replace(tzinfo=timezone.utc) if params.to.tzinfo is None else params.to
+        to_utc = (
+            params.to.replace(tzinfo=timezone.utc)
+            if params.to.tzinfo is None
+            else params.to
+        )
         filters.append(Run.created_at <= to_utc)
 
     # Count total matching rows (same filters, no limit/offset).
@@ -329,7 +339,9 @@ async def get_repo_stats(
     )
     repo = repo_result.scalar_one_or_none()
     if repo is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
+        )
 
     # Aggregate run-level stats.
     run_agg_result = await db.execute(
@@ -355,12 +367,14 @@ async def get_repo_stats(
 
     # Average attempts per run.
     avg_attempts_result = await db.execute(
-        select(func.avg(
-            select(func.count(Attempt.id))
-            .where(Attempt.run_id == Run.id)
-            .correlate(Run)
-            .scalar_subquery()
-        )).where(Run.repo_id == repo_id)
+        select(
+            func.avg(
+                select(func.count(Attempt.id))
+                .where(Attempt.run_id == Run.id)
+                .correlate(Run)
+                .scalar_subquery()
+            )
+        ).where(Run.repo_id == repo_id)
     )
     avg_attempts: float = float(avg_attempts_result.scalar_one() or 0.0)
 
@@ -459,16 +473,11 @@ async def batch_delete_runs(
 
     # Explicit cascade cleanup for RunStep and Attempt (RunAttempt) records
     # in case DB-level foreign key cascade is not handled.
-    await db.execute(
-        delete(RunStep).where(RunStep.run_id.in_(matching_run_ids))
-    )
-    await db.execute(
-        delete(Attempt).where(Attempt.run_id.in_(matching_run_ids))
-    )
+    await db.execute(delete(RunStep).where(RunStep.run_id.in_(matching_run_ids)))
+    await db.execute(delete(Attempt).where(Attempt.run_id.in_(matching_run_ids)))
 
     for run in matching_runs:
         await db.delete(run)
     await db.commit()
 
     return BatchDeleteRunsResponse(deleted_count=len(matching_runs))
-

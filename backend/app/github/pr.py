@@ -151,7 +151,7 @@ def _build_jwt() -> str:
     now = int(time.time())
     header = {"alg": "RS256", "typ": "JWT"}
     payload = {
-        "iat": now - 60,   # allow 60s clock skew
+        "iat": now - 60,  # allow 60s clock skew
         "exp": now + 600,  # 10 min max (GitHub enforces ≤ 10 min)
         "iss": settings.github_app_id,
     }
@@ -242,7 +242,9 @@ async def get_installation_token(repo: Any) -> str:
             "Check App ID, private key, and installation."
         )
     if response.is_error:
-        raise GitHubPRError(f"GitHub returned {response.status_code} fetching installation token.")
+        raise GitHubPRError(
+            f"GitHub returned {response.status_code} fetching installation token."
+        )
 
     data = response.json()
     token_str = data["token"]
@@ -311,7 +313,9 @@ async def create_branch(
 
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
         try:
-            resp = await client.post(url, headers=_build_auth_headers(token), json=payload)
+            resp = await client.post(
+                url, headers=_build_auth_headers(token), json=payload
+            )
         except httpx.RequestError as exc:
             raise GitHubPRError(
                 f"Network error creating branch {branch!r}: {exc.__class__.__name__}"
@@ -322,9 +326,13 @@ async def create_branch(
     if resp.status_code in (401, 403):
         raise GitHubPRAuthError(f"Auth failed creating branch ({resp.status_code}).")
     if resp.is_error:
-        raise GitHubPRError(f"Failed to create branch {branch!r}: HTTP {resp.status_code}")
+        raise GitHubPRError(
+            f"Failed to create branch {branch!r}: HTTP {resp.status_code}"
+        )
 
-    logger.info("github.pr: created branch %s/%s:%s at sha=%s", owner, repo, branch, sha[:8])
+    logger.info(
+        "github.pr: created branch %s/%s:%s at sha=%s", owner, repo, branch, sha[:8]
+    )
 
 
 def _parse_patch_files(patch_text: str) -> dict[str, str]:
@@ -341,7 +349,9 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     import re as _re
 
     # Pattern for file headers: --- a/path  or  --- /dev/null, then +++ b/path  or  +++ /dev/null
-    header_re = _re.compile(r"^---\s+(?:a/)?([^\n]+)\n\+\+\+\s+(?:b/)?([^\n]+)", _re.MULTILINE)
+    header_re = _re.compile(
+        r"^---\s+(?:a/)?([^\n]+)\n\+\+\+\s+(?:b/)?([^\n]+)", _re.MULTILINE
+    )
     # Find all header positions
     matches = list(header_re.finditer(patch_text))
     if not matches:
@@ -427,13 +437,19 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                 hunk_line = lines[i]
                 if hunk_line.startswith(" "):
                     # Context — must match original
-                    if orig_idx >= len(orig_lines) or orig_lines[orig_idx] != hunk_line[1:]:
+                    if (
+                        orig_idx >= len(orig_lines)
+                        or orig_lines[orig_idx] != hunk_line[1:]
+                    ):
                         return None
                     new_lines.append(orig_lines[orig_idx])
                     orig_idx += 1
                 elif hunk_line.startswith("-"):
                     # Deletion — must match original then skip
-                    if orig_idx >= len(orig_lines) or orig_lines[orig_idx] != hunk_line[1:]:
+                    if (
+                        orig_idx >= len(orig_lines)
+                        or orig_lines[orig_idx] != hunk_line[1:]
+                    ):
                         return None
                     orig_idx += 1
                 elif hunk_line.startswith("+"):
@@ -517,7 +533,9 @@ async def commit_patch(
         # 2. Get the tree SHA of HEAD commit
         commit_resp = await client.get(f"{api}/git/commits/{head_sha}", headers=headers)
         if commit_resp.is_error:
-            raise GitHubPRError(f"Cannot fetch commit {head_sha[:8]}: HTTP {commit_resp.status_code}")
+            raise GitHubPRError(
+                f"Cannot fetch commit {head_sha[:8]}: HTTP {commit_resp.status_code}"
+            )
         base_tree_sha = commit_resp.json()["tree"]["sha"]
 
         # 3. Try to parse and apply patch per-file
@@ -528,10 +546,19 @@ async def commit_patch(
         if per_file_patches:
             for file_path, file_patch in per_file_patches.items():
                 # Validate branch-safe file path
-                if len(file_path) > 255 or not _BRANCH_RE.match(file_path.replace("/", "_")):
+                if len(file_path) > 255 or not _BRANCH_RE.match(
+                    file_path.replace("/", "_")
+                ):
                     # Use looser check for file paths: allow slashes, dots, underscores, hyphens
-                    if ".." in file_path or file_path.startswith("/") or "//" in file_path:
-                        logger.warning("github.pr: skipping invalid file path %r from patch", file_path)
+                    if (
+                        ".." in file_path
+                        or file_path.startswith("/")
+                        or "//" in file_path
+                    ):
+                        logger.warning(
+                            "github.pr: skipping invalid file path %r from patch",
+                            file_path,
+                        )
                         use_fallback = True
                         break
                 # Fetch current file content (may be new file → 404)
@@ -545,7 +572,9 @@ async def commit_patch(
                 elif content_resp.is_error:
                     logger.warning(
                         "github.pr: failed to fetch %r for branch %s: HTTP %d — fallback to haunter.patch",
-                        file_path, branch, content_resp.status_code,
+                        file_path,
+                        branch,
+                        content_resp.status_code,
                     )
                     use_fallback = True
                     break
@@ -554,21 +583,37 @@ async def commit_patch(
                         data = content_resp.json()
                         # Contents API returns base64-encoded content (may be list for dir)
                         if isinstance(data, list):
-                            logger.warning("github.pr: path %r is a directory — fallback", file_path)
+                            logger.warning(
+                                "github.pr: path %r is a directory — fallback",
+                                file_path,
+                            )
                             use_fallback = True
                             break
                         b64 = data.get("content", "")
                         # Content may contain newlines; GitHub wraps at 60 chars
                         b64_clean = "".join(b64.split())
-                        original_text = base64.b64decode(b64_clean).decode("utf-8", errors="replace") if b64_clean else ""
+                        original_text = (
+                            base64.b64decode(b64_clean).decode(
+                                "utf-8", errors="replace"
+                            )
+                            if b64_clean
+                            else ""
+                        )
                     except Exception as exc:
-                        logger.warning("github.pr: decode failed for %r: %s — fallback", file_path, exc)
+                        logger.warning(
+                            "github.pr: decode failed for %r: %s — fallback",
+                            file_path,
+                            exc,
+                        )
                         use_fallback = True
                         break
 
                 new_text = _apply_unified_diff_to_content(original_text, file_patch)
                 if new_text is None:
-                    logger.warning("github.pr: hunk apply failed for %r — fallback to haunter.patch", file_path)
+                    logger.warning(
+                        "github.pr: hunk apply failed for %r — fallback to haunter.patch",
+                        file_path,
+                    )
                     use_fallback = True
                     break
 
@@ -579,7 +624,11 @@ async def commit_patch(
                     json={"content": new_text, "encoding": "utf-8"},
                 )
                 if blob_resp.is_error:
-                    logger.warning("github.pr: blob creation failed for %r: HTTP %d — fallback", file_path, blob_resp.status_code)
+                    logger.warning(
+                        "github.pr: blob creation failed for %r: HTTP %d — fallback",
+                        file_path,
+                        blob_resp.status_code,
+                    )
                     use_fallback = True
                     break
                 blob_sha = blob_resp.json()["sha"]
@@ -600,14 +649,21 @@ async def commit_patch(
 
         if use_fallback:
             # Legacy fallback: commit raw diff as haunter.patch artifact
-            logger.info("github.pr: falling back to haunter.patch artifact for %s/%s:%s", owner, repo, branch)
+            logger.info(
+                "github.pr: falling back to haunter.patch artifact for %s/%s:%s",
+                owner,
+                repo,
+                branch,
+            )
             blob_resp = await client.post(
                 f"{api}/git/blobs",
                 headers=headers,
                 json={"content": patch_text, "encoding": "utf-8"},
             )
             if blob_resp.is_error:
-                raise GitHubPRError(f"Failed to create blob: HTTP {blob_resp.status_code}")
+                raise GitHubPRError(
+                    f"Failed to create blob: HTTP {blob_resp.status_code}"
+                )
             blob_sha = blob_resp.json()["sha"]
             tree_entries = [
                 {
@@ -642,7 +698,9 @@ async def commit_patch(
             },
         )
         if new_commit_resp.is_error:
-            raise GitHubPRError(f"Failed to create commit: HTTP {new_commit_resp.status_code}")
+            raise GitHubPRError(
+                f"Failed to create commit: HTTP {new_commit_resp.status_code}"
+            )
         new_commit_sha = new_commit_resp.json()["sha"]
 
         # 6. Update the branch ref — force=False (default for PATCH)
@@ -658,7 +716,11 @@ async def commit_patch(
 
     logger.info(
         "github.pr: committed patch to %s/%s:%s new_sha=%s (%d file(s))",
-        owner, repo, branch, new_commit_sha[:8], len(tree_entries),
+        owner,
+        repo,
+        branch,
+        new_commit_sha[:8],
+        len(tree_entries),
     )
     return new_commit_sha
 
@@ -713,7 +775,9 @@ async def open_pr(
 
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
         try:
-            resp = await client.post(url, headers=_build_auth_headers(token), json=payload)
+            resp = await client.post(
+                url, headers=_build_auth_headers(token), json=payload
+            )
         except httpx.RequestError as exc:
             raise GitHubPRError(
                 f"Network error opening PR: {exc.__class__.__name__}"
@@ -729,6 +793,9 @@ async def open_pr(
     data = resp.json()
     logger.info(
         "github.pr: PR #%s opened %s/%s <- %s",
-        data["number"], owner, repo, head_branch,
+        data["number"],
+        owner,
+        repo,
+        head_branch,
     )
     return {"html_url": data["html_url"], "number": data["number"]}

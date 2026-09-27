@@ -96,7 +96,8 @@ def _unsupported(node: Any) -> UnsupportedStatementError:
 _TABLE_ENTITY = {
     mapper.local_table.name: mapper.class_
     for mapper in Base.registry.mappers
-    if mapper.local_table is not None and getattr(mapper.local_table, "name", None) is not None
+    if mapper.local_table is not None
+    and getattr(mapper.local_table, "name", None) is not None
 }
 
 
@@ -466,7 +467,9 @@ class FakeStore:
                 reverse = clause.modifier == "desc"
                 clause = clause.element
             matched.sort(
-                key=lambda bound, element=clause: _sort_key(_eval_value(element, bound)),
+                key=lambda bound, element=clause: _sort_key(
+                    _eval_value(element, bound)
+                ),
                 reverse=reverse,
             )
 
@@ -491,7 +494,9 @@ class FakeStore:
                     "the fake audit store does not model a SELECT that mixes whole "
                     "entities with individual columns"
                 )
-            return [tuple(bound[entity] for entity in whole_entities) for bound in matched]
+            return [
+                tuple(bound[entity] for entity in whole_entities) for bound in matched
+            ]
         if len(selected) == 1 and isinstance(selected[0], Function):
             if selected[0].name == "count":
                 return [len(matched)]
@@ -510,7 +515,10 @@ class FakeStore:
             return [_eval_value(selected[0], bound) for bound in matched]
         return [
             FakeRow(
-                [getattr(element, "key", str(index)) for index, element in enumerate(selected)],
+                [
+                    getattr(element, "key", str(index))
+                    for index, element in enumerate(selected)
+                ],
                 [_eval_value(element, bound) for element in selected],
             )
             for bound in matched
@@ -662,6 +670,7 @@ def fake_audit_db(audit_store: FakeStore, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(db_module, "async_session_maker", fake_session_maker)
     try:
         import app.orchestrator as orch_module
+
         monkeypatch.setattr(orch_module, "async_session_maker", fake_session_maker)
     except (ImportError, AttributeError):
         pass

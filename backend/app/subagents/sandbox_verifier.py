@@ -130,7 +130,9 @@ async def verify_session_patches(
             logger.warning("sandbox_verifier: SSE emit failed: %s", exc)
 
     if queue is not None:
-        await _emit(queue.put_sandbox_queued(run_url="pending", workflow_name=workflow_label))
+        await _emit(
+            queue.put_sandbox_queued(run_url="pending", workflow_name=workflow_label)
+        )
         await _emit(
             queue.put_sandbox_progress(step_name="dispatch", status="in_progress")
         )
@@ -163,7 +165,8 @@ async def verify_session_patches(
     except Exception as exc:
         logger.error(
             "sandbox_verifier: SandboxInput validation failed for session=%s: %s",
-            session.id, exc,
+            session.id,
+            exc,
         )
         if queue is not None:
             await _emit(
@@ -196,12 +199,15 @@ async def verify_session_patches(
     try:
         runner_cls = _load_github_actions_runner()
         runner = runner_cls()
-        result = await asyncio.wait_for(runner.verify(sandbox_input), timeout=timeout_sec)
+        result = await asyncio.wait_for(
+            runner.verify(sandbox_input), timeout=timeout_sec
+        )
     except asyncio.TimeoutError:
         duration_s = time.monotonic() - t_start
         logger.error(
             "sandbox_verifier: runner.verify() timed out after %ds for session=%s",
-            timeout_sec, session.id,
+            timeout_sec,
+            session.id,
         )
         if queue is not None:
             await _emit(
@@ -210,7 +216,9 @@ async def verify_session_patches(
                     stream="stderr",
                 )
             )
-            await _emit(queue.put_sandbox_status(status="failed", logs="CI sandbox timed out"))
+            await _emit(
+                queue.put_sandbox_status(status="failed", logs="CI sandbox timed out")
+            )
         return {
             "status": "failed",
             "passed": False,
@@ -223,7 +231,8 @@ async def verify_session_patches(
     except Exception as exc:
         logger.error(
             "sandbox_verifier: runner.verify() failed for session=%s: %s",
-            session.id, exc,
+            session.id,
+            exc,
         )
         if queue is not None:
             await _emit(
@@ -249,7 +258,9 @@ async def verify_session_patches(
 
     logger.info(
         "sandbox_verifier: session=%s verify complete — passed=%s run_url=%s",
-        session.id, passed, run_url,
+        session.id,
+        passed,
+        run_url,
     )
 
     if queue is not None:

@@ -48,7 +48,10 @@ def test_module_not_found_for_app_returns_conftest() -> None:
     assert "conftest.py" in patch_text
     # The canonical sys.path line — the LLM is trained to match this exact
     # shape via the system-prompt worked example, so it must appear verbatim.
-    assert "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))" in patch_text
+    assert (
+        "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))"
+        in patch_text
+    )
 
 
 def test_module_not_found_for_dotted_module_returns_conftest() -> None:
@@ -63,9 +66,7 @@ def test_module_not_found_for_dotted_module_returns_conftest() -> None:
 
 def test_no_module_not_found_returns_none() -> None:
     """A non-ModuleNotFoundError diagnosis → None (caller falls through to LLM)."""
-    patch_text = _module_not_found_path_fix(
-        "AssertionError: 1 != 2 in test_foo.py:10"
-    )
+    patch_text = _module_not_found_path_fix("AssertionError: 1 != 2 in test_foo.py:10")
     assert patch_text is None
 
 
@@ -84,9 +85,7 @@ def test_module_not_found_for_stdlib_safety_net() -> None:
 
     The allowlist is intentionally small — see ``_STDLIB_MODULE_HINTS``.
     """
-    patch_text = _module_not_found_path_fix(
-        "ModuleNotFoundError: No module named 'os'"
-    )
+    patch_text = _module_not_found_path_fix("ModuleNotFoundError: No module named 'os'")
     assert patch_text is None
 
 
@@ -161,8 +160,7 @@ async def test_generate_fix_uses_deterministic_when_match(db: AsyncSession) -> N
     user = await _create_user(db)
     repo = await _create_repo(db, user)
     diagnosis = (
-        "ModuleNotFoundError: No module named 'app' "
-        "in tests/test_smoke.py:3\n"
+        "ModuleNotFoundError: No module named 'app' " "in tests/test_smoke.py:3\n"
     )
     run = await _create_run(db, repo, diagnosis_summary=diagnosis)
 
@@ -217,7 +215,10 @@ def test_module_not_found_prose_format_returns_conftest() -> None:
     patch_text = _module_not_found_path_fix(diagnosis)
     assert patch_text is not None
     assert "conftest.py" in patch_text
-    assert "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))" in patch_text
+    assert (
+        "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))"
+        in patch_text
+    )
 
 
 def test_module_not_found_prose_format_unquoted() -> None:

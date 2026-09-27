@@ -38,7 +38,7 @@ _SECRET_PATTERNS: list[tuple[str, str, str]] = [
 _INJECTION_PATTERNS: list[tuple[str, str, str]] = [
     ("SQL_INJECTION_F_STRING", "HIGH", r'execute\(\s*f["\'].*\{.*\}'),
     ("SQL_INJECTION_PERCENT", "HIGH", r'\.execute\(\s*["\'].*%s'),
-    ("SHELL_INJECTION", "HIGH", r'subprocess\.(?:Popen|run|call)\(.*shell\s*=\s*True'),
+    ("SHELL_INJECTION", "HIGH", r"subprocess\.(?:Popen|run|call)\(.*shell\s*=\s*True"),
 ]
 
 
@@ -107,7 +107,9 @@ async def tool_checkpoint_restore(
     # Restore state.
     session.staged_patches = dict(cp["staged_patches"])
     history_length: int = cp["history_length"]
-    session.conversation_history = list((session.conversation_history or [])[:history_length])
+    session.conversation_history = list(
+        (session.conversation_history or [])[:history_length]
+    )
 
     # Emit SSE event to sync frontend buffers.
     await queue.put_checkpoint_restored(
@@ -161,7 +163,9 @@ def tool_scan_security_vulnerabilities(
             diff_text = staged[file_path]
             # Extract only added/context lines from the unified diff.
             lines = [
-                line[1:] if line.startswith("+") and not line.startswith("+++") else line
+                line[1:]
+                if line.startswith("+") and not line.startswith("+++")
+                else line
                 for line in diff_text.splitlines()
                 if not line.startswith("-") and not line.startswith("---")
             ]
@@ -184,13 +188,15 @@ def tool_scan_security_vulnerabilities(
             for line_no, line_text in enumerate(content_lines, start=1):
                 m = compiled.search(line_text)
                 if m:
-                    violations.append({
-                        "file": file_path,
-                        "line": line_no,
-                        "rule": rule_name,
-                        "severity": severity,
-                        "finding": _redact(m.group(0)),
-                    })
+                    violations.append(
+                        {
+                            "file": file_path,
+                            "line": line_no,
+                            "rule": rule_name,
+                            "severity": severity,
+                            "finding": _redact(m.group(0)),
+                        }
+                    )
 
         # Run injection patterns.
         for rule_name, severity, pattern in _INJECTION_PATTERNS:
@@ -201,13 +207,15 @@ def tool_scan_security_vulnerabilities(
             for line_no, line_text in enumerate(content_lines, start=1):
                 m = compiled.search(line_text)
                 if m:
-                    violations.append({
-                        "file": file_path,
-                        "line": line_no,
-                        "rule": rule_name,
-                        "severity": severity,
-                        "finding": _redact(m.group(0)),
-                    })
+                    violations.append(
+                        {
+                            "file": file_path,
+                            "line": line_no,
+                            "rule": rule_name,
+                            "severity": severity,
+                            "finding": _redact(m.group(0)),
+                        }
+                    )
 
     if not violations:
         return (

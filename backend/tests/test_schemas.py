@@ -270,10 +270,10 @@ def test_workflow_run_webhook_payload_valid() -> None:
 @pytest.mark.parametrize(
     "bad_sha",
     [
-        "0123456789abcdef0123456789abcdef0123456",    # 39 chars (too short)
-        "0123456789abcdef0123456789abcdef012345678",   # 41 chars (too long)
-        "0123456789abcdef0123456789abcdef0123456g",   # non-hex 'g'
-        "0123456789abcdef; rm -rf /; 0123456789ab",    # injection attempt
+        "0123456789abcdef0123456789abcdef0123456",  # 39 chars (too short)
+        "0123456789abcdef0123456789abcdef012345678",  # 41 chars (too long)
+        "0123456789abcdef0123456789abcdef0123456g",  # non-hex 'g'
+        "0123456789abcdef; rm -rf /; 0123456789ab",  # injection attempt
         "",
     ],
 )

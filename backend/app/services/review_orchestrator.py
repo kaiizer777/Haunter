@@ -67,7 +67,11 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
             return
 
         if review.status not in ("pending", "in_progress"):
-            logger.info("review_orchestrator: review_id=%s already in terminal status=%s", review_id, review.status)
+            logger.info(
+                "review_orchestrator: review_id=%s already in terminal status=%s",
+                review_id,
+                review.status,
+            )
             return
 
         review.status = "in_progress"
@@ -76,7 +80,9 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
 
         repo = review.repo
         if not repo:
-            logger.error("review_orchestrator: repo not found for review_id=%s", review_id)
+            logger.error(
+                "review_orchestrator: repo not found for review_id=%s", review_id
+            )
             review.status = "error"
             review.summary = "Repository record not found."
             await session.commit()
@@ -86,7 +92,12 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
         try:
             token = await get_installation_token(repo)
         except Exception as exc:
-            logger.warning("review_orchestrator: failed to resolve token for repo %s/%s: %s", repo.owner, repo.name, exc)
+            logger.warning(
+                "review_orchestrator: failed to resolve token for repo %s/%s: %s",
+                repo.owner,
+                repo.name,
+                exc,
+            )
             token = None
 
         # 2. Fetch diff
@@ -122,7 +133,13 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                     token=token,
                 )
         except Exception as diff_err:
-            logger.error("review_orchestrator: failed to fetch diff for %s/%s @ %s: %s", repo.owner, repo.name, review.commit_sha, diff_err)
+            logger.error(
+                "review_orchestrator: failed to fetch diff for %s/%s @ %s: %s",
+                repo.owner,
+                repo.name,
+                review.commit_sha,
+                diff_err,
+            )
             review.status = "error"
             review.summary = f"Failed to fetch git diff: {diff_err}"
             await session.commit()
@@ -141,7 +158,11 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                 repo_id=repo.id,
             )
         except Exception as llm_err:
-            logger.exception("review_orchestrator: LLM review analysis failed for review_id=%s: %s", review_id, llm_err)
+            logger.exception(
+                "review_orchestrator: LLM review analysis failed for review_id=%s: %s",
+                review_id,
+                llm_err,
+            )
             review.status = "error"
             review.summary = f"Code review analysis failed: {llm_err}"
             await session.commit()
@@ -230,7 +251,9 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                     for i, f in enumerate(result.output.findings, 1):
                         fallback_body += f"\n{i}. **{f.file_path}:{f.line_start}-{f.line_end}** ({f.category.upper()} / {f.severity.upper()}):\n   {f.critique}\n"
                         if f.suggested_patch:
-                            fallback_body += f"\n   ```\n   {f.suggested_patch.strip()}\n   ```\n"
+                            fallback_body += (
+                                f"\n   ```\n   {f.suggested_patch.strip()}\n   ```\n"
+                            )
 
                     await create_pull_request_review(
                         owner=repo.owner,
@@ -265,7 +288,9 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                 for i, f in enumerate(result.output.findings, 1):
                     findings_md += f"\n{i}. **{f.file_path}:{f.line_start}-{f.line_end}** ({f.category.upper()} / {f.severity.upper()}):\n   {f.critique}\n"
                     if f.suggested_patch:
-                        findings_md += f"\n   ```\n   {f.suggested_patch.strip()}\n   ```\n"
+                        findings_md += (
+                            f"\n   ```\n   {f.suggested_patch.strip()}\n   ```\n"
+                        )
 
             body = (
                 f"### 🛡️ Haunter Push-Level Code Review\n\n"

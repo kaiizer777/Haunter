@@ -145,14 +145,15 @@ def _get_runner():
     """
     from app.config import settings
 
-    provider: str = getattr(settings, "sandbox_provider", "github_actions").lower().strip()
+    provider: str = (
+        getattr(settings, "sandbox_provider", "github_actions").lower().strip()
+    )
 
     if provider == "github_actions":
         return _load_github_actions_runner()()
 
     raise ValueError(
-        f"Unknown SANDBOX_PROVIDER={provider!r}. "
-        "Must be 'github_actions'."
+        f"Unknown SANDBOX_PROVIDER={provider!r}. " "Must be 'github_actions'."
     )
 
 
@@ -180,7 +181,9 @@ async def verify(
     """
     from app.config import settings
 
-    provider: str = getattr(settings, "sandbox_provider", "github_actions").lower().strip()
+    provider: str = (
+        getattr(settings, "sandbox_provider", "github_actions").lower().strip()
+    )
 
     # ----------------------------------------------------------------
     # GitHub Actions path — construct SandboxInput with the per-attempt
@@ -231,6 +234,7 @@ async def verify(
             if db is not None:
                 try:
                     from app.models import User
+
                     user = await db.get(User, getattr(repo, "user_id", None))
                     if user is not None:
                         user_github_id = int(user.github_id)
@@ -280,8 +284,7 @@ async def verify(
     return {
         "status": "fail",
         "failure_reason": (
-            f"Unknown SANDBOX_PROVIDER={provider!r}. "
-            "Must be 'github_actions'."
+            f"Unknown SANDBOX_PROVIDER={provider!r}. " "Must be 'github_actions'."
         ),
         "build_duration_ms": 0,
     }
@@ -316,7 +319,9 @@ async def verify_determinism(
     """
     from app.config import settings
 
-    provider: str = getattr(settings, "sandbox_provider", "github_actions").lower().strip()
+    provider: str = (
+        getattr(settings, "sandbox_provider", "github_actions").lower().strip()
+    )
     if provider == "github_actions":
         runner_class = _load_github_actions_runner()
         runner = runner_class()
@@ -328,7 +333,9 @@ async def verify_determinism(
                 runs_count=runs_count,
             )
 
-    logger.warning("sandbox: verify_determinism not implemented for provider %r", provider)
+    logger.warning(
+        "sandbox: verify_determinism not implemented for provider %r", provider
+    )
     return DeterminismResult(
         is_flaky=False,
         consecutive_passes=0,

@@ -45,6 +45,7 @@ from tests.conftest import truncate_all
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_user(github_id: int = 999) -> User:
     return User(
         github_id=github_id,
@@ -109,13 +110,15 @@ async def _create_attempt(
     return attempt
 
 
-_VALID_PR_JSON = json.dumps({
-    "title": "fix: replace missing import in app/models.py",
-    "body": (
-        "Root cause: module 'foo' was removed from requirements.\n"
-        "Fix: replaced import with bar which provides the same interface."
-    ),
-})
+_VALID_PR_JSON = json.dumps(
+    {
+        "title": "fix: replace missing import in app/models.py",
+        "body": (
+            "Root cause: module 'foo' was removed from requirements.\n"
+            "Fix: replaced import with bar which provides the same interface."
+        ),
+    }
+)
 
 _VALID_LLM_RESPONSE = {
     "content": _VALID_PR_JSON,
@@ -129,6 +132,7 @@ _VALID_LLM_RESPONSE = {
 # Test 1: valid JSON → PROutput parsed correctly
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_generate_pr_text_valid_json(db: AsyncSession) -> None:
     """Happy path: valid LLM JSON → title and body extracted and validated."""
@@ -138,7 +142,9 @@ async def test_generate_pr_text_valid_json(db: AsyncSession) -> None:
     run = await _create_run(db, repo)
     attempt = await _create_attempt(db, run)
 
-    with patch("app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock) as mock_llm:
+    with patch(
+        "app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock
+    ) as mock_llm:
         mock_llm.return_value = _VALID_LLM_RESPONSE
         result = await generate_pr_text(
             run=run,
@@ -153,7 +159,11 @@ async def test_generate_pr_text_valid_json(db: AsyncSession) -> None:
     assert len(result["title"]) >= 5
     assert len(result["body"]) >= 20
     # Confirm RunStep trace was inserted
-    steps = (await db.execute(select(RunStep).where(RunStep.run_id == run.id))).scalars().all()
+    steps = (
+        (await db.execute(select(RunStep).where(RunStep.run_id == run.id)))
+        .scalars()
+        .all()
+    )
     pr_steps = [s for s in steps if s.step_name == "pr_writer"]
     assert len(pr_steps) == 1
     assert pr_steps[0].input_tokens > 0
@@ -162,6 +172,7 @@ async def test_generate_pr_text_valid_json(db: AsyncSession) -> None:
 # ---------------------------------------------------------------------------
 # Test 2: invalid JSON first → retry → success
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_generate_pr_text_invalid_json_retry_succeeds(db: AsyncSession) -> None:
@@ -179,13 +190,20 @@ async def test_generate_pr_text_invalid_json_retry_succeeds(db: AsyncSession) ->
         "model": "nemotron-3.5-lightning-free",
     }
     good_response = {
-        "content": json.dumps({"title": "fix: valid title here", "body": "Valid body text that explains the fix."}),
+        "content": json.dumps(
+            {
+                "title": "fix: valid title here",
+                "body": "Valid body text that explains the fix.",
+            }
+        ),
         "usage": {"input_tokens": 60, "output_tokens": 40},
         "latency_ms": 120,
         "model": "nemotron-3.5-lightning-free",
     }
 
-    with patch("app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock) as mock_llm:
+    with patch(
+        "app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock
+    ) as mock_llm:
         mock_llm.side_effect = [bad_response, good_response]
         result = await generate_pr_text(
             run=run,
@@ -201,6 +219,7 @@ async def test_generate_pr_text_invalid_json_retry_succeeds(db: AsyncSession) ->
 # ---------------------------------------------------------------------------
 # Test 3: both retries fail → PRGenerationError
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_generate_pr_text_both_retries_fail(db: AsyncSession) -> None:
@@ -218,7 +237,9 @@ async def test_generate_pr_text_both_retries_fail(db: AsyncSession) -> None:
         "model": "nemotron-3.5-lightning-free",
     }
 
-    with patch("app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock) as mock_llm:
+    with patch(
+        "app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock
+    ) as mock_llm:
         mock_llm.return_value = bad_response
         with pytest.raises(PRGenerationError):
             await generate_pr_text(
@@ -234,6 +255,7 @@ async def test_generate_pr_text_both_retries_fail(db: AsyncSession) -> None:
 # ---------------------------------------------------------------------------
 # Test 4: XSS injection in diagnosis → title/body escaped
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_generate_pr_text_xss_injection_escaped(db: AsyncSession) -> None:
@@ -255,18 +277,24 @@ async def test_generate_pr_text_xss_injection_escaped(db: AsyncSession) -> None:
     attempt = await _create_attempt(db, run)
 
     # LLM returns a PR with the injection content echoed in the body
-    xss_body = "<script>alert(1)</script> Fix: replaced bad import. Root cause: XSS test."
+    xss_body = (
+        "<script>alert(1)</script> Fix: replaced bad import. Root cause: XSS test."
+    )
     xss_response = {
-        "content": json.dumps({
-            "title": "fix: sanitise import in models.py",
-            "body": xss_body,
-        }),
+        "content": json.dumps(
+            {
+                "title": "fix: sanitise import in models.py",
+                "body": xss_body,
+            }
+        ),
         "usage": {"input_tokens": 80, "output_tokens": 50},
         "latency_ms": 150,
         "model": "nemotron-3.5-lightning-free",
     }
 
-    with patch("app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock) as mock_llm:
+    with patch(
+        "app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock
+    ) as mock_llm:
         mock_llm.return_value = xss_response
         result = await generate_pr_text(
             run=run,
@@ -285,6 +313,7 @@ async def test_generate_pr_text_xss_injection_escaped(db: AsyncSession) -> None:
 # Test 5: PROutput title length cap enforced by schema
 # ---------------------------------------------------------------------------
 
+
 def test_pr_output_title_max_length_enforced() -> None:
     """title > 72 chars → ValidationError raised by PROutput."""
     with pytest.raises(ValidationError):
@@ -301,6 +330,7 @@ def test_pr_output_title_min_length_enforced() -> None:
 # Test 6: PROutput body length cap
 # ---------------------------------------------------------------------------
 
+
 def test_pr_output_body_max_length_enforced() -> None:
     """body > 10_000_000 chars → ValidationError."""
     with pytest.raises(ValidationError):
@@ -316,6 +346,7 @@ def test_pr_output_body_large_accepted() -> None:
 # ---------------------------------------------------------------------------
 # Test 7: branch name is deterministic + server-side only
 # ---------------------------------------------------------------------------
+
 
 def test_pr_branch_name_format() -> None:
     """Branch name must be haunter/fix-{hex8}-{attempt_number}."""
@@ -343,6 +374,7 @@ def test_pr_branch_name_no_default_branch() -> None:
 # Test 8: branch name injection → ValueError
 # ---------------------------------------------------------------------------
 
+
 def test_pr_branch_name_injection_rejected() -> None:
     """
     If somehow a run.id hex produced invalid chars (impossible with UUID but
@@ -361,6 +393,7 @@ def test_pr_branch_name_injection_rejected() -> None:
 # Test 9: branch collision with default branch → -fix suffix
 # ---------------------------------------------------------------------------
 
+
 def test_pr_branch_name_collision_with_default_appends_fix() -> None:
     """If the computed branch equals the default_branch, -fix is appended."""
     # Use a UUID whose hex prefix and attempt number would ordinarily be fine
@@ -375,12 +408,15 @@ def test_pr_branch_name_collision_with_default_appends_fix() -> None:
 
     # Since "haunter/fix-..." will never equal "main", just verify no crash + format
     branch = pr_branch_name(run2, attempt2, default_branch="main")
-    assert "main" not in branch.split("/")[1:]  # main not in the path segments post-prefix
+    assert (
+        "main" not in branch.split("/")[1:]
+    )  # main not in the path segments post-prefix
 
 
 # ---------------------------------------------------------------------------
 # Test 10: RunStep trace row persisted by generate_pr_text
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_generate_pr_text_persists_run_step(db: AsyncSession) -> None:
@@ -391,7 +427,9 @@ async def test_generate_pr_text_persists_run_step(db: AsyncSession) -> None:
     run = await _create_run(db, repo)
     attempt = await _create_attempt(db, run)
 
-    with patch("app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock) as mock_llm:
+    with patch(
+        "app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock
+    ) as mock_llm:
         mock_llm.return_value = _VALID_LLM_RESPONSE
         await generate_pr_text(
             run=run,
@@ -400,9 +438,17 @@ async def test_generate_pr_text_persists_run_step(db: AsyncSession) -> None:
             db=db,
         )
 
-    steps = (await db.execute(
-        select(RunStep).where(RunStep.run_id == run.id, RunStep.step_name == "pr_writer")
-    )).scalars().all()
+    steps = (
+        (
+            await db.execute(
+                select(RunStep).where(
+                    RunStep.run_id == run.id, RunStep.step_name == "pr_writer"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     assert len(steps) == 1
     step = steps[0]
     assert step.input_tokens > 0
@@ -413,6 +459,7 @@ async def test_generate_pr_text_persists_run_step(db: AsyncSession) -> None:
 # ---------------------------------------------------------------------------
 # Test 11: _sanitize_fallback html.escape + secret redact + cap
 # ---------------------------------------------------------------------------
+
 
 def test_sanitize_fallback_escapes_html() -> None:
     """_sanitize_fallback must html.escape XSS content in diagnosis summary."""
@@ -442,10 +489,13 @@ def test_sanitize_fallback_caps_at_10m() -> None:
 # Test 12: _sanitize_fallback never includes raw patch
 # ---------------------------------------------------------------------------
 
+
 def test_sanitize_fallback_never_includes_patch() -> None:
     """Even with a patch-laden attempt, _sanitize_fallback output contains no patch."""
     diagnosis = "ImportError in models.py"
-    fake_attempt = Attempt(patch_text="--- a/secret.py\n+++ b/secret.py\n@@ -1 +1 @@\n-bad\n+good\n")
+    fake_attempt = Attempt(
+        patch_text="--- a/secret.py\n+++ b/secret.py\n@@ -1 +1 @@\n-bad\n+good\n"
+    )
     result = _sanitize_fallback(diagnosis, [fake_attempt])
     # Patch text must not appear in the output (sanitiser ignores attempt content)
     assert "--- a/secret.py" not in result
@@ -472,7 +522,9 @@ async def test_generate_pr_text_run_steps_usage_tokens(db: AsyncSession) -> None
         "latency_ms": 310,
     }
 
-    with patch("app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock) as mock_llm:
+    with patch(
+        "app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock
+    ) as mock_llm:
         mock_llm.return_value = mock_response
         await generate_pr_text(
             run=run,
@@ -481,9 +533,17 @@ async def test_generate_pr_text_run_steps_usage_tokens(db: AsyncSession) -> None
             db=db,
         )
 
-    steps = (await db.execute(
-        select(RunStep).where(RunStep.run_id == run.id, RunStep.step_name == "pr_writer")
-    )).scalars().all()
+    steps = (
+        (
+            await db.execute(
+                select(RunStep).where(
+                    RunStep.run_id == run.id, RunStep.step_name == "pr_writer"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     assert len(steps) == 1
     step = steps[0]
     assert step.input_tokens == 142
@@ -510,7 +570,11 @@ async def test_generate_pr_text_does_not_write_run_pr_fields(db: AsyncSession) -
     assert run.pr_number is None
     assert run.pr_branch is None
 
-    with patch("app.subagents.pr_writer.LLMClient.complete", new_callable=AsyncMock, return_value=_VALID_LLM_RESPONSE):
+    with patch(
+        "app.subagents.pr_writer.LLMClient.complete",
+        new_callable=AsyncMock,
+        return_value=_VALID_LLM_RESPONSE,
+    ):
         await generate_pr_text(
             run=run,
             verified_attempt=attempt,
@@ -545,4 +609,3 @@ def test_pr_text_xss_escaping_in_title_and_body() -> None:
     assert "</script>" not in escaped_body
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in escaped_body
     assert len(escaped_body) <= 3000
-

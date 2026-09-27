@@ -45,11 +45,13 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
+
 # Single source of truth lives in app.config.settings.max_attempts (Phase 1).
 # Re-exported as MAX_ATTEMPTS for readability inside this module; the value
 # is read at call-time so env-var overrides apply without a process restart.
 def _max_attempts() -> int:
     return settings.max_attempts
+
 
 # Placeholder pricing — same as context_gatherer; replace with real figures.
 COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
@@ -207,7 +209,9 @@ def _check_path(raw_path: str) -> None:
     try:
         p = PurePosixPath(raw_path)
     except Exception as exc:
-        raise PatchRejected(f"Patch path {raw_path!r} could not be parsed: {exc}") from exc
+        raise PatchRejected(
+            f"Patch path {raw_path!r} could not be parsed: {exc}"
+        ) from exc
 
     if p.is_absolute():
         raise PatchRejected(
@@ -274,7 +278,7 @@ def _strip_markdown_fences(content: str) -> str:
         first_brace = s.find("{")
         last_brace = s.rfind("}")
         if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-            extracted = s[first_brace: last_brace + 1]
+            extracted = s[first_brace : last_brace + 1]
             logger.debug(
                 "fix_generator: JSON boundary extraction applied "
                 "(prose_prefix_len=%d, json_len=%d)",
@@ -284,8 +288,6 @@ def _strip_markdown_fences(content: str) -> str:
             s = extracted
 
     return s
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -334,22 +336,70 @@ def _extract_module_name(diagnosis_summary: str) -> Optional[str]:
             return name.strip() or None
     return None
 
+
 # Stdlib heuristic: a small allowlist of names that look like top-level
 # importable packages but are actually stdlib. Used to guard the deterministic
 # fallback against the worst false-positive (a missing stdlib import). The
 # list is intentionally small — exhaustive stdlib coverage is impossible
 # without a Python-version table. The fallback remains "best-effort" and is
 # only taken when the diagnosis explicitly names a ModuleNotFoundError.
-_STDLIB_MODULE_HINTS: frozenset[str] = frozenset({
-    "os", "sys", "typing", "io", "re", "json", "math", "time", "datetime",
-    "collections", "itertools", "functools", "pathlib", "logging", "uuid",
-    "hashlib", "http", "urllib", "email", "unittest", "asyncio", "threading",
-    "multiprocessing", "subprocess", "socket", "ssl", "select", "signal",
-    "string", "textwrap", "struct", "copy", "pprint", "enum", "abc",
-    "contextlib", "dataclasses", "decimal", "fractions", "numbers",
-    "operator", "secrets", "shlex", "tempfile", "warnings", "weakref",
-    "array", "queue", "heapq", "bisect", "random", "statistics", "types",
-})
+_STDLIB_MODULE_HINTS: frozenset[str] = frozenset(
+    {
+        "os",
+        "sys",
+        "typing",
+        "io",
+        "re",
+        "json",
+        "math",
+        "time",
+        "datetime",
+        "collections",
+        "itertools",
+        "functools",
+        "pathlib",
+        "logging",
+        "uuid",
+        "hashlib",
+        "http",
+        "urllib",
+        "email",
+        "unittest",
+        "asyncio",
+        "threading",
+        "multiprocessing",
+        "subprocess",
+        "socket",
+        "ssl",
+        "select",
+        "signal",
+        "string",
+        "textwrap",
+        "struct",
+        "copy",
+        "pprint",
+        "enum",
+        "abc",
+        "contextlib",
+        "dataclasses",
+        "decimal",
+        "fractions",
+        "numbers",
+        "operator",
+        "secrets",
+        "shlex",
+        "tempfile",
+        "warnings",
+        "weakref",
+        "array",
+        "queue",
+        "heapq",
+        "bisect",
+        "random",
+        "statistics",
+        "types",
+    }
+)
 
 
 def _module_not_found_path_fix(diagnosis_summary: str) -> Optional[str]:
@@ -506,13 +556,15 @@ def _build_messages(
     # exact reason verbatim.
     if prior_attempt is not None:
         # Stub assistant turn — schema anchor for the upcoming user turn.
-        messages.append({
-            "role": "assistant",
-            "content": (
-                "Acknowledged. I will generate a new patch that addresses the "
-                "prior failure without repeating the same fix."
-            ),
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    "Acknowledged. I will generate a new patch that addresses the "
+                    "prior failure without repeating the same fix."
+                ),
+            }
+        )
         redacted_patch = _redact_secrets(prior_attempt.patch_text or "")
         strategy_section = ""
         if getattr(prior_attempt, "strategy_notes", None):
@@ -533,44 +585,52 @@ def _build_messages(
 
     # Reviewer critique refinement turn (Feature 1: Interactive PR feedback loop)
     if review_feedback:
-        messages.append({
-            "role": "assistant",
-            "content": (
-                "Acknowledged. I will refine the patch according to the reviewer critique "
-                "while preserving passing test behavior, adhering to repository architecture, "
-                "and satisfying all unified diff formatting requirements."
-            ),
-        })
-        messages.append({
-            "role": "user",
-            "content": (
-                f"## Reviewer Critique & Requested Adjustments\n"
-                f"{review_feedback}\n\n"
-                "Refine the patch to incorporate the reviewer's instructions while preserving "
-                "passing test behavior and adhering to all diff formatting constraints. "
-                "patch MUST be a unified diff with '---', '+++', and '@@' markers. Return JSON only."
-            ),
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    "Acknowledged. I will refine the patch according to the reviewer critique "
+                    "while preserving passing test behavior, adhering to repository architecture, "
+                    "and satisfying all unified diff formatting requirements."
+                ),
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"## Reviewer Critique & Requested Adjustments\n"
+                    f"{review_feedback}\n\n"
+                    "Refine the patch to incorporate the reviewer's instructions while preserving "
+                    "passing test behavior and adhering to all diff formatting constraints. "
+                    "patch MUST be a unified diff with '---', '+++', and '@@' markers. Return JSON only."
+                ),
+            }
+        )
 
     if validation_error_context is not None:
         # Stub assistant turn — anchors the format-correction request.
-        messages.append({
-            "role": "assistant",
-            "content": (
-                "Acknowledged. I will return valid JSON this time with the "
-                "patch formatted as a unified diff (must include '---', '+++', "
-                "and '@@' markers) and confidence as an integer 0-100."
-            ),
-        })
-        messages.append({
-            "role": "user",
-            "content": (
-                f"Your previous response failed validation: {validation_error_context}\n"
-                "Fix the issues and return valid JSON only. "
-                "patch MUST be a unified diff with '---', '+++', and '@@' markers. "
-                "confidence MUST be an integer 0-100."
-            ),
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    "Acknowledged. I will return valid JSON this time with the "
+                    "patch formatted as a unified diff (must include '---', '+++', "
+                    "and '@@' markers) and confidence as an integer 0-100."
+                ),
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Your previous response failed validation: {validation_error_context}\n"
+                    "Fix the issues and return valid JSON only. "
+                    "patch MUST be a unified diff with '---', '+++', and '@@' markers. "
+                    "confidence MUST be an integer 0-100."
+                ),
+            }
+        )
 
     # Invariant check: no two consecutive same-role messages (after system).
     for i in range(1, len(messages)):
@@ -668,8 +728,10 @@ async def _call_and_parse(
         usage = retry_response.get("usage", {})
         first_usage = response.get("usage", {})
         combined_usage = {
-            "input_tokens": usage.get("input_tokens", 0) + first_usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0) + first_usage.get("output_tokens", 0),
+            "input_tokens": usage.get("input_tokens", 0)
+            + first_usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0)
+            + first_usage.get("output_tokens", 0),
         }
         retry_response = {**retry_response, "usage": combined_usage}
         return fix_output, retry_response
@@ -739,7 +801,10 @@ async def _call_with_format_retry(
                 repo_id=repo_id,
                 review_feedback=review_feedback,
             )
-            if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
+            if (
+                fix_output.confidence < LOW_CONFIDENCE_THRESHOLD
+                or not fix_output.patch.strip()
+            ):
                 return fix_output, response
 
     # Final attempt: validate and raise exhausted if it still fails.
@@ -794,16 +859,10 @@ async def generate_fix(
     # -------------------------------------------------------------------------
     # 1. Atomic attempt cap check — lock the Run row to prevent race conditions
     # -------------------------------------------------------------------------
-    await db.execute(
-        select(Run.id)
-        .where(Run.id == run.id)
-        .with_for_update()
-    )
+    await db.execute(select(Run.id).where(Run.id == run.id).with_for_update())
 
     count_result = await db.execute(
-        select(func.count())
-        .select_from(Attempt)
-        .where(Attempt.run_id == run.id)
+        select(func.count()).select_from(Attempt).where(Attempt.run_id == run.id)
     )
     existing_count: int = count_result.scalar_one()
 
@@ -914,7 +973,9 @@ async def generate_fix(
     await _persist_run_step(
         db=db,
         run_id=run.id,
-        step_name="fix_generator_deterministic" if used_deterministic else "fix_generator",
+        step_name="fix_generator_deterministic"
+        if used_deterministic
+        else "fix_generator",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
@@ -947,7 +1008,9 @@ async def _persist_run_step(
     latency_ms: int,
 ) -> None:
     """Insert a RunStep trace row. Never stores patch content."""
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (output_tokens * COST_PER_OUTPUT_TOKEN)
+    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
+        output_tokens * COST_PER_OUTPUT_TOKEN
+    )
     step = RunStep(
         run_id=run_id,
         step_name=step_name,

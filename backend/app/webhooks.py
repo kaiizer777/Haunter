@@ -20,7 +20,15 @@ import json
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    status,
+)
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -47,13 +55,15 @@ MAX_PAYLOAD_SIZE_BYTES = 2 * 1024 * 1024
 
 # Collaborator authority allowlist for bot invocation
 ALLOWED_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
-ALLOWED_WEBHOOK_EVENTS = frozenset({
-    "workflow_run",
-    "issue_comment",
-    "pull_request_review_comment",
-    "pull_request",
-    "push",
-})
+ALLOWED_WEBHOOK_EVENTS = frozenset(
+    {
+        "workflow_run",
+        "issue_comment",
+        "pull_request_review_comment",
+        "pull_request",
+        "push",
+    }
+)
 
 
 def _log_repo(owner: Any, name: Any) -> str:
@@ -86,7 +96,6 @@ async def _read_limited_body(request: Request) -> bytes:
             )
         buffer.extend(chunk)
     return bytes(buffer)
-
 
 
 @router.post("/github")
@@ -150,7 +159,11 @@ async def github_webhook(
 
     # 5. Filter event type — accept workflow_run, issue_comment, pull_request_review_comment
     if x_github_event not in ALLOWED_WEBHOOK_EVENTS:
-        logger.info("Ignored webhook event: %s (delivery_id=%s)", x_github_event, x_github_delivery)
+        logger.info(
+            "Ignored webhook event: %s (delivery_id=%s)",
+            x_github_event,
+            x_github_delivery,
+        )
         return {"status": "ignored", "reason": f"unsupported event: {x_github_event}"}
 
     # 6. Parse JSON payload
@@ -180,13 +193,19 @@ async def github_webhook(
 
         # Guard 1: Ignore CI events on Haunter's own fix branches
         # (feedback-loop guard — applies to the auditor path as well).
-        if payload.workflow_run.head_branch and payload.workflow_run.head_branch.startswith("haunter/"):
+        if (
+            payload.workflow_run.head_branch
+            and payload.workflow_run.head_branch.startswith("haunter/")
+        ):
             logger.info(
                 "Ignored workflow_run (delivery_id=%s): branch=%s is a Haunter fix branch — feedback loop guard",
                 x_github_delivery,
                 payload.workflow_run.head_branch,
             )
-            return {"status": "ignored", "reason": "haunter fix branch — feedback loop guard"}
+            return {
+                "status": "ignored",
+                "reason": "haunter fix branch — feedback loop guard",
+            }
 
         # Guard 2: Cross-check repository registration in DB
         owner = payload.repository.owner.login
@@ -250,7 +269,10 @@ async def github_webhook(
                 )
                 # Success runs are ignored by the fix pipeline but are a
                 # first-class auditor trigger when on_ci_success is enabled.
-                if payload.action != "completed" or payload.workflow_run.conclusion != "failure":
+                if (
+                    payload.action != "completed"
+                    or payload.workflow_run.conclusion != "failure"
+                ):
                     return {
                         "status": "audit_queued",
                         "audit_id": _audit_id,
@@ -276,7 +298,10 @@ async def github_webhook(
             )
 
         # Filter action & conclusion: only completed + failure trigger the fix pipeline
-        if payload.action != "completed" or payload.workflow_run.conclusion != "failure":
+        if (
+            payload.action != "completed"
+            or payload.workflow_run.conclusion != "failure"
+        ):
             logger.info(
                 "Ignored workflow_run (delivery_id=%s): action=%s, conclusion=%s",
                 x_github_delivery,
@@ -289,7 +314,9 @@ async def github_webhook(
             }
 
         # Phase 6.3 Feature Enforcement: Autonomous Fix Guard
-        auto_fix_decision = feature_enforcement.is_auto_fix_allowed(repo_settings.enable_auto_fix)
+        auto_fix_decision = feature_enforcement.is_auto_fix_allowed(
+            repo_settings.enable_auto_fix
+        )
         if not auto_fix_decision.allowed:
             logger.info(
                 "Ignored workflow_run (delivery_id=%s): %s",
@@ -327,6 +354,7 @@ async def github_webhook(
             }
 
         from app.adapters.hosting import get_hosting_adapter
+
         adapter = await get_hosting_adapter()
         await adapter.schedule_pipeline(new_run.id, background_tasks)
 
@@ -354,11 +382,16 @@ async def github_webhook(
 
         # Check repository registration in DB
         repo_data = data.get("repository") or {}
-        owner = repo_data.get("owner", {}).get("login") or repo_data.get("owner", {}).get("name")
+        owner = repo_data.get("owner", {}).get("login") or repo_data.get(
+            "owner", {}
+        ).get("name")
         repo_name = repo_data.get("name")
 
         if not owner or not repo_name:
-            logger.warning("Ignored pull_request (delivery_id=%s): missing repo owner/name in payload", x_github_delivery)
+            logger.warning(
+                "Ignored pull_request (delivery_id=%s): missing repo owner/name in payload",
+                x_github_delivery,
+            )
             return {"status": "ignored", "reason": "invalid repository payload"}
 
         stmt = select(Repo).where(Repo.owner == owner, Repo.name == repo_name)
@@ -381,12 +414,18 @@ async def github_webhook(
             is_draft, repo_settings.ignore_draft_prs
         )
         if not draft_decision.allowed:
-            logger.info("Ignored pull_request (delivery_id=%s): %s", x_github_delivery, draft_decision.reason)
+            logger.info(
+                "Ignored pull_request (delivery_id=%s): %s",
+                x_github_delivery,
+                draft_decision.reason,
+            )
             return {"status": "ignored", "reason": "draft PR"}
 
         # Guard 2: Ignore closed PRs
         if pr_data.get("state") == "closed":
-            logger.info("Ignored pull_request (delivery_id=%s): PR is closed", x_github_delivery)
+            logger.info(
+                "Ignored pull_request (delivery_id=%s): PR is closed", x_github_delivery
+            )
             return {"status": "ignored", "reason": "closed PR"}
 
         # Guard 3: Ignore bot PRs
@@ -398,17 +437,25 @@ async def github_webhook(
             or pr_user.get("type") == "Bot"
             or pr_user.get("login", "").endswith("[bot]")
         ):
-            logger.info("Ignored pull_request (delivery_id=%s): bot PR", x_github_delivery)
+            logger.info(
+                "Ignored pull_request (delivery_id=%s): bot PR", x_github_delivery
+            )
             return {"status": "ignored", "reason": "bot PR"}
 
         # Guard 4: Ignore Haunter fix branches (feedback loop guard)
         head_branch = pr_data.get("head", {}).get("ref") or ""
         if head_branch.startswith("haunter/"):
-            logger.info("Ignored pull_request (delivery_id=%s): haunter fix branch %s", x_github_delivery, head_branch)
+            logger.info(
+                "Ignored pull_request (delivery_id=%s): haunter fix branch %s",
+                x_github_delivery,
+                head_branch,
+            )
             return {"status": "ignored", "reason": "haunter fix branch"}
 
         # Guard 5: Branch Allowance Guard (Phase 6.3)
-        base_branch = pr_data.get("base", {}).get("ref") or repo.default_branch or "main"
+        base_branch = (
+            pr_data.get("base", {}).get("ref") or repo.default_branch or "main"
+        )
         branch_decision = feature_enforcement.is_pr_branch_allowed(
             target_branch=base_branch,
             head_branch=head_branch,
@@ -511,6 +558,7 @@ async def github_webhook(
         await db.refresh(new_review)
 
         from app.adapters.hosting import get_hosting_adapter
+
         adapter = await get_hosting_adapter()
         await adapter.schedule_review(new_review.id, background_tasks)
 
@@ -531,46 +579,70 @@ async def github_webhook(
 
         # Guard 1: Ignore tag pushes
         if ref.startswith("refs/tags/"):
-            logger.info("Ignored push (delivery_id=%s): tag push %s", x_github_delivery, ref)
+            logger.info(
+                "Ignored push (delivery_id=%s): tag push %s", x_github_delivery, ref
+            )
             return {"status": "ignored", "reason": "tag push"}
 
         # Guard 2: Ignore deleted refs
         if data.get("deleted") is True:
-            logger.info("Ignored push (delivery_id=%s): deleted ref %s", x_github_delivery, ref)
+            logger.info(
+                "Ignored push (delivery_id=%s): deleted ref %s", x_github_delivery, ref
+            )
             return {"status": "ignored", "reason": "deleted ref"}
 
         # Guard 3: Ignore bot commits
         sender = data.get("sender") or {}
         if sender.get("type") == "Bot" or sender.get("login", "").endswith("[bot]"):
-            logger.info("Ignored push (delivery_id=%s): bot sender %s", x_github_delivery, sender.get("login"))
+            logger.info(
+                "Ignored push (delivery_id=%s): bot sender %s",
+                x_github_delivery,
+                sender.get("login"),
+            )
             return {"status": "ignored", "reason": "bot push"}
 
         head_commit = data.get("head_commit") or {}
         author = head_commit.get("author") or {}
         author_name = (author.get("name") or "").lower()
         if "haunter" in author_name or "[bot]" in author_name:
-            logger.info("Ignored push (delivery_id=%s): bot commit author %s", x_github_delivery, author_name)
+            logger.info(
+                "Ignored push (delivery_id=%s): bot commit author %s",
+                x_github_delivery,
+                author_name,
+            )
             return {"status": "ignored", "reason": "bot commit"}
 
         # Guard 4: Ignore pushes to Haunter fix branches
         branch_name = ref.replace("refs/heads/", "")
         if branch_name.startswith("haunter/"):
-            logger.info("Ignored push (delivery_id=%s): haunter fix branch %s", x_github_delivery, branch_name)
+            logger.info(
+                "Ignored push (delivery_id=%s): haunter fix branch %s",
+                x_github_delivery,
+                branch_name,
+            )
             return {"status": "ignored", "reason": "haunter fix branch"}
 
         # Guard 5: Check valid commit SHA
         commit_sha = head_commit.get("id") or data.get("after")
         if not commit_sha or commit_sha == "0000000000000000000000000000000000000000":
-            logger.info("Ignored push (delivery_id=%s): empty or null commit SHA", x_github_delivery)
+            logger.info(
+                "Ignored push (delivery_id=%s): empty or null commit SHA",
+                x_github_delivery,
+            )
             return {"status": "ignored", "reason": "empty commit sha"}
 
         # Check repository registration in DB
         repo_data = data.get("repository") or {}
-        owner = repo_data.get("owner", {}).get("name") or repo_data.get("owner", {}).get("login")
+        owner = repo_data.get("owner", {}).get("name") or repo_data.get(
+            "owner", {}
+        ).get("login")
         repo_name = repo_data.get("name")
 
         if not owner or not repo_name:
-            logger.warning("Ignored push (delivery_id=%s): missing repo owner/name in payload", x_github_delivery)
+            logger.warning(
+                "Ignored push (delivery_id=%s): missing repo owner/name in payload",
+                x_github_delivery,
+            )
             return {"status": "ignored", "reason": "invalid repository payload"}
 
         stmt = select(Repo).where(Repo.owner == owner, Repo.name == repo_name)
@@ -590,7 +662,11 @@ async def github_webhook(
             branch_name, repo_settings.allowed_branches
         )
         if not branch_decision.allowed:
-            logger.info("Ignored push (delivery_id=%s): %s", x_github_delivery, branch_decision.reason)
+            logger.info(
+                "Ignored push (delivery_id=%s): %s",
+                x_github_delivery,
+                branch_decision.reason,
+            )
             return {"status": "skipped", "reason": branch_decision.reason}
 
         # Deduplication guard: ignore redundant deliveries for the same commit
@@ -630,6 +706,7 @@ async def github_webhook(
         await db.refresh(new_review)
 
         from app.adapters.hosting import get_hosting_adapter
+
         adapter = await get_hosting_adapter()
         await adapter.schedule_review(new_review.id, background_tasks)
 
@@ -647,7 +724,12 @@ async def github_webhook(
     # 1. Action filtering: must be 'created'
     action = data.get("action")
     if action != "created":
-        logger.info("Ignored %s (delivery_id=%s): action=%s (expected 'created')", x_github_event, x_github_delivery, action)
+        logger.info(
+            "Ignored %s (delivery_id=%s): action=%s (expected 'created')",
+            x_github_event,
+            x_github_delivery,
+            action,
+        )
         return {"status": "ignored", "reason": f"unsupported action: {action}"}
 
     # 2. Schema validation
@@ -665,7 +747,10 @@ async def github_webhook(
             )
         # Verify comment is on a Pull Request (not a pure issue)
         if not comment_payload.issue.pull_request:
-            logger.info("Ignored issue_comment (delivery_id=%s): comment is on an issue, not a pull request", x_github_delivery)
+            logger.info(
+                "Ignored issue_comment (delivery_id=%s): comment is on an issue, not a pull request",
+                x_github_delivery,
+            )
             return {"status": "ignored", "reason": "comment on issue, not pull request"}
         pr_number = comment_payload.issue.number
         comment_obj = comment_payload.comment
@@ -673,7 +758,9 @@ async def github_webhook(
         repo_name = comment_payload.repository.name
     else:  # pull_request_review_comment
         try:
-            pr_comment_payload = PullRequestReviewCommentWebhookPayload.model_validate(data)
+            pr_comment_payload = PullRequestReviewCommentWebhookPayload.model_validate(
+                data
+            )
         except ValidationError as e:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -694,7 +781,11 @@ async def github_webhook(
     # 3. Mention Gate: comment body must contain @haunter (case-insensitive)
     comment_body = comment_obj.body or ""
     if "@haunter" not in comment_body.lower():
-        logger.info("Ignored %s (delivery_id=%s): no @haunter mention in comment", x_github_event, x_github_delivery)
+        logger.info(
+            "Ignored %s (delivery_id=%s): no @haunter mention in comment",
+            x_github_event,
+            x_github_delivery,
+        )
         return {"status": "ignored", "reason": "no @haunter mention"}
 
     # 4. Collaborator Authority: author_association must be in OWNER, MEMBER, COLLABORATOR
@@ -736,7 +827,9 @@ async def github_webhook(
     _audit_type: Optional[str] = None
     try:
         _trigger = await audit_pipeline.get_auditor_trigger(db, repo.id)
-        _decision = audit_pipeline.evaluate_manual_comment(_trigger, action, comment_body)
+        _decision = audit_pipeline.evaluate_manual_comment(
+            _trigger, action, comment_body
+        )
         if _decision.should_audit and _decision.audit_type:
             if not pr_base_sha or not pr_head_sha:
                 _auditor_skip_reason = (
@@ -862,7 +955,9 @@ async def github_webhook(
         }
 
     # 8. Rate Limit Guard: Max 5 refinement iterations per PR
-    count_stmt = select(func.count()).select_from(Run).where(Run.parent_run_id == initial_run.id)
+    count_stmt = (
+        select(func.count()).select_from(Run).where(Run.parent_run_id == initial_run.id)
+    )
     child_count = await db.scalar(count_stmt) or 0
     if child_count >= 5:
         logger.warning(
@@ -934,6 +1029,7 @@ async def github_webhook(
 
     # 10. Schedule pipeline asynchronously
     from app.adapters.hosting import get_hosting_adapter
+
     adapter = await get_hosting_adapter()
     await adapter.schedule_pipeline(new_run.id, background_tasks)
 
@@ -944,4 +1040,3 @@ async def github_webhook(
         "comment_id": comment_obj.id,
         "delivery_id": x_github_delivery,
     }
-

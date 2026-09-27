@@ -40,6 +40,7 @@ from app.github.pr import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_repo(install_id: int = 123, default_branch: str = "main"):
     """Minimal Repo-like object for testing without DB."""
     repo = MagicMock()
@@ -54,6 +55,7 @@ def _make_repo(install_id: int = 123, default_branch: str = "main"):
 # ---------------------------------------------------------------------------
 # Test 1: owner injection → GitHubPRValidationError
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_create_branch_invalid_owner_rejected() -> None:
@@ -87,6 +89,7 @@ async def test_open_pr_invalid_repo_name_rejected() -> None:
 # Test 2: branch with invalid chars → GitHubPRValidationError
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_create_branch_injection_branch_name_rejected() -> None:
     """Branch name with semicolons or spaces must be rejected."""
@@ -103,6 +106,7 @@ async def test_create_branch_injection_branch_name_rejected() -> None:
 # ---------------------------------------------------------------------------
 # Test 3: branch > 255 chars → GitHubPRValidationError
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_create_branch_too_long_rejected() -> None:
@@ -121,6 +125,7 @@ async def test_create_branch_too_long_rejected() -> None:
 # Test 4: get_installation_token POSTs to correct URL with JWT auth
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_get_installation_token_posts_to_correct_url() -> None:
     """get_installation_token() must POST to /app/installations/{id}/access_tokens."""
@@ -138,9 +143,7 @@ async def test_get_installation_token_posts_to_correct_url() -> None:
         mock_settings.github_token = None
 
         with respx.mock(assert_all_called=True) as rx:
-            rx.post(
-                "https://api.github.com/app/installations/456/access_tokens"
-            ).mock(
+            rx.post("https://api.github.com/app/installations/456/access_tokens").mock(
                 return_value=httpx.Response(
                     201,
                     json={"token": fake_token, "expires_at": "2099-01-01T00:00:00Z"},
@@ -156,6 +159,7 @@ async def test_get_installation_token_posts_to_correct_url() -> None:
 # ---------------------------------------------------------------------------
 # Test 5: get_installation_token caches token (second call skips HTTP)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_get_installation_token_cached() -> None:
@@ -186,6 +190,7 @@ async def test_get_installation_token_cached() -> None:
 # Test 6: get_installation_token falls back to github_token for dev
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_get_installation_token_dev_fallback() -> None:
     """When App credentials not set, falls back to settings.github_token."""
@@ -206,6 +211,7 @@ async def test_get_installation_token_dev_fallback() -> None:
 # ---------------------------------------------------------------------------
 # Test 7: create_branch always sends force=False (never force-push)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.anyio
 async def test_create_branch_force_false() -> None:
@@ -239,6 +245,7 @@ async def test_create_branch_force_false() -> None:
 # Test 8: open_pr escapes XSS in title + body
 # ---------------------------------------------------------------------------
 
+
 def test_escape_pr_text_html_escapes_xss() -> None:
     """_escape_pr_text must html.escape < > & chars."""
     raw = "<script>alert('xss')</script> fix: something"
@@ -259,6 +266,7 @@ def test_escape_pr_text_redacts_secrets() -> None:
 # Test 9: open_pr body capped at 3000 chars
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_open_pr_body_capped_at_3000() -> None:
     """PR body > 3000 chars must be truncated to 3000 in the POST payload."""
@@ -269,7 +277,10 @@ async def test_open_pr_body_capped_at_3000() -> None:
         captured_body.append(body)
         return httpx.Response(
             201,
-            json={"html_url": "https://github.com/test-org/test-repo/pull/1", "number": 1},
+            json={
+                "html_url": "https://github.com/test-org/test-repo/pull/1",
+                "number": 1,
+            },
         )
 
     with respx.mock() as rx:
@@ -293,6 +304,7 @@ async def test_open_pr_body_capped_at_3000() -> None:
 # ---------------------------------------------------------------------------
 # Test 10: _escape_pr_text html entities for XSS
 # ---------------------------------------------------------------------------
+
 
 def test_escape_pr_text_entities() -> None:
     """Ampersand, angle brackets → HTML entities."""

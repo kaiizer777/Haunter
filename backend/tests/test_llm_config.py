@@ -37,7 +37,9 @@ async def test_get_active_model_config_empty_db_env_fallback(db: AsyncSession) -
 
 
 @pytest.mark.asyncio
-async def test_get_active_model_config_multiple_active_picks_latest(db: AsyncSession) -> None:
+async def test_get_active_model_config_multiple_active_picks_latest(
+    db: AsyncSession,
+) -> None:
     await truncate_all(db)
 
     older_cfg = ModelConfig(

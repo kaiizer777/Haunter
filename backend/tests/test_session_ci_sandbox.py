@@ -70,8 +70,12 @@ async def _drain_queue(queue: SseQueue) -> list[str]:
 def test_tool_definition_present() -> None:
     from app.services.session_orchestrator import _TOOLS
 
-    defs = [t for t in _TOOLS if t.get("function", {}).get("name") == "verify_in_ci_sandbox"]
-    assert len(defs) == 1, "verify_in_ci_sandbox must be registered exactly once in _TOOLS"
+    defs = [
+        t for t in _TOOLS if t.get("function", {}).get("name") == "verify_in_ci_sandbox"
+    ]
+    assert (
+        len(defs) == 1
+    ), "verify_in_ci_sandbox must be registered exactly once in _TOOLS"
     fn = defs[0]["function"]
     assert "isolated GitHub Actions CI sandbox mirror repo" in fn["description"]
     assert "streams CI logs live" in fn["description"]
@@ -92,7 +96,11 @@ def test_system_prompt_advertises_tool() -> None:
     from app.services.session_orchestrator import _build_system_prompt
 
     prompt = _build_system_prompt(
-        repo_owner="o", repo_name="r", branch_name="b", base_sha="a" * 40, staged_patches={}
+        repo_owner="o",
+        repo_name="r",
+        branch_name="b",
+        base_sha="a" * 40,
+        staged_patches={},
     )
     assert "verify_in_ci_sandbox(workflow_file, timeout_sec)" in prompt
 
@@ -137,7 +145,9 @@ def test_sse_helpers_wire_format() -> None:
 @pytest.mark.asyncio
 async def test_sse_queue_helpers_emit() -> None:
     queue = SseQueue()
-    await queue.put_sandbox_queued(run_url="https://example.com/run/1", workflow_name="ci.yml")
+    await queue.put_sandbox_queued(
+        run_url="https://example.com/run/1", workflow_name="ci.yml"
+    )
     await queue.put_sandbox_progress(step_name="dispatch", status="in_progress")
     items = await _drain_queue(queue)
     assert any("sandbox_queued" in i and "ci.yml" in i for i in items)
@@ -186,7 +196,11 @@ async def test_timeout_clamped_before_github_dispatch() -> None:
         ),
     ):
         await tool_verify_ci_sandbox(
-            timeout_sec=9999, queue=None, session=session, repo=repo, staged_patches=patches
+            timeout_sec=9999,
+            queue=None,
+            session=session,
+            repo=repo,
+            staged_patches=patches,
         )
     assert seen.get("timeout_sec") == 600
 
@@ -199,7 +213,11 @@ async def test_timeout_clamped_before_github_dispatch() -> None:
         ),
     ):
         await tool_verify_ci_sandbox(
-            timeout_sec=0, queue=None, session=session, repo=repo, staged_patches=patches
+            timeout_sec=0,
+            queue=None,
+            session=session,
+            repo=repo,
+            staged_patches=patches,
         )
     assert seen.get("timeout_sec") == 1
 
@@ -289,7 +307,11 @@ async def test_local_provider_routes_to_targeted_tests() -> None:
         ) as mock_gh,
     ):
         result = await tool_verify_ci_sandbox(
-            queue=None, session=session, repo=repo, staged_patches=patches, timeout_sec=120
+            queue=None,
+            session=session,
+            repo=repo,
+            staged_patches=patches,
+            timeout_sec=120,
         )
 
     mock_local.assert_awaited_once()
@@ -374,7 +396,9 @@ async def test_github_path_emits_streaming_events() -> None:
         ),
     ):
         await tool_verify_ci_sandbox(
-            queue=queue, session=session, repo=repo,
+            queue=queue,
+            session=session,
+            repo=repo,
             staged_patches={"src/a.py": "@@ d\n"},
         )
 
@@ -420,7 +444,12 @@ async def test_verify_session_patches_streams_polling_logs() -> None:
 
     fake_runner = MagicMock()
     fake_runner.verify = AsyncMock(
-        return_value={"passed": True, "reason": "ok", "run_url": "https://x/run/1", "duration_ms": 10}
+        return_value={
+            "passed": True,
+            "reason": "ok",
+            "run_url": "https://x/run/1",
+            "duration_ms": 10,
+        }
     )
     with patch(
         "app.sandbox._load_github_actions_runner", return_value=lambda: fake_runner

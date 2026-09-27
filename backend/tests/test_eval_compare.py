@@ -149,8 +149,12 @@ def test_compare_eval_objects_regression_detected():
 
 def test_compare_eval_objects_no_regression_ok():
     """When scores are equal or improve, verdict is OK and any_regression=False."""
-    eval_a = _make_eval_result(overall_accuracy=0.80, cg_score=0.80, fg_score=0.80, pass_rate=0.80)
-    eval_b = _make_eval_result(overall_accuracy=0.82, cg_score=0.85, fg_score=0.81, pass_rate=0.85)
+    eval_a = _make_eval_result(
+        overall_accuracy=0.80, cg_score=0.80, fg_score=0.80, pass_rate=0.80
+    )
+    eval_b = _make_eval_result(
+        overall_accuracy=0.82, cg_score=0.85, fg_score=0.81, pass_rate=0.85
+    )
 
     report = compare_eval_objects(eval_a, eval_b)
 
@@ -192,7 +196,9 @@ async def test_compare_eval_missing_eval_a_raises_value_error():
     id_b = uuid.uuid4()
 
     mock_db = AsyncMock()
-    mock_db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+    mock_db.execute.return_value = MagicMock(
+        scalar_one_or_none=MagicMock(return_value=None)
+    )
 
     mock_session_maker = MagicMock()
     mock_session_maker.return_value.__aenter__.return_value = mock_db

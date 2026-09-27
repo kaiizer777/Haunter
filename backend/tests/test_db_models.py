@@ -14,7 +14,16 @@ from sqlalchemy.pool import NullPool
 
 from app.config import _to_asyncpg_url
 from app.db import engine, engine_unpooled
-from app.models import Attempt, AuditJob, ModelConfig, Repo, RepoSettings, Run, RunStep, User
+from app.models import (
+    Attempt,
+    AuditJob,
+    ModelConfig,
+    Repo,
+    RepoSettings,
+    Run,
+    RunStep,
+    User,
+)
 from tests.conftest import truncate_all
 
 
@@ -57,7 +66,9 @@ def test_to_asyncpg_url_variants():
 def test_nullpool_on_both_engines():
     """Assert both pooled and unpooled engines use NullPool for Neon compatibility."""
     assert isinstance(engine.pool, NullPool), "Runtime engine must use NullPool"
-    assert isinstance(engine_unpooled.pool, NullPool), "Unpooled migration engine must use NullPool"
+    assert isinstance(
+        engine_unpooled.pool, NullPool
+    ), "Unpooled migration engine must use NullPool"
 
 
 @pytest.mark.asyncio
@@ -78,7 +89,9 @@ async def test_users_github_id_unique_constraint(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_repos_user_owner_name_unique_per_user_cross_user_allowed(db: AsyncSession):
+async def test_repos_user_owner_name_unique_per_user_cross_user_allowed(
+    db: AsyncSession,
+):
     """
     Assert (user_id, owner, name) uniqueness:
     - Same user duplicate repo fails with IntegrityError.
@@ -147,21 +160,32 @@ async def test_fk_cascade_delete_user_repos_runs(db: AsyncSession):
     await db.refresh(run)
     run_id = run.id
 
-    step = RunStep(run_id=run_id, step_name="context_gatherer", input_tokens=10, output_tokens=20)
+    step = RunStep(
+        run_id=run_id, step_name="context_gatherer", input_tokens=10, output_tokens=20
+    )
     attempt = Attempt(run_id=run_id, attempt_number=1, patch_text="diff --git ...")
     db.add_all([step, attempt])
     await db.commit()
 
     # Delete the root user via SQL-level delete to test DB ON DELETE CASCADE
     from sqlalchemy import delete as sa_delete
+
     await db.execute(sa_delete(User).where(User.id == user_id))
     await db.commit()
 
     # Verify all children were deleted
-    assert (await db.execute(select(Repo).where(Repo.id == repo_id))).scalar_one_or_none() is None
-    assert (await db.execute(select(Run).where(Run.id == run_id))).scalar_one_or_none() is None
-    assert (await db.execute(select(RunStep).where(RunStep.run_id == run_id))).scalars().all() == []
-    assert (await db.execute(select(Attempt).where(Attempt.run_id == run_id))).scalars().all() == []
+    assert (
+        await db.execute(select(Repo).where(Repo.id == repo_id))
+    ).scalar_one_or_none() is None
+    assert (
+        await db.execute(select(Run).where(Run.id == run_id))
+    ).scalar_one_or_none() is None
+    assert (
+        await db.execute(select(RunStep).where(RunStep.run_id == run_id))
+    ).scalars().all() == []
+    assert (
+        await db.execute(select(Attempt).where(Attempt.run_id == run_id))
+    ).scalars().all() == []
 
 
 @pytest.mark.asyncio
@@ -318,9 +342,7 @@ async def test_audit_job_has_recoverable_dispatch_defaults(
         # `delivery_fingerprint` is NOT NULL by schema: a delivery id alone is
         # not an idempotency key, so the payload digest is part of the row's
         # identity and has no default to fall back on.
-        delivery_fingerprint=hashlib.sha256(
-            b"outbox-defaults-payload"
-        ).hexdigest(),
+        delivery_fingerprint=hashlib.sha256(b"outbox-defaults-payload").hexdigest(),
         audit_type="pr_audit",
         base_sha="b" * 40,
         status="queued",

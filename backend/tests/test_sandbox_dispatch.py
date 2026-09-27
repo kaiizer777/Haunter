@@ -91,7 +91,9 @@ async def test_verify_github_actions_success_legacy_shape(
         return_value=make_result(passed=True, reason=None, duration_ms=1234)
     )
     mock_runner_class = MagicMock(return_value=mock_runner_instance)
-    monkeypatch.setattr(app.sandbox, "_load_github_actions_runner", lambda: mock_runner_class)
+    monkeypatch.setattr(
+        app.sandbox, "_load_github_actions_runner", lambda: mock_runner_class
+    )
 
     mock_attempt = MagicMock()
     mock_attempt.patch_text = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-a\n+b"
@@ -134,7 +136,9 @@ async def test_verify_github_actions_failure_legacy_shape(
         )
     )
     mock_runner_class = MagicMock(return_value=mock_runner_instance)
-    monkeypatch.setattr(app.sandbox, "_load_github_actions_runner", lambda: mock_runner_class)
+    monkeypatch.setattr(
+        app.sandbox, "_load_github_actions_runner", lambda: mock_runner_class
+    )
 
     mock_attempt = MagicMock()
     mock_attempt.patch_text = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-a\n+b"
@@ -182,7 +186,10 @@ async def test_verify_lazy_load_import_failure(monkeypatch: pytest.MonkeyPatch) 
 
     result = await verify(attempt=mock_attempt, run=mock_run, repo=mock_repo)
     assert result["status"] == "fail"
-    assert "[non-retryable] GitHub Actions sandbox runner unavailable" in result["failure_reason"]
+    assert (
+        "[non-retryable] GitHub Actions sandbox runner unavailable"
+        in result["failure_reason"]
+    )
     assert result["build_duration_ms"] == 0
 
 
@@ -255,7 +262,9 @@ async def test_verify_db_session_user_github_id_resolution(
 
     # Exception in db.get logs warning and falls back to None
     mock_db.get = AsyncMock(side_effect=Exception("DB lookup failed"))
-    res_err = await verify(attempt=mock_attempt, run=mock_run, repo=mock_repo, db=mock_db)
+    res_err = await verify(
+        attempt=mock_attempt, run=mock_run, repo=mock_repo, db=mock_db
+    )
     assert res_err["status"] == "pass"
     assert captured_inputs[1].user_github_id is None
 
@@ -297,6 +306,7 @@ def test_get_runner_and_load_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "sandbox_provider", "github_actions")
     runner = _get_runner()
     from app.sandbox.github_actions_runner import GitHubActionsSandboxRunner
+
     assert isinstance(runner, GitHubActionsSandboxRunner)
 
     monkeypatch.setattr(settings, "sandbox_provider", "invalid_provider")

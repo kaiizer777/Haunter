@@ -43,7 +43,9 @@ def _validate_file_path(path: str) -> str:
     Raises ValueError with a descriptive message on violation.
     """
     if len(path) > _MAX_PATH_LEN:
-        raise ValueError(f"File path exceeds maximum length ({len(path)} > {_MAX_PATH_LEN})")
+        raise ValueError(
+            f"File path exceeds maximum length ({len(path)} > {_MAX_PATH_LEN})"
+        )
     if path.startswith("/"):
         raise ValueError(f"Absolute path rejected: {path!r}")
     if ".." in path:
@@ -59,6 +61,7 @@ validate_file_path = _validate_file_path
 # ---------------------------------------------------------------------------
 # Glob pattern matching helper
 # ---------------------------------------------------------------------------
+
 
 def _glob_to_regex(pat: str) -> re.Pattern[str]:
     """
@@ -104,6 +107,7 @@ def _glob_to_regex(pat: str) -> re.Pattern[str]:
 # ---------------------------------------------------------------------------
 # Recon Tool Handlers
 # ---------------------------------------------------------------------------
+
 
 async def tool_read_file_slice(
     path: str,
@@ -243,10 +247,30 @@ async def tool_grep_search(
         ".mypy_cache/",
     )
     _BINARY_EXTS = (
-        ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg",
-        ".pdf", ".zip", ".tar", ".gz", ".exe", ".bin",
-        ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mp3",
-        ".wav", ".pyc", ".so", ".dylib", ".dll", ".wasm",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".ico",
+        ".svg",
+        ".pdf",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".exe",
+        ".bin",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".mp4",
+        ".mp3",
+        ".wav",
+        ".pyc",
+        ".so",
+        ".dylib",
+        ".dll",
+        ".wasm",
     )
 
     candidate_files: list[str] = []

@@ -219,4 +219,3 @@ def test_make_result_returns_expected_dict_shape() -> None:
     assert fail_res["passed"] is False
     assert fail_res["reason"] == "error occurred"
     assert fail_res["duration_ms"] == 250
-

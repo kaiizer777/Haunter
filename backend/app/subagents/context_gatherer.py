@@ -96,7 +96,9 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"npg_[A-Za-z0-9]{20,}"), "[REDACTED]"),
     # Generic high-entropy Bearer / token headers
     (
-        re.compile(r"(?i)(?:authorization|bearer|token)\s*[:=]\s*[A-Za-z0-9\-_.~+/]{20,}"),
+        re.compile(
+            r"(?i)(?:authorization|bearer|token)\s*[:=]\s*[A-Za-z0-9\-_.~+/]{20,}"
+        ),
         "[REDACTED_AUTH_HEADER]",
     ),
 ]
@@ -147,7 +149,9 @@ def _extract_file_paths_from_diff(diff_text: str) -> list[str]:
     return paths
 
 
-def _discover_candidate_files_to_inspect(logs_text: str, repo_paths: list[str]) -> tuple[list[str], list[str]]:
+def _discover_candidate_files_to_inspect(
+    logs_text: str, repo_paths: list[str]
+) -> tuple[list[str], list[str]]:
     """
     Identify up to 2 candidate implementation files related to the failure,
     plus up to 1 candidate test file.
@@ -157,7 +161,9 @@ def _discover_candidate_files_to_inspect(logs_text: str, repo_paths: list[str]) 
     test_files: list[str] = []
 
     # 1. Match test file names (e.g. tests/test_analytics.py or test_analytics.py)
-    test_file_matches = re.findall(r"(?:[\w\-/]+/)?(test_[\w\-]+)\.(?:py|ts|js)", logs_text or "")
+    test_file_matches = re.findall(
+        r"(?:[\w\-/]+/)?(test_[\w\-]+)\.(?:py|ts|js)", logs_text or ""
+    )
     test_stems = set(test_file_matches)
 
     matching_files: list[str] = []
@@ -171,7 +177,9 @@ def _discover_candidate_files_to_inspect(logs_text: str, repo_paths: list[str]) 
                     if p not in matching_files:
                         matching_files.append(p)
             else:
-                if (base_stem == t_stem or base_stem == f"test_{core_name}") and p not in test_files:
+                if (
+                    base_stem == t_stem or base_stem == f"test_{core_name}"
+                ) and p not in test_files:
                     test_files.append(p)
 
     # Prioritize core logic over routers: core/, services/, models/ > api/, routers/
@@ -198,7 +206,12 @@ def _discover_candidate_files_to_inspect(logs_text: str, repo_paths: list[str]) 
     for tf in trace_files:
         norm_tf = tf.replace("\\", "/").strip()
         for p in repo_paths:
-            if (p == norm_tf or p.endswith("/" + norm_tf)) and not p.startswith("test") and "/test" not in p and "/tests/" not in p:
+            if (
+                (p == norm_tf or p.endswith("/" + norm_tf))
+                and not p.startswith("test")
+                and "/test" not in p
+                and "/tests/" not in p
+            ):
                 if p not in candidates:
                     candidates.append(p)
 
@@ -275,10 +288,14 @@ async def _safe_fetch(coro: Any, label: str) -> Any:
             result = json.dumps(result, default=str)
         return str(result) if result else ""
     except asyncio.TimeoutError:
-        logger.warning("context_gatherer: %s fetch timed out after %ss", label, FETCH_TIMEOUT_S)
+        logger.warning(
+            "context_gatherer: %s fetch timed out after %ss", label, FETCH_TIMEOUT_S
+        )
         return ""
     except Exception as exc:
-        logger.warning("context_gatherer: %s fetch failed (%s: %s)", label, type(exc).__name__, exc)
+        logger.warning(
+            "context_gatherer: %s fetch failed (%s: %s)", label, type(exc).__name__, exc
+        )
         return ""
 
 
@@ -325,6 +342,7 @@ async def gather_pr_feedback_context(
     token: Optional[str] = None
     try:
         from app.github.pr import get_installation_token
+
         token = await get_installation_token(repo)
     except Exception:
         token = None
@@ -355,7 +373,9 @@ async def gather_pr_feedback_context(
     if pr_number:
         comments_raw, diff_raw = await asyncio.gather(
             _safe_fetch(
-                gh.fetch_pr_comments(owner=owner, repo=name, pr_number=pr_number, token=token),
+                gh.fetch_pr_comments(
+                    owner=owner, repo=name, pr_number=pr_number, token=token
+                ),
                 label="pr_comments",
             ),
             _safe_fetch(
@@ -373,9 +393,15 @@ async def gather_pr_feedback_context(
         if not isinstance(item, dict):
             continue
         c_body = item.get("body", "")
-        author = item.get("user", {}).get("login", "unknown") if isinstance(item.get("user"), dict) else "unknown"
+        author = (
+            item.get("user", {}).get("login", "unknown")
+            if isinstance(item.get("user"), dict)
+            else "unknown"
+        )
         assoc = item.get("author_association", "NONE")
-        formatted_comments.append(f"Comment by @{author} ({assoc}):\n{c_body.strip()}\n")
+        formatted_comments.append(
+            f"Comment by @{author} ({assoc}):\n{c_body.strip()}\n"
+        )
         if "@haunter" in c_body.lower():
             latest_reviewer_instruction = c_body.strip()
 
@@ -384,10 +410,20 @@ async def gather_pr_feedback_context(
 
     # 4. Redact secrets across all assembled sections
     clean_instruction = _redact_secrets(latest_reviewer_instruction)
-    clean_comments = _redact_secrets("\n---\n".join(formatted_comments)) if formatted_comments else "(no comments found)"
+    clean_comments = (
+        _redact_secrets("\n---\n".join(formatted_comments))
+        if formatted_comments
+        else "(no comments found)"
+    )
     clean_patch = _redact_secrets(prior_patch) if prior_patch else "(no previous patch)"
-    clean_notes = _redact_secrets(prior_strategy_notes) if prior_strategy_notes else "(none)"
-    clean_diff = _redact_secrets(str(diff_raw or "")) if diff_raw else "(no branch diff available)"
+    clean_notes = (
+        _redact_secrets(prior_strategy_notes) if prior_strategy_notes else "(none)"
+    )
+    clean_diff = (
+        _redact_secrets(str(diff_raw or ""))
+        if diff_raw
+        else "(no branch diff available)"
+    )
 
     # Truncate to CAP_CHARS
     clean_instruction = clean_instruction[:CAP_CHARS]
@@ -487,7 +523,13 @@ async def gather_context(
     #    below. If the model returns whitespace / hits max_tokens, we try
     #    once more with a tighter, force-prose prompt before declaring failure.
     # -------------------------------------------------------------------------
-    summary, response, latency_ms, input_tokens, output_tokens = await _call_with_empty_retry(
+    (
+        summary,
+        response,
+        latency_ms,
+        input_tokens,
+        output_tokens,
+    ) = await _call_with_empty_retry(
         logs_clean=logs_clean,
         diff_clean=diff_clean,
         meta_clean=meta_clean,
@@ -517,9 +559,8 @@ async def gather_context(
     file_paths = _extract_file_paths_from_diff(diff_clean)
     tree_paths: list[str] = []
     if file_paths:
-        file_section = (
-            "\n\n## Files in the failing commit\n"
-            + "\n".join(f"- {p}" for p in file_paths)
+        file_section = "\n\n## Files in the failing commit\n" + "\n".join(
+            f"- {p}" for p in file_paths
         )
         summary = (summary or "").rstrip() + file_section
         logger.info(
@@ -531,9 +572,8 @@ async def gather_context(
         try:
             tree_paths = await gh.fetch_repo_tree_paths(owner=owner, repo=name, sha=sha)
             if tree_paths:
-                tree_section = (
-                    "\n\n## Repository Files\n"
-                    + "\n".join(f"- {p}" for p in tree_paths)
+                tree_section = "\n\n## Repository Files\n" + "\n".join(
+                    f"- {p}" for p in tree_paths
                 )
                 summary = (summary or "").rstrip() + tree_section
                 logger.info(
@@ -542,7 +582,11 @@ async def gather_context(
                     len(tree_paths),
                 )
         except Exception as exc:
-            logger.warning("context_gatherer: run=%s failed to fetch repo tree paths: %s", run.id, exc)
+            logger.warning(
+                "context_gatherer: run=%s failed to fetch repo tree paths: %s",
+                run.id,
+                exc,
+            )
 
     # -------------------------------------------------------------------------
     # 7. Discover and inject source code of candidate failing files & tests
@@ -551,9 +595,13 @@ async def gather_context(
     all_known_paths = file_paths or tree_paths
     if all_known_paths:
         try:
-            candidate_files, test_files = _discover_candidate_files_to_inspect(logs_clean, all_known_paths)
+            candidate_files, test_files = _discover_candidate_files_to_inspect(
+                logs_clean, all_known_paths
+            )
             for cand_path in candidate_files:
-                file_content = await gh.fetch_file_content(owner=owner, repo=name, path=cand_path, sha=sha)
+                file_content = await gh.fetch_file_content(
+                    owner=owner, repo=name, path=cand_path, sha=sha
+                )
                 if file_content:
                     fetched_contents[cand_path] = file_content
                     lines = file_content.splitlines()
@@ -576,7 +624,9 @@ async def gather_context(
                     )
 
             for test_path in test_files:
-                test_content = await gh.fetch_file_content(owner=owner, repo=name, path=test_path, sha=sha)
+                test_content = await gh.fetch_file_content(
+                    owner=owner, repo=name, path=test_path, sha=sha
+                )
                 if test_content:
                     fetched_contents[test_path] = test_content
                     lines = test_content.splitlines()
@@ -598,7 +648,11 @@ async def gather_context(
                         len(lines),
                     )
         except Exception as exc:
-            logger.warning("context_gatherer: run=%s failed to inject candidate source/test code: %s", run.id, exc)
+            logger.warning(
+                "context_gatherer: run=%s failed to inject candidate source/test code: %s",
+                run.id,
+                exc,
+            )
 
     # -------------------------------------------------------------------------
     # 8. Deep AST & Symbol Call-Graph Context Expansion (Feature 3)
@@ -609,22 +663,32 @@ async def gather_context(
         combined_paths = list(file_paths)
         if not tree_paths:
             try:
-                tree_paths = await gh.fetch_repo_tree_paths(owner=owner, repo=name, sha=sha)
+                tree_paths = await gh.fetch_repo_tree_paths(
+                    owner=owner, repo=name, sha=sha
+                )
             except Exception as exc:
-                logger.warning("context_gatherer: run=%s failed to fetch repo tree for AST: %s", run.id, exc)
+                logger.warning(
+                    "context_gatherer: run=%s failed to fetch repo tree for AST: %s",
+                    run.id,
+                    exc,
+                )
 
         if tree_paths:
             for tp in tree_paths:
                 if tp not in combined_paths:
                     combined_paths.append(tp)
 
-        frames = extract_stack_frames(logs_clean, repo_paths=combined_paths or None, max_frames=5)
+        frames = extract_stack_frames(
+            logs_clean, repo_paths=combined_paths or None, max_frames=5
+        )
         if frames:
             ast_sections: list[str] = []
             for frame in frames:
                 content = fetched_contents.get(frame.file_path)
                 if not content:
-                    content = await gh.fetch_file_content(owner=owner, repo=name, path=frame.file_path, sha=sha)
+                    content = await gh.fetch_file_content(
+                        owner=owner, repo=name, path=frame.file_path, sha=sha
+                    )
                     if content:
                         fetched_contents[frame.file_path] = content
 
@@ -632,7 +696,9 @@ async def gather_context(
                     if frame.file_path.endswith(".py"):
                         ast_ctx = extract_python_ast_context(content, frame.line_number)
                     else:
-                        ast_ctx = extract_generic_symbol_context(content, frame.line_number, frame.symbol_name)
+                        ast_ctx = extract_generic_symbol_context(
+                            content, frame.line_number, frame.symbol_name
+                        )
 
                     if ast_ctx:
                         formatted = format_ast_context(frame, ast_ctx)
@@ -641,14 +707,20 @@ async def gather_context(
 
             if ast_sections:
                 ast_header = "\n\n## Enclosing Scope & Symbol Context\n"
-                summary = (summary or "").rstrip() + ast_header + "\n\n".join(ast_sections)
+                summary = (
+                    (summary or "").rstrip() + ast_header + "\n\n".join(ast_sections)
+                )
                 logger.info(
                     "context_gatherer: run=%s injected AST & symbol context for %d frame(s)",
                     run.id,
                     len(ast_sections),
                 )
     except Exception as exc:
-        logger.warning("context_gatherer: run=%s failed to extract AST symbol context: %s", run.id, exc)
+        logger.warning(
+            "context_gatherer: run=%s failed to extract AST symbol context: %s",
+            run.id,
+            exc,
+        )
 
     # -------------------------------------------------------------------------
     # 9. Return distilled summary (with file list and symbol context appended)
@@ -744,14 +816,17 @@ async def _call_with_empty_retry(
     t0 = time.monotonic()
     try:
         response = await asyncio.wait_for(
-            llm.complete(messages=messages, db=db, repo_id=run.repo_id, max_tokens=10_000_000),
+            llm.complete(
+                messages=messages, db=db, repo_id=run.repo_id, max_tokens=10_000_000
+            ),
             timeout=FETCH_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         logger.error(
             "context_gatherer: LLM call (attempt 1) timed out for run %s after %dms",
-            run.id, elapsed_ms,
+            run.id,
+            elapsed_ms,
         )
         raise TimeoutError(
             f"context_gatherer LLM call timed out after {elapsed_ms}ms "
@@ -775,7 +850,10 @@ async def _call_with_empty_retry(
     logger.warning(
         "context_gatherer: run=%s attempt 1 returned empty (model=%s, "
         "output_tokens=%d, latency_ms=%d) — retrying with tighter prompt",
-        run.id, response.get("model", "unknown"), first_out, first_latency_ms,
+        run.id,
+        response.get("model", "unknown"),
+        first_out,
+        first_latency_ms,
     )
 
     retry_messages = _build_messages(logs_clean, diff_clean, meta_clean, retry=True)
@@ -794,7 +872,8 @@ async def _call_with_empty_retry(
         elapsed_ms = int((time.monotonic() - t1) * 1000)
         logger.error(
             "context_gatherer: LLM call (attempt 2 / retry) timed out for run %s after %dms",
-            run.id, elapsed_ms,
+            run.id,
+            elapsed_ms,
         )
         raise TimeoutError(
             f"context_gatherer LLM call (retry) timed out after {elapsed_ms}ms "
@@ -830,7 +909,10 @@ async def _call_with_empty_retry(
     logger.error(
         "context_gatherer: run=%s BOTH attempts returned empty "
         "(model=%s, total_output_tokens=%d, total_latency_ms=%d) — treating as failure",
-        run.id, model, total_out, total_latency,
+        run.id,
+        model,
+        total_out,
+        total_latency,
     )
     await _persist_run_step(
         db=db,
@@ -865,7 +947,9 @@ async def _persist_run_step(
     Cost is a placeholder estimate; replace with real pricing from provider docs.
     Raw inputs are NEVER stored here — only token counts and latency.
     """
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (output_tokens * COST_PER_OUTPUT_TOKEN)
+    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
+        output_tokens * COST_PER_OUTPUT_TOKEN
+    )
     step = RunStep(
         run_id=run_id,
         step_name=step_name if not error else f"{step_name}_error",

@@ -112,9 +112,7 @@ def self_invoke_secret(
     Without it, `claim_next_queued_job` fails closed by design, so every test in
     this module that reaches the outbox needs it configured.
     """
-    monkeypatch.setattr(
-        settings, "audit_self_invoke_secret", TEST_SELF_INVOKE_SECRET
-    )
+    monkeypatch.setattr(settings, "audit_self_invoke_secret", TEST_SELF_INVOKE_SECRET)
     yield
 
 
@@ -127,7 +125,9 @@ def deny_external_http(
     async def guarded_send(self, request, **kwargs):
         if isinstance(self._transport, httpx.ASGITransport):
             return await original_send(self, request, **kwargs)
-        raise AssertionError(f"external HTTP blocked in routing tests: {request.url.host}")
+        raise AssertionError(
+            f"external HTTP blocked in routing tests: {request.url.host}"
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "send", guarded_send)
     yield
@@ -345,7 +345,10 @@ async def post_signed(
 async def test_audit_hmac_missing_signature_rejected(client: httpx.AsyncClient):
     resp = await client.post(
         "/webhooks/github",
-        headers={"X-GitHub-Event": "pull_request", "X-GitHub-Delivery": str(uuid.uuid4())},
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-GitHub-Delivery": str(uuid.uuid4()),
+        },
         json={"action": "opened"},
     )
     assert resp.status_code == 401
@@ -397,12 +400,24 @@ def test_audit_verify_signature_uses_compare_digest():
     # Single-byte tamper must fail even though JSON semantics are identical.
     tampered = bytearray(body)
     tampered[0] ^= 0x01
-    assert audit_pipeline.verify_github_signature(bytes(tampered), good, TEST_SECRET) is False
+    assert (
+        audit_pipeline.verify_github_signature(bytes(tampered), good, TEST_SECRET)
+        is False
+    )
     # Malformed / missing inputs never raise — they return False (→ 401).
     assert audit_pipeline.verify_github_signature(body, None, TEST_SECRET) is False
-    assert audit_pipeline.verify_github_signature(body, "no-prefix", TEST_SECRET) is False
+    assert (
+        audit_pipeline.verify_github_signature(body, "no-prefix", TEST_SECRET) is False
+    )
     assert audit_pipeline.verify_github_signature(body, good, None) is False
-    assert audit_pipeline.verify_github_signature("not-bytes", good, TEST_SECRET) is False  # type: ignore[arg-type]
+    assert (
+        audit_pipeline.verify_github_signature(
+            "not-bytes",  # type: ignore[arg-type]
+            good,
+            TEST_SECRET,
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -417,7 +432,10 @@ def test_audit_verify_signature_uses_compare_digest():
 )
 def test_audit_signature_rejects_malformed_unicode_length_and_non_hex(signature: str):
     with patch("hmac.compare_digest", wraps=hmac.compare_digest) as spy:
-        assert audit_pipeline.verify_github_signature(b"{}", signature, TEST_SECRET) is False
+        assert (
+            audit_pipeline.verify_github_signature(b"{}", signature, TEST_SECRET)
+            is False
+        )
     spy.assert_not_called()
 
 
@@ -426,7 +444,9 @@ async def test_audit_raw_body_whitespace_invariant(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
     """Signature is computed over raw bytes: indented payload still verifies."""
-    await seed_repo(fake_audit_db, fake_audit_user_factory, "ws-audit-org", "ws-audit-repo")
+    await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "ws-audit-org", "ws-audit-repo"
+    )
     payload = make_pr_payload(
         "ws-audit-org",
         "ws-audit-repo",
@@ -471,7 +491,9 @@ class CountingChunkedBody:
     header, so the cheap header pre-check cannot be what rejects the request.
     """
 
-    def __init__(self, payload: bytes, chunk_size: int = WEBHOOK_STREAM_CHUNK_BYTES) -> None:
+    def __init__(
+        self, payload: bytes, chunk_size: int = WEBHOOK_STREAM_CHUNK_BYTES
+    ) -> None:
         self._payload = payload
         self._chunk_size = chunk_size
         self.bytes_produced = 0
@@ -625,15 +647,19 @@ def test_webhook_ingress_never_buffers_the_body_unbounded():
 # ---------------------------------------------------------------------------
 
 
-
 @pytest.mark.asyncio
 async def test_audit_pr_opened_dispatches(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "pr-audit-org", "pr-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "pr-audit-org", "pr-audit-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     payload = make_pr_payload(
-        "pr-audit-org", "pr-audit-repo", action="opened", pr_number=42,
+        "pr-audit-org",
+        "pr-audit-repo",
+        action="opened",
+        pr_number=42,
         head_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     )
     with patch(
@@ -644,7 +670,9 @@ async def test_audit_pr_opened_dispatches(
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"
     job = await fake_audit_db.scalar(
-        select(AuditJob).where(AuditJob.repo_id == repo.id, AuditJob.audit_type == "pr_audit")
+        select(AuditJob).where(
+            AuditJob.repo_id == repo.id, AuditJob.audit_type == "pr_audit"
+        )
     )
     assert job is not None
     assert job.status == "queued"
@@ -659,7 +687,9 @@ async def test_slow_audit_worker_does_not_block_existing_review_work(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "independent-org", "independent-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "independent-org", "independent-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     base_sha = "9999888877776666555544443333222211110000"
     first_payload = make_pr_payload(
@@ -764,7 +794,9 @@ async def test_real_outbox_worker_runs_read_only_report_path_without_core_patche
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "full-audit-org", "full-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "full-audit-org", "full-audit-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     base_sha = "a" * 40
     head_sha = "b" * 40
@@ -880,7 +912,9 @@ async def test_manual_audit_pins_both_endpoints_before_empty_diff_fetch(
     delivery is created pinned here and the empty diff is fetched against
     exactly those SHAs — never against the PR's current head.
     """
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "manual-pin-org", "manual-pin-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "manual-pin-org", "manual-pin-repo"
+    )
     # The worker re-verifies the persisted trigger before doing any external
     # work, so this repo has to be one where the auditor is actually enabled.
     await set_repo_auditor_settings(fake_audit_db, repo)
@@ -944,10 +978,15 @@ async def test_manual_audit_pins_both_endpoints_before_empty_diff_fetch(
 async def test_audit_pr_synchronize_dispatches(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "sync-audit-org", "sync-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "sync-audit-org", "sync-audit-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     payload = make_pr_payload(
-        "sync-audit-org", "sync-audit-repo", action="synchronize", pr_number=43,
+        "sync-audit-org",
+        "sync-audit-repo",
+        action="synchronize",
+        pr_number=43,
         head_sha="cccccccccccccccccccccccccccccccccccccccc",
     )
     with patch(
@@ -958,7 +997,9 @@ async def test_audit_pr_synchronize_dispatches(
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"
     job = await fake_audit_db.scalar(
-        select(AuditJob).where(AuditJob.repo_id == repo.id, AuditJob.audit_type == "pr_audit")
+        select(AuditJob).where(
+            AuditJob.repo_id == repo.id, AuditJob.audit_type == "pr_audit"
+        )
     )
     assert job is not None
     assert job.pr_number == 43
@@ -971,8 +1012,12 @@ async def test_audit_pr_synchronize_dispatches(
 async def test_audit_pr_unsupported_action_ignored(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    await seed_repo(fake_audit_db, fake_audit_user_factory, "ign-audit-org", "ign-audit-repo")
-    payload = make_pr_payload("ign-audit-org", "ign-audit-repo", action="labeled", pr_number=44)
+    await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "ign-audit-org", "ign-audit-repo"
+    )
+    payload = make_pr_payload(
+        "ign-audit-org", "ign-audit-repo", action="labeled", pr_number=44
+    )
     with patch(
         "app.services.audit_pipeline.dispatch_audit",
         return_value="audit-test",
@@ -992,12 +1037,16 @@ async def test_audit_pr_unsupported_action_ignored(
 async def test_audit_workflow_run_failure_dispatches(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "ci-audit-org", "ci-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "ci-audit-org", "ci-audit-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     payload = make_workflow_payload(
         owner="ci-audit-org", repo="ci-audit-repo", conclusion="failure", run_id=6001001
     )
-    with patch("app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock) as mock_get:
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+    ) as mock_get:
         mock_adapter = MagicMock()
         mock_adapter.schedule_pipeline = AsyncMock()
         mock_get.return_value = mock_adapter
@@ -1019,7 +1068,9 @@ async def test_audit_workflow_run_success_ignored_by_default(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
     """Safe default `on_ci_success=False` keeps green builds silent."""
-    await seed_repo(fake_audit_db, fake_audit_user_factory, "ok-audit-org", "ok-audit-repo")
+    await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "ok-audit-org", "ok-audit-repo"
+    )
     payload = make_workflow_payload(
         owner="ok-audit-org", repo="ok-audit-repo", conclusion="success", run_id=6001002
     )
@@ -1036,10 +1087,15 @@ async def test_audit_workflow_run_success_ignored_by_default(
 async def test_audit_workflow_run_success_queued_when_enabled(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "ok2-audit-org", "ok2-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "ok2-audit-org", "ok2-audit-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo, on_ci_success=True)
     payload = make_workflow_payload(
-        owner="ok2-audit-org", repo="ok2-audit-repo", conclusion="success", run_id=6001003
+        owner="ok2-audit-org",
+        repo="ok2-audit-repo",
+        conclusion="success",
+        run_id=6001003,
     )
     resp = await post_signed(client, "workflow_run", payload)
     assert resp.status_code == 200
@@ -1070,7 +1126,9 @@ async def test_issue_comment_manual_audit_is_refused_without_pinned_endpoints(
     Queuing one anyway would let the worker resolve the PR's *current* head at
     execution time and audit a commit the requester never referenced.
     """
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "m-audit-org", "m-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "m-audit-org", "m-audit-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     payload = make_issue_comment_payload(
         owner="m-audit-org",
@@ -1106,17 +1164,16 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
     audit to commits the requester never referenced. The request is refused, not
     silently re-pinned.
     """
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "m3-audit-org", "m3-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "m3-audit-org", "m3-audit-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     stale_base = "9" * 40
     stale_head = "8" * 40
     payload = make_issue_comment_payload(
         owner="m3-audit-org",
         repo="m3-audit-repo",
-        comment_body=(
-            "@haunter audit base "
-            f"{stale_base} head {stale_head} please"
-        ),
+        comment_body=("@haunter audit base " f"{stale_base} head {stale_head} please"),
         pr_number=78,
         comment_id=9101002,
     )
@@ -1151,10 +1208,11 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
 
 @pytest.mark.asyncio
 async def test_review_comment_manual_audit_is_pinned_to_the_reviewed_commits(
-
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "rc-audit-org", "rc-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "rc-audit-org", "rc-audit-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     base_sha = "1" * 40
     head_sha = "2" * 40
@@ -1187,7 +1245,9 @@ async def test_review_comment_manual_audit_is_pinned_to_the_reviewed_commits(
 async def test_review_comment_manual_audit_is_refused_without_base_sha(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "rc2-audit-org", "rc2-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "rc2-audit-org", "rc2-audit-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     payload = make_review_comment_payload(
         owner="rc2-audit-org",
@@ -1213,7 +1273,9 @@ async def test_audit_comment_without_audit_keyword_does_not_dispatch_auditor(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
     """Plain `@haunter fix …` (no `audit` keyword) must not schedule an audit."""
-    await seed_repo(fake_audit_db, fake_audit_user_factory, "m2-audit-org", "m2-audit-repo")
+    await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "m2-audit-org", "m2-audit-repo"
+    )
     payload = make_issue_comment_payload(
         owner="m2-audit-org",
         repo="m2-audit-repo",
@@ -1241,7 +1303,9 @@ async def test_audit_disabled_feature_early_exit_pr(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
     """Auditor disabled → no audit scheduled; review pipeline unaffected."""
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "off-audit-org", "off-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "off-audit-org", "off-audit-repo"
+    )
     await set_repo_auditor_settings(
         fake_audit_db,
         repo,
@@ -1252,7 +1316,10 @@ async def test_audit_disabled_feature_early_exit_pr(
         on_manual_mention=False,
     )
     payload = make_pr_payload(
-        "off-audit-org", "off-audit-repo", action="opened", pr_number=45,
+        "off-audit-org",
+        "off-audit-repo",
+        action="opened",
+        pr_number=45,
         head_sha="dddddddddddddddddddddddddddddddddddddddd",
     )
     with patch(
@@ -1272,7 +1339,9 @@ async def test_audit_disabled_feature_early_exit_pr(
 async def test_audit_disabled_feature_early_exit_manual(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "off2-audit-org", "off2-audit-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "off2-audit-org", "off2-audit-repo"
+    )
     await set_repo_auditor_settings(
         fake_audit_db,
         repo,
@@ -1302,15 +1371,24 @@ def test_audit_trigger_unit_disabled_short_circuits():
     """Pure unit check: disabled master switch suppresses every event type."""
     disabled = AuditorTriggerSettings(enabled=False)
     assert audit_pipeline.evaluate_pr(disabled, "opened").should_audit is False
-    assert audit_pipeline.evaluate_workflow_run(
-        disabled, "completed", "failure"
-    ).should_audit is False
-    assert audit_pipeline.evaluate_manual_comment(
-        disabled, "created", "@haunter audit"
-    ).should_audit is False
-    assert audit_pipeline.should_audit_event(
-        disabled, "pull_request", {"action": "opened"}
-    ).should_audit is False
+    assert (
+        audit_pipeline.evaluate_workflow_run(
+            disabled, "completed", "failure"
+        ).should_audit
+        is False
+    )
+    assert (
+        audit_pipeline.evaluate_manual_comment(
+            disabled, "created", "@haunter audit"
+        ).should_audit
+        is False
+    )
+    assert (
+        audit_pipeline.should_audit_event(
+            disabled, "pull_request", {"action": "opened"}
+        ).should_audit
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -1341,9 +1419,16 @@ async def test_auditor_trigger_missing_settings_row_fails_closed(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "settings-missing-org", "settings-missing-repo")
+    repo = await seed_repo(
+        fake_audit_db,
+        fake_audit_user_factory,
+        "settings-missing-org",
+        "settings-missing-repo",
+    )
 
-    trigger = await audit_pipeline.get_auditor_trigger(as_session(fake_audit_db), repo.id)
+    trigger = await audit_pipeline.get_auditor_trigger(
+        as_session(fake_audit_db), repo.id
+    )
 
     assert trigger.enabled is False
     assert trigger == audit_pipeline.default_auditor_trigger()
@@ -1379,9 +1464,7 @@ async def test_fake_audit_store_fails_loudly_on_unmodelled_sql(
     with pytest.raises(UnsupportedStatementError):
         await fake_audit_db.scalar(select(func.max(AuditJob.attempts)))
     # Rows must be left untouched by the rejected statements.
-    assert await fake_audit_db.scalar(
-        select(func.count()).select_from(AuditJob)
-    ) == 0
+    assert await fake_audit_db.scalar(select(func.count()).select_from(AuditJob)) == 0
 
 
 @pytest.mark.asyncio
@@ -1424,7 +1507,9 @@ async def test_auditor_trigger_explicit_enabled_row_is_real_db_opt_in(
     value that is not a real `bool` after that round trip.
     """
     await truncate_all(db)
-    repo = await seed_repo(db, user_factory, "settings-enabled-org", "settings-enabled-repo")
+    repo = await seed_repo(
+        db, user_factory, "settings-enabled-org", "settings-enabled-repo"
+    )
     await set_repo_auditor_settings(db, repo, on_ci_success=True)
 
     trigger = await audit_pipeline.get_auditor_trigger(db, repo.id)
@@ -1461,7 +1546,9 @@ async def test_audit_workflow_run_disabled_trigger_no_dispatch(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
     """Disabled per-repo trigger -> no audit dispatched; fix pipeline unaffected."""
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "kill-org", "kill-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "kill-org", "kill-repo"
+    )
     await set_repo_auditor_settings(
         fake_audit_db,
         repo,
@@ -1474,7 +1561,9 @@ async def test_audit_workflow_run_disabled_trigger_no_dispatch(
     payload = make_workflow_payload(
         owner="kill-org", repo="kill-repo", conclusion="failure", run_id=6001992
     )
-    with patch("app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock) as mock_get:
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+    ) as mock_get:
         mock_adapter = MagicMock()
         mock_adapter.schedule_pipeline = AsyncMock()
         mock_get.return_value = mock_adapter
@@ -1557,7 +1646,9 @@ async def test_audit_delivery_claim_is_atomic_across_worker_sessions(
     assert first.audit_id == second.audit_id
     assert sorted((first.claimed, second.claimed)) == [False, True]
     count = await db.scalar(
-        select(func.count()).select_from(AuditJob).where(AuditJob.delivery_id == delivery_id)
+        select(func.count())
+        .select_from(AuditJob)
+        .where(AuditJob.delivery_id == delivery_id)
     )
     assert count == 1
 
@@ -1594,10 +1685,19 @@ async def test_dispatch_scheduler_failure_requeues_then_fails_terminally(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "dispatch-fail-org", "dispatch-fail-repo")
-    audit_id = await persist_audit_job(fake_audit_db, repo, f"dispatch-fail-{uuid.uuid4().hex}")
+    repo = await seed_repo(
+        fake_audit_db,
+        fake_audit_user_factory,
+        "dispatch-fail-org",
+        "dispatch-fail-repo",
+    )
+    audit_id = await persist_audit_job(
+        fake_audit_db, repo, f"dispatch-fail-{uuid.uuid4().hex}"
+    )
     failing_adapter = MagicMock()
-    failing_adapter.schedule_audit = AsyncMock(side_effect=RuntimeError("scheduler down"))
+    failing_adapter.schedule_audit = AsyncMock(
+        side_effect=RuntimeError("scheduler down")
+    )
 
     with (
         patch(
@@ -1609,7 +1709,9 @@ async def test_dispatch_scheduler_failure_requeues_then_fails_terminally(
     ):
         first_summary = await audit_pipeline.dispatch_audit_jobs(batch_size=1)
 
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert first_summary.claimed == 1
     assert first_summary.released == 1
     assert first_summary.terminal == 0
@@ -1648,9 +1750,15 @@ async def test_expired_dispatch_and_processing_leases_are_recovered(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "lease-org", "lease-repo")
-    running_id = await persist_audit_job(fake_audit_db, repo, f"running-{uuid.uuid4().hex}")
-    dispatching_id = await persist_audit_job(fake_audit_db, repo, f"dispatching-{uuid.uuid4().hex}")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "lease-org", "lease-repo"
+    )
+    running_id = await persist_audit_job(
+        fake_audit_db, repo, f"running-{uuid.uuid4().hex}"
+    )
+    dispatching_id = await persist_audit_job(
+        fake_audit_db, repo, f"dispatching-{uuid.uuid4().hex}"
+    )
     expired = datetime.now(timezone.utc) - timedelta(minutes=5)
     await fake_audit_db.execute(
         update(AuditJob)
@@ -1680,7 +1788,9 @@ async def test_expired_dispatch_and_processing_leases_are_recovered(
     jobs = list(
         (
             await fake_audit_db.scalars(
-                select(AuditJob).where(AuditJob.audit_id.in_([running_id, dispatching_id]))
+                select(AuditJob).where(
+                    AuditJob.audit_id.in_([running_id, dispatching_id])
+                )
             )
         ).all()
     )
@@ -1703,9 +1813,13 @@ async def test_stale_lease_holder_cannot_overwrite_newer_attempt(
     in the same conditional UPDATE, so the "newer attempt" is set up here the
     same way: counter *and* fence move together.
     """
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "fencing-org", "fencing-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "fencing-org", "fencing-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
-    audit_id = await persist_audit_job(fake_audit_db, repo, f"fencing-{uuid.uuid4().hex}")
+    audit_id = await persist_audit_job(
+        fake_audit_db, repo, f"fencing-{uuid.uuid4().hex}"
+    )
     stale_dispatch = await audit_pipeline.claim_next_queued_job()
     assert stale_dispatch is not None
     superseded_fence = audit_pipeline.audit_dispatch_fence_token(
@@ -1731,7 +1845,9 @@ async def test_stale_lease_holder_cannot_overwrite_newer_attempt(
         is False
     )
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "dispatching"
     assert job.dispatch_attempts == 2
@@ -1770,13 +1886,17 @@ async def test_stale_lease_holder_cannot_overwrite_newer_attempt(
         is False
     )
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "running"
     assert job.attempts == newer_attempt
     assert await audit_pipeline._complete_audit_job(audit_id, claimed_attempt) is False
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "running"
     assert job.attempts == newer_attempt
@@ -1787,7 +1907,9 @@ async def test_pr_advancement_requeues_without_mixed_source_context(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "advance-org", "advance-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "advance-org", "advance-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     base_sha = "a" * 40
 
@@ -1844,7 +1966,9 @@ async def test_pr_advancement_requeues_without_mixed_source_context(
 
     fetch_source.assert_not_awaited()
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == claim.audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == claim.audit_id)
+    )
     assert job is not None
     assert job.status == "queued"
     assert job.base_sha == base_sha
@@ -1867,10 +1991,13 @@ async def test_typed_diff_fetch_failure_requeues_instead_of_completing(
     fake_audit_user_factory,
     error: Exception,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "fetch-fail-org", "fetch-fail-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "fetch-fail-org", "fetch-fail-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
-    audit_id = await persist_audit_job(fake_audit_db, repo, f"fetch-fail-{uuid.uuid4().hex}")
-
+    audit_id = await persist_audit_job(
+        fake_audit_db, repo, f"fetch-fail-{uuid.uuid4().hex}"
+    )
 
     with (
         patch(
@@ -1894,7 +2021,9 @@ async def test_typed_diff_fetch_failure_requeues_instead_of_completing(
         )
 
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "queued"
     assert job.attempts == 1
@@ -1906,10 +2035,13 @@ async def test_processing_failure_retries_then_fails_terminally(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "process-fail-org", "process-fail-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "process-fail-org", "process-fail-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
-    audit_id = await persist_audit_job(fake_audit_db, repo, f"process-fail-{uuid.uuid4().hex}")
-
+    audit_id = await persist_audit_job(
+        fake_audit_db, repo, f"process-fail-{uuid.uuid4().hex}"
+    )
 
     with (
         patch(
@@ -1924,7 +2056,9 @@ async def test_processing_failure_retries_then_fails_terminally(
         ),
         patch("app.services.audit_pipeline.random.uniform", return_value=1.0),
     ):
-        for expected_attempt in range(1, audit_pipeline.AUDIT_MAX_PROCESSING_ATTEMPTS + 1):
+        for expected_attempt in range(
+            1, audit_pipeline.AUDIT_MAX_PROCESSING_ATTEMPTS + 1
+        ):
             claim = await audit_pipeline.claim_next_queued_job()
             assert claim is not None
             assert (
@@ -1957,7 +2091,9 @@ async def test_dispatch_persists_idempotently_without_calling_scheduler(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "queue-org", "queue-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "queue-org", "queue-repo"
+    )
     delivery_id = f"queue-{uuid.uuid4().hex[:12]}"
     adapter = MagicMock()
     adapter.schedule_audit = AsyncMock(
@@ -2032,10 +2168,11 @@ async def test_delayed_child_from_superseded_attempt_cannot_claim_the_job(
     while an orphaned executor thread could still deliver its child, and the
     child then claimed a job that a newer attempt already owned.
     """
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "fence-org", "fence-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "fence-org", "fence-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     audit_id = await persist_audit_job(fake_audit_db, repo, f"fence-{uuid.uuid4().hex}")
-
 
     first = await audit_pipeline.claim_next_queued_job()
     assert first is not None
@@ -2054,7 +2191,9 @@ async def test_delayed_child_from_superseded_attempt_cannot_claim_the_job(
     await fake_audit_db.commit()
     await audit_pipeline.recover_expired_audit_leases()
     fake_audit_db.expire_all()
-    requeued = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    requeued = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert requeued is not None
     assert requeued.status == "queued"
     assert requeued.dispatch_fence_token is None
@@ -2067,13 +2206,13 @@ async def test_delayed_child_from_superseded_attempt_cannot_claim_the_job(
 
     # The delayed attempt-1 child is rejected and changes nothing.
     assert (
-        await audit_pipeline.process_audit_job(
-            audit_id, first.dispatch_fence_token
-        )
+        await audit_pipeline.process_audit_job(audit_id, first.dispatch_fence_token)
         is True
     )
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "dispatching"
     assert job.attempts == 0
@@ -2083,9 +2222,12 @@ async def test_delayed_child_from_superseded_attempt_cannot_claim_the_job(
     forged = "0" * 64
     assert await audit_pipeline._claim_processing_job(audit_id, forged) is None
     # The current attempt is the only one that may claim.
-    assert await audit_pipeline._claim_processing_job(
-        audit_id, second.dispatch_fence_token
-    ) is not None
+    assert (
+        await audit_pipeline._claim_processing_job(
+            audit_id, second.dispatch_fence_token
+        )
+        is not None
+    )
 
 
 @pytest.mark.asyncio
@@ -2093,7 +2235,9 @@ async def test_replay_with_identical_payload_deduplicates(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "fp-same-org", "fp-same-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "fp-same-org", "fp-same-repo"
+    )
     delivery_id = f"fp-same-{uuid.uuid4().hex[:12]}"
     payload: dict[str, Any] = {
         "db": as_session(fake_audit_db),
@@ -2118,7 +2262,9 @@ async def test_replay_with_different_payload_is_a_conflict(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "fp-diff-org", "fp-diff-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "fp-diff-org", "fp-diff-repo"
+    )
     delivery_id = f"fp-diff-{uuid.uuid4().hex[:12]}"
     base: dict[str, Any] = {
         "db": as_session(fake_audit_db),
@@ -2144,7 +2290,9 @@ async def test_replay_with_different_payload_is_a_conflict(
             await audit_pipeline.claim_audit_delivery(**{**base, **changed})
 
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.delivery_id == delivery_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.delivery_id == delivery_id)
+    )
     assert job is not None
     assert job.status == "queued"
     assert job.head_sha == "b" * 40
@@ -2156,14 +2304,24 @@ async def test_webhook_returns_409_when_a_delivery_is_replayed_with_new_content(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "conflict-org", "conflict-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "conflict-org", "conflict-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo)
     delivery_id = f"conflict-{uuid.uuid4().hex[:12]}"
     first = make_pr_payload(
-        "conflict-org", "conflict-repo", action="opened", pr_number=21, head_sha="d" * 40
+        "conflict-org",
+        "conflict-repo",
+        action="opened",
+        pr_number=21,
+        head_sha="d" * 40,
     )
     second = make_pr_payload(
-        "conflict-org", "conflict-repo", action="opened", pr_number=21, head_sha="e" * 40
+        "conflict-org",
+        "conflict-repo",
+        action="opened",
+        pr_number=21,
+        head_sha="e" * 40,
     )
     for payload in (first, second):
         body = json.dumps(payload).encode("utf-8")
@@ -2185,23 +2343,29 @@ async def test_dispatch_claim_persists_the_fence_and_clears_it_on_release(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "fence-rel-org", "fence-rel-repo")
-    audit_id = await persist_audit_job(fake_audit_db, repo, f"fence-rel-{uuid.uuid4().hex}")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "fence-rel-org", "fence-rel-repo"
+    )
+    audit_id = await persist_audit_job(
+        fake_audit_db, repo, f"fence-rel-{uuid.uuid4().hex}"
+    )
     claim = await audit_pipeline.claim_next_queued_job()
     assert claim is not None
     assert claim.audit_id == audit_id
     assert len(claim.dispatch_fence_token) == 64
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "dispatching"
     assert job.dispatch_fence_token == claim.dispatch_fence_token
 
-    await audit_pipeline.release_dispatch_claim(
-        claim, RuntimeError("scheduler down")
-    )
+    await audit_pipeline.release_dispatch_claim(claim, RuntimeError("scheduler down"))
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "queued"
     assert job.dispatch_fence_token is None
@@ -2286,6 +2450,7 @@ async def test_settings_version_is_persisted_with_the_audit_job(
     assert trigger.settings_version == refreshed.settings_version
     assert row.settings_version == refreshed.settings_version
 
+
 # ---------------------------------------------------------------------------
 # Phase 5.2: the per-repo kill switch is re-verified before any external work.
 # ---------------------------------------------------------------------------
@@ -2325,7 +2490,9 @@ async def test_kill_switch_stops_a_queued_job_before_any_external_work(
     `RepoSettings` row is a deleted configuration and must fail closed exactly
     like a disabled one.
     """
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "kill-org", "kill-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "kill-org", "kill-repo"
+    )
     if mode == "disabled":
         await set_repo_auditor_settings(fake_audit_db, repo, enabled=False)
     audit_id = await _seed_queued_pr_job(fake_audit_db, repo)
@@ -2337,12 +2504,13 @@ async def test_kill_switch_stops_a_queued_job_before_any_external_work(
     if stored is not None:
         assert stored.enable_auditor_mode is False
 
-
     with (
         patch(
             "app.services.audit_pipeline.get_auditor_installation_token",
             new_callable=AsyncMock,
-            side_effect=AssertionError("no credential may be fetched after the kill switch"),
+            side_effect=AssertionError(
+                "no credential may be fetched after the kill switch"
+            ),
         ) as credentials,
         patch(
             "app.services.audit_pipeline.execute_audit_job",
@@ -2357,7 +2525,9 @@ async def test_kill_switch_stops_a_queued_job_before_any_external_work(
         patch(
             "app.github_client.fetch_diff",
             new_callable=AsyncMock,
-            side_effect=AssertionError("no GitHub read may happen after the kill switch"),
+            side_effect=AssertionError(
+                "no GitHub read may happen after the kill switch"
+            ),
         ) as fetch_diff,
     ):
         claim = await audit_pipeline.claim_next_queued_job()
@@ -2365,9 +2535,10 @@ async def test_kill_switch_stops_a_queued_job_before_any_external_work(
         assert claim.audit_id == audit_id
         # True, not False: the job reached a terminal state rather than a
         # retryable failure, so the dispatcher must not try it again.
-        assert await audit_pipeline.process_audit_job(
-            audit_id, claim.dispatch_fence_token
-        ) is True
+        assert (
+            await audit_pipeline.process_audit_job(audit_id, claim.dispatch_fence_token)
+            is True
+        )
 
     credentials.assert_not_awaited()
     execute.assert_not_awaited()
@@ -2375,7 +2546,9 @@ async def test_kill_switch_stops_a_queued_job_before_any_external_work(
     fetch_diff.assert_not_awaited()
 
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "failed"
     assert job.last_error == audit_pipeline.AUDITOR_DISABLED_ERROR
@@ -2399,7 +2572,9 @@ async def test_kill_switch_recheck_follows_a_settings_change_after_dispatch(
     be refused, which is the whole point of re-reading rather than trusting the
     decision the webhook made minutes earlier.
     """
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "flip-org", "flip-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "flip-org", "flip-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo, enabled=True)
     audit_id = await _seed_queued_pr_job(fake_audit_db, repo)
 
@@ -2416,14 +2591,19 @@ async def test_kill_switch_recheck_follows_a_settings_change_after_dispatch(
     with patch(
         "app.services.audit_pipeline.get_auditor_installation_token",
         new_callable=AsyncMock,
-        side_effect=AssertionError("no credential may be fetched after the kill switch"),
+        side_effect=AssertionError(
+            "no credential may be fetched after the kill switch"
+        ),
     ):
-        assert await audit_pipeline.process_audit_job(
-            audit_id, claim.dispatch_fence_token
-        ) is True
+        assert (
+            await audit_pipeline.process_audit_job(audit_id, claim.dispatch_fence_token)
+            is True
+        )
 
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "failed"
     assert job.last_error == audit_pipeline.AUDITOR_DISABLED_ERROR
@@ -2442,7 +2622,9 @@ async def test_claim_outcome_keeps_a_refusal_distinct_from_a_superseded_child(
     would let a stale child look like a successful kill-switch stop, or hide a
     real refusal behind a silent no-op.
     """
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "outcome-org", "outcome-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "outcome-org", "outcome-repo"
+    )
     audit_id = await _seed_queued_pr_job(fake_audit_db, repo)
     claim = await audit_pipeline.claim_next_queued_job()
     assert claim is not None
@@ -2455,10 +2637,17 @@ async def test_claim_outcome_keeps_a_refusal_distinct_from_a_superseded_child(
     assert refusal is not None
 
     # A job that is not dispatching any more yields None, never the refusal.
-    assert await audit_pipeline._claim_processing_job(audit_id, claim.dispatch_fence_token) is None
-    assert await audit_pipeline._claim_processing_job(
-        "audit-ffffffffffff", claim.dispatch_fence_token
-    ) is None
+    assert (
+        await audit_pipeline._claim_processing_job(audit_id, claim.dispatch_fence_token)
+        is None
+    )
+    assert (
+        await audit_pipeline._claim_processing_job(
+            "audit-ffffffffffff", claim.dispatch_fence_token
+        )
+        is None
+    )
+
 
 @pytest.mark.asyncio
 async def test_kill_switch_lookup_db_error_leaves_job_recoverable_dispatching(
@@ -2472,7 +2661,9 @@ async def test_kill_switch_lookup_db_error_leaves_job_recoverable_dispatching(
     A raising lookup must abort the claim attempt, leave the dispatching lease
     intact so outbox recovery can retry it, and never mark the job as terminal failed.
     """
-    repo = await seed_repo(fake_audit_db, fake_audit_user_factory, "transient-org", "transient-repo")
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "transient-org", "transient-repo"
+    )
     await set_repo_auditor_settings(fake_audit_db, repo, enabled=True)
     audit_id = await _seed_queued_pr_job(fake_audit_db, repo)
 
@@ -2494,8 +2685,9 @@ async def test_kill_switch_lookup_db_error_leaves_job_recoverable_dispatching(
 
     monkeypatch.undo()
     fake_audit_db.expire_all()
-    job = await fake_audit_db.scalar(select(AuditJob).where(AuditJob.audit_id == audit_id))
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.audit_id == audit_id)
+    )
     assert job is not None
     assert job.status == "dispatching"
     assert job.last_error != audit_pipeline.AUDITOR_DISABLED_ERROR
-

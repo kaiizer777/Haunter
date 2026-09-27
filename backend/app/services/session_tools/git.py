@@ -65,7 +65,9 @@ async def tool_git_log(
             token=token,
         )
     except GitHubClientError as exc:
-        logger.warning("git_log: GitHub error for %s/%s branch=%s: %s", owner, repo, branch, exc)
+        logger.warning(
+            "git_log: GitHub error for %s/%s branch=%s: %s", owner, repo, branch, exc
+        )
         return f"Error fetching git log: {exc}"
 
     if not commits:
@@ -126,7 +128,9 @@ async def tool_git_blame(
         author = (r.get("author") or "unknown")[:18]
         msg = (r.get("message") or "")[:60]
         age = f"({r['age_days']}d ago)" if r.get("age_days") is not None else ""
-        lines.append(f"lines {start:>4}-{end:<4}  {sha}  {date_short}  {author:<18}  {msg} {age}")
+        lines.append(
+            f"lines {start:>4}-{end:<4}  {sha}  {date_short}  {author:<18}  {msg} {age}"
+        )
     return "\n".join(lines)
 
 
@@ -168,9 +172,9 @@ async def tool_git_show(
         f"commit {meta.get('sha', commit_sha)}",
         f"Author: {author_info.get('name', 'unknown')} <{author_info.get('email', '')}>",
         f"Date:   {author_info.get('date', '')}",
-        f"",
+        "",
         f"    {message.replace(chr(10), chr(10) + '    ')}",
-        f"",
+        "",
         f"Stats: +{stats.get('additions', 0)} / -{stats.get('deletions', 0)} across {stats.get('total', 0)} change(s)",
         "Files:",
     ]
@@ -192,7 +196,10 @@ async def tool_git_show(
         diff_text = f"(diff unavailable: {exc})"
 
     if len(diff_text) > _MAX_DIFF_CHARS:
-        diff_text = diff_text[:_MAX_DIFF_CHARS] + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
+        diff_text = (
+            diff_text[:_MAX_DIFF_CHARS]
+            + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
+        )
 
     return "\n".join(header_lines) + "\n\n" + diff_text
 
@@ -231,7 +238,10 @@ async def tool_git_diff(
         return f"No differences between '{base}' and '{head}'."
 
     if len(diff_text) > _MAX_DIFF_CHARS:
-        diff_text = diff_text[:_MAX_DIFF_CHARS] + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
+        diff_text = (
+            diff_text[:_MAX_DIFF_CHARS]
+            + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
+        )
 
     return diff_text
 

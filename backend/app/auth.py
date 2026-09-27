@@ -107,8 +107,10 @@ router = APIRouter(tags=["auth"])
 
 _SESSION_COOKIE_NAME = "haunter_session"
 _STATE_COOKIE_NAME = "haunter_oauth_state"
-_SESSION_MAX_AGE = int(timedelta(days=14).total_seconds())   # 14 days — enforced on every read
-_STATE_MAX_AGE = 600                                          # 10 minutes — OAuth state is short-lived
+_SESSION_MAX_AGE = int(
+    timedelta(days=14).total_seconds()
+)  # 14 days — enforced on every read
+_STATE_MAX_AGE = 600  # 10 minutes — OAuth state is short-lived
 
 _GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -125,15 +127,19 @@ _RATE_LIMIT = f"{settings.rate_limit_per_minute}/minute"
 # raise RuntimeError if unset, so this path only runs in test mode (key=None) or prod (key set).
 # ---------------------------------------------------------------------------
 
+
 def _get_fernet():
     """Return a Fernet instance if TOKEN_ENCRYPTION_KEY is configured, else None."""
     if settings.token_encryption_key is None:
         return None
     try:
         from cryptography.fernet import Fernet
+
         return Fernet(settings.token_encryption_key.encode())
     except Exception:
-        logger.error("TOKEN_ENCRYPTION_KEY is set but invalid — cannot initialize Fernet.")
+        logger.error(
+            "TOKEN_ENCRYPTION_KEY is set but invalid — cannot initialize Fernet."
+        )
         raise
 
 
@@ -168,6 +174,7 @@ def _decrypt_token(stored: str) -> str:
 # ---------------------------------------------------------------------------
 # Signer helpers — key rotation support
 # ---------------------------------------------------------------------------
+
 
 def _signers() -> list[TimestampSigner]:
     """
@@ -219,7 +226,9 @@ def _verify_state_cookie(signed_cookie: str, request_state: str) -> None:
     recovered_state: str | None = None
     for signer in _signers():
         try:
-            recovered_state = signer.unsign(signed_cookie, max_age=_STATE_MAX_AGE).decode()
+            recovered_state = signer.unsign(
+                signed_cookie, max_age=_STATE_MAX_AGE
+            ).decode()
             break  # verified with this key — stop trying
         except (SignatureExpired, BadSignature, ValueError):
             continue
@@ -237,6 +246,7 @@ def _verify_state_cookie(signed_cookie: str, request_state: str) -> None:
 # ---------------------------------------------------------------------------
 # Cookie helpers
 # ---------------------------------------------------------------------------
+
 
 def _set_session_cookie(response: Response, user_id: uuid.UUID) -> None:
     """
@@ -447,7 +457,10 @@ async def callback(
         async with httpx.AsyncClient() as http:
             gh_resp = await http.get(
                 _GITHUB_USER_URL,
-                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                },
             )
             gh_resp.raise_for_status()
             gh_user = gh_resp.json()

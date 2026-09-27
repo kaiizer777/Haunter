@@ -5,17 +5,19 @@ and XSS payload spot-checks to verify frontend anti-slop dashboard views and sec
 
 import asyncio
 import uuid
-from datetime import datetime, timezone, timedelta
 from sqlalchemy import select
 from app.db import async_session_maker
 from app.models import User, Repo, Run, RunStep, Attempt
 from app.auth import _sign_user_id
 
+
 async def main():
     async with async_session_maker() as db:
         # 1. User
         user_id = uuid.uuid4()
-        user_res = await db.execute(select(User).where(User.github_username == "saif-dev"))
+        user_res = await db.execute(
+            select(User).where(User.github_username == "saif-dev")
+        )
         user = user_res.scalar_one_or_none()
         if not user:
             user = User(
@@ -32,7 +34,13 @@ async def main():
 
         # 2. Repos
         repo1_id = uuid.uuid4()
-        repo1_res = await db.execute(select(Repo).where(Repo.user_id == user.id, Repo.owner == "saif-org", Repo.name == "haunter-demo"))
+        repo1_res = await db.execute(
+            select(Repo).where(
+                Repo.user_id == user.id,
+                Repo.owner == "saif-org",
+                Repo.name == "haunter-demo",
+            )
+        )
         repo1 = repo1_res.scalar_one_or_none()
         if not repo1:
             repo1 = Repo(
@@ -46,7 +54,13 @@ async def main():
             db.add(repo1)
 
         repo2_id = uuid.uuid4()
-        repo2_res = await db.execute(select(Repo).where(Repo.user_id == user.id, Repo.owner == "saif-org", Repo.name == "api-gateway"))
+        repo2_res = await db.execute(
+            select(Repo).where(
+                Repo.user_id == user.id,
+                Repo.owner == "saif-org",
+                Repo.name == "api-gateway",
+            )
+        )
         repo2 = repo2_res.scalar_one_or_none()
         if not repo2:
             repo2 = Repo(
@@ -61,10 +75,22 @@ async def main():
 
         await db.commit()
         if not repo1:
-            repo1_res = await db.execute(select(Repo).where(Repo.user_id == user.id, Repo.owner == "saif-org", Repo.name == "haunter-demo"))
+            repo1_res = await db.execute(
+                select(Repo).where(
+                    Repo.user_id == user.id,
+                    Repo.owner == "saif-org",
+                    Repo.name == "haunter-demo",
+                )
+            )
             repo1 = repo1_res.scalar_one()
         if not repo2:
-            repo2_res = await db.execute(select(Repo).where(Repo.user_id == user.id, Repo.owner == "saif-org", Repo.name == "api-gateway"))
+            repo2_res = await db.execute(
+                select(Repo).where(
+                    Repo.user_id == user.id,
+                    Repo.owner == "saif-org",
+                    Repo.name == "api-gateway",
+                )
+            )
             repo2 = repo2_res.scalar_one()
 
         print(f"Repos ready: {repo1.owner}/{repo1.name} and {repo2.owner}/{repo2.name}")
@@ -90,10 +116,42 @@ async def main():
         db.add(run1)
 
         # Run 1 Steps
-        s1 = RunStep(id=uuid.uuid4(), run_id=run1_id, step_name="context_gatherer", input_tokens=1420, output_tokens=310, latency_ms=1240, cost_estimate=0.00034)
-        s2 = RunStep(id=uuid.uuid4(), run_id=run1_id, step_name="fix_generator", input_tokens=2180, output_tokens=490, latency_ms=1890, cost_estimate=0.00078)
-        s3 = RunStep(id=uuid.uuid4(), run_id=run1_id, step_name="sandbox_verifier", input_tokens=0, output_tokens=0, latency_ms=14200, cost_estimate=0.00000)
-        s4 = RunStep(id=uuid.uuid4(), run_id=run1_id, step_name="pr_writer", input_tokens=850, output_tokens=220, latency_ms=980, cost_estimate=0.00021)
+        s1 = RunStep(
+            id=uuid.uuid4(),
+            run_id=run1_id,
+            step_name="context_gatherer",
+            input_tokens=1420,
+            output_tokens=310,
+            latency_ms=1240,
+            cost_estimate=0.00034,
+        )
+        s2 = RunStep(
+            id=uuid.uuid4(),
+            run_id=run1_id,
+            step_name="fix_generator",
+            input_tokens=2180,
+            output_tokens=490,
+            latency_ms=1890,
+            cost_estimate=0.00078,
+        )
+        s3 = RunStep(
+            id=uuid.uuid4(),
+            run_id=run1_id,
+            step_name="sandbox_verifier",
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=14200,
+            cost_estimate=0.00000,
+        )
+        s4 = RunStep(
+            id=uuid.uuid4(),
+            run_id=run1_id,
+            step_name="pr_writer",
+            input_tokens=850,
+            output_tokens=220,
+            latency_ms=980,
+            cost_estimate=0.00021,
+        )
         db.add_all([s1, s2, s3, s4])
 
         # Run 1 Attempt
@@ -130,8 +188,24 @@ async def main():
         )
         db.add(run2)
 
-        s2_1 = RunStep(id=uuid.uuid4(), run_id=run2_id, step_name="context_gatherer", input_tokens=1800, output_tokens=420, latency_ms=1600, cost_estimate=0.00045)
-        s2_2 = RunStep(id=uuid.uuid4(), run_id=run2_id, step_name="fix_generator", input_tokens=3100, output_tokens=650, latency_ms=2400, cost_estimate=0.00110)
+        s2_1 = RunStep(
+            id=uuid.uuid4(),
+            run_id=run2_id,
+            step_name="context_gatherer",
+            input_tokens=1800,
+            output_tokens=420,
+            latency_ms=1600,
+            cost_estimate=0.00045,
+        )
+        s2_2 = RunStep(
+            id=uuid.uuid4(),
+            run_id=run2_id,
+            step_name="fix_generator",
+            input_tokens=3100,
+            output_tokens=650,
+            latency_ms=2400,
+            cost_estimate=0.00110,
+        )
         db.add_all([s2_1, s2_2])
 
         att2_1 = Attempt(
@@ -184,7 +258,15 @@ async def main():
         )
         db.add(run3)
 
-        s3_1 = RunStep(id=uuid.uuid4(), run_id=run3_id, step_name="context_gatherer", input_tokens=1000, output_tokens=200, latency_ms=900, cost_estimate=0.00020)
+        s3_1 = RunStep(
+            id=uuid.uuid4(),
+            run_id=run3_id,
+            step_name="context_gatherer",
+            input_tokens=1000,
+            output_tokens=200,
+            latency_ms=900,
+            cost_estimate=0.00020,
+        )
         db.add(s3_1)
 
         att3_1 = Attempt(
@@ -206,12 +288,13 @@ async def main():
 
         # Generate signed session cookie
         signed_cookie = _sign_user_id(user.id)
-        print(f"\n==========================================")
+        print("\n==========================================")
         print(f"DEV_SESSION_COOKIE: {signed_cookie}")
         print(f"RUN_1 (Completed): {run1_id}")
         print(f"RUN_2 (Fallback):  {run2_id}")
         print(f"RUN_3 (XSS Spot):  {run3_id}")
-        print(f"==========================================\n")
+        print("==========================================\n")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

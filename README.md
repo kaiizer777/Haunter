@@ -280,6 +280,11 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
+# Install development dependencies (linters, formatters, pytest-timeout).
+# Required for local `pytest -v` so the `timeout = 120` setting in pytest.ini
+# is actually enforced; CI installs these automatically.
+pip install -r requirements-dev.txt  # for tests, linters, formatters
+
 # Run database migrations
 alembic upgrade head
 
@@ -305,6 +310,9 @@ Open [http://localhost:3011](http://localhost:3011) to access the dashboard.
 
 ```bash
 # Backend pytest suite
+# Prereq: from `backend/`, `pip install -r requirements.txt -r requirements-dev.txt`
+# (requirements-dev.txt ships pytest-timeout==2.4.0, which enforces pytest.ini's
+# `timeout = 120` and prevents a single hung test from stalling the whole run.)
 cd backend
 pytest -v
 

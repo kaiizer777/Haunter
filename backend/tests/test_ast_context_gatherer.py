@@ -99,11 +99,23 @@ def process_payment(amount: float, currency: str = "USD") -> bool:
         ]
 
     with (
-        patch("app.github_client.fetch_workflow_run_logs", AsyncMock(return_value=logs_with_traceback)),
+        patch(
+            "app.github_client.fetch_workflow_run_logs",
+            AsyncMock(return_value=logs_with_traceback),
+        ),
         patch("app.github_client.fetch_diff", AsyncMock(return_value=diff_content)),
-        patch("app.github_client.fetch_commit_metadata", AsyncMock(return_value={"commit": {"message": "update payment"}})),
-        patch("app.github_client.fetch_file_content", AsyncMock(side_effect=mock_fetch_file_content)),
-        patch("app.github_client.fetch_repo_tree_paths", AsyncMock(side_effect=mock_fetch_repo_tree)),
+        patch(
+            "app.github_client.fetch_commit_metadata",
+            AsyncMock(return_value={"commit": {"message": "update payment"}}),
+        ),
+        patch(
+            "app.github_client.fetch_file_content",
+            AsyncMock(side_effect=mock_fetch_file_content),
+        ),
+        patch(
+            "app.github_client.fetch_repo_tree_paths",
+            AsyncMock(side_effect=mock_fetch_repo_tree),
+        ),
         patch("app.llm.LLMClient.complete", AsyncMock(return_value=mock_llm_response)),
     ):
         summary = await gather_context(run=run, repo=repo, db=db)
@@ -115,4 +127,7 @@ def process_payment(amount: float, currency: str = "USD") -> bool:
         assert "## Enclosing Scope & Symbol Context" in summary
         assert "backend/app/services/processor.py" in summary
         assert "process_payment" in summary
-        assert "def process_payment(amount: float, currency: str = 'USD') -> bool:" in summary
+        assert (
+            "def process_payment(amount: float, currency: str = 'USD') -> bool:"
+            in summary
+        )

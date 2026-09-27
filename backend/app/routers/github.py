@@ -45,7 +45,11 @@ def _parse_next_link(response: httpx.Response) -> Optional[str]:
         if len(sections) >= 2:
             url_part = sections[0].strip()
             rel_part = sections[1].strip()
-            if rel_part == 'rel="next"' and url_part.startswith("<") and url_part.endswith(">"):
+            if (
+                rel_part == 'rel="next"'
+                and url_part.startswith("<")
+                and url_part.endswith(">")
+            ):
                 return url_part[1:-1]
     return None
 
@@ -112,7 +116,9 @@ async def list_available_repos(
                     current_user.id,
                     exc.__class__.__name__,
                 )
-                raise HTTPException(status_code=502, detail="Failed to connect to GitHub") from exc
+                raise HTTPException(
+                    status_code=502, detail="Failed to connect to GitHub"
+                ) from exc
 
             if response.status_code == 401:
                 logger.warning(
@@ -127,7 +133,9 @@ async def list_available_repos(
             if response.status_code in (403, 429):
                 retry_after = response.headers.get("Retry-After")
                 resp_headers = {"Retry-After": retry_after} if retry_after else None
-                logger.warning("GitHub rate limit encountered for user %s", current_user.id)
+                logger.warning(
+                    "GitHub rate limit encountered for user %s", current_user.id
+                )
                 raise HTTPException(
                     status_code=429,
                     detail="GitHub rate limit exceeded",
@@ -153,8 +161,12 @@ async def list_available_repos(
             try:
                 page_data = response.json()
             except Exception as exc:
-                logger.error("Failed to parse GitHub JSON response for user %s", current_user.id)
-                raise HTTPException(status_code=502, detail="Invalid response from GitHub") from exc
+                logger.error(
+                    "Failed to parse GitHub JSON response for user %s", current_user.id
+                )
+                raise HTTPException(
+                    status_code=502, detail="Invalid response from GitHub"
+                ) from exc
 
             if not isinstance(page_data, list):
                 break
@@ -181,7 +193,9 @@ async def list_available_repos(
             continue
 
         owner_info = r.get("owner")
-        owner_login = owner_info.get("login", "") if isinstance(owner_info, dict) else ""
+        owner_login = (
+            owner_info.get("login", "") if isinstance(owner_info, dict) else ""
+        )
         repo_name = r.get("name", "")
         if not owner_login or not repo_name:
             continue

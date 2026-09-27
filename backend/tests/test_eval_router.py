@@ -101,7 +101,12 @@ async def test_get_eval_results_admin_returns_list(
         overall_accuracy=0.85,
         model_config_id=mc.id,
         per_subagent_scores={
-            "overall": {"pass_rate": 0.90, "total_fixtures": 10, "passed": 9, "failed": 1},
+            "overall": {
+                "pass_rate": 0.90,
+                "total_fixtures": 10,
+                "passed": 9,
+                "failed": 1,
+            },
             "context_gatherer": {"average_score": 0.88},
             "fix_generator": {"average_score": 0.82},
             "mode": "DRY-RUN",

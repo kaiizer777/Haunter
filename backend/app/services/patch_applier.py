@@ -113,7 +113,9 @@ def _parse_hunks(patch_lines: list[str]) -> list[dict]:
         if current is not None:
             # Only capture lines that are part of the hunk body.
             # Skip filename headers (--- / +++), diff meta, and git binary patch.
-            if line.startswith(("---", "+++", "diff ", "index ", "new file", "deleted file", "Binary")):
+            if line.startswith(
+                ("---", "+++", "diff ", "index ", "new file", "deleted file", "Binary")
+            ):
                 if not hunks and current["lines"]:
                     # Hunk already started — this is a new file marker inside content (rare).
                     pass
@@ -129,7 +131,9 @@ def _parse_hunks(patch_lines: list[str]) -> list[dict]:
     return hunks
 
 
-def _apply_hunk(result_lines: list[str], hunk: dict, offset: int) -> tuple[list[str], int]:
+def _apply_hunk(
+    result_lines: list[str], hunk: dict, offset: int
+) -> tuple[list[str], int]:
     """
     Apply a single parsed hunk to result_lines (0-indexed internally).
 
@@ -148,7 +152,9 @@ def _apply_hunk(result_lines: list[str], hunk: dict, offset: int) -> tuple[list[
     start_idx = hunk["old_start"] - 1 + offset
 
     # Build the sequence of operations from hunk lines.
-    ops: list[tuple[str, str]] = []  # (op_type, content) — op_type in {' ', '+', '-', '\\'}
+    ops: list[
+        tuple[str, str]
+    ] = []  # (op_type, content) — op_type in {' ', '+', '-', '\\'}
     for raw in hunk["lines"]:
         if not raw:
             # Empty line within hunk body is a context line with no content.

@@ -101,7 +101,9 @@ def test_sse_stream_wire_format() -> None:
     assert payload == {"delta": "Analyzing the code…"}
 
     # file_diff
-    chunk = format_sse_event("file_diff", {"path": "src/main.py", "diff": "@@...", "action": "modify"})
+    chunk = format_sse_event(
+        "file_diff", {"path": "src/main.py", "diff": "@@...", "action": "modify"}
+    )
     assert chunk.startswith("event: file_diff\n")
     payload = json.loads(chunk.split("data: ", 1)[1].strip())
     assert payload["path"] == "src/main.py"
@@ -145,8 +147,16 @@ async def test_session_chat_streaming(
     }
 
     with (
-        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value=None),
-        patch("app.services.session_orchestrator.LLMClient.complete", new_callable=AsyncMock, return_value=fake_llm_response),
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "app.services.session_orchestrator.LLMClient.complete",
+            new_callable=AsyncMock,
+            return_value=fake_llm_response,
+        ),
     ):
         async with _auth_client(make_auth_client, user) as ac:
             resp = await ac.post(
@@ -164,7 +174,11 @@ async def test_session_chat_streaming(
 
     # Must terminate with a done event.
     assert "event: done" in body
-    done_lines = [line for line in body.splitlines() if line.startswith("data:") and "staged_files_count" in line]
+    done_lines = [
+        line
+        for line in body.splitlines()
+        if line.startswith("data:") and "staged_files_count" in line
+    ]
     assert done_lines, "done event data line not found in stream body"
 
 
@@ -194,11 +208,13 @@ async def test_tool_call_stage_patch(
                 "type": "function",
                 "function": {
                     "name": "stage_patch",
-                    "arguments": json.dumps({
-                        "path": "src/auth.py",
-                        "diff": "--- a/src/auth.py\n+++ b/src/auth.py\n@@ -1,3 +1,4 @@\n+import jwt\n import hmac\n",
-                        "action": "modify",
-                    }),
+                    "arguments": json.dumps(
+                        {
+                            "path": "src/auth.py",
+                            "diff": "--- a/src/auth.py\n+++ b/src/auth.py\n@@ -1,3 +1,4 @@\n+import jwt\n import hmac\n",
+                            "action": "modify",
+                        }
+                    ),
                 },
             }
         ],
@@ -224,8 +240,15 @@ async def test_tool_call_stage_patch(
         return tool_call_response if call_count == 1 else done_response
 
     with (
-        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value=None),
-        patch("app.services.session_orchestrator.LLMClient.complete", side_effect=_mock_complete),
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "app.services.session_orchestrator.LLMClient.complete",
+            side_effect=_mock_complete,
+        ),
     ):
         async with _auth_client(make_auth_client, user) as ac:
             resp = await ac.post(
@@ -238,9 +261,9 @@ async def test_tool_call_stage_patch(
     # Drain the full SSE body. For httpx ASGI transport the body is fully buffered
     # when .text is accessed — "event: done" proves the orchestrator committed.
     body = resp.text
-    assert "event: done" in body, (
-        f"done event missing — orchestrator may not have finished. Body: {body[:500]}"
-    )
+    assert (
+        "event: done" in body
+    ), f"done event missing — orchestrator may not have finished. Body: {body[:500]}"
 
     # Expunge the identity-map cache so the next SELECT hits the DB, not memory.
     db.expunge_all()
@@ -250,14 +273,15 @@ async def test_tool_call_stage_patch(
 
     assert updated_session is not None
     patches = updated_session.staged_patches or {}
-    assert "src/auth.py" in patches, (
-        f"staged_patches not updated after done event; got: {patches}"
-    )
+    assert (
+        "src/auth.py" in patches
+    ), f"staged_patches not updated after done event; got: {patches}"
 
     # Verify the SSE stream contains a file_diff event for the staged file.
     assert "event: file_diff" in body
     diff_data_lines = [
-        line for line in body.splitlines()
+        line
+        for line in body.splitlines()
         if line.startswith("data:") and "src/auth.py" in line
     ]
     assert diff_data_lines, "file_diff event for src/auth.py not found in stream"
@@ -330,7 +354,11 @@ async def test_session_verify_dispatch(
     }
 
     with (
-        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value=None),
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
         patch(
             "app.subagents.sandbox_verifier.verify_session_patches",
             new_callable=AsyncMock,
@@ -344,7 +372,10 @@ async def test_session_verify_dispatch(
     data = resp.json()
     assert data["status"] == "passed"
     assert data["passed"] is True
-    assert data["run_url"] == "https://github.com/test-org/haunter-test-mirror/actions/runs/12345"
+    assert (
+        data["run_url"]
+        == "https://github.com/test-org/haunter-test-mirror/actions/runs/12345"
+    )
     assert "All tests passed" in data["logs"]
 
 
@@ -374,12 +405,20 @@ def test_prune_conversation_history_turn_boundary_integrity() -> None:
 
     # Turn 1: 500 chars
     t1_user = {"role": "user", "content": "A" * 200}
-    t1_asst = {"role": "assistant", "content": "B" * 200, "tool_calls": [{"id": "c1", "function": {"name": "test"}}]}
+    t1_asst = {
+        "role": "assistant",
+        "content": "B" * 200,
+        "tool_calls": [{"id": "c1", "function": {"name": "test"}}],
+    }
     t1_tool = {"role": "tool", "tool_call_id": "c1", "content": "C" * 100}
 
     # Turn 2: 500 chars
     t2_user = {"role": "user", "content": "D" * 200}
-    t2_asst = {"role": "assistant", "content": "E" * 200, "tool_calls": [{"id": "c2", "function": {"name": "test"}}]}
+    t2_asst = {
+        "role": "assistant",
+        "content": "E" * 200,
+        "tool_calls": [{"id": "c2", "function": {"name": "test"}}],
+    }
     t2_tool = {"role": "tool", "tool_call_id": "c2", "content": "F" * 100}
 
     history = [t1_user, t1_asst, t1_tool, t2_user, t2_asst, t2_tool]
@@ -548,4 +587,3 @@ async def test_invoke_subagent_subagent_error_is_soft() -> None:
     assert "Subagent 'repo_navigator' failed" in result
     assert "LLM unavailable" in result
     assert "proceed without it" in result
-

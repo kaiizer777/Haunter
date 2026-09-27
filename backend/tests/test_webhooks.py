@@ -36,7 +36,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.github_client import _build_headers, fetch_commit_metadata, fetch_diff, fetch_workflow_run_logs
+from app.github_client import (
+    _build_headers,
+    fetch_commit_metadata,
+    fetch_diff,
+    fetch_workflow_run_logs,
+)
 from app.models import Repo, Run, User
 from tests.conftest import truncate_all
 
@@ -80,7 +85,10 @@ async def test_webhook_missing_signature(client: httpx.AsyncClient):
     """Missing X-Hub-Signature-256 header returns 401."""
     resp = await client.post(
         "/webhooks/github",
-        headers={"X-GitHub-Event": "workflow_run", "X-GitHub-Delivery": str(uuid.uuid4())},
+        headers={
+            "X-GitHub-Event": "workflow_run",
+            "X-GitHub-Delivery": str(uuid.uuid4()),
+        },
         json={"action": "completed"},
     )
     assert resp.status_code == 401
@@ -133,7 +141,9 @@ async def test_webhook_raw_body_hmac_whitespace_invariant(
     db.add(repo)
     await db.commit()
 
-    payload_data = make_valid_payload(owner="white-space-org", repo="white-space-repo", run_id=98765)
+    payload_data = make_valid_payload(
+        owner="white-space-org", repo="white-space-repo", run_id=98765
+    )
     # Intentionally format JSON with unusual indentation and spaces
     raw_body = json.dumps(payload_data, indent=4).encode("utf-8") + b"  \n\n"
     sig = sign_payload(TEST_SECRET, raw_body)
@@ -194,7 +204,8 @@ async def test_webhook_chunked_body_oversized(client: httpx.AsyncClient):
 async def test_webhook_exact_2mb_passes(client: httpx.AsyncClient):
     """Payload of exact 2MB (2,097,152 bytes) passes the size threshold check."""
     # 2MB of valid JSON padding
-    exact_body = b'{"action":"ping","pad":"' + (b'x' * (2 * 1024 * 1024 - 30)) + b'"}'
+    exact_body = b'{"action":"ping","pad":"' + (b"x" * (2 * 1024 * 1024 - 26)) + b'"}'
+    assert len(exact_body) == 2 * 1024 * 1024
     sig = sign_payload(TEST_SECRET, exact_body)
     resp = await client.post(
         "/webhooks/github",
@@ -307,7 +318,9 @@ async def test_webhook_invalid_head_sha(client: httpx.AsyncClient):
 async def test_webhook_unregistered_repo(client: httpx.AsyncClient, db: AsyncSession):
     """Webhook for a repository not registered in DB is dropped with 200 ignored."""
     await truncate_all(db)
-    payload = make_valid_payload(owner="unknown-org", repo="unknown-repo", run_id=999111)
+    payload = make_valid_payload(
+        owner="unknown-org", repo="unknown-repo", run_id=999111
+    )
     raw_body = json.dumps(payload).encode("utf-8")
     sig = sign_payload(TEST_SECRET, raw_body)
 
@@ -349,7 +362,9 @@ async def test_webhook_valid_failure_creates_run(
     raw_body = json.dumps(payload).encode("utf-8")
     sig = sign_payload(TEST_SECRET, raw_body)
 
-    with patch("app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock) as mock_get:
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+    ) as mock_get:
         mock_adapter = MagicMock()
         mock_adapter.schedule_pipeline = AsyncMock()
         mock_get.return_value = mock_adapter
@@ -393,7 +408,9 @@ async def test_webhook_deduplication(
 
     delivery_id = str(uuid.uuid4())
     gh_run_id = 776611
-    payload = make_valid_payload(owner="dedupe-org", repo="dedupe-repo", run_id=gh_run_id)
+    payload = make_valid_payload(
+        owner="dedupe-org", repo="dedupe-repo", run_id=gh_run_id
+    )
     raw_body = json.dumps(payload).encode("utf-8")
     sig = sign_payload(TEST_SECRET, raw_body)
     headers = {

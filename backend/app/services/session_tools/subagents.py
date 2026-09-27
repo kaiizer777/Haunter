@@ -83,30 +83,34 @@ class RoleConfig:
     system_prompt_suffix: str
 
 
-_VALID_ROLES: frozenset[str] = frozenset({
-    "repo_navigator",
-    "feature_architect",
-    "bug_hunter",
-    "sandbox_verifier",
-    "code_guardian",
-})
+_VALID_ROLES: frozenset[str] = frozenset(
+    {
+        "repo_navigator",
+        "feature_architect",
+        "bug_hunter",
+        "sandbox_verifier",
+        "code_guardian",
+    }
+)
 
 VALID_ROLES: frozenset[str] = _VALID_ROLES
 
 # Shared read-only recon surface for roles that need codebase exploration.
-_NAVIGATOR_TOOLS: frozenset[str] = frozenset({
-    "grep_search",
-    "glob_files",
-    "read_file_slice",
-    "list_directory",
-    "read_file",
-    "get_file_outline",
-    "find_symbol",
-    "find_references",
-    "search_web_docs",
-    "fetch_web_content",
-    "fetch_package_metadata",
-})
+_NAVIGATOR_TOOLS: frozenset[str] = frozenset(
+    {
+        "grep_search",
+        "glob_files",
+        "read_file_slice",
+        "list_directory",
+        "read_file",
+        "get_file_outline",
+        "find_symbol",
+        "find_references",
+        "search_web_docs",
+        "fetch_web_content",
+        "fetch_package_metadata",
+    }
+)
 
 ROLE_CONFIGS: dict[str, RoleConfig] = {
     "repo_navigator": RoleConfig(
@@ -125,14 +129,16 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
     "feature_architect": RoleConfig(
         role="feature_architect",
         allowed_tools=_NAVIGATOR_TOOLS
-        | frozenset({
-            "str_replace",
-            "create_file",
-            "delete_file",
-            "apply_multi_patch",
-            "run_linter",
-            "scan_security_vulnerabilities",
-        }),
+        | frozenset(
+            {
+                "str_replace",
+                "create_file",
+                "delete_file",
+                "apply_multi_patch",
+                "run_linter",
+                "scan_security_vulnerabilities",
+            }
+        ),
         max_iterations=20,
         system_prompt_suffix=(
             "You are FeatureArchitect, a multi-file feature implementation specialist. "
@@ -145,16 +151,18 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
     "bug_hunter": RoleConfig(
         role="bug_hunter",
         allowed_tools=_NAVIGATOR_TOOLS
-        | frozenset({
-            "git_log",
-            "git_blame",
-            "git_show",
-            "git_diff",
-            "str_replace",
-            "run_targeted_tests",
-            "run_linter",
-            "scan_security_vulnerabilities",
-        }),
+        | frozenset(
+            {
+                "git_log",
+                "git_blame",
+                "git_show",
+                "git_diff",
+                "str_replace",
+                "run_targeted_tests",
+                "run_linter",
+                "scan_security_vulnerabilities",
+            }
+        ),
         max_iterations=16,
         system_prompt_suffix=(
             "You are BugHunter, a root-cause diagnosis and surgical-fix specialist. "
@@ -166,13 +174,15 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
     ),
     "sandbox_verifier": RoleConfig(
         role="sandbox_verifier",
-        allowed_tools=frozenset({
-            "run_targeted_tests",
-            "run_linter",
-            "run_terminal_command",
-            "glob_files",
-            "read_file_slice",
-        }),
+        allowed_tools=frozenset(
+            {
+                "run_targeted_tests",
+                "run_linter",
+                "run_terminal_command",
+                "glob_files",
+                "read_file_slice",
+            }
+        ),
         max_iterations=8,
         system_prompt_suffix=(
             "You are SandboxVerifier, a test-execution and validation specialist. "
@@ -184,12 +194,14 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
     "code_guardian": RoleConfig(
         role="code_guardian",
         allowed_tools=_NAVIGATOR_TOOLS
-        | frozenset({
-            "git_diff",
-            "git_log",
-            "scan_security_vulnerabilities",
-            "run_audit_scan",
-        }),
+        | frozenset(
+            {
+                "git_diff",
+                "git_log",
+                "scan_security_vulnerabilities",
+                "run_audit_scan",
+            }
+        ),
         max_iterations=10,
         system_prompt_suffix=(
             "You are CodeGuardian, a security, performance, and API-compatibility "
@@ -321,9 +333,7 @@ class SubagentRunner:
                     **llm_kwargs,
                 )
             except LLMError as exc:
-                logger.error(
-                    "subagent_runner: LLM error role=%s: %s", self.role, exc
-                )
+                logger.error("subagent_runner: LLM error role=%s: %s", self.role, exc)
                 raise SubagentError(self.role, f"LLM unavailable: {exc}") from exc
 
             _llm_responses.append(response)
@@ -364,14 +374,18 @@ class SubagentRunner:
                 except Exception as exc:
                     logger.warning(
                         "subagent_runner: failed to emit tool_call role=%s tool=%s: %s",
-                        self.role, tool_name, exc,
+                        self.role,
+                        tool_name,
+                        exc,
                     )
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": tool_result,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": tool_result,
+                    }
+                )
         else:
             # Loop exhausted without LLM signalling done.
             truncated = True
@@ -395,7 +409,8 @@ class SubagentRunner:
         patches_modified = sorted(
             k
             for k in self.staged_patches
-            if k not in initial_snapshot or initial_snapshot[k] != self.staged_patches[k]
+            if k not in initial_snapshot
+            or initial_snapshot[k] != self.staged_patches[k]
         )
 
         try:
@@ -407,7 +422,8 @@ class SubagentRunner:
         except Exception as exc:
             logger.warning(
                 "subagent_runner: failed to emit subagent_done role=%s: %s",
-                self.role, exc,
+                self.role,
+                exc,
             )
 
         latency_ms = int((time.monotonic() - start_time) * 1000)
@@ -462,7 +478,8 @@ class SubagentRunner:
         except Exception as exc:
             logger.warning(
                 "subagent_runner: could not load parent _TOOLS for role=%s: %s",
-                self.role, exc,
+                self.role,
+                exc,
             )
             return None
         return [
@@ -579,7 +596,8 @@ class SubagentRunner:
         else:
             logger.warning(
                 "subagent_runner: unknown tool_name=%r role=%s",
-                tool_name, self.role,
+                tool_name,
+                self.role,
             )
             return f"Unknown tool: {tool_name!r}"
 
@@ -602,7 +620,9 @@ class SubagentRunner:
                 token=self.gh_token,
             )
         except GitHubClientError as exc:
-            logger.warning("subagent_runner: read_file GitHub error path=%s: %s", path, exc)
+            logger.warning(
+                "subagent_runner: read_file GitHub error path=%s: %s", path, exc
+            )
             return f"Error reading file: {exc}"
         if content is None:
             return f"File not found: {path!r}"
@@ -645,7 +665,11 @@ class SubagentRunner:
                 base_sha=self.base_sha,
                 token=self.gh_token,
             )
-            return "\n".join(matching) if matching else f"No files matched pattern: {pattern!r}"
+            return (
+                "\n".join(matching)
+                if matching
+                else f"No files matched pattern: {pattern!r}"
+            )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
 
@@ -684,7 +708,11 @@ class SubagentRunner:
                 base_sha=self.base_sha,
                 token=self.gh_token,
             )
-            return "\n".join(entries) if entries else f"Directory empty or not found: {path!r}"
+            return (
+                "\n".join(entries)
+                if entries
+                else f"Directory empty or not found: {path!r}"
+            )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
 
@@ -751,7 +779,9 @@ class SubagentRunner:
 
     async def _exec_run_linter(self, args: dict[str, Any]) -> str:
         raw_paths = args.get("paths", [])
-        paths: list[str] = [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
+        paths: list[str] = (
+            [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
+        )
         linter: str = str(args.get("linter", "auto"))
         cwd = args.get("cwd")
         cwd_str: str | None = str(cwd) if cwd is not None else None
@@ -864,7 +894,9 @@ class SubagentRunner:
 
     def _exec_scan_security(self, args: dict[str, Any]) -> str:
         raw_paths = args.get("paths", [])
-        paths: list[str] = [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
+        paths: list[str] = (
+            [str(p) for p in raw_paths] if isinstance(raw_paths, list) else []
+        )
         # Sync turn-local edits to session — scanner reads session.staged_patches.
         self.session.staged_patches = dict(self.staged_patches)
         return tool_scan_security_vulnerabilities(

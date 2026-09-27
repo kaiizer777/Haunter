@@ -91,7 +91,10 @@ def make_pr_review_comment_payload(
         "action": action,
         "pull_request": {
             "number": pr_number,
-            "head": {"ref": head_ref, "sha": "11223344556677889900aabbccddeeff00112233"},
+            "head": {
+                "ref": head_ref,
+                "sha": "11223344556677889900aabbccddeeff00112233",
+            },
             "base": {"ref": "main"},
         },
         "comment": {
@@ -166,7 +169,9 @@ async def test_webhook_hmac_and_mention_extraction(
     sig = sign_payload(TEST_SECRET, raw_body)
     delivery_id = str(uuid.uuid4())
 
-    with patch("app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock) as mock_get:
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+    ) as mock_get:
         mock_adapter = MagicMock()
         mock_adapter.schedule_pipeline = AsyncMock()
         mock_get.return_value = mock_adapter
@@ -374,7 +379,10 @@ async def test_rejection_of_comments_on_plain_issues(
         content=raw_body,
     )
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ignored", "reason": "comment on issue, not pull request"}
+    assert resp.json() == {
+        "status": "ignored",
+        "reason": "comment on issue, not pull request",
+    }
 
 
 # ===========================================================================
@@ -424,8 +432,14 @@ async def test_max_5_iterations_rate_limiting_enforcement(
     sig = sign_payload(TEST_SECRET, raw_body)
 
     with (
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock, return_value="fake_token"),
-        patch("app.github_client.post_pr_comment", new_callable=AsyncMock) as mock_post_pr,
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="fake_token",
+        ),
+        patch(
+            "app.github_client.post_pr_comment", new_callable=AsyncMock
+        ) as mock_post_pr,
     ):
         resp = await client.post(
             "/webhooks/github",
@@ -470,7 +484,9 @@ async def test_pull_request_review_comment_event(
     db.add(repo)
     await db.commit()
 
-    initial_run = await seed_initial_run(db, repo, pr_number=42, pr_branch="haunter/fix-7b1c4e9f-1")
+    initial_run = await seed_initial_run(
+        db, repo, pr_number=42, pr_branch="haunter/fix-7b1c4e9f-1"
+    )
 
     payload = make_pr_review_comment_payload(
         owner="acme-corp",
@@ -484,7 +500,9 @@ async def test_pull_request_review_comment_event(
     raw_body = json.dumps(payload).encode("utf-8")
     sig = sign_payload(TEST_SECRET, raw_body)
 
-    with patch("app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock) as mock_get:
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+    ) as mock_get:
         mock_adapter = MagicMock()
         mock_adapter.schedule_pipeline = AsyncMock()
         mock_get.return_value = mock_adapter
@@ -550,13 +568,29 @@ async def test_context_gatherer_pr_feedback_assembly(db: AsyncSession, user_fact
     await db.commit()
 
     mock_comments = [
-        {"user": {"login": "dev1"}, "author_association": "MEMBER", "body": "Initial comment"},
-        {"user": {"login": "dev2"}, "author_association": "OWNER", "body": "@haunter please also handle negative integers"},
+        {
+            "user": {"login": "dev1"},
+            "author_association": "MEMBER",
+            "body": "Initial comment",
+        },
+        {
+            "user": {"login": "dev2"},
+            "author_association": "OWNER",
+            "body": "@haunter please also handle negative integers",
+        },
     ]
 
     with (
-        patch("app.github_client.fetch_pr_comments", new_callable=AsyncMock, return_value=mock_comments),
-        patch("app.github_client.fetch_diff", new_callable=AsyncMock, return_value="diff --git a/calc.py b/calc.py"),
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=mock_comments,
+        ),
+        patch(
+            "app.github_client.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="diff --git a/calc.py b/calc.py",
+        ),
     ):
         summary = await gather_context(run=child_run, repo=repo, db=db)
 
@@ -600,7 +634,9 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     db.add(repo)
     await db.commit()
 
-    initial_run = await seed_initial_run(db, repo, pr_number=42, pr_branch="haunter/fix-7b1c4e9f-1")
+    initial_run = await seed_initial_run(
+        db, repo, pr_number=42, pr_branch="haunter/fix-7b1c4e9f-1"
+    )
 
     # Seed verified parent attempt
     parent_attempt = Attempt(
@@ -628,7 +664,11 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     await db.refresh(child_run)
 
     mock_comments = [
-        {"user": {"login": "staff"}, "author_association": "OWNER", "body": "@haunter add docstring and type hints"},
+        {
+            "user": {"login": "staff"},
+            "author_association": "OWNER",
+            "body": "@haunter add docstring and type hints",
+        },
     ]
 
     refined_patch = (
@@ -644,17 +684,23 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     fake_commit_sha = "abcdef99887766554433221100aabbccddeeff11"
 
     with (
-        patch("app.github_client.fetch_pr_comments", new_callable=AsyncMock, return_value=mock_comments),
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=mock_comments,
+        ),
         patch("app.github_client.fetch_diff", new_callable=AsyncMock, return_value=""),
         patch(
             "app.llm.LLMClient.complete",
             new_callable=AsyncMock,
             return_value={
-                "content": json.dumps({
-                    "patch": refined_patch,
-                    "confidence": 95,
-                    "strategy_notes": "Added docstring and type hints",
-                }),
+                "content": json.dumps(
+                    {
+                        "patch": refined_patch,
+                        "confidence": 95,
+                        "strategy_notes": "Added docstring and type hints",
+                    }
+                ),
                 "usage": {"input_tokens": 150, "output_tokens": 80},
             },
         ),
@@ -667,9 +713,19 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
                 "build_duration_ms": 1200,
             },
         ),
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock, return_value="fake_token"),
-        patch("app.github.pr.commit_patch", new_callable=AsyncMock, return_value=fake_commit_sha) as mock_commit_patch,
-        patch("app.github_client.post_pr_comment", new_callable=AsyncMock) as mock_post_pr,
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="fake_token",
+        ),
+        patch(
+            "app.github.pr.commit_patch",
+            new_callable=AsyncMock,
+            return_value=fake_commit_sha,
+        ) as mock_commit_patch,
+        patch(
+            "app.github_client.post_pr_comment", new_callable=AsyncMock
+        ) as mock_post_pr,
     ):
         await handle_failed_run(child_run.id)
 
@@ -710,7 +766,9 @@ async def test_refinement_verification_failure_posts_diagnostic_pr_comment(
     db.add(repo)
     await db.commit()
 
-    initial_run = await seed_initial_run(db, repo, pr_number=42, pr_branch="haunter/fix-7b1c4e9f-1")
+    initial_run = await seed_initial_run(
+        db, repo, pr_number=42, pr_branch="haunter/fix-7b1c4e9f-1"
+    )
 
     child_run = Run(
         repo_id=repo.id,
@@ -726,21 +784,31 @@ async def test_refinement_verification_failure_posts_diagnostic_pr_comment(
     await db.commit()
 
     mock_comments = [
-        {"user": {"login": "staff"}, "author_association": "OWNER", "body": "@haunter change timeout to 0s"},
+        {
+            "user": {"login": "staff"},
+            "author_association": "OWNER",
+            "body": "@haunter change timeout to 0s",
+        },
     ]
 
     with (
-        patch("app.github_client.fetch_pr_comments", new_callable=AsyncMock, return_value=mock_comments),
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=mock_comments,
+        ),
         patch("app.github_client.fetch_diff", new_callable=AsyncMock, return_value=""),
         patch(
             "app.llm.LLMClient.complete",
             new_callable=AsyncMock,
             return_value={
-                "content": json.dumps({
-                    "patch": "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-t=10\n+t=0\n",
-                    "confidence": 75,
-                    "strategy_notes": "Timeout changed to 0s",
-                }),
+                "content": json.dumps(
+                    {
+                        "patch": "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-t=10\n+t=0\n",
+                        "confidence": 75,
+                        "strategy_notes": "Timeout changed to 0s",
+                    }
+                ),
                 "usage": {"input_tokens": 100, "output_tokens": 50},
             },
         ),
@@ -753,9 +821,17 @@ async def test_refinement_verification_failure_posts_diagnostic_pr_comment(
                 "build_duration_ms": 800,
             },
         ),
-        patch("app.github.pr.get_installation_token", new_callable=AsyncMock, return_value="fake_token"),
-        patch("app.github.pr.commit_patch", new_callable=AsyncMock) as mock_commit_patch,
-        patch("app.github_client.post_pr_comment", new_callable=AsyncMock) as mock_post_pr,
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="fake_token",
+        ),
+        patch(
+            "app.github.pr.commit_patch", new_callable=AsyncMock
+        ) as mock_commit_patch,
+        patch(
+            "app.github_client.post_pr_comment", new_callable=AsyncMock
+        ) as mock_post_pr,
     ):
         await handle_failed_run(child_run.id)
 
@@ -771,5 +847,8 @@ async def test_refinement_verification_failure_posts_diagnostic_pr_comment(
 
     # Diagnostic comment should be posted to the PR
     mock_post_pr.assert_called_once()
-    assert "unable to verify the requested adjustments" in mock_post_pr.call_args[1]["body"]
+    assert (
+        "unable to verify the requested adjustments"
+        in mock_post_pr.call_args[1]["body"]
+    )
     assert mock_post_pr.call_args[1]["pr_number"] == 42

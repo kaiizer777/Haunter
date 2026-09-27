@@ -301,9 +301,7 @@ def evaluate_workflow_run(
         if not trigger.on_ci_success:
             return AuditDecision(False, "ci-success trigger disabled")
         return AuditDecision(True, "ci-success trigger matched", "ci_success_audit")
-    return AuditDecision(
-        False, f"unsupported workflow_run conclusion: {conclusion}"
-    )
+    return AuditDecision(False, f"unsupported workflow_run conclusion: {conclusion}")
 
 
 def evaluate_manual_comment(
@@ -409,8 +407,7 @@ def _validate_optional_ref(value: Optional[str]) -> Optional[str]:
         or not value
         or len(value) > 255
         or any(
-            character.isspace()
-            or unicodedata.category(character).startswith("C")
+            character.isspace() or unicodedata.category(character).startswith("C")
             for character in value
         )
     ):
@@ -421,7 +418,11 @@ def _validate_optional_ref(value: Optional[str]) -> Optional[str]:
 def _validate_optional_pr(value: Optional[int]) -> Optional[int]:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_PR_NUMBER:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= _MAX_PR_NUMBER
+    ):
         raise ValueError("pull request number is invalid")
     return value
 
@@ -451,7 +452,11 @@ def _validate_settings_version(value: Any) -> int:
 def _validate_optional_run_id(value: Optional[int]) -> Optional[int]:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_WORKFLOW_RUN_ID:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= _MAX_WORKFLOW_RUN_ID
+    ):
         raise ValueError("workflow run id is invalid")
     return value
 
@@ -915,8 +920,7 @@ async def recover_expired_audit_leases() -> tuple[int, int]:
                 .values(
                     status=case(
                         (
-                            AuditJob.dispatch_attempts
-                            >= AUDIT_MAX_DISPATCH_ATTEMPTS,
+                            AuditJob.dispatch_attempts >= AUDIT_MAX_DISPATCH_ATTEMPTS,
                             "failed",
                         ),
                         else_="queued",
@@ -954,7 +958,9 @@ async def claim_next_queued_job() -> Optional[AuditDispatchClaim]:
                     AuditJob.status == "queued",
                     AuditJob.next_attempt_at <= now,
                 )
-                .order_by(AuditJob.next_attempt_at, AuditJob.created_at, AuditJob.audit_id)
+                .order_by(
+                    AuditJob.next_attempt_at, AuditJob.created_at, AuditJob.audit_id
+                )
                 .limit(1)
                 .with_for_update(skip_locked=True)
             )
@@ -1021,7 +1027,10 @@ async def release_dispatch_claim(
                     next_attempt_at=(
                         now
                         if terminal
-                        else now + timedelta(seconds=_retry_delay_seconds(claim.dispatch_attempts))
+                        else now
+                        + timedelta(
+                            seconds=_retry_delay_seconds(claim.dispatch_attempts)
+                        )
                     ),
                     lease_expires_at=None,
                     last_error=_safe_error_code(exc),
@@ -1092,7 +1101,9 @@ async def _claim_processing_job(
                 )
                 await db.rollback()
                 return None
-            if not isinstance(locked.dispatch_fence_token, str) or not hmac.compare_digest(
+            if not isinstance(
+                locked.dispatch_fence_token, str
+            ) or not hmac.compare_digest(
                 locked.dispatch_fence_token, dispatch_fence_token
             ):
                 logger.warning(
@@ -1150,7 +1161,11 @@ async def _claim_processing_job(
                     audit_id,
                     closed is not None,
                 )
-                return ProcessingClaimOutcome.AUDITOR_DISABLED if closed is not None else None
+                return (
+                    ProcessingClaimOutcome.AUDITOR_DISABLED
+                    if closed is not None
+                    else None
+                )
             result = await db.execute(
                 update(AuditJob)
                 .where(
@@ -1164,8 +1179,7 @@ async def _claim_processing_job(
                     status="running",
                     attempts=AuditJob.attempts + 1,
                     dispatch_fence_token=None,
-                    lease_expires_at=now
-                    + timedelta(seconds=AUDIT_PROCESSING_LEASE_S),
+                    lease_expires_at=now + timedelta(seconds=AUDIT_PROCESSING_LEASE_S),
                     last_error=None,
                 )
                 .returning(AuditJob.audit_id, AuditJob.attempts)
@@ -1497,7 +1511,11 @@ async def _audit_dispatch_worker(
         cycles += 1
         if max_cycles is not None and cycles >= max_cycles:
             return
-        delay = 0.0 if summary.claimed == AUDIT_DISPATCH_BATCH_SIZE else AUDIT_DISPATCH_POLL_S
+        delay = (
+            0.0
+            if summary.claimed == AUDIT_DISPATCH_BATCH_SIZE
+            else AUDIT_DISPATCH_POLL_S
+        )
         await asyncio.sleep(delay)
 
 
@@ -1534,4 +1552,3 @@ async def stop_audit_dispatch_workers() -> None:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-

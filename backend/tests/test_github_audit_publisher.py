@@ -37,7 +37,10 @@ from app.github_client import (
     GitHubRateLimitError,
     GitHubResourceNotFoundError,
 )
-from app.llm.prompts.audit_prompts import INFORMATIONAL_CONFIDENCE_THRESHOLD, format_audit_report
+from app.llm.prompts.audit_prompts import (
+    INFORMATIONAL_CONFIDENCE_THRESHOLD,
+    format_audit_report,
+)
 from app.models import Repo
 from app.services import audit_pipeline
 from app.subagents.auditor import AuditFinding, AuditResult, build_diff_grounding
@@ -50,7 +53,9 @@ def deny_external_http(monkeypatch: pytest.MonkeyPatch) -> None:
     async def guarded_send(self, request, **kwargs):
         if isinstance(self._transport, (httpx.ASGITransport, httpx.MockTransport)):
             return await original_send(self, request, **kwargs)
-        raise AssertionError(f"external HTTP blocked in publisher tests: {request.url.host}")
+        raise AssertionError(
+            f"external HTTP blocked in publisher tests: {request.url.host}"
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "send", guarded_send)
 
@@ -176,7 +181,9 @@ def test_validate_coordinates_single_line_in_diff():
 
 def test_validate_coordinates_line_outside_diff_rejected():
     grounding = build_diff_grounding(SAMPLE_DIFF)
-    finding = _make_finding(file_path="backend/app/auth.py", line_start=500, line_end=502)
+    finding = _make_finding(
+        file_path="backend/app/auth.py", line_start=500, line_end=502
+    )
     coords = validate_finding_coordinates(finding, grounding)
 
     assert coords is None
@@ -184,7 +191,9 @@ def test_validate_coordinates_line_outside_diff_rejected():
 
 def test_validate_coordinates_file_not_in_diff_rejected():
     grounding = build_diff_grounding(SAMPLE_DIFF)
-    finding = _make_finding(file_path="backend/app/unrelated.py", line_start=10, line_end=12)
+    finding = _make_finding(
+        file_path="backend/app/unrelated.py", line_start=10, line_end=12
+    )
     coords = validate_finding_coordinates(finding, grounding)
 
     assert coords is None
@@ -262,7 +271,10 @@ async def test_publish_pr_review_success_with_inline_comments():
     mock_client = AsyncMock()
     mock_client.create_pr_review.return_value = {"id": 1001, "state": "COMMENTED"}
 
-    with patch("app.github.audit_publisher.github_client.create_pr_review", mock_client.create_pr_review):
+    with patch(
+        "app.github.audit_publisher.github_client.create_pr_review",
+        mock_client.create_pr_review,
+    ):
         outcome = await publish_audit_review(
             result=result,
             owner="octocat",
@@ -305,7 +317,10 @@ async def test_publish_pr_review_suppresses_low_confidence_inline_findings():
     mock_client = AsyncMock()
     mock_client.create_pr_review.return_value = {"id": 1002}
 
-    with patch("app.github.audit_publisher.github_client.create_pr_review", mock_client.create_pr_review):
+    with patch(
+        "app.github.audit_publisher.github_client.create_pr_review",
+        mock_client.create_pr_review,
+    ):
         outcome = await publish_audit_review(
             result=result,
             owner="octocat",
@@ -339,7 +354,10 @@ async def test_publish_pr_review_overall_confidence_under_75_suppresses_all_inli
     mock_client = AsyncMock()
     mock_client.create_pr_review.return_value = {"id": 1003}
 
-    with patch("app.github.audit_publisher.github_client.create_pr_review", mock_client.create_pr_review):
+    with patch(
+        "app.github.audit_publisher.github_client.create_pr_review",
+        mock_client.create_pr_review,
+    ):
         outcome = await publish_audit_review(
             result=result,
             owner="octocat",
@@ -370,7 +388,10 @@ async def test_publish_suppressed_when_publish_allowed_is_false():
 
     with (
         patch("app.github.audit_publisher.github_client.create_pr_review", mock_pr),
-        patch("app.github.audit_publisher.github_client.create_commit_comment", mock_commit),
+        patch(
+            "app.github.audit_publisher.github_client.create_commit_comment",
+            mock_commit,
+        ),
     ):
         outcome = await publish_audit_review(
             result=result,
@@ -413,7 +434,9 @@ async def test_publish_request_changes_on_blocker_policy():
         confidence=90,
         publish_allowed=True,
         findings=[
-            _make_finding(severity="BLOCKER", confidence=95, line_start=84, line_end=84),
+            _make_finding(
+                severity="BLOCKER", confidence=95, line_start=84, line_end=84
+            ),
         ],
     )
 
@@ -455,7 +478,10 @@ async def test_fallback_to_commit_comment_when_pr_number_is_none():
 
     with (
         patch("app.github.audit_publisher.github_client.create_pr_review", mock_pr),
-        patch("app.github.audit_publisher.github_client.create_commit_comment", mock_commit),
+        patch(
+            "app.github.audit_publisher.github_client.create_commit_comment",
+            mock_commit,
+        ),
     ):
         outcome = await publish_audit_review(
             result=result,
@@ -490,7 +516,9 @@ async def test_commit_comment_skipped_if_head_sha_missing():
     )
 
     mock_commit = AsyncMock()
-    with patch("app.github.audit_publisher.github_client.create_commit_comment", mock_commit):
+    with patch(
+        "app.github.audit_publisher.github_client.create_commit_comment", mock_commit
+    ):
         outcome = await publish_audit_review(
             result=result,
             owner="octocat",
@@ -562,12 +590,36 @@ async def test_audit_pipeline_wiring_tolerates_publisher_failure():
     mock_pub.side_effect = RuntimeError("Network partition")
 
     with (
-        patch("app.services.audit_pipeline._resolve_audit_target", new_callable=AsyncMock, return_value=target),
-        patch("app.services.audit_pipeline._fetch_pr_target", new_callable=AsyncMock, return_value=target),
-        patch("app.subagents.auditor.fetch_audit_diff", new_callable=AsyncMock, return_value=SAMPLE_DIFF),
-        patch("app.subagents.auditor.fetch_audit_source_contexts", new_callable=AsyncMock, return_value={}),
-        patch("app.subagents.auditor.build_ast_diff_summary_async", new_callable=AsyncMock, return_value=""),
-        patch("app.subagents.auditor.run_audit", new_callable=AsyncMock, return_value=fake_result),
+        patch(
+            "app.services.audit_pipeline._resolve_audit_target",
+            new_callable=AsyncMock,
+            return_value=target,
+        ),
+        patch(
+            "app.services.audit_pipeline._fetch_pr_target",
+            new_callable=AsyncMock,
+            return_value=target,
+        ),
+        patch(
+            "app.subagents.auditor.fetch_audit_diff",
+            new_callable=AsyncMock,
+            return_value=SAMPLE_DIFF,
+        ),
+        patch(
+            "app.subagents.auditor.fetch_audit_source_contexts",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+        patch(
+            "app.subagents.auditor.build_ast_diff_summary_async",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+        patch(
+            "app.subagents.auditor.run_audit",
+            new_callable=AsyncMock,
+            return_value=fake_result,
+        ),
         patch("app.github.audit_publisher.publish_audit_review", mock_pub),
     ):
         outcome = await audit_pipeline.execute_audit_job(
@@ -606,14 +658,19 @@ async def test_github_client_create_pr_review_request_format():
 
     transport = httpx.MockTransport(custom_handler)
 
-    with patch("app.github_client.httpx.AsyncClient", return_value=httpx.AsyncClient(transport=transport)):
+    with patch(
+        "app.github_client.httpx.AsyncClient",
+        return_value=httpx.AsyncClient(transport=transport),
+    ):
         res = await github_client.create_pr_review(
             owner="octocat",
             repo="hello-world",
             pr_number=42,
             commit_sha="a" * 40,
             body="Review summary",
-            comments=[{"path": "file.py", "line": 10, "side": "RIGHT", "body": "Fix here"}],
+            comments=[
+                {"path": "file.py", "line": 10, "side": "RIGHT", "body": "Fix here"}
+            ],
             event="COMMENT",
             token="test-token",
         )
@@ -641,7 +698,10 @@ async def test_github_client_create_commit_comment_request_format():
 
     transport = httpx.MockTransport(custom_handler)
 
-    with patch("app.github_client.httpx.AsyncClient", return_value=httpx.AsyncClient(transport=transport)):
+    with patch(
+        "app.github_client.httpx.AsyncClient",
+        return_value=httpx.AsyncClient(transport=transport),
+    ):
         res = await github_client.create_commit_comment(
             owner="octocat",
             repo="hello-world",
@@ -654,7 +714,9 @@ async def test_github_client_create_commit_comment_request_format():
 
     assert res["id"] == 777
     assert called_request["method"] == "POST"
-    assert f"/repos/octocat/hello-world/commits/{'c'*40}/comments" in called_request["url"]
+    assert (
+        f"/repos/octocat/hello-world/commits/{'c'*40}/comments" in called_request["url"]
+    )
     assert called_request["headers"]["authorization"] == "Bearer test-token"
     assert called_request["body"]["body"] == "Commit comment body"
     assert called_request["body"]["path"] == "backend/app/auth.py"
@@ -668,7 +730,9 @@ async def test_github_client_create_pr_review_error_mapping():
 
     with patch(
         "app.github_client.httpx.AsyncClient",
-        return_value=httpx.AsyncClient(transport=httpx.MockTransport(not_found_handler)),
+        return_value=httpx.AsyncClient(
+            transport=httpx.MockTransport(not_found_handler)
+        ),
     ):
         with pytest.raises(GitHubResourceNotFoundError):
             await github_client.create_pr_review(
@@ -701,4 +765,6 @@ def test_auditor_publisher_never_calls_code_mutation_apis():
         "create_branch",
     )
     for token in mutation_tokens:
-        assert token not in source, f"audit_publisher.py violates read-only invariant: contains {token!r}"
+        assert (
+            token not in source
+        ), f"audit_publisher.py violates read-only invariant: contains {token!r}"

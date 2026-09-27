@@ -69,7 +69,9 @@ class PROutput(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def pr_branch_name(run: Run, attempt: Attempt, default_branch: Optional[str] = None) -> str:
+def pr_branch_name(
+    run: Run, attempt: Attempt, default_branch: Optional[str] = None
+) -> str:
     """
     Compute a safe branch name for the Haunter fix PR.
 
@@ -148,18 +150,22 @@ def _build_pr_messages(
     ]
 
     if validation_error_context is not None:
-        messages.append({
-            "role": "assistant",
-            "content": "(prior response was invalid)",
-        })
-        messages.append({
-            "role": "user",
-            "content": (
-                f"Your previous response failed validation: {validation_error_context}\n"
-                "Fix the issues. title must be 5–72 chars, body must be at least 20 chars. "
-                "Return valid JSON only."
-            ),
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "(prior response was invalid)",
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Your previous response failed validation: {validation_error_context}\n"
+                    "Fix the issues. title must be 5–72 chars, body must be at least 20 chars. "
+                    "Return valid JSON only."
+                ),
+            }
+        )
 
     return messages
 
@@ -285,7 +291,9 @@ async def generate_pr_text(
     output_tokens: int = usage.get("output_tokens", 0)
 
     # Persist RunStep trace — tokens + latency only, never PR content
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (output_tokens * COST_PER_OUTPUT_TOKEN)
+    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
+        output_tokens * COST_PER_OUTPUT_TOKEN
+    )
     step = RunStep(
         run_id=run.id,
         step_name="pr_writer",

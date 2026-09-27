@@ -34,6 +34,7 @@ from app.services.session_tools.editor import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_queue() -> SseQueue:
     """Return a SseQueue with a large enough internal buffer for tests."""
     return SseQueue(maxsize=256)
@@ -51,6 +52,7 @@ def _gh_patch(return_value: str | None):
 # ---------------------------------------------------------------------------
 # 1. str_replace — success
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_str_replace_success() -> None:
@@ -95,6 +97,7 @@ async def test_str_replace_success() -> None:
 # 2. str_replace — not found
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_str_replace_not_found() -> None:
     """Returns descriptive error when old_str doesn't exist in the file."""
@@ -124,6 +127,7 @@ async def test_str_replace_not_found() -> None:
 # 3. str_replace — duplicate occurrence
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_str_replace_duplicate_occurrence() -> None:
     """Returns ambiguity error when old_str appears more than once."""
@@ -152,6 +156,7 @@ async def test_str_replace_duplicate_occurrence() -> None:
 # ---------------------------------------------------------------------------
 # 4. create_file
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_create_file() -> None:
@@ -187,6 +192,7 @@ async def test_create_file() -> None:
 # ---------------------------------------------------------------------------
 # 5. delete_file
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_delete_file() -> None:
@@ -225,6 +231,7 @@ async def test_delete_file() -> None:
 # 6. apply_multi_patch — atomic success
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_apply_multi_patch_atomic_success() -> None:
     """Applies edits to 2 files atomically; both are staged and events emitted."""
@@ -235,8 +242,18 @@ async def test_apply_multi_patch_atomic_success() -> None:
     queue = _make_queue()
 
     patches_input = [
-        {"type": "str_replace", "path": "mod_a.py", "old_str": "x = 1", "new_str": "x = 99"},
-        {"type": "str_replace", "path": "mod_b.py", "old_str": "alpha = 'a'", "new_str": "alpha = 'z'"},
+        {
+            "type": "str_replace",
+            "path": "mod_a.py",
+            "old_str": "x = 1",
+            "new_str": "x = 99",
+        },
+        {
+            "type": "str_replace",
+            "path": "mod_b.py",
+            "old_str": "alpha = 'a'",
+            "new_str": "alpha = 'z'",
+        },
     ]
 
     async def fake_fetch(owner, repo, path, sha, token=None):
@@ -278,6 +295,7 @@ async def test_apply_multi_patch_atomic_success() -> None:
 # 7. apply_multi_patch — atomic rollback on second failure
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_apply_multi_patch_atomic_rollback() -> None:
     """Second edit fails; verifies that the first edit was NOT staged (full rollback)."""
@@ -288,9 +306,19 @@ async def test_apply_multi_patch_atomic_rollback() -> None:
 
     patches_input = [
         # First op is valid.
-        {"type": "str_replace", "path": "mod_a.py", "old_str": "x = 1", "new_str": "x = 99"},
+        {
+            "type": "str_replace",
+            "path": "mod_a.py",
+            "old_str": "x = 1",
+            "new_str": "x = 99",
+        },
         # Second op targets a non-existent old_str — must fail.
-        {"type": "str_replace", "path": "mod_a.py", "old_str": "DOES_NOT_EXIST", "new_str": "whatever"},
+        {
+            "type": "str_replace",
+            "path": "mod_a.py",
+            "old_str": "DOES_NOT_EXIST",
+            "new_str": "whatever",
+        },
     ]
 
     with _gh_patch(file_a):
@@ -317,6 +345,7 @@ async def test_apply_multi_patch_atomic_rollback() -> None:
 # ---------------------------------------------------------------------------
 # 8. Path traversal blocked
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_path_traversal_blocked() -> None:
@@ -377,6 +406,7 @@ async def test_path_traversal_blocked() -> None:
 # 9. apply_multi_patch — sequential edits on the same file
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_apply_multi_patch_sequential_same_file() -> None:
     """
@@ -394,9 +424,19 @@ async def test_apply_multi_patch_sequential_same_file() -> None:
     queue = _make_queue()
 
     patches_input = [
-        {"type": "str_replace", "path": "mod.py", "old_str": "x = 1", "new_str": "x = 99"},
+        {
+            "type": "str_replace",
+            "path": "mod.py",
+            "old_str": "x = 1",
+            "new_str": "x = 99",
+        },
         # Second edit on the same file — requires seeing the post-first-edit state.
-        {"type": "str_replace", "path": "mod.py", "old_str": "y = 2", "new_str": "y = 200"},
+        {
+            "type": "str_replace",
+            "path": "mod.py",
+            "old_str": "y = 2",
+            "new_str": "y = 200",
+        },
     ]
 
     with _gh_patch(original):
@@ -424,4 +464,3 @@ async def test_apply_multi_patch_sequential_same_file() -> None:
     assert "x = 99" in patched
     assert "y = 200" in patched
     assert "z = 3" in patched
-

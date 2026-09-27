@@ -42,12 +42,22 @@ ReviewSeverity = Literal["low", "medium", "high", "critical"]
 class ReviewFinding(BaseModel):
     """An individual actionable review finding tied to specific file lines."""
 
-    file_path: str = Field(..., min_length=1, description="Relative path of the touched file")
-    line_start: int = Field(..., ge=1, description="Starting line of the finding (1-indexed)")
-    line_end: int = Field(..., ge=1, description="Ending line of the finding (1-indexed)")
+    file_path: str = Field(
+        ..., min_length=1, description="Relative path of the touched file"
+    )
+    line_start: int = Field(
+        ..., ge=1, description="Starting line of the finding (1-indexed)"
+    )
+    line_end: int = Field(
+        ..., ge=1, description="Ending line of the finding (1-indexed)"
+    )
     category: ReviewCategory
     severity: ReviewSeverity
-    critique: str = Field(..., min_length=5, description="Specific critique explaining the failure mechanism")
+    critique: str = Field(
+        ...,
+        min_length=5,
+        description="Specific critique explaining the failure mechanism",
+    )
     suggested_patch: Optional[str] = Field(
         None, description="Replacement code snippet for GitHub suggestion block"
     )
@@ -62,7 +72,9 @@ class ReviewFinding(BaseModel):
 class CodeReviewOutput(BaseModel):
     """Structured LLM output for code review."""
 
-    risk_score: int = Field(ge=0, le=100, description="Overall risk score from 0 (safe) to 100 (critical)")
+    risk_score: int = Field(
+        ge=0, le=100, description="Overall risk score from 0 (safe) to 100 (critical)"
+    )
     summary: str = Field(..., min_length=5, description="Executive review summary")
     findings: list[ReviewFinding] = Field(default_factory=list)
 
@@ -117,7 +129,11 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
         # Strip outer code fences if the model wrapped its patch in ```suggestion or ```lang
         if patch_clean.startswith("```"):
             lines = patch_clean.splitlines()
-            if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+            if (
+                len(lines) >= 2
+                and lines[0].startswith("```")
+                and lines[-1].strip() == "```"
+            ):
                 patch_clean = "\n".join(lines[1:-1]).strip("\r\n")
             elif lines[0].startswith("```"):
                 patch_clean = "\n".join(lines[1:]).strip("\r\n")
@@ -168,23 +184,29 @@ def _build_review_messages(
     repo_context: str = "",
     validation_error_context: Optional[str] = None,
 ) -> list[dict[str, str]]:
-    user_content = f"Repository Context:\n{repo_context}\n\nGit Diff to Review:\n{diff_text}"
+    user_content = (
+        f"Repository Context:\n{repo_context}\n\nGit Diff to Review:\n{diff_text}"
+    )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
     if validation_error_context:
-        messages.append({
-            "role": "assistant",
-            "content": "(prior response failed validation)",
-        })
-        messages.append({
-            "role": "user",
-            "content": (
-                f"Your previous response failed JSON schema validation: {validation_error_context}\n"
-                "Please correct the output. Return ONLY the strict JSON object."
-            ),
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "(prior response failed validation)",
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Your previous response failed JSON schema validation: {validation_error_context}\n"
+                    "Please correct the output. Return ONLY the strict JSON object."
+                ),
+            }
+        )
     return messages
 
 
@@ -250,7 +272,10 @@ async def analyze_diff(
         )
     except ValidationError as first_err:
         err_msg = str(first_err)
-        logger.warning("code_reviewer: first parse failed (%s) — retrying with error context", err_msg)
+        logger.warning(
+            "code_reviewer: first parse failed (%s) — retrying with error context",
+            err_msg,
+        )
 
     # Retry once with error feedback
     retry_messages = _build_review_messages(

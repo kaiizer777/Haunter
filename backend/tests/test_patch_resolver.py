@@ -8,7 +8,10 @@ from app.sandbox.mirror import (
 
 def test_resolve_file_path_exact():
     paths = ["backend/app/core/analytics.py", "tests/test_analytics.py", "pytest.ini"]
-    assert resolve_file_path("backend/app/core/analytics.py", paths) == "backend/app/core/analytics.py"
+    assert (
+        resolve_file_path("backend/app/core/analytics.py", paths)
+        == "backend/app/core/analytics.py"
+    )
     assert resolve_file_path("pytest.ini", paths) == "pytest.ini"
 
 
@@ -23,8 +26,13 @@ def test_resolve_file_path_basename():
 
 def test_resolve_file_path_suffix():
     paths = ["backend/app/core/analytics.py", "frontend/src/core/analytics.ts"]
-    assert resolve_file_path("core/analytics.py", paths) == "backend/app/core/analytics.py"
-    assert resolve_file_path("core/analytics.ts", paths) == "frontend/src/core/analytics.ts"
+    assert (
+        resolve_file_path("core/analytics.py", paths) == "backend/app/core/analytics.py"
+    )
+    assert (
+        resolve_file_path("core/analytics.ts", paths)
+        == "frontend/src/core/analytics.ts"
+    )
 
 
 def test_resolve_file_path_ambiguous():
@@ -151,4 +159,3 @@ def test_apply_unified_diff_tier3_missing_blank_lines():
     assert "data.pop(0)" in result
     assert "total = sum(data)" in result
     assert "\n\n    total = sum(data)" in result  # Preserved original blank line
-

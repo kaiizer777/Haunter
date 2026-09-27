@@ -187,7 +187,9 @@ def is_auto_fix_allowed(enable_auto_fix: bool) -> EnforcementDecision:
     )
 
 
-def is_sandbox_verification_allowed(enable_sandbox_verification: bool) -> EnforcementDecision:
+def is_sandbox_verification_allowed(
+    enable_sandbox_verification: bool,
+) -> EnforcementDecision:
     """Check if CI sandbox verification is enabled."""
     if not enable_sandbox_verification:
         return EnforcementDecision(
@@ -262,7 +264,9 @@ async def check_feature_enforcement(
 
     # 2. Branch check
     if target_branch is not None or head_branch is not None:
-        branch_dec = is_pr_branch_allowed(target_branch, head_branch, settings.allowed_branches)
+        branch_dec = is_pr_branch_allowed(
+            target_branch, head_branch, settings.allowed_branches
+        )
         if not branch_dec.allowed:
             return branch_dec
     elif branch is not None:
@@ -278,7 +282,9 @@ async def check_feature_enforcement(
 
     # 4. Cost ceiling check
     if current_cost_cents is not None:
-        cost_dec = check_cost_ceiling(current_cost_cents, settings.max_cost_per_run_cents)
+        cost_dec = check_cost_ceiling(
+            current_cost_cents, settings.max_cost_per_run_cents
+        )
         if not cost_dec.allowed:
             return cost_dec
 

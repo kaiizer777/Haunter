@@ -177,7 +177,10 @@ async def test_commit_success(
         async with _auth_client(make_auth_client, user) as ac:
             resp = await ac.post(
                 f"/sessions/{session.id}/commit",
-                json={"title": "Fix: return correct value", "body": "Detailed description."},
+                json={
+                    "title": "Fix: return correct value",
+                    "body": "Detailed description.",
+                },
             )
 
     assert resp.status_code == 200, resp.text
@@ -322,7 +325,7 @@ async def test_commit_closed_session_rejected(
                 json={"title": "Should be rejected"},
             )
 
-        assert resp.status_code == 400, (
-            f"Expected 400 for status={terminal_status!r}, got {resp.status_code}: {resp.text}"
-        )
+        assert (
+            resp.status_code == 400
+        ), f"Expected 400 for status={terminal_status!r}, got {resp.status_code}: {resp.text}"
         assert "active" in resp.json()["detail"].lower()

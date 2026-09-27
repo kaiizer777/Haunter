@@ -3,7 +3,19 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, Float, ForeignKey, Index, Integer, String, Text, UUID, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UUID,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -31,8 +43,12 @@ class User(Base):
         CheckConstraint("role IN ('user', 'admin')", name="check_user_role"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    github_id: Mapped[int] = mapped_column(
+        BigInteger, unique=True, nullable=False, index=True
+    )
     github_username: Mapped[str] = mapped_column(String(255), nullable=False)
     avatar_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Stores the GitHub OAuth access token encrypted at rest with Fernet.
@@ -40,7 +56,10 @@ class User(Base):
     # Encryption helpers: app/auth.py (_encrypt_token / _decrypt_token).
     access_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     role: Mapped[str] = mapped_column(
-        String(32), default=UserRole.USER.value, server_default=UserRole.USER.value, nullable=False
+        String(32),
+        default=UserRole.USER.value,
+        server_default=UserRole.USER.value,
+        nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -51,7 +70,9 @@ class User(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
-    repos: Mapped[list["Repo"]] = relationship("Repo", back_populates="user", cascade="all, delete-orphan")
+    repos: Mapped[list["Repo"]] = relationship(
+        "Repo", back_populates="user", cascade="all, delete-orphan"
+    )
     agent_sessions: Mapped[list["AgentSession"]] = relationship(
         "AgentSession", back_populates="user", cascade="all, delete-orphan"
     )
@@ -64,7 +85,9 @@ class User(Base):
 class Repo(Base):
     __tablename__ = "repos"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     # Multi-tenant ownership: every repo is scoped to a user.
     # Two users can independently track the same public repo — unique constraint is (user_id, owner, name).
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -75,7 +98,9 @@ class Repo(Base):
     default_branch: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     language_hint: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     github_install_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    auditor_github_install_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    auditor_github_install_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
     active_model_config_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True
     )
@@ -84,7 +109,9 @@ class Repo(Base):
     )
 
     user: Mapped["User"] = relationship("User", back_populates="repos")
-    runs: Mapped[list["Run"]] = relationship("Run", back_populates="repo", cascade="all, delete-orphan")
+    runs: Mapped[list["Run"]] = relationship(
+        "Run", back_populates="repo", cascade="all, delete-orphan"
+    )
     code_reviews: Mapped[list["CodeReview"]] = relationship(
         "CodeReview", back_populates="repo", cascade="all, delete-orphan"
     )
@@ -109,10 +136,16 @@ class Repo(Base):
 class Run(Base):
     __tablename__ = "runs"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), index=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    repo_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("repos.id", ondelete="CASCADE"), index=True
+    )
     github_run_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
-    github_delivery_id: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True, index=True)
+    github_delivery_id: Mapped[Optional[str]] = mapped_column(
+        String(255), unique=True, nullable=True, index=True
+    )
     head_sha: Mapped[str] = mapped_column(String(40), nullable=False)
     head_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -121,7 +154,9 @@ class Run(Base):
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+        TIMESTAMP(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
     # Distilled root-cause summary written by the Context Gatherer subagent (Phase 5).
     # Only the redacted, token-bounded summary is stored — never raw CI logs or diffs.
@@ -156,16 +191,26 @@ class Run(Base):
     children_runs: Mapped[list["Run"]] = relationship(
         "Run", back_populates="parent_run", cascade="all, delete-orphan"
     )
-    run_steps: Mapped[list["RunStep"]] = relationship("RunStep", back_populates="run", cascade="all, delete-orphan")
-    attempts: Mapped[list["Attempt"]] = relationship("Attempt", back_populates="run", cascade="all, delete-orphan")
-    eval_result: Mapped[Optional["EvalResult"]] = relationship("EvalResult", back_populates="run", uselist=False, cascade="all, delete-orphan")
+    run_steps: Mapped[list["RunStep"]] = relationship(
+        "RunStep", back_populates="run", cascade="all, delete-orphan"
+    )
+    attempts: Mapped[list["Attempt"]] = relationship(
+        "Attempt", back_populates="run", cascade="all, delete-orphan"
+    )
+    eval_result: Mapped[Optional["EvalResult"]] = relationship(
+        "EvalResult", back_populates="run", uselist=False, cascade="all, delete-orphan"
+    )
 
 
 class RunStep(Base):
     __tablename__ = "run_steps"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
     step_name: Mapped[str] = mapped_column(String(255), nullable=False)
     input_tokens: Mapped[Optional[int]] = mapped_column(Integer, default=0)
     output_tokens: Mapped[Optional[int]] = mapped_column(Integer, default=0)
@@ -181,13 +226,19 @@ class RunStep(Base):
 class Attempt(Base):
     __tablename__ = "attempts"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     patch_text: Mapped[str] = mapped_column(Text, nullable=False)
     confidence_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     strategy_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    verification_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    verification_status: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
     failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     build_duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -199,7 +250,6 @@ class Attempt(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "attempt_number", name="uq_attempt_run_number"),
     )
-
 
 
 class ModelConfigScope(StrEnum):
@@ -220,13 +270,22 @@ class ModelConfig(Base):
 
     __tablename__ = "model_configs"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     provider: Mapped[str] = mapped_column(String(255), nullable=False)
-    model_name: Mapped[str] = mapped_column(String(255), nullable=False, default="nemotron-3.5-lightning-free")
-    base_url: Mapped[str] = mapped_column(String(255), nullable=False, default="https://opencode.ai/zen/v1")
+    model_name: Mapped[str] = mapped_column(
+        String(255), nullable=False, default="nemotron-3.5-lightning-free"
+    )
+    base_url: Mapped[str] = mapped_column(
+        String(255), nullable=False, default="https://opencode.ai/zen/v1"
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     scope: Mapped[str] = mapped_column(
-        String(16), nullable=False, default=ModelConfigScope.GLOBAL.value, server_default="global"
+        String(16),
+        nullable=False,
+        default=ModelConfigScope.GLOBAL.value,
+        server_default="global",
     )
     repo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("repos.id", ondelete="SET NULL"), nullable=True
@@ -248,11 +307,19 @@ class ModelConfig(Base):
 class EvalResult(Base):
     __tablename__ = "eval_results"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"), unique=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), unique=True
+    )
     overall_accuracy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    per_subagent_scores: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-    model_config_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("model_configs.id", ondelete="SET NULL"))
+    per_subagent_scores: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True
+    )
+    model_config_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -296,13 +363,19 @@ class CodeReview(Base):
 
     __tablename__ = "code_reviews"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), index=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    repo_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("repos.id", ondelete="CASCADE"), index=True
+    )
     commit_sha: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     pr_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     risk_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
-    findings: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="completed")
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
@@ -328,7 +401,9 @@ class RepoSettings(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     repo_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("repos.id", ondelete="CASCADE"), nullable=False
     )
@@ -371,7 +446,10 @@ class RepoSettings(Base):
     )
 
     allowed_branches: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, default=lambda: ["main", "master"], server_default='["main", "master"]'
+        JSONB,
+        nullable=False,
+        default=lambda: ["main", "master"],
+        server_default='["main", "master"]',
     )
     ignore_draft_prs: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
@@ -501,7 +579,9 @@ class AuditJob(Base):
             name="ck_audit_jobs_status",
         ),
         CheckConstraint("attempts >= 0", name="ck_audit_jobs_attempts"),
-        CheckConstraint("dispatch_attempts >= 0", name="ck_audit_jobs_dispatch_attempts"),
+        CheckConstraint(
+            "dispatch_attempts >= 0", name="ck_audit_jobs_dispatch_attempts"
+        ),
         CheckConstraint("settings_version >= 1", name="ck_audit_jobs_settings_version"),
         CheckConstraint(
             "length(delivery_fingerprint) = 64",
@@ -537,14 +617,18 @@ class AgentSession(Base):
 
     __tablename__ = "agent_sessions"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     repo_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("repos.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    title: Mapped[str] = mapped_column(String(255), nullable=False, default="Pairing Session")
+    title: Mapped[str] = mapped_column(
+        String(255), nullable=False, default="Pairing Session"
+    )
     # Allowed statuses: "active" | "completed" | "closed"
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
     branch_name: Mapped[str] = mapped_column(String(255), nullable=False)

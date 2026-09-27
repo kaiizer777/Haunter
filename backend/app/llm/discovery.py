@@ -72,14 +72,20 @@ async def get_dynamic_free_models(
     global _cached_free_models, _cache_expires_at, _last_known_free_models
 
     now = time.monotonic()
-    if not force_refresh and _cached_free_models is not None and now < _cache_expires_at:
+    if (
+        not force_refresh
+        and _cached_free_models is not None
+        and now < _cache_expires_at
+    ):
         return list(_cached_free_models)
 
     resolved_base_url = (base_url or settings.opencode_zen_base_url).rstrip("/") + "/"
     resolved_api_key = api_key or settings.opencode_zen_api_key
 
     if not resolved_api_key:
-        logger.warning("opencode_zen: no API key configured for model discovery; using fallback list")
+        logger.warning(
+            "opencode_zen: no API key configured for model discovery; using fallback list"
+        )
         return list(_last_known_free_models)
 
     endpoint = urljoin(resolved_base_url, "models")
@@ -93,7 +99,11 @@ async def get_dynamic_free_models(
     async with _cache_lock:
         # Re-check cache inside lock to prevent thundering herd
         now = time.monotonic()
-        if not force_refresh and _cached_free_models is not None and now < _cache_expires_at:
+        if (
+            not force_refresh
+            and _cached_free_models is not None
+            and now < _cache_expires_at
+        ):
             return list(_cached_free_models)
 
         try:

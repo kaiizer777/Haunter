@@ -114,7 +114,9 @@ def _map_session_to_out(session: AgentSession, repo: Repo) -> SessionOut:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/sessions", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/sessions", response_model=SessionOut, status_code=status.HTTP_201_CREATED
+)
 async def create_session(
     body: SessionCreateIn,
     current_user: Annotated[User, Depends(get_current_user)],
@@ -128,11 +130,15 @@ async def create_session(
     - Resolves base_sha via GitHub App installation token.
     """
     # Object-level authorization: verify repo belongs to caller.
-    repo_stmt = select(Repo).where(Repo.id == body.repo_id, Repo.user_id == current_user.id)
+    repo_stmt = select(Repo).where(
+        Repo.id == body.repo_id, Repo.user_id == current_user.id
+    )
     repo_result = await db.execute(repo_stmt)
     repo: Optional[Repo] = repo_result.scalars().first()
     if not repo:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found"
+        )
 
     # Concurrency guard: count active sessions for this user.
     active_count_stmt = (
@@ -175,7 +181,10 @@ async def create_session(
     except GitHubClientError as exc:
         logger.error(
             "GitHub API error resolving branch SHA for %s/%s branch %s: %s",
-            repo.owner, repo.name, branch_name, exc,
+            repo.owner,
+            repo.name,
+            branch_name,
+            exc,
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -259,7 +268,9 @@ async def get_session(
     result = await db.execute(stmt)
     session: Optional[AgentSession] = result.scalars().first()
     if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
 
     return _map_session_to_out(session, session.repo)
 
@@ -285,7 +296,9 @@ async def get_session_tree(
     result = await db.execute(stmt)
     session: Optional[AgentSession] = result.scalars().first()
     if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
 
     repo = session.repo
 
@@ -310,7 +323,11 @@ async def get_session_tree(
     except GitHubClientError as exc:
         logger.error(
             "GitHub API error fetching tree for session %s (%s/%s @ %s): %s",
-            session_id, repo.owner, repo.name, session.base_sha, exc,
+            session_id,
+            repo.owner,
+            repo.name,
+            session.base_sha,
+            exc,
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -326,7 +343,10 @@ async def get_session_tree(
         if not p:
             continue
         # Filter common noise directories.
-        if any(p.startswith(prefix) or f"/{prefix}" in f"/{p}" for prefix in _TREE_IGNORE_PREFIXES):
+        if any(
+            p.startswith(prefix) or f"/{prefix}" in f"/{p}"
+            for prefix in _TREE_IGNORE_PREFIXES
+        ):
             continue
         paths.append(p)
 
@@ -355,7 +375,9 @@ async def close_session(
     result = await db.execute(stmt)
     session: Optional[AgentSession] = result.scalars().first()
     if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
 
     if session.status != "closed":
         session.status = "closed"
@@ -401,18 +423,17 @@ async def chat_session(
         X-Accel-Buffering: no
     """
     # Object-level authorization: session must be active and owned by caller.
-    stmt = (
-        select(AgentSession)
-        .where(
-            AgentSession.id == session_id,
-            AgentSession.user_id == current_user.id,
-        )
+    stmt = select(AgentSession).where(
+        AgentSession.id == session_id,
+        AgentSession.user_id == current_user.id,
     )
     result = await db.execute(stmt)
     session: Optional[AgentSession] = result.scalars().first()
 
     if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
     if session.status != "active":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -422,6 +443,7 @@ async def chat_session(
     # Resolve GitHub installation token for file reads — best-effort.
     try:
         from sqlalchemy.orm import selectinload as _sel
+
         repo_stmt = (
             select(AgentSession)
             .options(_sel(AgentSession.repo))
@@ -501,7 +523,9 @@ async def verify_session(
     session: Optional[AgentSession] = result.scalars().first()
 
     if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
     if session.status != "active":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -612,7 +636,9 @@ async def commit_session(
     session: Optional[AgentSession] = result.scalars().first()
 
     if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
 
     # ------------------------------------------------------------------
     # 2. State guards.
@@ -663,7 +689,9 @@ async def commit_session(
         except ValueError as exc:
             logger.error(
                 "sessions/commit: patch application failed for %s in session %s: %s",
-                file_path, session_id, exc,
+                file_path,
+                session_id,
+                exc,
             )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -681,19 +709,23 @@ async def commit_session(
         except _GHErr as exc:
             logger.error(
                 "sessions/commit: create_blob failed for %s in session %s: %s",
-                file_path, session_id, exc,
+                file_path,
+                session_id,
+                exc,
             )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Failed to create Git blob for '{file_path}' via GitHub API: {exc}",
             )
 
-        tree_entries.append({
-            "path": file_path,
-            "mode": "100644",
-            "type": "blob",
-            "sha": blob_sha,
-        })
+        tree_entries.append(
+            {
+                "path": file_path,
+                "mode": "100644",
+                "type": "blob",
+                "sha": blob_sha,
+            }
+        )
 
     # ------------------------------------------------------------------
     # 5. Create Git tree (rooted at base_sha as base_tree).
@@ -707,7 +739,11 @@ async def commit_session(
             installation_token=gh_token,
         )
     except _GHErr as exc:
-        logger.error("sessions/commit: create_git_tree failed for session %s: %s", session_id, exc)
+        logger.error(
+            "sessions/commit: create_git_tree failed for session %s: %s",
+            session_id,
+            exc,
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to create Git tree via GitHub API: {exc}",
@@ -730,7 +766,11 @@ async def commit_session(
             installation_token=gh_token,
         )
     except _GHErr as exc:
-        logger.error("sessions/commit: create_git_commit failed for session %s: %s", session_id, exc)
+        logger.error(
+            "sessions/commit: create_git_commit failed for session %s: %s",
+            session_id,
+            exc,
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to create Git commit via GitHub API: {exc}",
@@ -751,7 +791,9 @@ async def commit_session(
     except _GHErr as exc:
         logger.error(
             "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
-            session_id, session.branch_name, exc,
+            session_id,
+            session.branch_name,
+            exc,
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -773,7 +815,11 @@ async def commit_session(
             installation_token=gh_token,
         )
     except _GHErr as exc:
-        logger.error("sessions/commit: create_pull_request failed for session %s: %s", session_id, exc)
+        logger.error(
+            "sessions/commit: create_pull_request failed for session %s: %s",
+            session_id,
+            exc,
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to open pull request via GitHub API: {exc}",
@@ -789,24 +835,29 @@ async def commit_session(
     session.updated_at = datetime.now(timezone.utc)
 
     history: list = list(session.conversation_history or [])
-    history.append({
-        "role": "system",
-        "content": (
-            f"Commit published. PR #{pr_number} opened: {pr_url}\n"
-            f"Commit SHA: {commit_sha}"
-        ),
-        "pr_url": pr_url,
-        "pr_number": pr_number,
-        "commit_sha": commit_sha,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    history.append(
+        {
+            "role": "system",
+            "content": (
+                f"Commit published. PR #{pr_number} opened: {pr_url}\n"
+                f"Commit SHA: {commit_sha}"
+            ),
+            "pr_url": pr_url,
+            "pr_number": pr_number,
+            "commit_sha": commit_sha,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     session.conversation_history = history
 
     await db.commit()
 
     logger.info(
         "sessions/commit: session %s committed -- PR #%s %s commit=%s",
-        session_id, pr_number, pr_url, commit_sha,
+        session_id,
+        pr_number,
+        pr_url,
+        commit_sha,
     )
 
     return SessionCommitOut(
@@ -855,7 +906,9 @@ async def clarify_session(
     session: Optional[AgentSession] = result.scalars().first()
 
     if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
 
     if session.status != "awaiting_clarification":
         raise HTTPException(
@@ -868,10 +921,12 @@ async def clarify_session(
 
     # Append response to conversation history.
     history: list[dict[str, Any]] = list(session.conversation_history or [])
-    history.append({
-        "role": "user",
-        "content": f"[User Clarification Response]: {body.response}",
-    })
+    history.append(
+        {
+            "role": "user",
+            "content": f"[User Clarification Response]: {body.response}",
+        }
+    )
     session.conversation_history = history
 
     # Reset session status and clear waiting_input.
@@ -922,7 +977,9 @@ async def restore_checkpoint(
     session: Optional[AgentSession] = result.scalars().first()
 
     if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
 
     # Verify checkpoint exists before calling restore.
     checkpoints: list[dict[str, Any]] = list(session.checkpoints or [])
@@ -936,7 +993,9 @@ async def restore_checkpoint(
     # Restore state directly (no SSE queue needed for the REST endpoint path).
     session.staged_patches = dict(cp["staged_patches"])
     history_length: int = cp["history_length"]
-    session.conversation_history = list((session.conversation_history or [])[:history_length])
+    session.conversation_history = list(
+        (session.conversation_history or [])[:history_length]
+    )
     session.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
@@ -944,7 +1003,8 @@ async def restore_checkpoint(
 
     logger.info(
         "sessions/restore_checkpoint: session %s restored to checkpoint %s",
-        session_id, checkpoint_id,
+        session_id,
+        checkpoint_id,
     )
 
     return _map_session_to_out(session, session.repo)
