@@ -12,6 +12,7 @@
 [![Sandbox](https://img.shields.io/badge/Sandbox-GitHub%20Actions%20CI-181717?style=flat-square&logo=githubactions)](https://github.com/features/actions)
 [![Runtime Preview](https://img.shields.io/badge/In--Browser%20Preview-StackBlitz%20WebContainer-1389FD?style=flat-square)](https://webcontainers.io/)
 [![Multi--Model](https://img.shields.io/badge/LLM-OpenCode%20Zen%20%7C%20OpenAI%20%7C%20Anthropic-7C3AED?style=flat-square)](https://opencode.ai/zen/v1)
+[![License](https://img.shields.io/badge/License-Business%20Source%201.1-yellow?style=flat-square)](LICENSE)
 
 </div>
 
@@ -375,3 +376,46 @@ npx wrangler deploy
 - [future02.md](file:///C:/Users/bari2/Desktop/Haunter/future02.md): Specification for Auditor Mode, per-repo settings, and slash commands.
 - [aws.md](file:///C:/Users/bari2/Desktop/Haunter/aws.md): AWS Lambda deployment runbook, Terraform configuration, and gotchas.
 - [github.md](file:///C:/Users/bari2/Desktop/Haunter/github.md): GitHub Actions sandbox runner implementation and mirror lifecycle.
+
+---
+
+## License
+
+Haunter is licensed under the **Business Source License 1.1** (`BUSL-1.1`) — a source-available license, not an OSI-approved open source license.
+
+Copyright © 2026 MD Sufiyan Bari.
+
+### What this means in practice
+
+**You may:**
+- Read, study, and audit the entire codebase — it is public and transparent by design.
+- Fork it, modify it, and run it for yourself, including in production.
+- Use it internally within your own organization or for evaluation and research.
+
+**You may not, without purchasing a commercial license from the Licensor:**
+- Host, operate, or resell Haunter as a service.
+- Offer it as a managed, white-labelled, or rebranded product.
+- Make it available to third parties as part of any product, platform, or
+  service — whether or not Haunter is the primary component, and whether or not
+  the portion containing it is separately identified, priced, enabled, or
+  marketed. Bundling, embedding, or reselling it as part of a larger offering is
+  covered even if you never operate it on the purchaser's behalf.
+
+Publishing a modified copy as a public source fork is permitted redistribution. The restriction attaches to offering Haunter, or a derivative of it, as a product, platform, or service to third parties. The Competitive Offering definition in the `LICENSE` file is the controlling text; it also reaches substantially similar offerings and the offering of any individual Haunter feature or capability.
+
+### Conversion
+
+For each version, the rights change on **2030-09-27**, or on the fourth anniversary of that version's first publicly available distribution, whichever comes first, under the **GNU General Public License v3.0 or later**.
+
+This Change Date governs the versions licensed under the current `LICENSE` file. A later version carries a different Change Date only if the Licensor specifies one for it; if these terms are reused unchanged, the existing date continues to apply.
+
+After conversion, use is governed by the GPL's own terms. The GPL's source-sharing obligations are triggered by distributing or conveying the software, not by private internal use — modifications kept inside your own organization carry no publication requirement.
+
+Until the Change Date, commercial licensing is available directly from the Licensor.
+
+### Why this license
+
+The source is published in full so it can be read, verified, and trusted. The commercial terms exist so that the work cannot simply be taken and resold as someone else's product.
+
+Full license text: [LICENSE](LICENSE)
+
