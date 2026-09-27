@@ -209,10 +209,7 @@ async def update_model_config_endpoint(
             repo.active_model_config_id = config.id
 
         await db.commit()
-        try:
-            await db.refresh(config)
-        except Exception:
-            pass
+        await db.refresh(config)
         logger.info(
             "Repo model config updated: user=%s repo=%s provider=%s model=%s",
             current_user.id,
@@ -247,10 +244,7 @@ async def update_model_config_endpoint(
     db.add(new_config)
     await db.flush()
     await db.commit()
-    try:
-        await db.refresh(new_config)
-    except Exception:
-        pass
+    await db.refresh(new_config)
 
     logger.info(
         "Global model config switched: user=%s provider=%s model=%s",
@@ -314,7 +308,7 @@ async def get_available_models_endpoint(
     zen_items: list[AvailableModelItem] = []
     for mid in dynamic_zen_models:
         tag = "Default · Free" if mid == settings.default_model else "Free"
-        ctx = MODEL_CONTEXT_WINDOWS.get(mid, 131072)
+        ctx = MODEL_CONTEXT_WINDOWS.get(mid)
         zen_items.append(
             AvailableModelItem(
                 id=mid,

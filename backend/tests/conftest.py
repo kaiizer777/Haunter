@@ -323,7 +323,10 @@ def pytest_collection_modifyitems(
 
     # If in CI (CI=true / GITHUB_ACTIONS=true), or if --all / -m / -k / explicit target file passed:
     is_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
-    has_explicit_target = bool(config.args and any(".py" in arg or "::" in arg for arg in config.args))
+    has_explicit_target = bool(
+        getattr(config.option, "pyargs", False)
+        or config.args
+    )
     if (
         is_ci
         or config.getoption("--all")
