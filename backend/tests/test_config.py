@@ -16,6 +16,12 @@ Covers:
 - Startup security guard for TOKEN_ENCRYPTION_KEY at config.py:172:
   - raises RuntimeError if key is None and pytest is not in sys.modules
   - succeeds if key is set even when pytest is not in sys.modules
+- Placeholder-credential startup guard at config.py:215:
+  - _find_placeholder_credential returns None when all guarded fields are real
+  - detects REPLACE_ME, dashed 'replace-me', and embedded sentinel variants
+  - raises RuntimeError naming the offending env var at non-test startup
+  - raises without echoing the credential value into the message
+  - only warns under pytest so the suite imports against a placeholder .env
 """
 
 import importlib
@@ -27,6 +33,25 @@ from pydantic_settings import DotEnvSettingsSource
 
 import app.config
 from app.config import Settings, _to_asyncpg_url, settings
+
+
+# Real-shaped values for every field guarded by the placeholder startup check.
+# Reloading app.config with the local .env (which ships REPLACE_ME) would trip
+# that guard, so tests that pop pytest out of sys.modules must neutralize it.
+_REAL_CREDENTIAL_ENV = {
+    "GITHUB_CLIENT_ID": "Iv1.0123456789abcdef",
+    "GITHUB_CLIENT_SECRET": "0123456789abcdef0123456789abcdef01234567",
+    "CALLBACK_URL": "http://localhost:8000/auth/callback",
+    "SESSION_SECRET_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "FRONTEND_URL": "http://localhost:3000",
+}
+
+
+@pytest.fixture
+def real_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force every placeholder-guarded field to a non-placeholder value."""
+    for key, value in _REAL_CREDENTIAL_ENV.items():
+        monkeypatch.setenv(key, value)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +167,7 @@ def test_settings_alias_choices_seed_max_files(monkeypatch: pytest.MonkeyPatch) 
 
 def test_token_encryption_key_guard_raises_when_missing_and_no_pytest(
     monkeypatch: pytest.MonkeyPatch,
+    real_credentials: None,
 ) -> None:
     """When TOKEN_ENCRYPTION_KEY is None and 'pytest' not in sys.modules, reload raises RuntimeError."""
     orig_load = DotEnvSettingsSource._load_env_vars
@@ -170,6 +196,7 @@ def test_token_encryption_key_guard_raises_when_missing_and_no_pytest(
 
 def test_token_encryption_key_guard_succeeds_when_key_set_and_no_pytest(
     monkeypatch: pytest.MonkeyPatch,
+    real_credentials: None,
 ) -> None:
     """When TOKEN_ENCRYPTION_KEY is set and 'pytest' not in sys.modules, reload succeeds."""
     dummy_key = "8wche2Etq2-FHkJHpJz-MsVV0XFqp_dU_kHCc1FZgG8="
@@ -183,3 +210,92 @@ def test_token_encryption_key_guard_succeeds_when_key_set_and_no_pytest(
         if pytest_module is not None:
             sys.modules["pytest"] = pytest_module
         importlib.reload(app.config)
+
+
+# ---------------------------------------------------------------------------
+# Placeholder-credential startup guard (app/config.py:215)
+# ---------------------------------------------------------------------------
+
+
+def test_find_placeholder_returns_none_with_real_credentials(
+    real_credentials: None,
+) -> None:
+    """All guarded fields set to real-shaped values → no placeholder detected."""
+    reloaded = importlib.reload(app.config)
+    assert reloaded._find_placeholder_credential() is None
+
+
+def test_find_placeholder_detects_replace_me(
+    monkeypatch: pytest.MonkeyPatch,
+    real_credentials: None,
+) -> None:
+    """A REPLACE_ME client_id is reported as the offending env var."""
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "REPLACE_ME")
+    reloaded = importlib.reload(app.config)
+    assert reloaded._find_placeholder_credential() == "GITHUB_CLIENT_ID"
+
+
+def test_find_placeholder_detects_dashed_variant(
+    monkeypatch: pytest.MonkeyPatch,
+    real_credentials: None,
+) -> None:
+    """Near-miss placeholders like 'replace-me' are caught, not just the exact sentinel."""
+    monkeypatch.setenv("GITHUB_CLIENT_SECRET", "replace-me")
+    reloaded = importlib.reload(app.config)
+    assert reloaded._find_placeholder_credential() == "GITHUB_CLIENT_SECRET"
+
+
+def test_find_placeholder_detects_embedded_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+    real_credentials: None,
+) -> None:
+    """A sentinel embedded in a longer string (e.g. GITHUB_TOKEN suffix pattern) is caught."""
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "ghp_REPLACE_ME_for_local_dev")
+    reloaded = importlib.reload(app.config)
+    assert reloaded._find_placeholder_credential() == "GITHUB_CLIENT_ID"
+
+
+def test_placeholder_guard_raises_at_non_test_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    With a placeholder credential and pytest absent from sys.modules, reloading
+    app.config raises RuntimeError naming the offending env var.
+
+    Deliberately does NOT use the real_credentials fixture — the placeholder is
+    the condition under test. CALLBACK_URL and the remaining fields are pinned to
+    real values so the guard reports GITHUB_CLIENT_ID specifically rather than
+    whichever field happens to be unfilled first.
+    """
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "REPLACE_ME")
+    for key, value in _REAL_CREDENTIAL_ENV.items():
+        if key != "GITHUB_CLIENT_ID":
+            monkeypatch.setenv(key, value)
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", "8wche2Etq2-FHkJHpJz-MsVV0XFqp_dU_kHCc1FZgG8=")
+
+    pytest_module = sys.modules.pop("pytest", None)
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            importlib.reload(app.config)
+        message = str(exc_info.value)
+        assert "GITHUB_CLIENT_ID" in message
+        # The error must name the variable but never echo the credential value.
+        assert "REPLACE_ME" not in message
+    finally:
+        if pytest_module is not None:
+            sys.modules["pytest"] = pytest_module
+        importlib.reload(app.config)
+
+
+def test_placeholder_guard_does_not_raise_under_pytest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Under pytest (sys.modules probe true) a placeholder credential only warns.
+    The suite must be able to import app.config against a placeholder .env —
+    otherwise one unfilled value would take out every test at collection time.
+    """
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "REPLACE_ME")
+    reloaded = importlib.reload(app.config)
+    assert reloaded.settings.github_client_id == "REPLACE_ME"
+    assert reloaded._find_placeholder_credential() == "GITHUB_CLIENT_ID"

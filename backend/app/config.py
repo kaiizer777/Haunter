@@ -210,3 +210,64 @@ if settings.token_encryption_key is None and "pytest" not in sys.modules:
         "Generate with: "
         'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
     )
+
+
+# Sentinel values that mean "operator never filled this in". Copied verbatim from
+# .env.example, so a guard that only matched the exact string would still let
+# near-miss placeholders (e.g. "replace-me") through to the OAuth redirect.
+_PLACEHOLDER_SENTINELS: tuple[str, ...] = ("replace_me", "replace-me", "placeholder")
+
+# Field name -> operator-facing env var name, for the error message only.
+# Values are never interpolated into the exception — a startup error that echoes
+# a credential is a credential leak into logs and crash reporters.
+_PLACEHOLDER_GUARDED_FIELDS: dict[str, str] = {
+    "github_client_id": "GITHUB_CLIENT_ID",
+    "github_client_secret": "GITHUB_CLIENT_SECRET",
+    "callback_url": "CALLBACK_URL",
+    "session_secret_key": "SESSION_SECRET_KEY",
+    "frontend_url": "FRONTEND_URL",
+}
+
+
+def _find_placeholder_credential() -> str | None:
+    """
+    Return the env var name whose configured value is still an unfilled
+    placeholder, or None when every guarded field holds a real value.
+
+    Matches are case-insensitive substring checks so "REPLACE_ME" and
+    "replace-me" are both caught.
+    """
+    for field, env_name in _PLACEHOLDER_GUARDED_FIELDS.items():
+        value = getattr(settings, field, None)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        normalized = value.strip().lower()
+        if any(sentinel in normalized for sentinel in _PLACEHOLDER_SENTINELS):
+            return env_name
+    return None
+
+
+# Fail closed on placeholder credentials at non-test startup.
+# Without this, a placeholder client_id is passed straight into the OAuth
+# authorization URL (app/auth.py), GitHub returns an opaque 404 for the unknown
+# client_id, and the operator sees a dead login button with no signal about the
+# real cause. A boot-time error naming the offending env var is strictly more
+# actionable than a 404 discovered mid-login-flow.
+# Uses the same sys.modules pytest probe as the TOKEN_ENCRYPTION_KEY guard above:
+# the test suite legitimately runs against placeholder values, and a hard startup
+# failure would take out the whole suite at import time rather than one test.
+if _placeholder_credential := _find_placeholder_credential():
+    if "pytest" not in sys.modules:
+        raise RuntimeError(
+            f"{_placeholder_credential} is still a placeholder value. "
+            "GitHub OAuth login cannot work with an unfilled credential — "
+            "register an OAuth App at https://github.com/settings/developers/apps "
+            "(Authorization callback URL must exactly match CALLBACK_URL, e.g. "
+            "http://localhost:8000/auth/callback for local dev), then set the real "
+            "values in backend/.env."
+        )
+    logger.warning(
+        "%s is a placeholder value — OAuth login will fail against GitHub. "
+        "Test context only.",
+        _placeholder_credential,
+    )

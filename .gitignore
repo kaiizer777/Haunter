@@ -8,6 +8,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+# Local dev runtime logs (backend/server.log, backend/server_err.log, etc.)
+*.log
 
 # Python & FastAPI
 __pycache__/
