@@ -775,6 +775,8 @@ class SubagentRunner:
             timeout_sec=timeout_sec,
             queue=self.queue,
             cwd=cwd_str,
+            repo_owner=self.repo_owner,
+            repo_name=self.repo_name,
         )
 
     async def _exec_run_linter(self, args: dict[str, Any]) -> str:
@@ -795,6 +797,8 @@ class SubagentRunner:
             timeout_sec=timeout_sec,
             queue=self.queue,
             cwd=cwd_str,
+            repo_owner=self.repo_owner,
+            repo_name=self.repo_name,
         )
 
     async def _exec_run_targeted_tests(self, args: dict[str, Any]) -> str:
@@ -813,6 +817,8 @@ class SubagentRunner:
             timeout_sec=timeout_sec,
             queue=self.queue,
             cwd=cwd_str,
+            repo_owner=self.repo_owner,
+            repo_name=self.repo_name,
         )
 
     async def _exec_search_web_docs(self, args: dict[str, Any]) -> str:

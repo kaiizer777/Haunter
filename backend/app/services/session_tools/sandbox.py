@@ -125,18 +125,52 @@ def _resolve_binary(name: str) -> str:
     return cand if cand else name
 
 
-def _prepare_cmd_argv(argv: list[str]) -> list[str]:
+def _find_repo_python(cwd: str | None = None) -> str | None:
+    """Find a local virtualenv python in cwd or adjacent directories if one exists."""
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    curr = os.path.abspath(cwd)
+    for _ in range(4):
+        for venv_name in (".venv", "venv", "env"):
+            if sys.platform == "win32":
+                cand = os.path.join(curr, venv_name, "Scripts", "python.exe")
+                cand_sub = os.path.join(curr, "backend", venv_name, "Scripts", "python.exe")
+            else:
+                cand = os.path.join(curr, venv_name, "bin", "python")
+                cand_sub = os.path.join(curr, "backend", venv_name, "bin", "python")
+            if os.path.isfile(cand):
+                return cand
+            if os.path.isfile(cand_sub):
+                return cand_sub
+        parent = os.path.dirname(curr)
+        if parent == curr:
+            break
+        curr = parent
+    return None
+
+
+def _prepare_cmd_argv(argv: list[str], cwd: str | None = None) -> list[str]:
     """Resolve Python, pytest, ruff, and binaries for reliable cross-platform execution."""
     cmd_argv = list(argv)
     if not cmd_argv:
         return cmd_argv
     bin_name = cmd_argv[0].lower()
+
+    # On Windows, wrap shell builtins so subprocess.Popen succeeds with shell=False
+    if sys.platform == "win32" and bin_name in (
+        "dir", "del", "copy", "type", "cls", "mkdir", "md", "rmdir", "rd", "move"
+    ):
+        return ["cmd", "/c"] + cmd_argv
+
+    repo_python = _find_repo_python(cwd)
+    effective_python = repo_python if repo_python else sys.executable
+
     if bin_name in ("python", "python3"):
-        cmd_argv[0] = sys.executable
+        cmd_argv[0] = effective_python
     elif bin_name == "pytest":
-        cmd_argv = [sys.executable, "-m", "pytest"] + cmd_argv[1:]
+        cmd_argv = [effective_python, "-m", "pytest"] + cmd_argv[1:]
     elif bin_name == "ruff":
-        cmd_argv = [sys.executable, "-m", "ruff"] + cmd_argv[1:]
+        cmd_argv = [effective_python, "-m", "ruff"] + cmd_argv[1:]
     else:
         cmd_argv[0] = _resolve_binary(cmd_argv[0])
     return cmd_argv
@@ -173,13 +207,15 @@ def _run_subprocess_sync(
 
     # Ensure virtualenv bin/Scripts directory is in PATH
     env = os.environ.copy()
-    bin_dir = os.path.dirname(sys.executable)
+    repo_python = _find_repo_python(cwd)
+    effective_python = repo_python if repo_python else sys.executable
+    bin_dir = os.path.dirname(effective_python)
     scripts_dir = os.path.join(bin_dir, "Scripts")
     path_dirs = [d for d in (bin_dir, scripts_dir) if os.path.isdir(d)]
     if path_dirs:
         env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{env.get('PATH', '')}"
 
-    cmd_argv = _prepare_cmd_argv(argv)
+    cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)
 
     try:
         proc = subprocess.Popen(
@@ -297,13 +333,15 @@ async def _run_subprocess(
 
     # Ensure virtualenv bin/Scripts is in PATH
     env = os.environ.copy()
-    bin_dir = os.path.dirname(sys.executable)
+    repo_python = _find_repo_python(cwd)
+    effective_python = repo_python if repo_python else sys.executable
+    bin_dir = os.path.dirname(effective_python)
     scripts_dir = os.path.join(bin_dir, "Scripts")
     path_dirs = [d for d in (bin_dir, scripts_dir) if os.path.isdir(d)]
     if path_dirs:
         env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{env.get('PATH', '')}"
 
-    cmd_argv = _prepare_cmd_argv(argv)
+    cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -430,6 +468,114 @@ def parse_command_chain(command: str) -> list[tuple[list[str], str]]:
 
 
 # ---------------------------------------------------------------------------
+# Repository Working Directory Resolver
+# ---------------------------------------------------------------------------
+
+
+def resolve_repo_dir(
+    repo_name: str | None = None,
+    repo_owner: str | None = None,
+    cwd: str | None = None,
+) -> tuple[str | None, str | None]:
+    """
+    Resolve the absolute working directory for repository execution.
+
+    If repo_name is provided, locates the local repository checkout on disk:
+      1. Explicit environment variables (LOCAL_REPOS_DIR, REPOS_DIR, WORKSPACE_DIR).
+      2. Traversal up from current working directory (checking matching basename, children, and siblings).
+      3. Common developer directories (~/Desktop, ~, ~/projects, ~/repos, ~/workspace).
+
+    Returns:
+      (effective_cwd, None) on success.
+      (None, error_message) if repo_name is provided but cannot be found locally.
+    """
+    if not repo_name or not repo_name.strip():
+        base_dir = os.getcwd()
+        if cwd and cwd.strip():
+            stripped = cwd.strip()
+            effective = (
+                stripped
+                if os.path.isabs(stripped)
+                else os.path.normpath(os.path.join(base_dir, stripped))
+            )
+            return effective, None
+        return base_dir, None
+
+    clean_repo = repo_name.strip()
+    if clean_repo.endswith(".git"):
+        clean_repo = clean_repo[:-4]
+
+    candidates: list[str] = []
+
+    # 1. Environment variables
+    for env_var in ("LOCAL_REPOS_DIR", "REPOS_DIR", "WORKSPACE_DIR", "PROJECTS_DIR"):
+        val = os.getenv(env_var)
+        if val and os.path.isdir(val):
+            candidates.append(os.path.join(val, clean_repo))
+            if repo_owner:
+                candidates.append(os.path.join(val, repo_owner, clean_repo))
+
+    # 2. Traversal up from current working directory (e.g. backend/ -> Haunter/ -> Desktop/)
+    curr = os.path.abspath(os.getcwd())
+    for _ in range(5):
+        if os.path.basename(curr).lower() == clean_repo.lower():
+            candidates.append(curr)
+        candidates.append(os.path.join(curr, clean_repo))
+        for sub in ("projects", "repos", "workspace", "src"):
+            candidates.append(os.path.join(curr, sub, clean_repo))
+        parent = os.path.dirname(curr)
+        if parent == curr:
+            break
+        curr = parent
+
+    # 3. User home and desktop common developer locations
+    home = os.path.expanduser("~")
+    for base in (
+        os.path.join(home, "Desktop"),
+        home,
+        os.path.join(home, "projects"),
+        os.path.join(home, "repos"),
+        os.path.join(home, "workspace"),
+        os.path.join(home, "source", "repos"),
+        os.path.join(home, "src"),
+    ):
+        candidates.append(os.path.join(base, clean_repo))
+
+    resolved_repo_root: str | None = None
+    seen: set[str] = set()
+    for cand in candidates:
+        norm = os.path.normpath(cand)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if os.path.isdir(norm):
+            resolved_repo_root = norm
+            break
+
+    if not resolved_repo_root:
+        repo_desc = f"{repo_owner}/{clean_repo}" if repo_owner else clean_repo
+        return None, (
+            f"Error: Local checkout for repository {repo_desc!r} was not found on this machine. "
+            "Local terminal commands and test runners require a local clone of the repository. "
+            "To verify staged patches in an isolated cloud environment, use 'verify_in_ci_sandbox'."
+        )
+
+    if cwd and cwd.strip():
+        stripped_cwd = cwd.strip()
+        if os.path.isabs(stripped_cwd):
+            norm_cwd = os.path.normpath(stripped_cwd)
+            if norm_cwd.lower().startswith(resolved_repo_root.lower()):
+                return norm_cwd, None
+            return None, (
+                f"Error: Working directory {cwd!r} is outside repository root {resolved_repo_root!r}."
+            )
+        target_cwd = os.path.normpath(os.path.join(resolved_repo_root, stripped_cwd))
+        return target_cwd, None
+
+    return resolved_repo_root, None
+
+
+# ---------------------------------------------------------------------------
 # Tool: run_terminal_command
 # ---------------------------------------------------------------------------
 
@@ -442,6 +588,8 @@ async def tool_run_terminal_command(
     timeout_sec: int = 60,
     queue: "SseQueue | None" = None,
     cwd: str | None = None,
+    repo_owner: str | None = None,
+    repo_name: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -455,7 +603,9 @@ async def tool_run_terminal_command(
         timeout_sec: Wall-clock timeout in seconds (default 60, max 300).
         queue:       SseQueue for streaming terminal_output events.
         cwd:         Optional base working directory relative to repository root.
-        **_kwargs:   Accepts and ignores session/repo/staged_patches for signature consistency.
+        repo_owner:  Optional repository owner (e.g. 'kaiizer777').
+        repo_name:   Optional repository name (e.g. 'UpGrade').
+        **_kwargs:   Accepts and ignores session/staged_patches for signature consistency.
 
     Returns:
         Formatted string:
@@ -483,7 +633,12 @@ async def tool_run_terminal_command(
     if not subcommands:
         return "Error: Empty command after parsing."
 
-    current_cwd = cwd or os.getcwd()
+    resolved_cwd, err = resolve_repo_dir(
+        repo_name=repo_name, repo_owner=repo_owner, cwd=cwd
+    )
+    if err:
+        return err
+    current_cwd = resolved_cwd or os.getcwd()
     all_stdout: list[str] = []
     all_stderr: list[str] = []
     total_duration = 0.0
@@ -596,6 +751,8 @@ async def tool_run_linter(
     timeout_sec: int = 60,
     queue: "SseQueue | None" = None,
     cwd: str | None = None,
+    repo_owner: str | None = None,
+    repo_name: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -611,6 +768,8 @@ async def tool_run_linter(
         timeout_sec: Command timeout in seconds (clamped to [1, 300]).
         queue:       SseQueue for streaming terminal_output events.
         cwd:         Optional working directory.
+        repo_owner:  Optional repository owner (e.g. 'kaiizer777').
+        repo_name:   Optional repository name (e.g. 'UpGrade').
 
     Returns:
         Formatted linter output or error string.
@@ -618,9 +777,15 @@ async def tool_run_linter(
     if not paths:
         return "Error: No paths provided to run_linter."
 
+    resolved_cwd, err = resolve_repo_dir(
+        repo_name=repo_name, repo_owner=repo_owner, cwd=cwd
+    )
+    if err:
+        return err
+    effective_cwd = resolved_cwd or os.getcwd()
+
     # Sanitize each path — no traversal allowed.
     cleaned: list[str] = []
-    effective_cwd = cwd or os.getcwd()
     for p in paths:
         stripped = p.strip()
         if ".." in stripped or stripped.startswith("/"):
@@ -690,6 +855,8 @@ async def tool_run_targeted_tests(
     timeout_sec: int = 120,
     queue: "SseQueue | None" = None,
     cwd: str | None = None,
+    repo_owner: str | None = None,
+    repo_name: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -704,6 +871,8 @@ async def tool_run_targeted_tests(
         timeout_sec:  Command timeout in seconds (clamped to [1, 300]).
         queue:        SseQueue for streaming terminal_output events.
         cwd:         Optional working directory.
+        repo_owner:  Optional repository owner (e.g. 'kaiizer777').
+        repo_name:   Optional repository name (e.g. 'UpGrade').
 
     Returns:
         Formatted test output including failing tracebacks.
@@ -711,9 +880,15 @@ async def tool_run_targeted_tests(
     if not test_targets:
         return "Error: No test targets provided."
 
+    resolved_cwd, err = resolve_repo_dir(
+        repo_name=repo_name, repo_owner=repo_owner, cwd=cwd
+    )
+    if err:
+        return err
+    effective_cwd = resolved_cwd or os.getcwd()
+
     # Sanitize target paths.
     cleaned: list[str] = []
-    effective_cwd = cwd or os.getcwd()
     for t in test_targets:
         stripped = t.strip()
         if ".." in stripped or stripped.startswith("/"):

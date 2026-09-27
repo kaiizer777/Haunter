@@ -34,6 +34,7 @@ from app.services.session_tools.symbols import (
 )
 from app.services.session_tools.sandbox import (
     _sanitize_command,
+    resolve_repo_dir,
     tool_run_terminal_command,
     tool_run_linter,
     tool_run_targeted_tests,
@@ -92,6 +93,7 @@ __all__ = [
     "find_references",
     # sandbox execution (Phase 5)
     "_sanitize_command",
+    "resolve_repo_dir",
     "tool_run_terminal_command",
     "tool_run_linter",
     "tool_run_targeted_tests",

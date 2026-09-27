@@ -512,3 +512,142 @@ async def test_subprocess_error_formatting_never_empty() -> None:
         )
         assert code == -1
         assert "Subprocess error (NotImplementedError)" in stderr
+
+
+# ---------------------------------------------------------------------------
+# 11. resolve_repo_dir and repo-aware execution routing
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_repo_dir_none_fallback() -> None:
+    """When repo_name is None, resolve_repo_dir defaults to cwd or os.getcwd()."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+    import os
+
+    res, err = resolve_repo_dir(None)
+    assert err is None
+    assert res == os.getcwd()
+
+    res_cwd, err_cwd = resolve_repo_dir(None, cwd="subdir")
+    assert err_cwd is None
+    assert res_cwd == os.path.normpath(os.path.join(os.getcwd(), "subdir"))
+
+
+def test_resolve_repo_dir_not_found(tmp_path: any) -> None:
+    """When repo_name cannot be found on disk, returns informative error pointing to verify_in_ci_sandbox."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    res, err = resolve_repo_dir(
+        repo_name="completely_nonexistent_repo_xyz_123",
+        repo_owner="testowner",
+    )
+    assert res is None
+    assert err is not None
+    assert "Local checkout for repository 'testowner/completely_nonexistent_repo_xyz_123' was not found" in err
+    assert "verify_in_ci_sandbox" in err
+
+
+def test_resolve_repo_dir_env_var(tmp_path: any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir discovers repositories via LOCAL_REPOS_DIR environment variable."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    repo_dir = tmp_path / "MySpecialRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    res, err = resolve_repo_dir(repo_name="MySpecialRepo")
+    assert err is None
+    assert res == str(repo_dir)
+
+
+def test_resolve_repo_dir_relative_cwd(tmp_path: any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir joins relative cwd to resolved repository directory."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    repo_dir = tmp_path / "MySpecialRepo"
+    sub_dir = repo_dir / "backend"
+    sub_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    res, err = resolve_repo_dir(repo_name="MySpecialRepo", cwd="backend")
+    assert err is None
+    assert res == str(sub_dir)
+
+
+def test_resolve_repo_dir_outside_cwd_rejected(tmp_path: any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir rejects absolute cwd outside the resolved repository root."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    repo_dir = tmp_path / "MySpecialRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    outside_dir = tmp_path / "OtherPlace"
+    outside_dir.mkdir()
+
+    res, err = resolve_repo_dir(repo_name="MySpecialRepo", cwd=str(outside_dir))
+    assert res is None
+    assert err is not None
+    assert "is outside repository root" in err
+
+
+@pytest.mark.asyncio
+async def test_tool_run_terminal_command_repo_not_found() -> None:
+    """tool_run_terminal_command returns error when repo is specified but not found locally."""
+    result = await tool_run_terminal_command(
+        command="git status",
+        repo_owner="fake_owner",
+        repo_name="fake_repo_xyz_999",
+    )
+    assert "Error: Local checkout for repository 'fake_owner/fake_repo_xyz_999' was not found" in result
+    assert "verify_in_ci_sandbox" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_run_linter_repo_not_found() -> None:
+    """tool_run_linter returns error when repo is specified but not found locally."""
+    result = await tool_run_linter(
+        paths=["app/main.py"],
+        repo_owner="fake_owner",
+        repo_name="fake_repo_xyz_999",
+    )
+    assert "Error: Local checkout for repository 'fake_owner/fake_repo_xyz_999' was not found" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_run_targeted_tests_repo_not_found() -> None:
+    """tool_run_targeted_tests returns error when repo is specified but not found locally."""
+    result = await tool_run_targeted_tests(
+        test_targets=["tests/test_foo.py"],
+        repo_owner="fake_owner",
+        repo_name="fake_repo_xyz_999",
+    )
+    assert "Error: Local checkout for repository 'fake_owner/fake_repo_xyz_999' was not found" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_run_terminal_command_resolves_upgrade_sibling() -> None:
+    """When repo_name='UpGrade' is passed on this machine, terminal executes inside the UpGrade repository."""
+    import os
+    upgrade_path = os.path.normpath("C:/Users/bari2/Desktop/UpGrade")
+    if os.path.isdir(upgrade_path):
+        res = await tool_run_terminal_command(
+            command="git remote -v",
+            repo_owner="kaiizer777",
+            repo_name="UpGrade",
+        )
+        assert "kaiizer777/UpGrade" in res
+        assert "Haunter" not in res
+
+
+def test_prepare_cmd_argv_windows_builtins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, shell builtins like 'dir' are wrapped with ['cmd', '/c']."""
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    argv = _prepare_cmd_argv(["dir", "C:\\Users"])
+    assert argv[:2] == ["cmd", "/c"]
+    assert argv[2:] == ["dir", "C:\\Users"]
+
+
