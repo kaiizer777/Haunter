@@ -211,3 +211,98 @@ if settings.token_encryption_key is None and "pytest" not in sys.modules:
         "Generate with: "
         'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
     )
+
+
+# Sentinel values that mean "operator never filled this in". Matched
+# case-insensitively so both REPLACE_ME and replace-me are caught.
+_PLACEHOLDER_SENTINELS: frozenset[str] = frozenset(
+    {"replace_me", "replace-me", "placeholder"}
+)
+
+# Fields holding an opaque credential. A sentinel appearing anywhere in the value
+# means the .env.example default was never replaced, so substring matching is both
+# safe and correct here: a real GitHub client id or Fernet key is a fixed-shape
+# token that cannot legitimately contain a sentinel.
+# Field name -> operator-facing env var name, for the error message only. Values
+# are never interpolated into the exception — a startup error that echoes a
+# credential leaks it into logs and crash reporters.
+_PLACEHOLDER_CREDENTIAL_FIELDS: dict[str, str] = {
+    "github_client_id": "GITHUB_CLIENT_ID",
+    "github_client_secret": "GITHUB_CLIENT_SECRET",
+    "session_secret_key": "SESSION_SECRET_KEY",
+    "token_encryption_key": "TOKEN_ENCRYPTION_KEY",
+}
+
+# Fields holding a URL. Only an exact sentinel match counts: a hostname or path
+# may legitimately contain "placeholder" (e.g. an internal
+# https://placeholder.example.com origin), and substring matching here would stop
+# a correctly configured deployment from booting.
+_PLACEHOLDER_URL_FIELDS: dict[str, str] = {
+    "callback_url": "CALLBACK_URL",
+    "frontend_url": "FRONTEND_URL",
+}
+
+
+def _is_unusable_secret(value: object, *, exact_only: bool) -> bool:
+    """
+    True when a configured value is unusable as a credential.
+
+    An absent (None) optional secret is not judged here — TOKEN_ENCRYPTION_KEY has
+    its own fail-closed guard above, which must keep ownership of the None case so
+    its error message stays specific.
+
+    A blank or whitespace-only value IS unusable: itsdangerous would sign sessions
+    with an empty key, and authlib would build an OAuth URL with an empty
+    client_id — both failures that surface far from their cause.
+    """
+    if value is None:
+        return False
+    if not isinstance(value, str):
+        return True
+    normalized = value.strip().lower()
+    if not normalized:
+        return True
+    if exact_only:
+        return normalized in _PLACEHOLDER_SENTINELS
+    return any(sentinel in normalized for sentinel in _PLACEHOLDER_SENTINELS)
+
+
+def _find_placeholder_credential() -> str | None:
+    """
+    Return the env var name whose value is still unusable — blank or left at a
+    .env.example placeholder — or None when every guarded field is usable.
+    """
+    for field, env_name in _PLACEHOLDER_CREDENTIAL_FIELDS.items():
+        if _is_unusable_secret(getattr(settings, field, None), exact_only=False):
+            return env_name
+    for field, env_name in _PLACEHOLDER_URL_FIELDS.items():
+        if _is_unusable_secret(getattr(settings, field, None), exact_only=True):
+            return env_name
+    return None
+
+
+# Fail closed on unusable credentials at non-test startup.
+# Without this, a placeholder client_id is passed straight into the OAuth
+# authorization URL (app/auth.py), GitHub returns an opaque 404 for the unknown
+# client_id, and the operator sees a dead login button with no signal about the
+# real cause. A boot-time error naming the offending env var is strictly more
+# actionable than a 404 discovered mid-login-flow.
+# Uses the same sys.modules pytest probe as the TOKEN_ENCRYPTION_KEY guard above:
+# the test suite legitimately runs against placeholder values, and a hard startup
+# failure would take out the whole suite at import time rather than one test.
+if _placeholder_credential := _find_placeholder_credential():
+    if "pytest" not in sys.modules:
+        raise RuntimeError(
+            f"{_placeholder_credential} is missing, blank, or still set to a "
+            "placeholder value, so GitHub OAuth login cannot start. Register a "
+            "GitHub OAuth App with read:user and repo scopes, set its "
+            "authorization callback URL to exactly match CALLBACK_URL, then set "
+            f"the real {_placeholder_credential} in the active environment or "
+            "deployment configuration (backend/.env for local development) and "
+            "restart."
+        )
+    logger.warning(
+        "%s is missing, blank, or a placeholder value — OAuth login will fail "
+        "against GitHub. Test context only.",
+        _placeholder_credential,
+    )
