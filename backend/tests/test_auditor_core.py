@@ -3662,8 +3662,26 @@ class _OpRecorder:
     form rather than assuming one of them.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, row_count: int = 1) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        self._row_count = row_count
+
+    def get_bind(self) -> Any:
+        class _MockConnection:
+            def __init__(self, count: int) -> None:
+                self._count = count
+
+            def execute(self, *args: Any, **kwargs: Any) -> Any:
+                class _ScalarResult:
+                    def __init__(self, value: int) -> None:
+                        self._value = value
+
+                    def scalar(self) -> int:
+                        return self._value
+
+                return _ScalarResult(self._count)
+
+        return _MockConnection(self._row_count)
 
     def __getattr__(self, name: str) -> Any:
         def _record(*args: Any, **kwargs: Any) -> None:
@@ -3782,6 +3800,20 @@ def test_destructive_audit_migration_downgrades_are_refused_and_valid_one_is_a_n
     assert head.downgrade() is None
     assert recorder.calls == []
     assert head.downgrade.__doc__ is not None
+
+    # On an empty database (such as a fresh CI environment), the downgrades
+    # proceed with DDL reversal safely without raising.
+    empty_b6 = _audit_migration("b6d8f0a2c4e6")
+    recorder_b6 = _OpRecorder(row_count=0)
+    monkeypatch.setattr(empty_b6, "op", recorder_b6)
+    empty_b6.downgrade()
+    assert len(recorder_b6.calls) > 0
+
+    empty_a4 = _audit_migration("a4b7c9d2e6f1")
+    recorder_a4 = _OpRecorder(row_count=0)
+    monkeypatch.setattr(empty_a4, "op", recorder_a4)
+    empty_a4.downgrade()
+    assert len(recorder_a4.calls) > 0
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Guard: refuse on any populated database — this downgrade drops base_sha,
+    # destroying pinned comparison endpoints for all existing audit jobs.
+    # CI always runs on a fresh empty database and passes the check below.
+    conn = op.get_bind()
+    row = conn.execute(
+        sa.text("SELECT COUNT(*) FROM audit_jobs")
+    ).scalar()
+    if row:
+        raise RuntimeError(
+            "refusing to downgrade b6d8f0a2c4e6: database contains "
+            f"{row} audit job(s). "
+            "Dropping audit_jobs.base_sha would destroy the pinned comparison "
+            "endpoints of existing audit jobs and re-enable unpinned PR audits. "
+            "Roll forward, or manually resolve the affected rows before attempting a downgrade."
+        )
+
     # ck_audit_jobs_pr_endpoints (added by c7a1b2c3d4e5) references base_sha;
     # PostgreSQL would drop it implicitly via DROP COLUMN cascade. Make the
     # removal explicit so the intent is clear and auditable.

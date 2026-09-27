@@ -133,15 +133,16 @@ def downgrade() -> None:
     row = conn.execute(
         sa.text(
             "SELECT (SELECT COUNT(*) FROM repo_settings) + "
-            "(SELECT COUNT(*) FROM audit_jobs) AS total"
+            "(SELECT COUNT(*) FROM audit_jobs) + "
+            "(SELECT COUNT(*) FROM repos WHERE auditor_github_install_id IS NOT NULL) AS total"
         )
     ).scalar()
     if row:
         raise RuntimeError(
             "refusing to downgrade a4b7c9d2e6f1: database contains "
-            f"{row} row(s) across repo_settings / audit_jobs. "
+            f"{row} row(s) across repo_settings / audit_jobs / auditor repos. "
             "Dropping these tables and columns would destroy every repository's "
-            "auditor trigger configuration and all in-flight dispatch state with "
+            "auditor trigger configuration (repo_settings) and all in-flight dispatch state with "
             "no recovery path. Roll forward, or export the affected rows first."
         )
 
