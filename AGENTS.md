@@ -3,6 +3,16 @@
 ## Project Description
 Haunter is an autonomous CI failure diagnosis and fix agent. On `workflow_run` failure (GitHub Actions), a FastAPI orchestrator on AWS Lambda (via Mangum & Function URL) wakes via webhook, delegates to subagents (Context Gatherer → Fix Generator → Sandbox Verifier via GitHub Actions (via isolated mirror repo) → PR Writer), verifies fixes in an isolated sandbox, opens a PR with fix+explanation or posts a diagnosis-only comment on exhaust. Every step (tokens, latency, cost, confidence, attempts) is logged to Neon Postgres and surfaced on a Cloudflare Workers dashboard with run history, per-run trace, eval harness (20 golden cases), and live model/provider switcher (OpenCode Zen, default `nemotron-3.5-lightning-free` at `https://opencode.ai/zen/v1`). Multi-repo, GitHub OAuth gated, auditable. See `HAUNTER.md` and `WORK.md`.
 
+## Spinning up dev servers
+
+Run `npm run dev` for frontend and `.\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000` for backend.
+
+## Running Tests
+
+- **Fast Dev Suite (Default)**: Run `pytest` inside `backend/` (runs all unit/hermetic tests, finishes in seconds).
+- **Full / Deep Suite**: Run `pytest --all` inside `backend/` (runs remote DB, slow E2E, and eval suites).
+- **Targeted Module**: Run `pytest tests/test_auth.py` for focused unit testing.
+
 ## Instructions for AI Agents Working on This Repo
 
 This is a **production-grade, user-facing system** — not a side project, demo, or prototype. Real repos, real CI, real PRs. Code quality must be shippable. Treat every change as if it will run in production tomorrow.

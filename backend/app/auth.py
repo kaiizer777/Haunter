@@ -480,6 +480,7 @@ async def callback(
 
         if user is None:
             user = User(
+                id=uuid.uuid4(),
                 github_id=github_id,
                 github_username=github_username,
                 avatar_url=avatar_url,
@@ -492,7 +493,6 @@ async def callback(
             user.access_token = encrypted_token
 
         await db.commit()
-        await db.refresh(user)
     except Exception:
         logger.exception("OAuth callback: DB upsert failed")
         return _error("DB upsert failed")
