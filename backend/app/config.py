@@ -160,9 +160,30 @@ class Settings(BaseSettings):
     hosting_provider: str = "aws"
 
     # Name/ARN of the Lambda function to self-invoke for async pipeline execution.
-    # Defaults to AWS_LAMBDA_FUNCTION_NAME env var (set automatically by Lambda runtime).
+    # Defaults to AWS_LAMBDA_FUNCTION_NAME, which the Lambda runtime injects
+    # automatically and which therefore needs no Terraform support.
+    #
+    # AWS_LAMBDA_FUNCTION_NAME is an AWS-RESERVED key: Lambda owns it and sets it
+    # itself, so Terraform must never pass it in an environment.variables block.
+    # CreateFunction rejects it outright —
+    #   InvalidParameterValueException: ...contains reserved keys that are
+    #   currently not supported for modification. Reserved keys used in this
+    #   request: AWS_LAMBDA_FUNCTION_NAME
+    # HAUNTER_LAMBDA_FUNCTION_NAME is the supported, non-reserved override, for a
+    # function that must target a *different* Lambda than the one it runs in (the
+    # audit dispatcher schedules its children on the main function).
+    #
+    # Alias order is load-bearing and must stay as written. Lambda ALWAYS sets
+    # AWS_LAMBDA_FUNCTION_NAME in its own runtime, so that alias is always present
+    # on the dispatcher; listing it first would let the dispatcher's own name win
+    # and every audit child would self-invoke back into the dispatcher.
     # Required when hosting_provider="aws". Never commit a hardcoded ARN.
-    aws_lambda_function_name: Optional[str] = None
+    aws_lambda_function_name: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "HAUNTER_LAMBDA_FUNCTION_NAME", "aws_lambda_function_name"
+        ),
+    )
 
     # Maximum number of fix-generation attempts per Run before falling back to
     # a diagnosis-only comment. Phase 1 (BLOCKER-1 / NICE-1 / O-07): single
