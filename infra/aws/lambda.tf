@@ -424,7 +424,7 @@ resource "aws_lambda_function" "audit_dispatcher" {
       # itself. Without this, resolve_lambda_function_name() would resolve to
       # the dispatcher and every child invoke would land in the wrong function.
       #
-      # The key must be HAUNDER_LAMBDA_FUNCTION_NAME, never AWS_LAMBDA_FUNCTION_NAME.
+      # The key must be HAUNTER_LAMBDA_FUNCTION_NAME, never AWS_LAMBDA_FUNCTION_NAME.
       # AWS_LAMBDA_FUNCTION_NAME is an AWS-reserved key that the Lambda runtime
       # provides automatically, and CreateFunction rejects it as user-supplied
       # input: "InvalidParameterValueException: Lambda was unable to configure
@@ -432,7 +432,7 @@ resource "aws_lambda_function" "audit_dispatcher" {
       # provided contains reserved keys ... Reserved keys used in this request:
       # AWS_LAMBDA_FUNCTION_NAME". Do not "fix" this back to the reserved name.
       # See backend/app/config.py for the matching validation_alias.
-      HAUNDER_LAMBDA_FUNCTION_NAME = aws_lambda_function.haunter.function_name
+      HAUNTER_LAMBDA_FUNCTION_NAME = aws_lambda_function.haunter.function_name
     }
   }
 

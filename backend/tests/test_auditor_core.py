@@ -5027,9 +5027,28 @@ async def test_both_resolvers_agree_including_the_environment_fallback(
 # ---------------------------------------------------------------------------
 
 # The keys the Lambda runtime sets itself. A deployment that passes any of them
-# to CreateFunction is rejected outright, so Terraform may never write one.
+# to CreateFunction is rejected outright with InvalidParameterValueException
+# ("...contains reserved keys that are currently not supported for
+# modification. Reserved keys used in this request: ..."), so Terraform may
+# never write one.
+#
+# Transcribed from the AWS documentation's "Reserved environment variables"
+# list under "Defined runtime environment variables"
+# (docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html), which is
+# the list AWS's own troubleshooting page points at for the error above.
+# AWS_DEFAULT_REGION *is* on that list, so it belongs here. AWS explicitly
+# documents PATH, LANG, LD_LIBRARY_PATH, NODE_PATH, NODE_OPTIONS, PYTHONPATH,
+# GEM_PATH, AWS_XRAY_CONTEXT_MISSING, AWS_XRAY_DAEMON_ADDRESS,
+# AWS_LAMBDA_DOTNET_PREJIT and TZ as "aren't reserved and can be extended", so
+# none of them belong here — except AWS_XRAY_CONTEXT_MISSING, which the runtime
+# still injects and which is kept for the conservative side of the line, along
+# with AWS_LAMBDA_RUNTIME_DIR. Both are runtime-injected even though AWS does
+# not list them as reserved, so this set is "never write one of these" rather
+# than a claim about what the API refuses.
 AWS_RESERVED_LAMBDA_ENV_KEYS = frozenset(
     {
+        "AWS_ACCESS_KEY",
+        "AWS_ACCESS_KEY_ID",
         "AWS_DEFAULT_REGION",
         "AWS_EXECUTION_ENV",
         "AWS_LAMBDA_FUNCTION_MEMORY_SIZE",
@@ -5038,9 +5057,14 @@ AWS_RESERVED_LAMBDA_ENV_KEYS = frozenset(
         "AWS_LAMBDA_INITIALIZATION_TYPE",
         "AWS_LAMBDA_LOG_GROUP_NAME",
         "AWS_LAMBDA_LOG_STREAM_NAME",
+        "AWS_LAMBDA_MAX_CONCURRENCY",
+        "AWS_LAMBDA_METADATA_API",
+        "AWS_LAMBDA_METADATA_TOKEN",
         "AWS_LAMBDA_RUNTIME_API",
         "AWS_LAMBDA_RUNTIME_DIR",
         "AWS_REGION",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
         "AWS_XRAY_CONTEXT_MISSING",
         "LAMBDA_RUNTIME_DIR",
         "LAMBDA_TASK_ROOT",
@@ -5146,19 +5170,85 @@ def test_the_override_key_wins_when_lambda_also_injected_the_reserved_key():
 
 
 _TF_ENVIRONMENT_BLOCK = re.compile(r"^\s*environment\s*\{")
-_TF_ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
-_TF_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+# A map key, bare (`KEY = value`) or double-quoted (`"KEY" = value`). Quoted map
+# keys are valid HCL and must be matched, so only the quote characters are
+# removed — not the key itself, which is what stripping strings wholesale did.
+_TF_ASSIGNMENT = re.compile(
+    r'^\s*(?:"(?P<quoted>[A-Za-z_][A-Za-z0-9_]*)"|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))\s*='
+)
+
+
+def _terraform_line_views(
+    raw: str, in_block_comment: bool
+) -> tuple[str, str, bool]:
+    """Split one source line into (structural, keyed, in_block_comment).
+
+    A single left-to-right pass, so string literals and comments are told apart
+    correctly: `#` or `//` inside a quoted value is data, not a comment.
+
+    `structural` keeps braces for depth counting but drops string interiors —
+    a `${...}` interpolation or a JSON blob is balanced, while an unbraced value
+    would otherwise shift the depth. `keyed` drops only comments and keeps the
+    quotes, so a double-quoted map key is still matched as a key.
+    """
+    structural: list[str] = []
+    keyed: list[str] = []
+    index = 0
+    in_string = False
+    length = len(raw)
+    while index < length:
+        character = raw[index]
+        if in_block_comment:
+            if raw.startswith("*/", index):
+                in_block_comment = False
+                index += 2
+            else:
+                index += 1
+            continue
+        if in_string:
+            keyed.append(character)
+            if character == "\\":
+                # An escaped character, `\"` or `\\`, cannot end the string.
+                if index + 1 < length:
+                    keyed.append(raw[index + 1])
+                index += 2
+                continue
+            if character == '"':
+                in_string = False
+                structural.append(character)
+            index += 1
+            continue
+        if raw.startswith("/*", index):
+            in_block_comment = True
+            index += 2
+            continue
+        if character == '"':
+            in_string = True
+            structural.append(character)
+            keyed.append(character)
+            index += 1
+            continue
+        if character == "#" or raw.startswith("//", index):
+            break
+        structural.append(character)
+        keyed.append(character)
+        index += 1
+    return "".join(structural), "".join(keyed), in_block_comment
 
 
 def _terraform_environment_keys(text: str) -> list[tuple[int, str]]:
     """Return (lineno, key) for each assignment inside a Terraform environment block.
 
-    Structural rather than a full HCL parse: string literals and `#` comments
-    are stripped and braces are counted per line. A brace hiding in a comment or
-    an unterminated string could close a block early, so this can miss a key
-    that sits after it — a limitation worth stating rather than hiding, and the
-    reason the test also asserts the known keys were found, so a parser that
-    silently matched nothing cannot pass.
+    Structural rather than a full HCL parse, and deliberately dependency-free.
+    Comments come off first — `#`, `//`, and multi-line `/* ... */` — because a
+    brace inside any of them would otherwise shift the depth counting and make
+    every later real assignment look like it sits outside the block, which is a
+    silent false negative on exactly the config this guards.
+
+    Remaining limitations: an unterminated string or block comment still runs to
+    end of line, and a heredoc body is not modelled. That is worth stating
+    rather than hiding, and is why the test also asserts the known keys were
+    found, so a parser that silently matched nothing cannot pass.
 
     Only direct children of the environment block are reported, which keeps the
     structural `variables = {` line out of the result.
@@ -5166,17 +5256,20 @@ def _terraform_environment_keys(text: str) -> list[tuple[int, str]]:
     depth = 0
     environment_depth: int | None = None
     keys: list[tuple[int, str]] = []
+    in_block_comment = False
     for lineno, raw in enumerate(text.splitlines(), 1):
-        line = _TF_STRING.sub("", raw).split("#", 1)[0]
-        match = _TF_ASSIGNMENT.match(line)
+        structural, keyed, in_block_comment = _terraform_line_views(
+            raw, in_block_comment
+        )
+        match = _TF_ASSIGNMENT.match(keyed)
         if (
             match is not None
             and environment_depth is not None
             and depth == environment_depth + 1
         ):
-            keys.append((lineno, match.group(1)))
-        opens_environment = _TF_ENVIRONMENT_BLOCK.match(line) is not None
-        for character in line:
+            keys.append((lineno, match.group("quoted") or match.group("bare")))
+        opens_environment = _TF_ENVIRONMENT_BLOCK.match(structural) is not None
+        for character in structural:
             if character == "{":
                 depth += 1
                 if opens_environment:
@@ -5216,24 +5309,118 @@ def test_terraform_never_sets_an_aws_reserved_key_on_a_lambda_function():
     assert offenders == []
 
 
-def test_terraform_environment_key_scan_reports_a_reserved_key():
+@pytest.mark.parametrize(
+    ("case", "block_body", "expected_reserved"),
+    [
+        # A bare key, the ordinary spelling every .tf in this repo uses.
+        ("bare", 'AWS_LAMBDA_FUNCTION_NAME = "reserved"', ["AWS_LAMBDA_FUNCTION_NAME"]),
+        # A quoted map key: valid HCL, and invisible to a parser that blanks out
+        # string literals before matching.
+        (
+            "quoted",
+            '"AWS_SESSION_TOKEN" = "reserved"',
+            ["AWS_SESSION_TOKEN"],
+        ),
+        # `#` is HCL's comment sigil and `//` is equally valid. A brace in either
+        # would, unstripped, close the block early and make every key after it
+        # look like it sat outside the environment block.
+        (
+            "hash_comment_brace",
+            '# a stray } brace in a comment\n'
+            '      AWS_ACCESS_KEY_ID = "reserved"',
+            ["AWS_ACCESS_KEY_ID"],
+        ),
+        (
+            "slash_comment_brace",
+            '// a stray } brace in a comment\n'
+            '      AWS_SECRET_ACCESS_KEY = "reserved"',
+            ["AWS_SECRET_ACCESS_KEY"],
+        ),
+        # A block comment, including the multi-line form, whose braces must not
+        # count either.
+        (
+            "block_comment_brace",
+            '/* { a stray brace */\n'
+            '      AWS_LAMBDA_LOG_GROUP_NAME = "reserved"',
+            ["AWS_LAMBDA_LOG_GROUP_NAME"],
+        ),
+        (
+            "multiline_block_comment",
+            "/*\n"
+            "  {\n"
+            "  a brace spanning lines\n"
+            "*/\n"
+            '      AWS_LAMBDA_METADATA_TOKEN = "reserved"',
+            ["AWS_LAMBDA_METADATA_TOKEN"],
+        ),
+    ],
+)
+def test_terraform_environment_key_scan_reports_a_reserved_key(
+    case: str, block_body: str, expected_reserved: list[str]
+):
     # Self-test for the parser the scan above depends on. Without it, a parser
     # that silently matched nothing would let that test pass vacuously. Driving it
     # with a synthetic block proves detection independently of the real .tf files.
+    # One case per HCL spelling the parser has to survive, because each spelling
+    # failed differently: a quoted key was blanked out, and a brace in any of the
+    # three comment forms shifted the depth counting.
+    del case  # only in the id, so a failure names the form that broke
     synthetic = (
         'resource "aws_lambda_function" "probe" {\n'
         "  environment {\n"
         "    variables = {\n"
-        '      AWS_LAMBDA_FUNCTION_NAME = "reserved"\n'
+        f"      {block_body}\n"
         '      SOME_ORDINARY_KEY       = "fine"\n'
+        '      "ANOTHER_ORDINARY_KEY"  = "also fine"\n'
         "    }\n"
         "  }\n"
         "}\n"
     )
     keys = [key for _lineno, key in _terraform_environment_keys(synthetic)]
-    assert keys == ["AWS_LAMBDA_FUNCTION_NAME", "SOME_ORDINARY_KEY"]
-    reserved_found = [k for k in keys if k in AWS_RESERVED_LAMBDA_ENV_KEYS]
-    assert reserved_found == ["AWS_LAMBDA_FUNCTION_NAME"]
+    assert keys == [*expected_reserved, "SOME_ORDINARY_KEY", "ANOTHER_ORDINARY_KEY"]
+    reserved_found = [key for key in keys if key in AWS_RESERVED_LAMBDA_ENV_KEYS]
+    assert reserved_found == expected_reserved
+
+
+def test_the_terraform_override_key_matches_the_settings_validation_alias():
+    # The bug this guards: a one-character typo in the Terraform key made the
+    # dispatcher set an env var Settings never reads. resolve_lambda_function_name()
+    # then fell back to AWS_LAMBDA_FUNCTION_NAME — the dispatcher's own
+    # AWS-injected name — and every audit child invoke targeted the dispatcher
+    # instead of the main function. Nothing else caught it: the reserved-key scan
+    # cannot (the typo'd key is not reserved), and neither file is wrong on its own.
+    #
+    # The expected value is read out of config.py rather than written out here, so
+    # a legitimate rename of the alias keeps this test working instead of leaving a
+    # third hardcoded copy to drift the way the first two did.
+    config_source = (
+        Path(__file__).resolve().parents[1] / "app" / "config.py"
+    ).read_text(encoding="utf-8")
+    alias_match = re.search(
+        r'validation_alias=AliasChoices\(\s*"([^"]+)"', config_source
+    )
+    assert alias_match is not None, (
+        "backend/app/config.py no longer spells validation_alias=AliasChoices(\"...\", "
+        "...) for the self-invoke target — update this test to match the new shape"
+    )
+    alias = alias_match.group(1)
+
+    terraform_source = (
+        Path(__file__).resolve().parents[2] / "infra" / "aws" / "lambda.tf"
+    ).read_text(encoding="utf-8")
+    terraform_keys = {
+        key for _lineno, key in _terraform_environment_keys(terraform_source)
+    }
+    assert alias in terraform_keys, (
+        f"infra/aws/lambda.tf does not set {alias!r} (the validation_alias of "
+        f"Settings.aws_lambda_function_name in backend/app/config.py); it sets "
+        f"{sorted(terraform_keys)}. A key that differs by even one character is "
+        "silently ignored by Settings and leaves the dispatcher pointing at itself"
+    )
+
+    # Cheap secondary property: the whole point of the override is that it is not
+    # a key Lambda reserves, so the scan above must keep agreeing.
+    assert alias not in AWS_RESERVED_LAMBDA_ENV_KEYS
 
 
 @pytest.mark.asyncio
