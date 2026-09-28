@@ -251,7 +251,8 @@ resource "aws_lambda_function" "haunter" {
 resource "aws_lambda_function_url" "haunter" {
   function_name      = aws_lambda_function.haunter.function_name
   authorization_type = "NONE"  # Secured via HMAC-SHA256 in webhooks.py
-  # CORS disabled at Function URL layer — FastAPI CORSMiddleware (backend/main.py:38) owns CORS.
+  # CORS disabled at Function URL layer — FastAPI CORSMiddleware (backend/main.py:64-80) owns CORS;
+  # its allowlist is derived from the FRONTEND_URL env var (single source of truth, not hand-maintained).
   # Duplicate headers (Lambda + FastAPI both add Access-Control-Allow-Origin) caused
   # "contains multiple values 'https://haunter.sufiyanx.workers.dev, https://haunter.sufiyanx.workers.dev'" error.
 }

@@ -11,7 +11,7 @@ AUTH ARCHITECTURE
   scopes — least-privilege principle.
 - Session is a signed, httpOnly, Secure, SameSite=None cookie containing only the
   user UUID (itsdangerous TimestampSigner, 14-day max-age). No JWT, no JWKS.
-  SameSite=None is required for cross-site deployment (frontend on pages.dev,
+  SameSite=None is required for cross-site deployment (frontend on workers.dev,
   API on lambda-url) with credentials: include.
 - Cookie verification is done entirely inside FastAPI via get_current_user; the
   Next.js frontend never sees or stores auth state beyond calling /auth/me.
@@ -50,7 +50,7 @@ COOKIE PREFIX (__Host-)
   sends the API cookie to the API origin automatically without a Domain attribute —
   __Host- would be compatible here BUT requires the cookie to only be sent over HTTPS.
    During local dev (http://localhost) Secure cookies are rejected by browsers, breaking
-  the flow. For prod cross-site topology (pages.dev frontend + lambda-url API) the
+  the flow. For prod cross-site topology (workers.dev frontend + lambda-url API) the
   session and state cookies use Secure;HttpOnly;SameSite=None;Path=/ to allow
   credentialed fetch. Local dev may need SameSite=Lax if not on HTTPS.
 
@@ -251,7 +251,7 @@ def _verify_state_cookie(signed_cookie: str, request_state: str) -> None:
 def _set_session_cookie(response: Response, user_id: uuid.UUID) -> None:
     """
     Set the session cookie with full security attributes.
-    Cross-site deployment (pages.dev -> lambda-url) requires SameSite=None; Secure.
+    Cross-site deployment (workers.dev -> lambda-url) requires SameSite=None; Secure.
     Attributes must be identical to those used in _clear_session_cookie — browsers
     only remove a cookie when the delete request matches the original attributes exactly.
     """
@@ -283,7 +283,7 @@ def _clear_session_cookie(response: Response) -> None:
 
 def _set_state_cookie(response: Response, signed_state: str) -> None:
     """Short-lived state cookie — httpOnly, 10min TTL, deleted after use.
-    SameSite=None for cross-site pages.dev -> lambda-url."""
+    SameSite=None for cross-site workers.dev -> lambda-url."""
     response.set_cookie(
         key=_STATE_COOKIE_NAME,
         value=signed_state,
