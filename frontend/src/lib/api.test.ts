@@ -499,7 +499,7 @@ describe("api.ts", () => {
     });
 
     it("api.updateRepoSettings calls PATCH /repos/:repoId/settings", async () => {
-      const payload = { min_confidence_threshold: 85 };
+      const payload = { max_cost_per_run_cents: 150 };
       await api.updateRepoSettings("repo-123", payload);
       expect(capturedUrl).toBe("https://api.example.com/repos/repo-123/settings");
       expect(capturedOpts.method).toBe("PATCH");

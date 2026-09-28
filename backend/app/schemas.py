@@ -38,9 +38,31 @@ class RepoOut(BaseModel):
     default_branch: Optional[str]
     language_hint: Optional[str]
     active_model_config_id: Optional[uuid.UUID]
+    auditor_github_install_id: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class RepoAuditorInstallUpdate(BaseModel):
+    """
+    Request body for PATCH /repos/{repo_id}/auditor-install.
+
+    Sets (or clears with null) the auditor GitHub App installation id for a
+    repo the caller already owns. Positive ints only; bools are rejected
+    explicitly because bool is a subclass of int in Python.
+    """
+
+    auditor_github_install_id: Optional[int] = Field(default=None, gt=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("auditor_github_install_id")
+    @classmethod
+    def reject_bool_install_id(cls, v: Optional[int]) -> Optional[int]:
+        if isinstance(v, bool):
+            raise ValueError("auditor_github_install_id must be a positive integer.")
+        return v
 
 
 class AvailableRepoOut(BaseModel):
@@ -549,7 +571,6 @@ class RepoSettingsOut(BaseModel):
     enable_pr_comments: bool = True
     enable_live_sessions: bool = True
     enable_webcontainer_preview: bool = True
-    enable_subagents: bool = True
     audit_trigger_on_pr: bool = True
     audit_trigger_on_ci_failure: bool = True
     audit_trigger_on_ci_success: bool = False
@@ -557,7 +578,6 @@ class RepoSettingsOut(BaseModel):
     allowed_branches: list[str] = Field(default_factory=lambda: ["main", "master"])
     monitored_branches: list[str] = Field(default_factory=lambda: ["main", "master"])
     ignore_draft_prs: bool = True
-    min_confidence_threshold: int = 80
     max_cost_per_run_cents: int = 100
     model_override_scope: str = "inherit"
     settings_version: int = 1
@@ -609,7 +629,6 @@ class RepoSettingsUpdate(BaseModel):
     enable_pr_comments: Optional[bool] = None
     enable_live_sessions: Optional[bool] = None
     enable_webcontainer_preview: Optional[bool] = None
-    enable_subagents: Optional[bool] = None
     audit_trigger_on_pr: Optional[bool] = None
     audit_trigger_on_ci_failure: Optional[bool] = None
     audit_trigger_on_ci_success: Optional[bool] = None
@@ -617,7 +636,6 @@ class RepoSettingsUpdate(BaseModel):
     allowed_branches: Optional[list[str]] = None
     monitored_branches: Optional[list[str]] = None
     ignore_draft_prs: Optional[bool] = None
-    min_confidence_threshold: Optional[int] = None
     max_cost_per_run_cents: Optional[int] = None
     model_override_scope: Optional[str] = None
 
@@ -651,8 +669,6 @@ class RepoSettingsUpdate(BaseModel):
                 out["enable_live_sessions"] = feats["live_sessions"]
             if "webcontainer_preview" in feats:
                 out["enable_webcontainer_preview"] = feats["webcontainer_preview"]
-            if "subagents" in feats:
-                out["enable_subagents"] = feats["subagents"]
             if "pr_comments" in feats:
                 out["enable_pr_comments"] = feats["pr_comments"]
 
@@ -691,18 +707,6 @@ class RepoSettingsUpdate(BaseModel):
                 raise ValueError(
                     "max_cost_per_run_cents must be a non-negative integer."
                 )
-
-        if (
-            "min_confidence_threshold" in out
-            and out["min_confidence_threshold"] is not None
-        ):
-            thresh = out["min_confidence_threshold"]
-            if (
-                not isinstance(thresh, int)
-                or isinstance(thresh, bool)
-                or not (0 <= thresh <= 100)
-            ):
-                raise ValueError("min_confidence_threshold must be between 0 and 100.")
 
         if "preset" in out and out["preset"] is not None:
             from app.services.repo_settings import normalize_preset_name

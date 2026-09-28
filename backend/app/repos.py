@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.db import get_db
 from app.models import Repo, User
-from app.schemas import RepoCreate, RepoOut
+from app.schemas import RepoAuditorInstallUpdate, RepoCreate, RepoOut
 
 logger = logging.getLogger(__name__)
 
@@ -119,3 +119,31 @@ async def remove_repo(
     await db.delete(repo)
     await db.commit()
     logger.info("Repo removed: user=%s repo_id=%s", current_user.id, repo_id)
+
+
+@router.patch("/repos/{repo_id}/auditor-install", response_model=RepoOut)
+async def set_repo_auditor_install(
+    repo_id: uuid.UUID,
+    body: RepoAuditorInstallUpdate,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RepoOut:
+    """
+    Set or clear the auditor GitHub App installation id for a repo owned by
+    the current user. Returns 404 whether the repo doesn't exist OR isn't
+    owned by the caller — prevents existence oracle leakage to non-owners.
+    """
+    result = await db.execute(
+        select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
+    )
+    repo = result.scalar_one_or_none()
+    if repo is None:
+        raise HTTPException(status_code=404, detail="Repo not found")
+
+    repo.auditor_github_install_id = body.auditor_github_install_id
+    await db.commit()
+    await db.refresh(repo)
+    logger.info(
+        "Repo auditor install updated: user=%s repo_id=%s", current_user.id, repo_id
+    )
+    return RepoOut.model_validate(repo)

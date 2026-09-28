@@ -12,13 +12,17 @@ The web dashboard for [Haunter](file:///C:/Users/bari2/Desktop/Haunter/README.md
 
 ## Environment Variables
 
-The dashboard compiles as a client-side static bundle. Environment variables must be set at build time in `frontend/.env.local`:
+The dashboard compiles as a client-side static bundle. `NEXT_PUBLIC_API_URL` is baked into the JavaScript bundle at build time:
+
+- Local dev: leave `NEXT_PUBLIC_API_URL` ABSENT from `frontend/.env.local` — dev falls back to the `http://localhost:7555` default in `frontend/next.config.ts:8`.
+- Production builds (`npm run build`): read `frontend/.env.production`.
 
 | Variable | Description | Example |
 |---|---|---|
 | `NEXT_PUBLIC_API_URL` | Backend AWS Lambda Function URL (no trailing slash or space) | `https://gjdbtzw5h36jhniqgdcxvhmjxu0tcjqr.lambda-url.us-east-1.on.aws` |
 
-> **Note**: If the AWS Lambda Function URL changes after a backend redeployment, update `NEXT_PUBLIC_API_URL` in `.env.local`, re-run `npm run build`, and redeploy with `npm run deploy`.
+> **Note**: If the AWS Lambda Function URL changes after a backend redeployment, update `NEXT_PUBLIC_API_URL` in `.env.production`, re-run `npm run build`, and redeploy with `npm run deploy`.
+> **Why**: `.env.local` outranks `.env.production` in Next's precedence, so any value left in `.env.local` overrides prod and is baked into the deployed bundle (e.g. localhost shipped to prod).
 
 ## Development Commands
 

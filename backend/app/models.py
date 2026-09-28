@@ -392,10 +392,6 @@ class RepoSettings(Base):
         UniqueConstraint("repo_id", name="repo_settings_repo_id_key"),
         Index("ix_repo_settings_repo_id", "repo_id", unique=True),
         CheckConstraint(
-            "min_confidence_threshold >= 0 AND min_confidence_threshold <= 100",
-            name="ck_repo_settings_confidence_bounds",
-        ),
-        CheckConstraint(
             "max_cost_per_run_cents >= 0",
             name="ck_repo_settings_cost_bounds",
         ),
@@ -428,9 +424,6 @@ class RepoSettings(Base):
     enable_webcontainer_preview: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
     )
-    enable_subagents: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default="true"
-    )
 
     audit_trigger_on_pr: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
@@ -453,9 +446,6 @@ class RepoSettings(Base):
     )
     ignore_draft_prs: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
-    )
-    min_confidence_threshold: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=80, server_default="80"
     )
     max_cost_per_run_cents: Mapped[int] = mapped_column(
         Integer, nullable=False, default=100, server_default="100"

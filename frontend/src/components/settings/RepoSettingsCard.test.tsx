@@ -18,7 +18,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
     enable_pr_comments: true,
     enable_live_sessions: true,
     enable_webcontainer_preview: true,
-    enable_subagents: true,
     audit_trigger_on_pr: true,
     audit_trigger_on_ci_failure: true,
     audit_trigger_on_ci_success: false,
@@ -26,7 +25,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
     allowed_branches: ["main", "master"],
     monitored_branches: ["main", "master"],
     ignore_draft_prs: true,
-    min_confidence_threshold: 80,
     max_cost_per_run_cents: 100,
     model_override_scope: "inherit",
     settings_version: 1,
@@ -67,7 +65,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
     expect(screen.getByText("PR & Commit Annotations")).toBeInTheDocument();
     expect(screen.getByText("Interactive Live Cloud Sessions")).toBeInTheDocument();
     expect(screen.getByText("In-Browser WebContainer Preview")).toBeInTheDocument();
-    expect(screen.getByText("Subagent Task Delegation Engine")).toBeInTheDocument();
 
     // Auditor triggers
     expect(screen.getByText("Trigger on Pull Requests")).toBeInTheDocument();
@@ -75,7 +72,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
 
     // Operational bounds
     expect(screen.getByLabelText(/monitored branches/i)).toHaveValue("main, master");
-    expect(screen.getByLabelText(/min confidence threshold/i)).toHaveValue("80");
     expect(screen.getByLabelText(/max budget cap per run/i)).toHaveValue(100);
   });
 
@@ -86,7 +82,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
       preset_profile: "conservative",
       enable_auto_fix: false,
       enable_auditor_mode: true,
-      min_confidence_threshold: 90,
       max_cost_per_run_cents: 50,
       settings_version: 2,
     };
@@ -183,7 +178,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
   it("submits updated policy payload when Save Governance Policy is clicked", async () => {
     const updatedSettings: RepoSettingsOut = {
       ...mockSettings,
-      min_confidence_threshold: 85,
       max_cost_per_run_cents: 150,
       settings_version: 2,
     };
@@ -202,9 +196,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
     const costInput = screen.getByLabelText(/max budget cap per run/i);
     fireEvent.change(costInput, { target: { value: "150" } });
 
-    const confidenceSlider = screen.getByLabelText(/min confidence threshold/i);
-    fireEvent.change(confidenceSlider, { target: { value: "85" } });
-
     const saveBtn = screen.getByRole("button", { name: /save governance policy/i });
     expect(saveBtn).not.toBeDisabled();
 
@@ -212,7 +203,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
 
     expect(onSave).toHaveBeenCalledWith(
       expect.objectContaining({
-        min_confidence_threshold: 85,
         max_cost_per_run_cents: 150,
       })
     );

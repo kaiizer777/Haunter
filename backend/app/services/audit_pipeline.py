@@ -1136,8 +1136,12 @@ async def _claim_processing_job(
             settings_row = await db.scalar(
                 select(RepoSettings).where(RepoSettings.repo_id == locked.repo_id)
             )
+            row_present = settings_row is not None
             trigger = _valid_trigger_row(settings_row)
             if not trigger.enabled:
+                refusal_reason = (
+                    "auditor_disabled" if row_present else "missing_settings_row"
+                )
                 refused = await db.execute(
                     update(AuditJob)
                     .where(
@@ -1157,9 +1161,11 @@ async def _claim_processing_job(
                 closed = refused.scalar_one_or_none()
                 await db.commit()
                 logger.warning(
-                    "audit processing_refused audit_id=%s reason=auditor_disabled persisted=%s",
+                    "audit processing_refused audit_id=%s reason=%s persisted=%s row_present=%s",
                     audit_id,
+                    refusal_reason,
                     closed is not None,
+                    row_present,
                 )
                 return (
                     ProcessingClaimOutcome.AUDITOR_DISABLED
