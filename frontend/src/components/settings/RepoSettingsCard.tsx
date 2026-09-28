@@ -11,14 +11,12 @@ import {
   FlaskConical,
   MessageSquareQuote,
   Globe,
-  Bot,
   CheckCircle2,
   AlertCircle,
   RotateCcw,
   Save,
   GitBranch,
   DollarSign,
-  Gauge,
   Workflow,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
@@ -62,7 +60,7 @@ export const PRESET_OPTIONS: PresetMeta[] = [
     key: "conservative",
     title: "Conservative Guardian",
     badge: "High Confidence",
-    description: "Multi-perspective audit reports with high 90% confidence threshold. Code changes require human sign-off.",
+    description: "Multi-perspective audit reports with strict review gates. Code changes require human sign-off.",
     icon: ShieldAlert,
     accentColor: "text-sky-400 border-sky-500/30 bg-sky-500/10",
   },
@@ -86,7 +84,7 @@ export const PRESET_OPTIONS: PresetMeta[] = [
     key: "live_studio_only",
     title: "Live Studio Only",
     badge: "Interactive",
-    description: "Focused exclusively on in-browser WebContainer live preview and subagent cloud terminal sessions.",
+    description: "Focused exclusively on in-browser WebContainer live preview and interactive cloud terminal sessions.",
     icon: TerminalSquare,
     accentColor: "text-violet-400 border-violet-500/30 bg-violet-500/10",
   },
@@ -141,7 +139,6 @@ export function RepoSettingsCard({
   const [enablePrComments, setEnablePrComments] = useState<boolean>(initialSettings.enable_pr_comments);
   const [enableLiveSessions, setEnableLiveSessions] = useState<boolean>(initialSettings.enable_live_sessions);
   const [enableWebcontainer, setEnableWebcontainer] = useState<boolean>(initialSettings.enable_webcontainer_preview);
-  const [enableSubagents, setEnableSubagents] = useState<boolean>(initialSettings.enable_subagents);
 
   // Auditor triggers
   const [triggerOnPr, setTriggerOnPr] = useState<boolean>(initialSettings.audit_trigger_on_pr);
@@ -154,7 +151,6 @@ export function RepoSettingsCard({
     (initialSettings.allowed_branches || ["main", "master"]).join(", ")
   );
   const [ignoreDraftPrs, setIgnoreDraftPrs] = useState<boolean>(initialSettings.ignore_draft_prs);
-  const [minConfidence, setMinConfidence] = useState<number>(initialSettings.min_confidence_threshold ?? 80);
   const [maxCostCents, setMaxCostCents] = useState<number>(initialSettings.max_cost_per_run_cents ?? 100);
   const [modelScope, setModelScope] = useState<string>(initialSettings.model_override_scope || "inherit");
 
@@ -174,7 +170,6 @@ export function RepoSettingsCard({
     setEnablePrComments(initialSettings.enable_pr_comments);
     setEnableLiveSessions(initialSettings.enable_live_sessions);
     setEnableWebcontainer(initialSettings.enable_webcontainer_preview);
-    setEnableSubagents(initialSettings.enable_subagents);
 
     setTriggerOnPr(initialSettings.audit_trigger_on_pr);
     setTriggerOnCiFailure(initialSettings.audit_trigger_on_ci_failure);
@@ -183,7 +178,6 @@ export function RepoSettingsCard({
 
     setBranchesStr((initialSettings.allowed_branches || ["main", "master"]).join(", "));
     setIgnoreDraftPrs(initialSettings.ignore_draft_prs);
-    setMinConfidence(initialSettings.min_confidence_threshold ?? 80);
     setMaxCostCents(initialSettings.max_cost_per_run_cents ?? 100);
     setModelScope(initialSettings.model_override_scope || "inherit");
 
@@ -240,14 +234,12 @@ export function RepoSettingsCard({
       enablePrComments !== initialSettings.enable_pr_comments ||
       enableLiveSessions !== initialSettings.enable_live_sessions ||
       enableWebcontainer !== initialSettings.enable_webcontainer_preview ||
-      enableSubagents !== initialSettings.enable_subagents ||
       triggerOnPr !== initialSettings.audit_trigger_on_pr ||
       triggerOnCiFailure !== initialSettings.audit_trigger_on_ci_failure ||
       triggerOnCiSuccess !== initialSettings.audit_trigger_on_ci_success ||
       triggerOnManualMention !== initialSettings.audit_trigger_on_manual_mention ||
       branchesStr !== initialBranches ||
       ignoreDraftPrs !== initialSettings.ignore_draft_prs ||
-      minConfidence !== (initialSettings.min_confidence_threshold ?? 80) ||
       maxCostCents !== (initialSettings.max_cost_per_run_cents ?? 100) ||
       modelScope !== (initialSettings.model_override_scope || "inherit")
     );
@@ -259,14 +251,12 @@ export function RepoSettingsCard({
     enablePrComments,
     enableLiveSessions,
     enableWebcontainer,
-    enableSubagents,
     triggerOnPr,
     triggerOnCiFailure,
     triggerOnCiSuccess,
     triggerOnManualMention,
     branchesStr,
     ignoreDraftPrs,
-    minConfidence,
     maxCostCents,
     modelScope,
     initialSettings,
@@ -288,14 +278,12 @@ export function RepoSettingsCard({
         setEnablePrComments(updated.enable_pr_comments);
         setEnableLiveSessions(updated.enable_live_sessions);
         setEnableWebcontainer(updated.enable_webcontainer_preview);
-        setEnableSubagents(updated.enable_subagents);
 
         setTriggerOnPr(updated.audit_trigger_on_pr);
         setTriggerOnCiFailure(updated.audit_trigger_on_ci_failure);
         setTriggerOnCiSuccess(updated.audit_trigger_on_ci_success);
         setTriggerOnManualMention(updated.audit_trigger_on_manual_mention);
 
-        setMinConfidence(updated.min_confidence_threshold ?? 80);
         setMaxCostCents(updated.max_cost_per_run_cents ?? 100);
         setStatusMessage({
           type: "success",
@@ -324,14 +312,12 @@ export function RepoSettingsCard({
       enable_pr_comments: enablePrComments,
       enable_live_sessions: enableLiveSessions,
       enable_webcontainer_preview: enableWebcontainer,
-      enable_subagents: enableSubagents,
       audit_trigger_on_pr: triggerOnPr,
       audit_trigger_on_ci_failure: triggerOnCiFailure,
       audit_trigger_on_ci_success: triggerOnCiSuccess,
       audit_trigger_on_manual_mention: triggerOnManualMention,
       allowed_branches: parsedBranches,
       ignore_draft_prs: ignoreDraftPrs,
-      min_confidence_threshold: minConfidence,
       max_cost_per_run_cents: maxCostCents,
       model_override_scope: modelScope,
     };
@@ -356,14 +342,12 @@ export function RepoSettingsCard({
     enablePrComments,
     enableLiveSessions,
     enableWebcontainer,
-    enableSubagents,
     triggerOnPr,
     triggerOnCiFailure,
     triggerOnCiSuccess,
     triggerOnManualMention,
     parsedBranches,
     ignoreDraftPrs,
-    minConfidence,
     maxCostCents,
     modelScope,
     onSave,
@@ -378,7 +362,6 @@ export function RepoSettingsCard({
     setEnablePrComments(initialSettings.enable_pr_comments);
     setEnableLiveSessions(initialSettings.enable_live_sessions);
     setEnableWebcontainer(initialSettings.enable_webcontainer_preview);
-    setEnableSubagents(initialSettings.enable_subagents);
 
     setTriggerOnPr(initialSettings.audit_trigger_on_pr);
     setTriggerOnCiFailure(initialSettings.audit_trigger_on_ci_failure);
@@ -387,7 +370,6 @@ export function RepoSettingsCard({
 
     setBranchesStr((initialSettings.allowed_branches || ["main", "master"]).join(", "));
     setIgnoreDraftPrs(initialSettings.ignore_draft_prs);
-    setMinConfidence(initialSettings.min_confidence_threshold ?? 80);
     setMaxCostCents(initialSettings.max_cost_per_run_cents ?? 100);
     setModelScope(initialSettings.model_override_scope || "inherit");
     setStatusMessage(null);
@@ -694,32 +676,6 @@ export function RepoSettingsCard({
               aria-label="In-Browser WebContainer Preview"
             />
           </div>
-
-          {/* Subagent Task Delegation */}
-          <div className="flex items-start justify-between gap-4 p-3.5 rounded-lg border border-zinc-800/70 bg-[#121216]/80 hover:border-zinc-700/80 transition-all md:col-span-2">
-            <div className="flex items-start gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400 shrink-0 mt-0.5">
-                <Bot className="h-4 w-4" />
-              </div>
-              <div>
-                <label
-                  htmlFor="toggle-subagents"
-                  className="text-xs font-semibold text-zinc-200 block cursor-pointer select-none"
-                >
-                  Subagent Task Delegation Engine
-                </label>
-                <p className="text-[11px] text-zinc-400 leading-relaxed mt-0.5">
-                  Empowers orchestrators to spawn autonomous specialized subagents for security scans, diff analysis, and unit test generation.
-                </p>
-              </div>
-            </div>
-            <Switch
-              id="toggle-subagents"
-              checked={enableSubagents}
-              onCheckedChange={(val) => handleCustomToggle(setEnableSubagents, val)}
-              aria-label="Subagent Task Delegation Engine"
-            />
-          </div>
         </div>
       </div>
 
@@ -867,47 +823,6 @@ export function RepoSettingsCard({
               options={SCOPE_OPTIONS}
               aria-label="Model Override Scope"
             />
-          </div>
-
-          {/* Confidence Threshold */}
-          <div className="space-y-2 p-3.5 rounded-lg border border-zinc-800/60 bg-[#121216]/60">
-            <div className="flex items-center justify-between">
-              <label htmlFor="slider-confidence" className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
-                <Gauge className="h-3.5 w-3.5 text-zinc-400" />
-                Min Confidence Threshold
-              </label>
-              <div className="flex items-center gap-1.5">
-                <span className="font-mono text-xs font-bold text-amber-400">{minConfidence}%</span>
-                <span
-                  className={cn(
-                    "text-[9px] font-mono px-1 py-0.2 rounded border",
-                    minConfidence >= 85
-                      ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/10"
-                      : minConfidence >= 75
-                      ? "border-sky-500/40 text-sky-300 bg-sky-500/10"
-                      : "border-amber-500/40 text-amber-300 bg-amber-500/10"
-                  )}
-                >
-                  {minConfidence >= 85 ? "Strict" : minConfidence >= 75 ? "Balanced" : "Permissive"}
-                </span>
-              </div>
-            </div>
-            <input
-              id="slider-confidence"
-              type="range"
-              min={0}
-              max={100}
-              step={5}
-              value={minConfidence}
-              onChange={(e) => {
-                setMinConfidence(parseInt(e.target.value, 10));
-                if (preset !== "custom") setPreset("custom");
-              }}
-              className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-400"
-            />
-            <p className="text-[10px] font-mono text-zinc-500">
-              Patches with confidence scores below this threshold are suppressed or logged as comments only.
-            </p>
           </div>
 
           {/* Max Cost per Run */}

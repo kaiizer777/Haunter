@@ -323,7 +323,8 @@ function SettingsContent() {
               </span>
             </div>
             <div className="mt-1 text-[11px] text-zinc-500 font-mono truncate">
-              Min confidence: {activeSettings?.min_confidence_threshold ?? 80}%
+              Triggers: PR {activeSettings?.audit_trigger_on_pr ? "on" : "off"} • CI{" "}
+              {activeSettings?.audit_trigger_on_ci_failure ? "on" : "off"}
             </div>
           </div>
 

@@ -4,7 +4,7 @@ Repository operational governance & feature settings service layer.
 Provides:
 - Loading repo settings with fallback to default preset profile
 - Preset application (autonomous, conservative, standard, audit_only, live_studio_only, custom)
-- Updating settings with validation (branch names, cost bounds, confidence bounds)
+- Updating settings with validation (branch names, cost bounds)
 - Multi-tenant repo access and ownership verification
 """
 
@@ -48,13 +48,11 @@ PRESET_CONFIGURATIONS: dict[str, dict[str, Any]] = {
         "enable_pr_comments": True,
         "enable_live_sessions": True,
         "enable_webcontainer_preview": True,
-        "enable_subagents": True,
         "audit_trigger_on_pr": True,
         "audit_trigger_on_ci_failure": True,
         "audit_trigger_on_ci_success": False,
         "audit_trigger_on_manual_mention": True,
         "ignore_draft_prs": True,
-        "min_confidence_threshold": 80,
         "max_cost_per_run_cents": 100,
         "model_override_scope": "inherit",
     },
@@ -66,13 +64,11 @@ PRESET_CONFIGURATIONS: dict[str, dict[str, Any]] = {
         "enable_pr_comments": True,
         "enable_live_sessions": False,
         "enable_webcontainer_preview": False,
-        "enable_subagents": False,
         "audit_trigger_on_pr": True,
         "audit_trigger_on_ci_failure": True,
         "audit_trigger_on_ci_success": False,
         "audit_trigger_on_manual_mention": True,
         "ignore_draft_prs": True,
-        "min_confidence_threshold": 90,
         "max_cost_per_run_cents": 50,
         "model_override_scope": "inherit",
     },
@@ -84,13 +80,11 @@ PRESET_CONFIGURATIONS: dict[str, dict[str, Any]] = {
         "enable_pr_comments": True,
         "enable_live_sessions": True,
         "enable_webcontainer_preview": True,
-        "enable_subagents": True,
         "audit_trigger_on_pr": True,
         "audit_trigger_on_ci_failure": True,
         "audit_trigger_on_ci_success": False,
         "audit_trigger_on_manual_mention": True,
         "ignore_draft_prs": True,
-        "min_confidence_threshold": 85,
         "max_cost_per_run_cents": 100,
         "model_override_scope": "inherit",
     },
@@ -102,13 +96,11 @@ PRESET_CONFIGURATIONS: dict[str, dict[str, Any]] = {
         "enable_pr_comments": True,
         "enable_live_sessions": False,
         "enable_webcontainer_preview": False,
-        "enable_subagents": False,
         "audit_trigger_on_pr": True,
         "audit_trigger_on_ci_failure": True,
         "audit_trigger_on_ci_success": False,
         "audit_trigger_on_manual_mention": True,
         "ignore_draft_prs": True,
-        "min_confidence_threshold": 80,
         "max_cost_per_run_cents": 50,
         "model_override_scope": "inherit",
     },
@@ -120,13 +112,11 @@ PRESET_CONFIGURATIONS: dict[str, dict[str, Any]] = {
         "enable_pr_comments": False,
         "enable_live_sessions": True,
         "enable_webcontainer_preview": True,
-        "enable_subagents": True,
         "audit_trigger_on_pr": False,
         "audit_trigger_on_ci_failure": False,
         "audit_trigger_on_ci_success": False,
         "audit_trigger_on_manual_mention": False,
         "ignore_draft_prs": True,
-        "min_confidence_threshold": 80,
         "max_cost_per_run_cents": 100,
         "model_override_scope": "inherit",
     },
@@ -196,17 +186,6 @@ def validate_cost_bounds(cost_cents: int) -> int:
     return cost_cents
 
 
-def validate_confidence_threshold(threshold: int) -> int:
-    """Validate minimum confidence threshold (0 to 100 inclusive)."""
-    if not isinstance(threshold, int) or isinstance(threshold, bool):
-        raise ValueError("Confidence threshold must be an integer.")
-    if not (0 <= threshold <= 100):
-        raise ValueError(
-            f"Confidence threshold must be between 0 and 100 (got {threshold})."
-        )
-    return threshold
-
-
 def create_default_repo_settings(
     repo_id: uuid.UUID,
     preset: str = DEFAULT_PRESET,
@@ -225,7 +204,6 @@ def create_default_repo_settings(
         enable_pr_comments=cfg.get("enable_pr_comments", True),
         enable_live_sessions=cfg.get("enable_live_sessions", True),
         enable_webcontainer_preview=cfg.get("enable_webcontainer_preview", True),
-        enable_subagents=cfg.get("enable_subagents", True),
         audit_trigger_on_pr=cfg.get("audit_trigger_on_pr", True),
         audit_trigger_on_ci_failure=cfg.get("audit_trigger_on_ci_failure", True),
         audit_trigger_on_ci_success=cfg.get("audit_trigger_on_ci_success", False),
@@ -234,7 +212,6 @@ def create_default_repo_settings(
         ),
         allowed_branches=["main", "master"],
         ignore_draft_prs=cfg.get("ignore_draft_prs", True),
-        min_confidence_threshold=cfg.get("min_confidence_threshold", 80),
         max_cost_per_run_cents=cfg.get("max_cost_per_run_cents", 100),
         model_override_scope=cfg.get("model_override_scope", "inherit"),
         settings_version=1,
@@ -362,8 +339,6 @@ async def update_repo_settings(
             settings.allowed_branches = validate_branches(value)
         elif key == "max_cost_per_run_cents":
             settings.max_cost_per_run_cents = validate_cost_bounds(value)
-        elif key == "min_confidence_threshold":
-            settings.min_confidence_threshold = validate_confidence_threshold(value)
         elif hasattr(settings, key):
             if key in trigger_fields and getattr(settings, key) != value:
                 bump_version = True
@@ -416,6 +391,5 @@ __all__ = [
     "update_repo_settings",
     "validate_branch_name",
     "validate_branches",
-    "validate_confidence_threshold",
     "validate_cost_bounds",
 ]

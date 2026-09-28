@@ -230,7 +230,6 @@ async def list_repos_with_settings(
                     "live_sessions": settings.enable_live_sessions,
                     "webcontainer_preview": settings.enable_webcontainer_preview,
                     "ci_sandbox": settings.enable_sandbox_verification,
-                    "subagents": settings.enable_subagents,
                 },
                 audit_triggers={
                     "on_pr": settings.audit_trigger_on_pr,

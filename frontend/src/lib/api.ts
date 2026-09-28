@@ -313,7 +313,6 @@ export interface RepoWithSettingsOut {
     live_sessions: boolean;
     webcontainer_preview: boolean;
     ci_sandbox: boolean;
-    subagents: boolean;
   };
   audit_triggers: {
     on_pr: boolean;
@@ -337,7 +336,6 @@ export interface RepoSettingsOut {
   enable_pr_comments: boolean;
   enable_live_sessions: boolean;
   enable_webcontainer_preview: boolean;
-  enable_subagents: boolean;
   audit_trigger_on_pr: boolean;
   audit_trigger_on_ci_failure: boolean;
   audit_trigger_on_ci_success: boolean;
@@ -345,7 +343,6 @@ export interface RepoSettingsOut {
   allowed_branches: string[];
   monitored_branches?: string[];
   ignore_draft_prs: boolean;
-  min_confidence_threshold: number;
   max_cost_per_run_cents: number;
   model_override_scope: string;
   settings_version: number;
@@ -364,7 +361,6 @@ export interface RepoSettingsUpdate {
   enable_pr_comments?: boolean;
   enable_live_sessions?: boolean;
   enable_webcontainer_preview?: boolean;
-  enable_subagents?: boolean;
   audit_trigger_on_pr?: boolean;
   audit_trigger_on_ci_failure?: boolean;
   audit_trigger_on_ci_success?: boolean;
@@ -372,7 +368,6 @@ export interface RepoSettingsUpdate {
   allowed_branches?: string[];
   monitored_branches?: string[];
   ignore_draft_prs?: boolean;
-  min_confidence_threshold?: number;
   max_cost_per_run_cents?: number;
   model_override_scope?: string;
   features?: Record<string, boolean>;

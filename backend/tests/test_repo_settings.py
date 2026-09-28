@@ -11,7 +11,7 @@ Covers:
 7. PATCH /api/repos/{repo_id}/settings partial update with nested features and audit_triggers (future02.md)
 8. PATCH /api/repos/{repo_id}/settings validation failures:
    - negative max_cost_per_run_cents (422)
-   - min_confidence_threshold < 0 or > 100 (422)
+   - removed dead flags enable_subagents / min_confidence_threshold (422)
    - invalid preset name (422)
    - invalid git branch names (422)
 9. PATCH /api/repos/{repo_id}/settings cross-user repo access (404)
@@ -49,7 +49,6 @@ from app.services.repo_settings import (
     update_repo_settings,
     validate_branch_name,
     validate_branches,
-    validate_confidence_threshold,
     validate_cost_bounds,
 )
 from main import app
@@ -131,14 +130,12 @@ async def test_get_settings_default_fallback(seeded_env, make_fake_auth_client):
         assert data["enable_pr_comments"] is True
         assert data["enable_live_sessions"] is True
         assert data["enable_webcontainer_preview"] is True
-        assert data["enable_subagents"] is True
         assert data["audit_trigger_on_pr"] is True
         assert data["audit_trigger_on_ci_failure"] is True
         assert data["audit_trigger_on_ci_success"] is False
         assert data["audit_trigger_on_manual_mention"] is True
         assert data["allowed_branches"] == ["main", "master"]
         assert data["monitored_branches"] == ["main", "master"]
-        assert data["min_confidence_threshold"] == 80
         assert data["max_cost_per_run_cents"] == 100
         assert data["model_override_scope"] == "inherit"
         assert data["settings_version"] == 1
@@ -175,13 +172,11 @@ async def test_get_settings_persisted_row(
         enable_pr_comments=True,
         enable_live_sessions=False,
         enable_webcontainer_preview=False,
-        enable_subagents=False,
         audit_trigger_on_pr=True,
         audit_trigger_on_ci_failure=True,
         audit_trigger_on_ci_success=False,
         audit_trigger_on_manual_mention=True,
         allowed_branches=["release", "prod"],
-        min_confidence_threshold=92,
         max_cost_per_run_cents=45,
         model_override_scope="repo",
         settings_version=3,
@@ -198,7 +193,6 @@ async def test_get_settings_persisted_row(
         assert data["enable_auto_fix"] is False
         assert data["enable_auditor_mode"] is True
         assert data["allowed_branches"] == ["release", "prod"]
-        assert data["min_confidence_threshold"] == 92
         assert data["max_cost_per_run_cents"] == 45
         assert data["model_override_scope"] == "repo"
         assert data["settings_version"] == 3
@@ -253,7 +247,6 @@ async def test_patch_settings_flat_fields(seeded_env, make_fake_auth_client):
             "enable_auto_fix": False,
             "enable_auditor_mode": True,
             "max_cost_per_run_cents": 250,
-            "min_confidence_threshold": 88,
             "allowed_branches": ["main", "staging"],
         }
         resp = await client.patch(
@@ -265,7 +258,6 @@ async def test_patch_settings_flat_fields(seeded_env, make_fake_auth_client):
         assert data["enable_auto_fix"] is False
         assert data["enable_auditor_mode"] is True
         assert data["max_cost_per_run_cents"] == 250
-        assert data["min_confidence_threshold"] == 88
         assert data["allowed_branches"] == ["main", "staging"]
         assert data["settings_version"] == 2  # bumped due to auditor toggle change
 
@@ -323,7 +315,6 @@ async def test_patch_settings_with_preset_profile(seeded_env, make_fake_auth_cli
         assert data["preset"] == "conservative"
         assert data["enable_auto_fix"] is False
         assert data["enable_auditor_mode"] is True
-        assert data["min_confidence_threshold"] == 90
         assert data["settings_version"] >= 2
 
 
@@ -341,7 +332,6 @@ async def test_patch_settings_with_preset_and_explicit_override(
             json={
                 "preset": "conservative",
                 "enable_auto_fix": True,
-                "min_confidence_threshold": 95,
             },
         )
         assert resp.status_code == 200, resp.text
@@ -349,7 +339,6 @@ async def test_patch_settings_with_preset_and_explicit_override(
         assert data["preset"] == "conservative"
         assert data["enable_auto_fix"] is True
         assert data["enable_auditor_mode"] is True
-        assert data["min_confidence_threshold"] == 95
 
 
 @pytest.mark.asyncio
@@ -367,25 +356,34 @@ async def test_patch_settings_negative_cost_fails(seeded_env, make_fake_auth_cli
 
 
 @pytest.mark.asyncio
-async def test_patch_settings_confidence_bounds_fails(
-    seeded_env, make_fake_auth_client
-):
-    """PATCH with out-of-bounds confidence threshold returns 422."""
+async def test_patch_settings_dead_flags_rejected(seeded_env, make_fake_auth_client):
+    """PATCH with removed dead flags returns 422 (extra=forbid)."""
     user_a, _, repo_a, _ = seeded_env
     client = make_fake_auth_client(user_a.id)
 
     async with client:
         resp1 = await client.patch(
             f"/api/repos/{repo_a.id}/settings",
-            json={"min_confidence_threshold": 105},
+            json={"min_confidence_threshold": 90},
         )
         assert resp1.status_code == 422
 
         resp2 = await client.patch(
             f"/api/repos/{repo_a.id}/settings",
-            json={"min_confidence_threshold": -1},
+            json={"enable_subagents": True},
         )
         assert resp2.status_code == 422
+
+        # Nested future02-style subagents payload is ignored (no top-level key created).
+        resp3 = await client.patch(
+            f"/api/repos/{repo_a.id}/settings",
+            json={"features": {"subagents": False, "auto_fixer": False}},
+        )
+        assert resp3.status_code == 200, resp3.text
+        data = resp3.json()
+        assert data["enable_auto_fix"] is False
+        assert "enable_subagents" not in data
+        assert "min_confidence_threshold" not in data
 
 
 @pytest.mark.asyncio
@@ -452,15 +450,15 @@ async def test_patch_settings_cross_user_isolation(seeded_env, make_fake_auth_cl
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "preset_name,expected_auto_fix,expected_auditor,expected_sandbox,expected_conf",
+    "preset_name,expected_auto_fix,expected_auditor,expected_sandbox",
     [
-        ("autonomous", True, False, True, 80),
-        ("full_autonomous", True, False, True, 80),
-        ("conservative", False, True, True, 90),
-        ("standard", True, True, True, 85),
-        ("audit_only", False, True, False, 80),
-        ("auditor_only", False, True, False, 80),
-        ("live_studio_only", False, False, True, 80),
+        ("autonomous", True, False, True),
+        ("full_autonomous", True, False, True),
+        ("conservative", False, True, True),
+        ("standard", True, True, True),
+        ("audit_only", False, True, False),
+        ("auditor_only", False, True, False),
+        ("live_studio_only", False, False, True),
     ],
 )
 async def test_post_preset_application(
@@ -470,7 +468,6 @@ async def test_post_preset_application(
     expected_auto_fix,
     expected_auditor,
     expected_sandbox,
-    expected_conf,
 ):
     """Applying any standard preset sets the exact expected operational flags."""
     user_a, _, repo_a, _ = seeded_env
@@ -487,7 +484,8 @@ async def test_post_preset_application(
         assert data["enable_auto_fix"] == expected_auto_fix
         assert data["enable_auditor_mode"] == expected_auditor
         assert data["enable_sandbox_verification"] == expected_sandbox
-        assert data["min_confidence_threshold"] == expected_conf
+        assert "enable_subagents" not in data
+        assert "min_confidence_threshold" not in data
         assert data["settings_version"] >= 2
 
 
@@ -641,7 +639,7 @@ def test_service_branch_validation_rules():
 
 
 def test_service_bounds_validation():
-    """Validates cost bounds and confidence thresholds."""
+    """Validates cost bounds."""
     assert validate_cost_bounds(0) == 0
     assert validate_cost_bounds(100) == 100
     assert validate_cost_bounds(10_000_000) == 10_000_000
@@ -650,15 +648,6 @@ def test_service_bounds_validation():
         validate_cost_bounds(-1)
     with pytest.raises(ValueError):
         validate_cost_bounds(10_000_001)
-
-    assert validate_confidence_threshold(0) == 0
-    assert validate_confidence_threshold(50) == 50
-    assert validate_confidence_threshold(100) == 100
-
-    with pytest.raises(ValueError):
-        validate_confidence_threshold(-1)
-    with pytest.raises(ValueError):
-        validate_confidence_threshold(101)
 
 
 def test_service_preset_normalization():
@@ -693,7 +682,6 @@ def test_service_apply_preset_logic():
     assert settings.preset == "conservative"
     assert settings.enable_auto_fix is False
     assert settings.enable_auditor_mode is True
-    assert settings.min_confidence_threshold == 90
     assert settings.settings_version == 2
 
     apply_preset(settings, "audit_only")
