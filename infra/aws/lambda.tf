@@ -147,16 +147,16 @@ resource "aws_lambda_function" "haunter" {
   #   package_type = "Zip"   + filename + handler + runtime
   #
   # For zip deployment (simpler at MVP scale):
-  package_type  = "Zip"
-  filename      = var.lambda_zip_path
+  package_type     = "Zip"
+  filename         = var.lambda_zip_path
   # Phase 17 deploy fix: track the zip's content hash so ``terraform plan``
   # detects a new bundle and ``terraform apply`` actually re-uploads the
   # function code. Without this, only the filename string is tracked and
   # a code update is silently ignored by the plan diff.
   source_code_hash = filebase64sha256(var.lambda_zip_path)
-  handler       = "lambda_handler.handler"
-  runtime       = "python3.11"
-  architectures = ["x86_64"]
+  handler          = "lambda_handler.handler"
+  runtime          = "python3.11"
+  architectures    = ["x86_64"]
 
   timeout     = 900   # 15 minutes — covers sandbox poll loop
   memory_size = 512   # MB
@@ -389,12 +389,12 @@ resource "aws_lambda_function" "audit_dispatcher" {
   description   = "IAM-only durable audit outbox poller (no public endpoint)"
   role          = aws_iam_role.audit_dispatcher.arn
 
-  package_type  = "Zip"
-  filename      = var.lambda_zip_path
+  package_type     = "Zip"
+  filename         = var.lambda_zip_path
   source_code_hash = filebase64sha256(var.lambda_zip_path)
-  handler       = "audit_dispatcher_handler.handler"
-  runtime       = "python3.11"
-  architectures = ["x86_64"]
+  handler          = "audit_dispatcher_handler.handler"
+  runtime          = "python3.11"
+  architectures    = ["x86_64"]
 
   timeout     = 60
   memory_size = 256
