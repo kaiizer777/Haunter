@@ -12,6 +12,7 @@
 |------|--------|
 | **Terraform binary** | `C:\Terraform\terraform.exe` — NOT in PATH, NOT in WSL `/usr/bin`. Always call by absolute path. |
 | **Terraform working dir** | `infra/aws/` relative to repo root, i.e. `C:\Users\bari2\Desktop\Haunter\infra\aws\` |
+| **DNS resolver (REQUIRED)** | Set `$env:GODEBUG='netdns=cgo'` in the shell **before every single Terraform invocation on this machine** — this is mandatory, not an optimisation. Terraform's Go HTTP client uses Go's pure-Go resolver, which intermittently fails here with `dial tcp: lookup lambda.us-east-1.amazonaws.com: no such host` while the Python-based AWS CLI works fine. `netdns=cgo` forces the Windows resolver and fixed the deploy immediately. This one cost three failed deploys. |
 | **AWS credentials** | Live at `C:\Users\bari2\.aws\credentials`. Picked up automatically by the AWS provider. Do NOT export `AWS_ACCESS_KEY_ID` manually. |
 | **Secrets** | `infra/aws/terraform.tfvars` contains real secrets (GitHub PAT, OpenCode Zen API key, Fernet key). Never echo its contents to chat/logs. Never overwrite it. It is `.gitignore`'d for a reason. |
 | **Lambda function name** | `haunter` |
@@ -28,6 +29,9 @@
 ## 1. The ONE correct way to invoke Terraform from PowerShell
 
 ```powershell
+# MANDATORY on this machine — see the "DNS resolver" row in section 0.
+$env:GODEBUG='netdns=cgo'
+
 # Plan (dry-run — always do this first)
 & 'C:\Terraform\terraform.exe' -chdir='C:\Users\bari2\Desktop\Haunter\infra\aws' plan -no-color
 
@@ -67,7 +71,7 @@ Expected output:
 Wrote C:\Users\bari2\Desktop\Haunter\lambda.zip (NNNN files, NN.NN MB)
 ```
 
-> The zip is ~39–41 MB. If it's < 5 MB, the deps install step silently failed — check stderr.
+> The zip is ~31–32 MB (~4000 files) — a real build on 2026-09-28 reported `(4003 files, 31.46 MB)`. If it's < 5 MB, the deps install step silently failed — check stderr.
 
 ### Step 2 — Audit the plan (mandatory before apply)
 
@@ -87,6 +91,19 @@ If you see more changes than `source_code_hash`, stop and classify each one befo
 - **(a) Desired** — matches an intentional `.tf` edit on disk
 - **(b) Drift** — AWS drifted from config (rare; happens if someone edited the function in the console)
 - **(c) Noise** — env var re-apply with unchanged value (safe to apply)
+
+> **Code-only deploy:** always read the plan before applying. If it contains changes you did not
+> intend — in particular *new* resources unrelated to the Lambda function — scope the apply.
+> **Quote the `-target` argument** — PowerShell splits it on the `.` and Terraform then fails with
+> `Error: Too many command line arguments` / `Invalid target "aws_lambda_function"`:
+> ```
+> & 'C:\Terraform\terraform.exe' -chdir='C:\Users\bari2\Desktop\Haunter\infra\aws' apply '-target=aws_lambda_function.haunter' -auto-approve -no-color
+> ```
+
+> **Terraform applies are NOT atomic.** Within `aws_lambda_function`, the `environment` block and
+> `source_code_hash` are written in **separate** API calls. A deploy that fails partway can land the
+> env vars and then never upload the new code — leaving the function running **old code with new env
+> vars**. See section 7 for how to detect this. The remedy is simply to re-run the apply; it is idempotent.
 
 > **`haunter` is the production webhook handler.** A bad apply will 502 every failing CI run
 > until rolled back. Never apply without a plan review and explicit user approval.
@@ -112,7 +129,7 @@ If they differ → the zip needs to be deployed.
 & 'C:\Terraform\terraform.exe' -chdir='C:\Users\bari2\Desktop\Haunter\infra\aws' apply -auto-approve -no-color
 ```
 
-A 39 MB zip takes **3–4 minutes** to upload. The `Still modifying...` polling lines are normal — do not cancel.
+A ~31 MB zip takes **~6–7 minutes** to upload (one real deploy spent 6.5 minutes emitting `Still modifying...` before completing). The `Still modifying...` polling lines are normal — do not cancel.
 
 ---
 
@@ -202,6 +219,10 @@ Lambda swaps code atomically. There is no blue/green here, but upload + activati
 | 502 on every webhook after deploy | Import error or syntax error in deployed code | Check `/aws/lambda/haunter` CloudWatch logs immediately; rollback |
 | `Error: Invalid function argument` on `filebase64sha256` | `lambda.zip` does not exist yet | Run `rebuild_lambda_zip.py` first |
 | Plan shows 0 changes but you know code changed | `rebuild_lambda_zip.py` wasn't run after the code edit | Always rebuild before planning |
+| `dial tcp: lookup lambda.us-east-1.amazonaws.com: no such host` (from Terraform, while the `aws` CLI works fine) | Terraform's Go HTTP client uses Go's pure-Go DNS resolver, which intermittently fails on this Windows host. Note the AWS CLI is Python and resolves correctly, so "the network is up" is not a valid diagnosis | **Required on this machine for every Terraform invocation**, not optional: `$env:GODEBUG='netdns=cgo'` before running `plan`/`apply`. This forces the Windows (cgo) resolver and made the deploy succeed immediately. It has already cost three failed deploys |
+| `InvalidSignatureException: Signature expired: ... (5 min. tolerance exceeded)` | The local Windows clock drifted behind AWS by more than the SigV4 5-minute window (~6.5 min observed) | Compare local UTC against the `Date` response header of any AWS/HTTP response. A retry only helps **once the clock has resynced** — let Windows time sync settle, then re-run the apply. Re-running immediately while the clock is still behind will fail the same way |
+| Every Terraform command hangs with no output after a killed `apply` | The interrupted run left a stale state lock behind: `infra/aws/.terraform.tfstate.lock.info` | Confirm no `terraform` process is running (check Task Manager / `Get-Process terraform`), then delete `infra/aws/.terraform.tfstate.lock.info` and re-run. Kills here are usually a tool or terminal timeout, not a real failure |
+| Deploy reported an error, yet the function now has NEW env vars but is still running OLD code | Terraform applies are not atomic — `aws_lambda_function` env vars and `source_code_hash` are updated in separate steps, so a failure after the env write leaves them half-applied | Check with `aws lambda get-function-configuration --function-name haunter --region us-east-1 --query CodeSha256 --output text` and compare against the local zip hash. The remedy is simply to re-run the apply — it is idempotent. Scope it with `-target=aws_lambda_function.haunter` if the plan also wants to create unrelated new resources |
 
 ---
 
@@ -228,7 +249,7 @@ Key vars:
 
 | # | Where | What to change |
 |---|---|---|
-| 1 | `aws.md` line 21 | This file's `Function URL` row in the Quick reference table |
+| 1 | `aws.md` section 0 "Critical facts" | This file's `**Function URL**` row (referenced by name, not line number, so it survives edits) |
 | 2 | `backend/.env` (if using locally) | `CALLBACK_URL` and `FRONTEND_URL` |
 | 3 | Lambda env vars (set by terraform, no manual edit) | `CALLBACK_URL` and `FRONTEND_URL` are injected from `terraform.tfvars` — `terraform apply` updates them automatically |
 | 4 | GitHub Webhook Payload URL | https://github.com/<owner>/<repo>/settings/hooks → click Edit → paste new URL + `/webhooks/github` |
