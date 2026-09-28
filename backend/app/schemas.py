@@ -38,9 +38,31 @@ class RepoOut(BaseModel):
     default_branch: Optional[str]
     language_hint: Optional[str]
     active_model_config_id: Optional[uuid.UUID]
+    auditor_github_install_id: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class RepoAuditorInstallUpdate(BaseModel):
+    """
+    Request body for PATCH /repos/{repo_id}/auditor-install.
+
+    Sets (or clears with null) the auditor GitHub App installation id for a
+    repo the caller already owns. Positive ints only; bools are rejected
+    explicitly because bool is a subclass of int in Python.
+    """
+
+    auditor_github_install_id: Optional[int] = Field(default=None, gt=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("auditor_github_install_id")
+    @classmethod
+    def reject_bool_install_id(cls, v: Optional[int]) -> Optional[int]:
+        if isinstance(v, bool):
+            raise ValueError("auditor_github_install_id must be a positive integer.")
+        return v
 
 
 class AvailableRepoOut(BaseModel):
