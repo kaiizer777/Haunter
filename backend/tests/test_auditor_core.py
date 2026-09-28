@@ -5479,3 +5479,106 @@ async def test_a_lambda_like_runtime_refuses_to_execute_audit_jobs_in_process():
     assert summary.scheduled == 1
     in_process.assert_not_called()
     adapter.schedule_audit.assert_awaited_once_with("audit-aaaaaaaaaaaa", "0" * 64)
+
+
+def _mock_processing_claim_session(
+    *,
+    settings_row: Any,
+    audit_id: str = "audit-aaaaaaaaaaaa",
+    fence_token: str = "a" * 64,
+) -> tuple[AsyncMock, MagicMock]:
+    """Hermetic session for `_claim_processing_job` up to the kill-switch check.
+
+    Returns the mock db session and the mock session-maker to install at
+    `app.db.async_session_maker`. The locked job row carries `fence_token` so
+    the stored-fence comparison passes; callers must also patch
+    `verify_audit_dispatch_fence` to True.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    locked = SimpleNamespace(
+        status="dispatching",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+        dispatch_attempts=1,
+        dispatch_fence_token=fence_token,
+        repo_id=uuid.uuid4(),
+    )
+    lock_result = MagicMock()
+    lock_result.one_or_none.return_value = locked
+    refused_result = MagicMock()
+    refused_result.scalar_one_or_none.return_value = audit_id
+    db = AsyncMock()
+    db.execute.side_effect = [lock_result, refused_result]
+    db.scalar.return_value = settings_row
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = db
+    session_cm.__aexit__.return_value = False
+    maker = MagicMock(return_value=session_cm)
+    return db, maker
+
+
+@pytest.mark.asyncio
+async def test_claim_refusal_logs_missing_settings_row(
+    caplog: pytest.LogCaptureFixture,
+):
+    """A missing `RepoSettings` row refuses fail-closed AND logs distinctly.
+
+    The execution-time kill-switch check must stay fail-closed (missing row
+    still yields `AUDITOR_DISABLED` with no credential/model work), but the
+    operator-visible warning must distinguish a deleted configuration
+    (`reason=missing_settings_row row_present=False`) from a deliberate
+    opt-out (`reason=auditor_disabled row_present=True`).
+    """
+    audit_id = "audit-aaaaaaaaaaaa"
+    fence_token = "a" * 64
+    _, maker = _mock_processing_claim_session(settings_row=None, audit_id=audit_id)
+    with (
+        patch("app.db.async_session_maker", maker),
+        patch(
+            "app.services.audit_pipeline.verify_audit_dispatch_fence",
+            return_value=True,
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        outcome = await audit_pipeline._claim_processing_job(audit_id, fence_token)
+
+    assert outcome is audit_pipeline.ProcessingClaimOutcome.AUDITOR_DISABLED
+    assert "processing_refused" in caplog.text
+    assert "reason=missing_settings_row" in caplog.text
+    assert "row_present=False" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_claim_refusal_logs_disabled_row_distinctly(
+    caplog: pytest.LogCaptureFixture,
+):
+    """A present-but-disabled row keeps the `auditor_disabled` reason."""
+    audit_id = "audit-bbbbbbbbbbbb"
+    fence_token = "b" * 64
+    disabled_row = SimpleNamespace(
+        enable_auditor_mode=False,
+        audit_trigger_on_pr=True,
+        audit_trigger_on_ci_failure=True,
+        audit_trigger_on_ci_success=False,
+        audit_trigger_on_manual_mention=True,
+    )
+    _, maker = _mock_processing_claim_session(
+        settings_row=disabled_row,
+        audit_id=audit_id,
+        fence_token=fence_token,
+    )
+    with (
+        patch("app.db.async_session_maker", maker),
+        patch(
+            "app.services.audit_pipeline.verify_audit_dispatch_fence",
+            return_value=True,
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        outcome = await audit_pipeline._claim_processing_job(audit_id, fence_token)
+
+    assert outcome is audit_pipeline.ProcessingClaimOutcome.AUDITOR_DISABLED
+    assert "processing_refused" in caplog.text
+    assert "reason=auditor_disabled" in caplog.text
+    assert "reason=missing_settings_row" not in caplog.text
+    assert "row_present=True" in caplog.text
