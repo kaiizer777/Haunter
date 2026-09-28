@@ -5016,6 +5016,226 @@ async def test_both_resolvers_agree_including_the_environment_fallback(
         lambda_client.invoke.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# The Lambda function name is read from the environment by pydantic-settings,
+# not straight from os.environ, so the alias config in app/config.py decides
+# which environment keys are accepted. AWS_LAMBDA_FUNCTION_NAME is an
+# AWS-reserved key that Lambda always injects; HAUNTER_LAMBDA_FUNCTION_NAME is
+# the non-reserved override the audit dispatcher is allowed to point at the main
+# function. Both must keep working, and the override must win when Lambda has
+# also injected the reserved key.
+# ---------------------------------------------------------------------------
+
+# The keys the Lambda runtime sets itself. A deployment that passes any of them
+# to CreateFunction is rejected outright, so Terraform may never write one.
+AWS_RESERVED_LAMBDA_ENV_KEYS = frozenset(
+    {
+        "AWS_DEFAULT_REGION",
+        "AWS_EXECUTION_ENV",
+        "AWS_LAMBDA_FUNCTION_MEMORY_SIZE",
+        "AWS_LAMBDA_FUNCTION_NAME",
+        "AWS_LAMBDA_FUNCTION_VERSION",
+        "AWS_LAMBDA_INITIALIZATION_TYPE",
+        "AWS_LAMBDA_LOG_GROUP_NAME",
+        "AWS_LAMBDA_LOG_STREAM_NAME",
+        "AWS_LAMBDA_RUNTIME_API",
+        "AWS_LAMBDA_RUNTIME_DIR",
+        "AWS_REGION",
+        "AWS_XRAY_CONTEXT_MISSING",
+        "LAMBDA_RUNTIME_DIR",
+        "LAMBDA_TASK_ROOT",
+        "_HANDLER",
+        "_X_AMZN_TRACE_ID",
+    }
+)
+
+_LAMBDA_FUNCTION_NAME_ENV_KEYS = (
+    "AWS_LAMBDA_FUNCTION_NAME",
+    "HAUNTER_LAMBDA_FUNCTION_NAME",
+)
+
+# The fields Settings requires, supplied explicitly so the test does not depend
+# on the developer's own environment.
+_REQUIRED_SETTINGS = {
+    "database_url": "postgresql://haunter:haunter@localhost:5432/haunter",
+    "database_url_unpooled": "postgresql://haunter:haunter@localhost:5432/haunter",
+    "github_client_id": "test-github-client-id",
+    "github_client_secret": "test-github-client-secret",
+    "callback_url": "https://haunter.test/auth/github/callback",
+    "session_secret_key": "test-session-secret-key",
+    "frontend_url": "https://haunter.test",
+}
+
+
+def _settings_with_function_name_env(environment: dict[str, str]):
+    """Build a fresh Settings with exactly `environment` for the two name keys.
+
+    A fresh instance is required: app.config.settings is a module-level singleton
+    built at import time, so it cannot show what the environment resolves to now.
+    _env_file=None keeps the answer independent of a developer .env, which is also
+    the faithful case — Lambda has no .env file.
+    """
+    from app.config import Settings
+
+    with patch.dict("os.environ", environment):
+        # os.environ is case-insensitive on Windows, where a lowercase spelling
+        # is stored upper-cased, so the "absent" check has to fold case too —
+        # otherwise the cleanup below deletes the value just set for the case that
+        # spells the key the way pydantic would.
+        wanted = {key.casefold() for key in environment}
+        for key in _LAMBDA_FUNCTION_NAME_ENV_KEYS:
+            if key.casefold() not in wanted:
+                os.environ.pop(key, None)
+        return Settings(**_REQUIRED_SETTINGS, _env_file=None)
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        # The reserved key. Lambda injects it for the main function on every
+        # invocation, and it must keep resolving or the main function has no
+        # self-invoke target at all.
+        ({"AWS_LAMBDA_FUNCTION_NAME": "haunter"}, "haunter"),
+        # The non-reserved override: the only key Terraform may set.
+        ({"HAUNTER_LAMBDA_FUNCTION_NAME": "haunter"}, "haunter"),
+        # pydantic-settings matches env var names case-insensitively, so the
+        # alias also keeps working in its lowercase field-name spelling.
+        ({"aws_lambda_function_name": "haunter"}, "haunter"),
+        # Neither key set: local dev, where there is no function to self-invoke.
+        ({}, None),
+    ],
+)
+def test_the_lambda_function_name_accepts_the_reserved_key_and_the_override_key(
+    environment: dict[str, str], expected: str | None
+):
+    settings = _settings_with_function_name_env(environment)
+    assert settings.aws_lambda_function_name == expected
+
+
+def test_the_override_key_wins_when_lambda_also_injected_the_reserved_key():
+    # On the dispatcher BOTH keys are present in the real runtime: Lambda always
+    # injects AWS_LAMBDA_FUNCTION_NAME pointing at the dispatcher itself, and
+    # Terraform adds HAUNTER_LAMBDA_FUNCTION_NAME pointing at the main function.
+    # The alias order in app/config.py therefore decides the outcome. If the
+    # reserved alias were checked first it would win, and every audit child would
+    # self-invoke straight back into the dispatcher.
+    dispatcher = _settings_with_function_name_env(
+        {
+            "AWS_LAMBDA_FUNCTION_NAME": "haunter-audit-dispatcher",
+            "HAUNTER_LAMBDA_FUNCTION_NAME": "haunter",
+        }
+    )
+    assert dispatcher.aws_lambda_function_name == "haunter"
+
+    # The resolver reads that one setting, so the child lands on the main
+    # function rather than back on the dispatcher.
+    from app import lambda_runtime
+
+    with patch(
+        "app.config.settings.aws_lambda_function_name",
+        dispatcher.aws_lambda_function_name,
+    ):
+        assert lambda_runtime.resolve_lambda_function_name() == "haunter"
+
+    # The mirror image: the main function has only the reserved key, and must
+    # still resolve to its own name.
+    main = _settings_with_function_name_env(
+        {"AWS_LAMBDA_FUNCTION_NAME": "haunter"}
+    )
+    assert main.aws_lambda_function_name == "haunter"
+
+
+_TF_ENVIRONMENT_BLOCK = re.compile(r"^\s*environment\s*\{")
+_TF_ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+_TF_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _terraform_environment_keys(text: str) -> list[tuple[int, str]]:
+    """Return (lineno, key) for each assignment inside a Terraform environment block.
+
+    Structural rather than a full HCL parse: string literals and `#` comments
+    are stripped and braces are counted per line. A brace hiding in a comment or
+    an unterminated string could close a block early, so this can miss a key
+    that sits after it — a limitation worth stating rather than hiding, and the
+    reason the test also asserts the known keys were found, so a parser that
+    silently matched nothing cannot pass.
+
+    Only direct children of the environment block are reported, which keeps the
+    structural `variables = {` line out of the result.
+    """
+    depth = 0
+    environment_depth: int | None = None
+    keys: list[tuple[int, str]] = []
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = _TF_STRING.sub("", raw).split("#", 1)[0]
+        match = _TF_ASSIGNMENT.match(line)
+        if (
+            match is not None
+            and environment_depth is not None
+            and depth == environment_depth + 1
+        ):
+            keys.append((lineno, match.group(1)))
+        opens_environment = _TF_ENVIRONMENT_BLOCK.match(line) is not None
+        for character in line:
+            if character == "{":
+                depth += 1
+                if opens_environment:
+                    environment_depth = depth
+            elif character == "}":
+                depth -= 1
+                if environment_depth is not None and depth < environment_depth:
+                    environment_depth = None
+    return keys
+
+
+def test_terraform_never_sets_an_aws_reserved_key_on_a_lambda_function():
+    # Guards the class of bug, not the instance: any aws_lambda_function
+    # environment.variables block that names a key Lambda reserves is an apply
+    # that fails with InvalidParameterValueException before it creates anything.
+    # Reading only *.tf, so terraform.tfvars is never touched.
+    terraform_dir = Path(__file__).resolve().parents[2] / "infra" / "aws"
+    terraform_files = sorted(terraform_dir.glob("*.tf"))
+    assert terraform_files, "no Terraform files found — the scan would pass vacuously"
+
+    detected: set[str] = set()
+    offenders: list[str] = []
+    for terraform_file in terraform_files:
+        source = terraform_file.read_text(encoding="utf-8")
+        for lineno, key in _terraform_environment_keys(source):
+            detected.add(key)
+            if key in AWS_RESERVED_LAMBDA_ENV_KEYS:
+                offenders.append(
+                    f"{terraform_file.name}:{lineno} sets reserved key {key}"
+                )
+
+    # Non-vacuity is proved by
+    # test_terraform_environment_key_scan_reports_a_reserved_key, which feeds the
+    # parser a synthetic block rather than depending on which keys happen to be in
+    # lambda.tf today. Asserting specific live keys here made this test fail for
+    # reasons unrelated to the property it guards.
+    assert offenders == []
+
+
+def test_terraform_environment_key_scan_reports_a_reserved_key():
+    # Self-test for the parser the scan above depends on. Without it, a parser
+    # that silently matched nothing would let that test pass vacuously. Driving it
+    # with a synthetic block proves detection independently of the real .tf files.
+    synthetic = (
+        'resource "aws_lambda_function" "probe" {\n'
+        "  environment {\n"
+        "    variables = {\n"
+        '      AWS_LAMBDA_FUNCTION_NAME = "reserved"\n'
+        '      SOME_ORDINARY_KEY       = "fine"\n'
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    keys = [key for _lineno, key in _terraform_environment_keys(synthetic)]
+    assert keys == ["AWS_LAMBDA_FUNCTION_NAME", "SOME_ORDINARY_KEY"]
+    reserved_found = [k for k in keys if k in AWS_RESERVED_LAMBDA_ENV_KEYS]
+    assert reserved_found == ["AWS_LAMBDA_FUNCTION_NAME"]
+
+
 @pytest.mark.asyncio
 async def test_a_lambda_like_runtime_refuses_to_execute_audit_jobs_in_process():
     from app.lambda_runtime import is_lambda_runtime, resolve_lambda_function_name
