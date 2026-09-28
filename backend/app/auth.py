@@ -44,7 +44,7 @@ PKCE DECISION
 
 COOKIE PREFIX (__Host-)
 -----------------------
-- NOT used. Reason: API (Cloud Run / localhost:8000) and frontend (localhost:3000 /
+- NOT used. Reason: API (Cloud Run / localhost:7555) and frontend (localhost:3011 /
   separate domain) are on different origins. __Host- requires Secure, no Domain
   attribute, and Path=/. When the API and frontend are on separate origins, the browser
   sends the API cookie to the API origin automatically without a Domain attribute —

@@ -253,7 +253,7 @@ resource "aws_lambda_function_url" "haunter" {
   authorization_type = "NONE"  # Secured via HMAC-SHA256 in webhooks.py
   # CORS disabled at Function URL layer — FastAPI CORSMiddleware (backend/main.py:38) owns CORS.
   # Duplicate headers (Lambda + FastAPI both add Access-Control-Allow-Origin) caused
-  # "contains multiple values 'https://haunter-dfg.pages.dev, https://haunter-dfg.pages.dev'" error.
+  # "contains multiple values 'https://haunter.sufiyanx.workers.dev, https://haunter.sufiyanx.workers.dev'" error.
 }
 
 # Fix for AWS accounts created after ~2024: "Block public access" for Function URLs

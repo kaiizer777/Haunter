@@ -14,7 +14,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 The Haunter frontend is a Next.js 16 static SPA dashboard (React 19, Tailwind CSS v4, TypeScript) for monitoring and administering the Haunter autonomous CI failure diagnosis and fix agent. The dashboard provides run history, detailed step-by-step diagnostic traces, eval harness results, active repository controls, and live model switching.
 
 ## Architecture & Hosting Ground Truth
-- **Frontend Hosting**: **Cloudflare Workers Static Assets** configured via `wrangler.jsonc` (Worker name: `haunter-ci-agent`, static directory: `./out`). It is **NOT** hosted on Cloudflare Pages and **NOT** hosted on Vercel.
+- **Frontend Hosting**: **Cloudflare Workers Static Assets** configured via `wrangler.jsonc` (Worker name: `haunter`, static directory: `./out`). It is **NOT** hosted on Cloudflare Pages and **NOT** hosted on Vercel.
 - **Static Export**: Built with `output: "export"` in `next.config.ts`. All pages are exported as static HTML/JS/CSS assets to `./out` and served directly by Cloudflare Workers Assets.
 - **Backend API**: AWS Lambda running FastAPI + Mangum via Lambda Function URL (`us-east-1`, `x86_64` architecture).
 - **Authentication**: GitHub OAuth with cross-origin session cookies (`SameSite=None`, `Secure`, `HttpOnly`).
@@ -29,7 +29,7 @@ The Haunter frontend is a Next.js 16 static SPA dashboard (React 19, Tailwind CS
   - Must not contain trailing slashes or trailing whitespace (causes URL malformation).
 
 ## Scripts & Deployment Workflow
-- `npm run dev` — Start the local Next.js development server on `http://localhost:3000`.
+- `npm run dev` — Start the local Next.js development server on `http://localhost:3011`.
 - `npm run build` — Compile TypeScript and generate the static export in `frontend/out/`.
 - `npm test` — Run the Vitest unit/component test suite (must pass with 0 errors).
 - `npm run deploy` — Deploy the static assets to Cloudflare Workers via Wrangler (`wrangler deploy`).

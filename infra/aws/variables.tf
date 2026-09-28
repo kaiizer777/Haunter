@@ -68,7 +68,7 @@ variable "session_secret_key" {
 }
 
 variable "frontend_url" {
-  description = "Frontend URL for CORS + OAuth redirect (e.g. https://haunter.pages.dev)."
+  description = "Frontend URL for CORS + OAuth redirect (e.g. https://haunter.sufiyanx.workers.dev)."
   type        = string
 }
 

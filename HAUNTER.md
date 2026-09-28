@@ -594,7 +594,7 @@ Neon Postgres utilizes an external PgBouncer connection pooler (`*-pooler.postgr
 ```
 
 ### 7.1 Cross-Origin Cookie Transmissions
-The frontend SPA runs on Cloudflare Workers (`haunter-ci-agent.workers.dev` or custom domain) while the backend runs on AWS Lambda Function URL (`*.lambda-url.us-east-1.on.aws`). Because these exist on different effective top-level domains (eTLD+1), browser cross-site cookie policies apply:
+The frontend SPA runs on Cloudflare Workers (`haunter.sufiyanx.workers.dev` or custom domain) while the backend runs on AWS Lambda Function URL (`*.lambda-url.us-east-1.on.aws`). Because these exist on different effective top-level domains (eTLD+1), browser cross-site cookie policies apply:
 - Cookie Name: `haunter_session`.
 - Flags: `samesite="none"`, `secure=True`, `httponly=True`, `max_age=1209600` (14 days).
 - Cryptographic Signature: Signed using `itsdangerous.TimestampSigner` with `SESSION_SECRET_KEY`.
@@ -634,9 +634,9 @@ Asynchronous self-invocations (`boto3.client("lambda").invoke(InvocationType="Ev
 - **Export Mode:** Static HTML/JS bundle (`output: "export"`, `images: { unoptimized: true }` in `frontend/next.config.ts`).
 - **Deployment Platform:** Cloudflare Workers using Wrangler Static Assets (`frontend/wrangler.jsonc`).
 - **Worker Configuration:**
-  - Name: `haunter-ci-agent`.
+  - Name: `haunter`.
   - Static Asset Directory: `./out`.
-  - Not Found Handling: `404-page` (routes missing paths to SPA error handling).
+  - Not Found Handling: `single-page-application` (unmatched paths are served the app shell, not a 404 page).
   - Compatibility Date: `2025-09-01` (`nodejs_compat`).
 
 ### 8.3 Zero-Cost Operating Envelope
@@ -734,7 +734,7 @@ During early system design, Haunter planned multi-cloud sandbox runners across A
 - **Pure GitHub Actions Selection:** Zero additional infrastructure cost, native parity with real CI environments, instant runner availability on public repositories, and zero external daemon dependencies.
 
 ### 12.2 Hosting Platform Evolution: Cloudflare Workers Static Assets
-Originally targeted for Cloudflare Pages (`*.pages.dev`), the frontend hosting was migrated to **Cloudflare Workers Static Assets** (`frontend/wrangler.jsonc`) using worker `haunter-ci-agent`. This consolidates edge infrastructure onto Cloudflare's modern Workers platform with explicit asset directory routing (`./out`) and single-command Wrangler deployments.
+Originally targeted for Cloudflare Pages (`*.pages.dev`), the frontend hosting was migrated to **Cloudflare Workers Static Assets** (`frontend/wrangler.jsonc`) using worker `haunter`. This consolidates edge infrastructure onto Cloudflare's modern Workers platform with explicit asset directory routing (`./out`) and single-command Wrangler deployments.
 
 ### 12.3 Compute Architecture Alignment: x86_64
 Early architecture drafts proposed ARM64 Graviton2 for Lambda. Ground truth verification confirmed and locked the architecture to **`x86_64`** (`infra/aws/lambda.tf:159`, `aws.md:57`). Cross-compiling Python packages with native extensions (such as `asyncpg` and `cryptography`) from Windows development hosts for Lambda requires standardizing on `--platform manylinux2014_x86_64`, which aligns with the x86_64 Lambda runtime.

@@ -27,10 +27,10 @@ jobs:
     env:
       GITHUB_CLIENT_ID: ci_test_client_id
       GITHUB_CLIENT_SECRET: ci_test_client_secret
-      CALLBACK_URL: http://localhost:8787/auth/callback
+      CALLBACK_URL: http://localhost:7555/auth/callback
       SESSION_SECRET_KEY: ci_test_session_secret_key_replace_in_prod
       GITHUB_WEBHOOK_SECRET: ci_test_webhook_secret
-      FRONTEND_URL: http://localhost:3000
+      FRONTEND_URL: http://localhost:3011
       OPENCODE_ZEN_API_KEY: ci_test_zen_api_key
 
     steps:
@@ -157,5 +157,5 @@ jobs:
       - name: Build
         env:
           # Dummy URL — build only renders, doesn't call the API.
-          NEXT_PUBLIC_API_URL: http://localhost:8000
+          NEXT_PUBLIC_API_URL: http://localhost:7555
         run: npm run build

@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "haunter-ci-agent",
+  "name": "haunter",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,

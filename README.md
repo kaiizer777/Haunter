@@ -155,7 +155,7 @@ flowchart TD
 
 | Layer | Technology | Details |
 |---|---|---|
-| **Frontend** | Next.js 16.3.3, React 19.2.8, Tailwind CSS v4 | Static SPA export (`output: "export"`) deployed on **Cloudflare Workers** Static Assets (`frontend/wrangler.jsonc`, worker `haunter-ci-agent`). |
+| **Frontend** | Next.js 16.3.3, React 19.2.8, Tailwind CSS v4 | Static SPA export (`output: "export"`) deployed on **Cloudflare Workers** Static Assets (`frontend/wrangler.jsonc`, worker `haunter`). |
 | **Browser Runtime** | StackBlitz WebContainer API (`@webcontainer/api`) | Browser-based Node.js virtual container with cross-origin isolation (COOP: `same-origin`, COEP: `require-corp`). |
 | **Code Editor** | Monaco Editor (`@monaco-editor/react`) | Interactive side-by-side unified diff inspection. |
 | **Backend** | FastAPI, Python 3.11, Mangum | Serverless ASGI orchestrator on **AWS Lambda** Function URL in `us-east-1` (`x86_64`, 512 MB, 900s timeout). |
@@ -247,7 +247,7 @@ DATABASE_URL_UNPOOLED=postgresql+asyncpg://user:pass@ep-direct.us-east-2.aws.neo
 # Auth & Secrets
 GITHUB_CLIENT_ID=your_oauth_client_id
 GITHUB_CLIENT_SECRET=your_oauth_client_secret
-CALLBACK_URL=http://localhost:7555/auth/github/callback
+CALLBACK_URL=http://localhost:7555/auth/callback
 SESSION_SECRET_KEY=generate_with_openssl_rand_hex_32
 TOKEN_ENCRYPTION_KEY=generate_with_fernet_generate_key
 FRONTEND_URL=http://localhost:3011

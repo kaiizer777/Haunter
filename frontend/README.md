@@ -6,7 +6,7 @@ The web dashboard for [Haunter](file:///C:/Users/bari2/Desktop/Haunter/README.md
 - **Framework**: [Next.js](https://nextjs.org/) 16 (App Router)
 - **UI Library**: React 19, [Tailwind CSS](https://tailwindcss.com/) v4, Lucide React
 - **Architecture**: Single Page Application (SPA) Static Export (`output: "export"` in [`next.config.ts`](file:///C:/Users/bari2/Desktop/Haunter/frontend/next.config.ts))
-- **Hosting**: [Cloudflare Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/) configured via [`wrangler.jsonc`](file:///C:/Users/bari2/Desktop/Haunter/frontend/wrangler.jsonc) (`haunter-ci-agent`)
+- **Hosting**: [Cloudflare Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/) configured via [`wrangler.jsonc`](file:///C:/Users/bari2/Desktop/Haunter/frontend/wrangler.jsonc) (`haunter`)
 - **Testing**: [Vitest](https://vitest.dev/) with `@testing-library/react`
 - **Backend API**: AWS Lambda (FastAPI + Mangum via Lambda Function URL in `us-east-1`)
 
@@ -26,7 +26,7 @@ The dashboard compiles as a client-side static bundle. Environment variables mus
 # Install dependencies
 npm install
 
-# Start local Next.js dev server (http://localhost:3000)
+# Start local Next.js dev server (http://localhost:3011)
 npm run dev
 
 # Run Vitest component & unit tests
