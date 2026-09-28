@@ -230,6 +230,8 @@ Lambda swaps code atomically. There is no blue/green here, but upload + activati
 
 All env vars are injected via Terraform (`infra/aws/lambda.tf` `environment` block) and sourced from `terraform.tfvars`. **Do not change them in the AWS console** — they will be overwritten on the next `terraform apply`.
 
+> **SESSION_SECRET_KEY authority:** prod value comes from `var.session_secret_key` in `infra/aws/terraform.tfvars` (injected as Lambda env via `infra/aws/lambda.tf:174`). `backend/.env` is local-only — a session cookie signed with the local `SESSION_SECRET_KEY` returns `401` against prod. Never print secret values; compare SHA-256 fingerprints only.
+
 Key vars:
 
 | Variable | Value | Purpose |
@@ -254,7 +256,7 @@ Key vars:
 | 3 | Lambda env vars (set by terraform, no manual edit) | `CALLBACK_URL` and `FRONTEND_URL` are injected from `terraform.tfvars` — `terraform apply` updates them automatically |
 | 4 | GitHub Webhook Payload URL | https://github.com/<owner>/<repo>/settings/hooks → click Edit → paste new URL + `/webhooks/github` |
 | 5 | GitHub OAuth App Authorization callback URL | https://github.com/settings/developers → your OAuth App → "Authorization callback URL" → paste new URL + `/auth/callback`. **Must match `CALLBACK_URL` exactly or login breaks** |
-| 6 | Cloudflare Workers frontend env var | `NEXT_PUBLIC_API_URL` in `frontend/.env.local` (must re-run `npm run build` and `npm run deploy` via Wrangler) |
+| 6 | Cloudflare Workers frontend env var | `NEXT_PUBLIC_API_URL` in `frontend/.env.production` (prod builds read this file; keep the var ABSENT from `frontend/.env.local` — local dev falls back to the `http://localhost:7555` default in `frontend/next.config.ts:8`. `.env.local` outranks `.env.production` in Next's precedence, so any value left in `.env.local` overrides prod and is baked into the deployed bundle. Must re-run `npm run build` and `npm run deploy` via Wrangler) |
 | 7 | Terraform state (`terraform.tfvars`) | `callback_url` and `frontend_url` — committed locally, used by next deploy |
 
 

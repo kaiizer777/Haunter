@@ -25,7 +25,9 @@ The Haunter frontend is a Next.js 16 static SPA dashboard (React 19, Tailwind CS
 ## Environment Variables & Configuration
 - `NEXT_PUBLIC_API_URL`: Base URL of the backend AWS Lambda Function URL.
   - **Crucial**: Because this is a static export (`output: "export"`), `NEXT_PUBLIC_API_URL` is baked into the JavaScript bundle at build time (`npm run build`).
-  - Set this in `frontend/.env.local` before running `npm run build`.
+  - Local dev: leave the var ABSENT from `frontend/.env.local` — falls back to the `http://localhost:7555` default in `frontend/next.config.ts:8`.
+  - Production builds read `frontend/.env.production`.
+  - `.env.local` outranks `.env.production` in Next's precedence, so any value left in `.env.local` overrides prod and is baked into the deployed bundle.
   - Must not contain trailing slashes or trailing whitespace (causes URL malformation).
 
 ## Scripts & Deployment Workflow
