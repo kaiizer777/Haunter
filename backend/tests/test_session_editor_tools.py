@@ -770,7 +770,14 @@ async def test_apply_multi_patch_staged_file_fails_closed_without_clean_base() -
         return None
 
     async def _resolve_current(
-        path, staged_patches, repo_owner, repo_name, base_sha, gh_token=None
+        path,
+        staged_patches,
+        repo_owner,
+        repo_name,
+        base_sha,
+        gh_token=None,
+        session_id=None,
+        **kwargs,
     ):
         return "x = 99\ny = 2\n"
 

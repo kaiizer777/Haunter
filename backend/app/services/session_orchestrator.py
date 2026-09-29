@@ -1464,6 +1464,10 @@ class SessionOrchestrator:
 
         Mutates `staged_patches` in place for stage_patch / discard_patch.
         """
+        try:
+            session_id = str(self.session_id) if self.session_id else None
+        except Exception:
+            session_id = None
         if tool_name == "read_file":
             return await self._tool_read_file(
                 args=args,
@@ -1471,6 +1475,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 base_sha=base_sha,
                 staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "stage_patch":
             return await self._tool_stage_patch(
@@ -1480,6 +1485,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                session_id=session_id,
             )
         elif tool_name == "discard_patch":
             return self._tool_discard_patch(
@@ -1487,6 +1493,7 @@ class SessionOrchestrator:
                 staged_patches=staged_patches,
                 repo_owner=repo_owner,
                 repo_name=repo_name,
+                session_id=session_id,
             )
         elif tool_name == "grep_search":
             return await self._tool_grep_search(
@@ -1524,6 +1531,7 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 queue=queue,
+                session_id=session_id,
             )
         elif tool_name == "create_file":
             return await self._tool_create_file(
@@ -1532,6 +1540,7 @@ class SessionOrchestrator:
                 queue=queue,
                 repo_owner=repo_owner,
                 repo_name=repo_name,
+                session_id=session_id,
             )
         elif tool_name == "delete_file":
             return await self._tool_delete_file(
@@ -1541,6 +1550,7 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 queue=queue,
+                session_id=session_id,
             )
         elif tool_name == "apply_multi_patch":
             return await self._tool_apply_multi_patch(
@@ -1550,6 +1560,7 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 queue=queue,
+                session_id=session_id,
             )
         elif tool_name == "get_file_outline":
             return await self._tool_get_file_outline(
@@ -1583,6 +1594,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 staged_patches=staged_patches,
                 base_sha=base_sha,
+                session_id=session_id,
             )
         elif tool_name == "run_linter":
             return await self._tool_run_linter(
@@ -1592,6 +1604,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 staged_patches=staged_patches,
                 base_sha=base_sha,
+                session_id=session_id,
             )
         elif tool_name == "run_targeted_tests":
             return await self._tool_run_targeted_tests(
@@ -1601,6 +1614,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 staged_patches=staged_patches,
                 base_sha=base_sha,
+                session_id=session_id,
             )
         elif tool_name == "verify_in_ci_sandbox":
             if session is None:
@@ -1711,6 +1725,7 @@ class SessionOrchestrator:
         repo_name: str,
         base_sha: str,
         staged_patches: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         """
         Read file contents with support for local checkout synchronization,
@@ -1734,7 +1749,15 @@ class SessionOrchestrator:
         if repo_name and repo_name.strip():
             try:
                 from app.services.session_tools.sandbox import resolve_repo_dir
-                repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+                effective_sid = session_id
+                if effective_sid is None:
+                    try:
+                        effective_sid = str(self.session_id) if self.session_id else None
+                    except Exception:
+                        effective_sid = None
+                repo_root, _ = resolve_repo_dir(
+                    repo_name=repo_name, repo_owner=repo_owner, session_id=effective_sid
+                )
                 if repo_root:
                     real_root = os.path.realpath(repo_root)
                     local_path = os.path.normpath(os.path.join(real_root, path))
@@ -1795,6 +1818,7 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
         base_sha: str | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Stage a unified diff into session staged_patches and synchronize to disk."""
         path: str = args.get("path", "")
@@ -1827,7 +1851,15 @@ class SessionOrchestrator:
         if repo_name:
             try:
                 from app.services.session_tools.sandbox import resolve_repo_dir, sync_staged_patches_to_repo
-                repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+                effective_sid = session_id
+                if effective_sid is None:
+                    try:
+                        effective_sid = str(self.session_id) if self.session_id else None
+                    except Exception:
+                        effective_sid = None
+                repo_root, _ = resolve_repo_dir(
+                    repo_name=repo_name, repo_owner=repo_owner, session_id=effective_sid
+                )
                 if repo_root:
                     # Isolate sync to the patch being staged only: syncing the
                     # entire staged_patches dict would rewrite every staged file
@@ -1835,7 +1867,9 @@ class SessionOrchestrator:
                     # unrelated files. The staged patch is authoritative: sync
                     # writes it to disk as-is and never mutates it with
                     # pre-existing disk content.
-                    sync_staged_patches_to_repo(repo_root, {path: diff}, base_sha=base_sha)
+                    sync_staged_patches_to_repo(
+                        repo_root, {path: diff}, base_sha=base_sha, session_id=effective_sid
+                    )
             except Exception as e:
                 logger.warning("Failed syncing staged patch to disk: %s", e)
 
@@ -1851,22 +1885,109 @@ class SessionOrchestrator:
 
         return f"Patch staged for {path!r} (action={action})."
 
+    def _reverse_apply_staged_diff(
+        self, repo_root: str, path: str, staged_diff: str
+    ) -> bool:
+        """
+        Reverse-apply ``staged_diff`` against the working-tree file so only the
+        staged hunks are undone while unrelated terminal edits are preserved.
+
+        Tries ``git apply --reverse`` first, then a Python invert+apply
+        fallback verified by re-application round-trip. Returns True on
+        success, False when the diff does not reverse-apply cleanly (caller
+        must keep the staged entry and avoid destructive checkout).
+        """
+        import subprocess
+
+        real_root = os.path.realpath(repo_root)
+        diff_text = staged_diff if staged_diff.endswith("\n") else staged_diff + "\n"
+        try:
+            res = subprocess.run(
+                ["git", "apply", "--reverse", "--whitespace=nowarn"],
+                input=diff_text,
+                cwd=real_root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if res.returncode == 0:
+                return True
+            logger.debug(
+                "discard_patch: git apply --reverse failed for %r: %s",
+                path,
+                (res.stderr or "").strip()[:500],
+            )
+        except Exception as exc:
+            logger.debug("discard_patch: git apply --reverse error for %r: %s", path, exc)
+
+        # Python fallback: invert the diff and apply to current disk content.
+        # Accept only when re-applying the original diff to the restored
+        # content reproduces the on-disk state (round-trip proof).
+        try:
+            from app.sandbox.mirror import apply_unified_diff
+            from app.services.session_tools.editor import (
+                _invert_unified_diff,
+                _is_diff_applied,
+            )
+
+            target_file = os.path.normpath(os.path.join(real_root, path))
+            real_target = os.path.realpath(target_file)
+            if os.path.commonpath([real_root, real_target]) != real_root:
+                return False
+            inverted = _invert_unified_diff(staged_diff)
+            if os.path.isfile(real_target) and not os.path.islink(target_file):
+                with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                    disk_content = f.read()
+                restored = apply_unified_diff(disk_content, inverted)
+                if restored != disk_content and _is_diff_applied(
+                    disk_content, staged_diff, base_content=restored
+                ):
+                    with open(target_file, "w", encoding="utf-8", newline="\n") as f:
+                        f.write(restored)
+                    return True
+            else:
+                # File missing on disk (e.g. staged deletion synced): the
+                # inverted diff applied to empty reconstructs the base.
+                if "+++ /dev/null" in staged_diff:
+                    restored = apply_unified_diff("", inverted)
+                    if restored:
+                        os.makedirs(os.path.dirname(target_file), exist_ok=True)
+                        with open(target_file, "w", encoding="utf-8", newline="\n") as f:
+                            f.write(restored)
+                        return True
+        except Exception as exc:
+            logger.debug("discard_patch: python reverse-apply error for %r: %s", path, exc)
+        return False
+
     def _tool_discard_patch(
         self,
         args: dict[str, Any],
         staged_patches: dict[str, str],
         repo_owner: str | None = None,
         repo_name: str | None = None,
+        session_id: str | None = None,
     ) -> str:
         """
-        Discard a currently staged patch, restoring the file from local HEAD or
-        removing it if untracked / newly created.
+        Discard a currently staged patch by reverse-applying it, preserving
+        unrelated working-tree edits, or removing a newly created file.
+
+        Newly created files (``--- /dev/null``) are unlinked after an
+        untracked check via ``git ls-files``. Modified files are undone with
+        ``git apply --reverse`` (Python invert+apply fallback); when
+        reverse-apply fails the staged entry is kept and no destructive
+        ``git checkout`` is performed.
         """
         path: str = args.get("path", "")
         try:
             path = _validate_file_path(path)
         except ValueError as exc:
             return f"Error: {exc}"
+
+        if session_id is None:
+            try:
+                session_id = str(self.session_id) if self.session_id else None
+            except Exception:
+                session_id = None
 
         if path in staged_patches:
             staged_diff = staged_patches[path]
@@ -1875,7 +1996,11 @@ class SessionOrchestrator:
                 try:
                     import subprocess
                     from app.services.session_tools.sandbox import resolve_repo_dir
-                    repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+                    repo_root, _ = resolve_repo_dir(
+                        repo_name=repo_name,
+                        repo_owner=repo_owner,
+                        session_id=session_id,
+                    )
                     if repo_root:
                         real_root = os.path.realpath(repo_root)
                         target_file = os.path.normpath(os.path.join(real_root, path))
@@ -1917,20 +2042,18 @@ class SessionOrchestrator:
                                     return f"Error: failed to discard patch for {path!r}."
                                 del staged_patches[path]
                                 return f"Patch for {path!r} discarded."
-                            res = subprocess.run(
-                                ["git", "checkout", "HEAD", "--", path],
-                                cwd=real_root,
-                                capture_output=True,
-                                timeout=10,
+                            if self._reverse_apply_staged_diff(
+                                real_root, path, staged_diff
+                            ):
+                                del staged_patches[path]
+                                return f"Patch for {path!r} discarded."
+                            return (
+                                f"Error: failed to discard patch for {path!r} "
+                                "(reverse-apply failed; staged patch preserved to avoid "
+                                "losing unrelated working-tree edits)."
                             )
-                            if res.returncode != 0:
-                                return f"Error: failed to discard patch for {path!r} (git checkout failed)."
-                            del staged_patches[path]
-                            return f"Patch for {path!r} discarded."
                 except Exception as e:
                     logger.debug("Failed reverting file in local repo: %s", e)
-                    if is_creation:
-                        return f"Error: failed to discard patch for {path!r}."
                     return f"Error: failed to discard patch for {path!r}."
             del staged_patches[path]
             return f"Patch for {path!r} discarded."
@@ -2056,10 +2179,17 @@ class SessionOrchestrator:
         base_sha: str,
         staged_patches: dict[str, str],
         queue: SseQueue,
+        session_id: str | None = None,
     ) -> str:
         path: str = str(args.get("path", ""))
         old_str: str = str(args.get("old_str", ""))
         new_str: str = str(args.get("new_str", ""))
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         return await tool_str_replace(
             path=path,
             old_str=old_str,
@@ -2070,6 +2200,7 @@ class SessionOrchestrator:
             staged_patches=staged_patches,
             queue=queue,
             gh_token=self.gh_token,
+            session_id=effective_sid,
         )
 
     async def _tool_create_file(
@@ -2079,10 +2210,17 @@ class SessionOrchestrator:
         queue: SseQueue,
         repo_owner: str | None = None,
         repo_name: str | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Create a new file in staged_patches and synchronize to the local checkout."""
         path: str = str(args.get("path", ""))
         content: str = str(args.get("content", ""))
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         return await tool_create_file(
             path=path,
             content=content,
@@ -2090,6 +2228,7 @@ class SessionOrchestrator:
             queue=queue,
             repo_owner=repo_owner or "",
             repo_name=repo_name or "",
+            session_id=effective_sid,
         )
 
     async def _tool_delete_file(
@@ -2100,8 +2239,15 @@ class SessionOrchestrator:
         base_sha: str,
         staged_patches: dict[str, str],
         queue: SseQueue,
+        session_id: str | None = None,
     ) -> str:
         path: str = str(args.get("path", ""))
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         return await tool_delete_file(
             path=path,
             repo_owner=repo_owner,
@@ -2110,6 +2256,7 @@ class SessionOrchestrator:
             staged_patches=staged_patches,
             queue=queue,
             gh_token=self.gh_token,
+            session_id=effective_sid,
         )
 
     async def _tool_apply_multi_patch(
@@ -2120,10 +2267,17 @@ class SessionOrchestrator:
         base_sha: str,
         staged_patches: dict[str, str],
         queue: SseQueue,
+        session_id: str | None = None,
     ) -> str:
         patches: list[dict[str, Any]] = args.get("patches", [])
         if not isinstance(patches, list):
             return "Error: 'patches' must be a list."
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         return await tool_apply_multi_patch(
             patches=patches,
             repo_owner=repo_owner,
@@ -2132,6 +2286,7 @@ class SessionOrchestrator:
             staged_patches=staged_patches,
             queue=queue,
             gh_token=self.gh_token,
+            session_id=effective_sid,
         )
 
     async def _tool_get_file_outline(
@@ -2310,6 +2465,7 @@ class SessionOrchestrator:
         repo_name: str | None = None,
         staged_patches: dict[str, str] | None = None,
         base_sha: str | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Execute a terminal command with session context, SSE streaming, and repository routing."""
         command: str = str(args.get("command", ""))
@@ -2320,6 +2476,12 @@ class SessionOrchestrator:
             timeout_sec: int = int(args.get("timeout_sec", 60))
         except (TypeError, ValueError):
             timeout_sec = 60
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         result = await tool_run_terminal_command(
             command=command,
             timeout_sec=timeout_sec,
@@ -2329,6 +2491,7 @@ class SessionOrchestrator:
             repo_name=repo_name,
             staged_patches=staged_patches,
             base_sha=base_sha,
+            session_id=effective_sid,
         )
         # Populate exit_code on args for frontend chip counters.
         first_line = result.splitlines()[0] if result else ""
@@ -2346,6 +2509,7 @@ class SessionOrchestrator:
         repo_name: str | None = None,
         staged_patches: dict[str, str] | None = None,
         base_sha: str | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Run code linting with session context, SSE streaming, and repository routing."""
         raw_paths = args.get("paths", [])
@@ -2360,6 +2524,12 @@ class SessionOrchestrator:
             timeout_sec: int = int(args.get("timeout_sec", 60))
         except (TypeError, ValueError):
             timeout_sec = 60
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         result = await tool_run_linter(
             paths=paths,
             linter=linter,
@@ -2370,6 +2540,7 @@ class SessionOrchestrator:
             repo_name=repo_name,
             staged_patches=staged_patches,
             base_sha=base_sha,
+            session_id=effective_sid,
         )
         # Populate file_count for frontend chip.
         args["file_count"] = len(paths)
@@ -2383,6 +2554,7 @@ class SessionOrchestrator:
         repo_name: str | None = None,
         staged_patches: dict[str, str] | None = None,
         base_sha: str | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Execute targeted test runners with session context, SSE streaming, and repository routing."""
         raw_targets = args.get("test_targets", [])
@@ -2396,6 +2568,12 @@ class SessionOrchestrator:
             timeout_sec: int = int(args.get("timeout_sec", 120))
         except (TypeError, ValueError):
             timeout_sec = 120
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         result = await tool_run_targeted_tests(
             test_targets=test_targets,
             timeout_sec=timeout_sec,
@@ -2405,6 +2583,7 @@ class SessionOrchestrator:
             repo_name=repo_name,
             staged_patches=staged_patches,
             base_sha=base_sha,
+            session_id=effective_sid,
         )
         # Populate target_count for frontend chip.
         args["target_count"] = len(test_targets)

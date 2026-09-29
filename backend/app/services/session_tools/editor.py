@@ -39,17 +39,21 @@ def _sync_to_local_disk(
     repo_name: str | None,
     repo_owner: str | None,
     action: str = "write",
+    session_id: str | None = None,
 ) -> None:
     """
     Synchronize staged modifications directly to the local working tree on disk if
     a local checkout exists. Eliminates runner/editor checkout mismatches.
     Enforces strict realpath and directory containment checks against symlink traversal.
+    When ``session_id`` is provided, syncs to the session-isolated checkout.
     """
     if not repo_name or not repo_name.strip():
         return
     try:
         from app.services.session_tools.sandbox import resolve_repo_dir
-        repo_root, err = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+        repo_root, err = resolve_repo_dir(
+            repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+        )
         if not repo_root or not os.path.isdir(repo_root):
             return
 
@@ -159,6 +163,7 @@ async def _get_clean_base(
     repo_name: str,
     base_sha: str,
     gh_token: str | None,
+    session_id: str | None = None,
 ) -> str | None:
     """
     Retrieve the unmodified original clean base content for path bound to the
@@ -168,7 +173,9 @@ async def _get_clean_base(
         try:
             from app.services.session_tools.sandbox import resolve_repo_dir
 
-            repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+            repo_root, _ = resolve_repo_dir(
+                repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+            )
             if repo_root and os.path.isdir(repo_root):
                 git_path = path.replace("\\", "/")
                 res = subprocess.run(
@@ -198,7 +205,9 @@ async def _get_clean_base(
         try:
             from app.services.session_tools.sandbox import resolve_repo_dir
 
-            repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+            repo_root, _ = resolve_repo_dir(
+                repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+            )
             if repo_root and os.path.isdir(repo_root):
                 git_path = path.replace("\\", "/")
                 res = subprocess.run(
@@ -245,6 +254,7 @@ async def _resolve_current_content(
     repo_name: str,
     base_sha: str,
     gh_token: str | None,
+    session_id: str | None = None,
 ) -> str | None:
     """
     Resolve the current working content of *path*.
@@ -275,7 +285,9 @@ async def _resolve_current_content(
     if repo_name and repo_name.strip():
         try:
             from app.services.session_tools.sandbox import resolve_repo_dir
-            repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+            repo_root, _ = resolve_repo_dir(
+                repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+            )
             if repo_root:
                 real_root = os.path.realpath(repo_root)
                 local_path = os.path.normpath(os.path.join(real_root, path))
@@ -316,6 +328,7 @@ async def _resolve_current_content(
             repo_name=repo_name,
             base_sha=base_sha,
             gh_token=gh_token,
+            session_id=session_id,
         )
 
         from app.sandbox.mirror import apply_unified_diff
@@ -350,6 +363,7 @@ async def _resolve_current_content(
         repo_name=repo_name,
         base_sha=base_sha,
         gh_token=gh_token,
+        session_id=session_id,
     )
     if clean_base is not None:
         return clean_base
@@ -392,6 +406,7 @@ async def tool_str_replace(
     staged_patches: dict[str, str],
     queue: SseQueue,
     gh_token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Perform an exact, unique string replacement in *path*.
@@ -420,6 +435,7 @@ async def tool_str_replace(
         repo_name=repo_name,
         base_sha=base_sha,
         gh_token=gh_token,
+        session_id=session_id,
     )
     if content is None:
         return f"Error: File not found: '{path}'."
@@ -455,6 +471,7 @@ async def tool_str_replace(
             repo_name=repo_name,
             base_sha=base_sha,
             gh_token=gh_token,
+            session_id=session_id,
         )
         if path in staged_patches and clean_base is None:
             return f"Error: Cannot resolve base revision for '{path}' to build cumulative diff. Staged patch preserved."
@@ -465,7 +482,9 @@ async def tool_str_replace(
     staged_patches[path] = diff
 
     # Sync to local disk if local checkout exists
-    _sync_to_local_disk(path, new_content, repo_name, repo_owner, action="write")
+    _sync_to_local_disk(
+        path, new_content, repo_name, repo_owner, action="write", session_id=session_id
+    )
 
     # Emit SSE event.
     try:
@@ -490,6 +509,7 @@ async def tool_create_file(
     queue: SseQueue,
     repo_owner: str = "",
     repo_name: str = "",
+    session_id: str | None = None,
 ) -> str:
     """
     Stage a new file by generating a unified diff from /dev/null to the new content.
@@ -514,7 +534,9 @@ async def tool_create_file(
     staged_patches[path] = diff
 
     # Sync to local disk if local checkout exists
-    _sync_to_local_disk(path, content, repo_name, repo_owner, action="create")
+    _sync_to_local_disk(
+        path, content, repo_name, repo_owner, action="create", session_id=session_id
+    )
 
     try:
         await queue.put_file_diff(path=path, diff=diff, action="create")
@@ -539,6 +561,7 @@ async def tool_delete_file(
     staged_patches: dict[str, str],
     queue: SseQueue,
     gh_token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Stage deletion of an existing file.
@@ -560,6 +583,7 @@ async def tool_delete_file(
         repo_name=repo_name,
         base_sha=base_sha,
         gh_token=gh_token,
+        session_id=session_id,
     )
     if content is None:
         return f"Error: File not found: '{path}'."
@@ -576,7 +600,9 @@ async def tool_delete_file(
     staged_patches[path] = diff
 
     # Sync to local disk if local checkout exists
-    _sync_to_local_disk(path, None, repo_name, repo_owner, action="delete")
+    _sync_to_local_disk(
+        path, None, repo_name, repo_owner, action="delete", session_id=session_id
+    )
 
     try:
         await queue.put_file_diff(path=path, diff=diff, action="delete")
@@ -601,6 +627,7 @@ async def tool_apply_multi_patch(
     staged_patches: dict[str, str],
     queue: SseQueue,
     gh_token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Atomically apply a batch of file edits.
@@ -673,6 +700,7 @@ async def tool_apply_multi_patch(
                     repo_name=repo_name,
                     base_sha=base_sha,
                     gh_token=gh_token,
+                    session_id=session_id,
                 )
                 if not is_created_files[path]:
                     clean_bases[path] = await _get_clean_base(
@@ -681,6 +709,7 @@ async def tool_apply_multi_patch(
                         repo_name=repo_name,
                         base_sha=base_sha,
                         gh_token=gh_token,
+                        session_id=session_id,
                     )
                     if path in staged_patches and clean_bases[path] is None:
                         return (
@@ -748,6 +777,7 @@ async def tool_apply_multi_patch(
                     repo_name=repo_name,
                     base_sha=base_sha,
                     gh_token=gh_token,
+                    session_id=session_id,
                 )
                 if not is_created_files[path]:
                     clean_bases[path] = await _get_clean_base(
@@ -756,6 +786,7 @@ async def tool_apply_multi_patch(
                         repo_name=repo_name,
                         base_sha=base_sha,
                         gh_token=gh_token,
+                        session_id=session_id,
                     )
                     if path in staged_patches and clean_bases[path] is None:
                         return (
@@ -840,6 +871,7 @@ async def tool_apply_multi_patch(
             repo_name,
             repo_owner,
             action=action,
+            session_id=session_id,
         )
         try:
             await queue.put_file_diff(path=path, diff=diff, action=action)

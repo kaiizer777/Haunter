@@ -588,12 +588,16 @@ def sync_staged_patches_to_repo(
     repo_root: str,
     staged_patches: dict[str, str] | None,
     base_sha: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     """
     Ensure all patches currently staged in memory/DB are synced to the local repository checkout.
     This guarantees that local terminal commands, linters, and test runners execute
     against the actual patched code, eliminating runner/editor checkout mismatches.
     Protects against symlink escapes, makes application idempotent, and preserves full file content.
+
+    When ``session_id`` is provided and a session-isolated directory exists
+    under ``repo_root``, patches are synced to the session checkout instead.
     """
     if not staged_patches or not repo_root or not os.path.isdir(repo_root):
         return
@@ -601,6 +605,10 @@ def sync_staged_patches_to_repo(
     from app.sandbox.mirror import apply_unified_diff
 
     real_root = os.path.realpath(repo_root)
+    if session_id and session_id.strip() and _is_safe_session_component(session_id):
+        session_root = _resolve_session_root(real_root, session_id.strip())
+        if session_root:
+            real_root = session_root
 
     for rel_path, diff in staged_patches.items():
         if not diff or not diff.strip():
@@ -808,10 +816,72 @@ def _candidate_matches_owner(candidate_dir: str, repo_owner: str | None) -> bool
 # ---------------------------------------------------------------------------
 
 
+_SAFE_SESSION_COMPONENT_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,128}$")
+
+
+def _is_safe_session_component(val: str | None) -> bool:
+    """Validate a session_id for safe use as a path component (no traversal)."""
+    if not val:
+        return False
+    stripped = val.strip()
+    if not stripped or ".." in stripped or "/" in stripped or "\\" in stripped:
+        return False
+    return bool(_SAFE_SESSION_COMPONENT_RE.match(stripped))
+
+
+def _resolve_session_root(main_root_real: str, session_id: str) -> str | None:
+    """
+    Return a session-isolated directory under the main checkout when present.
+
+    Checks, in order:
+      1. ``<repo>/.haunter_sessions/<session_id>``
+      2. ``<repo>/.worktrees/session-<session_id>``
+      3. ``<repo>/session-<session_id>``
+      4. ``<parent>/.haunter_sessions/<session_id>/<repo_basename>``
+    Returns None when no session-isolated directory exists (caller falls
+    back safely to the main checkout).
+    """
+    sid = session_id.strip()
+    base = os.path.basename(main_root_real)
+    parent = os.path.dirname(main_root_real)
+    candidates = [
+        os.path.join(main_root_real, ".haunter_sessions", sid),
+        os.path.join(main_root_real, ".worktrees", f"session-{sid}"),
+        os.path.join(main_root_real, f"session-{sid}"),
+        os.path.join(parent, ".haunter_sessions", sid, base),
+    ]
+    for cand in candidates:
+        try:
+            cand_real = os.path.realpath(cand)
+            if os.path.isdir(cand_real):
+                return cand_real
+        except Exception:
+            continue
+    # Best-effort git worktree lookup: a worktree whose path ends with
+    # session-<id> is treated as the session checkout when it exists on disk.
+    try:
+        res = subprocess.run(
+            ["git", "-C", main_root_real, "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                if line.startswith("worktree "):
+                    wt_path = line[len("worktree ") :].strip()
+                    if wt_path.endswith(f"session-{sid}") and os.path.isdir(wt_path):
+                        return os.path.realpath(wt_path)
+    except Exception:
+        pass
+    return None
+
+
 def resolve_repo_dir(
     repo_name: str | None = None,
     repo_owner: str | None = None,
     cwd: str | None = None,
+    session_id: str | None = None,
 ) -> tuple[str | None, str | None]:
     """
     Resolve the absolute working directory for repository execution.
@@ -820,6 +890,11 @@ def resolve_repo_dir(
       1. Explicit environment variables (LOCAL_REPOS_DIR, REPOS_DIR, WORKSPACE_DIR).
       2. Traversal up from current working directory (checking matching basename, children, and siblings).
       3. Common developer directories (~/Desktop, ~, ~/projects, ~/repos, ~/workspace).
+
+    When ``session_id`` is provided and a session-isolated worktree or
+    session-scoped directory (``.haunter_sessions/<session_id>`` or
+    ``session-<session_id>`` worktree) exists, it is preferred; otherwise
+    falls back safely to the main checkout.
 
     Returns:
       (effective_cwd, None) on success.
@@ -910,6 +985,12 @@ def resolve_repo_dir(
 
     root_real = os.path.realpath(resolved_repo_root)
 
+    if session_id and session_id.strip() and _is_safe_session_component(session_id):
+        session_root = _resolve_session_root(root_real, session_id.strip())
+        if session_root:
+            root_real = session_root
+            resolved_repo_root = session_root
+
     if cwd and cwd.strip():
         stripped_cwd = cwd.strip()
         target_candidate = (
@@ -950,6 +1031,7 @@ async def tool_run_terminal_command(
     cwd: str | None = None,
     repo_owner: str | None = None,
     repo_name: str | None = None,
+    session_id: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -993,8 +1075,12 @@ async def tool_run_terminal_command(
     if not subcommands:
         return "Error: Empty command after parsing."
 
+    effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
-        repo_name=repo_name, repo_owner=repo_owner, cwd=cwd
+        repo_name=repo_name,
+        repo_owner=repo_owner,
+        cwd=cwd,
+        session_id=effective_session_id,
     )
     if err:
         return err
@@ -1004,7 +1090,10 @@ async def tool_run_terminal_command(
     if repo_name and repo_name.strip():
         if cwd and cwd.strip():
             root_dir, _ = resolve_repo_dir(
-                repo_name=repo_name, repo_owner=repo_owner, cwd=None
+                repo_name=repo_name,
+                repo_owner=repo_owner,
+                cwd=None,
+                session_id=effective_session_id,
             )
             repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
         elif resolved_cwd:
@@ -1016,6 +1105,7 @@ async def tool_run_terminal_command(
             target_sync_root,
             _kwargs.get("staged_patches"),
             base_sha=_kwargs.get("base_sha"),
+            session_id=effective_session_id,
         )
 
     all_stdout: list[str] = []
@@ -1150,6 +1240,7 @@ async def tool_run_linter(
     cwd: str | None = None,
     repo_owner: str | None = None,
     repo_name: str | None = None,
+    session_id: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -1174,8 +1265,12 @@ async def tool_run_linter(
     if not paths:
         return "Error: No paths provided to run_linter."
 
+    effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
-        repo_name=repo_name, repo_owner=repo_owner, cwd=cwd
+        repo_name=repo_name,
+        repo_owner=repo_owner,
+        cwd=cwd,
+        session_id=effective_session_id,
     )
     if err:
         return err
@@ -1184,7 +1279,10 @@ async def tool_run_linter(
     repo_boundary_root: str | None = None
     if repo_name and repo_name.strip():
         root_dir, _ = resolve_repo_dir(
-            repo_name=repo_name, repo_owner=repo_owner, cwd=None
+            repo_name=repo_name,
+            repo_owner=repo_owner,
+            cwd=None,
+            session_id=effective_session_id,
         )
         repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
     target_sync_root = repo_boundary_root or effective_cwd
@@ -1193,6 +1291,7 @@ async def tool_run_linter(
             target_sync_root,
             _kwargs.get("staged_patches"),
             base_sha=_kwargs.get("base_sha"),
+            session_id=effective_session_id,
         )
 
     # Sanitize each path — no traversal allowed.
@@ -1268,6 +1367,7 @@ async def tool_run_targeted_tests(
     cwd: str | None = None,
     repo_owner: str | None = None,
     repo_name: str | None = None,
+    session_id: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -1291,8 +1391,12 @@ async def tool_run_targeted_tests(
     if not test_targets:
         return "Error: No test targets provided."
 
+    effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
-        repo_name=repo_name, repo_owner=repo_owner, cwd=cwd
+        repo_name=repo_name,
+        repo_owner=repo_owner,
+        cwd=cwd,
+        session_id=effective_session_id,
     )
     if err:
         return err
@@ -1301,7 +1405,10 @@ async def tool_run_targeted_tests(
     repo_boundary_root: str | None = None
     if repo_name and repo_name.strip():
         root_dir, _ = resolve_repo_dir(
-            repo_name=repo_name, repo_owner=repo_owner, cwd=None
+            repo_name=repo_name,
+            repo_owner=repo_owner,
+            cwd=None,
+            session_id=effective_session_id,
         )
         repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
     target_sync_root = repo_boundary_root or effective_cwd
@@ -1310,6 +1417,7 @@ async def tool_run_targeted_tests(
             target_sync_root,
             _kwargs.get("staged_patches"),
             base_sha=_kwargs.get("base_sha"),
+            session_id=effective_session_id,
         )
 
     # Sanitize target paths.
