@@ -264,20 +264,68 @@ async def tool_git_diff(
                     if p.stdout and p.stdout.strip():
                         diff_parts.append(p.stdout.strip())
 
-                    # Also include untracked newly created files in working-tree diff
+                    # Also include untracked newly created files in working-tree diff.
+                    # Use NUL-delimited porcelain output so filenames with spaces are
+                    # not quoted (e.g. ?? "my file.py") and untracked directories
+                    # are expanded to individual files via --untracked-files=all.
                     real_root = os.path.realpath(repo_root)
-                    status_cmd = ["git", "-C", repo_root, "status", "--porcelain"]
+                    status_cmd = [
+                        "git",
+                        "-C",
+                        repo_root,
+                        "status",
+                        "--porcelain",
+                        "-z",
+                        "--untracked-files=all",
+                    ]
                     sp = subprocess.run(status_cmd, capture_output=True, text=True, timeout=5)
                     if sp.stdout:
-                        for sline in sp.stdout.splitlines():
-                            if sline.startswith("?? "):
-                                untracked_path = sline[3:].strip()
-                                target_file = os.path.normpath(os.path.join(real_root, untracked_path))
+                        for entry in sp.stdout.split("\0"):
+                            entry = entry.strip()
+                            if not entry:
+                                continue
+                            if not entry.startswith("?? "):
+                                continue
+                            untracked_path = entry[3:].strip()
+                            if not untracked_path:
+                                continue
+                            # Defensive: strip surrounding quotes if a non -z
+                            # consumer or older git still quotes spaces.
+                            if (
+                                len(untracked_path) >= 2
+                                and untracked_path.startswith('"')
+                                and untracked_path.endswith('"')
+                            ):
+                                untracked_path = untracked_path[1:-1]
+                            untracked_path = os.path.normpath(untracked_path)
+                            candidate_paths: list[str] = []
+                            abs_candidate = os.path.normpath(
+                                os.path.join(real_root, untracked_path)
+                            )
+                            if os.path.isdir(abs_candidate) and not os.path.islink(
+                                abs_candidate
+                            ):
+                                for dir_root, _, files in os.walk(abs_candidate):
+                                    for fname in files:
+                                        full = os.path.join(dir_root, fname)
+                                        candidate_paths.append(
+                                            os.path.relpath(full, real_root)
+                                        )
+                            else:
+                                candidate_paths.append(untracked_path)
+                            for cand_rel in candidate_paths:
+                                target_file = os.path.normpath(
+                                    os.path.join(real_root, cand_rel)
+                                )
                                 real_untracked = os.path.realpath(target_file)
-                                real_parent = os.path.realpath(os.path.dirname(target_file))
+                                real_parent = os.path.realpath(
+                                    os.path.dirname(target_file)
+                                )
                                 if (
-                                    os.path.commonpath([real_root, real_parent]) == real_root
-                                    and os.path.commonpath([real_root, real_untracked]) == real_root
+                                    os.path.commonpath([real_root, real_parent])
+                                    == real_root
+                                    and os.path.commonpath([real_root, real_untracked])
+                                    == real_root
                                     and os.path.isfile(real_untracked)
                                     and not os.path.islink(target_file)
                                 ):
@@ -285,8 +333,9 @@ async def tool_git_diff(
                                         with open(real_untracked, "r", encoding="utf-8", errors="replace") as uf:
                                             u_content = uf.read()
                                         num_lines = len(u_content.splitlines()) or 1
+                                        display_path = cand_rel.replace("\\", "/")
                                         diff_parts.append(
-                                            f"--- /dev/null\n+++ b/{untracked_path}\n@@ -0,0 +1,{num_lines} @@\n"
+                                            f"--- /dev/null\n+++ b/{display_path}\n@@ -0,0 +1,{num_lines} @@\n"
                                             + "".join(f"+{line}\n" for line in u_content.splitlines())
                                         )
                                     except Exception:

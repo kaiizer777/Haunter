@@ -1581,6 +1581,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 staged_patches=staged_patches,
+                base_sha=base_sha,
             )
         elif tool_name == "run_linter":
             return await self._tool_run_linter(
@@ -1589,6 +1590,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 staged_patches=staged_patches,
+                base_sha=base_sha,
             )
         elif tool_name == "run_targeted_tests":
             return await self._tool_run_targeted_tests(
@@ -1597,6 +1599,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 staged_patches=staged_patches,
+                base_sha=base_sha,
             )
         elif tool_name == "verify_in_ci_sandbox":
             if session is None:
@@ -1859,7 +1862,7 @@ class SessionOrchestrator:
 
         if path in staged_patches:
             staged_diff = staged_patches[path]
-            del staged_patches[path]
+            is_creation = staged_diff.startswith("--- /dev/null")
             if repo_name:
                 try:
                     import subprocess
@@ -1874,23 +1877,33 @@ class SessionOrchestrator:
                             os.path.commonpath([real_root, real_parent]) == real_root
                             and os.path.commonpath([real_root, real_target]) == real_root
                         ):
+                            if is_creation:
+                                try:
+                                    if os.path.isfile(real_target) and not os.path.islink(
+                                        target_file
+                                    ):
+                                        os.remove(real_target)
+                                except Exception as e:
+                                    logger.debug("Failed removing created file %r: %s", path, e)
+                                    return f"Error: failed to discard patch for {path!r}."
+                                del staged_patches[path]
+                                return f"Patch for {path!r} discarded."
                             res = subprocess.run(
                                 ["git", "checkout", "HEAD", "--", path],
                                 cwd=real_root,
                                 capture_output=True,
                                 timeout=10,
                             )
-                            # If git checkout failed (e.g. untracked created file), remove it from working tree
-                            # only if the staged patch was creating a file from /dev/null
-                            if (
-                                res.returncode != 0
-                                and os.path.isfile(real_target)
-                                and not os.path.islink(target_file)
-                                and staged_diff.startswith("--- /dev/null")
-                            ):
-                                os.remove(real_target)
+                            if res.returncode != 0:
+                                return f"Error: failed to discard patch for {path!r} (git checkout failed)."
+                            del staged_patches[path]
+                            return f"Patch for {path!r} discarded."
                 except Exception as e:
                     logger.debug("Failed reverting file in local repo: %s", e)
+                    if is_creation:
+                        return f"Error: failed to discard patch for {path!r}."
+                    return f"Error: failed to discard patch for {path!r}."
+            del staged_patches[path]
             return f"Patch for {path!r} discarded."
         return f"No staged patch found for {path!r}."
 
@@ -2267,6 +2280,7 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
         staged_patches: dict[str, str] | None = None,
+        base_sha: str | None = None,
     ) -> str:
         """Execute a terminal command with session context, SSE streaming, and repository routing."""
         command: str = str(args.get("command", ""))
@@ -2285,6 +2299,7 @@ class SessionOrchestrator:
             repo_owner=repo_owner,
             repo_name=repo_name,
             staged_patches=staged_patches,
+            base_sha=base_sha,
         )
         # Populate exit_code on args for frontend chip counters.
         first_line = result.splitlines()[0] if result else ""
@@ -2301,6 +2316,7 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
         staged_patches: dict[str, str] | None = None,
+        base_sha: str | None = None,
     ) -> str:
         """Run code linting with session context, SSE streaming, and repository routing."""
         raw_paths = args.get("paths", [])
@@ -2324,6 +2340,7 @@ class SessionOrchestrator:
             repo_owner=repo_owner,
             repo_name=repo_name,
             staged_patches=staged_patches,
+            base_sha=base_sha,
         )
         # Populate file_count for frontend chip.
         args["file_count"] = len(paths)
@@ -2336,6 +2353,7 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
         staged_patches: dict[str, str] | None = None,
+        base_sha: str | None = None,
     ) -> str:
         """Execute targeted test runners with session context, SSE streaming, and repository routing."""
         raw_targets = args.get("test_targets", [])
@@ -2357,6 +2375,7 @@ class SessionOrchestrator:
             repo_owner=repo_owner,
             repo_name=repo_name,
             staged_patches=staged_patches,
+            base_sha=base_sha,
         )
         # Populate target_count for frontend chip.
         args["target_count"] = len(test_targets)

@@ -587,6 +587,7 @@ def parse_command_chain(command: str) -> list[tuple[list[str], str]]:
 def sync_staged_patches_to_repo(
     repo_root: str,
     staged_patches: dict[str, str] | None,
+    base_sha: str | None = None,
 ) -> None:
     """
     Ensure all patches currently staged in memory/DB are synced to the local repository checkout.
@@ -632,6 +633,13 @@ def sync_staged_patches_to_repo(
                     with open(real_target, "r", encoding="utf-8", errors="replace") as f:
                         disk_content = f.read()
                     expected_content = apply_unified_diff("", diff)
+                    if (
+                        diff.endswith("\n")
+                        and "\\ No newline at end of file" not in diff
+                        and expected_content
+                        and not expected_content.endswith("\n")
+                    ):
+                        expected_content += "\n"
                     if disk_content == expected_content:
                         continue  # already synchronized, avoid rewriting
                     # File exists on disk but was modified (e.g. via terminal command).
@@ -650,6 +658,13 @@ def sync_staged_patches_to_repo(
                     continue
 
                 expected_content = apply_unified_diff("", diff)
+                if (
+                    diff.endswith("\n")
+                    and "\\ No newline at end of file" not in diff
+                    and expected_content
+                    and not expected_content.endswith("\n")
+                ):
+                    expected_content += "\n"
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 with open(target_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(expected_content)
@@ -657,18 +672,30 @@ def sync_staged_patches_to_repo(
                 continue
 
             # If it's a modify patch:
-            # Reconstruct target content from clean git base if available
+            # Reconstruct target content from clean git base bound to the session's
+            # base_sha when available; only fall back to local HEAD when no base_sha
+            # is provided (local HEAD can differ from the session base commit).
             clean_base: str | None = None
             git_path = rel_path.replace("\\", "/")
             try:
-                res = subprocess.run(
-                    ["git", "-C", repo_root, "show", f"HEAD:{git_path}"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if res.returncode == 0:
-                    clean_base = res.stdout
+                if base_sha and base_sha.strip():
+                    res = subprocess.run(
+                        ["git", "-C", repo_root, "show", f"{base_sha.strip()}:{git_path}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if res.returncode == 0:
+                        clean_base = res.stdout
+                else:
+                    res = subprocess.run(
+                        ["git", "-C", repo_root, "show", f"HEAD:{git_path}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if res.returncode == 0:
+                        clean_base = res.stdout
             except Exception:
                 clean_base = None
 
@@ -1005,7 +1032,11 @@ async def tool_run_terminal_command(
 
     target_sync_root = repo_boundary_root or resolved_cwd
     if target_sync_root and _kwargs.get("staged_patches"):
-        sync_staged_patches_to_repo(target_sync_root, _kwargs.get("staged_patches"))
+        sync_staged_patches_to_repo(
+            target_sync_root,
+            _kwargs.get("staged_patches"),
+            base_sha=_kwargs.get("base_sha"),
+        )
 
     all_stdout: list[str] = []
     all_stderr: list[str] = []
@@ -1178,7 +1209,11 @@ async def tool_run_linter(
         repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
     target_sync_root = repo_boundary_root or effective_cwd
     if target_sync_root and _kwargs.get("staged_patches"):
-        sync_staged_patches_to_repo(target_sync_root, _kwargs.get("staged_patches"))
+        sync_staged_patches_to_repo(
+            target_sync_root,
+            _kwargs.get("staged_patches"),
+            base_sha=_kwargs.get("base_sha"),
+        )
 
     # Sanitize each path — no traversal allowed.
     cleaned: list[str] = []
@@ -1291,7 +1326,11 @@ async def tool_run_targeted_tests(
         repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
     target_sync_root = repo_boundary_root or effective_cwd
     if target_sync_root and _kwargs.get("staged_patches"):
-        sync_staged_patches_to_repo(target_sync_root, _kwargs.get("staged_patches"))
+        sync_staged_patches_to_repo(
+            target_sync_root,
+            _kwargs.get("staged_patches"),
+            base_sha=_kwargs.get("base_sha"),
+        )
 
     # Sanitize target paths.
     cleaned: list[str] = []

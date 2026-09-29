@@ -161,9 +161,39 @@ async def _get_clean_base(
     gh_token: str | None,
 ) -> str | None:
     """
-    Retrieve the unmodified original clean base content for path from git HEAD
-    or the remote repository at base_sha.
+    Retrieve the unmodified original clean base content for path bound to the
+    session's base_sha (never local HEAD unless base_sha is unavailable).
     """
+    if repo_name and repo_name.strip() and base_sha and base_sha.strip():
+        try:
+            from app.services.session_tools.sandbox import resolve_repo_dir
+
+            repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+            if repo_root and os.path.isdir(repo_root):
+                git_path = path.replace("\\", "/")
+                res = subprocess.run(
+                    ["git", "-C", repo_root, "show", f"{base_sha.strip()}:{git_path}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if res.returncode == 0:
+                    return res.stdout
+        except Exception:
+            pass
+
+        try:
+            return await fetch_file_content(
+                owner=repo_owner,
+                repo=repo_name,
+                path=path,
+                sha=base_sha,
+                token=gh_token,
+            )
+        except Exception:
+            pass
+        return None
+
     if repo_name and repo_name.strip():
         try:
             from app.services.session_tools.sandbox import resolve_repo_dir
@@ -226,10 +256,13 @@ async def _resolve_current_content(
            and update staged_patches[path] with diff from /dev/null to disk content.
          - Otherwise reconstruct from patch.
       3. If path is in staged_patches and modified:
-         - Compute expected patched content from clean_base + staged_patches[path].
-         - If local disk exists and equals expected, return local disk content.
-         - If local disk exists but differs, return expected (preserving staged patch).
-         - If local disk doesn't exist, return expected.
+         - Compute expected patched content from clean_base (bound to base_sha) +
+           staged_patches[path].
+         - If local disk equals expected, return local disk content.
+         - If local disk differs from both clean_base and expected, the file was
+           modified via terminal command: prioritize disk as ground truth, refresh
+           staged_patches[path] from clean_base to disk content, and return disk.
+         - Otherwise return expected (preserving staged patch).
       4. If path is not in staged_patches:
          - Return local disk content if present.
          - Otherwise fetch from GitHub at base_sha.
@@ -285,27 +318,23 @@ async def _resolve_current_content(
 
         from app.sandbox.mirror import apply_unified_diff
 
-        expected: str | None = None
         if clean_base is not None:
             expected = apply_unified_diff(clean_base, diff)
-        elif local_base is not None:
-            try:
-                inverted = _invert_unified_diff(diff)
-                candidate_base = apply_unified_diff(local_base, inverted)
-                if candidate_base != local_base:
-                    expected = local_base
-                else:
-                    expected = apply_unified_diff(local_base, diff)
-            except Exception:
-                expected = apply_unified_diff(local_base, diff)
-
-        if expected is not None:
-            if local_base is not None and local_base == expected:
-                return local_base
+            if local_base is not None:
+                if local_base == expected:
+                    return local_base
+                if local_base != clean_base and local_base != expected:
+                    staged_patches[path] = _make_unified_diff(clean_base, local_base, path)
+                    return local_base
             return expected
 
         if local_base is not None:
-            return local_base
+            # No deterministic clean base available: apply the staged diff directly
+            # to disk content without inverse-diff provenance guessing.
+            try:
+                return apply_unified_diff(local_base, diff)
+            except Exception:
+                return local_base
         return None
 
     if local_base is not None:
@@ -414,16 +443,11 @@ async def tool_str_replace(
             gh_token=gh_token,
         )
         if clean_base is None:
-            if path not in staged_patches:
-                clean_base = content
-            else:
-                try:
-                    from app.sandbox.mirror import apply_unified_diff
-
-                    inverted = _invert_unified_diff(staged_patches[path])
-                    clean_base = apply_unified_diff(content, inverted)
-                except Exception:
-                    clean_base = content
+            # Deterministic provenance only: when no clean base is available from
+            # git at base_sha or GitHub, use the resolved current content as the
+            # diff base. Never guess provenance via inverse-diff application,
+            # which can fuzzy-match stale hunks and hallucinate patch history.
+            clean_base = content
 
         diff = _make_unified_diff(clean_base, new_content, path)
 
@@ -774,18 +798,10 @@ async def tool_apply_multi_patch(
         else:  # modify
             clean_base = clean_bases.get(path)
             if clean_base is None:
-                if path in staged_patches:
-                    try:
-                        from app.sandbox.mirror import apply_unified_diff
-
-                        inverted = _invert_unified_diff(staged_patches[path])
-                        clean_base = apply_unified_diff(
-                            initial_contents.get(path, ""), inverted
-                        )
-                    except Exception:
-                        clean_base = initial_contents.get(path) or ""
-                else:
-                    clean_base = initial_contents.get(path) or ""
+                # Deterministic provenance only: never infer the base via
+                # inverse-diff application (fuzzy matches hallucinate history).
+                # Fall back to the resolved working content as the diff base.
+                clean_base = initial_contents.get(path) or ""
             diff = _make_unified_diff(clean_base, final_content, path)
             final_action = "modify"
 
