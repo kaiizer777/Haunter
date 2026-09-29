@@ -1017,4 +1017,61 @@ def test_sync_staged_patches_to_repo_idempotent(tmp_path: Path) -> None:
     assert new_file.read_text(encoding="utf-8").splitlines() == ["first", "second"]
 
 
+def test_sync_staged_patches_to_repo_git_repo_multi_edit(tmp_path: Path) -> None:
+    """Verifies sync_staged_patches_to_repo on a git repo with a cumulative multi-edit patch preserves all edits."""
+    import subprocess
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+    from app.services.session_tools.editor import _make_unified_diff
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(repo_dir), check=True, capture_output=True)
+
+    base_content = "def step1():\n    return 1\n\ndef step2():\n    return 2\n"
+    target_file = repo_dir / "pipeline.py"
+    target_file.write_text(base_content, encoding="utf-8")
+
+    subprocess.run(["git", "add", "pipeline.py"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+
+    # Multi-edit content where both step1 and step2 are modified
+    final_content = "def step1():\n    return 100\n\ndef step2():\n    return 200\n"
+    diff = _make_unified_diff(base_content, final_content, "pipeline.py")
+
+    staged = {"pipeline.py": diff}
+    sync_staged_patches_to_repo(str(repo_dir), staged)
+
+    disk_content = target_file.read_text(encoding="utf-8")
+    assert disk_content == final_content
+    assert "return 100" in disk_content
+    assert "return 200" in disk_content
+    assert "return 1\n" not in disk_content
+    assert "return 2\n" not in disk_content
+
+
+def test_sync_staged_patches_to_repo_created_file_terminal_modification(tmp_path: Path) -> None:
+    """If a created file on disk was modified by terminal command, sync_staged_patches_to_repo does not overwrite it."""
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    staged = {
+        "created.txt": "--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+initial creation\n"
+    }
+    sync_staged_patches_to_repo(str(repo_dir), staged)
+    created_file = repo_dir / "created.txt"
+    assert created_file.read_text(encoding="utf-8") == "initial creation\n"
+
+    # Terminal command edits file
+    created_file.write_text("initial creation\nappended line\n", encoding="utf-8")
+
+    # Run sync again
+    sync_staged_patches_to_repo(str(repo_dir), staged)
+    assert created_file.read_text(encoding="utf-8") == "initial creation\nappended line\n"
+    assert "appended line" in staged["created.txt"]
+
+
 

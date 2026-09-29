@@ -17,6 +17,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -623,6 +624,146 @@ async def test_resolve_current_content_created_staged_preserves_content() -> Non
     assert content is not None
     assert "print('hello')" in content
     assert "print('world')" in content
+
+
+@pytest.mark.asyncio
+async def test_sequential_str_replace_preserves_earlier_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    2+ sequential tool_str_replace calls on the same file verify that staged_patches[path]
+    encodes both changes as a cumulative diff and syncing to disk preserves both changes.
+    """
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    original = "def foo():\n    return 1\n\ndef bar():\n    pass\n"
+    test_file = repo_dir / "main.py"
+    test_file.write_text(original, encoding="utf-8")
+
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+
+    with _gh_patch(original):
+        # Edit 1: return 1 -> return 42
+        res1 = await tool_str_replace(
+            path="main.py",
+            old_str="return 1",
+            new_str="return 42",
+            repo_owner="owner",
+            repo_name="repo",
+            base_sha="sha123",
+            staged_patches=staged,
+            queue=queue,
+        )
+        assert "Successfully replaced" in res1
+
+        # Edit 2: pass -> return 'bar'
+        res2 = await tool_str_replace(
+            path="main.py",
+            old_str="pass",
+            new_str="return 'bar'",
+            repo_owner="owner",
+            repo_name="repo",
+            base_sha="sha123",
+            staged_patches=staged,
+            queue=queue,
+        )
+        assert "Successfully replaced" in res2
+
+    diff = staged["main.py"]
+    # Cumulative diff must encode both edits
+    assert "-    return 1" in diff
+    assert "+    return 42" in diff
+    assert "-    pass" in diff
+    assert "+    return 'bar'" in diff
+
+    # Working tree on disk has both changes
+    disk_content = test_file.read_text(encoding="utf-8")
+    assert "return 42" in disk_content
+    assert "return 'bar'" in disk_content
+    assert "return 1" not in disk_content
+    assert "pass" not in disk_content
+
+    # Sync to repo preserves both changes without erasing earlier edits
+    sync_staged_patches_to_repo(str(repo_dir), staged)
+    post_sync = test_file.read_text(encoding="utf-8")
+    assert post_sync == disk_content
+
+
+def test_is_diff_applied_no_false_positive_with_repeated_lines() -> None:
+    """
+    Files with repeated lines (e.g. multiple pass statements) must never falsely mark
+    an unapplied diff as applied.
+    """
+    from app.services.session_tools.editor import _is_diff_applied
+
+    base = "def a():\n    pass\n\ndef b():\n    pass\n\ndef c():\n    pass\n"
+    diff_add_pass = (
+        "--- a/sample.py\n"
+        "+++ b/sample.py\n"
+        "@@ -6,3 +6,6 @@\n"
+        " def c():\n"
+        "     pass\n"
+        "+\n"
+        "+def d():\n"
+        "+    pass\n"
+    )
+
+    # In base content, 'pass' is already present, but def d() does NOT exist
+    assert _is_diff_applied(base, diff_add_pass) is False
+    assert _is_diff_applied(base, diff_add_pass, base_content=base) is False
+
+    # When diff is actually applied:
+    applied_content = base + "\ndef d():\n    pass\n"
+    assert _is_diff_applied(applied_content, diff_add_pass) is True
+    assert _is_diff_applied(applied_content, diff_add_pass, base_content=base) is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_current_content_created_file_reflects_terminal_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    When a staged created file is subsequently edited via terminal on disk,
+    _resolve_current_content reflects the terminal modifications and updates staged_patches.
+    """
+    from app.services.session_tools.editor import _resolve_current_content
+
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    created_file = repo_dir / "service.py"
+    initial_content = "def start():\n    pass\n"
+    created_file.write_text(initial_content, encoding="utf-8")
+
+    staged = {
+        "service.py": "--- /dev/null\n+++ b/service.py\n@@ -0,0 +1,2 @@\n+def start():\n+    pass\n"
+    }
+
+    # Simulate terminal command modifying the created file
+    terminal_edited = "def start():\n    pass\n\ndef stop():\n    pass\n"
+    created_file.write_text(terminal_edited, encoding="utf-8")
+
+    content = await _resolve_current_content(
+        path="service.py",
+        staged_patches=staged,
+        repo_owner="owner",
+        repo_name="repo",
+        base_sha="any",
+        gh_token=None,
+    )
+
+    assert content == terminal_edited
+    assert "def stop():" in staged["service.py"]
 
 
 

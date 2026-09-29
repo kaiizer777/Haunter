@@ -628,11 +628,28 @@ def sync_staged_patches_to_repo(
 
             # If it's a file creation patch
             if "--- /dev/null" in diff:
-                expected_content = apply_unified_diff("", diff)
                 if os.path.isfile(real_target):
                     with open(real_target, "r", encoding="utf-8", errors="replace") as f:
-                        if f.read() == expected_content:
-                            continue  # already synchronized, avoid rewriting
+                        disk_content = f.read()
+                    expected_content = apply_unified_diff("", diff)
+                    if disk_content == expected_content:
+                        continue  # already synchronized, avoid rewriting
+                    # File exists on disk but was modified (e.g. via terminal command).
+                    # Prioritize disk content and update staged patch from /dev/null to disk content.
+                    import difflib
+
+                    new_diff = "".join(
+                        difflib.unified_diff(
+                            [],
+                            disk_content.splitlines(keepends=True),
+                            fromfile="/dev/null",
+                            tofile=f"b/{rel_path}",
+                        )
+                    )
+                    staged_patches[rel_path] = new_diff
+                    continue
+
+                expected_content = apply_unified_diff("", diff)
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 with open(target_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(expected_content)
