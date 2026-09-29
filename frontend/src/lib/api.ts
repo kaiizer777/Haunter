@@ -1,7 +1,7 @@
 export const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "").trim() as string;
 if (!API_BASE) {
   throw new Error(
-    "NEXT_PUBLIC_API_URL is not set — set it in Cloudflare Pages → Settings → Environment variables to the Lambda function URL (no trailing space)."
+    "NEXT_PUBLIC_API_URL is not set — set NEXT_PUBLIC_API_URL in frontend/.env.production and re-run `npm run build` to bake it into the static bundle (no trailing space)."
   );
 }
 
