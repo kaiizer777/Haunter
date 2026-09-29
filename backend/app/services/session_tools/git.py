@@ -265,16 +265,24 @@ async def tool_git_diff(
                         diff_parts.append(p.stdout.strip())
 
                     # Also include untracked newly created files in working-tree diff
+                    real_root = os.path.realpath(repo_root)
                     status_cmd = ["git", "-C", repo_root, "status", "--porcelain"]
                     sp = subprocess.run(status_cmd, capture_output=True, text=True, timeout=5)
                     if sp.stdout:
                         for sline in sp.stdout.splitlines():
                             if sline.startswith("?? "):
                                 untracked_path = sline[3:].strip()
-                                full_untracked = os.path.join(repo_root, untracked_path)
-                                if os.path.isfile(full_untracked):
+                                target_file = os.path.normpath(os.path.join(real_root, untracked_path))
+                                real_untracked = os.path.realpath(target_file)
+                                real_parent = os.path.realpath(os.path.dirname(target_file))
+                                if (
+                                    os.path.commonpath([real_root, real_parent]) == real_root
+                                    and os.path.commonpath([real_root, real_untracked]) == real_root
+                                    and os.path.isfile(real_untracked)
+                                    and not os.path.islink(target_file)
+                                ):
                                     try:
-                                        with open(full_untracked, "r", encoding="utf-8", errors="replace") as uf:
+                                        with open(real_untracked, "r", encoding="utf-8", errors="replace") as uf:
                                             u_content = uf.read()
                                         num_lines = len(u_content.splitlines()) or 1
                                         diff_parts.append(

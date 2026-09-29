@@ -27,7 +27,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -1767,6 +1766,8 @@ class SessionOrchestrator:
             if staged_patches and path in staged_patches:
                 from app.sandbox.mirror import apply_unified_diff
                 diff = staged_patches[path]
+                if content is None and "--- /dev/null" not in diff:
+                    return f"Error reading file: base content for {path!r} is unavailable."
                 content = apply_unified_diff(content or "", diff)
 
         if content is None:
@@ -1857,6 +1858,7 @@ class SessionOrchestrator:
             return f"Error: {exc}"
 
         if path in staged_patches:
+            staged_diff = staged_patches[path]
             del staged_patches[path]
             if repo_name:
                 try:
@@ -1867,7 +1869,11 @@ class SessionOrchestrator:
                         real_root = os.path.realpath(repo_root)
                         target_file = os.path.normpath(os.path.join(real_root, path))
                         real_target = os.path.realpath(target_file)
-                        if os.path.commonpath([real_root, real_target]) == real_root:
+                        real_parent = os.path.realpath(os.path.dirname(target_file))
+                        if (
+                            os.path.commonpath([real_root, real_parent]) == real_root
+                            and os.path.commonpath([real_root, real_target]) == real_root
+                        ):
                             res = subprocess.run(
                                 ["git", "checkout", "HEAD", "--", path],
                                 cwd=real_root,
@@ -1875,7 +1881,13 @@ class SessionOrchestrator:
                                 timeout=10,
                             )
                             # If git checkout failed (e.g. untracked created file), remove it from working tree
-                            if res.returncode != 0 and os.path.isfile(real_target):
+                            # only if the staged patch was creating a file from /dev/null
+                            if (
+                                res.returncode != 0
+                                and os.path.isfile(real_target)
+                                and not os.path.islink(target_file)
+                                and staged_diff.startswith("--- /dev/null")
+                            ):
                                 os.remove(real_target)
                 except Exception as e:
                     logger.debug("Failed reverting file in local repo: %s", e)

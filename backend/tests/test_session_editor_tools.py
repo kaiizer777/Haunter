@@ -572,3 +572,57 @@ async def test_resolve_current_content_deleted_staged() -> None:
     assert content is None
 
 
+@pytest.mark.asyncio
+async def test_resolve_current_content_unsynced_disk_preserves_staged_patch(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When disk file is stale (sync failed or missed), _resolve_current_content still returns staged content."""
+    from app.services.session_tools.editor import _resolve_current_content
+
+    owner_dir = tmp_path / "test"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "LocalRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    test_file = repo_dir / "mod.py"
+    # Unpatched content on disk
+    test_file.write_text("x = 1\ny = 2\n", encoding="utf-8")
+
+    staged = {
+        "mod.py": "--- a/mod.py\n+++ b/mod.py\n@@ -1,2 +1,2 @@\n-x = 1\n+x = 99\n y = 2\n"
+    }
+
+    content = await _resolve_current_content(
+        path="mod.py",
+        staged_patches=staged,
+        repo_owner="test",
+        repo_name="LocalRepo",
+        base_sha="any",
+        gh_token=None,
+    )
+    assert content is not None
+    assert "x = 99" in content
+    assert "x = 1" not in content
+
+
+@pytest.mark.asyncio
+async def test_resolve_current_content_created_staged_preserves_content() -> None:
+    """A created file staged with /dev/null returns its content even without local disk file."""
+    from app.services.session_tools.editor import _resolve_current_content
+
+    staged = {
+        "new_file.py": "--- /dev/null\n+++ b/new_file.py\n@@ -0,0 +1,2 @@\n+print('hello')\n+print('world')\n"
+    }
+    content = await _resolve_current_content(
+        path="new_file.py",
+        staged_patches=staged,
+        repo_owner="test",
+        repo_name="LocalRepo",
+        base_sha="any",
+        gh_token=None,
+    )
+    assert content is not None
+    assert "print('hello')" in content
+    assert "print('world')" in content
+
+
+

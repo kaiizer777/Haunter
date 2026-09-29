@@ -975,3 +975,46 @@ def test_prepare_cmd_argv_windows_echo_and_cat(monkeypatch: pytest.MonkeyPatch) 
     assert argv_cat[-1] == "README.md"
 
 
+def test_windows_cat_fallback_fails_on_missing_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows cat fallback exits with non-zero code on missing or unreadable files."""
+    import subprocess
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    argv_cat = _prepare_cmd_argv(["cat", "definitely_nonexistent_file_xyz_987.txt"])
+    proc = subprocess.run(argv_cat, capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "cat:" in proc.stderr
+
+
+def test_sync_staged_patches_to_repo_idempotent(tmp_path: Path) -> None:
+    """sync_staged_patches_to_repo applies patches idempotently without line duplication."""
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    test_file = repo_dir / "test.py"
+    test_file.write_text("line1\nline2\n", encoding="utf-8")
+
+    # Pure addition / modification diff
+    staged = {
+        "test.py": "--- a/test.py\n+++ b/test.py\n@@ -1,2 +1,3 @@\n line1\n+line1.5\n line2\n",
+        "new.py": "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,2 @@\n+first\n+second\n",
+    }
+
+    # Call sync 3 times in a row
+    for _ in range(3):
+        sync_staged_patches_to_repo(str(repo_dir), staged)
+
+    # Content must NOT be duplicated
+    test_lines = test_file.read_text(encoding="utf-8").splitlines()
+    assert test_lines == ["line1", "line1.5", "line2"]
+
+    new_file = repo_dir / "new.py"
+    assert new_file.is_file()
+    assert new_file.read_text(encoding="utf-8").splitlines() == ["first", "second"]
+
+
+

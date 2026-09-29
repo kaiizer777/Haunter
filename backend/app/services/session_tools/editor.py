@@ -60,8 +60,11 @@ def _sync_to_local_disk(
         if os.path.commonpath([real_root, real_parent]) != real_root:
             logger.warning("editor: rejected path outside repository root: %r", path)
             return
-        if os.path.exists(target_file) and os.path.commonpath([real_root, real_target]) != real_root:
+        if os.path.commonpath([real_root, real_target]) != real_root:
             logger.warning("editor: rejected symlink target outside repository root: %r", path)
+            return
+        if os.path.islink(target_file):
+            logger.warning("editor: rejected write to symlink: %r", path)
             return
 
         if action == "delete":
@@ -75,6 +78,43 @@ def _sync_to_local_disk(
             logger.info("editor: synced updated content to local file %r", target_file)
     except Exception as exc:
         logger.warning("editor: failed to sync %r to disk: %s", path, exc)
+
+
+def _is_diff_applied(content: str, diff_text: str) -> bool:
+    """
+    Check if a unified diff appears to be already applied to content.
+    Returns True if:
+      - All added lines ('+') are present in content
+      - All removed lines ('-') are absent from content
+    """
+    if not diff_text or not diff_text.strip():
+        return True
+
+    lines = diff_text.splitlines()
+    added_lines: list[str] = []
+    removed_lines: list[str] = []
+
+    for line in lines:
+        if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+            continue
+        if line.startswith("+"):
+            val = line[1:].strip()
+            if val:
+                added_lines.append(val)
+        elif line.startswith("-"):
+            val = line[1:].strip()
+            if val:
+                removed_lines.append(val)
+
+    for rem in removed_lines:
+        if rem in content:
+            return False
+
+    for add in added_lines:
+        if add not in content:
+            return False
+
+    return bool(added_lines or removed_lines)
 
 
 def _apply_staged_diff(base_content: str, diff_text: str) -> str:
@@ -101,9 +141,10 @@ async def _resolve_current_content(
 
     Priority:
       1. If path is deleted in staged_patches — return None.
-      2. If path is in staged_patches and local checkout is synchronized — return local content.
-      3. If path is in staged_patches but not local — apply unified diff on GitHub base.
-      4. Otherwise return local disk content or fetch from GitHub at base_sha.
+      2. If path is newly created in staged_patches — reconstruct from patch.
+      3. If path is in staged_patches and local checkout is synchronized — return local content.
+      4. If path is in staged_patches but unsynchronized — apply unified diff on local_base or GitHub base.
+      5. Otherwise return local disk content or fetch from GitHub at base_sha.
 
     Returns None if the file does not exist at base and is not staged.
     """
@@ -116,7 +157,13 @@ async def _resolve_current_content(
                 real_root = os.path.realpath(repo_root)
                 local_path = os.path.normpath(os.path.join(real_root, path))
                 real_target = os.path.realpath(local_path)
-                if os.path.commonpath([real_root, real_target]) == real_root and os.path.isfile(real_target):
+                real_parent = os.path.realpath(os.path.dirname(local_path))
+                if (
+                    os.path.commonpath([real_root, real_parent]) == real_root
+                    and os.path.commonpath([real_root, real_target]) == real_root
+                    and os.path.isfile(real_target)
+                    and not os.path.islink(local_path)
+                ):
                     with open(real_target, "r", encoding="utf-8", errors="replace") as f:
                         local_base = f.read()
         except Exception:
@@ -126,9 +173,18 @@ async def _resolve_current_content(
         diff = staged_patches[path]
         if "+++ /dev/null" in diff:
             return None
-        # When local checkout content is already synchronized, return it directly
+        if "--- /dev/null" in diff:
+            from app.sandbox.mirror import apply_unified_diff
+            return apply_unified_diff("", diff)
+
+        # When local checkout content is already synchronized, return it directly.
+        # Otherwise, overlay the staged diff on top of local_base.
         if local_base is not None:
-            return local_base
+            if _is_diff_applied(local_base, diff):
+                return local_base
+            from app.sandbox.mirror import apply_unified_diff
+            return apply_unified_diff(local_base, diff)
+
         # Otherwise fetch base from GitHub to apply the patch on top of it.
         try:
             base = await fetch_file_content(
@@ -140,9 +196,10 @@ async def _resolve_current_content(
             )
         except GitHubClientError:
             base = None
-        base_str = base or ""
+        if base is None:
+            return None
         from app.sandbox.mirror import apply_unified_diff
-        return apply_unified_diff(base_str, diff)
+        return apply_unified_diff(base, diff)
 
     if local_base is not None:
         return local_base

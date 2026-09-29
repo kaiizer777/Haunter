@@ -584,16 +584,16 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
             queue=mock_queue,
         )
         assert res == "Error: Invalid range"
- 
- 
+
+
 @pytest.mark.asyncio
 async def test_tool_git_diff_working_tree_and_staged() -> None:
     from app.services.session_tools.git import tool_git_diff
- 
+
     staged = {
         "app/test.py": "--- a/app/test.py\n+++ b/app/test.py\n@@ -1 +1 @@\n-old\n+new\n"
     }
- 
+
     # Test querying working / uncommitted
     diff_worktree = await tool_git_diff(
         base="HEAD",
@@ -605,7 +605,7 @@ async def test_tool_git_diff_working_tree_and_staged() -> None:
     )
     assert "app/test.py" in diff_worktree
     assert "+new" in diff_worktree
- 
+
     # Test base == head with staged patches notifies user
     diff_same = await tool_git_diff(
         base="main",
@@ -638,5 +638,35 @@ async def test_tool_git_diff_working_tree_and_staged() -> None:
         staged_patches={},
     )
     assert diff_empty_staged == "No staged patches currently in session."
+
+
+@pytest.mark.asyncio
+async def test_tool_git_diff_untracked_symlink_ignored(tmp_path) -> None:
+    """Working tree diff ignores untracked symlinks or paths escaping repo root."""
+    import subprocess
+    from unittest.mock import patch
+    from app.services.session_tools.git import tool_git_diff
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    # Simulate git diff returning empty, but status returning an untracked symlink
+    mock_diff = subprocess.CompletedProcess(args=["git", "diff"], returncode=0, stdout="", stderr="")
+    mock_status = subprocess.CompletedProcess(args=["git", "status"], returncode=0, stdout="?? outside_link\n", stderr="")
+
+    with patch("app.services.session_tools.sandbox.resolve_repo_dir", return_value=(str(repo_dir), None)), \
+         patch("subprocess.run", side_effect=[mock_diff, mock_status]):
+        res = await tool_git_diff(
+            base="HEAD",
+            head="working",
+            owner="org",
+            repo="repo",
+            token="token",
+            staged_patches={},
+        )
+    # The file does not exist or is not valid inside repo, so diff returns no uncommitted differences
+    assert "outside_link" not in res
+    assert "No uncommitted working-tree differences found." in res
+
 
 

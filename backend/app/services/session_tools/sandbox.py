@@ -208,12 +208,16 @@ def _prepare_cmd_argv(argv: list[str], cwd: str | None = None) -> list[str]:
             file_args = [a for a in cmd_argv[1:] if not a.startswith("-")]
             code = (
                 "import sys\n"
+                "err = 0\n"
                 "for p in sys.argv[1:]:\n"
                 "    try:\n"
                 "        with open(p, 'rb') as f:\n"
                 "            sys.stdout.buffer.write(f.read())\n"
                 "    except Exception as e:\n"
                 "        sys.stderr.write(f'cat: {p}: {e}\\n')\n"
+                "        err = 1\n"
+                "if err:\n"
+                "    sys.exit(err)\n"
             )
             return [sys.executable, "-c", code] + file_args
 
@@ -588,7 +592,7 @@ def sync_staged_patches_to_repo(
     Ensure all patches currently staged in memory/DB are synced to the local repository checkout.
     This guarantees that local terminal commands, linters, and test runners execute
     against the actual patched code, eliminating runner/editor checkout mismatches.
-    Protects against symlink escapes and preserves full file content via apply_unified_diff.
+    Protects against symlink escapes, makes application idempotent, and preserves full file content.
     """
     if not staged_patches or not repo_root or not os.path.isdir(repo_root):
         return
@@ -609,8 +613,11 @@ def sync_staged_patches_to_repo(
             if os.path.commonpath([real_root, real_parent]) != real_root:
                 logger.warning("sandbox: rejected path outside repository root: %r", rel_path)
                 continue
-            if os.path.exists(target_path) and os.path.commonpath([real_root, real_target]) != real_root:
+            if os.path.commonpath([real_root, real_target]) != real_root:
                 logger.warning("sandbox: rejected symlink escaping repository root: %r", rel_path)
+                continue
+            if os.path.islink(target_path):
+                logger.warning("sandbox: rejected write to symlink: %r", rel_path)
                 continue
 
             # If it's a file deletion patch
@@ -619,16 +626,62 @@ def sync_staged_patches_to_repo(
                     os.remove(real_target)
                 continue
 
-            base_content = ""
-            if os.path.isfile(real_target):
-                with open(real_target, "r", encoding="utf-8", errors="replace") as f:
-                    base_content = f.read()
+            # If it's a file creation patch
+            if "--- /dev/null" in diff:
+                expected_content = apply_unified_diff("", diff)
+                if os.path.isfile(real_target):
+                    with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                        if f.read() == expected_content:
+                            continue  # already synchronized, avoid rewriting
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with open(target_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(expected_content)
+                logger.info("sandbox: synced staged created file %r to local disk", rel_path)
+                continue
 
-            new_content = apply_unified_diff(base_content, diff)
-            os.makedirs(os.path.dirname(target_path), exist_ok=True)
-            with open(target_path, "w", encoding="utf-8", newline="\n") as f:
-                f.write(new_content)
-            logger.info("sandbox: synced staged patch for %r to local disk", rel_path)
+            # If it's a modify patch:
+            # Reconstruct target content from clean git base if available
+            clean_base: str | None = None
+            git_path = rel_path.replace("\\", "/")
+            try:
+                res = subprocess.run(
+                    ["git", "-C", repo_root, "show", f"HEAD:{git_path}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if res.returncode == 0:
+                    clean_base = res.stdout
+            except Exception:
+                clean_base = None
+
+            if clean_base is not None:
+                new_content = apply_unified_diff(clean_base, diff)
+                if os.path.isfile(real_target):
+                    with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                        if f.read() == new_content:
+                            continue  # already synchronized, avoid duplicate diff application
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with open(target_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(new_content)
+                logger.info("sandbox: synced staged patch for %r from clean base to local disk", rel_path)
+            else:
+                # Fallback when file is not in git HEAD:
+                base_content = ""
+                if os.path.isfile(real_target):
+                    with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                        base_content = f.read()
+
+                # If the diff was already applied to base_content, skip to prevent line duplication
+                from app.services.session_tools.editor import _is_diff_applied
+                if base_content and _is_diff_applied(base_content, diff):
+                    continue
+
+                new_content = apply_unified_diff(base_content, diff)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with open(target_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(new_content)
+                logger.info("sandbox: synced staged patch for %r to local disk", rel_path)
         except Exception as exc:
             logger.warning("sandbox: failed to sync staged patch %r to disk: %s", rel_path, exc)
 
