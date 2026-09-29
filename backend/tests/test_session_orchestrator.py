@@ -738,3 +738,39 @@ async def test_tool_stage_patch_syncs_only_target_path(
     # Target file synced.
     assert (repo_dir / "a.py").read_text(encoding="utf-8") == new_a
 
+
+@pytest.mark.asyncio
+async def test_tool_stage_patch_creation_authority_over_existing_disk_content(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restaging a creation patch when the file already exists on disk writes the
+    staged creation content to disk and preserves staged_patches[path] intact —
+    stale disk content must never overwrite the newly staged diff."""
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    (repo_dir / "newmod.py").write_text("stale = True\n", encoding="utf-8")
+
+    orch = _make_orchestrator_for_subagent_tests()
+    queue = SseQueue(maxsize=16)
+    staged: dict[str, str] = {}
+    creation_diff = (
+        "--- /dev/null\n+++ b/newmod.py\n@@ -0,0 +1,2 @@\n+fresh = 1\n+ready = True\n"
+    )
+
+    result = await orch._tool_stage_patch(
+        args={"path": "newmod.py", "diff": creation_diff, "action": "create"},
+        staged_patches=staged,
+        queue=queue,
+        repo_owner="owner",
+        repo_name="repo",
+        base_sha="deadbeef",
+    )
+
+    assert "Patch staged" in result
+    assert staged["newmod.py"] == creation_diff
+    assert (repo_dir / "newmod.py").read_text(encoding="utf-8") == "fresh = 1\nready = True\n"
+

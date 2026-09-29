@@ -1832,12 +1832,10 @@ class SessionOrchestrator:
                     # Isolate sync to the patch being staged only: syncing the
                     # entire staged_patches dict would rewrite every staged file
                     # from clean_base + diff and erase terminal edits on
-                    # unrelated files. Propagate a disk-refresh back if sync
-                    # updated this patch (created-file terminal-edit case).
-                    sync_dict = {path: diff}
-                    sync_staged_patches_to_repo(repo_root, sync_dict, base_sha=base_sha)
-                    if sync_dict.get(path) != diff:
-                        staged_patches[path] = sync_dict[path]
+                    # unrelated files. The staged patch is authoritative: sync
+                    # writes it to disk as-is and never mutates it with
+                    # pre-existing disk content.
+                    sync_staged_patches_to_repo(repo_root, {path: diff}, base_sha=base_sha)
             except Exception as e:
                 logger.warning("Failed syncing staged patch to disk: %s", e)
 

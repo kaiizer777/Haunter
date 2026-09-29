@@ -656,11 +656,12 @@ async def test_resolve_current_content_no_clean_base_returns_disk_as_is(
 
 
 @pytest.mark.asyncio
-async def test_resolve_current_content_unstaged_prefers_clean_base_over_dirty_tree(
+async def test_resolve_current_content_unstaged_preserves_terminal_edits(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unstaged file resolves to the clean base bound to base_sha even when
-    the shared working tree carries dirty changes from another session/host."""
+    """An unstaged file resolves to its on-disk content even when a clean base
+    is available — terminal and editor share the local checkout, so returning
+    the base revision here would silently discard terminal modifications."""
     from app.services.session_tools.editor import _resolve_current_content
 
     owner_dir = tmp_path / "test"
@@ -669,16 +670,42 @@ async def test_resolve_current_content_unstaged_prefers_clean_base_over_dirty_tr
     repo_dir.mkdir()
     monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
 
-    dirty = "x = 1\ny = 2\n# foreign dirty line\n"
+    terminal_edited = "x = 1\ny = 2\n# terminal edit\n"
     clean = "x = 1\ny = 2\n"
-    (repo_dir / "mod.py").write_text(dirty, encoding="utf-8")
+    (repo_dir / "mod.py").write_text(terminal_edited, encoding="utf-8")
 
-    with _gh_patch(clean):
+    with patch(
+        "app.services.session_tools.editor._get_clean_base",
+        new_callable=AsyncMock,
+        return_value=clean,
+    ):
         content = await _resolve_current_content(
             path="mod.py",
             staged_patches={},
             repo_owner="test",
             repo_name="LocalRepo",
+            base_sha="abc123",
+            gh_token=None,
+        )
+    assert content == terminal_edited
+
+
+@pytest.mark.asyncio
+async def test_resolve_current_content_unstaged_no_disk_falls_back_to_clean_base() -> None:
+    """An unstaged file with no local checkout entry resolves via the clean base."""
+    from app.services.session_tools.editor import _resolve_current_content
+
+    clean = "x = 1\ny = 2\n"
+    with patch(
+        "app.services.session_tools.editor._get_clean_base",
+        new_callable=AsyncMock,
+        return_value=clean,
+    ):
+        content = await _resolve_current_content(
+            path="mod.py",
+            staged_patches={},
+            repo_owner="",
+            repo_name="",
             base_sha="abc123",
             gh_token=None,
         )
@@ -936,6 +963,127 @@ async def test_resolve_current_content_created_file_reflects_terminal_edits(
 
     assert content == terminal_edited
     assert "def stop():" in staged["service.py"]
+
+
+@pytest.mark.asyncio
+async def test_sequential_str_replace_empty_base_retains_all_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A file that is empty (0 bytes) at session base accumulates sequential edits
+    into one cumulative diff. clean_base == "" is falsy and must be
+    distinguished from None via `is not None` — otherwise the second edit diffs
+    against the already-edited buffer and drops the first edit.
+    """
+    from app.sandbox.mirror import apply_unified_diff
+
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    # Terminal writes content into the base-empty file (still unstaged).
+    test_file = repo_dir / "empty.py"
+    test_file.write_text("x = 1\ny = 2\n", encoding="utf-8")
+
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+
+    async def _empty_base(*args, **kwargs):
+        return ""
+
+    with patch(
+        "app.services.session_tools.editor._get_clean_base",
+        side_effect=_empty_base,
+    ):
+        res1 = await tool_str_replace(
+            path="empty.py",
+            old_str="x = 1",
+            new_str="x = 99",
+            repo_owner="owner",
+            repo_name="repo",
+            base_sha="sha123",
+            staged_patches=staged,
+            queue=queue,
+        )
+        assert "Successfully replaced" in res1
+
+        res2 = await tool_str_replace(
+            path="empty.py",
+            old_str="y = 2",
+            new_str="y = 200",
+            repo_owner="owner",
+            repo_name="repo",
+            base_sha="sha123",
+            staged_patches=staged,
+            queue=queue,
+        )
+        assert "Successfully replaced" in res2
+
+    diff = staged["empty.py"]
+    # The cumulative diff from the empty base must encode BOTH additions.
+    assert "+x = 99" in diff
+    assert "+y = 200" in diff
+
+    # The diff applies cleanly against the empty base (commit-time behaviour).
+    assert apply_unified_diff("", diff).splitlines() == ["x = 99", "y = 200"]
+
+
+@pytest.mark.asyncio
+async def test_apply_multi_patch_empty_base_retains_all_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch of sequential edits on a base-empty file produces a cumulative
+    base->final diff retaining every change (explicit `is not None` handling)."""
+    from app.sandbox.mirror import apply_unified_diff
+
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    test_file = repo_dir / "empty.py"
+    test_file.write_text("x = 1\ny = 2\n", encoding="utf-8")
+
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+
+    async def _empty_base(*args, **kwargs):
+        return ""
+
+    with patch(
+        "app.services.session_tools.editor._get_clean_base",
+        side_effect=_empty_base,
+    ):
+        result = await tool_apply_multi_patch(
+            patches=[
+                {
+                    "type": "str_replace",
+                    "path": "empty.py",
+                    "old_str": "x = 1",
+                    "new_str": "x = 99",
+                },
+                {
+                    "type": "str_replace",
+                    "path": "empty.py",
+                    "old_str": "y = 2",
+                    "new_str": "y = 200",
+                },
+            ],
+            repo_owner="owner",
+            repo_name="repo",
+            base_sha="sha123",
+            staged_patches=staged,
+            queue=queue,
+        )
+
+    assert result == "Successfully applied 2 file edits atomically.", result
+    diff = staged["empty.py"]
+    assert "+x = 99" in diff
+    assert "+y = 200" in diff
+    assert apply_unified_diff("", diff).splitlines() == ["x = 99", "y = 200"]
 
 
 

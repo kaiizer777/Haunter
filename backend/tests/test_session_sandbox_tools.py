@@ -1051,27 +1051,29 @@ def test_sync_staged_patches_to_repo_git_repo_multi_edit(tmp_path: Path) -> None
     assert "return 2\n" not in disk_content
 
 
-def test_sync_staged_patches_to_repo_created_file_terminal_modification(tmp_path: Path) -> None:
-    """If a created file on disk was modified by terminal command, sync_staged_patches_to_repo does not overwrite it."""
+def test_sync_staged_patches_to_repo_created_file_staged_patch_authority(tmp_path: Path) -> None:
+    """The staged creation patch is authoritative: when the file exists on disk
+    with different content, sync writes the staged creation content to disk and
+    never mutates the staged patch with stale disk content."""
     from app.services.session_tools.sandbox import sync_staged_patches_to_repo
 
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
 
-    staged = {
-        "created.txt": "--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+initial creation\n"
-    }
+    creation_diff = "--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+initial creation\n"
+    staged = {"created.txt": creation_diff}
     sync_staged_patches_to_repo(str(repo_dir), staged)
     created_file = repo_dir / "created.txt"
     assert created_file.read_text(encoding="utf-8") == "initial creation\n"
 
-    # Terminal command edits file
-    created_file.write_text("initial creation\nappended line\n", encoding="utf-8")
+    # Disk carries different (stale/terminal) content.
+    created_file.write_text("stale disk content\n", encoding="utf-8")
 
-    # Run sync again
+    # Syncing the staged creation patch overwrites disk with staged content...
     sync_staged_patches_to_repo(str(repo_dir), staged)
-    assert created_file.read_text(encoding="utf-8") == "initial creation\nappended line\n"
-    assert "appended line" in staged["created.txt"]
+    assert created_file.read_text(encoding="utf-8") == "initial creation\n"
+    # ...and the staged patch itself is never mutated with disk content.
+    assert staged["created.txt"] == creation_diff
 
 
 

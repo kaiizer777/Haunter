@@ -263,10 +263,11 @@ async def _resolve_current_content(
            modified via terminal command: prioritize disk as ground truth, refresh
            staged_patches[path] from clean_base to disk content, and return disk.
          - Otherwise return expected (preserving staged patch).
-      4. If path is not in staged_patches:
-          - Return the clean base bound to base_sha when available, so dirty
-            working-tree changes from other sessions/host never contaminate
-            session patches. Fall back to local disk, then GitHub at base_sha.
+       4. If path is not in staged_patches:
+           - Return the local on-disk content when the file exists locally,
+             so terminal modifications on unstaged files are preserved as
+             ground truth. Fall back to the clean base bound to base_sha,
+             then GitHub at base_sha.
 
     Returns None if the file does not exist at base and is not staged.
     """
@@ -338,20 +339,20 @@ async def _resolve_current_content(
         return None
 
     if local_base is not None:
-        # Session base isolation: the shared working tree may carry dirty
-        # changes from other sessions or the host checkout. Prefer the clean
-        # base bound to base_sha so foreign dirt never contaminates session
-        # patches. Fall back to disk only when no clean base is available.
-        clean_base = await _get_clean_base(
-            path=path,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            gh_token=gh_token,
-        )
-        if clean_base is not None:
-            return clean_base
+        # Terminal and editor share the local checkout: an unstaged file's
+        # on-disk content is ground truth (e.g. written via terminal command).
+        # Returning the clean base here would silently discard those edits.
         return local_base
+
+    clean_base = await _get_clean_base(
+        path=path,
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        base_sha=base_sha,
+        gh_token=gh_token,
+    )
+    if clean_base is not None:
+        return clean_base
 
     try:
         content = await fetch_file_content(
@@ -458,7 +459,7 @@ async def tool_str_replace(
         if path in staged_patches and clean_base is None:
             return f"Error: Cannot resolve base revision for '{path}' to build cumulative diff. Staged patch preserved."
 
-        diff = _make_unified_diff(clean_base or content, new_content, path)
+        diff = _make_unified_diff(clean_base if clean_base is not None else content, new_content, path)
 
     # Update staged patches.
     staged_patches[path] = diff
@@ -804,7 +805,8 @@ async def tool_apply_multi_patch(
         elif action == "delete":
             clean_base = clean_bases.get(path)
             if clean_base is None:
-                clean_base = initial_contents.get(path) or ""
+                _initial = initial_contents.get(path)
+                clean_base = _initial if _initial is not None else ""
             diff = "".join(
                 difflib.unified_diff(
                     clean_base.splitlines(keepends=True),
@@ -820,7 +822,10 @@ async def tool_apply_multi_patch(
                 # Deterministic provenance only: never infer the base via
                 # inverse-diff application (fuzzy matches hallucinate history).
                 # Fall back to the resolved working content as the diff base.
-                clean_base = initial_contents.get(path) or ""
+                # Explicit `is not None`: an empty base ("") is a valid base
+                # and must not fall through to the already-edited content.
+                _initial = initial_contents.get(path)
+                clean_base = _initial if _initial is not None else ""
             diff = _make_unified_diff(clean_base, final_content, path)
             final_action = "modify"
 
