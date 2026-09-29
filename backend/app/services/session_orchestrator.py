@@ -1709,11 +1709,21 @@ class SessionOrchestrator:
         base_sha: str,
         staged_patches: dict[str, str] | None = None,
     ) -> str:
+        """
+        Read file contents with support for local checkout synchronization,
+        staged patches overlay, symlink containment, and deletion detection.
+        """
         path: str = args.get("path", "")
         try:
             path = _validate_file_path(path)
         except ValueError as exc:
             return f"Error: {exc}"
+
+        # If file is staged for deletion, report deleted
+        if staged_patches and path in staged_patches:
+            diff = staged_patches[path]
+            if "+++ /dev/null" in diff:
+                return f"File not found: {path!r} (deleted in staged changes)"
 
         content: str | None = None
 
@@ -1723,10 +1733,14 @@ class SessionOrchestrator:
                 from app.services.session_tools.sandbox import resolve_repo_dir
                 repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
                 if repo_root:
-                    local_path = os.path.normpath(os.path.join(repo_root, path))
-                    if os.path.isfile(local_path):
-                        with open(local_path, "r", encoding="utf-8", errors="replace") as f:
-                            content = f.read()
+                    real_root = os.path.realpath(repo_root)
+                    local_path = os.path.normpath(os.path.join(real_root, path))
+                    real_target = os.path.realpath(local_path)
+                    # Symlink / traversal check
+                    if os.path.commonpath([real_root, real_target]) == real_root:
+                        if os.path.isfile(real_target):
+                            with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                                content = f.read()
             except Exception as e:
                 logger.debug("Failed reading file from local checkout: %s", e)
 
@@ -1749,11 +1763,11 @@ class SessionOrchestrator:
                 if not (staged_patches and path in staged_patches):
                     return f"Error reading file: {exc}"
 
-        # 3. If staged_patches has an entry for path and wasn't already synced, overlay it
-        if staged_patches and path in staged_patches:
-            from app.services.session_tools.editor import _apply_staged_diff
-            diff = staged_patches[path]
-            content = _apply_staged_diff(content or "", diff)
+            # If fetched from GitHub and staged_patches has an entry, overlay via apply_unified_diff
+            if staged_patches and path in staged_patches:
+                from app.sandbox.mirror import apply_unified_diff
+                diff = staged_patches[path]
+                content = apply_unified_diff(content or "", diff)
 
         if content is None:
             return f"File not found: {path!r}"
@@ -1776,6 +1790,7 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
     ) -> str:
+        """Stage a unified diff into session staged_patches and synchronize to disk."""
         path: str = args.get("path", "")
         diff: str = args.get("diff", "")
         action: str = args.get("action", "modify")
@@ -1831,6 +1846,10 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
     ) -> str:
+        """
+        Discard a currently staged patch, restoring the file from local HEAD or
+        removing it if untracked / newly created.
+        """
         path: str = args.get("path", "")
         try:
             path = _validate_file_path(path)
@@ -1845,12 +1864,19 @@ class SessionOrchestrator:
                     from app.services.session_tools.sandbox import resolve_repo_dir
                     repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
                     if repo_root:
-                        subprocess.run(
-                            ["git", "checkout", "HEAD", "--", path],
-                            cwd=repo_root,
-                            capture_output=True,
-                            timeout=10,
-                        )
+                        real_root = os.path.realpath(repo_root)
+                        target_file = os.path.normpath(os.path.join(real_root, path))
+                        real_target = os.path.realpath(target_file)
+                        if os.path.commonpath([real_root, real_target]) == real_root:
+                            res = subprocess.run(
+                                ["git", "checkout", "HEAD", "--", path],
+                                cwd=real_root,
+                                capture_output=True,
+                                timeout=10,
+                            )
+                            # If git checkout failed (e.g. untracked created file), remove it from working tree
+                            if res.returncode != 0 and os.path.isfile(real_target):
+                                os.remove(real_target)
                 except Exception as e:
                     logger.debug("Failed reverting file in local repo: %s", e)
             return f"Patch for {path!r} discarded."
@@ -2000,6 +2026,7 @@ class SessionOrchestrator:
         repo_owner: str | None = None,
         repo_name: str | None = None,
     ) -> str:
+        """Create a new file in staged_patches and synchronize to the local checkout."""
         path: str = str(args.get("path", ""))
         content: str = str(args.get("content", ""))
         return await tool_create_file(
@@ -2428,6 +2455,7 @@ class SessionOrchestrator:
         repo_name: str,
         staged_patches: dict[str, str] | None = None,
     ) -> str:
+        """Inspect unified diff between git refs or local working tree / staged patches."""
         base: str = str(args.get("base", ""))
         head: str = str(args.get("head", ""))
         if not base or not head:

@@ -229,19 +229,25 @@ async def tool_git_diff(
     if not base or not head:
         return "Error: both base and head refs are required."
 
+    if base.strip().startswith("-") or head.strip().startswith("-"):
+        bad_ref = base.strip() if base.strip().startswith("-") else head.strip()
+        return f"Error: invalid ref '{bad_ref}'."
+
     head_lower = head.strip().lower()
     base_lower = base.strip().lower()
 
     # Working tree or staged query
     if head_lower in ("working", "worktree", "working_tree", "staged", "uncommitted") or base_lower in ("working", "worktree", "staged"):
-        # 1. If explicit staged requested or staged_patches present
-        if head_lower in ("staged", "staged_patches") and staged_patches:
-            diff_text = "\n\n".join(
-                f"# Staged patch: {p}\n{d.strip()}"
-                for p, d in staged_patches.items()
-                if d and d.strip()
-            )
-            return diff_text if diff_text else "No staged patches currently in session."
+        # 1. If explicit staged requested
+        if head_lower in ("staged", "staged_patches") or base_lower in ("staged", "staged_patches"):
+            if staged_patches:
+                diff_text = "\n\n".join(
+                    f"# Staged patch: {p}\n{d.strip()}"
+                    for p, d in staged_patches.items()
+                    if d and d.strip()
+                )
+                return diff_text if diff_text else "No staged patches currently in session."
+            return "No staged patches currently in session."
 
         # 2. Check local repo checkout if available
         if repo:
@@ -250,10 +256,36 @@ async def tool_git_diff(
                 repo_root, _ = resolve_repo_dir(repo_name=repo, repo_owner=owner)
                 if repo_root and os.path.isdir(repo_root):
                     ref_target = "HEAD" if base_lower in ("working", "worktree", "staged") else base
-                    cmd = ["git", "-C", repo_root, "diff", ref_target]
+                    if ref_target.startswith("-"):
+                        return f"Error: invalid ref '{ref_target}'."
+                    cmd = ["git", "-C", repo_root, "diff", "--end-of-options", ref_target]
                     p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    diff_parts: list[str] = []
                     if p.stdout and p.stdout.strip():
-                        diff_text = p.stdout
+                        diff_parts.append(p.stdout.strip())
+
+                    # Also include untracked newly created files in working-tree diff
+                    status_cmd = ["git", "-C", repo_root, "status", "--porcelain"]
+                    sp = subprocess.run(status_cmd, capture_output=True, text=True, timeout=5)
+                    if sp.stdout:
+                        for sline in sp.stdout.splitlines():
+                            if sline.startswith("?? "):
+                                untracked_path = sline[3:].strip()
+                                full_untracked = os.path.join(repo_root, untracked_path)
+                                if os.path.isfile(full_untracked):
+                                    try:
+                                        with open(full_untracked, "r", encoding="utf-8", errors="replace") as uf:
+                                            u_content = uf.read()
+                                        num_lines = len(u_content.splitlines()) or 1
+                                        diff_parts.append(
+                                            f"--- /dev/null\n+++ b/{untracked_path}\n@@ -0,0 +1,{num_lines} @@\n"
+                                            + "".join(f"+{line}\n" for line in u_content.splitlines())
+                                        )
+                                    except Exception:
+                                        pass
+
+                    if diff_parts:
+                        diff_text = "\n\n".join(diff_parts)
                         if len(diff_text) > _MAX_DIFF_CHARS:
                             return diff_text[:_MAX_DIFF_CHARS] + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
                         return diff_text

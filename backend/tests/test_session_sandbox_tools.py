@@ -967,8 +967,11 @@ def test_prepare_cmd_argv_windows_echo_and_cat(monkeypatch: pytest.MonkeyPatch) 
     argv_echo = _prepare_cmd_argv(["echo", "hello world"])
     assert argv_echo == ["cmd", "/c", "echo", "hello world"]
 
-    # Cat emulation when cat is not on PATH
+    # Cat emulation when cat is not on PATH (uses safe Python runner without shell)
     monkeypatch.setattr("shutil.which", lambda name: None)
     argv_cat = _prepare_cmd_argv(["cat", "-A", "README.md"])
-    assert argv_cat == ["cmd", "/c", "type", "README.md"]
+    assert argv_cat[0] == sys.executable
+    assert argv_cat[1] == "-c"
+    assert argv_cat[-1] == "README.md"
+
 

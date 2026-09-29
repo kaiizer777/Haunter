@@ -531,3 +531,44 @@ async def test_editor_tools_sync_to_local_disk(tmp_path, monkeypatch: pytest.Mon
     assert "Successfully staged deletion" in res_del
     assert not helper_file.exists()
 
+
+def test_apply_staged_diff_preserves_full_file() -> None:
+    """Verifies that _apply_staged_diff preserves all context lines outside hunks without truncation."""
+    from app.services.session_tools.editor import _apply_staged_diff
+
+    long_file = "\n".join(f"line_{i}" for i in range(1, 100)) + "\n"
+    diff = (
+        "--- a/file.py\n"
+        "+++ b/file.py\n"
+        "@@ -50,3 +50,3 @@\n"
+        " line_50\n"
+        "-line_51\n"
+        "+line_51_modified\n"
+        " line_52\n"
+    )
+    result = _apply_staged_diff(long_file, diff)
+    assert "line_1" in result
+    assert "line_51_modified" in result
+    assert "line_99" in result
+    assert len(result.splitlines()) == 99
+
+
+@pytest.mark.asyncio
+async def test_resolve_current_content_deleted_staged() -> None:
+    """Verifies that _resolve_current_content returns None for files deleted in staged patches."""
+    from app.services.session_tools.editor import _resolve_current_content
+
+    staged = {
+        "deleted.py": "--- a/deleted.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-some code\n"
+    }
+    content = await _resolve_current_content(
+        path="deleted.py",
+        staged_patches=staged,
+        repo_owner="test",
+        repo_name="LocalRepo",
+        base_sha="any",
+        gh_token=None,
+    )
+    assert content is None
+
+

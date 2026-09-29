@@ -205,9 +205,17 @@ def _prepare_cmd_argv(argv: list[str], cwd: str | None = None) -> list[str]:
                     )
             return ["cmd", "/c"] + cmd_argv
         if bin_name == "cat" and not shutil.which("cat"):
-            # Emulate Unix cat on Windows via cmd /c type
             file_args = [a for a in cmd_argv[1:] if not a.startswith("-")]
-            return ["cmd", "/c", "type"] + file_args
+            code = (
+                "import sys\n"
+                "for p in sys.argv[1:]:\n"
+                "    try:\n"
+                "        with open(p, 'rb') as f:\n"
+                "            sys.stdout.buffer.write(f.read())\n"
+                "    except Exception as e:\n"
+                "        sys.stderr.write(f'cat: {p}: {e}\\n')\n"
+            )
+            return [sys.executable, "-c", code] + file_args
 
     repo_python = _find_repo_python(cwd)
     effective_python = repo_python if repo_python else sys.executable
@@ -580,32 +588,43 @@ def sync_staged_patches_to_repo(
     Ensure all patches currently staged in memory/DB are synced to the local repository checkout.
     This guarantees that local terminal commands, linters, and test runners execute
     against the actual patched code, eliminating runner/editor checkout mismatches.
+    Protects against symlink escapes and preserves full file content via apply_unified_diff.
     """
     if not staged_patches or not repo_root or not os.path.isdir(repo_root):
         return
 
-    from app.services.session_tools.editor import _apply_staged_diff
+    from app.sandbox.mirror import apply_unified_diff
+
+    real_root = os.path.realpath(repo_root)
 
     for rel_path, diff in staged_patches.items():
         if not diff or not diff.strip():
             continue
         try:
-            target_path = os.path.normpath(os.path.join(repo_root, rel_path))
-            if os.path.commonpath([repo_root, target_path]) != repo_root:
+            target_path = os.path.normpath(os.path.join(real_root, rel_path))
+            real_target = os.path.realpath(target_path)
+            real_parent = os.path.realpath(os.path.dirname(target_path))
+
+            # Defense-in-depth: Ensure target and its parent do not escape repo boundary via symlinks
+            if os.path.commonpath([real_root, real_parent]) != real_root:
+                logger.warning("sandbox: rejected path outside repository root: %r", rel_path)
+                continue
+            if os.path.exists(target_path) and os.path.commonpath([real_root, real_target]) != real_root:
+                logger.warning("sandbox: rejected symlink escaping repository root: %r", rel_path)
                 continue
 
             # If it's a file deletion patch
             if "--- " in diff and "+++ /dev/null" in diff:
-                if os.path.isfile(target_path):
-                    os.remove(target_path)
+                if os.path.isfile(real_target):
+                    os.remove(real_target)
                 continue
 
             base_content = ""
-            if os.path.isfile(target_path):
-                with open(target_path, "r", encoding="utf-8", errors="replace") as f:
+            if os.path.isfile(real_target):
+                with open(real_target, "r", encoding="utf-8", errors="replace") as f:
                     base_content = f.read()
 
-            new_content = _apply_staged_diff(base_content, diff)
+            new_content = apply_unified_diff(base_content, diff)
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             with open(target_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new_content)
@@ -1081,8 +1100,15 @@ async def tool_run_linter(
         return err
     effective_cwd = resolved_cwd or os.getcwd()
 
-    if effective_cwd and _kwargs.get("staged_patches"):
-        sync_staged_patches_to_repo(effective_cwd, _kwargs.get("staged_patches"))
+    repo_boundary_root: str | None = None
+    if repo_name and repo_name.strip():
+        root_dir, _ = resolve_repo_dir(
+            repo_name=repo_name, repo_owner=repo_owner, cwd=None
+        )
+        repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
+    target_sync_root = repo_boundary_root or effective_cwd
+    if target_sync_root and _kwargs.get("staged_patches"):
+        sync_staged_patches_to_repo(target_sync_root, _kwargs.get("staged_patches"))
 
     # Sanitize each path — no traversal allowed.
     cleaned: list[str] = []
@@ -1187,8 +1213,15 @@ async def tool_run_targeted_tests(
         return err
     effective_cwd = resolved_cwd or os.getcwd()
 
-    if effective_cwd and _kwargs.get("staged_patches"):
-        sync_staged_patches_to_repo(effective_cwd, _kwargs.get("staged_patches"))
+    repo_boundary_root: str | None = None
+    if repo_name and repo_name.strip():
+        root_dir, _ = resolve_repo_dir(
+            repo_name=repo_name, repo_owner=repo_owner, cwd=None
+        )
+        repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
+    target_sync_root = repo_boundary_root or effective_cwd
+    if target_sync_root and _kwargs.get("staged_patches"):
+        sync_staged_patches_to_repo(target_sync_root, _kwargs.get("staged_patches"))
 
     # Sanitize target paths.
     cleaned: list[str] = []

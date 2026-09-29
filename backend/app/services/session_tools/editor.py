@@ -41,6 +41,7 @@ def _sync_to_local_disk(
     """
     Synchronize staged modifications directly to the local working tree on disk if
     a local checkout exists. Eliminates runner/editor checkout mismatches.
+    Enforces strict realpath and directory containment checks against symlink traversal.
     """
     if not repo_name or not repo_name.strip():
         return
@@ -50,14 +51,23 @@ def _sync_to_local_disk(
         if not repo_root or not os.path.isdir(repo_root):
             return
 
-        target_file = os.path.normpath(os.path.join(repo_root, path))
-        if os.path.commonpath([repo_root, target_file]) != repo_root:
+        real_root = os.path.realpath(repo_root)
+        target_file = os.path.normpath(os.path.join(real_root, path))
+        real_target = os.path.realpath(target_file)
+        real_parent = os.path.realpath(os.path.dirname(target_file))
+
+        # Defense-in-depth: Ensure target and its parent do not escape repo boundary via symlinks
+        if os.path.commonpath([real_root, real_parent]) != real_root:
+            logger.warning("editor: rejected path outside repository root: %r", path)
+            return
+        if os.path.exists(target_file) and os.path.commonpath([real_root, real_target]) != real_root:
+            logger.warning("editor: rejected symlink target outside repository root: %r", path)
             return
 
         if action == "delete":
-            if os.path.isfile(target_file):
-                os.remove(target_file)
-                logger.info("editor: deleted local file %r", target_file)
+            if os.path.isfile(real_target):
+                os.remove(real_target)
+                logger.info("editor: deleted local file %r", real_target)
         elif action in ("write", "modify", "create") and content is not None:
             os.makedirs(os.path.dirname(target_file), exist_ok=True)
             with open(target_file, "w", encoding="utf-8", newline="\n") as f:
@@ -70,42 +80,12 @@ def _sync_to_local_disk(
 def _apply_staged_diff(base_content: str, diff_text: str) -> str:
     """
     Reconstruct the current working buffer by applying a staged unified diff
-    on top of the base content.
-
-    Extracts the new-side content from the unified diff by collecting context
-    lines (prefixed with ' ') and addition lines (prefixed with '+'), skipping
-    the unified diff header lines ('---', '+++', '@@').
-
-    If the diff is empty or malformed, falls back to base_content so the
-    downstream occurrence check will catch any real conflicts.
+    on top of the base content using the full-file diff applier.
     """
-    if not diff_text:
+    if not diff_text or not diff_text.strip():
         return base_content
-
-    result_lines: list[str] = []
-    in_hunk = False
-    for line in diff_text.splitlines(keepends=True):
-        if line.startswith("--- ") or line.startswith("+++ "):
-            # Unified diff file headers -- skip.
-            continue
-        if line.startswith("@@ "):
-            # Hunk header -- marks start of patch content.
-            in_hunk = True
-            continue
-        if not in_hunk:
-            continue
-        if line.startswith("+") and not line.startswith("+++ "):
-            # Added line -- appears in new file.
-            result_lines.append(line[1:])
-        elif line.startswith(" "):
-            # Context line -- appears in both old and new.
-            result_lines.append(line[1:])
-        # Lines starting with '-' are deletions -- skip them.
-
-    if not result_lines:
-        return base_content
-
-    return "".join(result_lines)
+    from app.sandbox.mirror import apply_unified_diff
+    return apply_unified_diff(base_content, diff_text)
 
 
 async def _resolve_current_content(
@@ -120,9 +100,10 @@ async def _resolve_current_content(
     Resolve the current working content of *path*.
 
     Priority:
-      1. If path is in staged_patches — reconstruct from the staged diff (using local disk or GitHub base).
-      2. If local checkout exists on disk — read directly from local file.
-      3. Otherwise fetch from GitHub at base_sha.
+      1. If path is deleted in staged_patches — return None.
+      2. If path is in staged_patches and local checkout is synchronized — return local content.
+      3. If path is in staged_patches but not local — apply unified diff on GitHub base.
+      4. Otherwise return local disk content or fetch from GitHub at base_sha.
 
     Returns None if the file does not exist at base and is not staged.
     """
@@ -132,17 +113,23 @@ async def _resolve_current_content(
             from app.services.session_tools.sandbox import resolve_repo_dir
             repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
             if repo_root:
-                local_path = os.path.normpath(os.path.join(repo_root, path))
-                if os.path.isfile(local_path):
-                    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
+                real_root = os.path.realpath(repo_root)
+                local_path = os.path.normpath(os.path.join(real_root, path))
+                real_target = os.path.realpath(local_path)
+                if os.path.commonpath([real_root, real_target]) == real_root and os.path.isfile(real_target):
+                    with open(real_target, "r", encoding="utf-8", errors="replace") as f:
                         local_base = f.read()
         except Exception:
             local_base = None
 
     if path in staged_patches:
+        diff = staged_patches[path]
+        if "+++ /dev/null" in diff:
+            return None
+        # When local checkout content is already synchronized, return it directly
         if local_base is not None:
-            return _apply_staged_diff(local_base, staged_patches[path])
-        # Fetch base to apply the patch on top of it.
+            return local_base
+        # Otherwise fetch base from GitHub to apply the patch on top of it.
         try:
             base = await fetch_file_content(
                 owner=repo_owner,
@@ -154,7 +141,8 @@ async def _resolve_current_content(
         except GitHubClientError:
             base = None
         base_str = base or ""
-        return _apply_staged_diff(base_str, staged_patches[path])
+        from app.sandbox.mirror import apply_unified_diff
+        return apply_unified_diff(base_str, diff)
 
     if local_base is not None:
         return local_base

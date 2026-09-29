@@ -618,3 +618,25 @@ async def test_tool_git_diff_working_tree_and_staged() -> None:
     assert "No differences between ref 'main' and 'main'" in diff_same
     assert "Note: 1 uncommitted file(s) are currently staged in the session" in diff_same
 
+    # Test rejection of option injection (e.g. --output=...)
+    diff_injection = await tool_git_diff(
+        base="--output=/tmp/pwn",
+        head="working",
+        owner="org",
+        repo="repo",
+        token="token",
+    )
+    assert "Error: invalid ref" in diff_injection
+
+    # Test empty staged query returns clean message rather than falling through to worktree
+    diff_empty_staged = await tool_git_diff(
+        base="HEAD",
+        head="staged",
+        owner="org",
+        repo="repo",
+        token="token",
+        staged_patches={},
+    )
+    assert diff_empty_staged == "No staged patches currently in session."
+
+
