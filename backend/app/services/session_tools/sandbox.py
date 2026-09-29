@@ -589,6 +589,7 @@ def sync_staged_patches_to_repo(
     staged_patches: dict[str, str] | None,
     base_sha: str | None = None,
     session_id: str | None = None,
+    staged_authoritative: bool = False,
 ) -> None:
     """
     Ensure all patches currently staged in memory/DB are synced to the local repository checkout.
@@ -598,6 +599,13 @@ def sync_staged_patches_to_repo(
 
     When ``session_id`` is provided and a session-isolated directory exists
     under ``repo_root``, patches are synced to the session checkout instead.
+
+    When ``staged_authoritative`` is False (default, pre-command sync for
+    terminal/linter/tests), direct disk modifications (e.g. ``sed -i``) are
+    adopted: if disk differs from both the clean base and the expected staged
+    content, ``staged_patches[path]`` is rebuilt from disk instead of
+    reverting disk. When True (editor staging path), the staged patch wins
+    and disk is overwritten.
     """
     if not staged_patches or not repo_root or not os.path.isdir(repo_root):
         return
@@ -647,12 +655,32 @@ def sync_staged_patches_to_repo(
                     expected_content += "\n"
                 if os.path.isfile(real_target):
                     with open(real_target, "r", encoding="utf-8", errors="replace") as f:
-                        if f.read() == expected_content:
-                            continue  # already synchronized, avoid rewriting
-                    # The staged patch is the intended target: write the staged
-                    # creation content to disk even when the file already exists
-                    # with different content. Never mutate the incoming staged
-                    # patch with old disk content.
+                        disk_content = f.read()
+                    if disk_content == expected_content:
+                        continue  # already synchronized, avoid rewriting
+                    if not staged_authoritative:
+                        # Terminal modified the created file directly: adopt disk
+                        # as ground truth and refresh the staged patch instead
+                        # of reverting disk.
+                        import difflib
+
+                        staged_patches[rel_path] = "".join(
+                            difflib.unified_diff(
+                                [],
+                                disk_content.splitlines(keepends=True),
+                                fromfile="/dev/null",
+                                tofile=f"b/{rel_path}",
+                            )
+                        )
+                        logger.info(
+                            "sandbox: adopted terminal edits on disk for created file %r into staged patch",
+                            rel_path,
+                        )
+                        continue
+                    # Authoritative staging path (editor _tool_stage_patch):
+                    # write the staged creation content to disk even when the
+                    # file already exists with different content. Never mutate
+                    # the incoming staged patch with old disk content.
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 with open(target_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(expected_content)
@@ -691,8 +719,28 @@ def sync_staged_patches_to_repo(
                 new_content = apply_unified_diff(clean_base, diff)
                 if os.path.isfile(real_target):
                     with open(real_target, "r", encoding="utf-8", errors="replace") as f:
-                        if f.read() == new_content:
-                            continue  # already synchronized, avoid duplicate diff application
+                        disk_content = f.read()
+                    if disk_content == new_content:
+                        continue  # already synchronized, avoid duplicate diff application
+                    if not staged_authoritative and disk_content != clean_base:
+                        # Disk was modified directly (e.g. sed -i) on top of or
+                        # instead of the staged state: adopt disk and refresh
+                        # the staged patch rather than reverting terminal edits.
+                        import difflib
+
+                        staged_patches[rel_path] = "".join(
+                            difflib.unified_diff(
+                                clean_base.splitlines(keepends=True),
+                                disk_content.splitlines(keepends=True),
+                                fromfile=f"a/{rel_path}",
+                                tofile=f"b/{rel_path}",
+                            )
+                        )
+                        logger.info(
+                            "sandbox: adopted terminal edits on disk for %r into staged patch",
+                            rel_path,
+                        )
+                        continue
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 with open(target_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(new_content)
@@ -840,6 +888,11 @@ def _resolve_session_root(main_root_real: str, session_id: str) -> str | None:
       4. ``<parent>/.haunter_sessions/<session_id>/<repo_basename>``
     Returns None when no session-isolated directory exists (caller falls
     back safely to the main checkout).
+
+    Hardening: empty/uninitialized directories are skipped; candidates that
+    escape the repository boundary via symlinks are rejected unless they are
+    legitimate git worktrees; candidates must look like a checkout (valid
+    git repo/worktree or containing files).
     """
     sid = session_id.strip()
     base = os.path.basename(main_root_real)
@@ -850,11 +903,94 @@ def _resolve_session_root(main_root_real: str, session_id: str) -> str | None:
         os.path.join(main_root_real, f"session-{sid}"),
         os.path.join(parent, ".haunter_sessions", sid, base),
     ]
-    for cand in candidates:
+    session_base_real = os.path.realpath(os.path.join(parent, ".haunter_sessions", sid))
+
+    def _is_valid_checkout(cand_real: str) -> bool:
         try:
+            entries = os.listdir(cand_real)
+        except Exception:
+            return False
+        if not entries:
+            return False
+        if os.path.exists(os.path.join(cand_real, ".git")):
+            return True
+        try:
+            rev = subprocess.run(
+                ["git", "-C", cand_real, "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if rev.returncode == 0 and rev.stdout.strip().lower() == "true":
+                return True
+        except Exception:
+            pass
+        # Non-empty directory containing files qualifies as a checkout root
+        # (e.g. plain session dir synced without .git metadata).
+        return True
+
+    def _is_legitimate_worktree(cand_real: str, worktrees: set[str]) -> bool:
+        try:
+            norm = os.path.normcase(os.path.realpath(cand_real))
+        except Exception:
+            return False
+        return norm in worktrees
+
+    worktree_paths: set[str] = set()
+    try:
+        _wt = subprocess.run(
+            ["git", "-C", main_root_real, "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if _wt.returncode == 0:
+            for _line in _wt.stdout.splitlines():
+                if _line.startswith("worktree "):
+                    _wp = _line[len("worktree ") :].strip()
+                    if _wp:
+                        try:
+                            worktree_paths.add(os.path.normcase(os.path.realpath(_wp)))
+                        except Exception:
+                            continue
+    except Exception:
+        pass
+
+    for idx, cand in enumerate(candidates):
+        try:
+            if not os.path.isdir(cand):
+                continue
             cand_real = os.path.realpath(cand)
-            if os.path.isdir(cand_real):
-                return cand_real
+            if not os.path.isdir(cand_real):
+                continue
+            # Skip empty/uninitialized session dirs; fall back to main checkout.
+            try:
+                if not os.listdir(cand_real):
+                    continue
+            except Exception:
+                continue
+            # Symlink-boundary check: candidates under the main checkout must
+            # resolve inside it; the parent-scoped candidate must resolve
+            # inside its session base. Legitimate git worktrees are exempt.
+            if idx < 3:
+                try:
+                    inside = os.path.commonpath([main_root_real, cand_real]) == main_root_real
+                except ValueError:
+                    inside = False
+                if not inside and not _is_legitimate_worktree(cand_real, worktree_paths):
+                    logger.warning("sandbox: rejected session dir escaping repo boundary: %r", cand)
+                    continue
+            else:
+                try:
+                    inside = os.path.commonpath([session_base_real, cand_real]) == session_base_real
+                except ValueError:
+                    inside = False
+                if not inside and not _is_legitimate_worktree(cand_real, worktree_paths):
+                    logger.warning("sandbox: rejected session dir escaping session base: %r", cand)
+                    continue
+            if not _is_valid_checkout(cand_real):
+                continue
+            return cand_real
         except Exception:
             continue
     # Best-effort git worktree lookup: a worktree whose path ends with
@@ -871,7 +1007,13 @@ def _resolve_session_root(main_root_real: str, session_id: str) -> str | None:
                 if line.startswith("worktree "):
                     wt_path = line[len("worktree ") :].strip()
                     if wt_path.endswith(f"session-{sid}") and os.path.isdir(wt_path):
-                        return os.path.realpath(wt_path)
+                        wt_real = os.path.realpath(wt_path)
+                        try:
+                            if not os.listdir(wt_real):
+                                continue
+                        except Exception:
+                            continue
+                        return wt_real
     except Exception:
         pass
     return None

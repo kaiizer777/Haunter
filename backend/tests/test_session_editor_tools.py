@@ -1093,4 +1093,83 @@ async def test_apply_multi_patch_empty_base_retains_all_edits(
     assert apply_unified_diff("", diff).splitlines() == ["x = 99", "y = 200"]
 
 
+@pytest.mark.asyncio
+async def test_str_replace_terminal_created_file_generates_creation_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file created via terminal (absent at base_sha) gets a /dev/null
+    creation diff, and subsequent edits rebuild cumulatively against /dev/null."""
+    import subprocess
+
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    (repo_dir / "keep.py").write_text("x = 1\n", encoding="utf-8")
+    for cmd in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test User"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "init"],
+    ):
+        subprocess.run(cmd, cwd=str(repo_dir), check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    terminal_content = "a = 1\nb = 2\n"
+    (repo_dir / "new_term.py").write_text(terminal_content, encoding="utf-8")
+
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+
+    with patch(
+        "app.services.session_tools.editor.fetch_file_content",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        res1 = await tool_str_replace(
+            path="new_term.py",
+            old_str="a = 1",
+            new_str="a = 99",
+            repo_owner="owner",
+            repo_name="repo",
+            base_sha=sha,
+            staged_patches=staged,
+            queue=queue,
+        )
+    assert "Successfully replaced" in res1
+    diff1 = staged["new_term.py"]
+    assert "--- /dev/null" in diff1
+    assert "+++ b/new_term.py" in diff1
+
+    with patch(
+        "app.services.session_tools.editor.fetch_file_content",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        res2 = await tool_str_replace(
+            path="new_term.py",
+            old_str="b = 2",
+            new_str="b = 200",
+            repo_owner="owner",
+            repo_name="repo",
+            base_sha=sha,
+            staged_patches=staged,
+            queue=queue,
+        )
+    assert "Successfully replaced" in res2
+    diff2 = staged["new_term.py"]
+    assert "--- /dev/null" in diff2
+    assert "a = 99" in diff2
+    assert "b = 200" in diff2
+
+
 

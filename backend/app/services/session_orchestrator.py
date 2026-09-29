@@ -1868,7 +1868,11 @@ class SessionOrchestrator:
                     # writes it to disk as-is and never mutates it with
                     # pre-existing disk content.
                     sync_staged_patches_to_repo(
-                        repo_root, {path: diff}, base_sha=base_sha, session_id=effective_sid
+                        repo_root,
+                        {path: diff},
+                        base_sha=base_sha,
+                        session_id=effective_sid,
+                        staged_authoritative=True,
                     )
             except Exception as e:
                 logger.warning("Failed syncing staged patch to disk: %s", e)
@@ -1901,9 +1905,49 @@ class SessionOrchestrator:
 
         real_root = os.path.realpath(repo_root)
         diff_text = staged_diff if staged_diff.endswith("\n") else staged_diff + "\n"
+        # Containment: the diff header must reference only the requested path.
+        # A mismatched/malicious header could otherwise modify an unrelated file
+        # via `git apply --reverse`. Reject before invoking git.
+        git_path = path.replace("\\", "/")
+        try:
+            header_paths: list[str] = []
+            for _line in diff_text.splitlines():
+                if _line.startswith("diff --git "):
+                    _parts = _line[len("diff --git ") :].split()
+                    if len(_parts) >= 2:
+                        for _p in _parts[:2]:
+                            _p = _p.strip().strip('"').strip("'")
+                            if _p.startswith("a/"):
+                                _p = _p[2:]
+                            elif _p.startswith("b/"):
+                                _p = _p[2:]
+                            if _p not in ("", "/dev/null"):
+                                header_paths.append(_p)
+                elif _line.startswith("--- "):
+                    _p = _line[4:].strip().split("\t")[0].strip().strip('"').strip("'")
+                    if _p.startswith("a/"):
+                        _p = _p[2:]
+                    if _p not in ("", "/dev/null"):
+                        header_paths.append(_p)
+                elif _line.startswith("+++ "):
+                    _p = _line[4:].strip().split("\t")[0].strip().strip('"').strip("'")
+                    if _p.startswith("b/"):
+                        _p = _p[2:]
+                    if _p not in ("", "/dev/null"):
+                        header_paths.append(_p)
+            if not header_paths or any(_p != git_path for _p in header_paths):
+                logger.warning(
+                    "discard_patch: diff headers do not match requested path %r: %r",
+                    path,
+                    header_paths[:5],
+                )
+                return False
+        except Exception as exc:
+            logger.debug("discard_patch: diff header validation error for %r: %s", path, exc)
+            return False
         try:
             res = subprocess.run(
-                ["git", "apply", "--reverse", "--whitespace=nowarn"],
+                ["git", "apply", "--reverse", "--whitespace=nowarn", f"--include={git_path}"],
                 input=diff_text,
                 cwd=real_root,
                 capture_output=True,

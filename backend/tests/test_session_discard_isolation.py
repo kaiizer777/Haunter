@@ -167,6 +167,8 @@ def test_resolve_repo_dir_session_isolation(
     session_id = "sess-abc-123"
     session_dir = repo_dir / ".haunter_sessions" / session_id
     session_dir.mkdir(parents=True)
+    # Valid checkout marker: empty/uninitialized session dirs are skipped.
+    (session_dir / ".gitkeep").write_text("session checkout\n", encoding="utf-8")
     monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
 
     main_root, err_main = resolve_repo_dir(repo_name="repo")
@@ -188,6 +190,7 @@ def test_resolve_repo_dir_session_isolation(
     wt_id = "sess-worktree-1"
     wt_dir = repo_dir / f"session-{wt_id}"
     wt_dir.mkdir()
+    (wt_dir / ".gitkeep").write_text("worktree checkout\n", encoding="utf-8")
     wt_root, err_wt = resolve_repo_dir(repo_name="repo", session_id=wt_id)
     assert err_wt is None
     assert os.path.realpath(wt_root or "") == os.path.realpath(str(wt_dir))
@@ -206,6 +209,7 @@ def test_sync_to_local_disk_respects_session_id(
     session_id = "sess-sync-1"
     session_dir = repo_dir / ".haunter_sessions" / session_id
     session_dir.mkdir(parents=True)
+    (session_dir / ".gitkeep").write_text("session checkout\n", encoding="utf-8")
     monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
 
     _sync_to_local_disk(
@@ -213,3 +217,64 @@ def test_sync_to_local_disk_respects_session_id(
     )
     assert (session_dir / "hello.py").is_file()
     assert not (repo_dir / "hello.py").is_file()
+
+
+def test_discard_patch_mismatched_headers_does_not_touch_other_file(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Discard validates diff headers and uses --include: a staged diff whose
+    headers reference victim.py must not modify victim.py when discarding
+    target.py."""
+    orch = _make_orchestrator()
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    victim_base = "v = 1\n"
+    victim_modified = "v = 99\n"
+    target_base = "t = 1\n"
+    (repo_dir / "victim.py").write_text(victim_base, encoding="utf-8")
+    (repo_dir / "target.py").write_text(target_base, encoding="utf-8")
+    _init_git_repo(repo_dir)
+
+    # Staged entry keyed as target.py but headers touch victim.py.
+    malicious_diff = _make_diff(victim_base, victim_modified, "victim.py")
+    (repo_dir / "victim.py").write_text(victim_modified, encoding="utf-8")
+
+    staged = {"target.py": malicious_diff}
+    result = orch._tool_discard_patch(
+        args={"path": "target.py"},
+        staged_patches=staged,
+        repo_owner="owner",
+        repo_name="repo",
+    )
+
+    assert "failed" in result.lower() or "preserved" in result.lower()
+    assert "target.py" in staged
+    assert (repo_dir / "victim.py").read_text(encoding="utf-8") == victim_modified
+    assert (repo_dir / "target.py").read_text(encoding="utf-8") == target_base
+
+
+def test_resolve_session_root_skips_empty_dirs(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Empty/uninitialized session dirs are skipped with fallback to main checkout."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    session_id = "sess-empty-1"
+    empty_session = repo_dir / ".haunter_sessions" / session_id
+    empty_session.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    root, err = resolve_repo_dir(repo_name="repo", session_id=session_id)
+    assert err is None
+    assert os.path.realpath(root or "") == os.path.realpath(str(repo_dir))
+
+    (empty_session / "file.txt").write_text("x\n", encoding="utf-8")
+    root2, err2 = resolve_repo_dir(repo_name="repo", session_id=session_id)
+    assert err2 is None
+    assert os.path.realpath(root2 or "") == os.path.realpath(str(empty_session))

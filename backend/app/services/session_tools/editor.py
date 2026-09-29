@@ -236,6 +236,55 @@ async def _get_clean_base(
     return None
 
 
+def _is_absent_at_base(
+    path: str,
+    repo_owner: str,
+    repo_name: str,
+    base_sha: str,
+    session_id: str | None = None,
+) -> bool:
+    """
+    Confirm whether *path* is absent at the session base revision.
+
+    Distinguishes "file did not exist at base_sha" (terminal-created /
+    untracked file) from a transient fetch error. Returns True only when a
+    local checkout proves the base ref exists but the path is missing there.
+    Returns False when existence is confirmed or when absence cannot be
+    proven (fail-closed: callers preserve the existing staged patch).
+    """
+    if not repo_name or not repo_name.strip():
+        return False
+    try:
+        from app.services.session_tools.sandbox import resolve_repo_dir
+
+        repo_root, _ = resolve_repo_dir(
+            repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+        )
+        if not repo_root or not os.path.isdir(repo_root):
+            return False
+        git_path = path.replace("\\", "/")
+        ref = base_sha.strip() if base_sha and base_sha.strip() else "HEAD"
+        cat = subprocess.run(
+            ["git", "-C", repo_root, "cat-file", "-e", ref],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if cat.returncode != 0:
+            return False
+        show = subprocess.run(
+            ["git", "-C", repo_root, "show", f"{ref}:{git_path}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if show.returncode == 0:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _apply_staged_diff(base_content: str, diff_text: str) -> str:
     """
     Reconstruct the current working buffer by applying a staged unified diff
@@ -473,10 +522,31 @@ async def tool_str_replace(
             gh_token=gh_token,
             session_id=session_id,
         )
-        if path in staged_patches and clean_base is None:
-            return f"Error: Cannot resolve base revision for '{path}' to build cumulative diff. Staged patch preserved."
-
-        diff = _make_unified_diff(clean_base if clean_base is not None else content, new_content, path)
+        if clean_base is None:
+            # Distinguish absent-at-base (terminal-created/untracked) from a
+            # transient fetch error. Confirmed-absent files get a /dev/null
+            # creation diff so cumulative edits rebuild correctly.
+            if _is_absent_at_base(
+                path=path,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                session_id=session_id,
+            ):
+                diff = "".join(
+                    difflib.unified_diff(
+                        [],
+                        new_content.splitlines(keepends=True),
+                        fromfile="/dev/null",
+                        tofile=f"b/{path}",
+                    )
+                )
+            elif path in staged_patches:
+                return f"Error: Cannot resolve base revision for '{path}' to build cumulative diff. Staged patch preserved."
+            else:
+                diff = _make_unified_diff(content, new_content, path)
+        else:
+            diff = _make_unified_diff(clean_base, new_content, path)
 
     # Update staged patches.
     staged_patches[path] = diff
@@ -711,11 +781,22 @@ async def tool_apply_multi_patch(
                         gh_token=gh_token,
                         session_id=session_id,
                     )
-                    if path in staged_patches and clean_bases[path] is None:
-                        return (
-                            f"Error in {label}: Cannot resolve base revision for "
-                            f"'{path}' to build cumulative diff. Staged patch preserved."
-                        )
+                    if clean_bases[path] is None:
+                        if _is_absent_at_base(
+                            path=path,
+                            repo_owner=repo_owner,
+                            repo_name=repo_name,
+                            base_sha=base_sha,
+                            session_id=session_id,
+                        ):
+                            # Terminal-created/untracked file absent at base:
+                            # subsequent cumulative edits rebuild against /dev/null.
+                            is_created_files[path] = True
+                        elif path in staged_patches:
+                            return (
+                                f"Error in {label}: Cannot resolve base revision for "
+                                f"'{path}' to build cumulative diff. Staged patch preserved."
+                            )
 
             # Use working content if available (post-previous-edit state),
             # otherwise use the freshly fetched base.
@@ -788,11 +869,20 @@ async def tool_apply_multi_patch(
                         gh_token=gh_token,
                         session_id=session_id,
                     )
-                    if path in staged_patches and clean_bases[path] is None:
-                        return (
-                            f"Error in {label}: Cannot resolve base revision for "
-                            f"'{path}' to build cumulative diff. Staged patch preserved."
-                        )
+                    if clean_bases[path] is None:
+                        if _is_absent_at_base(
+                            path=path,
+                            repo_owner=repo_owner,
+                            repo_name=repo_name,
+                            base_sha=base_sha,
+                            session_id=session_id,
+                        ):
+                            is_created_files[path] = True
+                        elif path in staged_patches:
+                            return (
+                                f"Error in {label}: Cannot resolve base revision for "
+                                f"'{path}' to build cumulative diff. Staged patch preserved."
+                            )
 
             if initial_contents.get(path) is None and working_contents.get(path) is None:
                 return f"Error in {label}: File not found: '{path}'."
