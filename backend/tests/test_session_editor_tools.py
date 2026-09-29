@@ -575,7 +575,8 @@ async def test_resolve_current_content_deleted_staged() -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_current_content_unsynced_disk_preserves_staged_patch(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When disk file is stale (sync failed or missed), _resolve_current_content still returns staged content."""
+    """When disk file is stale (sync failed or missed) but a clean base is
+    available, _resolve_current_content still returns staged content."""
     from app.services.session_tools.editor import _resolve_current_content
 
     owner_dir = tmp_path / "test"
@@ -592,17 +593,188 @@ async def test_resolve_current_content_unsynced_disk_preserves_staged_patch(tmp_
         "mod.py": "--- a/mod.py\n+++ b/mod.py\n@@ -1,2 +1,2 @@\n-x = 1\n+x = 99\n y = 2\n"
     }
 
-    content = await _resolve_current_content(
-        path="mod.py",
-        staged_patches=staged,
-        repo_owner="test",
-        repo_name="LocalRepo",
-        base_sha="any",
-        gh_token=None,
-    )
+    # Clean base available via remote fetch (no git repo in tmp dir).
+    with _gh_patch("x = 1\ny = 2\n"):
+        content = await _resolve_current_content(
+            path="mod.py",
+            staged_patches=staged,
+            repo_owner="test",
+            repo_name="LocalRepo",
+            base_sha="any",
+            gh_token=None,
+        )
     assert content is not None
     assert "x = 99" in content
     assert "x = 1" not in content
+
+
+@pytest.mark.asyncio
+async def test_resolve_current_content_no_clean_base_returns_disk_as_is(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a clean base, disk is the only ground truth: the staged diff is
+    NOT reapplied on top of disk content (prevents double diff application)."""
+    from app.services.session_tools.editor import _resolve_current_content
+
+    owner_dir = tmp_path / "test"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "LocalRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    disk_content = "x = 99\ny = 2\n"
+    test_file = repo_dir / "mod.py"
+    test_file.write_text(disk_content, encoding="utf-8")
+
+    staged = {
+        "mod.py": "--- a/mod.py\n+++ b/mod.py\n@@ -1,2 +1,2 @@\n-x = 1\n+x = 99\n y = 2\n"
+    }
+
+    async def _no_base(*args, **kwargs):
+        return None
+
+    with (
+        patch(
+            "app.services.session_tools.editor._get_clean_base",
+            side_effect=_no_base,
+        ),
+        patch(
+            "app.services.session_tools.editor.fetch_file_content",
+            new_callable=AsyncMock,
+            side_effect=Exception("no remote"),
+        ),
+    ):
+        content = await _resolve_current_content(
+            path="mod.py",
+            staged_patches=staged,
+            repo_owner="test",
+            repo_name="LocalRepo",
+            base_sha="any",
+            gh_token=None,
+        )
+    assert content == disk_content
+
+
+@pytest.mark.asyncio
+async def test_resolve_current_content_unstaged_prefers_clean_base_over_dirty_tree(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unstaged file resolves to the clean base bound to base_sha even when
+    the shared working tree carries dirty changes from another session/host."""
+    from app.services.session_tools.editor import _resolve_current_content
+
+    owner_dir = tmp_path / "test"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "LocalRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    dirty = "x = 1\ny = 2\n# foreign dirty line\n"
+    clean = "x = 1\ny = 2\n"
+    (repo_dir / "mod.py").write_text(dirty, encoding="utf-8")
+
+    with _gh_patch(clean):
+        content = await _resolve_current_content(
+            path="mod.py",
+            staged_patches={},
+            repo_owner="test",
+            repo_name="LocalRepo",
+            base_sha="abc123",
+            gh_token=None,
+        )
+    assert content == clean
+
+
+@pytest.mark.asyncio
+async def test_str_replace_staged_file_fails_closed_without_clean_base(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second edit on an already-staged file fails closed when the base
+    revision is unresolvable, instead of diffing against the intermediate
+    buffer and dropping the first edit."""
+    owner_dir = tmp_path / "test"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "LocalRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    (repo_dir / "mod.py").write_text("x = 99\ny = 2\n", encoding="utf-8")
+    staged = {
+        "mod.py": "--- a/mod.py\n+++ b/mod.py\n@@ -1,2 +1,2 @@\n-x = 1\n+x = 99\n y = 2\n"
+    }
+    queue = _make_queue()
+
+    async def _no_base(*args, **kwargs):
+        return None
+
+    with patch(
+        "app.services.session_tools.editor._get_clean_base",
+        side_effect=_no_base,
+    ):
+        result = await tool_str_replace(
+            path="mod.py",
+            old_str="y = 2",
+            new_str="y = 200",
+            repo_owner="test",
+            repo_name="LocalRepo",
+            base_sha="abc123",
+            staged_patches=staged,
+            queue=queue,
+        )
+
+    assert "Cannot resolve base revision" in result
+    assert "Staged patch preserved" in result
+    # First edit's staged patch untouched; nothing emitted.
+    assert staged["mod.py"].startswith("--- a/mod.py")
+    assert "+x = 99" in staged["mod.py"]
+    assert queue._q.empty()
+
+
+@pytest.mark.asyncio
+async def test_apply_multi_patch_staged_file_fails_closed_without_clean_base() -> None:
+    """A multi-patch batch touching an already-staged file fails atomically
+    when the base revision is unresolvable — staged_patches left untouched."""
+    staged = {
+        "mod.py": "--- a/mod.py\n+++ b/mod.py\n@@ -1,2 +1,2 @@\n-x = 1\n+x = 99\n y = 2\n"
+    }
+    queue = _make_queue()
+
+    async def _no_base(*args, **kwargs):
+        return None
+
+    async def _resolve_current(
+        path, staged_patches, repo_owner, repo_name, base_sha, gh_token=None
+    ):
+        return "x = 99\ny = 2\n"
+
+    with patch(
+        "app.services.session_tools.editor._get_clean_base",
+        side_effect=_no_base,
+    ), patch(
+        "app.services.session_tools.editor._resolve_current_content",
+        side_effect=_resolve_current,
+    ):
+        result = await tool_apply_multi_patch(
+            patches=[
+                {
+                    "type": "str_replace",
+                    "path": "mod.py",
+                    "old_str": "y = 2",
+                    "new_str": "y = 200",
+                }
+            ],
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="abc123",
+            staged_patches=staged,
+            queue=queue,
+        )
+
+    assert "Cannot resolve base revision" in result
+    assert "Staged patch preserved" in result
+    assert "+x = 99" in staged["mod.py"]
+    assert "y = 200" not in staged["mod.py"]
+    assert queue._q.empty()
 
 
 @pytest.mark.asyncio

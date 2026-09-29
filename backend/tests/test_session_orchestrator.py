@@ -663,3 +663,78 @@ def test_discard_patch_preserves_tracked_file_on_failed_checkout(tmp_path) -> No
         )
         assert not created_file.exists()
 
+
+@pytest.mark.asyncio
+async def test_tool_stage_patch_syncs_only_target_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging a patch for file A must not overwrite terminal edits on file B.
+
+    Regression test: _tool_stage_patch used to sync the entire staged_patches
+    dict to disk, which rewrote every staged file from clean_base + diff and
+    erased terminal edits on unrelated files.
+    """
+    import subprocess
+
+    from app.services.session_tools.editor import _make_unified_diff
+
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    base_a = "a = 1\n"
+    base_b = "b = 1\n"
+    (repo_dir / "a.py").write_text(base_a, encoding="utf-8")
+    (repo_dir / "b.py").write_text(base_b, encoding="utf-8")
+    for cmd in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test User"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "init"],
+    ):
+        subprocess.run(cmd, cwd=str(repo_dir), check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    staged_a = "a = 10\n"
+    staged_b = "b = 10\n"
+    diff_a = _make_unified_diff(base_a, staged_a, "a.py")
+    diff_b = _make_unified_diff(base_b, staged_b, "b.py")
+    staged = {"a.py": diff_a, "b.py": diff_b}
+
+    # Disk already reflects staged state; terminal then edits b.py.
+    (repo_dir / "a.py").write_text(staged_a, encoding="utf-8")
+    terminal_b = staged_b + "# terminal edit\n"
+    (repo_dir / "b.py").write_text(terminal_b, encoding="utf-8")
+
+    orch = _make_orchestrator_for_subagent_tests()
+    queue = SseQueue(maxsize=16)
+    new_a = "a = 10\n# staged via tool\n"
+    diff_a2 = _make_unified_diff(base_a, new_a, "a.py")
+
+    result = await orch._tool_stage_patch(
+        args={"path": "a.py", "diff": diff_a2, "action": "modify"},
+        staged_patches=staged,
+        queue=queue,
+        repo_owner="owner",
+        repo_name="repo",
+        base_sha=sha,
+    )
+
+    assert "Patch staged" in result
+    assert staged["a.py"] == diff_a2
+    # Unrelated staged patch untouched in memory...
+    assert staged["b.py"] == diff_b
+    # ...and its terminal edits preserved on disk.
+    assert (repo_dir / "b.py").read_text(encoding="utf-8") == terminal_b
+    # Target file synced.
+    assert (repo_dir / "a.py").read_text(encoding="utf-8") == new_a
+

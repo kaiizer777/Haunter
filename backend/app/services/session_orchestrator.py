@@ -1829,7 +1829,15 @@ class SessionOrchestrator:
                 from app.services.session_tools.sandbox import resolve_repo_dir, sync_staged_patches_to_repo
                 repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
                 if repo_root:
-                    sync_staged_patches_to_repo(repo_root, staged_patches, base_sha=base_sha)
+                    # Isolate sync to the patch being staged only: syncing the
+                    # entire staged_patches dict would rewrite every staged file
+                    # from clean_base + diff and erase terminal edits on
+                    # unrelated files. Propagate a disk-refresh back if sync
+                    # updated this patch (created-file terminal-edit case).
+                    sync_dict = {path: diff}
+                    sync_staged_patches_to_repo(repo_root, sync_dict, base_sha=base_sha)
+                    if sync_dict.get(path) != diff:
+                        staged_patches[path] = sync_dict[path]
             except Exception as e:
                 logger.warning("Failed syncing staged patch to disk: %s", e)
 
