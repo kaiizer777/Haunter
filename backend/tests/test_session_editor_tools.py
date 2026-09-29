@@ -464,3 +464,70 @@ async def test_apply_multi_patch_sequential_same_file() -> None:
     assert "x = 99" in patched
     assert "y = 200" in patched
     assert "z = 3" in patched
+
+
+@pytest.mark.asyncio
+async def test_editor_tools_sync_to_local_disk(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a local checkout is found, editor tools read and write directly to disk."""
+    from pathlib import Path
+    from app.services.session_tools.editor import (
+        tool_create_file,
+        tool_delete_file,
+        tool_str_replace,
+    )
+
+    owner_dir = tmp_path / "test"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "LocalRepo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    src_dir = repo_dir / "src"
+    src_dir.mkdir()
+    main_file = src_dir / "main.py"
+    main_file.write_text("def test():\n    return 10\n", encoding="utf-8")
+
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+
+    # 1. str_replace reads from disk and writes updated code to disk
+    res = await tool_str_replace(
+        path="src/main.py",
+        old_str="return 10",
+        new_str="return 42",
+        repo_owner="test",
+        repo_name="LocalRepo",
+        base_sha="any",
+        staged_patches=staged,
+        queue=queue,
+    )
+    assert "Successfully replaced code" in res
+    assert "return 42" in main_file.read_text(encoding="utf-8")
+    assert "src/main.py" in staged
+
+    # 2. create_file creates the file on disk
+    res_create = await tool_create_file(
+        path="src/helper.py",
+        content="HELPER = True\n",
+        staged_patches=staged,
+        queue=queue,
+        repo_owner="test",
+        repo_name="LocalRepo",
+    )
+    assert "Successfully staged new file" in res_create
+    helper_file = src_dir / "helper.py"
+    assert helper_file.is_file()
+    assert helper_file.read_text(encoding="utf-8") == "HELPER = True\n"
+
+    # 3. delete_file deletes the file on disk
+    res_del = await tool_delete_file(
+        path="src/helper.py",
+        repo_owner="test",
+        repo_name="LocalRepo",
+        base_sha="any",
+        staged_patches=staged,
+        queue=queue,
+    )
+    assert "Successfully staged deletion" in res_del
+    assert not helper_file.exists()
+

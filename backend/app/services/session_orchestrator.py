@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -861,8 +863,9 @@ _TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "git_diff",
             "description": (
-                "Show a unified diff between two refs (branch names, commit SHAs, or tags). "
-                "Use this to compare the session branch against main, or any two commit SHAs."
+                "Show a unified diff between two refs (branch names, commit SHAs, or tags), "
+                "or between a ref and the local working tree (use head='working' or head='staged'). "
+                "Use this to inspect uncommitted edits, staged patches, or compare the session branch against main."
             ),
             "parameters": {
                 "type": "object",
@@ -991,7 +994,7 @@ def _build_system_prompt(
         " 26. `git_log(path, limit)` — list commit history on the session branch (optionally scoped to a file). Returns sha, date, author, message.\n"
         " 27. `git_blame(path)` — annotate each line range of a file with the commit that last modified it (author, date, sha, message).\n"
         " 28. `git_show(commit_sha)` — show full metadata and unified diff for a single commit.\n"
-        " 29. `git_diff(base, head)` — unified diff between two refs (branch names, SHAs, or tags).\n"
+        " 29. `git_diff(base, head)` — unified diff between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
         " 30. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
         "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n\n"
         "For multi-step requests, start by calling update_plan to outline your steps. "
@@ -1468,15 +1471,23 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
             )
         elif tool_name == "stage_patch":
             return await self._tool_stage_patch(
                 args=args,
                 staged_patches=staged_patches,
                 queue=queue,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
             )
         elif tool_name == "discard_patch":
-            return self._tool_discard_patch(args=args, staged_patches=staged_patches)
+            return self._tool_discard_patch(
+                args=args,
+                staged_patches=staged_patches,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+            )
         elif tool_name == "grep_search":
             return await self._tool_grep_search(
                 args=args,
@@ -1519,6 +1530,8 @@ class SessionOrchestrator:
                 args=args,
                 staged_patches=staged_patches,
                 queue=queue,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
             )
         elif tool_name == "delete_file":
             return await self._tool_delete_file(
@@ -1568,6 +1581,7 @@ class SessionOrchestrator:
                 queue=queue,
                 repo_owner=repo_owner,
                 repo_name=repo_name,
+                staged_patches=staged_patches,
             )
         elif tool_name == "run_linter":
             return await self._tool_run_linter(
@@ -1575,6 +1589,7 @@ class SessionOrchestrator:
                 queue=queue,
                 repo_owner=repo_owner,
                 repo_name=repo_name,
+                staged_patches=staged_patches,
             )
         elif tool_name == "run_targeted_tests":
             return await self._tool_run_targeted_tests(
@@ -1582,6 +1597,7 @@ class SessionOrchestrator:
                 queue=queue,
                 repo_owner=repo_owner,
                 repo_name=repo_name,
+                staged_patches=staged_patches,
             )
         elif tool_name == "verify_in_ci_sandbox":
             if session is None:
@@ -1651,6 +1667,7 @@ class SessionOrchestrator:
                 args=args,
                 repo_owner=repo_owner,
                 repo_name=repo_name,
+                staged_patches=staged_patches,
             )
         elif tool_name == "invoke_subagent":
             if session is None:
@@ -1690,6 +1707,7 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
     ) -> str:
         path: str = args.get("path", "")
         try:
@@ -1697,21 +1715,45 @@ class SessionOrchestrator:
         except ValueError as exc:
             return f"Error: {exc}"
 
-        try:
-            content = await fetch_file_content(
-                owner=repo_owner,
-                repo=repo_name,
-                path=path,
-                sha=base_sha,
-                token=self.gh_token,
-            )
-        except GitHubClientError as exc:
-            logger.warning(
-                "session_orchestrator: read_file GitHub error for path=%s: %s",
-                path,
-                exc,
-            )
-            return f"Error reading file: {exc}"
+        content: str | None = None
+
+        # 1. Check local checkout if available
+        if repo_name and repo_name.strip():
+            try:
+                from app.services.session_tools.sandbox import resolve_repo_dir
+                repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+                if repo_root:
+                    local_path = os.path.normpath(os.path.join(repo_root, path))
+                    if os.path.isfile(local_path):
+                        with open(local_path, "r", encoding="utf-8", errors="replace") as f:
+                            content = f.read()
+            except Exception as e:
+                logger.debug("Failed reading file from local checkout: %s", e)
+
+        # 2. If not on local disk, fetch from GitHub
+        if content is None:
+            try:
+                content = await fetch_file_content(
+                    owner=repo_owner,
+                    repo=repo_name,
+                    path=path,
+                    sha=base_sha,
+                    token=self.gh_token,
+                )
+            except GitHubClientError as exc:
+                logger.warning(
+                    "session_orchestrator: read_file GitHub error for path=%s: %s",
+                    path,
+                    exc,
+                )
+                if not (staged_patches and path in staged_patches):
+                    return f"Error reading file: {exc}"
+
+        # 3. If staged_patches has an entry for path and wasn't already synced, overlay it
+        if staged_patches and path in staged_patches:
+            from app.services.session_tools.editor import _apply_staged_diff
+            diff = staged_patches[path]
+            content = _apply_staged_diff(content or "", diff)
 
         if content is None:
             return f"File not found: {path!r}"
@@ -1731,6 +1773,8 @@ class SessionOrchestrator:
         args: dict[str, Any],
         staged_patches: dict[str, str],
         queue: SseQueue,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
         path: str = args.get("path", "")
         diff: str = args.get("diff", "")
@@ -1758,6 +1802,16 @@ class SessionOrchestrator:
         # Stage the patch (upsert).
         staged_patches[path] = diff
 
+        # If a local checkout exists, sync to disk immediately
+        if repo_name:
+            try:
+                from app.services.session_tools.sandbox import resolve_repo_dir, sync_staged_patches_to_repo
+                repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+                if repo_root:
+                    sync_staged_patches_to_repo(repo_root, {path: diff})
+            except Exception as e:
+                logger.warning("Failed syncing staged patch to disk: %s", e)
+
         # Emit a file_diff SSE event so the Monaco editor updates live.
         try:
             await queue.put_file_diff(path=path, diff=diff, action=action)
@@ -1774,6 +1828,8 @@ class SessionOrchestrator:
         self,
         args: dict[str, Any],
         staged_patches: dict[str, str],
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
         path: str = args.get("path", "")
         try:
@@ -1783,6 +1839,20 @@ class SessionOrchestrator:
 
         if path in staged_patches:
             del staged_patches[path]
+            if repo_name:
+                try:
+                    import subprocess
+                    from app.services.session_tools.sandbox import resolve_repo_dir
+                    repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+                    if repo_root:
+                        subprocess.run(
+                            ["git", "checkout", "HEAD", "--", path],
+                            cwd=repo_root,
+                            capture_output=True,
+                            timeout=10,
+                        )
+                except Exception as e:
+                    logger.debug("Failed reverting file in local repo: %s", e)
             return f"Patch for {path!r} discarded."
         return f"No staged patch found for {path!r}."
 
@@ -1927,6 +1997,8 @@ class SessionOrchestrator:
         args: dict[str, Any],
         staged_patches: dict[str, str],
         queue: SseQueue,
+        repo_owner: str | None = None,
+        repo_name: str | None = None,
     ) -> str:
         path: str = str(args.get("path", ""))
         content: str = str(args.get("content", ""))
@@ -1935,6 +2007,8 @@ class SessionOrchestrator:
             content=content,
             staged_patches=staged_patches,
             queue=queue,
+            repo_owner=repo_owner or "",
+            repo_name=repo_name or "",
         )
 
     async def _tool_delete_file(
@@ -2153,6 +2227,7 @@ class SessionOrchestrator:
         queue: SseQueue,
         repo_owner: str | None = None,
         repo_name: str | None = None,
+        staged_patches: dict[str, str] | None = None,
     ) -> str:
         """Execute a terminal command with session context, SSE streaming, and repository routing."""
         command: str = str(args.get("command", ""))
@@ -2170,6 +2245,7 @@ class SessionOrchestrator:
             cwd=cwd,
             repo_owner=repo_owner,
             repo_name=repo_name,
+            staged_patches=staged_patches,
         )
         # Populate exit_code on args for frontend chip counters.
         first_line = result.splitlines()[0] if result else ""
@@ -2185,6 +2261,7 @@ class SessionOrchestrator:
         queue: SseQueue,
         repo_owner: str | None = None,
         repo_name: str | None = None,
+        staged_patches: dict[str, str] | None = None,
     ) -> str:
         """Run code linting with session context, SSE streaming, and repository routing."""
         raw_paths = args.get("paths", [])
@@ -2207,6 +2284,7 @@ class SessionOrchestrator:
             cwd=cwd,
             repo_owner=repo_owner,
             repo_name=repo_name,
+            staged_patches=staged_patches,
         )
         # Populate file_count for frontend chip.
         args["file_count"] = len(paths)
@@ -2218,6 +2296,7 @@ class SessionOrchestrator:
         queue: SseQueue,
         repo_owner: str | None = None,
         repo_name: str | None = None,
+        staged_patches: dict[str, str] | None = None,
     ) -> str:
         """Execute targeted test runners with session context, SSE streaming, and repository routing."""
         raw_targets = args.get("test_targets", [])
@@ -2238,6 +2317,7 @@ class SessionOrchestrator:
             cwd=cwd,
             repo_owner=repo_owner,
             repo_name=repo_name,
+            staged_patches=staged_patches,
         )
         # Populate target_count for frontend chip.
         args["target_count"] = len(test_targets)
@@ -2346,6 +2426,7 @@ class SessionOrchestrator:
         args: dict[str, Any],
         repo_owner: str,
         repo_name: str,
+        staged_patches: dict[str, str] | None = None,
     ) -> str:
         base: str = str(args.get("base", ""))
         head: str = str(args.get("head", ""))
@@ -2357,6 +2438,7 @@ class SessionOrchestrator:
             owner=repo_owner,
             repo=repo_name,
             token=self.gh_token,
+            staged_patches=staged_patches,
         )
 
     async def _tool_invoke_subagent(

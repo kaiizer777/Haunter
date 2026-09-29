@@ -584,3 +584,37 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
             queue=mock_queue,
         )
         assert res == "Error: Invalid range"
+ 
+ 
+@pytest.mark.asyncio
+async def test_tool_git_diff_working_tree_and_staged() -> None:
+    from app.services.session_tools.git import tool_git_diff
+ 
+    staged = {
+        "app/test.py": "--- a/app/test.py\n+++ b/app/test.py\n@@ -1 +1 @@\n-old\n+new\n"
+    }
+ 
+    # Test querying working / uncommitted
+    diff_worktree = await tool_git_diff(
+        base="HEAD",
+        head="working",
+        owner="org",
+        repo="repo",
+        token="token",
+        staged_patches=staged,
+    )
+    assert "app/test.py" in diff_worktree
+    assert "+new" in diff_worktree
+ 
+    # Test base == head with staged patches notifies user
+    diff_same = await tool_git_diff(
+        base="main",
+        head="main",
+        owner="org",
+        repo="repo",
+        token="token",
+        staged_patches=staged,
+    )
+    assert "No differences between ref 'main' and 'main'" in diff_same
+    assert "Note: 1 uncommitted file(s) are currently staged in the session" in diff_same
+

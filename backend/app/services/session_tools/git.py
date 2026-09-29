@@ -14,6 +14,8 @@ Exposed tools:
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 from typing import Any
 
 from app.github_client import (
@@ -213,15 +215,71 @@ async def tool_git_diff(
     owner: str = "",
     repo: str = "",
     token: str | None = None,
+    staged_patches: dict[str, str] | None = None,
 ) -> str:
     """
-    Show a unified diff between two refs (branches, tags, or SHAs).
+    Show a unified diff between two refs (branches, tags, or SHAs), or between a ref
+    and the local working tree (use head='working' or head='staged').
 
     base and head can be any ref: branch names, commit SHAs, or tags.
+    Set head='working' to inspect uncommitted changes in the local working tree,
+    or head='staged' to inspect currently staged patches in the session.
     Diff is truncated at 40 000 chars.
     """
     if not base or not head:
         return "Error: both base and head refs are required."
+
+    head_lower = head.strip().lower()
+    base_lower = base.strip().lower()
+
+    # Working tree or staged query
+    if head_lower in ("working", "worktree", "working_tree", "staged", "uncommitted") or base_lower in ("working", "worktree", "staged"):
+        # 1. If explicit staged requested or staged_patches present
+        if head_lower in ("staged", "staged_patches") and staged_patches:
+            diff_text = "\n\n".join(
+                f"# Staged patch: {p}\n{d.strip()}"
+                for p, d in staged_patches.items()
+                if d and d.strip()
+            )
+            return diff_text if diff_text else "No staged patches currently in session."
+
+        # 2. Check local repo checkout if available
+        if repo:
+            try:
+                from app.services.session_tools.sandbox import resolve_repo_dir
+                repo_root, _ = resolve_repo_dir(repo_name=repo, repo_owner=owner)
+                if repo_root and os.path.isdir(repo_root):
+                    ref_target = "HEAD" if base_lower in ("working", "worktree", "staged") else base
+                    cmd = ["git", "-C", repo_root, "diff", ref_target]
+                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if p.stdout and p.stdout.strip():
+                        diff_text = p.stdout
+                        if len(diff_text) > _MAX_DIFF_CHARS:
+                            return diff_text[:_MAX_DIFF_CHARS] + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
+                        return diff_text
+            except Exception as exc:
+                logger.debug("git_diff: local git diff failed: %s", exc)
+
+        # 3. Fallback to staged_patches if available
+        if staged_patches:
+            diff_text = "\n\n".join(
+                f"# Staged patch: {p}\n{d.strip()}"
+                for p, d in staged_patches.items()
+                if d and d.strip()
+            )
+            if diff_text:
+                return diff_text
+
+        return "No uncommitted working-tree differences found."
+
+    if base.strip() == head.strip():
+        if staged_patches:
+            return (
+                f"No differences between ref '{base}' and '{head}'. "
+                f"Note: {len(staged_patches)} uncommitted file(s) are currently staged in the session. "
+                "Use head='working' or head='staged' to inspect uncommitted working-tree edits."
+            )
+        return f"No differences between '{base}' and '{head}'."
 
     try:
         diff_text = await fetch_diff(
@@ -235,6 +293,12 @@ async def tool_git_diff(
         return f"Error fetching diff between '{base}' and '{head}': {exc}"
 
     if not diff_text.strip():
+        if staged_patches:
+            return (
+                f"No differences between ref '{base}' and '{head}'. "
+                f"Note: {len(staged_patches)} uncommitted file(s) are currently staged in the session. "
+                "Use head='working' or head='staged' to inspect uncommitted working-tree edits."
+            )
         return f"No differences between '{base}' and '{head}'."
 
     if len(diff_text) > _MAX_DIFF_CHARS:

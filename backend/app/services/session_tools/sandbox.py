@@ -130,7 +130,7 @@ def _find_repo_python(cwd: str | None = None) -> str | None:
     if not cwd or not os.path.isdir(cwd):
         return None
     curr = os.path.abspath(cwd)
-    for _ in range(4):
+    for _ in range(5):
         for venv_name in (".venv", "venv", "env"):
             if sys.platform == "win32":
                 cand = os.path.join(curr, venv_name, "Scripts", "python.exe")
@@ -163,8 +163,26 @@ def _has_runner(python_bin: str, runner_name: str) -> bool:
         os.path.join("lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"),
         "site-packages",
     ):
-        if os.path.isdir(os.path.join(parent_dir, site_sub, runner_name)):
-            return True
+        target_dir = os.path.join(parent_dir, site_sub)
+        if os.path.isdir(target_dir):
+            if os.path.isdir(os.path.join(target_dir, runner_name)):
+                return True
+            for entry in os.listdir(target_dir):
+                if entry.lower().startswith(runner_name.lower()):
+                    return True
+    lib_dir = os.path.join(parent_dir, "lib")
+    if os.path.isdir(lib_dir):
+        try:
+            for sub in os.listdir(lib_dir):
+                if sub.startswith("python"):
+                    sp = os.path.join(lib_dir, sub, "site-packages")
+                    if os.path.isdir(sp) and (
+                        os.path.isdir(os.path.join(sp, runner_name))
+                        or any(e.lower().startswith(runner_name.lower()) for e in os.listdir(sp))
+                    ):
+                        return True
+        except Exception:
+            pass
     return False
 
 
@@ -176,15 +194,20 @@ def _prepare_cmd_argv(argv: list[str], cwd: str | None = None) -> list[str]:
     bin_name = cmd_argv[0].lower()
 
     # On Windows, wrap shell builtins so subprocess.Popen succeeds with shell=False
-    if sys.platform == "win32" and bin_name in (
-        "dir", "del", "copy", "type", "cls", "mkdir", "md", "rmdir", "rd", "move"
-    ):
-        for arg in cmd_argv[1:]:
-            if any(char in arg for char in ("&", "|", "<", ">", "^")):
-                raise ValueError(
-                    f"Shell metacharacters are not permitted in arguments for Windows built-in '{bin_name}'"
-                )
-        return ["cmd", "/c"] + cmd_argv
+    if sys.platform == "win32":
+        if bin_name in (
+            "dir", "del", "copy", "type", "cls", "mkdir", "md", "rmdir", "rd", "move", "echo", "time", "ver"
+        ):
+            for arg in cmd_argv[1:]:
+                if any(char in arg for char in ("&", "|", "<", ">", "^")):
+                    raise ValueError(
+                        f"Shell metacharacters are not permitted in arguments for Windows built-in '{bin_name}'"
+                    )
+            return ["cmd", "/c"] + cmd_argv
+        if bin_name == "cat" and not shutil.which("cat"):
+            # Emulate Unix cat on Windows via cmd /c type
+            file_args = [a for a in cmd_argv[1:] if not a.startswith("-")]
+            return ["cmd", "/c", "type"] + file_args
 
     repo_python = _find_repo_python(cwd)
     effective_python = repo_python if repo_python else sys.executable
@@ -465,41 +488,130 @@ def parse_command_chain(command: str) -> list[tuple[list[str], str]]:
     """
     Split command string into a list of (argv, operator) pairs.
     operator is '&&', ';', or '' (for the final command).
-    Preserves quoted strings and prevents injection.
+
+    Robustly handles:
+      - Quotes ('...' and "...") and escaped characters without mangling arguments.
+      - Preserves arguments with colons (e.g. 'git show HEAD:path').
+      - Strips redundant shell redirection tokens ('2>&1', '1>&2', etc.) that break shell=False subprocesses.
+      - Preserves multi-line strings and newlines inside quoted strings.
     """
-    s = shlex.shlex(command, punctuation_chars=True)
-    s.whitespace_split = False
-    tokens = list(s)
+    if not command or not command.strip():
+        return []
 
+    # 1. Split into subcommands on '&&' and ';' strictly outside quoted blocks
+    raw_subcommands: list[tuple[str, str]] = []
+    current: list[str] = []
+    in_single_quote = False
+    in_double_quote = False
+    escape = False
+
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if escape:
+            current.append(ch)
+            escape = False
+            i += 1
+            continue
+
+        if ch == "\\" and not in_single_quote:
+            escape = True
+            current.append(ch)
+            i += 1
+            continue
+
+        if ch == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(ch)
+            i += 1
+            continue
+
+        if ch == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(ch)
+            i += 1
+            continue
+
+        if not in_single_quote and not in_double_quote:
+            if command[i : i + 2] == "&&":
+                raw_subcommands.append(("".join(current).strip(), "&&"))
+                current = []
+                i += 2
+                continue
+            elif ch == ";":
+                raw_subcommands.append(("".join(current).strip(), ";"))
+                current = []
+                i += 1
+                continue
+
+        current.append(ch)
+        i += 1
+
+    if current:
+        tail = "".join(current).strip()
+        if tail:
+            raw_subcommands.append((tail, ""))
+
+    # 2. For each subcommand, parse into argv using shlex.split with posix mode
     subcommands: list[tuple[list[str], str]] = []
-    current_argv: list[str] = []
+    for sub_str, op in raw_subcommands:
+        if not sub_str:
+            continue
+        try:
+            tokens = shlex.split(sub_str, posix=True)
+        except ValueError:
+            # Fallback on non-posix if unclosed quote
+            tokens = shlex.split(sub_str, posix=False)
 
-    for tok in tokens:
-        if tok in ("&&", ";"):
-            if current_argv:
-                cleaned = [
-                    t[1:-1]
-                    if (t.startswith('"') and t.endswith('"'))
-                    or (t.startswith("'") and t.endswith("'"))
-                    else t
-                    for t in current_argv
-                ]
-                subcommands.append((cleaned, tok))
-                current_argv = []
-        else:
-            current_argv.append(tok)
-
-    if current_argv:
-        cleaned = [
-            t[1:-1]
-            if (t.startswith('"') and t.endswith('"'))
-            or (t.startswith("'") and t.endswith("'"))
-            else t
-            for t in current_argv
-        ]
-        subcommands.append((cleaned, ""))
+        # Clean out common shell redirects that break subprocess with shell=False
+        cleaned_tokens = [t for t in tokens if t not in ("2>&1", "1>&2", ">&1", ">&2")]
+        if cleaned_tokens:
+            subcommands.append((cleaned_tokens, op))
 
     return subcommands
+
+
+def sync_staged_patches_to_repo(
+    repo_root: str,
+    staged_patches: dict[str, str] | None,
+) -> None:
+    """
+    Ensure all patches currently staged in memory/DB are synced to the local repository checkout.
+    This guarantees that local terminal commands, linters, and test runners execute
+    against the actual patched code, eliminating runner/editor checkout mismatches.
+    """
+    if not staged_patches or not repo_root or not os.path.isdir(repo_root):
+        return
+
+    from app.services.session_tools.editor import _apply_staged_diff
+
+    for rel_path, diff in staged_patches.items():
+        if not diff or not diff.strip():
+            continue
+        try:
+            target_path = os.path.normpath(os.path.join(repo_root, rel_path))
+            if os.path.commonpath([repo_root, target_path]) != repo_root:
+                continue
+
+            # If it's a file deletion patch
+            if "--- " in diff and "+++ /dev/null" in diff:
+                if os.path.isfile(target_path):
+                    os.remove(target_path)
+                continue
+
+            base_content = ""
+            if os.path.isfile(target_path):
+                with open(target_path, "r", encoding="utf-8", errors="replace") as f:
+                    base_content = f.read()
+
+            new_content = _apply_staged_diff(base_content, diff)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with open(target_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(new_content)
+            logger.info("sandbox: synced staged patch for %r to local disk", rel_path)
+        except Exception as exc:
+            logger.warning("sandbox: failed to sync staged patch %r to disk: %s", rel_path, exc)
 
 
 _SAFE_REPO_COMPONENT_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
@@ -801,6 +913,11 @@ async def tool_run_terminal_command(
             repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
         elif resolved_cwd:
             repo_boundary_root = os.path.realpath(resolved_cwd)
+
+    target_sync_root = repo_boundary_root or resolved_cwd
+    if target_sync_root and _kwargs.get("staged_patches"):
+        sync_staged_patches_to_repo(target_sync_root, _kwargs.get("staged_patches"))
+
     all_stdout: list[str] = []
     all_stderr: list[str] = []
     total_duration = 0.0
@@ -964,6 +1081,9 @@ async def tool_run_linter(
         return err
     effective_cwd = resolved_cwd or os.getcwd()
 
+    if effective_cwd and _kwargs.get("staged_patches"):
+        sync_staged_patches_to_repo(effective_cwd, _kwargs.get("staged_patches"))
+
     # Sanitize each path — no traversal allowed.
     cleaned: list[str] = []
     for p in paths:
@@ -1066,6 +1186,9 @@ async def tool_run_targeted_tests(
     if err:
         return err
     effective_cwd = resolved_cwd or os.getcwd()
+
+    if effective_cwd and _kwargs.get("staged_patches"):
+        sync_staged_patches_to_repo(effective_cwd, _kwargs.get("staged_patches"))
 
     # Sanitize target paths.
     cleaned: list[str] = []

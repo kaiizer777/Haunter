@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import os
 from typing import Any
 
 from app.github_client import GitHubClientError, fetch_file_content
@@ -28,6 +29,42 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _sync_to_local_disk(
+    path: str,
+    content: str | None,
+    repo_name: str | None,
+    repo_owner: str | None,
+    action: str = "write",
+) -> None:
+    """
+    Synchronize staged modifications directly to the local working tree on disk if
+    a local checkout exists. Eliminates runner/editor checkout mismatches.
+    """
+    if not repo_name or not repo_name.strip():
+        return
+    try:
+        from app.services.session_tools.sandbox import resolve_repo_dir
+        repo_root, err = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+        if not repo_root or not os.path.isdir(repo_root):
+            return
+
+        target_file = os.path.normpath(os.path.join(repo_root, path))
+        if os.path.commonpath([repo_root, target_file]) != repo_root:
+            return
+
+        if action == "delete":
+            if os.path.isfile(target_file):
+                os.remove(target_file)
+                logger.info("editor: deleted local file %r", target_file)
+        elif action in ("write", "modify", "create") and content is not None:
+            os.makedirs(os.path.dirname(target_file), exist_ok=True)
+            with open(target_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+            logger.info("editor: synced updated content to local file %r", target_file)
+    except Exception as exc:
+        logger.warning("editor: failed to sync %r to disk: %s", path, exc)
 
 
 def _apply_staged_diff(base_content: str, diff_text: str) -> str:
@@ -83,12 +120,28 @@ async def _resolve_current_content(
     Resolve the current working content of *path*.
 
     Priority:
-      1. If path is in staged_patches — reconstruct from the staged diff.
-      2. Otherwise fetch from GitHub at base_sha.
+      1. If path is in staged_patches — reconstruct from the staged diff (using local disk or GitHub base).
+      2. If local checkout exists on disk — read directly from local file.
+      3. Otherwise fetch from GitHub at base_sha.
 
     Returns None if the file does not exist at base and is not staged.
     """
+    local_base: str | None = None
+    if repo_name and repo_name.strip():
+        try:
+            from app.services.session_tools.sandbox import resolve_repo_dir
+            repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
+            if repo_root:
+                local_path = os.path.normpath(os.path.join(repo_root, path))
+                if os.path.isfile(local_path):
+                    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
+                        local_base = f.read()
+        except Exception:
+            local_base = None
+
     if path in staged_patches:
+        if local_base is not None:
+            return _apply_staged_diff(local_base, staged_patches[path])
         # Fetch base to apply the patch on top of it.
         try:
             base = await fetch_file_content(
@@ -102,6 +155,9 @@ async def _resolve_current_content(
             base = None
         base_str = base or ""
         return _apply_staged_diff(base_str, staged_patches[path])
+
+    if local_base is not None:
+        return local_base
 
     try:
         content = await fetch_file_content(
@@ -192,6 +248,9 @@ async def tool_str_replace(
     # Update staged patches.
     staged_patches[path] = diff
 
+    # Sync to local disk if local checkout exists
+    _sync_to_local_disk(path, new_content, repo_name, repo_owner, action="write")
+
     # Emit SSE event.
     try:
         await queue.put_file_diff(path=path, diff=diff, action="modify")
@@ -213,6 +272,8 @@ async def tool_create_file(
     content: str,
     staged_patches: dict[str, str],
     queue: SseQueue,
+    repo_owner: str = "",
+    repo_name: str = "",
 ) -> str:
     """
     Stage a new file by generating a unified diff from /dev/null to the new content.
@@ -235,6 +296,9 @@ async def tool_create_file(
     )
 
     staged_patches[path] = diff
+
+    # Sync to local disk if local checkout exists
+    _sync_to_local_disk(path, content, repo_name, repo_owner, action="create")
 
     try:
         await queue.put_file_diff(path=path, diff=diff, action="create")
@@ -294,6 +358,9 @@ async def tool_delete_file(
     )
 
     staged_patches[path] = diff
+
+    # Sync to local disk if local checkout exists
+    _sync_to_local_disk(path, None, repo_name, repo_owner, action="delete")
 
     try:
         await queue.put_file_diff(path=path, diff=diff, action="delete")
@@ -497,6 +564,14 @@ async def tool_apply_multi_patch(
 
     for path, diff, action in final_committed:
         staged_patches[path] = diff
+        final_content = working_contents.get(path, "")
+        _sync_to_local_disk(
+            path,
+            final_content if action != "delete" else None,
+            repo_name,
+            repo_owner,
+            action=action,
+        )
         try:
             await queue.put_file_diff(path=path, diff=diff, action=action)
         except Exception as exc:

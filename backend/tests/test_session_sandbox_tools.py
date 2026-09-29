@@ -927,3 +927,48 @@ def test_prepare_cmd_argv_windows_builtins_percent_allowed(monkeypatch: pytest.M
 
     argv_user = _prepare_cmd_argv(["type", r"%USERPROFILE%\notes.txt"])
     assert argv_user == ["cmd", "/c", "type", r"%USERPROFILE%\notes.txt"]
+
+
+def test_parse_command_chain_preserves_colons_and_quotes() -> None:
+    """parse_command_chain must not split git refs with colons or mangled quotes."""
+    from app.services.session_tools.sandbox import parse_command_chain
+
+    # 1. Colon preservation for git show HEAD:path
+    parsed = parse_command_chain("git show HEAD:path")
+    assert parsed == [(['git', 'show', 'HEAD:path'], '')]
+
+    # 2. Semicolons inside quotes must not split command chains
+    parsed = parse_command_chain('python -c "import sys; print(1)"')
+    assert parsed == [(['python', '-c', 'import sys; print(1)'], '')]
+
+    # 3. Chained commands with quotes and internal semicolons
+    parsed = parse_command_chain('cd backend && python -c "import sys; print(1)"')
+    assert parsed == [
+        (['cd', 'backend'], '&&'),
+        (['python', '-c', 'import sys; print(1)'], ''),
+    ]
+
+    # 4. Redundant shell redirect removal (2>&1)
+    parsed = parse_command_chain("pytest 2>&1")
+    assert parsed == [(['pytest'], '')]
+
+    # 5. Multiline string preservation
+    multiline = 'python -c "x = 1\ny = 2\nprint(x + y)"'
+    parsed = parse_command_chain(multiline)
+    assert parsed == [(['python', '-c', 'x = 1\ny = 2\nprint(x + y)'], '')]
+
+
+def test_prepare_cmd_argv_windows_echo_and_cat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_prepare_cmd_argv handles 'echo' as cmd builtin and emulates 'cat' on Windows."""
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    argv_echo = _prepare_cmd_argv(["echo", "hello world"])
+    assert argv_echo == ["cmd", "/c", "echo", "hello world"]
+
+    # Cat emulation when cat is not on PATH
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    argv_cat = _prepare_cmd_argv(["cat", "-A", "README.md"])
+    assert argv_cat == ["cmd", "/c", "type", "README.md"]
+
