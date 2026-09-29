@@ -1479,6 +1479,7 @@ class SessionOrchestrator:
                 queue=queue,
                 repo_owner=repo_owner,
                 repo_name=repo_name,
+                base_sha=base_sha,
             )
         elif tool_name == "discard_patch":
             return self._tool_discard_patch(
@@ -1793,6 +1794,7 @@ class SessionOrchestrator:
         queue: SseQueue,
         repo_owner: str | None = None,
         repo_name: str | None = None,
+        base_sha: str | None = None,
     ) -> str:
         """Stage a unified diff into session staged_patches and synchronize to disk."""
         path: str = args.get("path", "")
@@ -1827,7 +1829,7 @@ class SessionOrchestrator:
                 from app.services.session_tools.sandbox import resolve_repo_dir, sync_staged_patches_to_repo
                 repo_root, _ = resolve_repo_dir(repo_name=repo_name, repo_owner=repo_owner)
                 if repo_root:
-                    sync_staged_patches_to_repo(repo_root, {path: diff})
+                    sync_staged_patches_to_repo(repo_root, staged_patches, base_sha=base_sha)
             except Exception as e:
                 logger.warning("Failed syncing staged patch to disk: %s", e)
 
@@ -1862,7 +1864,7 @@ class SessionOrchestrator:
 
         if path in staged_patches:
             staged_diff = staged_patches[path]
-            is_creation = staged_diff.startswith("--- /dev/null")
+            is_creation = "--- /dev/null" in staged_diff or not staged_diff.strip()
             if repo_name:
                 try:
                     import subprocess
@@ -1878,6 +1880,27 @@ class SessionOrchestrator:
                             and os.path.commonpath([real_root, real_target]) == real_root
                         ):
                             if is_creation:
+                                # Creation relative to session base may still be tracked
+                                # in the local checkout HEAD. Check Git before unlinking
+                                # to avoid deleting a tracked file from disk.
+                                ls_res = subprocess.run(
+                                    ["git", "ls-files", "--error-unmatch", "--", path],
+                                    cwd=real_root,
+                                    capture_output=True,
+                                    timeout=10,
+                                )
+                                if ls_res.returncode == 0:
+                                    # Tracked in Git: restore from HEAD instead of unlinking.
+                                    res = subprocess.run(
+                                        ["git", "checkout", "HEAD", "--", path],
+                                        cwd=real_root,
+                                        capture_output=True,
+                                        timeout=10,
+                                    )
+                                    if res.returncode != 0:
+                                        return f"Error: failed to discard patch for {path!r} (git checkout failed)."
+                                    del staged_patches[path]
+                                    return f"Patch for {path!r} discarded."
                                 try:
                                     if os.path.isfile(real_target) and not os.path.islink(
                                         target_file

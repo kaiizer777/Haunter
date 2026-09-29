@@ -329,8 +329,14 @@ async def _resolve_current_content(
             return expected
 
         if local_base is not None:
-            # No deterministic clean base available: apply the staged diff directly
-            # to disk content without inverse-diff provenance guessing.
+            # No clean base available: editor tools synchronize every change to disk,
+            # so local content usually already reflects the staged state. Reapplying
+            # a pure-insertion diff would trigger Tier-3 anchor matching and duplicate
+            # lines, so skip reapply when the diff is already applied. When disk is
+            # stale (sync missed), the diff is not applied — apply it to preserve
+            # staged content.
+            if _is_diff_applied(local_base, diff):
+                return local_base
             try:
                 return apply_unified_diff(local_base, diff)
             except Exception:
