@@ -125,7 +125,7 @@ variable "github_app_id" {
 }
 
 variable "github_app_private_key" {
-  description = "PEM private key for the repo-write GitHub App. Injected as Lambda env var GITHUB_APP_PRIVATE_KEY — never commit the PEM."
+  description = "PEM private key for the repo-write GitHub App. Local dev only — NOT injected as a Lambda env var (Lambda shares the auditor App PEM via the pr.py fallback to stay under the env-var size limit). Never commit the PEM."
   type        = string
   sensitive   = true
   default     = ""

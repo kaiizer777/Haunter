@@ -122,22 +122,69 @@ def _escape_pr_text(text: str, max_len: int) -> str:
     return sanitised[:max_len]
 
 
+def _is_configured_str(value: object) -> bool:
+    """True when a credential setting is a non-blank string (whitespace-only = unset)."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _resolve_app_credentials() -> tuple[str | None, str | None, str]:
+    """
+    Resolve the GitHub App credentials used for installation-token auth.
+
+    Priority (same App 5109915 in dev — no key rotation):
+      1. ``settings.github_app_id`` + ``settings.github_app_private_key`` (explicit).
+      2. ``settings.github_auditor_app_id`` + ``settings.github_auditor_app_private_key``
+         (shared fallback — Lambda injects only the auditor PEM to stay under
+         the env-var size limit).
+      3. No App credentials → caller falls back to ``settings.github_token`` (dev only).
+
+    Both members of a pair must be non-blank for that source to win; a
+    half-configured pair is treated as missing so we never sign with a
+    mismatched id/key combination.
+
+    Returns:
+        (app_id, private_key, source) where source is one of
+        ``"github_app"``, ``"auditor_app"``, or ``"none"``. Values are never
+        logged by callers — only ``source``.
+    """
+    if _is_configured_str(settings.github_app_id) and _is_configured_str(
+        settings.github_app_private_key
+    ):
+        assert settings.github_app_id is not None
+        assert settings.github_app_private_key is not None
+        return settings.github_app_id.strip(), settings.github_app_private_key, "github_app"
+    if _is_configured_str(settings.github_auditor_app_id) and _is_configured_str(
+        settings.github_auditor_app_private_key
+    ):
+        assert settings.github_auditor_app_id is not None
+        assert settings.github_auditor_app_private_key is not None
+        return (
+            settings.github_auditor_app_id.strip(),
+            settings.github_auditor_app_private_key,
+            "auditor_app",
+        )
+    return None, None, "none"
+
+
 def _build_jwt() -> str:
     """
     Build a GitHub App JWT for authenticating as the App itself.
 
     Uses RS256 (RSA + SHA-256) as required by GitHub. The private key PEM
-    comes from settings.github_app_private_key — never logged here.
+    comes from _resolve_app_credentials() (explicit github_app_* first,
+    auditor_app_* fallback) — never logged here.
 
     Raises:
-        GitHubPRError: If github_app_id or github_app_private_key are not configured.
+        GitHubPRError: If no App credentials are configured under either source.
         ImportError:   If 'cryptography' is not installed.
     """
-    if not settings.github_app_id or not settings.github_app_private_key:
+    app_id, private_key, source = _resolve_app_credentials()
+    if not app_id or not private_key:
         raise GitHubPRError(
             "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be set to use "
             "installation token auth. Falling back to settings.github_token for dev."
         )
+    logger.info("github.pr: building App JWT with source=%s", source)
 
     try:
         from cryptography.hazmat.primitives import hashes, serialization
@@ -153,7 +200,7 @@ def _build_jwt() -> str:
     payload = {
         "iat": now - 60,  # allow 60s clock skew
         "exp": now + 600,  # 10 min max (GitHub enforces ≤ 10 min)
-        "iss": settings.github_app_id,
+        "iss": app_id,
     }
 
     def _b64url(data: bytes) -> str:
@@ -164,10 +211,10 @@ def _build_jwt() -> str:
     signing_input = f"{header_b64}.{payload_b64}".encode()
 
     # Load PEM — never log the key object
-    pem_bytes = settings.github_app_private_key.encode()
-    private_key = serialization.load_pem_private_key(pem_bytes, password=None)
+    pem_bytes = private_key.encode()
+    loaded_key = serialization.load_pem_private_key(pem_bytes, password=None)
 
-    signature = private_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+    signature = loaded_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
     sig_b64 = _b64url(signature)
 
     return f"{header_b64}.{payload_b64}.{sig_b64}"
@@ -180,8 +227,10 @@ async def get_installation_token(repo: Any) -> str:
     Token is cached per installation_id for 50 minutes (GitHub expires at 60).
     Cache is in-process only — token is NEVER written to DB or logs.
 
-    Falls back to settings.github_token when GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY
-    are not configured (dev/test convenience only — not for prod).
+    App credentials resolve via _resolve_app_credentials(): explicit
+    GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY first, then the shared auditor
+    App pair (same App in dev). Falls back to settings.github_token when
+    neither source is configured (dev/test convenience only — not for prod).
 
     Args:
         repo: Repo ORM object — must have .github_install_id set.
@@ -195,16 +244,19 @@ async def get_installation_token(repo: Any) -> str:
     install_id: Optional[int] = getattr(repo, "github_install_id", None)
 
     # Dev/test fallback — documented: not for prod
-    if not settings.github_app_id or not settings.github_app_private_key:
+    _, _, app_source = _resolve_app_credentials()
+    if app_source == "none":
         logger.warning(
-            "github.pr: GITHUB_APP_ID/PRIVATE_KEY not set — using settings.github_token (dev only)"
+            "github.pr: no App credentials (github_app_* or auditor_app_*) — "
+            "using settings.github_token (dev only)"
         )
         if settings.github_token:
             return settings.github_token
         raise GitHubPRError(
             "No GitHub auth configured: set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY "
-            "or GITHUB_TOKEN for dev."
+            "(or the shared auditor App pair) or GITHUB_TOKEN for dev."
         )
+    logger.info("github.pr: resolving installation token with source=%s", app_source)
 
     if not install_id:
         raise GitHubPRError(
@@ -277,11 +329,13 @@ async def resolve_installation_id(owner: str, repo: str) -> int:
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
 
-    if not settings.github_app_id or not settings.github_app_private_key:
+    _, _, app_source = _resolve_app_credentials()
+    if app_source == "none":
         raise GitHubPRError(
             "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be set to resolve "
             "the installation id."
         )
+    logger.info("github.pr: resolving installation id with source=%s", app_source)
 
     jwt_token = _build_jwt()
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/installation"

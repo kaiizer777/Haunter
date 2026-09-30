@@ -30,6 +30,7 @@ from app.github.pr import (
     GitHubPRValidationError,
     _TOKEN_CACHE,
     _escape_pr_text,
+    _resolve_app_credentials,
     create_branch,
     get_installation_token,
     open_pr,
@@ -206,6 +207,91 @@ async def test_get_installation_token_dev_fallback() -> None:
         token = await get_installation_token(repo)
 
     assert token == "ghp_dev_fallback_token"
+
+
+# ---------------------------------------------------------------------------
+# Test 6b: _resolve_app_credentials priority (explicit > auditor > none)
+# ---------------------------------------------------------------------------
+
+
+def _mock_pr_settings(
+    app_id=None,
+    app_key=None,
+    auditor_id=None,
+    auditor_key=None,
+):
+    """Patch app.github.pr.settings with fully explicit attrs (no MagicMock leakage)."""
+    patcher = patch("app.github.pr.settings")
+    mock_settings = patcher.start()
+    mock_settings.github_app_id = app_id
+    mock_settings.github_app_private_key = app_key
+    mock_settings.github_auditor_app_id = auditor_id
+    mock_settings.github_auditor_app_private_key = auditor_key
+    return patcher
+
+
+def test_resolve_app_credentials_explicit_wins() -> None:
+    """Both pairs set → explicit github_app_* wins (same App 5109915, no rotation)."""
+    patcher = _mock_pr_settings("explicit-id", "explicit-pem", "auditor-id", "auditor-pem")
+    try:
+        app_id, key, source = _resolve_app_credentials()
+    finally:
+        patcher.stop()
+    assert (app_id, key, source) == ("explicit-id", "explicit-pem", "github_app")
+
+
+def test_resolve_app_credentials_auditor_fallback() -> None:
+    """Explicit pair missing → shared auditor pair is used (Lambda size-limit path)."""
+    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem")
+    try:
+        app_id, key, source = _resolve_app_credentials()
+    finally:
+        patcher.stop()
+    assert (app_id, key, source) == ("auditor-id", "auditor-pem", "auditor_app")
+
+
+def test_resolve_app_credentials_half_pair_falls_through() -> None:
+    """Half-configured explicit pair (id without key) → auditor fallback, never mixed."""
+    patcher = _mock_pr_settings("explicit-id", "   ", "auditor-id", "auditor-pem")
+    try:
+        app_id, key, source = _resolve_app_credentials()
+    finally:
+        patcher.stop()
+    assert (app_id, key, source) == ("auditor-id", "auditor-pem", "auditor_app")
+
+
+def test_resolve_app_credentials_none_when_all_missing() -> None:
+    """Nothing configured → source=none so callers take the dev GITHUB_TOKEN path."""
+    patcher = _mock_pr_settings(None, "", "  ", None)
+    try:
+        app_id, key, source = _resolve_app_credentials()
+    finally:
+        patcher.stop()
+    assert (app_id, key, source) == (None, None, "none")
+
+
+@pytest.mark.anyio
+async def test_get_installation_token_uses_auditor_fallback() -> None:
+    """Explicit pair missing but auditor pair set → POSTs with JWT (no dev fallback)."""
+    repo = _make_repo(install_id=321)
+    _TOKEN_CACHE.clear()
+    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem")
+    try:
+        with patch("app.github.pr._build_jwt", return_value="fake_jwt") as mock_jwt:
+            with respx.mock(assert_all_called=True) as rx:
+                rx.post(
+                    "https://api.github.com/app/installations/321/access_tokens"
+                ).mock(
+                    return_value=httpx.Response(
+                        201, json={"token": "ghs_auditor_token"}
+                    )
+                )
+                token = await get_installation_token(repo)
+    finally:
+        patcher.stop()
+    assert token == "ghs_auditor_token"
+    assert mock_jwt.called
+    _TOKEN_CACHE.clear()
 
 
 # ---------------------------------------------------------------------------
