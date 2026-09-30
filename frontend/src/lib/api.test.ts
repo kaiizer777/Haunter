@@ -390,6 +390,22 @@ describe("api.ts", () => {
         false
       );
     });
+
+    it("scopes github token matching strictly to github credentials", () => {
+      // Generic unqualified token strings must NOT classify as GitHub-token
+      // errors — otherwise session/auth expiries skip the /login redirect.
+      expect(isGithubTokenError("Session token expired")).toBe(false);
+      expect(isGithubTokenError("Token invalid")).toBe(false);
+      expect(isGithubTokenError("Bearer token expired")).toBe(false);
+      expect(isGithubTokenError("Token has expired")).toBe(false);
+      expect(isGithubTokenError("Bearer token invalid")).toBe(false);
+      // Exact machine-readable codes classify as GitHub-token errors.
+      expect(isGithubTokenError("github_token_missing")).toBe(true);
+      expect(isGithubTokenError("github_token_invalid")).toBe(true);
+      // Explicit GitHub credential phrases classify as GitHub-token errors.
+      expect(isGithubTokenError("No github token found")).toBe(true);
+      expect(isGithubTokenError("Invalid github token")).toBe(true);
+    });
   });
 
   describe("non-2xx error status mapping", () => {

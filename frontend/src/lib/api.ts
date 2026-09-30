@@ -406,8 +406,14 @@ export function isGithubTokenError(detail: unknown): boolean {
   ) {
     return true;
   }
-  // Legacy human-readable strings from older backends / mixed deployments.
-  // Each example below is covered by one of these substrings:
+  // Strictly GitHub-qualified phrases only. Generic unqualified token
+  // substrings ("token expired", "token has expired", "token revoked",
+  // "token invalid", "token not found") MUST NOT match here — they
+  // misclassify session/auth errors such as "Session token expired",
+  // "Bearer token invalid", or "Token has expired" as GitHub-grant failures
+  // and incorrectly suppress the global 401 → /login redirect. Every branch
+  // below requires an explicit GitHub credential signal.
+  // Covered legacy strings (each contains "github" + "token"):
   // - "No GitHub token found" / "GitHub access token not found for user."
   // - "Invalid GitHub token" / "GitHub token revoked or invalid."
   // - "GitHub token expired" / "GITHUB ACCESS TOKEN EXPIRED"
@@ -416,19 +422,16 @@ export function isGithubTokenError(detail: unknown): boolean {
     d.includes("github token") ||
     d.includes("github access token") ||
     d.includes("decrypt github") ||
-    d.includes("token not found") ||
-    d.includes("token has expired") ||
-    d.includes("token expired") ||
-    d.includes("token revoked") ||
-    d.includes("token invalid")
+    (d.includes("github") && d.includes("token"))
   ) {
     return true;
   }
   // True session-expiry messages must NEVER classify as GitHub-token errors:
   // "Not authenticated" (backend app/auth.py), "Authentication required",
-  // "Invalid session" / "Invalid or expired session" / "Session expired...".
-  // None of the substrings above match these, so execution reaches here and
-  // correctly returns false.
+  // "Invalid session" / "Invalid or expired session" / "Session expired...",
+  // "Session token expired", "Bearer token invalid", "Token has expired",
+  // "Token invalid". None of the substrings above match these, so execution
+  // reaches here and correctly returns false.
   return false;
 }
 
