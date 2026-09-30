@@ -27,6 +27,15 @@ _GITHUB_API_BASE = "https://api.github.com"
 _DEFAULT_TIMEOUT_SECONDS = 15.0
 _MAX_PAGES = 3  # MVP limit: 3 pages @ 100 repos/page = 300 repos max
 
+# Machine-readable error codes for GitHub OAuth grant problems.
+# These MUST stay non-401: the app session (haunter_session cookie via
+# get_current_user) is still valid when the stored GitHub token is missing,
+# undecryptable, or rejected by api.github.com. Returning 401 here makes
+# frontend apiFetch treat a healthy session as expired and redirect to /login.
+# 428 (Precondition Required) = "re-grant GitHub OAuth first, then retry".
+GITHUB_TOKEN_MISSING_DETAIL = "github_token_missing"
+GITHUB_TOKEN_INVALID_DETAIL = "github_token_invalid"
+
 
 def _parse_next_link(response: httpx.Response) -> Optional[str]:
     """
@@ -69,11 +78,16 @@ async def list_available_repos(
     4. Compares with tenant's connected repos in DB (WHERE user_id = current_user.id)
        to set already_connected=True without leaking cross-tenant status.
     5. Returns repositories sorted by updated_at descending.
+
+    Error contract: GitHub OAuth grant problems (missing/undecryptable token,
+    or api.github.com rejecting the token with 401) return 428 with a
+    machine-readable detail ("github_token_missing" / "github_token_invalid")
+    — never 401 — so clients do not invalidate a healthy app session.
     """
     if not current_user.access_token:
         raise HTTPException(
-            status_code=401,
-            detail="GitHub not connected - please re-login",
+            status_code=428,
+            detail=GITHUB_TOKEN_MISSING_DETAIL,
         )
 
     try:
@@ -81,14 +95,14 @@ async def list_available_repos(
     except Exception:
         logger.error("Failed to decrypt access token for user %s", current_user.id)
         raise HTTPException(
-            status_code=401,
-            detail="GitHub not connected - please re-login",
+            status_code=428,
+            detail=GITHUB_TOKEN_MISSING_DETAIL,
         )
 
     if not token:
         raise HTTPException(
-            status_code=401,
-            detail="GitHub not connected - please re-login",
+            status_code=428,
+            detail=GITHUB_TOKEN_MISSING_DETAIL,
         )
 
     headers = {
@@ -126,8 +140,8 @@ async def list_available_repos(
                     current_user.id,
                 )
                 raise HTTPException(
-                    status_code=401,
-                    detail="Please re-login to grant repo access",
+                    status_code=428,
+                    detail=GITHUB_TOKEN_INVALID_DETAIL,
                 )
 
             if response.status_code in (403, 429):

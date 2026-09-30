@@ -383,6 +383,58 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Machine-readable error codes returned by GET /github/available-repos when
+ * the app session is valid but the stored GitHub OAuth grant is unusable.
+ * These must NEVER trigger the global 401 → /login redirect below — the
+ * user is still authenticated; only the GitHub grant needs a refresh via
+ * `${API_BASE}/auth/login`.
+ */
+export const GITHUB_TOKEN_MISSING = "github_token_missing";
+export const GITHUB_TOKEN_INVALID = "github_token_invalid";
+
+export function isGithubTokenError(detail: unknown): boolean {
+  if (typeof detail !== "string") return false;
+  const d = detail.toLowerCase();
+  // Machine-readable codes from GET /github/available-repos (backend
+  // app/routers/github.py: GITHUB_TOKEN_MISSING_DETAIL /
+  // GITHUB_TOKEN_INVALID_DETAIL). Match by inclusion so wrapped messages
+  // (e.g. prefixed by proxies) still classify correctly.
+  if (
+    d.includes(GITHUB_TOKEN_MISSING) ||
+    d.includes(GITHUB_TOKEN_INVALID)
+  ) {
+    return true;
+  }
+  // Strictly GitHub-qualified phrases only. Generic unqualified token
+  // substrings ("token expired", "token has expired", "token revoked",
+  // "token invalid", "token not found") MUST NOT match here — they
+  // misclassify session/auth errors such as "Session token expired",
+  // "Bearer token invalid", or "Token has expired" as GitHub-grant failures
+  // and incorrectly suppress the global 401 → /login redirect. Every branch
+  // below requires an explicit GitHub credential signal.
+  // Covered legacy strings (each contains "github" + "token"):
+  // - "No GitHub token found" / "GitHub access token not found for user."
+  // - "Invalid GitHub token" / "GitHub token revoked or invalid."
+  // - "GitHub token expired" / "GITHUB ACCESS TOKEN EXPIRED"
+  // - "Failed to decrypt GitHub token" / "Failed to decrypt GitHub access token."
+  if (
+    d.includes("github token") ||
+    d.includes("github access token") ||
+    d.includes("decrypt github") ||
+    (d.includes("github") && d.includes("token"))
+  ) {
+    return true;
+  }
+  // True session-expiry messages must NEVER classify as GitHub-token errors:
+  // "Not authenticated" (backend app/auth.py), "Authentication required",
+  // "Invalid session" / "Invalid or expired session" / "Session expired...",
+  // "Session token expired", "Bearer token invalid", "Token has expired",
+  // "Token invalid". None of the substrings above match these, so execution
+  // reaches here and correctly returns false.
+  return false;
+}
+
 type RequestOptions = RequestInit & { silent?: boolean };
 
 async function request<T>(
@@ -422,11 +474,44 @@ async function request<T>(
   }
 
   if (res.status === 401) {
+    // 401 dispatch: ONLY a GitHub-grant failure (machine-readable
+    // github_token_* codes or legacy human-readable GitHub-token strings,
+    // per isGithubTokenError) suppresses the global /login redirect — the
+    // app session is still valid, only the GitHub OAuth grant needs a
+    // refresh. Any other 401 (e.g. "Not authenticated" from backend
+    // app/auth.py when the session cookie is missing/invalid) is a true
+    // session expiry and follows the standard redirect to /login below,
+    // regardless of endpoint — including /github/available-repos.
+    try {
+      const body = (await res.clone().json()) as { detail?: unknown } | null;
+      if (body && isGithubTokenError(body.detail)) {
+        throw new ApiError(body.detail as string, 401);
+      }
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      // Non-JSON 401 body — fall through to the session-expiry redirect.
+    }
     if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.href = "/login";
     }
     throw new ApiError("Session expired or unauthorized", 401);
+  }
+
+  if (res.status === 428) {
+    // 428 (Precondition Required) is the GitHub-grant refresh contract for
+    // GET /github/available-repos: always surface as ApiError and NEVER
+    // redirect to /login — the app session is valid by definition here.
+    let detail = "github_token_missing";
+    try {
+      const body = (await res.clone().json()) as { detail?: unknown } | null;
+      if (body && typeof body.detail === "string" && body.detail) {
+        detail = body.detail;
+      }
+    } catch {
+      // Non-JSON 428 body — keep the github_token_missing default.
+    }
+    throw new ApiError(detail, 428);
   }
 
   if (res.status === 204) {

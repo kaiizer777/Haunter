@@ -3,12 +3,12 @@ Tests for GitHub integration router (backend/app/routers/github.py).
 
 Covers:
 1. 401 when no session cookie.
-2. User with missing or un-decryptable access token returns 401.
+2. User with missing or un-decryptable access token returns 428.
 3. List user's repos that are both private=True and permissions.push=True -> returned
    with already_connected=True if the user already added them.
 4. Pagination cursor passed through via Link rel="next" header across multiple pages.
 5. Network error connecting to GitHub (httpx.RequestError) is mapped to 502 with redacted body.
-6. GitHub 401 / expired / insufficient scope mapping to 401 with re-login prompt.
+6. GitHub 401 / expired / insufficient scope mapping to 428 with re-grant prompt.
 7. GitHub 403 / 429 rate limit mapping to 429 with Retry-After header.
 8. GitHub 5xx mapping to 502 generic error.
 9. Permission filtering: repositories without push or admin permissions are filtered out.
@@ -75,7 +75,7 @@ async def test_list_available_repos_requires_auth(client: httpx.AsyncClient):
 async def test_list_available_repos_user_missing_token(
     db: AsyncSession, user_factory, make_auth_client
 ):
-    """User without access_token returns 401."""
+    """User without access_token returns 428 (GitHub grant missing, session intact)."""
     await truncate_all(db)
     user = await user_factory(github_id=901, username="user_notoken", access_token=None)
     client = make_auth_client(user.id)
@@ -83,15 +83,15 @@ async def test_list_available_repos_user_missing_token(
     async with client:
         resp = await client.get("/github/available-repos")
 
-    assert resp.status_code == 401
-    assert resp.json() == {"detail": "GitHub not connected - please re-login"}
+    assert resp.status_code == 428
+    assert resp.json() == {"detail": "github_token_missing"}
 
 
 @pytest.mark.asyncio
 async def test_list_available_repos_user_corrupted_token(
     db: AsyncSession, user_factory, make_auth_client
 ):
-    """User with un-decryptable access_token returns 401."""
+    """User with un-decryptable access_token returns 428 (grant missing, session intact)."""
     await truncate_all(db)
     user = await user_factory(
         github_id=902, username="user_badtoken", access_token="initial"
@@ -104,8 +104,8 @@ async def test_list_available_repos_user_corrupted_token(
     async with client:
         resp = await client.get("/github/available-repos")
 
-    assert resp.status_code == 401
-    assert resp.json() == {"detail": "GitHub not connected - please re-login"}
+    assert resp.status_code == 428
+    assert resp.json() == {"detail": "github_token_missing"}
 
 
 @pytest.mark.asyncio
@@ -265,7 +265,7 @@ async def test_list_available_repos_network_error_mapped_to_502(
 async def test_list_available_repos_handles_insufficient_scope(
     db: AsyncSession, user_factory, make_auth_client
 ):
-    """GitHub returning 401 maps to 401 with re-login prompt."""
+    """GitHub returning 401 maps to 428 with machine-readable re-grant detail."""
     await truncate_all(db)
     user = await user_factory(
         github_id=906, username="user_expired", access_token="expired_token"
@@ -279,8 +279,8 @@ async def test_list_available_repos_handles_insufficient_scope(
         async with client:
             resp = await client.get("/github/available-repos")
 
-    assert resp.status_code == 401
-    assert resp.json() == {"detail": "Please re-login to grant repo access"}
+    assert resp.status_code == 428
+    assert resp.json() == {"detail": "github_token_invalid"}
 
 
 @pytest.mark.asyncio

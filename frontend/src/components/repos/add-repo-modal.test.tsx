@@ -18,6 +18,10 @@ vi.mock("@/lib/api", () => ({
       this.status = status;
     }
   },
+  GITHUB_TOKEN_MISSING: "github_token_missing",
+  GITHUB_TOKEN_INVALID: "github_token_invalid",
+  isGithubTokenError: (detail: unknown) =>
+    detail === "github_token_missing" || detail === "github_token_invalid",
 }));
 
 describe("add-repo-modal.tsx", () => {
@@ -263,8 +267,39 @@ describe("add-repo-modal.tsx", () => {
       />
     );
 
-    expect(await screen.findByText(/please re-login to grant repo access/i)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /re-login →/i })).toBeInTheDocument();
+    expect(await screen.findByText(/github access needed to list repositories/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /connect with github →/i })).toBeInTheDocument();
+  });
+
+  it("renders Connect with GitHub affordance on 428 github_token_missing without redirect", async () => {
+    vi.mocked(api.getAvailableRepos).mockRejectedValue(new ApiError("github_token_missing", 428));
+
+    render(
+      <AddRepoModal
+        isOpen={true}
+        onClose={mockOnClose}
+        onSuccess={mockOnSuccess}
+      />
+    );
+
+    expect(await screen.findByText(/github access needed to list repositories/i)).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /connect with github →/i });
+    expect(link.getAttribute("href")).toContain("/auth/login");
+  });
+
+  it("renders Connect with GitHub affordance on 428 github_token_invalid", async () => {
+    vi.mocked(api.getAvailableRepos).mockRejectedValue(new ApiError("github_token_invalid", 428));
+
+    render(
+      <AddRepoModal
+        isOpen={true}
+        onClose={mockOnClose}
+        onSuccess={mockOnSuccess}
+      />
+    );
+
+    expect(await screen.findByText(/github access needed to list repositories/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /connect with github →/i })).toBeInTheDocument();
   });
 
   it("renders 429 rate limit error with retry button when getAvailableRepos returns 429", async () => {
