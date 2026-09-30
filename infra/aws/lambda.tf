@@ -30,6 +30,21 @@
 ##############################################################################
 
 # ---------------------------------------------------------------------------
+# Normalised SSM parameter paths
+# ---------------------------------------------------------------------------
+# SSM parameter names should carry a leading slash ("/haunter/..."), and the
+# IAM Resource ARN below is built as "...:parameter${path}" — so a custom
+# path WITHOUT the slash (e.g. "custom/key") would produce the broken ARN
+# "...:parametercustom/key" and silently deny GetParameter. Normalise here so
+# the IAM policy and the Lambda env vars below always agree on one exact name.
+# ---------------------------------------------------------------------------
+
+locals {
+  github_app_private_key_ssm_path = startswith(var.github_app_private_key_ssm_path, "/") ? var.github_app_private_key_ssm_path : "/${var.github_app_private_key_ssm_path}"
+  github_sandbox_app_private_key_ssm_path = startswith(var.github_sandbox_app_private_key_ssm_path, "/") ? var.github_sandbox_app_private_key_ssm_path : "/${var.github_sandbox_app_private_key_ssm_path}"
+}
+
+# ---------------------------------------------------------------------------
 # CloudWatch Log Group
 # ---------------------------------------------------------------------------
 
@@ -106,8 +121,8 @@ resource "aws_iam_role_policy" "lambda_inline" {
           "ssm:GetParameters",
         ]
         Resource = [
-          "arn:aws:ssm:${var.region}:*:parameter${var.github_sandbox_app_private_key_ssm_path}",
-          "arn:aws:ssm:${var.region}:*:parameter${var.github_app_private_key_ssm_path}",
+          "arn:aws:ssm:${var.region}:*:parameter${local.github_sandbox_app_private_key_ssm_path}",
+          "arn:aws:ssm:${var.region}:*:parameter${local.github_app_private_key_ssm_path}",
         ]
       },
       # ----------------------------------------------------------------
@@ -190,7 +205,7 @@ resource "aws_lambda_function" "haunter" {
       # environment-variable size limit. The read-only auditor App below is
       # NEVER used for writes (fail-closed in pr.py).
       GITHUB_APP_ID                       = var.github_app_id
-      GITHUB_APP_PRIVATE_KEY_SSM_PATH     = var.github_app_private_key_ssm_path
+      GITHUB_APP_PRIVATE_KEY_SSM_PATH     = local.github_app_private_key_ssm_path
       # Read-only auditor App — used ONLY by the audit read path
       # (backend/app/github/auditor.py). Never a source for PR writes.
       GITHUB_AUDITOR_APP_ID               = var.github_auditor_app_id
@@ -207,7 +222,7 @@ resource "aws_lambda_function" "haunter" {
       GITHUB_SANDBOX_ORG                       = var.github_sandbox_org
       GITHUB_SANDBOX_APP_ID                    = var.github_sandbox_app_id
       GITHUB_SANDBOX_INSTALLATION_ID           = var.github_sandbox_installation_id
-      GITHUB_SANDBOX_APP_PRIVATE_KEY_SSM_PATH  = var.github_sandbox_app_private_key_ssm_path
+      GITHUB_SANDBOX_APP_PRIVATE_KEY_SSM_PATH  = local.github_sandbox_app_private_key_ssm_path
       GITHUB_SANDBOX_POLL_INTERVAL_SECONDS     = tostring(var.github_sandbox_poll_interval_seconds)
       GITHUB_SANDBOX_POLL_TIMEOUT_SECONDS      = tostring(var.github_sandbox_poll_timeout_seconds)
 

@@ -75,9 +75,19 @@ async def _ensure_install_id(session: Any, repo: Any) -> None:
         settings.github_app_id
     ) and _is_configured_str(settings.github_app_private_key)
     if not explicit_configured:
-        _, _, app_source = _resolve_app_credentials()
-        if app_source == "none":
-            return
+        # SSM-backed Lambda path: App ID + SSM PEM path (no PEM in env)
+        # counts as configured — resolve_installation_id() below loads the
+        # PEM from SSM via _resolve_write_credentials(), so backfill must
+        # not be skipped or get_installation_token() would fail on the
+        # missing install id.
+        ssm_path = getattr(settings, "github_app_private_key_ssm_path", "")
+        ssm_configured = _is_configured_str(
+            settings.github_app_id
+        ) and _is_configured_str(ssm_path)
+        if not ssm_configured:
+            _, _, app_source = _resolve_app_credentials()
+            if app_source == "none":
+                return
     try:
         install_id = await resolve_installation_id(repo.owner, repo.name)
     except Exception as exc:
