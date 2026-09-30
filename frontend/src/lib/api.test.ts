@@ -157,6 +157,13 @@ describe("api.ts", () => {
       expect(window.location.href).toBe("https://example.com/login");
     });
 
+    /**
+     * Machine-code 401s (github_token_missing / github_token_invalid from
+     * backend app/routers/github.py) bypass the /login redirect: the app
+     * session is valid, only the GitHub OAuth grant needs refresh. The body
+     * detail is preserved on the thrown ApiError so the modal can offer a
+     * re-grant CTA instead of a login redirect.
+     */
     it("does not redirect on 401 carrying a github_token detail (session stays valid)", async () => {
       delete (window as any).location;
       window.location = {
@@ -182,6 +189,11 @@ describe("api.ts", () => {
       expect(window.location.href).toBe("https://example.com/repos");
     });
 
+    /**
+     * 428 is the GitHub-grant refresh contract: always surfaces as ApiError
+     * without any /login redirect, for both machine codes. The detail is
+     * preserved verbatim so callers can branch on it.
+     */
     it("does not redirect on 428 github_token responses", async () => {
       delete (window as any).location;
       window.location = {
@@ -210,10 +222,17 @@ describe("api.ts", () => {
     });
 
     it("does not redirect on 401 with legacy backend github-token strings", async () => {
+      // CodeRabbit coverage: legacy mixed-deployment 401 messages must bypass
+      // the /login redirect (app session is valid; only the GitHub grant
+      // needs refresh) and surface as ApiError(401) with the body detail.
       const legacyDetails = [
         "GitHub access token not found for user.",
         "Failed to decrypt GitHub access token.",
         "GitHub token revoked or invalid.",
+        "No GitHub token found",
+        "Invalid GitHub token",
+        "GitHub token expired",
+        "Failed to decrypt GitHub token",
       ];
       for (const detail of legacyDetails) {
         delete (window as any).location;
@@ -241,14 +260,54 @@ describe("api.ts", () => {
       }
     });
 
-    it("never redirects 401s from /github/available-repos, even with unknown details", async () => {
+    /**
+     * Session-expiry 401s on /github/available-repos MUST preserve the global
+     * login redirect. Regression guard: a prior blanket
+     * `if (isAvailableRepos)` override suppressed the redirect for every 401
+     * on this endpoint — including "Not authenticated" (backend app/auth.py
+     * when the session cookie is missing/invalid) — leaving logged-out users
+     * stuck in the modal instead of landing on /login.
+     */
+    it("redirects to /login on 401 'Not authenticated' from /github/available-repos (session expiry)", async () => {
       delete (window as any).location;
       window.location = {
         pathname: "/repos",
         href: "https://example.com/repos",
       } as any;
 
-      // Unknown JSON detail → preserves body detail, no redirect.
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: "Not authenticated" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      try {
+        await api.getAvailableRepos();
+        expect.unreachable();
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.status).toBe(401);
+        expect(err.message).toBe("Session expired or unauthorized");
+      }
+      expect(window.location.href).toBe("/login");
+    });
+
+    /**
+     * Non-GitHub 401 details (unknown server messages, non-JSON bodies) are
+     * NOT GitHub-token errors, so they follow the standard session-expiry
+     * path: redirect to /login and throw ApiError(401). Only
+     * isGithubTokenError(body.detail) === true bypasses the redirect.
+     */
+    it("redirects to /login on 401 with non-github details from /github/available-repos", async () => {
+      delete (window as any).location;
+      window.location = {
+        pathname: "/repos",
+        href: "https://example.com/repos",
+      } as any;
+
+      // Unknown JSON detail → session-expiry redirect (detail NOT preserved;
+      // only github-token errors preserve the body detail).
       globalThis.fetch = vi.fn().mockResolvedValue(
         new Response(JSON.stringify({ detail: "Some unexpected error" }), {
           status: 401,
@@ -261,11 +320,16 @@ describe("api.ts", () => {
       } catch (err: any) {
         expect(err).toBeInstanceOf(ApiError);
         expect(err.status).toBe(401);
-        expect(err.message).toBe("Some unexpected error");
+        expect(err.message).toBe("Session expired or unauthorized");
       }
-      expect(window.location.href).toBe("https://example.com/repos");
+      expect(window.location.href).toBe("/login");
 
-      // Non-JSON 401 body → github_token_missing fallback, no redirect.
+      // Non-JSON 401 body → session-expiry redirect as well.
+      delete (window as any).location;
+      window.location = {
+        pathname: "/repos",
+        href: "https://example.com/repos",
+      } as any;
       globalThis.fetch = vi.fn().mockResolvedValue(
         new Response("Unauthorized", { status: 401 })
       );
@@ -275,9 +339,9 @@ describe("api.ts", () => {
       } catch (err: any) {
         expect(err).toBeInstanceOf(ApiError);
         expect(err.status).toBe(401);
-        expect(err.message).toBe("github_token_missing");
+        expect(err.message).toBe("Session expired or unauthorized");
       }
-      expect(window.location.href).toBe("https://example.com/repos");
+      expect(window.location.href).toBe("/login");
     });
   });
 
@@ -288,6 +352,9 @@ describe("api.ts", () => {
     });
 
     it("matches legacy backend 401 message strings (case-insensitive)", () => {
+      // CodeRabbit coverage: every legacy human-readable variant the
+      // mixed-deployment fleet may emit must classify as a GitHub-token
+      // error so the 401 handler bypasses the /login redirect.
       expect(
         isGithubTokenError("GitHub access token not found for user.")
       ).toBe(true);
@@ -298,9 +365,17 @@ describe("api.ts", () => {
         true
       );
       expect(isGithubTokenError("GITHUB ACCESS TOKEN EXPIRED")).toBe(true);
+      expect(isGithubTokenError("No GitHub token found")).toBe(true);
+      expect(isGithubTokenError("Invalid GitHub token")).toBe(true);
+      expect(isGithubTokenError("GitHub token expired")).toBe(true);
+      expect(isGithubTokenError("Failed to decrypt GitHub token")).toBe(true);
     });
 
     it("rejects non-strings and true session-expiry messages", () => {
+      // CodeRabbit coverage: session-expiry signals must NEVER classify as
+      // GitHub-token errors, otherwise logged-out users miss the /login
+      // redirect. Covers backend app/auth.py ("Not authenticated") plus
+      // generic session-expiry phrasings.
       expect(isGithubTokenError(undefined)).toBe(false);
       expect(isGithubTokenError(null)).toBe(false);
       expect(isGithubTokenError(401)).toBe(false);
@@ -308,6 +383,8 @@ describe("api.ts", () => {
         false
       );
       expect(isGithubTokenError("Not authenticated")).toBe(false);
+      expect(isGithubTokenError("Authentication required")).toBe(false);
+      expect(isGithubTokenError("Invalid session")).toBe(false);
       expect(isGithubTokenError("Invalid or expired session")).toBe(false);
       expect(isGithubTokenError("Session expired or unauthorized")).toBe(
         false
