@@ -125,10 +125,16 @@ variable "github_app_id" {
 }
 
 variable "github_app_private_key" {
-  description = "PEM private key for the repo-write GitHub App. Local dev only — NOT injected as a Lambda env var (Lambda shares the auditor App PEM via the pr.py fallback to stay under the env-var size limit). Never commit the PEM."
+  description = "PEM private key for the repo-write GitHub App. Local dev only — never injected as a Lambda env var (Lambda reads the PEM from SSM via github_app_private_key_ssm_path to stay under the env-var size limit). Never commit the PEM."
   type        = string
   sensitive   = true
   default     = ""
+}
+
+variable "github_app_private_key_ssm_path" {
+  description = "SSM Parameter Store path (SecureString) holding the repo-write GitHub App PEM. The main Lambda role has ssm:GetParameter on this path only; the PEM is read at runtime via boto3 and never enters Terraform state, .env, or lambda.zip. Manage the value manually via `aws ssm put-parameter` (see infra/aws/ssm.tf)."
+  type        = string
+  default     = "/haunter/GITHUB_APP_PRIVATE_KEY"
 }
 
 # ---------------------------------------------------------------------------

@@ -67,9 +67,10 @@ async def _ensure_install_id(session: Any, repo: Any) -> None:
     if isinstance(existing, int) and not isinstance(existing, bool) and existing > 0:
         return
     # Explicit pair checked against this module's settings first (unit tests
-    # patch review_orchestrator.settings directly); the shared auditor App
-    # pair is the fallback via _resolve_app_credentials(). Either source
-    # being configured means a backfill attempt is worthwhile.
+    # patch review_orchestrator.settings directly). The sync resolver is
+    # env-only on purpose: the read-only auditor App is NEVER valid for
+    # writes, so only the write-capable pair justifies a backfill attempt
+    # here (the async SSM path is resolved later by get_installation_token()).
     explicit_configured = _is_configured_str(
         settings.github_app_id
     ) and _is_configured_str(settings.github_app_private_key)

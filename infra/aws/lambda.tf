@@ -92,9 +92,11 @@ resource "aws_iam_role_policy" "lambda_inline" {
         Resource = "arn:aws:lambda:${var.region}:*:function/${var.project_name}"
       },
       # ----------------------------------------------------------------
-      # ALLOW — Read GitHub App private key from SSM (Phase 1.6 of github.md)
-      # Scoped to the specific parameter path. WithDecryption is enabled
-      # by default for SecureString, so the PEM is decrypted in-flight.
+      # ALLOW — Read GitHub App private keys from SSM
+      # Scoped to the two parameter paths (sandbox runner + PR-write App).
+      # WithDecryption is enabled by default for SecureString, so each PEM
+      # is decrypted in-flight. Keeps both ~1.6KB PEMs out of the Lambda
+      # environment-variable block (4KB limit).
       # ----------------------------------------------------------------
       {
         Sid    = "AllowSSMReadGitHubAppKey"
@@ -103,7 +105,10 @@ resource "aws_iam_role_policy" "lambda_inline" {
           "ssm:GetParameter",
           "ssm:GetParameters",
         ]
-        Resource = "arn:aws:ssm:${var.region}:*:parameter${var.github_sandbox_app_private_key_ssm_path}"
+        Resource = [
+          "arn:aws:ssm:${var.region}:*:parameter${var.github_sandbox_app_private_key_ssm_path}",
+          "arn:aws:ssm:${var.region}:*:parameter${var.github_app_private_key_ssm_path}",
+        ]
       },
       # ----------------------------------------------------------------
       # EXPLICIT DENY — Secrets Manager, IAM, EC2, cross-role assumption
@@ -179,11 +184,15 @@ resource "aws_lambda_function" "haunter" {
       # GitHub webhook + API
       GITHUB_WEBHOOK_SECRET               = var.github_webhook_secret
       GITHUB_TOKEN                        = var.github_token
-      # Only the App ID is injected here — the PEM is shared from the auditor
-      # App pair in code (backend/app/github/pr.py:_resolve_app_credentials,
-      # same App in dev) so a duplicate ~1.6KB PEM does not push the function
-      # over the Lambda environment-variable size limit.
+      # Write-capable App for PR writes (backend/app/github/pr.py). Only the
+      # App ID travels as an env var — the ~1.6KB PEM is read at runtime from
+      # SSM (GITHUB_APP_PRIVATE_KEY_SSM_PATH) to stay under the Lambda
+      # environment-variable size limit. The read-only auditor App below is
+      # NEVER used for writes (fail-closed in pr.py).
       GITHUB_APP_ID                       = var.github_app_id
+      GITHUB_APP_PRIVATE_KEY_SSM_PATH     = var.github_app_private_key_ssm_path
+      # Read-only auditor App — used ONLY by the audit read path
+      # (backend/app/github/auditor.py). Never a source for PR writes.
       GITHUB_AUDITOR_APP_ID               = var.github_auditor_app_id
       GITHUB_AUDITOR_APP_PRIVATE_KEY      = var.github_auditor_app_private_key
       AUDIT_SELF_INVOKE_SECRET            = var.audit_self_invoke_secret

@@ -29,8 +29,10 @@ from app.github.pr import (
     GitHubPRError,
     GitHubPRValidationError,
     _TOKEN_CACHE,
+    _clear_pem_cache_for_tests,
     _escape_pr_text,
     _resolve_app_credentials,
+    _resolve_write_credentials,
     create_branch,
     get_installation_token,
     open_pr,
@@ -210,7 +212,7 @@ async def test_get_installation_token_dev_fallback() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 6b: _resolve_app_credentials priority (explicit > auditor > none)
+# Test 6b: _resolve_app_credentials — write-capable pair only, never auditor
 # ---------------------------------------------------------------------------
 
 
@@ -219,6 +221,7 @@ def _mock_pr_settings(
     app_key=None,
     auditor_id=None,
     auditor_key=None,
+    ssm_path="",
 ):
     """Patch app.github.pr.settings with fully explicit attrs (no MagicMock leakage)."""
     patcher = patch("app.github.pr.settings")
@@ -227,11 +230,12 @@ def _mock_pr_settings(
     mock_settings.github_app_private_key = app_key
     mock_settings.github_auditor_app_id = auditor_id
     mock_settings.github_auditor_app_private_key = auditor_key
+    mock_settings.github_app_private_key_ssm_path = ssm_path
     return patcher
 
 
 def test_resolve_app_credentials_explicit_wins() -> None:
-    """Both pairs set → explicit github_app_* wins (same App 5109915, no rotation)."""
+    """Explicit write pair set → source=github_app (auditor attrs ignored)."""
     patcher = _mock_pr_settings("explicit-id", "explicit-pem", "auditor-id", "auditor-pem")
     try:
         app_id, key, source = _resolve_app_credentials()
@@ -240,24 +244,33 @@ def test_resolve_app_credentials_explicit_wins() -> None:
     assert (app_id, key, source) == ("explicit-id", "explicit-pem", "github_app")
 
 
-def test_resolve_app_credentials_auditor_fallback() -> None:
-    """Explicit pair missing → shared auditor pair is used (Lambda size-limit path)."""
+def test_resolve_app_credentials_never_uses_auditor() -> None:
+    """Auditor pair alone is NOT valid for writes → source=none (fail closed).
+
+    The auditor App is read-only; its token lacks contents:write /
+    pull_requests:write. PR writes must never be signed with it.
+    """
     patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem")
     try:
         app_id, key, source = _resolve_app_credentials()
     finally:
         patcher.stop()
-    assert (app_id, key, source) == ("auditor-id", "auditor-pem", "auditor_app")
+    assert (app_id, key, source) == (None, None, "none")
 
 
-def test_resolve_app_credentials_half_pair_falls_through() -> None:
-    """Half-configured explicit pair (id without key) → auditor fallback, never mixed."""
+def test_resolve_app_credentials_half_pair_fails_closed() -> None:
+    """Half-configured explicit pair (id without key) → none, never auditor.
+
+    Even with a fully configured auditor pair present, a half write pair
+    must not silently become an auditor-signed write — that would mask the
+    misconfiguration behind a 403 at GitHub.
+    """
     patcher = _mock_pr_settings("explicit-id", "   ", "auditor-id", "auditor-pem")
     try:
         app_id, key, source = _resolve_app_credentials()
     finally:
         patcher.stop()
-    assert (app_id, key, source) == ("auditor-id", "auditor-pem", "auditor_app")
+    assert (app_id, key, source) == (None, None, "none")
 
 
 def test_resolve_app_credentials_none_when_all_missing() -> None:
@@ -271,26 +284,118 @@ def test_resolve_app_credentials_none_when_all_missing() -> None:
 
 
 @pytest.mark.anyio
-async def test_get_installation_token_uses_auditor_fallback() -> None:
-    """Explicit pair missing but auditor pair set → POSTs with JWT (no dev fallback)."""
+async def test_resolve_write_credentials_prefers_env_pair() -> None:
+    """Env pair set (+ SSM path set) → env wins, SSM never read."""
+    patcher = _mock_pr_settings("env-id", "env-pem", None, None, "/haunter/WRITE_KEY")
+    try:
+        with patch(
+            "app.github.pr._load_pem_from_ssm",
+            new_callable=AsyncMock,
+        ) as mock_ssm:
+            app_id, key, source = await _resolve_write_credentials()
+    finally:
+        patcher.stop()
+        _clear_pem_cache_for_tests()
+    assert (app_id, key, source) == ("env-id", "env-pem", "github_app")
+    assert not mock_ssm.called
+
+
+@pytest.mark.anyio
+async def test_resolve_write_credentials_ssm_path() -> None:
+    """App ID + SSM path (no env PEM) → PEM loaded from SSM (Lambda path)."""
+    patcher = _mock_pr_settings("app-id", None, "auditor-id", "auditor-pem", "/haunter/WRITE_KEY")
+    try:
+        with patch(
+            "app.github.pr._load_pem_from_ssm",
+            new_callable=AsyncMock,
+            return_value="ssm-pem",
+        ) as mock_ssm:
+            app_id, key, source = await _resolve_write_credentials()
+    finally:
+        patcher.stop()
+        _clear_pem_cache_for_tests()
+    assert (app_id, key, source) == ("app-id", "ssm-pem", "github_app_ssm")
+    mock_ssm.assert_called_once_with("/haunter/WRITE_KEY")
+
+
+@pytest.mark.anyio
+async def test_resolve_write_credentials_auditor_only_is_none() -> None:
+    """Auditor pair alone (no SSM) → none, so writes fail closed."""
+    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
+    try:
+        app_id, key, source = await _resolve_write_credentials()
+    finally:
+        patcher.stop()
+        _clear_pem_cache_for_tests()
+    assert (app_id, key, source) == (None, None, "none")
+
+
+@pytest.mark.anyio
+async def test_get_installation_token_auditor_only_uses_dev_fallback() -> None:
+    """Auditor-only config + GITHUB_TOKEN set → dev token, no JWT, no HTTP."""
     repo = _make_repo(install_id=321)
     _TOKEN_CACHE.clear()
-    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem")
+    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
+    mock_settings = patcher.start()
+    mock_settings.github_token = "ghp_dev_fallback_token"
     try:
-        with patch("app.github.pr._build_jwt", return_value="fake_jwt") as mock_jwt:
+        with (
+            patch("app.github.pr._build_jwt") as mock_jwt,
+            respx.mock(),
+        ):
+            token = await get_installation_token(repo)
+    finally:
+        patcher.stop()
+    assert token == "ghp_dev_fallback_token"
+    assert not mock_jwt.called
+    _TOKEN_CACHE.clear()
+
+
+@pytest.mark.anyio
+async def test_get_installation_token_auditor_only_no_token_fails_closed() -> None:
+    """Auditor-only config + no GITHUB_TOKEN → explicit GitHubPRError (no silent auditor write)."""
+    repo = _make_repo(install_id=322)
+    _TOKEN_CACHE.clear()
+    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
+    mock_settings = patcher.start()
+    mock_settings.github_token = None
+    try:
+        with pytest.raises(GitHubPRError, match="auditor"):
+            await get_installation_token(repo)
+    finally:
+        patcher.stop()
+    _TOKEN_CACHE.clear()
+
+
+@pytest.mark.anyio
+async def test_get_installation_token_uses_ssm_write_key() -> None:
+    """App ID + SSM PEM → POSTs with JWT minted from the SSM key."""
+    repo = _make_repo(install_id=323)
+    _TOKEN_CACHE.clear()
+    patcher = _mock_pr_settings("app-id", None, None, None, "/haunter/WRITE_KEY")
+    try:
+        with (
+            patch(
+                "app.github.pr._load_pem_from_ssm",
+                new_callable=AsyncMock,
+                return_value="ssm-pem",
+            ),
+            patch("app.github.pr._build_jwt", return_value="fake_jwt") as mock_jwt,
+        ):
             with respx.mock(assert_all_called=True) as rx:
                 rx.post(
-                    "https://api.github.com/app/installations/321/access_tokens"
+                    "https://api.github.com/app/installations/323/access_tokens"
                 ).mock(
                     return_value=httpx.Response(
-                        201, json={"token": "ghs_auditor_token"}
+                        201, json={"token": "ghs_ssm_token"}
                     )
                 )
                 token = await get_installation_token(repo)
     finally:
         patcher.stop()
-    assert token == "ghs_auditor_token"
-    assert mock_jwt.called
+        _clear_pem_cache_for_tests()
+    assert token == "ghs_ssm_token"
+    mock_jwt.assert_called_once_with("app-id", "ssm-pem", "github_app_ssm")
     _TOKEN_CACHE.clear()
 
 
