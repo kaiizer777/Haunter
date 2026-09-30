@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import difflib
 import logging
+import os
+import re
+import subprocess
 from typing import Any
 
 from app.github_client import GitHubClientError, fetch_file_content
@@ -30,45 +33,267 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _sync_to_local_disk(
+    path: str,
+    content: str | None,
+    repo_name: str | None,
+    repo_owner: str | None,
+    action: str = "write",
+    session_id: str | None = None,
+) -> None:
+    """
+    Synchronize staged modifications directly to the local working tree on disk if
+    a local checkout exists. Eliminates runner/editor checkout mismatches.
+    Enforces strict realpath and directory containment checks against symlink traversal.
+    When ``session_id`` is provided, syncs to the session-isolated checkout.
+    """
+    if not repo_name or not repo_name.strip():
+        return
+    try:
+        from app.services.session_tools.sandbox import resolve_repo_dir
+        repo_root, err = resolve_repo_dir(
+            repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+        )
+        if not repo_root or not os.path.isdir(repo_root):
+            return
+
+        real_root = os.path.realpath(repo_root)
+        target_file = os.path.normpath(os.path.join(real_root, path))
+        real_target = os.path.realpath(target_file)
+        real_parent = os.path.realpath(os.path.dirname(target_file))
+
+        # Defense-in-depth: Ensure target and its parent do not escape repo boundary via symlinks
+        if os.path.commonpath([real_root, real_parent]) != real_root:
+            logger.warning("editor: rejected path outside repository root: %r", path)
+            return
+        if os.path.commonpath([real_root, real_target]) != real_root:
+            logger.warning("editor: rejected symlink target outside repository root: %r", path)
+            return
+        if os.path.islink(target_file):
+            logger.warning("editor: rejected write to symlink: %r", path)
+            return
+
+        if action == "delete":
+            if os.path.isfile(real_target):
+                os.remove(real_target)
+                logger.info("editor: deleted local file %r", real_target)
+        elif action in ("write", "modify", "create") and content is not None:
+            os.makedirs(os.path.dirname(target_file), exist_ok=True)
+            with open(target_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+            logger.info("editor: synced updated content to local file %r", target_file)
+    except Exception as exc:
+        logger.warning("editor: failed to sync %r to disk: %s", path, exc)
+
+
+def _invert_unified_diff(diff: str) -> str:
+    """
+    Invert a unified diff (swap additions and deletions, reverse hunk headers,
+    and flip file paths). Applying the inverted diff to the patched content
+    reconstructs the original base content.
+    """
+    if not diff or not diff.strip():
+        return diff
+
+    inverted_lines: list[str] = []
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("--- "):
+            inverted_lines.append("+++ " + line[4:])
+        elif line.startswith("+++ "):
+            inverted_lines.append("--- " + line[4:])
+        elif line.startswith("@@"):
+            m = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", line)
+            if m:
+                old_s, old_c, new_s, new_c, rest = m.groups()
+                old_part = f"-{new_s}" + (f",{new_c}" if new_c is not None else "")
+                new_part = f"+{old_s}" + (f",{old_c}" if old_c is not None else "")
+                inverted_lines.append(f"@@ {old_part} {new_part} @@{rest}")
+            else:
+                inverted_lines.append(line)
+        elif line.startswith("-"):
+            inverted_lines.append("+" + line[1:])
+        elif line.startswith("+"):
+            inverted_lines.append("-" + line[1:])
+        else:
+            inverted_lines.append(line)
+
+    return "".join(inverted_lines)
+
+
+def _is_diff_applied(
+    content: str,
+    diff_text: str,
+    base_content: str | None = None,
+) -> bool:
+    """
+    Check if a unified diff is already applied to content.
+    Eliminates naive substring checks which produce false positives when added lines
+    (e.g. 'pass', 'import sys') appear elsewhere in the file.
+
+    If base_content is provided:
+      Compares content directly against apply_unified_diff(base_content, diff_text).
+    If base_content is not provided:
+      Attempts to invert the diff and verify if applying the inverted diff produces
+      a candidate base whose diff against content reproduces content.
+    """
+    if not diff_text or not diff_text.strip():
+        return True
+
+    from app.sandbox.mirror import apply_unified_diff
+
+    if base_content is not None:
+        expected = apply_unified_diff(base_content, diff_text)
+        return content == expected
+
+    try:
+        inverted = _invert_unified_diff(diff_text)
+        candidate_base = apply_unified_diff(content, inverted)
+        if candidate_base != content:
+            expected = apply_unified_diff(candidate_base, diff_text)
+            return expected == content
+    except Exception:
+        pass
+
+    return False
+
+
+async def _get_clean_base(
+    path: str,
+    repo_owner: str,
+    repo_name: str,
+    base_sha: str,
+    gh_token: str | None,
+    session_id: str | None = None,
+) -> str | None:
+    """
+    Retrieve the unmodified original clean base content for path bound to the
+    session's base_sha (never local HEAD unless base_sha is unavailable).
+    """
+    if repo_name and repo_name.strip() and base_sha and base_sha.strip():
+        try:
+            from app.services.session_tools.sandbox import resolve_repo_dir
+
+            repo_root, _ = resolve_repo_dir(
+                repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+            )
+            if repo_root and os.path.isdir(repo_root):
+                git_path = path.replace("\\", "/")
+                res = subprocess.run(
+                    ["git", "-C", repo_root, "show", f"{base_sha.strip()}:{git_path}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if res.returncode == 0:
+                    return res.stdout
+        except Exception:
+            pass
+
+        try:
+            return await fetch_file_content(
+                owner=repo_owner,
+                repo=repo_name,
+                path=path,
+                sha=base_sha,
+                token=gh_token,
+            )
+        except Exception:
+            pass
+        return None
+
+    if repo_name and repo_name.strip():
+        try:
+            from app.services.session_tools.sandbox import resolve_repo_dir
+
+            repo_root, _ = resolve_repo_dir(
+                repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+            )
+            if repo_root and os.path.isdir(repo_root):
+                git_path = path.replace("\\", "/")
+                res = subprocess.run(
+                    ["git", "-C", repo_root, "show", f"HEAD:{git_path}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if res.returncode == 0:
+                    return res.stdout
+        except Exception:
+            pass
+
+    if repo_owner and repo_name and base_sha:
+        try:
+            return await fetch_file_content(
+                owner=repo_owner,
+                repo=repo_name,
+                path=path,
+                sha=base_sha,
+                token=gh_token,
+            )
+        except Exception:
+            pass
+
+    return None
+
+
+def _is_absent_at_base(
+    path: str,
+    repo_owner: str,
+    repo_name: str,
+    base_sha: str,
+    session_id: str | None = None,
+) -> bool:
+    """
+    Confirm whether *path* is absent at the session base revision.
+
+    Distinguishes "file did not exist at base_sha" (terminal-created /
+    untracked file) from a transient fetch error. Returns True only when a
+    local checkout proves the base ref exists but the path is missing there.
+    Returns False when existence is confirmed or when absence cannot be
+    proven (fail-closed: callers preserve the existing staged patch).
+    """
+    if not repo_name or not repo_name.strip():
+        return False
+    try:
+        from app.services.session_tools.sandbox import resolve_repo_dir
+
+        repo_root, _ = resolve_repo_dir(
+            repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+        )
+        if not repo_root or not os.path.isdir(repo_root):
+            return False
+        git_path = path.replace("\\", "/")
+        ref = base_sha.strip() if base_sha and base_sha.strip() else "HEAD"
+        cat = subprocess.run(
+            ["git", "-C", repo_root, "cat-file", "-e", ref],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if cat.returncode != 0:
+            return False
+        show = subprocess.run(
+            ["git", "-C", repo_root, "show", f"{ref}:{git_path}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if show.returncode == 0:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _apply_staged_diff(base_content: str, diff_text: str) -> str:
     """
     Reconstruct the current working buffer by applying a staged unified diff
-    on top of the base content.
-
-    Extracts the new-side content from the unified diff by collecting context
-    lines (prefixed with ' ') and addition lines (prefixed with '+'), skipping
-    the unified diff header lines ('---', '+++', '@@').
-
-    If the diff is empty or malformed, falls back to base_content so the
-    downstream occurrence check will catch any real conflicts.
+    on top of the base content using the full-file diff applier.
     """
-    if not diff_text:
+    if not diff_text or not diff_text.strip():
         return base_content
-
-    result_lines: list[str] = []
-    in_hunk = False
-    for line in diff_text.splitlines(keepends=True):
-        if line.startswith("--- ") or line.startswith("+++ "):
-            # Unified diff file headers -- skip.
-            continue
-        if line.startswith("@@ "):
-            # Hunk header -- marks start of patch content.
-            in_hunk = True
-            continue
-        if not in_hunk:
-            continue
-        if line.startswith("+") and not line.startswith("+++ "):
-            # Added line -- appears in new file.
-            result_lines.append(line[1:])
-        elif line.startswith(" "):
-            # Context line -- appears in both old and new.
-            result_lines.append(line[1:])
-        # Lines starting with '-' are deletions -- skip them.
-
-    if not result_lines:
-        return base_content
-
-    return "".join(result_lines)
+    from app.sandbox.mirror import apply_unified_diff
+    return apply_unified_diff(base_content, diff_text)
 
 
 async def _resolve_current_content(
@@ -78,30 +303,119 @@ async def _resolve_current_content(
     repo_name: str,
     base_sha: str,
     gh_token: str | None,
+    session_id: str | None = None,
 ) -> str | None:
     """
     Resolve the current working content of *path*.
 
     Priority:
-      1. If path is in staged_patches — reconstruct from the staged diff.
-      2. Otherwise fetch from GitHub at base_sha.
+      1. If path is deleted in staged_patches — return None.
+      2. If path is newly created in staged_patches:
+         - If local checkout disk exists, prioritize actual disk content as ground truth
+           and update staged_patches[path] with diff from /dev/null to disk content.
+         - Otherwise reconstruct from patch.
+      3. If path is in staged_patches and modified:
+         - Compute expected patched content from clean_base (bound to base_sha) +
+           staged_patches[path].
+         - If local disk equals expected, return local disk content.
+         - If local disk differs from both clean_base and expected, the file was
+           modified via terminal command: prioritize disk as ground truth, refresh
+           staged_patches[path] from clean_base to disk content, and return disk.
+         - Otherwise return expected (preserving staged patch).
+       4. If path is not in staged_patches:
+           - Return the local on-disk content when the file exists locally,
+             so terminal modifications on unstaged files are preserved as
+             ground truth. Fall back to the clean base bound to base_sha,
+             then GitHub at base_sha.
 
     Returns None if the file does not exist at base and is not staged.
     """
-    if path in staged_patches:
-        # Fetch base to apply the patch on top of it.
+    local_base: str | None = None
+    if repo_name and repo_name.strip():
         try:
-            base = await fetch_file_content(
-                owner=repo_owner,
-                repo=repo_name,
-                path=path,
-                sha=base_sha,
-                token=gh_token,
+            from app.services.session_tools.sandbox import resolve_repo_dir
+            repo_root, _ = resolve_repo_dir(
+                repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
             )
-        except GitHubClientError:
-            base = None
-        base_str = base or ""
-        return _apply_staged_diff(base_str, staged_patches[path])
+            if repo_root:
+                real_root = os.path.realpath(repo_root)
+                local_path = os.path.normpath(os.path.join(real_root, path))
+                real_target = os.path.realpath(local_path)
+                real_parent = os.path.realpath(os.path.dirname(local_path))
+                if (
+                    os.path.commonpath([real_root, real_parent]) == real_root
+                    and os.path.commonpath([real_root, real_target]) == real_root
+                    and os.path.isfile(real_target)
+                    and not os.path.islink(local_path)
+                ):
+                    with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                        local_base = f.read()
+        except Exception:
+            local_base = None
+
+    if path in staged_patches:
+        diff = staged_patches[path]
+        if "+++ /dev/null" in diff:
+            return None
+        if "--- /dev/null" in diff:
+            if local_base is not None:
+                staged_patches[path] = "".join(
+                    difflib.unified_diff(
+                        [],
+                        local_base.splitlines(keepends=True),
+                        fromfile="/dev/null",
+                        tofile=f"b/{path}",
+                    )
+                )
+                return local_base
+            from app.sandbox.mirror import apply_unified_diff
+            return apply_unified_diff("", diff)
+
+        clean_base = await _get_clean_base(
+            path=path,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            base_sha=base_sha,
+            gh_token=gh_token,
+            session_id=session_id,
+        )
+
+        from app.sandbox.mirror import apply_unified_diff
+
+        if clean_base is not None:
+            expected = apply_unified_diff(clean_base, diff)
+            if local_base is not None:
+                if local_base == expected:
+                    return local_base
+                if local_base != clean_base and local_base != expected:
+                    staged_patches[path] = _make_unified_diff(clean_base, local_base, path)
+                    return local_base
+            return expected
+
+        if local_base is not None:
+            # No clean base available: local disk is the only ground truth.
+            # Editor tools synchronize every change to disk, so disk usually
+            # already reflects the staged state — reapplying the diff on top
+            # of synced content would duplicate lines via anchor matching.
+            return local_base
+        return None
+
+    if local_base is not None:
+        # Terminal and editor share the local checkout: an unstaged file's
+        # on-disk content is ground truth (e.g. written via terminal command).
+        # Returning the clean base here would silently discard those edits.
+        return local_base
+
+    clean_base = await _get_clean_base(
+        path=path,
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        base_sha=base_sha,
+        gh_token=gh_token,
+        session_id=session_id,
+    )
+    if clean_base is not None:
+        return clean_base
 
     try:
         content = await fetch_file_content(
@@ -141,6 +455,7 @@ async def tool_str_replace(
     staged_patches: dict[str, str],
     queue: SseQueue,
     gh_token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Perform an exact, unique string replacement in *path*.
@@ -169,6 +484,7 @@ async def tool_str_replace(
         repo_name=repo_name,
         base_sha=base_sha,
         gh_token=gh_token,
+        session_id=session_id,
     )
     if content is None:
         return f"Error: File not found: '{path}'."
@@ -186,11 +502,59 @@ async def tool_str_replace(
     # Perform replacement.
     new_content = content.replace(old_str, new_str, 1)
 
-    # Generate unified diff.
-    diff = _make_unified_diff(content, new_content, path)
+    # Generate cumulative unified diff from clean base to new_content so staged_patches[path]
+    # represents the complete delta from HEAD to current working state.
+    if path in staged_patches and "--- /dev/null" in staged_patches[path]:
+        diff = "".join(
+            difflib.unified_diff(
+                [],
+                new_content.splitlines(keepends=True),
+                fromfile="/dev/null",
+                tofile=f"b/{path}",
+            )
+        )
+    else:
+        clean_base = await _get_clean_base(
+            path=path,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            base_sha=base_sha,
+            gh_token=gh_token,
+            session_id=session_id,
+        )
+        if clean_base is None:
+            # Distinguish absent-at-base (terminal-created/untracked) from a
+            # transient fetch error. Confirmed-absent files get a /dev/null
+            # creation diff so cumulative edits rebuild correctly.
+            if _is_absent_at_base(
+                path=path,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                session_id=session_id,
+            ):
+                diff = "".join(
+                    difflib.unified_diff(
+                        [],
+                        new_content.splitlines(keepends=True),
+                        fromfile="/dev/null",
+                        tofile=f"b/{path}",
+                    )
+                )
+            elif path in staged_patches:
+                return f"Error: Cannot resolve base revision for '{path}' to build cumulative diff. Staged patch preserved."
+            else:
+                diff = _make_unified_diff(content, new_content, path)
+        else:
+            diff = _make_unified_diff(clean_base, new_content, path)
 
     # Update staged patches.
     staged_patches[path] = diff
+
+    # Sync to local disk if local checkout exists
+    _sync_to_local_disk(
+        path, new_content, repo_name, repo_owner, action="write", session_id=session_id
+    )
 
     # Emit SSE event.
     try:
@@ -213,6 +577,9 @@ async def tool_create_file(
     content: str,
     staged_patches: dict[str, str],
     queue: SseQueue,
+    repo_owner: str = "",
+    repo_name: str = "",
+    session_id: str | None = None,
 ) -> str:
     """
     Stage a new file by generating a unified diff from /dev/null to the new content.
@@ -235,6 +602,11 @@ async def tool_create_file(
     )
 
     staged_patches[path] = diff
+
+    # Sync to local disk if local checkout exists
+    _sync_to_local_disk(
+        path, content, repo_name, repo_owner, action="create", session_id=session_id
+    )
 
     try:
         await queue.put_file_diff(path=path, diff=diff, action="create")
@@ -259,6 +631,7 @@ async def tool_delete_file(
     staged_patches: dict[str, str],
     queue: SseQueue,
     gh_token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Stage deletion of an existing file.
@@ -280,6 +653,7 @@ async def tool_delete_file(
         repo_name=repo_name,
         base_sha=base_sha,
         gh_token=gh_token,
+        session_id=session_id,
     )
     if content is None:
         return f"Error: File not found: '{path}'."
@@ -294,6 +668,11 @@ async def tool_delete_file(
     )
 
     staged_patches[path] = diff
+
+    # Sync to local disk if local checkout exists
+    _sync_to_local_disk(
+        path, None, repo_name, repo_owner, action="delete", session_id=session_id
+    )
 
     try:
         await queue.put_file_diff(path=path, diff=diff, action="delete")
@@ -318,6 +697,7 @@ async def tool_apply_multi_patch(
     staged_patches: dict[str, str],
     queue: SseQueue,
     gh_token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Atomically apply a batch of file edits.
@@ -344,9 +724,14 @@ async def tool_apply_multi_patch(
     # Work on a scratch copy so we don't mutate staged_patches on failure.
     scratch_patches: dict[str, str] = dict(staged_patches)
 
-    # Track original base content per file (first fetch from GitHub).
-    # Used to generate the final base->final diff at commit time.
-    base_contents: dict[str, str | None] = {}
+    # Track initial resolved content per file (to validate operations against).
+    initial_contents: dict[str, str | None] = {}
+
+    # Track clean base content per file (to generate final base->final cumulative diff).
+    clean_bases: dict[str, str | None] = {}
+
+    # Track files that were already created in staged_patches prior to this batch
+    is_created_files: dict[str, bool] = {}
 
     # Track evolving working content per file across sequential edits.
     working_contents: dict[str, str] = {}
@@ -374,19 +759,48 @@ async def tool_apply_multi_patch(
                 return f"Error in {label}: old_str must not be empty."
 
             # Fetch base content on first access to this path.
-            if path not in base_contents:
-                base_contents[path] = await _resolve_current_content(
+            if path not in initial_contents:
+                is_created_files[path] = (
+                    path in scratch_patches and "--- /dev/null" in scratch_patches[path]
+                )
+                initial_contents[path] = await _resolve_current_content(
                     path=path,
                     staged_patches=scratch_patches,
                     repo_owner=repo_owner,
                     repo_name=repo_name,
                     base_sha=base_sha,
                     gh_token=gh_token,
+                    session_id=session_id,
                 )
+                if not is_created_files[path]:
+                    clean_bases[path] = await _get_clean_base(
+                        path=path,
+                        repo_owner=repo_owner,
+                        repo_name=repo_name,
+                        base_sha=base_sha,
+                        gh_token=gh_token,
+                        session_id=session_id,
+                    )
+                    if clean_bases[path] is None:
+                        if _is_absent_at_base(
+                            path=path,
+                            repo_owner=repo_owner,
+                            repo_name=repo_name,
+                            base_sha=base_sha,
+                            session_id=session_id,
+                        ):
+                            # Terminal-created/untracked file absent at base:
+                            # subsequent cumulative edits rebuild against /dev/null.
+                            is_created_files[path] = True
+                        elif path in staged_patches:
+                            return (
+                                f"Error in {label}: Cannot resolve base revision for "
+                                f"'{path}' to build cumulative diff. Staged patch preserved."
+                            )
 
             # Use working content if available (post-previous-edit state),
             # otherwise use the freshly fetched base.
-            content = working_contents.get(path, base_contents[path])
+            content = working_contents.get(path, initial_contents[path])
             if content is None:
                 return f"Error in {label}: File not found: '{path}'."
 
@@ -413,7 +827,9 @@ async def tool_apply_multi_patch(
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 
-            base_contents[path] = None  # new file -- no base
+            initial_contents[path] = None  # new file -- no base
+            clean_bases[path] = None
+            is_created_files[path] = True
             working_contents[path] = content_str
             if path not in [p for p, _ in committed_paths]:
                 committed_paths.append((path, "create"))
@@ -431,16 +847,44 @@ async def tool_apply_multi_patch(
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 
-            if path not in base_contents:
-                base_contents[path] = await _resolve_current_content(
+            if path not in initial_contents:
+                is_created_files[path] = (
+                    path in scratch_patches and "--- /dev/null" in scratch_patches[path]
+                )
+                initial_contents[path] = await _resolve_current_content(
                     path=path,
                     staged_patches=scratch_patches,
                     repo_owner=repo_owner,
                     repo_name=repo_name,
                     base_sha=base_sha,
                     gh_token=gh_token,
+                    session_id=session_id,
                 )
-            if base_contents.get(path) is None and working_contents.get(path) is None:
+                if not is_created_files[path]:
+                    clean_bases[path] = await _get_clean_base(
+                        path=path,
+                        repo_owner=repo_owner,
+                        repo_name=repo_name,
+                        base_sha=base_sha,
+                        gh_token=gh_token,
+                        session_id=session_id,
+                    )
+                    if clean_bases[path] is None:
+                        if _is_absent_at_base(
+                            path=path,
+                            repo_owner=repo_owner,
+                            repo_name=repo_name,
+                            base_sha=base_sha,
+                            session_id=session_id,
+                        ):
+                            is_created_files[path] = True
+                        elif path in staged_patches:
+                            return (
+                                f"Error in {label}: Cannot resolve base revision for "
+                                f"'{path}' to build cumulative diff. Staged patch preserved."
+                            )
+
+            if initial_contents.get(path) is None and working_contents.get(path) is None:
                 return f"Error in {label}: File not found: '{path}'."
 
             working_contents[path] = ""  # deletion: final content is empty
@@ -468,9 +912,8 @@ async def tool_apply_multi_patch(
         seen_paths.add(path)
 
         final_content = working_contents.get(path, "")
-        base_content = base_contents.get(path)
 
-        if action == "create":
+        if action == "create" or (action == "modify" and is_created_files.get(path)):
             diff = "".join(
                 difflib.unified_diff(
                     [],
@@ -479,24 +922,47 @@ async def tool_apply_multi_patch(
                     tofile=f"b/{path}",
                 )
             )
+            final_action = "create" if is_created_files.get(path) else action
         elif action == "delete":
-            src = base_content or ""
+            clean_base = clean_bases.get(path)
+            if clean_base is None:
+                _initial = initial_contents.get(path)
+                clean_base = _initial if _initial is not None else ""
             diff = "".join(
                 difflib.unified_diff(
-                    src.splitlines(keepends=True),
+                    clean_base.splitlines(keepends=True),
                     [],
                     fromfile=f"a/{path}",
                     tofile="/dev/null",
                 )
             )
+            final_action = "delete"
         else:  # modify
-            src = base_content or ""
-            diff = _make_unified_diff(src, final_content, path)
+            clean_base = clean_bases.get(path)
+            if clean_base is None:
+                # Deterministic provenance only: never infer the base via
+                # inverse-diff application (fuzzy matches hallucinate history).
+                # Fall back to the resolved working content as the diff base.
+                # Explicit `is not None`: an empty base ("") is a valid base
+                # and must not fall through to the already-edited content.
+                _initial = initial_contents.get(path)
+                clean_base = _initial if _initial is not None else ""
+            diff = _make_unified_diff(clean_base, final_content, path)
+            final_action = "modify"
 
-        final_committed.append((path, diff, action))
+        final_committed.append((path, diff, final_action))
 
     for path, diff, action in final_committed:
         staged_patches[path] = diff
+        final_content = working_contents.get(path, "")
+        _sync_to_local_disk(
+            path,
+            final_content if action != "delete" else None,
+            repo_name,
+            repo_owner,
+            action=action,
+            session_id=session_id,
+        )
         try:
             await queue.put_file_diff(path=path, diff=diff, action=action)
         except Exception as exc:

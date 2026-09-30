@@ -22,6 +22,7 @@ Security:
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import os
 import re
@@ -130,7 +131,7 @@ def _find_repo_python(cwd: str | None = None) -> str | None:
     if not cwd or not os.path.isdir(cwd):
         return None
     curr = os.path.abspath(cwd)
-    for _ in range(4):
+    for _ in range(5):
         for venv_name in (".venv", "venv", "env"):
             if sys.platform == "win32":
                 cand = os.path.join(curr, venv_name, "Scripts", "python.exe")
@@ -163,8 +164,26 @@ def _has_runner(python_bin: str, runner_name: str) -> bool:
         os.path.join("lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"),
         "site-packages",
     ):
-        if os.path.isdir(os.path.join(parent_dir, site_sub, runner_name)):
-            return True
+        target_dir = os.path.join(parent_dir, site_sub)
+        if os.path.isdir(target_dir):
+            if os.path.isdir(os.path.join(target_dir, runner_name)):
+                return True
+            for entry in os.listdir(target_dir):
+                if entry.lower().startswith(runner_name.lower()):
+                    return True
+    lib_dir = os.path.join(parent_dir, "lib")
+    if os.path.isdir(lib_dir):
+        try:
+            for sub in os.listdir(lib_dir):
+                if sub.startswith("python"):
+                    sp = os.path.join(lib_dir, sub, "site-packages")
+                    if os.path.isdir(sp) and (
+                        os.path.isdir(os.path.join(sp, runner_name))
+                        or any(e.lower().startswith(runner_name.lower()) for e in os.listdir(sp))
+                    ):
+                        return True
+        except Exception:
+            pass
     return False
 
 
@@ -176,15 +195,32 @@ def _prepare_cmd_argv(argv: list[str], cwd: str | None = None) -> list[str]:
     bin_name = cmd_argv[0].lower()
 
     # On Windows, wrap shell builtins so subprocess.Popen succeeds with shell=False
-    if sys.platform == "win32" and bin_name in (
-        "dir", "del", "copy", "type", "cls", "mkdir", "md", "rmdir", "rd", "move"
-    ):
-        for arg in cmd_argv[1:]:
-            if any(char in arg for char in ("&", "|", "<", ">", "^")):
-                raise ValueError(
-                    f"Shell metacharacters are not permitted in arguments for Windows built-in '{bin_name}'"
-                )
-        return ["cmd", "/c"] + cmd_argv
+    if sys.platform == "win32":
+        if bin_name in (
+            "dir", "del", "copy", "type", "cls", "mkdir", "md", "rmdir", "rd", "move", "echo", "time", "ver"
+        ):
+            for arg in cmd_argv[1:]:
+                if any(char in arg for char in ("&", "|", "<", ">", "^")):
+                    raise ValueError(
+                        f"Shell metacharacters are not permitted in arguments for Windows built-in '{bin_name}'"
+                    )
+            return ["cmd", "/c"] + cmd_argv
+        if bin_name == "cat" and not shutil.which("cat"):
+            file_args = [a for a in cmd_argv[1:] if not a.startswith("-")]
+            code = (
+                "import sys\n"
+                "err = 0\n"
+                "for p in sys.argv[1:]:\n"
+                "    try:\n"
+                "        with open(p, 'rb') as f:\n"
+                "            sys.stdout.buffer.write(f.read())\n"
+                "    except Exception as e:\n"
+                "        sys.stderr.write(f'cat: {p}: {e}\\n')\n"
+                "        err = 1\n"
+                "if err:\n"
+                "    sys.exit(err)\n"
+            )
+            return [sys.executable, "-c", code] + file_args
 
     repo_python = _find_repo_python(cwd)
     effective_python = repo_python if repo_python else sys.executable
@@ -465,41 +501,274 @@ def parse_command_chain(command: str) -> list[tuple[list[str], str]]:
     """
     Split command string into a list of (argv, operator) pairs.
     operator is '&&', ';', or '' (for the final command).
-    Preserves quoted strings and prevents injection.
+
+    Robustly handles:
+      - Quotes ('...' and "...") and escaped characters without mangling arguments.
+      - Preserves arguments with colons (e.g. 'git show HEAD:path').
+      - Strips redundant shell redirection tokens ('2>&1', '1>&2', etc.) that break shell=False subprocesses.
+      - Preserves multi-line strings and newlines inside quoted strings.
     """
-    s = shlex.shlex(command, punctuation_chars=True)
-    s.whitespace_split = False
-    tokens = list(s)
+    if not command or not command.strip():
+        return []
 
+    # 1. Split into subcommands on '&&' and ';' strictly outside quoted blocks
+    raw_subcommands: list[tuple[str, str]] = []
+    current: list[str] = []
+    in_single_quote = False
+    in_double_quote = False
+    escape = False
+
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if escape:
+            current.append(ch)
+            escape = False
+            i += 1
+            continue
+
+        if ch == "\\" and not in_single_quote:
+            escape = True
+            current.append(ch)
+            i += 1
+            continue
+
+        if ch == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(ch)
+            i += 1
+            continue
+
+        if ch == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(ch)
+            i += 1
+            continue
+
+        if not in_single_quote and not in_double_quote:
+            if command[i : i + 2] == "&&":
+                raw_subcommands.append(("".join(current).strip(), "&&"))
+                current = []
+                i += 2
+                continue
+            elif ch == ";":
+                raw_subcommands.append(("".join(current).strip(), ";"))
+                current = []
+                i += 1
+                continue
+
+        current.append(ch)
+        i += 1
+
+    if current:
+        tail = "".join(current).strip()
+        if tail:
+            raw_subcommands.append((tail, ""))
+
+    # 2. For each subcommand, parse into argv using shlex.split with posix mode
     subcommands: list[tuple[list[str], str]] = []
-    current_argv: list[str] = []
+    for sub_str, op in raw_subcommands:
+        if not sub_str:
+            continue
+        try:
+            tokens = shlex.split(sub_str, posix=True)
+        except ValueError:
+            # Fallback on non-posix if unclosed quote
+            tokens = shlex.split(sub_str, posix=False)
 
-    for tok in tokens:
-        if tok in ("&&", ";"):
-            if current_argv:
-                cleaned = [
-                    t[1:-1]
-                    if (t.startswith('"') and t.endswith('"'))
-                    or (t.startswith("'") and t.endswith("'"))
-                    else t
-                    for t in current_argv
-                ]
-                subcommands.append((cleaned, tok))
-                current_argv = []
-        else:
-            current_argv.append(tok)
-
-    if current_argv:
-        cleaned = [
-            t[1:-1]
-            if (t.startswith('"') and t.endswith('"'))
-            or (t.startswith("'") and t.endswith("'"))
-            else t
-            for t in current_argv
-        ]
-        subcommands.append((cleaned, ""))
+        # Clean out common shell redirects that break subprocess with shell=False
+        cleaned_tokens = [t for t in tokens if t not in ("2>&1", "1>&2", ">&1", ">&2")]
+        if cleaned_tokens:
+            subcommands.append((cleaned_tokens, op))
 
     return subcommands
+
+
+def sync_staged_patches_to_repo(
+    repo_root: str,
+    staged_patches: dict[str, str] | None,
+    base_sha: str | None = None,
+    session_id: str | None = None,
+    staged_authoritative: bool = False,
+) -> None:
+    """
+    Ensure all patches currently staged in memory/DB are synced to the local repository checkout.
+    This guarantees that local terminal commands, linters, and test runners execute
+    against the actual patched code, eliminating runner/editor checkout mismatches.
+    Protects against symlink escapes, makes application idempotent, and preserves full file content.
+
+    When ``session_id`` is provided and a session-isolated directory exists
+    under ``repo_root``, patches are synced to the session checkout instead.
+
+    ``staged_authoritative`` selects the conflict winner when disk diverges
+    from the staged content. It is True only on the explicit staging path
+    (``_tool_stage_patch`` syncs the just-staged single-file dict): the staged
+    patch is written to disk as-is and never mutated. It is False on
+    pre-command syncs (terminal/linter/test runners): terminal commands and
+    formatters (ruff format, black) that modify a staged file on disk are
+    treated as ground truth — disk is preserved and the staged entry is
+    rebuilt from the on-disk content so tests/linters validate the updated
+    code. A disk that still equals the clean base was never touched after
+    staging, so the staged content is newer and is written to disk.
+    """
+    if not staged_patches or not repo_root or not os.path.isdir(repo_root):
+        return
+
+    from app.sandbox.mirror import apply_unified_diff
+
+    real_root = os.path.realpath(repo_root)
+    if session_id and session_id.strip() and _is_safe_session_component(session_id):
+        session_root = _resolve_session_root(real_root, session_id.strip())
+        if session_root:
+            real_root = session_root
+
+    for rel_path, diff in staged_patches.items():
+        if not diff or not diff.strip():
+            continue
+        try:
+            target_path = os.path.normpath(os.path.join(real_root, rel_path))
+            real_target = os.path.realpath(target_path)
+            real_parent = os.path.realpath(os.path.dirname(target_path))
+
+            # Defense-in-depth: Ensure target and its parent do not escape repo boundary via symlinks
+            if os.path.commonpath([real_root, real_parent]) != real_root:
+                logger.warning("sandbox: rejected path outside repository root: %r", rel_path)
+                continue
+            if os.path.commonpath([real_root, real_target]) != real_root:
+                logger.warning("sandbox: rejected symlink escaping repository root: %r", rel_path)
+                continue
+            if os.path.islink(target_path):
+                logger.warning("sandbox: rejected write to symlink: %r", rel_path)
+                continue
+
+            # If it's a file deletion patch
+            if "--- " in diff and "+++ /dev/null" in diff:
+                if os.path.isfile(real_target):
+                    os.remove(real_target)
+                continue
+
+            # If it's a file creation patch
+            if "--- /dev/null" in diff:
+                expected_content = apply_unified_diff("", diff)
+                if (
+                    diff.endswith("\n")
+                    and "\\ No newline at end of file" not in diff
+                    and expected_content
+                    and not expected_content.endswith("\n")
+                ):
+                    expected_content += "\n"
+                if os.path.isfile(real_target):
+                    with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                        disk_content = f.read()
+                    if disk_content == expected_content:
+                        continue  # already synchronized, avoid rewriting
+                    if not staged_authoritative:
+                        # Disk diverged (terminal command / formatter edited the
+                        # staged file after staging): preserve disk as ground
+                        # truth and refresh the staged patch from disk content
+                        # so tests/linters validate the updated code.
+                        staged_patches[rel_path] = "".join(
+                            difflib.unified_diff(
+                                [],
+                                disk_content.splitlines(keepends=True),
+                                fromfile="/dev/null",
+                                tofile=f"b/{rel_path}",
+                            )
+                        )
+                        logger.info(
+                            "sandbox: refreshed staged created file %r from disk edits",
+                            rel_path,
+                        )
+                        continue
+                    # Explicit staging path (staged_authoritative): fall through
+                    # to overwrite disk with the staged creation content.
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with open(target_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(expected_content)
+                logger.info("sandbox: synced staged created file %r to local disk", rel_path)
+                continue
+
+            # If it's a modify patch:
+            # Reconstruct target content from clean git base bound to the session's
+            # base_sha when available; only fall back to local HEAD when no base_sha
+            # is provided (local HEAD can differ from the session base commit).
+            clean_base: str | None = None
+            git_path = rel_path.replace("\\", "/")
+            try:
+                if base_sha and base_sha.strip():
+                    res = subprocess.run(
+                        ["git", "-C", repo_root, "show", f"{base_sha.strip()}:{git_path}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if res.returncode == 0:
+                        clean_base = res.stdout
+                else:
+                    res = subprocess.run(
+                        ["git", "-C", repo_root, "show", f"HEAD:{git_path}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if res.returncode == 0:
+                        clean_base = res.stdout
+            except Exception:
+                clean_base = None
+
+            if clean_base is not None:
+                new_content = apply_unified_diff(clean_base, diff)
+                if os.path.isfile(real_target):
+                    with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                        disk_content = f.read()
+                    if disk_content == new_content:
+                        continue  # already synchronized, avoid duplicate diff application
+                    if not staged_authoritative and disk_content != clean_base:
+                        # Disk differs from both the clean base and the staged
+                        # result: a terminal command / formatter edited the
+                        # staged file after staging. Preserve disk as ground
+                        # truth and refresh the staged patch from disk content
+                        # so tests/linters validate the updated code.
+                        # (When disk still equals the clean base it was never
+                        # touched after staging, so the staged content is newer
+                        # and is written to disk below.)
+                        staged_patches[rel_path] = "".join(
+                            difflib.unified_diff(
+                                clean_base.splitlines(keepends=True),
+                                disk_content.splitlines(keepends=True),
+                                fromfile=f"a/{rel_path}",
+                                tofile=f"b/{rel_path}",
+                            )
+                        )
+                        logger.info(
+                            "sandbox: refreshed staged patch for %r from disk edits",
+                            rel_path,
+                        )
+                        continue
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with open(target_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(new_content)
+                logger.info("sandbox: synced staged patch for %r from clean base to local disk", rel_path)
+            else:
+                # Fallback when file is not in git HEAD:
+                base_content = ""
+                if os.path.isfile(real_target):
+                    with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                        base_content = f.read()
+
+                # If the diff was already applied to base_content, skip to prevent line duplication
+                from app.services.session_tools.editor import _is_diff_applied
+                if base_content and _is_diff_applied(base_content, diff):
+                    continue
+
+                new_content = apply_unified_diff(base_content, diff)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with open(target_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(new_content)
+                logger.info("sandbox: synced staged patch for %r to local disk", rel_path)
+        except Exception as exc:
+            logger.warning("sandbox: failed to sync staged patch %r to disk: %s", rel_path, exc)
 
 
 _SAFE_REPO_COMPONENT_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
@@ -600,10 +869,166 @@ def _candidate_matches_owner(candidate_dir: str, repo_owner: str | None) -> bool
 # ---------------------------------------------------------------------------
 
 
+_SAFE_SESSION_COMPONENT_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,128}$")
+
+
+def _is_safe_session_component(val: str | None) -> bool:
+    """Validate a session_id for safe use as a path component (no traversal)."""
+    if not val:
+        return False
+    stripped = val.strip()
+    if not stripped or ".." in stripped or "/" in stripped or "\\" in stripped:
+        return False
+    return bool(_SAFE_SESSION_COMPONENT_RE.match(stripped))
+
+
+def _resolve_session_root(main_root_real: str, session_id: str) -> str | None:
+    """
+    Return a session-isolated directory under the main checkout when present.
+
+    Checks, in order:
+      1. ``<repo>/.haunter_sessions/<session_id>``
+      2. ``<repo>/.worktrees/session-<session_id>``
+      3. ``<repo>/session-<session_id>``
+      4. ``<parent>/.haunter_sessions/<session_id>/<repo_basename>``
+    Returns None when no session-isolated directory exists (caller falls
+    back safely to the main checkout).
+
+    Hardening: empty/uninitialized directories are skipped; candidates that
+    escape the repository boundary via symlinks are rejected unless they are
+    legitimate git worktrees; candidates must look like a checkout (valid
+    git repo/worktree or containing files).
+    """
+    sid = session_id.strip()
+    base = os.path.basename(main_root_real)
+    parent = os.path.dirname(main_root_real)
+    candidates = [
+        os.path.join(main_root_real, ".haunter_sessions", sid),
+        os.path.join(main_root_real, ".worktrees", f"session-{sid}"),
+        os.path.join(main_root_real, f"session-{sid}"),
+        os.path.join(parent, ".haunter_sessions", sid, base),
+    ]
+    session_base_real = os.path.realpath(os.path.join(parent, ".haunter_sessions", sid))
+
+    def _is_valid_checkout(cand_real: str) -> bool:
+        try:
+            entries = os.listdir(cand_real)
+        except Exception:
+            return False
+        if not entries:
+            return False
+        if os.path.exists(os.path.join(cand_real, ".git")):
+            return True
+        try:
+            rev = subprocess.run(
+                ["git", "-C", cand_real, "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if rev.returncode == 0 and rev.stdout.strip().lower() == "true":
+                return True
+        except Exception:
+            pass
+        # Non-empty directory containing files qualifies as a checkout root
+        # (e.g. plain session dir synced without .git metadata).
+        return True
+
+    def _is_legitimate_worktree(cand_real: str, worktrees: set[str]) -> bool:
+        try:
+            norm = os.path.normcase(os.path.realpath(cand_real))
+        except Exception:
+            return False
+        return norm in worktrees
+
+    worktree_paths: set[str] = set()
+    try:
+        _wt = subprocess.run(
+            ["git", "-C", main_root_real, "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if _wt.returncode == 0:
+            for _line in _wt.stdout.splitlines():
+                if _line.startswith("worktree "):
+                    _wp = _line[len("worktree ") :].strip()
+                    if _wp:
+                        try:
+                            worktree_paths.add(os.path.normcase(os.path.realpath(_wp)))
+                        except Exception:
+                            continue
+    except Exception:
+        pass
+
+    for idx, cand in enumerate(candidates):
+        try:
+            if not os.path.isdir(cand):
+                continue
+            cand_real = os.path.realpath(cand)
+            if not os.path.isdir(cand_real):
+                continue
+            # Skip empty/uninitialized session dirs; fall back to main checkout.
+            try:
+                if not os.listdir(cand_real):
+                    continue
+            except Exception:
+                continue
+            # Symlink-boundary check: candidates under the main checkout must
+            # resolve inside it; the parent-scoped candidate must resolve
+            # inside its session base. Legitimate git worktrees are exempt.
+            if idx < 3:
+                try:
+                    inside = os.path.commonpath([main_root_real, cand_real]) == main_root_real
+                except ValueError:
+                    inside = False
+                if not inside and not _is_legitimate_worktree(cand_real, worktree_paths):
+                    logger.warning("sandbox: rejected session dir escaping repo boundary: %r", cand)
+                    continue
+            else:
+                try:
+                    inside = os.path.commonpath([session_base_real, cand_real]) == session_base_real
+                except ValueError:
+                    inside = False
+                if not inside and not _is_legitimate_worktree(cand_real, worktree_paths):
+                    logger.warning("sandbox: rejected session dir escaping session base: %r", cand)
+                    continue
+            if not _is_valid_checkout(cand_real):
+                continue
+            return cand_real
+        except Exception:
+            continue
+    # Best-effort git worktree lookup: a worktree whose path ends with
+    # session-<id> is treated as the session checkout when it exists on disk.
+    try:
+        res = subprocess.run(
+            ["git", "-C", main_root_real, "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                if line.startswith("worktree "):
+                    wt_path = line[len("worktree ") :].strip()
+                    if wt_path.endswith(f"session-{sid}") and os.path.isdir(wt_path):
+                        wt_real = os.path.realpath(wt_path)
+                        try:
+                            if not os.listdir(wt_real):
+                                continue
+                        except Exception:
+                            continue
+                        return wt_real
+    except Exception:
+        pass
+    return None
+
+
 def resolve_repo_dir(
     repo_name: str | None = None,
     repo_owner: str | None = None,
     cwd: str | None = None,
+    session_id: str | None = None,
 ) -> tuple[str | None, str | None]:
     """
     Resolve the absolute working directory for repository execution.
@@ -612,6 +1037,11 @@ def resolve_repo_dir(
       1. Explicit environment variables (LOCAL_REPOS_DIR, REPOS_DIR, WORKSPACE_DIR).
       2. Traversal up from current working directory (checking matching basename, children, and siblings).
       3. Common developer directories (~/Desktop, ~, ~/projects, ~/repos, ~/workspace).
+
+    When ``session_id`` is provided and a session-isolated worktree or
+    session-scoped directory (``.haunter_sessions/<session_id>`` or
+    ``session-<session_id>`` worktree) exists, it is preferred; otherwise
+    falls back safely to the main checkout.
 
     Returns:
       (effective_cwd, None) on success.
@@ -702,6 +1132,12 @@ def resolve_repo_dir(
 
     root_real = os.path.realpath(resolved_repo_root)
 
+    if session_id and session_id.strip() and _is_safe_session_component(session_id):
+        session_root = _resolve_session_root(root_real, session_id.strip())
+        if session_root:
+            root_real = session_root
+            resolved_repo_root = session_root
+
     if cwd and cwd.strip():
         stripped_cwd = cwd.strip()
         target_candidate = (
@@ -742,6 +1178,7 @@ async def tool_run_terminal_command(
     cwd: str | None = None,
     repo_owner: str | None = None,
     repo_name: str | None = None,
+    session_id: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -785,8 +1222,12 @@ async def tool_run_terminal_command(
     if not subcommands:
         return "Error: Empty command after parsing."
 
+    effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
-        repo_name=repo_name, repo_owner=repo_owner, cwd=cwd
+        repo_name=repo_name,
+        repo_owner=repo_owner,
+        cwd=cwd,
+        session_id=effective_session_id,
     )
     if err:
         return err
@@ -796,11 +1237,24 @@ async def tool_run_terminal_command(
     if repo_name and repo_name.strip():
         if cwd and cwd.strip():
             root_dir, _ = resolve_repo_dir(
-                repo_name=repo_name, repo_owner=repo_owner, cwd=None
+                repo_name=repo_name,
+                repo_owner=repo_owner,
+                cwd=None,
+                session_id=effective_session_id,
             )
             repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
         elif resolved_cwd:
             repo_boundary_root = os.path.realpath(resolved_cwd)
+
+    target_sync_root = repo_boundary_root or resolved_cwd
+    if target_sync_root and _kwargs.get("staged_patches"):
+        sync_staged_patches_to_repo(
+            target_sync_root,
+            _kwargs.get("staged_patches"),
+            base_sha=_kwargs.get("base_sha"),
+            session_id=effective_session_id,
+        )
+
     all_stdout: list[str] = []
     all_stderr: list[str] = []
     total_duration = 0.0
@@ -933,6 +1387,7 @@ async def tool_run_linter(
     cwd: str | None = None,
     repo_owner: str | None = None,
     repo_name: str | None = None,
+    session_id: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -957,12 +1412,34 @@ async def tool_run_linter(
     if not paths:
         return "Error: No paths provided to run_linter."
 
+    effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
-        repo_name=repo_name, repo_owner=repo_owner, cwd=cwd
+        repo_name=repo_name,
+        repo_owner=repo_owner,
+        cwd=cwd,
+        session_id=effective_session_id,
     )
     if err:
         return err
     effective_cwd = resolved_cwd or os.getcwd()
+
+    repo_boundary_root: str | None = None
+    if repo_name and repo_name.strip():
+        root_dir, _ = resolve_repo_dir(
+            repo_name=repo_name,
+            repo_owner=repo_owner,
+            cwd=None,
+            session_id=effective_session_id,
+        )
+        repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
+    target_sync_root = repo_boundary_root or effective_cwd
+    if target_sync_root and _kwargs.get("staged_patches"):
+        sync_staged_patches_to_repo(
+            target_sync_root,
+            _kwargs.get("staged_patches"),
+            base_sha=_kwargs.get("base_sha"),
+            session_id=effective_session_id,
+        )
 
     # Sanitize each path — no traversal allowed.
     cleaned: list[str] = []
@@ -1037,6 +1514,7 @@ async def tool_run_targeted_tests(
     cwd: str | None = None,
     repo_owner: str | None = None,
     repo_name: str | None = None,
+    session_id: str | None = None,
     **_kwargs: Any,
 ) -> str:
     """
@@ -1060,12 +1538,34 @@ async def tool_run_targeted_tests(
     if not test_targets:
         return "Error: No test targets provided."
 
+    effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
-        repo_name=repo_name, repo_owner=repo_owner, cwd=cwd
+        repo_name=repo_name,
+        repo_owner=repo_owner,
+        cwd=cwd,
+        session_id=effective_session_id,
     )
     if err:
         return err
     effective_cwd = resolved_cwd or os.getcwd()
+
+    repo_boundary_root: str | None = None
+    if repo_name and repo_name.strip():
+        root_dir, _ = resolve_repo_dir(
+            repo_name=repo_name,
+            repo_owner=repo_owner,
+            cwd=None,
+            session_id=effective_session_id,
+        )
+        repo_boundary_root = os.path.realpath(root_dir) if root_dir else None
+    target_sync_root = repo_boundary_root or effective_cwd
+    if target_sync_root and _kwargs.get("staged_patches"):
+        sync_staged_patches_to_repo(
+            target_sync_root,
+            _kwargs.get("staged_patches"),
+            base_sha=_kwargs.get("base_sha"),
+            session_id=effective_session_id,
+        )
 
     # Sanitize target paths.
     cleaned: list[str] = []

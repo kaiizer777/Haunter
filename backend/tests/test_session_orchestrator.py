@@ -587,3 +587,190 @@ async def test_invoke_subagent_subagent_error_is_soft() -> None:
     assert "Subagent 'repo_navigator' failed" in result
     assert "LLM unavailable" in result
     assert "proceed without it" in result
+
+
+@pytest.mark.asyncio
+async def test_read_file_overlay_github_error_modify_vs_create() -> None:
+    """read_file handles failed GitHub base fetch safely: permits create diffs, rejects modify diffs."""
+    from app.github_client import GitHubClientError
+
+    orch = _make_orchestrator_for_subagent_tests()
+
+    # 1. Staged create diff -> reconstructed from /dev/null patch
+    create_diff = "--- /dev/null\n+++ b/brand_new.py\n@@ -0,0 +1,1 @@\n+print('created')\n"
+    with patch("app.services.session_orchestrator.fetch_file_content", side_effect=GitHubClientError("Not found")):
+        res_create = await orch._tool_read_file(
+            args={"path": "brand_new.py"},
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha",
+            staged_patches={"brand_new.py": create_diff},
+        )
+    assert res_create == "print('created')"
+
+    # 2. Staged modify diff -> rejects because base is unavailable
+    mod_diff = "--- a/existing.py\n+++ b/existing.py\n@@ -1 +1 @@\n-old\n+new\n"
+    with patch("app.services.session_orchestrator.fetch_file_content", side_effect=GitHubClientError("Not found")):
+        res_mod = await orch._tool_read_file(
+            args={"path": "existing.py"},
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha",
+            staged_patches={"existing.py": mod_diff},
+        )
+    assert "Error reading file: base content for 'existing.py' is unavailable." in res_mod
+
+
+def test_discard_patch_preserves_tracked_file_on_failed_checkout(tmp_path) -> None:
+    """discard_patch unlinks untracked created files on failed checkout, but preserves modified files."""
+    import subprocess
+    orch = _make_orchestrator_for_subagent_tests()
+
+    # Set up mock repo dir
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    mod_file = repo_dir / "tracked.py"
+    mod_file.write_text("modified content", encoding="utf-8")
+
+    created_file = repo_dir / "created.py"
+    created_file.write_text("new content", encoding="utf-8")
+
+    staged = {
+        "tracked.py": "--- a/tracked.py\n+++ b/tracked.py\n@@ -1 +1 @@\n-old\n+new\n",
+        "created.py": "--- /dev/null\n+++ b/created.py\n@@ -0,0 +1 @@\n+new content\n",
+    }
+
+    # Simulate git checkout failure (e.g. untracked or checkout error)
+    failed_proc = subprocess.CompletedProcess(args=["git", "checkout"], returncode=1, stdout="", stderr="error")
+
+    with patch("app.services.session_tools.sandbox.resolve_repo_dir", return_value=(str(repo_dir), None)), \
+         patch("subprocess.run", return_value=failed_proc):
+        # Discarding modify diff when git checkout fails must NOT delete tracked.py
+        orch._tool_discard_patch(
+            args={"path": "tracked.py"},
+            staged_patches=staged,
+            repo_owner="org",
+            repo_name="repo",
+        )
+        assert mod_file.is_file()
+
+        # Discarding create diff when git checkout fails MUST delete created.py
+        orch._tool_discard_patch(
+            args={"path": "created.py"},
+            staged_patches=staged,
+            repo_owner="org",
+            repo_name="repo",
+        )
+        assert not created_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_tool_stage_patch_syncs_only_target_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging a patch for file A must not overwrite terminal edits on file B.
+
+    Regression test: _tool_stage_patch used to sync the entire staged_patches
+    dict to disk, which rewrote every staged file from clean_base + diff and
+    erased terminal edits on unrelated files.
+    """
+    import subprocess
+
+    from app.services.session_tools.editor import _make_unified_diff
+
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    base_a = "a = 1\n"
+    base_b = "b = 1\n"
+    (repo_dir / "a.py").write_text(base_a, encoding="utf-8")
+    (repo_dir / "b.py").write_text(base_b, encoding="utf-8")
+    for cmd in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test User"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "init"],
+    ):
+        subprocess.run(cmd, cwd=str(repo_dir), check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    staged_a = "a = 10\n"
+    staged_b = "b = 10\n"
+    diff_a = _make_unified_diff(base_a, staged_a, "a.py")
+    diff_b = _make_unified_diff(base_b, staged_b, "b.py")
+    staged = {"a.py": diff_a, "b.py": diff_b}
+
+    # Disk already reflects staged state; terminal then edits b.py.
+    (repo_dir / "a.py").write_text(staged_a, encoding="utf-8")
+    terminal_b = staged_b + "# terminal edit\n"
+    (repo_dir / "b.py").write_text(terminal_b, encoding="utf-8")
+
+    orch = _make_orchestrator_for_subagent_tests()
+    queue = SseQueue(maxsize=16)
+    new_a = "a = 10\n# staged via tool\n"
+    diff_a2 = _make_unified_diff(base_a, new_a, "a.py")
+
+    result = await orch._tool_stage_patch(
+        args={"path": "a.py", "diff": diff_a2, "action": "modify"},
+        staged_patches=staged,
+        queue=queue,
+        repo_owner="owner",
+        repo_name="repo",
+        base_sha=sha,
+    )
+
+    assert "Patch staged" in result
+    assert staged["a.py"] == diff_a2
+    # Unrelated staged patch untouched in memory...
+    assert staged["b.py"] == diff_b
+    # ...and its terminal edits preserved on disk.
+    assert (repo_dir / "b.py").read_text(encoding="utf-8") == terminal_b
+    # Target file synced.
+    assert (repo_dir / "a.py").read_text(encoding="utf-8") == new_a
+
+
+@pytest.mark.asyncio
+async def test_tool_stage_patch_creation_authority_over_existing_disk_content(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restaging a creation patch when the file already exists on disk writes the
+    staged creation content to disk and preserves staged_patches[path] intact —
+    stale disk content must never overwrite the newly staged diff."""
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    (repo_dir / "newmod.py").write_text("stale = True\n", encoding="utf-8")
+
+    orch = _make_orchestrator_for_subagent_tests()
+    queue = SseQueue(maxsize=16)
+    staged: dict[str, str] = {}
+    creation_diff = (
+        "--- /dev/null\n+++ b/newmod.py\n@@ -0,0 +1,2 @@\n+fresh = 1\n+ready = True\n"
+    )
+
+    result = await orch._tool_stage_patch(
+        args={"path": "newmod.py", "diff": creation_diff, "action": "create"},
+        staged_patches=staged,
+        queue=queue,
+        repo_owner="owner",
+        repo_name="repo",
+        base_sha="deadbeef",
+    )
+
+    assert "Patch staged" in result
+    assert staged["newmod.py"] == creation_diff
+    assert (repo_dir / "newmod.py").read_text(encoding="utf-8") == "fresh = 1\nready = True\n"
+

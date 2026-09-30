@@ -927,3 +927,254 @@ def test_prepare_cmd_argv_windows_builtins_percent_allowed(monkeypatch: pytest.M
 
     argv_user = _prepare_cmd_argv(["type", r"%USERPROFILE%\notes.txt"])
     assert argv_user == ["cmd", "/c", "type", r"%USERPROFILE%\notes.txt"]
+
+
+def test_parse_command_chain_preserves_colons_and_quotes() -> None:
+    """parse_command_chain must not split git refs with colons or mangled quotes."""
+    from app.services.session_tools.sandbox import parse_command_chain
+
+    # 1. Colon preservation for git show HEAD:path
+    parsed = parse_command_chain("git show HEAD:path")
+    assert parsed == [(['git', 'show', 'HEAD:path'], '')]
+
+    # 2. Semicolons inside quotes must not split command chains
+    parsed = parse_command_chain('python -c "import sys; print(1)"')
+    assert parsed == [(['python', '-c', 'import sys; print(1)'], '')]
+
+    # 3. Chained commands with quotes and internal semicolons
+    parsed = parse_command_chain('cd backend && python -c "import sys; print(1)"')
+    assert parsed == [
+        (['cd', 'backend'], '&&'),
+        (['python', '-c', 'import sys; print(1)'], ''),
+    ]
+
+    # 4. Redundant shell redirect removal (2>&1)
+    parsed = parse_command_chain("pytest 2>&1")
+    assert parsed == [(['pytest'], '')]
+
+    # 5. Multiline string preservation
+    multiline = 'python -c "x = 1\ny = 2\nprint(x + y)"'
+    parsed = parse_command_chain(multiline)
+    assert parsed == [(['python', '-c', 'x = 1\ny = 2\nprint(x + y)'], '')]
+
+
+def test_prepare_cmd_argv_windows_echo_and_cat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_prepare_cmd_argv handles 'echo' as cmd builtin and emulates 'cat' on Windows."""
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    argv_echo = _prepare_cmd_argv(["echo", "hello world"])
+    assert argv_echo == ["cmd", "/c", "echo", "hello world"]
+
+    # Cat emulation when cat is not on PATH (uses safe Python runner without shell)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    argv_cat = _prepare_cmd_argv(["cat", "-A", "README.md"])
+    assert argv_cat[0] == sys.executable
+    assert argv_cat[1] == "-c"
+    assert argv_cat[-1] == "README.md"
+
+
+def test_windows_cat_fallback_fails_on_missing_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows cat fallback exits with non-zero code on missing or unreadable files."""
+    import subprocess
+    import sys
+    from app.services.session_tools.sandbox import _prepare_cmd_argv
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    argv_cat = _prepare_cmd_argv(["cat", "definitely_nonexistent_file_xyz_987.txt"])
+    proc = subprocess.run(argv_cat, capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "cat:" in proc.stderr
+
+
+def test_sync_staged_patches_to_repo_idempotent(tmp_path: Path) -> None:
+    """sync_staged_patches_to_repo applies patches idempotently without line duplication."""
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    test_file = repo_dir / "test.py"
+    test_file.write_text("line1\nline2\n", encoding="utf-8")
+
+    # Pure addition / modification diff
+    staged = {
+        "test.py": "--- a/test.py\n+++ b/test.py\n@@ -1,2 +1,3 @@\n line1\n+line1.5\n line2\n",
+        "new.py": "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,2 @@\n+first\n+second\n",
+    }
+
+    # Call sync 3 times in a row
+    for _ in range(3):
+        sync_staged_patches_to_repo(str(repo_dir), staged)
+
+    # Content must NOT be duplicated
+    test_lines = test_file.read_text(encoding="utf-8").splitlines()
+    assert test_lines == ["line1", "line1.5", "line2"]
+
+    new_file = repo_dir / "new.py"
+    assert new_file.is_file()
+    assert new_file.read_text(encoding="utf-8").splitlines() == ["first", "second"]
+
+
+def test_sync_staged_patches_to_repo_git_repo_multi_edit(tmp_path: Path) -> None:
+    """Verifies sync_staged_patches_to_repo on a git repo with a cumulative multi-edit patch preserves all edits."""
+    import subprocess
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+    from app.services.session_tools.editor import _make_unified_diff
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=str(repo_dir), check=True, capture_output=True)
+
+    base_content = "def step1():\n    return 1\n\ndef step2():\n    return 2\n"
+    target_file = repo_dir / "pipeline.py"
+    target_file.write_text(base_content, encoding="utf-8")
+
+    subprocess.run(["git", "add", "pipeline.py"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+
+    # Multi-edit content where both step1 and step2 are modified
+    final_content = "def step1():\n    return 100\n\ndef step2():\n    return 200\n"
+    diff = _make_unified_diff(base_content, final_content, "pipeline.py")
+
+    staged = {"pipeline.py": diff}
+    sync_staged_patches_to_repo(str(repo_dir), staged)
+
+    disk_content = target_file.read_text(encoding="utf-8")
+    assert disk_content == final_content
+    assert "return 100" in disk_content
+    assert "return 200" in disk_content
+    assert "return 1\n" not in disk_content
+    assert "return 2\n" not in disk_content
+
+
+def test_sync_staged_patches_to_repo_created_file_staged_patch_authority(tmp_path: Path) -> None:
+    """Pre-command sync preserves terminal/formatter edits to staged created
+    files: divergent disk content is kept and the staged patch is refreshed
+    from disk rather than overwriting disk."""
+    from app.sandbox.mirror import apply_unified_diff
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    creation_diff = "--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+initial creation\n"
+    staged = {"created.txt": creation_diff}
+    sync_staged_patches_to_repo(str(repo_dir), staged)
+    created_file = repo_dir / "created.txt"
+    assert created_file.read_text(encoding="utf-8") == "initial creation\n"
+
+    # Disk carries different (terminal/formatter) content.
+    created_file.write_text("stale disk content\n", encoding="utf-8")
+
+    # Pre-command sync preserves disk and refreshes the staged patch...
+    sync_staged_patches_to_repo(str(repo_dir), staged)
+    assert created_file.read_text(encoding="utf-8") == "stale disk content\n"
+    # ...so the refreshed patch rebuilds the disk content from /dev/null.
+    assert staged["created.txt"] != creation_diff
+    assert "+stale disk content" in staged["created.txt"]
+    assert apply_unified_diff("", staged["created.txt"]).strip() == "stale disk content"
+
+    # Explicit staging path (staged_authoritative=True) still lets the
+    # just-staged patch win over pre-existing disk content.
+    staged_auth = {"created.txt": creation_diff}
+    created_file.write_text("stale disk content\n", encoding="utf-8")
+    sync_staged_patches_to_repo(str(repo_dir), staged_auth, staged_authoritative=True)
+    assert created_file.read_text(encoding="utf-8") == "initial creation\n"
+    assert staged_auth["created.txt"] == creation_diff
+
+
+def test_sync_staged_patches_to_repo_adopts_terminal_mods(tmp_path: Path) -> None:
+    """Pre-command sync preserves terminal/formatter edits to staged modified
+    files: disk is kept and the staged patch is refreshed from disk content."""
+    import subprocess
+
+    from app.sandbox.mirror import apply_unified_diff
+    from app.services.session_tools.editor import _make_unified_diff
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    base = "a = 1\nb = 2\n"
+    (repo_dir / "mod.py").write_text(base, encoding="utf-8")
+    for cmd in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test User"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "init"],
+    ):
+        subprocess.run(cmd, cwd=str(repo_dir), check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    staged_content = "a = 10\nb = 2\n"
+    diff = _make_unified_diff(base, staged_content, "mod.py")
+    staged = {"mod.py": diff}
+    sync_staged_patches_to_repo(str(repo_dir), staged, base_sha=sha)
+    assert (repo_dir / "mod.py").read_text(encoding="utf-8") == staged_content
+
+    terminal_content = staged_content + "# terminal edit\n"
+    (repo_dir / "mod.py").write_text(terminal_content, encoding="utf-8")
+    sync_staged_patches_to_repo(str(repo_dir), staged, base_sha=sha)
+    # Disk edit preserved, staged patch refreshed from disk.
+    assert (repo_dir / "mod.py").read_text(encoding="utf-8") == terminal_content
+    assert staged["mod.py"] != diff
+    assert apply_unified_diff(base, staged["mod.py"]) == terminal_content
+
+
+def test_sync_staged_patches_to_repo_preserves_formatter_edits(tmp_path: Path) -> None:
+    """Formatter (ruff format/black) tweak to a staged file is refreshed into
+    staged_patches during pre-command sync rather than overwritten."""
+    import subprocess
+
+    from app.sandbox.mirror import apply_unified_diff
+    from app.services.session_tools.editor import _make_unified_diff
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    base = "x=1\ny=2\n"
+    (repo_dir / "fmt.py").write_text(base, encoding="utf-8")
+    for cmd in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test User"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "init"],
+    ):
+        subprocess.run(cmd, cwd=str(repo_dir), check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    staged_content = "x = 10\ny = 2\n"
+    diff = _make_unified_diff(base, staged_content, "fmt.py")
+    staged = {"fmt.py": diff}
+    sync_staged_patches_to_repo(str(repo_dir), staged, base_sha=sha)
+    assert (repo_dir / "fmt.py").read_text(encoding="utf-8") == staged_content
+
+    # Simulate `ruff format`-style normalization applied on disk by the agent.
+    formatted_content = 'x = 10\ny = 2\n\n\n__all__ = ["x"]\n'
+    (repo_dir / "fmt.py").write_text(formatted_content, encoding="utf-8")
+    sync_staged_patches_to_repo(str(repo_dir), staged, base_sha=sha)
+
+    # Disk formatter output survives sync...
+    assert (repo_dir / "fmt.py").read_text(encoding="utf-8") == formatted_content
+    # ...and the staged patch now rebuilds the formatted content from the base.
+    assert apply_unified_diff(base, staged["fmt.py"]) == formatted_content
+
+
+
