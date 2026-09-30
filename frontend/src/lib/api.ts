@@ -394,7 +394,17 @@ export const GITHUB_TOKEN_MISSING = "github_token_missing";
 export const GITHUB_TOKEN_INVALID = "github_token_invalid";
 
 export function isGithubTokenError(detail: unknown): boolean {
-  return detail === GITHUB_TOKEN_MISSING || detail === GITHUB_TOKEN_INVALID;
+  if (typeof detail !== "string") return false;
+  const d = detail.toLowerCase();
+  return (
+    d === GITHUB_TOKEN_MISSING ||
+    d === GITHUB_TOKEN_INVALID ||
+    d.includes("github access token") ||
+    d.includes("decrypt github") ||
+    d.includes("github token revoked") ||
+    d.includes("token not found") ||
+    d.includes("token has expired")
+  );
 }
 
 type RequestOptions = RequestInit & { silent?: boolean };
@@ -440,13 +450,30 @@ async function request<T>(
     // invalidate the app session: peek at the body before deciding. A true
     // session expiry ("Not authenticated" / "Invalid or expired session")
     // still redirects to /login below.
+    // Mixed-deployment compat: legacy backends return 401 with human-readable
+    // messages ("GitHub access token not found for user.", ...) instead of
+    // the machine-readable github_token_* codes — isGithubTokenError covers
+    // both. Additionally, 401s from /github/available-repos NEVER invalidate
+    // the app session (the session cookie is valid; only the GitHub grant
+    // needs a refresh), so they must never redirect to /login.
+    const isAvailableRepos = endpoint.includes("/github/available-repos");
     try {
       const body = (await res.clone().json()) as { detail?: unknown } | null;
       if (body && isGithubTokenError(body.detail)) {
         throw new ApiError(body.detail as string, 401);
       }
+      if (isAvailableRepos) {
+        const detail =
+          body && typeof body.detail === "string" && body.detail
+            ? body.detail
+            : GITHUB_TOKEN_MISSING;
+        throw new ApiError(detail, res.status);
+      }
     } catch (err) {
       if (err instanceof ApiError) throw err;
+      if (isAvailableRepos) {
+        throw new ApiError(GITHUB_TOKEN_MISSING, res.status);
+      }
       // Non-JSON 401 body — fall through to the session-expiry redirect.
     }
     if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {

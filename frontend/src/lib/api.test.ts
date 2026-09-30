@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { api, ApiError, API_BASE } from "./api";
+import { api, ApiError, API_BASE, isGithubTokenError } from "./api";
 
 describe("api.ts", () => {
   const originalFetch = globalThis.fetch;
@@ -207,6 +207,111 @@ describe("api.ts", () => {
         }
       }
       expect(window.location.href).toBe("https://example.com/repos");
+    });
+
+    it("does not redirect on 401 with legacy backend github-token strings", async () => {
+      const legacyDetails = [
+        "GitHub access token not found for user.",
+        "Failed to decrypt GitHub access token.",
+        "GitHub token revoked or invalid.",
+      ];
+      for (const detail of legacyDetails) {
+        delete (window as any).location;
+        window.location = {
+          pathname: "/repos",
+          href: "https://example.com/repos",
+        } as any;
+
+        globalThis.fetch = vi.fn().mockResolvedValue(
+          new Response(JSON.stringify({ detail }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+
+        try {
+          await api.getAvailableRepos();
+          expect.unreachable();
+        } catch (err: any) {
+          expect(err).toBeInstanceOf(ApiError);
+          expect(err.status).toBe(401);
+          expect(err.message).toBe(detail);
+        }
+        expect(window.location.href).toBe("https://example.com/repos");
+      }
+    });
+
+    it("never redirects 401s from /github/available-repos, even with unknown details", async () => {
+      delete (window as any).location;
+      window.location = {
+        pathname: "/repos",
+        href: "https://example.com/repos",
+      } as any;
+
+      // Unknown JSON detail → preserves body detail, no redirect.
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: "Some unexpected error" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+      try {
+        await api.getAvailableRepos();
+        expect.unreachable();
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.status).toBe(401);
+        expect(err.message).toBe("Some unexpected error");
+      }
+      expect(window.location.href).toBe("https://example.com/repos");
+
+      // Non-JSON 401 body → github_token_missing fallback, no redirect.
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response("Unauthorized", { status: 401 })
+      );
+      try {
+        await api.getAvailableRepos();
+        expect.unreachable();
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.status).toBe(401);
+        expect(err.message).toBe("github_token_missing");
+      }
+      expect(window.location.href).toBe("https://example.com/repos");
+    });
+  });
+
+  describe("isGithubTokenError mixed-deployment compatibility", () => {
+    it("matches new machine-readable codes", () => {
+      expect(isGithubTokenError("github_token_missing")).toBe(true);
+      expect(isGithubTokenError("github_token_invalid")).toBe(true);
+    });
+
+    it("matches legacy backend 401 message strings (case-insensitive)", () => {
+      expect(
+        isGithubTokenError("GitHub access token not found for user.")
+      ).toBe(true);
+      expect(
+        isGithubTokenError("Failed to decrypt GitHub access token.")
+      ).toBe(true);
+      expect(isGithubTokenError("GitHub token revoked or invalid.")).toBe(
+        true
+      );
+      expect(isGithubTokenError("GITHUB ACCESS TOKEN EXPIRED")).toBe(true);
+    });
+
+    it("rejects non-strings and true session-expiry messages", () => {
+      expect(isGithubTokenError(undefined)).toBe(false);
+      expect(isGithubTokenError(null)).toBe(false);
+      expect(isGithubTokenError(401)).toBe(false);
+      expect(isGithubTokenError({ detail: "github_token_missing" })).toBe(
+        false
+      );
+      expect(isGithubTokenError("Not authenticated")).toBe(false);
+      expect(isGithubTokenError("Invalid or expired session")).toBe(false);
+      expect(isGithubTokenError("Session expired or unauthorized")).toBe(
+        false
+      );
     });
   });
 
