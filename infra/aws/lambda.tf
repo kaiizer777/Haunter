@@ -179,6 +179,8 @@ resource "aws_lambda_function" "haunter" {
       # GitHub webhook + API
       GITHUB_WEBHOOK_SECRET               = var.github_webhook_secret
       GITHUB_TOKEN                        = var.github_token
+      GITHUB_APP_ID                       = var.github_app_id
+      GITHUB_APP_PRIVATE_KEY              = var.github_app_private_key
       GITHUB_AUDITOR_APP_ID               = var.github_auditor_app_id
       GITHUB_AUDITOR_APP_PRIVATE_KEY      = var.github_auditor_app_private_key
       AUDIT_SELF_INVOKE_SECRET            = var.audit_self_invoke_secret

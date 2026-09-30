@@ -111,6 +111,27 @@ variable "token_encryption_key" {
 }
 
 # ---------------------------------------------------------------------------
+# GitHub App (PR write operations — Phase 8)
+# Used by backend/app/github/pr.py via GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY
+# for installation-token auth (contents:write, pull_requests:write).
+# Optional: empty default keeps `terraform plan` clean when the App is not
+# configured; the backend falls back to GITHUB_TOKEN (dev only).
+# ---------------------------------------------------------------------------
+
+variable "github_app_id" {
+  description = "GitHub App ID for repo-write operations (PR creation). Non-secret (visible in App's public metadata)."
+  type        = string
+  default     = ""
+}
+
+variable "github_app_private_key" {
+  description = "PEM private key for the repo-write GitHub App. Injected as Lambda env var GITHUB_APP_PRIVATE_KEY — never commit the PEM."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+# ---------------------------------------------------------------------------
 # GitHub Actions sandbox variables (Phase 1.6 of github.md)
 # Used when SANDBOX_PROVIDER=github_actions. The private key itself lives
 # in SSM Parameter Store as a SecureString — only the path is here.
