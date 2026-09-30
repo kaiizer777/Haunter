@@ -600,12 +600,11 @@ def sync_staged_patches_to_repo(
     When ``session_id`` is provided and a session-isolated directory exists
     under ``repo_root``, patches are synced to the session checkout instead.
 
-    When ``staged_authoritative`` is False (default, pre-command sync for
-    terminal/linter/tests), direct disk modifications (e.g. ``sed -i``) are
-    adopted: if disk differs from both the clean base and the expected staged
-    content, ``staged_patches[path]`` is rebuilt from disk instead of
-    reverting disk. When True (editor staging path), the staged patch wins
-    and disk is overwritten.
+    ``staged_patches`` is ALWAYS authoritative: disk is overwritten with the
+    staged content even when disk diverges (e.g. direct ``sed -i`` edits).
+    The staged entries are never mutated with disk content during sync.
+    ``staged_authoritative`` is retained for backward compatibility but is
+    now a no-op (all sync paths are authoritative).
     """
     if not staged_patches or not repo_root or not os.path.isdir(repo_root):
         return
@@ -658,29 +657,9 @@ def sync_staged_patches_to_repo(
                         disk_content = f.read()
                     if disk_content == expected_content:
                         continue  # already synchronized, avoid rewriting
-                    if not staged_authoritative:
-                        # Terminal modified the created file directly: adopt disk
-                        # as ground truth and refresh the staged patch instead
-                        # of reverting disk.
-                        import difflib
-
-                        staged_patches[rel_path] = "".join(
-                            difflib.unified_diff(
-                                [],
-                                disk_content.splitlines(keepends=True),
-                                fromfile="/dev/null",
-                                tofile=f"b/{rel_path}",
-                            )
-                        )
-                        logger.info(
-                            "sandbox: adopted terminal edits on disk for created file %r into staged patch",
-                            rel_path,
-                        )
-                        continue
-                    # Authoritative staging path (editor _tool_stage_patch):
-                    # write the staged creation content to disk even when the
-                    # file already exists with different content. Never mutate
-                    # the incoming staged patch with old disk content.
+                    # Staged patch is authoritative: fall through to overwrite
+                    # disk with the staged creation content. Never mutate the
+                    # staged patch with disk content.
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 with open(target_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(expected_content)
@@ -722,25 +701,9 @@ def sync_staged_patches_to_repo(
                         disk_content = f.read()
                     if disk_content == new_content:
                         continue  # already synchronized, avoid duplicate diff application
-                    if not staged_authoritative and disk_content != clean_base:
-                        # Disk was modified directly (e.g. sed -i) on top of or
-                        # instead of the staged state: adopt disk and refresh
-                        # the staged patch rather than reverting terminal edits.
-                        import difflib
-
-                        staged_patches[rel_path] = "".join(
-                            difflib.unified_diff(
-                                clean_base.splitlines(keepends=True),
-                                disk_content.splitlines(keepends=True),
-                                fromfile=f"a/{rel_path}",
-                                tofile=f"b/{rel_path}",
-                            )
-                        )
-                        logger.info(
-                            "sandbox: adopted terminal edits on disk for %r into staged patch",
-                            rel_path,
-                        )
-                        continue
+                    # Staged patch is authoritative: fall through to overwrite
+                    # disk with new_content derived from clean_base + diff.
+                    # Never mutate the staged patch with disk content.
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 with open(target_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(new_content)

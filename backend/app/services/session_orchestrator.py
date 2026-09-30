@@ -1910,36 +1910,37 @@ class SessionOrchestrator:
         # via `git apply --reverse`. Reject before invoking git.
         git_path = path.replace("\\", "/")
         try:
-            header_paths: list[str] = []
+            seen_header = False
             for _line in diff_text.splitlines():
-                if _line.startswith("diff --git "):
-                    _parts = _line[len("diff --git ") :].split()
-                    if len(_parts) >= 2:
-                        for _p in _parts[:2]:
-                            _p = _p.strip().strip('"').strip("'")
-                            if _p.startswith("a/"):
-                                _p = _p[2:]
-                            elif _p.startswith("b/"):
-                                _p = _p[2:]
-                            if _p not in ("", "/dev/null"):
-                                header_paths.append(_p)
-                elif _line.startswith("--- "):
-                    _p = _line[4:].strip().split("\t")[0].strip().strip('"').strip("'")
-                    if _p.startswith("a/"):
-                        _p = _p[2:]
-                    if _p not in ("", "/dev/null"):
-                        header_paths.append(_p)
+                # Space-safe: prefix-strip + strip, never split() on
+                # whitespace (filenames may contain spaces). The
+                # `diff --git` line is intentionally ignored here because its
+                # two paths cannot be split safely when quoted/with spaces;
+                # ---/+++ headers are authoritative for containment.
+                if _line.startswith("--- "):
+                    seen_header = True
+                    _target = _line[4:].split("\t")[0].strip().strip('"').strip("'")
+                    if _target != "/dev/null" and _target != f"a/{git_path}" and _target != git_path:
+                        logger.warning(
+                            "discard_patch: rejecting diff with mismatched header %r for %r",
+                            _target,
+                            path,
+                        )
+                        return False
                 elif _line.startswith("+++ "):
-                    _p = _line[4:].strip().split("\t")[0].strip().strip('"').strip("'")
-                    if _p.startswith("b/"):
-                        _p = _p[2:]
-                    if _p not in ("", "/dev/null"):
-                        header_paths.append(_p)
-            if not header_paths or any(_p != git_path for _p in header_paths):
+                    seen_header = True
+                    _target = _line[4:].split("\t")[0].strip().strip('"').strip("'")
+                    if _target != "/dev/null" and _target != f"b/{git_path}" and _target != git_path:
+                        logger.warning(
+                            "discard_patch: rejecting diff with mismatched header %r for %r",
+                            _target,
+                            path,
+                        )
+                        return False
+            if not seen_header:
                 logger.warning(
-                    "discard_patch: diff headers do not match requested path %r: %r",
+                    "discard_patch: diff headers do not match requested path %r: no ---/+++ headers",
                     path,
-                    header_paths[:5],
                 )
                 return False
         except Exception as exc:

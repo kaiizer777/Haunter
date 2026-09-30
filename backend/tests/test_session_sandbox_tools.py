@@ -1052,10 +1052,8 @@ def test_sync_staged_patches_to_repo_git_repo_multi_edit(tmp_path: Path) -> None
 
 
 def test_sync_staged_patches_to_repo_created_file_staged_patch_authority(tmp_path: Path) -> None:
-    """Pre-command sync adopts terminal edits: when the created file exists on
-    disk with different content, sync refreshes the staged patch from disk
-    instead of reverting disk (editor staging via ``staged_authoritative=True``
-    remains the only authoritative-overwrite path)."""
+    """Pre-command sync is authoritative: staged creation content wins over
+    divergent disk content and the staged patch is never mutated."""
     from app.services.session_tools.sandbox import sync_staged_patches_to_repo
 
     repo_dir = tmp_path / "repo"
@@ -1070,15 +1068,13 @@ def test_sync_staged_patches_to_repo_created_file_staged_patch_authority(tmp_pat
     # Disk carries different (stale/terminal) content.
     created_file.write_text("stale disk content\n", encoding="utf-8")
 
-    # Pre-command sync adopts disk edits into the staged patch...
+    # Pre-command sync overwrites disk with the staged content...
     sync_staged_patches_to_repo(str(repo_dir), staged)
-    assert created_file.read_text(encoding="utf-8") == "stale disk content\n"
-    # ...and the staged patch is refreshed from disk.
-    assert staged["created.txt"] != creation_diff
-    assert "stale disk content" in staged["created.txt"]
-    assert "--- /dev/null" in staged["created.txt"]
+    assert created_file.read_text(encoding="utf-8") == "initial creation\n"
+    # ...and the staged patch is left untouched.
+    assert staged["created.txt"] == creation_diff
 
-    # Authoritative staging path still overwrites disk and preserves staged.
+    # Authoritative staging path behaves identically.
     staged_auth = {"created.txt": creation_diff}
     created_file.write_text("stale disk content\n", encoding="utf-8")
     sync_staged_patches_to_repo(str(repo_dir), staged_auth, staged_authoritative=True)
@@ -1087,8 +1083,8 @@ def test_sync_staged_patches_to_repo_created_file_staged_patch_authority(tmp_pat
 
 
 def test_sync_staged_patches_to_repo_adopts_terminal_mods(tmp_path: Path) -> None:
-    """Pre-command sync refreshes staged modify patches from disk when terminal
-    edits diverge from both clean base and expected staged content."""
+    """Pre-command sync is authoritative for modify patches: disk is reset to
+    clean_base + staged diff even when terminal edits diverge."""
     import subprocess
 
     from app.services.session_tools.editor import _make_unified_diff
@@ -1123,8 +1119,9 @@ def test_sync_staged_patches_to_repo_adopts_terminal_mods(tmp_path: Path) -> Non
     terminal_content = staged_content + "# terminal edit\n"
     (repo_dir / "mod.py").write_text(terminal_content, encoding="utf-8")
     sync_staged_patches_to_repo(str(repo_dir), staged, base_sha=sha)
-    assert (repo_dir / "mod.py").read_text(encoding="utf-8") == terminal_content
-    assert "terminal edit" in staged["mod.py"]
+    # Authoritative: disk is restored to staged content, staged patch untouched.
+    assert (repo_dir / "mod.py").read_text(encoding="utf-8") == staged_content
+    assert staged["mod.py"] == diff
 
 
 

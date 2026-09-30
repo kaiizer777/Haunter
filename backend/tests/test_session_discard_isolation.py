@@ -257,6 +257,45 @@ def test_discard_patch_mismatched_headers_does_not_touch_other_file(
     assert (repo_dir / "target.py").read_text(encoding="utf-8") == target_base
 
 
+def test_discard_patch_with_spaces_in_filename(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Discard must handle filenames with spaces via space-safe ---/+++ parsing."""
+    orch = _make_orchestrator()
+    owner_dir = tmp_path / "owner"
+    owner_dir.mkdir()
+    repo_dir = owner_dir / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setenv("LOCAL_REPOS_DIR", str(tmp_path))
+
+    spaced_rel = "folder/file with spaces.py"
+    spaced_file = repo_dir / spaced_rel
+    spaced_file.parent.mkdir(parents=True, exist_ok=True)
+    base = "x = 1\n"
+    staged_content = "x = 2\n"
+    spaced_file.write_text(base, encoding="utf-8")
+    _init_git_repo(repo_dir)
+
+    staged_diff = _make_diff(base, staged_content, spaced_rel)
+    # Diff includes a diff --git line with spaces plus ---/+++ headers.
+    staged_diff = (
+        f"diff --git a/{spaced_rel} b/{spaced_rel}\n" + staged_diff
+    )
+    spaced_file.write_text(staged_content, encoding="utf-8")
+
+    staged = {spaced_rel: staged_diff}
+    result = orch._tool_discard_patch(
+        args={"path": spaced_rel},
+        staged_patches=staged,
+        repo_owner="owner",
+        repo_name="repo",
+    )
+
+    assert "discarded" in result.lower()
+    assert spaced_rel not in staged
+    assert spaced_file.read_text(encoding="utf-8") == base
+
+
 def test_resolve_session_root_skips_empty_dirs(
     tmp_path: Path, monkeypatch,
 ) -> None:
