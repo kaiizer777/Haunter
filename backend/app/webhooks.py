@@ -78,6 +78,38 @@ def _log_repo(owner: Any, name: Any) -> str:
     return f"{sanitize_log_value(owner, 100)}/{sanitize_log_value(name, 100)}"
 
 
+def _log_webhook_decision(
+    *,
+    event: Any,
+    delivery_id: Any,
+    status: str,
+    reason: Any,
+    repo: Any = None,
+    level: str = "info",
+) -> None:
+    """Structured log for ignored/skipped/duplicate webhook decisions.
+
+    Emits a single key=value line so CloudWatch Insights can filter on
+    ``webhook_decision``, ``event``, ``status``, and ``delivery_id`` without
+    regex parsing. All values pass through the log sanitizer (delivery ids
+    and reasons are attacker-influenced via headers/payload).
+    """
+    msg = (
+        "webhook_decision event=%s status=%s reason=%s delivery_id=%s repo=%s"
+        % (
+            sanitize_log_value(event, 64),
+            sanitize_log_value(status, 32),
+            sanitize_log_value(reason, 255),
+            sanitize_log_value(delivery_id, 64),
+            sanitize_log_value(repo, 200) if repo is not None else "-",
+        )
+    )
+    if level == "warning":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+
+
 async def _read_limited_body(request: Request) -> bytes:
     """Read the request body, aborting as soon as the cap is exceeded.
 
@@ -347,6 +379,13 @@ async def github_webhook(
                 x_github_delivery,
                 payload.workflow_run.id,
             )
+            _log_webhook_decision(
+                event="workflow_run",
+                delivery_id=x_github_delivery,
+                status="duplicate",
+                reason=f"github_run_id={payload.workflow_run.id}",
+                repo=f"{owner}/{repo_name}",
+            )
             return {
                 "status": "duplicate",
                 "delivery_id": x_github_delivery,
@@ -473,6 +512,17 @@ async def github_webhook(
         base_sha = pr_data.get("base", {}).get("sha")
         pr_number = pr_data.get("number")
         if not commit_sha:
+            logger.info(
+                "Ignored pull_request (delivery_id=%s): missing head sha",
+                x_github_delivery,
+            )
+            _log_webhook_decision(
+                event="pull_request",
+                delivery_id=x_github_delivery,
+                status="ignored",
+                reason="missing head sha",
+                repo=f"{owner}/{repo_name}",
+            )
             return {"status": "ignored", "reason": "missing head sha"}
 
         # Deduplication guard: ignore redundant deliveries for the same commit
@@ -489,6 +539,13 @@ async def github_webhook(
                 _log_repo(owner, repo_name),
                 sanitize_log_value(commit_sha, 64),
                 existing_review.id,
+            )
+            _log_webhook_decision(
+                event="pull_request",
+                delivery_id=x_github_delivery,
+                status="duplicate",
+                reason=f"commit={commit_sha} review_id={existing_review.id}",
+                repo=f"{owner}/{repo_name}",
             )
             return {
                 "status": "duplicate",
@@ -683,6 +740,13 @@ async def github_webhook(
                 _log_repo(owner, repo_name),
                 sanitize_log_value(commit_sha, 64),
                 existing_review.id,
+            )
+            _log_webhook_decision(
+                event="push",
+                delivery_id=x_github_delivery,
+                status="duplicate",
+                reason=f"commit={commit_sha} review_id={existing_review.id}",
+                repo=f"{owner}/{repo_name}",
             )
             return {
                 "status": "duplicate",

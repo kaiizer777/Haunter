@@ -17,6 +17,7 @@ from app.github.pr import (
     create_branch,
     get_installation_token,
     open_pr,
+    resolve_installation_id,
 )
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "create_branch",
     "get_installation_token",
     "open_pr",
+    "resolve_installation_id",
 ]

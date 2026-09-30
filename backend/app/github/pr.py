@@ -255,6 +255,83 @@ async def get_installation_token(repo: Any) -> str:
     return token_str
 
 
+async def resolve_installation_id(owner: str, repo: str) -> int:
+    """
+    Resolve the GitHub App installation id for ``owner/repo`` via the App JWT.
+
+    Uses ``GET /repos/{owner}/{repo}/installation`` authenticated as the App
+    itself (JWT bearer). Intended as a backfill path for repos connected
+    before ``github_install_id`` was wired into the connect flow.
+
+    Args:
+        owner: Repository owner (validated against _REPO_IDENT_RE).
+        repo:  Repository name (validated against _REPO_IDENT_RE).
+
+    Returns:
+        The installation id as a positive int.
+
+    Raises:
+        GitHubPRAuthError: On 401/403 (bad App credentials or App not installed).
+        GitHubPRError: On missing App config, validation failure, network or HTTP error.
+    """
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+
+    if not settings.github_app_id or not settings.github_app_private_key:
+        raise GitHubPRError(
+            "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be set to resolve "
+            "the installation id."
+        )
+
+    jwt_token = _build_jwt()
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/installation"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {jwt_token}",
+        "User-Agent": "Haunter-Autonomous-Agent/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error resolving installation id: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code in (401, 403):
+        raise GitHubPRAuthError(
+            f"GitHub App auth failed resolving installation ({response.status_code})."
+        )
+    if response.status_code == 404:
+        raise GitHubPRError(
+            f"GitHub App is not installed on {owner}/{repo} (404)."
+        )
+    if response.is_error:
+        raise GitHubPRError(
+            f"GitHub returned {response.status_code} resolving installation id."
+        )
+
+    try:
+        data = response.json()
+        install_id = int(data["id"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise GitHubPRError(
+            "GitHub installation lookup returned an unexpected payload."
+        ) from exc
+    if install_id <= 0:
+        raise GitHubPRError(
+            "GitHub installation lookup returned an invalid installation id."
+        )
+    logger.info(
+        "github.pr: resolved installation id for %s/%s",
+        owner,
+        repo,
+    )
+    return install_id
+
+
 # ---------------------------------------------------------------------------
 # Branch + commit helpers
 # ---------------------------------------------------------------------------

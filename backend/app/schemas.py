@@ -29,6 +29,14 @@ class RepoCreate(BaseModel):
     default_branch: Optional[str] = Field(None, max_length=255)
     language_hint: Optional[str] = Field(None, max_length=255)
     active_model_config_id: Optional[uuid.UUID] = None
+    github_install_id: Optional[int] = Field(default=None, gt=0)
+
+    @field_validator("github_install_id")
+    @classmethod
+    def reject_bool_install_id(cls, v: Optional[int]) -> Optional[int]:
+        if isinstance(v, bool):
+            raise ValueError("github_install_id must be a positive integer.")
+        return v
 
 
 class RepoOut(BaseModel):
@@ -38,6 +46,7 @@ class RepoOut(BaseModel):
     default_branch: Optional[str]
     language_hint: Optional[str]
     active_model_config_id: Optional[uuid.UUID]
+    github_install_id: Optional[int] = None
     auditor_github_install_id: Optional[int] = None
     created_at: datetime
 
