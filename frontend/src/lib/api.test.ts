@@ -123,6 +123,97 @@ describe("api.ts", () => {
     });
   });
 
+  describe("timeout retry behavior", () => {
+    it("retries once after a timeout then returns the successful response", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DOMException("operation timed out", "TimeoutError")
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+      globalThis.fetch = fetchMock;
+
+      const data = await api.get<{ ok: boolean }>("/repos");
+      expect(data).toEqual({ ok: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not retry caller-supplied signal aborts", async () => {
+      const controller = new AbortController();
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValue(new DOMException("aborted", "AbortError"));
+      globalThis.fetch = fetchMock;
+
+      try {
+        await api.get("/repos", { signal: controller.signal });
+        expect.unreachable();
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.status).toBe(0);
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not retry non-timeout aborts on plain GETs", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValue(new DOMException("aborted", "AbortError"));
+      globalThis.fetch = fetchMock;
+
+      try {
+        await api.get("/repos");
+        expect.unreachable();
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.status).toBe(0);
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not retry non-GET requests on timeout", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValue(
+          new DOMException("operation timed out", "TimeoutError")
+        );
+      globalThis.fetch = fetchMock;
+
+      try {
+        await api.post("/repos", { owner: "a", name: "b" });
+        expect.unreachable();
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.status).toBe(0);
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("surfaces a network error after the second timeout attempt fails", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValue(
+          new DOMException("operation timed out", "TimeoutError")
+        );
+      globalThis.fetch = fetchMock;
+
+      try {
+        await api.get("/repos");
+        expect.unreachable();
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.status).toBe(0);
+        expect(err.message).toContain("Network connection failure");
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe("401 unauthorized handling", () => {
     it("redirects to /login and throws ApiError(401) when not on /login path", async () => {
       // Setup window.location mock

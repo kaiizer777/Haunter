@@ -459,10 +459,7 @@ async function request<T>(
   }
 
   function isTimeoutAbort(err: unknown): boolean {
-    return (
-      err instanceof DOMException &&
-      (err.name === "TimeoutError" || err.name === "AbortError")
-    );
+    return err instanceof DOMException && err.name === "TimeoutError";
   }
 
   async function doFetch(signal: AbortSignal | undefined): Promise<Response> {
