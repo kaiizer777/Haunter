@@ -4,13 +4,13 @@ Tests for GET /github/available-repos endpoint (test_github_available_repos.py).
 Covers:
 1. Multi-tenant isolation and connected status deduplication.
 2. Unauthenticated access prevention (401).
-3. GitHub 401 / expired / insufficient scope mapping to 401 with re-login prompt.
+3. GitHub 401 / expired / insufficient scope mapping to 428 with re-grant prompt.
 4. Cross-tenant isolation (User B does not see User A's connected status).
 5. Permission filtering (push / admin required; read-only repos excluded).
 6. Pagination handling (Link rel="next" up to 3 pages).
 7. GitHub rate limit (403/429) mapping to 429 with Retry-After header.
 8. GitHub 5xx mapping to 502 generic error.
-9. User with missing or corrupted access token mapping to 401.
+9. User with missing or corrupted access token mapping to 428.
 """
 
 import httpx
@@ -115,7 +115,7 @@ async def test_list_available_repos_requires_auth(client: httpx.AsyncClient):
 async def test_list_available_repos_handles_insufficient_scope(
     db: AsyncSession, user_factory, make_auth_client
 ):
-    """GitHub returning 401 (e.g. invalid/revoked/expired token) maps to 401 with re-login detail."""
+    """GitHub returning 401 (e.g. invalid/revoked/expired token) maps to 428 with re-grant detail."""
     await truncate_all(db)
     user = await user_factory(
         github_id=803, username="user_expired", access_token="expired_token"
@@ -129,8 +129,8 @@ async def test_list_available_repos_handles_insufficient_scope(
         async with client:
             resp = await client.get("/github/available-repos")
 
-    assert resp.status_code == 401
-    assert resp.json() == {"detail": "Please re-login to grant repo access"}
+    assert resp.status_code == 428
+    assert resp.json() == {"detail": "github_token_invalid"}
 
 
 @pytest.mark.asyncio
@@ -343,7 +343,7 @@ async def test_list_available_repos_github_5xx(
 async def test_list_available_repos_user_missing_token(
     db: AsyncSession, user_factory, make_auth_client
 ):
-    """User without access_token returns 401."""
+    """User without access_token returns 428 (GitHub grant missing, session intact)."""
     await truncate_all(db)
     user = await user_factory(github_id=810, username="user_notoken", access_token=None)
     client = make_auth_client(user.id)
@@ -351,5 +351,5 @@ async def test_list_available_repos_user_missing_token(
     async with client:
         resp = await client.get("/github/available-repos")
 
-    assert resp.status_code == 401
-    assert resp.json() == {"detail": "GitHub not connected - please re-login"}
+    assert resp.status_code == 428
+    assert resp.json() == {"detail": "github_token_missing"}

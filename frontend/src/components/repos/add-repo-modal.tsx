@@ -5,7 +5,7 @@ import { Modal } from "@/components/ui/modal";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, AvailableRepoOut, RepoOut, ApiError } from "@/lib/api";
+import { api, AvailableRepoOut, RepoOut, ApiError, isGithubTokenError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
@@ -121,6 +121,15 @@ export function AddRepoModal({ isOpen, onClose, onSuccess }: AddRepoModalProps) 
 
   const API_LOGIN_URL = `${process.env.NEXT_PUBLIC_API_URL}/auth/login`;
 
+  // GitHub OAuth grant missing/expired: the app session is still valid, so
+  // stay in the modal and offer a re-grant instead of redirecting to /login.
+  // Covers the 428 github_token_* contract and legacy 401 re-login responses.
+  const isGithubAuthError =
+    fetchError !== null &&
+    (fetchError.status === 428 ||
+      fetchError.status === 401 ||
+      isGithubTokenError(fetchError.message));
+
   return (
     <Modal
       isOpen={isOpen}
@@ -143,14 +152,14 @@ export function AddRepoModal({ isOpen, onClose, onSuccess }: AddRepoModalProps) 
           <div className="flex items-start gap-2.5 rounded-lg border border-amber-900/80 bg-amber-950/30 p-3 text-xs text-amber-300 shadow-md">
             <AlertCircle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
             <div className="space-y-1">
-              {fetchError.status === 401 ? (
+              {isGithubAuthError ? (
                 <span>
-                  Please re-login to grant repo access.
+                  GitHub access needed to list repositories.
                   <a
                     href={API_LOGIN_URL}
                     className="ml-1 underline underline-offset-2 text-amber-200 hover:text-white font-medium"
                   >
-                    Re-login →
+                    Connect with GitHub →
                   </a>
                 </span>
               ) : fetchError.status === 429 ? (

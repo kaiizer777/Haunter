@@ -383,6 +383,20 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Machine-readable error codes returned by GET /github/available-repos when
+ * the app session is valid but the stored GitHub OAuth grant is unusable.
+ * These must NEVER trigger the global 401 → /login redirect below — the
+ * user is still authenticated; only the GitHub grant needs a refresh via
+ * `${API_BASE}/auth/login`.
+ */
+export const GITHUB_TOKEN_MISSING = "github_token_missing";
+export const GITHUB_TOKEN_INVALID = "github_token_invalid";
+
+export function isGithubTokenError(detail: unknown): boolean {
+  return detail === GITHUB_TOKEN_MISSING || detail === GITHUB_TOKEN_INVALID;
+}
+
 type RequestOptions = RequestInit & { silent?: boolean };
 
 async function request<T>(
@@ -422,6 +436,19 @@ async function request<T>(
   }
 
   if (res.status === 401) {
+    // GitHub-grant failures carry a machine-readable detail and must not
+    // invalidate the app session: peek at the body before deciding. A true
+    // session expiry ("Not authenticated" / "Invalid or expired session")
+    // still redirects to /login below.
+    try {
+      const body = (await res.clone().json()) as { detail?: unknown } | null;
+      if (body && isGithubTokenError(body.detail)) {
+        throw new ApiError(body.detail as string, 401);
+      }
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      // Non-JSON 401 body — fall through to the session-expiry redirect.
+    }
     if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.href = "/login";

@@ -156,6 +156,58 @@ describe("api.ts", () => {
       );
       expect(window.location.href).toBe("https://example.com/login");
     });
+
+    it("does not redirect on 401 carrying a github_token detail (session stays valid)", async () => {
+      delete (window as any).location;
+      window.location = {
+        pathname: "/repos",
+        href: "https://example.com/repos",
+      } as any;
+
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: "github_token_missing" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      try {
+        await api.getAvailableRepos();
+        expect.unreachable();
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.status).toBe(401);
+        expect(err.message).toBe("github_token_missing");
+      }
+      expect(window.location.href).toBe("https://example.com/repos");
+    });
+
+    it("does not redirect on 428 github_token responses", async () => {
+      delete (window as any).location;
+      window.location = {
+        pathname: "/repos",
+        href: "https://example.com/repos",
+      } as any;
+
+      for (const detail of ["github_token_missing", "github_token_invalid"]) {
+        globalThis.fetch = vi.fn().mockResolvedValue(
+          new Response(JSON.stringify({ detail }), {
+            status: 428,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+
+        try {
+          await api.getAvailableRepos();
+          expect.unreachable();
+        } catch (err: any) {
+          expect(err).toBeInstanceOf(ApiError);
+          expect(err.status).toBe(428);
+          expect(err.message).toBe(detail);
+        }
+      }
+      expect(window.location.href).toBe("https://example.com/repos");
+    });
   });
 
   describe("non-2xx error status mapping", () => {
