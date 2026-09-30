@@ -128,6 +128,14 @@ class Settings(BaseSettings):
     github_app_id: Optional[str] = None
     github_app_private_key: Optional[str] = None  # full PEM, newlines preserved
 
+    # SSM Parameter Store path (SecureString) holding the PEM for the
+    # repo-write GitHub App. The Lambda path (see infra/aws/lambda.tf):
+    # the ~1.6KB PEM is read at runtime via boto3 instead of being injected
+    # as an env var, keeping the function under the Lambda
+    # environment-variable size limit. Local dev sets the PEM directly via
+    # GITHUB_APP_PRIVATE_KEY instead.
+    github_app_private_key_ssm_path: str = "/haunter/GITHUB_APP_PRIVATE_KEY"
+
     # Phase 13 — Sandbox provider selection.
     # "github_actions" uses a Haunter-org test mirror + GitHub Actions polling
     # (see github.md). Active sandbox provider.

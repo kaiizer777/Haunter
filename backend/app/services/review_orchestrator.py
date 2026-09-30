@@ -22,7 +22,12 @@ from sqlalchemy.orm import selectinload
 
 from app.db import async_session_maker
 from app.config import settings
-from app.github.pr import get_installation_token, resolve_installation_id
+from app.github.pr import (
+    _is_configured_str,
+    _resolve_app_credentials,
+    get_installation_token,
+    resolve_installation_id,
+)
 from app.github_client import (
     create_commit_comment,
     create_pull_request_review,
@@ -61,8 +66,28 @@ async def _ensure_install_id(session: Any, repo: Any) -> None:
     existing = getattr(repo, "github_install_id", None)
     if isinstance(existing, int) and not isinstance(existing, bool) and existing > 0:
         return
-    if not settings.github_app_id or not settings.github_app_private_key:
-        return
+    # Explicit pair checked against this module's settings first (unit tests
+    # patch review_orchestrator.settings directly). The sync resolver is
+    # env-only on purpose: the read-only auditor App is NEVER valid for
+    # writes, so only the write-capable pair justifies a backfill attempt
+    # here (the async SSM path is resolved later by get_installation_token()).
+    explicit_configured = _is_configured_str(
+        settings.github_app_id
+    ) and _is_configured_str(settings.github_app_private_key)
+    if not explicit_configured:
+        # SSM-backed Lambda path: App ID + SSM PEM path (no PEM in env)
+        # counts as configured — resolve_installation_id() below loads the
+        # PEM from SSM via _resolve_write_credentials(), so backfill must
+        # not be skipped or get_installation_token() would fail on the
+        # missing install id.
+        ssm_path = getattr(settings, "github_app_private_key_ssm_path", "")
+        ssm_configured = _is_configured_str(
+            settings.github_app_id
+        ) and _is_configured_str(ssm_path)
+        if not ssm_configured:
+            _, _, app_source = _resolve_app_credentials()
+            if app_source == "none":
+                return
     try:
         install_id = await resolve_installation_id(repo.owner, repo.name)
     except Exception as exc:
@@ -153,7 +178,7 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                 repo.owner,
                 repo.name,
                 bool(getattr(repo, "github_install_id", None)),
-                bool(settings.github_app_id and settings.github_app_private_key),
+                _resolve_app_credentials()[2],
                 exc,
             )
             token = None

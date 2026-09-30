@@ -20,6 +20,7 @@ Security invariants:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import json
@@ -122,22 +123,226 @@ def _escape_pr_text(text: str, max_len: int) -> str:
     return sanitised[:max_len]
 
 
-def _build_jwt() -> str:
+def _is_configured_str(value: object) -> bool:
+    """True when a credential setting is a non-blank string (whitespace-only = unset)."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _resolve_app_credentials() -> tuple[str | None, str | None, str]:
+    """
+    Resolve the write-capable GitHub App credentials from environment.
+
+    ONLY the explicit write-capable pair (``settings.github_app_id`` +
+    ``settings.github_app_private_key``) is accepted here. The read-only
+    auditor App (``settings.github_auditor_app_*``) is NEVER a valid source
+    for write operations — its installation token lacks
+    ``contents:write`` / ``pull_requests:write``, so signing PR writes with
+    it fails at GitHub with 403 while masking the real misconfiguration
+    (a missing write App PEM).
+
+    Both members of the explicit pair must be non-blank; a half-configured
+    pair is treated as missing so we never sign with a mismatched id/key
+    combination.
+
+    The SSM-backed write key (``settings.github_app_private_key_ssm_path``)
+    is resolved separately by ``_resolve_write_credentials()`` — this
+    function stays sync and env-only so non-async callers keep working.
+
+    Returns:
+        (app_id, private_key, source) where source is ``"github_app"`` or
+        ``"none"``. Values are never logged by callers — only ``source``.
+    """
+    if _is_configured_str(settings.github_app_id) and _is_configured_str(
+        settings.github_app_private_key
+    ):
+        assert settings.github_app_id is not None
+        assert settings.github_app_private_key is not None
+        return settings.github_app_id.strip(), settings.github_app_private_key, "github_app"
+    return None, None, "none"
+
+
+# Module-level PEM cache for the SSM-backed write App key.
+# Key: SSM path -> (PEM string, loaded_at_monotonic). TTL-bounded so a
+# rotated key is picked up without a Lambda restart/redeploy: entries older
+# than _PEM_CACHE_TTL_SECONDS are re-fetched from SSM, and any 401/403 from
+# GitHub on the SSM path triggers an immediate invalidate + single retry
+# (see _invalidate_pem_cache() call sites in get_installation_token() and
+# resolve_installation_id()).
+_PEM_CACHE: dict[str, tuple[str, float]] = {}
+
+# PEM cache TTL — 10 min. Short enough that a key rotation propagates
+# quickly on a warm Lambda, long enough to avoid an SSM call per webhook.
+_PEM_CACHE_TTL_SECONDS: float = 10 * 60
+
+# Timeout for the blocking boto3 get_parameter call (run via asyncio.to_thread
+# so the event loop is never blocked — same pattern as the sandbox runner).
+_PEM_LOAD_TIMEOUT_SECONDS: float = 5.0
+
+
+def _clear_pem_cache_for_tests() -> None:
+    """Reset the module-level PEM cache. Test-only — never call from production."""
+    _PEM_CACHE.clear()
+
+
+def _invalidate_pem_cache(ssm_path: str | None) -> None:
+    """Drop one SSM path from the PEM cache so the next read re-fetches.
+
+    Called when GitHub rejects the App JWT with 401/403 on the SSM path —
+    the cached PEM is likely a rotated (stale) key. No-op for unknown or
+    blank paths. Never logs key material — only the path.
+    """
+    if _is_configured_str(ssm_path):
+        assert isinstance(ssm_path, str)
+        if _PEM_CACHE.pop(ssm_path.strip(), None) is not None:
+            logger.info(
+                "github.pr: invalidated cached PEM (path=%s) after auth failure",
+                ssm_path.strip(),
+            )
+
+
+async def _load_pem_from_ssm(ssm_path: str) -> str:
+    """
+    Load the write-capable GitHub App private key (PEM) from SSM Parameter Store.
+
+    Cached in ``_PEM_CACHE`` for ``_PEM_CACHE_TTL_SECONDS`` (10 min) so a
+    rotated key propagates without a Lambda restart. The blocking
+    ``boto3`` call runs via ``asyncio.to_thread`` so the event loop is never
+    blocked. The PEM is never logged — only the path and length.
+
+    Raises:
+        RuntimeError: If the parameter is missing, inaccessible, or the call
+            times out (the IAM policy on the Lambda role is the only
+            realistic failure mode — see infra/aws/lambda.tf).
+    """
+    cached = _PEM_CACHE.get(ssm_path)
+    if cached is not None:
+        pem, loaded_at = cached
+        if time.monotonic() - loaded_at < _PEM_CACHE_TTL_SECONDS:
+            return pem
+        # Stale entry — drop it and re-fetch below (rotation window).
+
+    def _sync_load() -> str:
+        import boto3
+
+        client = boto3.client("ssm")
+        resp = client.get_parameter(Name=ssm_path, WithDecryption=True)
+        return resp["Parameter"]["Value"]
+
+    try:
+        pem = await asyncio.wait_for(
+            asyncio.to_thread(_sync_load),
+            timeout=_PEM_LOAD_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"SSM get_parameter timed out after {_PEM_LOAD_TIMEOUT_SECONDS}s "
+            f"(path={ssm_path})"
+        ) from None
+    except Exception as exc:
+        raise RuntimeError(
+            f"SSM get_parameter failed (path={ssm_path}): {exc}"
+        ) from exc
+
+    _PEM_CACHE[ssm_path] = (pem, time.monotonic())
+    logger.info(
+        "github.pr: loaded write App PEM from SSM (path=%s, len=%d)",
+        ssm_path,
+        len(pem),
+    )
+    return pem
+
+
+async def _resolve_write_credentials() -> tuple[str | None, str | None, str]:
+    """
+    Resolve the write-capable GitHub App credentials for PR write operations.
+
+    Order:
+      1. Explicit env pair via ``_resolve_app_credentials()`` (local dev, tests).
+      2. ``settings.github_app_id`` + PEM loaded from SSM at
+         ``settings.github_app_private_key_ssm_path`` — the Lambda path,
+         which keeps the ~1.6KB PEM out of the Lambda env-var block.
+      3. ``(None, None, "none")`` — the caller falls back to
+         ``settings.github_token`` (dev only) or fails closed.
+
+    The read-only auditor App is NEVER consulted here (see
+    ``_resolve_app_credentials``): its token cannot publish writes.
+
+    Returns:
+        (app_id, private_key, source) where source is one of
+        ``"github_app"``, ``"github_app_ssm"``, or ``"none"``. Values are
+        never logged by callers — only ``source``.
+    """
+    app_id, private_key, source = _resolve_app_credentials()
+    if app_id and private_key:
+        return app_id, private_key, source
+    ssm_path = getattr(settings, "github_app_private_key_ssm_path", "")
+    if _is_configured_str(settings.github_app_id) and _is_configured_str(ssm_path):
+        assert settings.github_app_id is not None
+        assert isinstance(ssm_path, str)
+        pem = await _load_pem_from_ssm(ssm_path.strip())
+        if _is_configured_str(pem):
+            return settings.github_app_id.strip(), pem, "github_app_ssm"
+    return None, None, "none"
+
+
+async def _refresh_ssm_credentials_after_auth_failure(
+    app_source: str,
+) -> tuple[str | None, str | None, str]:
+    """Invalidate the cached SSM PEM and re-resolve write credentials once.
+
+    Called when GitHub rejects the App JWT with 401/403 and the failed
+    request used the SSM-backed key (``source == "github_app_ssm"``): the
+    cached PEM is likely a rotated (stale) key held by a warm Lambda.
+    Drops the stale entry so the re-resolve below re-fetches from SSM.
+
+    Returns fresh ``(app_id, private_key, source)``, or
+    ``(None, None, "none")`` when a retry cannot help (env-pair source, or
+    the re-resolve itself failed). Values are never logged — only ``source``.
+    """
+    if app_source != "github_app_ssm":
+        return None, None, "none"
+    ssm_path = getattr(settings, "github_app_private_key_ssm_path", "")
+    _invalidate_pem_cache(ssm_path if isinstance(ssm_path, str) else None)
+    try:
+        return await _resolve_write_credentials()
+    except Exception as exc:
+        logger.warning(
+            "github.pr: SSM credential refresh after auth failure failed: %s",
+            exc,
+        )
+        return None, None, "none"
+
+
+def _build_jwt(
+    app_id: str | None = None,
+    private_key: str | None = None,
+    source: str | None = None,
+) -> str:
     """
     Build a GitHub App JWT for authenticating as the App itself.
 
-    Uses RS256 (RSA + SHA-256) as required by GitHub. The private key PEM
-    comes from settings.github_app_private_key — never logged here.
+    Uses RS256 (RSA + SHA-256) as required by GitHub. When ``app_id`` /
+    ``private_key`` are not passed, the explicit env pair is resolved via
+    ``_resolve_app_credentials()``; SSM-backed callers resolve first via
+    ``_resolve_write_credentials()`` and pass the values in. The key material
+    is never logged here — only ``source``.
 
     Raises:
-        GitHubPRError: If github_app_id or github_app_private_key are not configured.
+        GitHubPRError: If no write-capable App credentials are available,
+            or the private key PEM is malformed (never logs key material).
         ImportError:   If 'cryptography' is not installed.
     """
-    if not settings.github_app_id or not settings.github_app_private_key:
+    resolved_source = source
+    if app_id is None or private_key is None:
+        app_id, private_key, resolved_source = _resolve_app_credentials()
+        if source is None:
+            source = resolved_source
+    if not app_id or not private_key:
         raise GitHubPRError(
             "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be set to use "
             "installation token auth. Falling back to settings.github_token for dev."
         )
+    logger.info("github.pr: building App JWT with source=%s", source or "github_app")
 
     try:
         from cryptography.hazmat.primitives import hashes, serialization
@@ -153,7 +358,7 @@ def _build_jwt() -> str:
     payload = {
         "iat": now - 60,  # allow 60s clock skew
         "exp": now + 600,  # 10 min max (GitHub enforces ≤ 10 min)
-        "iss": settings.github_app_id,
+        "iss": app_id,
     }
 
     def _b64url(data: bytes) -> str:
@@ -164,10 +369,15 @@ def _build_jwt() -> str:
     signing_input = f"{header_b64}.{payload_b64}".encode()
 
     # Load PEM — never log the key object
-    pem_bytes = settings.github_app_private_key.encode()
-    private_key = serialization.load_pem_private_key(pem_bytes, password=None)
+    pem_bytes = private_key.encode()
+    try:
+        loaded_key = serialization.load_pem_private_key(pem_bytes, password=None)
+    except (ValueError, TypeError):
+        raise GitHubPRError(
+            f"Invalid GitHub App private key (source={source or 'github_app'})."
+        ) from None
 
-    signature = private_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+    signature = loaded_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
     sig_b64 = _b64url(signature)
 
     return f"{header_b64}.{payload_b64}.{sig_b64}"
@@ -180,8 +390,11 @@ async def get_installation_token(repo: Any) -> str:
     Token is cached per installation_id for 50 minutes (GitHub expires at 60).
     Cache is in-process only — token is NEVER written to DB or logs.
 
-    Falls back to settings.github_token when GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY
-    are not configured (dev/test convenience only — not for prod).
+    Write auth resolves via _resolve_write_credentials(): the explicit
+    GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY env pair first, then the same App
+    ID with the PEM loaded from SSM (Lambda path). The read-only auditor App
+    is NEVER used here. Falls back to settings.github_token when no
+    write-capable credentials exist (dev/test convenience only — not for prod).
 
     Args:
         repo: Repo ORM object — must have .github_install_id set.
@@ -190,21 +403,27 @@ async def get_installation_token(repo: Any) -> str:
         A GitHub installation access token string.
 
     Raises:
-        GitHubPRError: On HTTP error or missing install_id.
+        GitHubPRError: On HTTP error, missing install_id, or missing auth.
     """
     install_id: Optional[int] = getattr(repo, "github_install_id", None)
 
     # Dev/test fallback — documented: not for prod
-    if not settings.github_app_id or not settings.github_app_private_key:
+    app_id, private_key, app_source = await _resolve_write_credentials()
+    if app_source == "none":
         logger.warning(
-            "github.pr: GITHUB_APP_ID/PRIVATE_KEY not set — using settings.github_token (dev only)"
+            "github.pr: no write-capable App credentials (GITHUB_APP_ID + "
+            "GITHUB_APP_PRIVATE_KEY or GITHUB_APP_PRIVATE_KEY_SSM_PATH) — "
+            "using settings.github_token (dev only)"
         )
         if settings.github_token:
             return settings.github_token
         raise GitHubPRError(
-            "No GitHub auth configured: set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY "
-            "or GITHUB_TOKEN for dev."
+            "No GitHub auth configured for PR writes: set GITHUB_APP_ID + "
+            "GITHUB_APP_PRIVATE_KEY (or GITHUB_APP_PRIVATE_KEY_SSM_PATH "
+            "pointing at the write App PEM in SSM). The read-only auditor "
+            "App cannot publish writes and is never used here."
         )
+    logger.info("github.pr: resolving installation token with source=%s", app_source)
 
     if not install_id:
         raise GitHubPRError(
@@ -219,7 +438,7 @@ async def get_installation_token(repo: Any) -> str:
         if time.monotonic() < expires_at:
             return token_str
 
-    jwt_token = _build_jwt()
+    jwt_token = _build_jwt(app_id, private_key, app_source)
     url = f"{GITHUB_API_BASE}/app/installations/{install_id}/access_tokens"
     headers = {
         "Accept": "application/vnd.github+json",
@@ -228,13 +447,36 @@ async def get_installation_token(repo: Any) -> str:
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        try:
-            response = await client.post(url, headers=headers)
-        except httpx.RequestError as exc:
-            raise GitHubPRError(
-                f"Network error fetching installation token: {exc.__class__.__name__}"
-            ) from exc
+    async def _post_token(auth_headers: dict[str, str]) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+            try:
+                return await client.post(url, headers=auth_headers)
+            except httpx.RequestError as exc:
+                raise GitHubPRError(
+                    f"Network error fetching installation token: {exc.__class__.__name__}"
+                ) from exc
+
+    response = await _post_token(headers)
+
+    if response.status_code in (401, 403) and app_source == "github_app_ssm":
+        # The cached PEM may be a rotated (stale) key on a warm Lambda —
+        # drop it, reload from SSM, and retry once with a fresh JWT.
+        logger.warning(
+            "github.pr: installation token auth failed (%s) on SSM key — "
+            "refreshing PEM and retrying once",
+            response.status_code,
+        )
+        retry_id, retry_key, retry_source = (
+            await _refresh_ssm_credentials_after_auth_failure(app_source)
+        )
+        if retry_source != "none" and retry_id and retry_key:
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {_build_jwt(retry_id, retry_key, retry_source)}",
+                "User-Agent": "Haunter-Autonomous-Agent/1.0",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            response = await _post_token(headers)
 
     if response.status_code in (401, 403):
         raise GitHubPRAuthError(
@@ -277,13 +519,17 @@ async def resolve_installation_id(owner: str, repo: str) -> int:
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
 
-    if not settings.github_app_id or not settings.github_app_private_key:
+    app_id, private_key, app_source = await _resolve_write_credentials()
+    if app_source == "none":
         raise GitHubPRError(
-            "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be set to resolve "
-            "the installation id."
+            "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY (or "
+            "GITHUB_APP_PRIVATE_KEY_SSM_PATH) must be set to resolve "
+            "the installation id. The read-only auditor App cannot "
+            "publish writes and is never used here."
         )
+    logger.info("github.pr: resolving installation id with source=%s", app_source)
 
-    jwt_token = _build_jwt()
+    jwt_token = _build_jwt(app_id, private_key, app_source)
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/installation"
     headers = {
         "Accept": "application/vnd.github+json",
@@ -292,13 +538,36 @@ async def resolve_installation_id(owner: str, repo: str) -> int:
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        try:
-            response = await client.get(url, headers=headers)
-        except httpx.RequestError as exc:
-            raise GitHubPRError(
-                f"Network error resolving installation id: {exc.__class__.__name__}"
-            ) from exc
+    async def _get_installation(auth_headers: dict[str, str]) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+            try:
+                return await client.get(url, headers=auth_headers)
+            except httpx.RequestError as exc:
+                raise GitHubPRError(
+                    f"Network error resolving installation id: {exc.__class__.__name__}"
+                ) from exc
+
+    response = await _get_installation(headers)
+
+    if response.status_code in (401, 403) and app_source == "github_app_ssm":
+        # The cached PEM may be a rotated (stale) key on a warm Lambda —
+        # drop it, reload from SSM, and retry once with a fresh JWT.
+        logger.warning(
+            "github.pr: installation lookup auth failed (%s) on SSM key — "
+            "refreshing PEM and retrying once",
+            response.status_code,
+        )
+        retry_id, retry_key, retry_source = (
+            await _refresh_ssm_credentials_after_auth_failure(app_source)
+        )
+        if retry_source != "none" and retry_id and retry_key:
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {_build_jwt(retry_id, retry_key, retry_source)}",
+                "User-Agent": "Haunter-Autonomous-Agent/1.0",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            response = await _get_installation(headers)
 
     if response.status_code in (401, 403):
         raise GitHubPRAuthError(

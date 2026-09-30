@@ -11,7 +11,7 @@ variable "project_name" {
 }
 
 variable "github_token" {
-  description = "GitHub Personal Access Token (PAT) for context_gatherer's GitHub API calls (logs, diff, commit metadata). Stored as Lambda env var GITHUB_TOKEN. Note: separate from the GitHub App PEM, which lives in SSM at /haunter/GITHUB_TOKEN and is used by the GitHub Actions sandbox runner."
+  description = "GitHub Personal Access Token (PAT) for context_gatherer's GitHub API calls (logs, diff, commit metadata). Stored as Lambda env var GITHUB_TOKEN. Note: separate from the GitHub App PEMs, which live in SSM at /haunter/GITHUB_APP_PRIVATE_KEY (PR-write App) and /haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY (sandbox runner App)."
   type        = string
   sensitive   = true
 }
@@ -108,6 +108,33 @@ variable "token_encryption_key" {
   description = "Fernet key for encrypting users.access_token at rest. Generate with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
   type        = string
   sensitive   = true
+}
+
+# ---------------------------------------------------------------------------
+# GitHub App (PR write operations — Phase 8)
+# Used by backend/app/github/pr.py via GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY
+# for installation-token auth (contents:write, pull_requests:write).
+# Optional: empty default keeps `terraform plan` clean when the App is not
+# configured; the backend falls back to GITHUB_TOKEN (dev only).
+# ---------------------------------------------------------------------------
+
+variable "github_app_id" {
+  description = "GitHub App ID for repo-write operations (PR creation). Non-secret (visible in App's public metadata)."
+  type        = string
+  default     = ""
+}
+
+variable "github_app_private_key" {
+  description = "PEM private key for the repo-write GitHub App. Local dev only — never injected as a Lambda env var (Lambda reads the PEM from SSM via github_app_private_key_ssm_path to stay under the env-var size limit). Never commit the PEM."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "github_app_private_key_ssm_path" {
+  description = "SSM Parameter Store path (SecureString) holding the repo-write GitHub App PEM. The main Lambda role has ssm:GetParameter on this path only; the PEM is read at runtime via boto3 and never enters Terraform state, .env, or lambda.zip. Manage the value manually: aws ssm put-parameter --name /haunter/GITHUB_APP_PRIVATE_KEY --type SecureString --value \"$(cat temp_pem.txt)\" --overwrite (then delete temp_pem.txt)."
+  type        = string
+  default     = "/haunter/GITHUB_APP_PRIVATE_KEY"
 }
 
 # ---------------------------------------------------------------------------

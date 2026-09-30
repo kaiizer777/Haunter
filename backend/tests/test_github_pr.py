@@ -29,7 +29,11 @@ from app.github.pr import (
     GitHubPRError,
     GitHubPRValidationError,
     _TOKEN_CACHE,
+    _build_jwt,
+    _clear_pem_cache_for_tests,
     _escape_pr_text,
+    _resolve_app_credentials,
+    _resolve_write_credentials,
     create_branch,
     get_installation_token,
     open_pr,
@@ -209,6 +213,194 @@ async def test_get_installation_token_dev_fallback() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 6b: _resolve_app_credentials — write-capable pair only, never auditor
+# ---------------------------------------------------------------------------
+
+
+def _mock_pr_settings(
+    app_id=None,
+    app_key=None,
+    auditor_id=None,
+    auditor_key=None,
+    ssm_path="",
+):
+    """Patch app.github.pr.settings with fully explicit attrs (no MagicMock leakage)."""
+    patcher = patch("app.github.pr.settings")
+    mock_settings = patcher.start()
+    mock_settings.github_app_id = app_id
+    mock_settings.github_app_private_key = app_key
+    mock_settings.github_auditor_app_id = auditor_id
+    mock_settings.github_auditor_app_private_key = auditor_key
+    mock_settings.github_app_private_key_ssm_path = ssm_path
+    return patcher
+
+
+def test_resolve_app_credentials_explicit_wins() -> None:
+    """Explicit write pair set → source=github_app (auditor attrs ignored)."""
+    patcher = _mock_pr_settings("explicit-id", "explicit-pem", "auditor-id", "auditor-pem")
+    try:
+        app_id, key, source = _resolve_app_credentials()
+    finally:
+        patcher.stop()
+    assert (app_id, key, source) == ("explicit-id", "explicit-pem", "github_app")
+
+
+def test_resolve_app_credentials_never_uses_auditor() -> None:
+    """Auditor pair alone is NOT valid for writes → source=none (fail closed).
+
+    The auditor App is read-only; its token lacks contents:write /
+    pull_requests:write. PR writes must never be signed with it.
+    """
+    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem")
+    try:
+        app_id, key, source = _resolve_app_credentials()
+    finally:
+        patcher.stop()
+    assert (app_id, key, source) == (None, None, "none")
+
+
+def test_resolve_app_credentials_half_pair_fails_closed() -> None:
+    """Half-configured explicit pair (id without key) → none, never auditor.
+
+    Even with a fully configured auditor pair present, a half write pair
+    must not silently become an auditor-signed write — that would mask the
+    misconfiguration behind a 403 at GitHub.
+    """
+    patcher = _mock_pr_settings("explicit-id", "   ", "auditor-id", "auditor-pem")
+    try:
+        app_id, key, source = _resolve_app_credentials()
+    finally:
+        patcher.stop()
+    assert (app_id, key, source) == (None, None, "none")
+
+
+def test_resolve_app_credentials_none_when_all_missing() -> None:
+    """Nothing configured → source=none so callers take the dev GITHUB_TOKEN path."""
+    patcher = _mock_pr_settings(None, "", "  ", None)
+    try:
+        app_id, key, source = _resolve_app_credentials()
+    finally:
+        patcher.stop()
+    assert (app_id, key, source) == (None, None, "none")
+
+
+@pytest.mark.anyio
+async def test_resolve_write_credentials_prefers_env_pair() -> None:
+    """Env pair set (+ SSM path set) → env wins, SSM never read."""
+    patcher = _mock_pr_settings("env-id", "env-pem", None, None, "/haunter/WRITE_KEY")
+    try:
+        with patch(
+            "app.github.pr._load_pem_from_ssm",
+            new_callable=AsyncMock,
+        ) as mock_ssm:
+            app_id, key, source = await _resolve_write_credentials()
+    finally:
+        patcher.stop()
+        _clear_pem_cache_for_tests()
+    assert (app_id, key, source) == ("env-id", "env-pem", "github_app")
+    assert not mock_ssm.called
+
+
+@pytest.mark.anyio
+async def test_resolve_write_credentials_ssm_path() -> None:
+    """App ID + SSM path (no env PEM) → PEM loaded from SSM (Lambda path)."""
+    patcher = _mock_pr_settings("app-id", None, "auditor-id", "auditor-pem", "/haunter/WRITE_KEY")
+    try:
+        with patch(
+            "app.github.pr._load_pem_from_ssm",
+            new_callable=AsyncMock,
+            return_value="ssm-pem",
+        ) as mock_ssm:
+            app_id, key, source = await _resolve_write_credentials()
+    finally:
+        patcher.stop()
+        _clear_pem_cache_for_tests()
+    assert (app_id, key, source) == ("app-id", "ssm-pem", "github_app_ssm")
+    mock_ssm.assert_called_once_with("/haunter/WRITE_KEY")
+
+
+@pytest.mark.anyio
+async def test_resolve_write_credentials_auditor_only_is_none() -> None:
+    """Auditor pair alone (no SSM) → none, so writes fail closed."""
+    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
+    try:
+        app_id, key, source = await _resolve_write_credentials()
+    finally:
+        patcher.stop()
+        _clear_pem_cache_for_tests()
+    assert (app_id, key, source) == (None, None, "none")
+
+
+@pytest.mark.anyio
+async def test_get_installation_token_auditor_only_uses_dev_fallback() -> None:
+    """Auditor-only config + GITHUB_TOKEN set → dev token, no JWT, no HTTP."""
+    repo = _make_repo(install_id=321)
+    _TOKEN_CACHE.clear()
+    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
+    mock_settings = patcher.start()
+    mock_settings.github_token = "ghp_dev_fallback_token"
+    try:
+        with (
+            patch("app.github.pr._build_jwt") as mock_jwt,
+            respx.mock(),
+        ):
+            token = await get_installation_token(repo)
+    finally:
+        patcher.stop()
+    assert token == "ghp_dev_fallback_token"
+    assert not mock_jwt.called
+    _TOKEN_CACHE.clear()
+
+
+@pytest.mark.anyio
+async def test_get_installation_token_auditor_only_no_token_fails_closed() -> None:
+    """Auditor-only config + no GITHUB_TOKEN → explicit GitHubPRError (no silent auditor write)."""
+    repo = _make_repo(install_id=322)
+    _TOKEN_CACHE.clear()
+    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
+    mock_settings = patcher.start()
+    mock_settings.github_token = None
+    try:
+        with pytest.raises(GitHubPRError, match="auditor"):
+            await get_installation_token(repo)
+    finally:
+        patcher.stop()
+    _TOKEN_CACHE.clear()
+
+
+@pytest.mark.anyio
+async def test_get_installation_token_uses_ssm_write_key() -> None:
+    """App ID + SSM PEM → POSTs with JWT minted from the SSM key."""
+    repo = _make_repo(install_id=323)
+    _TOKEN_CACHE.clear()
+    patcher = _mock_pr_settings("app-id", None, None, None, "/haunter/WRITE_KEY")
+    try:
+        with (
+            patch(
+                "app.github.pr._load_pem_from_ssm",
+                new_callable=AsyncMock,
+                return_value="ssm-pem",
+            ),
+            patch("app.github.pr._build_jwt", return_value="fake_jwt") as mock_jwt,
+        ):
+            with respx.mock(assert_all_called=True) as rx:
+                rx.post(
+                    "https://api.github.com/app/installations/323/access_tokens"
+                ).mock(
+                    return_value=httpx.Response(
+                        201, json={"token": "ghs_ssm_token"}
+                    )
+                )
+                token = await get_installation_token(repo)
+    finally:
+        patcher.stop()
+        _clear_pem_cache_for_tests()
+    assert token == "ghs_ssm_token"
+    mock_jwt.assert_called_once_with("app-id", "ssm-pem", "github_app_ssm")
+    _TOKEN_CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
 # Test 7: create_branch always sends force=False (never force-push)
 # ---------------------------------------------------------------------------
 
@@ -314,3 +506,28 @@ def test_escape_pr_text_entities() -> None:
     assert "&lt;foo&gt;" in escaped
     # Quotes are NOT escaped (quote=False in html.escape)
     assert "'" in escaped
+
+
+# ---------------------------------------------------------------------------
+# _build_jwt: malformed PEM normalizes to GitHubPRError (never AuthError)
+# ---------------------------------------------------------------------------
+
+
+def test_build_jwt_malformed_pem_raises_github_pr_error() -> None:
+    """Malformed PEM must raise GitHubPRError (not raw ValueError, not AuthError).
+
+    Covers env + SSM paths: a truncated/rotated SSM value must surface as a
+    clear config error with source context so orchestrator handling stays
+    consistent. Key material must never appear in the message.
+    """
+    bad_pem = "not-a-valid-pem"
+    with pytest.raises(GitHubPRError, match=r"source=github_app_ssm") as exc_info:
+        _build_jwt("app-id", bad_pem, "github_app_ssm")
+    assert not isinstance(exc_info.value, GitHubPRAuthError)
+    assert bad_pem not in str(exc_info.value)
+
+
+def test_build_jwt_malformed_env_pem_defaults_source() -> None:
+    """Malformed env PEM without explicit source still raises GitHubPRError."""
+    with pytest.raises(GitHubPRError, match=r"source=github_app"):
+        _build_jwt("app-id", "bogus-key", None)
