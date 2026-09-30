@@ -21,7 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.db import async_session_maker
-from app.github.pr import get_installation_token
+from app.config import settings
+from app.github.pr import get_installation_token, resolve_installation_id
 from app.github_client import (
     create_commit_comment,
     create_pull_request_review,
@@ -36,6 +37,59 @@ from app.subagents.code_reviewer import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Maximum chars stored in code_reviews.failure_reason (human-readable, no secrets).
+_FAILURE_REASON_MAX_CHARS = 500
+
+
+def _truncate_failure_reason(reason: object) -> str:
+    """Truncate a publish/fetch failure to 500 chars for DB storage."""
+    text = str(reason) if reason is not None else "unknown error"
+    return text[:_FAILURE_REASON_MAX_CHARS]
+
+
+async def _ensure_install_id(session: Any, repo: Any) -> None:
+    """
+    Backfill ``repo.github_install_id`` when missing but the GitHub App is configured.
+
+    Resolves via ``GET /repos/{owner}/{repo}/installation`` (App JWT) and
+    persists the result on the repo row. No-op when the id is already set or
+    when App credentials are absent (dev fallback uses ``settings.github_token``).
+    Never raises — failures are logged and the caller proceeds to token
+    resolution, which will surface a clear error downstream.
+    """
+    existing = getattr(repo, "github_install_id", None)
+    if isinstance(existing, int) and not isinstance(existing, bool) and existing > 0:
+        return
+    if not settings.github_app_id or not settings.github_app_private_key:
+        return
+    try:
+        install_id = await resolve_installation_id(repo.owner, repo.name)
+    except Exception as exc:
+        logger.warning(
+            "review_orchestrator: could not auto-resolve install id for %s/%s: %s",
+            repo.owner,
+            repo.name,
+            exc,
+        )
+        return
+    repo.github_install_id = install_id
+    try:
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logger.warning(
+            "review_orchestrator: failed to backfill install id for %s/%s: %s",
+            repo.owner,
+            repo.name,
+            exc,
+        )
+        return
+    logger.info(
+        "review_orchestrator: backfilled github_install_id for %s/%s",
+        repo.owner,
+        repo.name,
+    )
 
 
 def _build_risk_badge(risk_score: int) -> str:
@@ -88,14 +142,18 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
             await session.commit()
             return
 
-        # 1. Resolve installation token
+        # 1. Resolve installation token (backfill install id first for legacy repos)
+        await _ensure_install_id(session, repo)
         try:
             token = await get_installation_token(repo)
         except Exception as exc:
             logger.warning(
-                "review_orchestrator: failed to resolve token for repo %s/%s: %s",
+                "review_orchestrator: failed to resolve token for repo %s/%s "
+                "(has_install_id=%s app_configured=%s): %s",
                 repo.owner,
                 repo.name,
+                bool(getattr(repo, "github_install_id", None)),
+                bool(settings.github_app_id and settings.github_app_private_key),
                 exc,
             )
             token = None
@@ -142,6 +200,9 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
             )
             review.status = "error"
             review.summary = f"Failed to fetch git diff: {diff_err}"
+            review.failure_reason = _truncate_failure_reason(
+                f"Failed to fetch git diff: {diff_err}"
+            )
             await session.commit()
             return
 
@@ -165,21 +226,26 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
             )
             review.status = "error"
             review.summary = f"Code review analysis failed: {llm_err}"
+            review.failure_reason = _truncate_failure_reason(
+                f"Code review analysis failed: {llm_err}"
+            )
             await session.commit()
             return
 
-        # 4. Update database record
+        # 4. Persist analysis results — status stays in_progress until the
+        # GitHub publish below succeeds. Marking completed here would hide
+        # POST failures behind a success status (R2).
         review.risk_score = result.output.risk_score
         review.summary = result.output.summary
         review.findings = [f.model_dump() for f in result.output.findings]
         review.input_tokens = result.input_tokens
         review.output_tokens = result.output_tokens
-        review.status = "completed"
+        review.failure_reason = None
         await session.commit()
         await session.refresh(review)
 
         logger.info(
-            "review_orchestrator: review completed for %s/%s @ %s (risk_score=%d, findings=%d, latency=%dms)",
+            "review_orchestrator: review analyzed for %s/%s @ %s (risk_score=%d, findings=%d, latency=%dms)",
             repo.owner,
             repo.name,
             review.commit_sha,
@@ -188,7 +254,9 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
             result.latency_ms,
         )
 
-        # 5. Submit review to GitHub
+        # 5. Submit review to GitHub — only now may the row become completed.
+        # Publish failures set status=error + failure_reason (truncated 500)
+        # while keeping findings/summary so the dashboard stays truthful.
         repo_settings = await get_repo_settings(session, repo.id)
         risk_badge = _build_risk_badge(review.risk_score)
         if not repo_settings.enable_pr_comments:
@@ -197,7 +265,17 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                 repo.owner,
                 repo.name,
             )
-        elif review.pr_number:
+            review.status = "completed"
+            await session.commit()
+            await session.refresh(review)
+            logger.info(
+                "review_orchestrator: review completed (comments suppressed) for %s/%s @ %s",
+                repo.owner,
+                repo.name,
+                review.commit_sha,
+            )
+            return
+        if review.pr_number:
             # PR Review: comments array + overall event
             comments: list[dict[str, Any]] = []
             for f in result.output.findings:
@@ -238,12 +316,27 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                     review.pr_number,
                     review_event,
                 )
+                review.status = "completed"
+                await session.commit()
+                await session.refresh(review)
+                logger.info(
+                    "review_orchestrator: review completed for %s/%s @ %s (risk_score=%d, findings=%d)",
+                    repo.owner,
+                    repo.name,
+                    review.commit_sha,
+                    review.risk_score,
+                    len(result.output.findings),
+                )
             except Exception as gh_err:
+                is_422 = "422" in str(gh_err)
                 logger.warning(
-                    "review_orchestrator: failed to post PR review with inline comments on %s/%s PR #%d: %s. Attempting fallback to summary review.",
+                    "review_orchestrator: failed to post PR review with inline comments "
+                    "on %s/%s PR #%d (invalid_inline_422=%s): %s. "
+                    "Dropping inline comments and retrying summary-only review.",
                     repo.owner,
                     repo.name,
                     review.pr_number,
+                    is_422,
                     gh_err,
                 )
                 try:
@@ -272,6 +365,9 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                         review.pr_number,
                         review_event,
                     )
+                    review.status = "completed"
+                    await session.commit()
+                    await session.refresh(review)
                 except Exception as fallback_err:
                     logger.error(
                         "review_orchestrator: fallback PR review also failed on %s/%s PR #%d: %s",
@@ -280,6 +376,14 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                         review.pr_number,
                         fallback_err,
                     )
+                    # Findings/summary are kept; only the status signals the
+                    # publish failure so the dashboard stays truthful.
+                    review.status = "error"
+                    review.failure_reason = _truncate_failure_reason(
+                        f"Failed to publish PR review: {fallback_err}"
+                    )
+                    await session.commit()
+                    await session.refresh(review)
         else:
             # Commit comment for push without PR
             findings_md = ""
@@ -313,11 +417,20 @@ async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
                     repo.name,
                     review.commit_sha,
                 )
+                review.status = "completed"
+                await session.commit()
+                await session.refresh(review)
             except Exception as gh_err:
-                logger.warning(
+                logger.error(
                     "review_orchestrator: failed to post commit comment on %s/%s @ %s: %s",
                     repo.owner,
                     repo.name,
                     review.commit_sha,
                     gh_err,
                 )
+                review.status = "error"
+                review.failure_reason = _truncate_failure_reason(
+                    f"Failed to publish commit comment: {gh_err}"
+                )
+                await session.commit()
+                await session.refresh(review)

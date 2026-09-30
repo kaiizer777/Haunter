@@ -66,6 +66,7 @@ async def add_repo(
         default_branch=body.default_branch,
         language_hint=body.language_hint,
         active_model_config_id=body.active_model_config_id,
+        github_install_id=body.github_install_id,
     )
     db.add(repo)
     try:

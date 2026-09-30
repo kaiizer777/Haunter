@@ -629,3 +629,254 @@ async def test_pr_webhook_duplicate_delivery(
     )
     count = await db.scalar(stmt)
     assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_null_install_app_configured_backfills_and_completes(
+    db: AsyncSession, seeded_repo: tuple[User, Repo]
+):
+    """R1: repo with github_install_id=None but App configured auto-resolves and completes.
+
+    Regression for repos connected before github_install_id was wired into
+    POST /repos: the orchestrator must backfill via installation lookup
+    instead of falling back to token=None -> "Failed to fetch git diff".
+    """
+    _, repo = seeded_repo
+    assert repo.github_install_id is None
+    repo_id = repo.id
+
+    review = CodeReview(
+        repo_id=repo_id,
+        commit_sha="abcd1234abcd1234abcd1234abcd1234abcd1234",
+        pr_number=77,
+        risk_score=0,
+        summary="Pending review",
+        findings=[],
+        status="pending",
+    )
+    db.add(review)
+    await db.commit()
+    await db.refresh(review)
+
+    mock_llm_response = {
+        "content": json.dumps(
+            {
+                "risk_score": 25,
+                "summary": "Clean change, no issues.",
+                "findings": [],
+            }
+        ),
+        "usage": {"input_tokens": 100, "output_tokens": 20},
+    }
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value="diff --git a/x.py b/x.py\n+pass",
+        ),
+        patch("app.subagents.code_reviewer.LLMClient") as mock_llm_cls,
+        patch(
+            "app.services.review_orchestrator.create_pull_request_review",
+            new_callable=AsyncMock,
+            return_value={},
+        ) as mock_pr_review,
+        patch(
+            "app.services.review_orchestrator.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="mock-token",
+        ),
+        patch(
+            "app.services.review_orchestrator.resolve_installation_id",
+            new_callable=AsyncMock,
+            return_value=555666,
+        ),
+        patch("app.services.review_orchestrator.settings") as mock_settings,
+    ):
+        mock_settings.github_app_id = "test-app-id"
+        mock_settings.github_app_private_key = "fake-pem"
+        mock_llm = mock_llm_cls.return_value
+        mock_llm.complete = AsyncMock(return_value=mock_llm_response)
+
+        await run_code_review_pipeline(review.id)
+
+        assert mock_pr_review.called
+
+    db.expire_all()
+    stmt = select(CodeReview).where(CodeReview.id == review.id)
+    updated = (await db.execute(stmt)).scalars().first()
+    assert updated is not None
+    assert updated.status == "completed"
+    assert updated.failure_reason is None
+
+    # Backfill persisted on the repo row.
+    repo_stmt = select(Repo).where(Repo.id == repo_id)
+    repo_row = (await db.execute(repo_stmt)).scalars().first()
+    assert repo_row is not None
+    assert repo_row.github_install_id == 555666
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_publish_failure_sets_error_with_failure_reason(
+    db: AsyncSession, seeded_repo: tuple[User, Repo]
+):
+    """R2: GitHub POST failure must surface as status=error + failure_reason, keeping findings."""
+    _, repo = seeded_repo
+
+    review = CodeReview(
+        repo_id=repo.id,
+        commit_sha="eeee1111eeee1111eeee1111eeee1111eeee1111",
+        pr_number=202,
+        risk_score=0,
+        summary="Pending review",
+        findings=[],
+        status="pending",
+    )
+    db.add(review)
+    await db.commit()
+    await db.refresh(review)
+
+    mock_llm_response = {
+        "content": json.dumps(
+            {
+                "risk_score": 90,
+                "summary": "Critical issue found.",
+                "findings": [
+                    {
+                        "file_path": "app.py",
+                        "line_start": 1,
+                        "line_end": 1,
+                        "category": "security",
+                        "severity": "critical",
+                        "critique": "Command injection.",
+                        "suggested_patch": "fix it",
+                    }
+                ],
+            }
+        ),
+        "usage": {"input_tokens": 300, "output_tokens": 120},
+    }
+
+    long_error = "GitHub API returned error 500: " + "x" * 1000
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value="diff",
+        ),
+        patch("app.subagents.code_reviewer.LLMClient") as mock_llm_cls,
+        patch(
+            "app.services.review_orchestrator.create_pull_request_review",
+            new_callable=AsyncMock,
+            side_effect=Exception(long_error),
+        ),
+        patch(
+            "app.services.review_orchestrator.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="mock-token",
+        ),
+    ):
+        mock_llm = mock_llm_cls.return_value
+        mock_llm.complete = AsyncMock(return_value=mock_llm_response)
+
+        await run_code_review_pipeline(review.id)
+
+    db.expire_all()
+    stmt = select(CodeReview).where(CodeReview.id == review.id)
+    updated = (await db.execute(stmt)).scalars().first()
+    assert updated is not None
+    # Publish failure is visible — never silently completed.
+    assert updated.status == "error"
+    assert updated.failure_reason is not None
+    assert len(updated.failure_reason) <= 500
+    assert "Failed to publish PR review" in updated.failure_reason
+    # Findings and summary are preserved for the dashboard.
+    assert len(updated.findings) == 1
+    assert updated.summary == "Critical issue found."
+    assert updated.risk_score == 90
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_422_inline_fallback_drops_comments_keeps_summary(
+    db: AsyncSession, seeded_repo: tuple[User, Repo]
+):
+    """R2: invalid inline 422 comments are dropped, summary-only retry still completes."""
+    _, repo = seeded_repo
+
+    review = CodeReview(
+        repo_id=repo.id,
+        commit_sha="ffff3333ffff3333ffff3333ffff3333ffff3333",
+        pr_number=203,
+        risk_score=0,
+        summary="Pending review",
+        findings=[],
+        status="pending",
+    )
+    db.add(review)
+    await db.commit()
+    await db.refresh(review)
+
+    mock_llm_response = {
+        "content": json.dumps(
+            {
+                "risk_score": 85,
+                "summary": "Risky change.",
+                "findings": [
+                    {
+                        "file_path": "app.py",
+                        "line_start": 1,
+                        "line_end": 5,
+                        "category": "security",
+                        "severity": "high",
+                        "critique": "Review this range.",
+                        "suggested_patch": "patch here",
+                    }
+                ],
+            }
+        ),
+        "usage": {"input_tokens": 200, "output_tokens": 80},
+    }
+
+    calls: list[dict] = []
+
+    async def _fake_post_review(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        if kwargs.get("comments"):
+            raise Exception("GitHub API returned error 422: inline comment line out of range")
+        return {"id": 1}
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value="diff",
+        ),
+        patch("app.subagents.code_reviewer.LLMClient") as mock_llm_cls,
+        patch(
+            "app.services.review_orchestrator.create_pull_request_review",
+            new_callable=AsyncMock,
+            side_effect=_fake_post_review,
+        ),
+        patch(
+            "app.services.review_orchestrator.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="mock-token",
+        ),
+    ):
+        mock_llm = mock_llm_cls.return_value
+        mock_llm.complete = AsyncMock(return_value=mock_llm_response)
+
+        await run_code_review_pipeline(review.id)
+
+    # First attempt with inline comments, second attempt summary-only.
+    assert len(calls) == 2
+    assert len(calls[0]["comments"]) == 1
+    assert calls[1]["comments"] == []
+
+    db.expire_all()
+    stmt = select(CodeReview).where(CodeReview.id == review.id)
+    updated = (await db.execute(stmt)).scalars().first()
+    assert updated is not None
+    assert updated.status == "completed"
+    assert updated.failure_reason is None
+    assert len(updated.findings) == 1

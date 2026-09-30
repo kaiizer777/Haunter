@@ -377,6 +377,7 @@ class CodeReview(Base):
         JSONB, nullable=False, default=list
     )
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="completed")
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(

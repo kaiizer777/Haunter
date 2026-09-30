@@ -60,6 +60,7 @@ class CodeReviewOut(BaseModel):
     summary: str
     findings: list[ReviewFindingOut]
     status: str
+    failure_reason: Optional[str] = None
     input_tokens: int
     output_tokens: int
     created_at: datetime
@@ -110,6 +111,7 @@ def _map_review_to_out(
         summary=review.summary,
         findings=findings_list,
         status=review.status,
+        failure_reason=getattr(review, "failure_reason", None),
         input_tokens=review.input_tokens,
         output_tokens=review.output_tokens,
         created_at=review.created_at,
