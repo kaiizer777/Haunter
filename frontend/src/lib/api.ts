@@ -449,20 +449,44 @@ async function request<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  let res: Response;
-  const timeoutSignal =
-    typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
-      ? AbortSignal.timeout(15000)
-      : undefined;
-  const signal = fetchOptions.signal ?? timeoutSignal;
+  // 30s timeout covers Lambda cold starts; idempotent GETs get one retry on timeout.
+  const API_TIMEOUT_MS = 30000;
 
-  try {
-    res = await fetch(url, {
+  function createTimeoutSignal(): AbortSignal | undefined {
+    return typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
+      ? AbortSignal.timeout(API_TIMEOUT_MS)
+      : undefined;
+  }
+
+  function isTimeoutAbort(err: unknown): boolean {
+    return err instanceof DOMException && err.name === "TimeoutError";
+  }
+
+  async function doFetch(signal: AbortSignal | undefined): Promise<Response> {
+    return fetch(url, {
       ...fetchOptions,
       signal,
       headers,
       credentials: "include",
     });
+  }
+
+  const method = (fetchOptions.method || "GET").toUpperCase();
+  // Only retry idempotent GETs using our own timeout signal — never retry
+  // caller-aborted requests or non-idempotent methods.
+  const retryOnTimeout = method === "GET" && fetchOptions.signal == null;
+
+  let res: Response;
+  try {
+    try {
+      res = await doFetch(fetchOptions.signal ?? createTimeoutSignal());
+    } catch (err) {
+      if (retryOnTimeout && isTimeoutAbort(err)) {
+        res = await doFetch(createTimeoutSignal());
+      } else {
+        throw err;
+      }
+    }
   } catch (err) {
     if (!silent && typeof window !== "undefined") {
       console.error(`[API Network Error] ${fetchOptions.method || "GET"} ${url}:`, err);
