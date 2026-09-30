@@ -22,7 +22,7 @@ Haunter is an enterprise-grade autonomous CI failure remediation engine, securit
 
 When a GitHub Actions workflow fails, Haunter wakes autonomously via webhooks, distills failure context, determines the root cause, generates candidate patches, verifies fixes inside an isolated GitHub Actions sandbox mirror, and opens an auditable Pull Request with complete diagnostic rationale — or leaves a structured root-cause diagnostic comment if retries are exhausted.
 
-Beyond reactive CI repair, Haunter features **Auditor Mode** (an autonomous, read-only AI Staff Engineer & Security Reviewer bot), **Cloud Agentic Live Sessions** (an interactive in-browser development environment powered by StackBlitz WebContainer and Monaco Diff Editor), and **Granular Per-Repository Governance** with 1-click policy presets.
+Beyond reactive CI repair, Haunter features **Auditor Mode** (an autonomous, read-only AI Staff Engineer & Security Reviewer bot), **Cloud Agentic Live Sessions** (an interactive in-browser development environment powered by StackBlitz WebContainers and Monaco Diff Editor), and **Granular Per-Repository Governance** with 1-click policy presets.
 
 > **The Human Merge Gate Invariant:** Haunter operates strictly as an autonomous contributor, never an autonomous administrator. It **never** auto-merges or pushes directly to default branches. Developers remain the final merge authority.
 
