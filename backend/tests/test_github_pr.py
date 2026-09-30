@@ -29,6 +29,7 @@ from app.github.pr import (
     GitHubPRError,
     GitHubPRValidationError,
     _TOKEN_CACHE,
+    _build_jwt,
     _clear_pem_cache_for_tests,
     _escape_pr_text,
     _resolve_app_credentials,
@@ -505,3 +506,28 @@ def test_escape_pr_text_entities() -> None:
     assert "&lt;foo&gt;" in escaped
     # Quotes are NOT escaped (quote=False in html.escape)
     assert "'" in escaped
+
+
+# ---------------------------------------------------------------------------
+# _build_jwt: malformed PEM normalizes to GitHubPRError (never AuthError)
+# ---------------------------------------------------------------------------
+
+
+def test_build_jwt_malformed_pem_raises_github_pr_error() -> None:
+    """Malformed PEM must raise GitHubPRError (not raw ValueError, not AuthError).
+
+    Covers env + SSM paths: a truncated/rotated SSM value must surface as a
+    clear config error with source context so orchestrator handling stays
+    consistent. Key material must never appear in the message.
+    """
+    bad_pem = "not-a-valid-pem"
+    with pytest.raises(GitHubPRError, match=r"source=github_app_ssm") as exc_info:
+        _build_jwt("app-id", bad_pem, "github_app_ssm")
+    assert not isinstance(exc_info.value, GitHubPRAuthError)
+    assert bad_pem not in str(exc_info.value)
+
+
+def test_build_jwt_malformed_env_pem_defaults_source() -> None:
+    """Malformed env PEM without explicit source still raises GitHubPRError."""
+    with pytest.raises(GitHubPRError, match=r"source=github_app"):
+        _build_jwt("app-id", "bogus-key", None)

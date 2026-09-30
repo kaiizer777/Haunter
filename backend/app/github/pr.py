@@ -328,7 +328,8 @@ def _build_jwt(
     is never logged here — only ``source``.
 
     Raises:
-        GitHubPRError: If no write-capable App credentials are available.
+        GitHubPRError: If no write-capable App credentials are available,
+            or the private key PEM is malformed (never logs key material).
         ImportError:   If 'cryptography' is not installed.
     """
     resolved_source = source
@@ -369,7 +370,12 @@ def _build_jwt(
 
     # Load PEM — never log the key object
     pem_bytes = private_key.encode()
-    loaded_key = serialization.load_pem_private_key(pem_bytes, password=None)
+    try:
+        loaded_key = serialization.load_pem_private_key(pem_bytes, password=None)
+    except (ValueError, TypeError):
+        raise GitHubPRError(
+            f"Invalid GitHub App private key (source={source or 'github_app'})."
+        ) from None
 
     signature = loaded_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
     sig_b64 = _b64url(signature)
