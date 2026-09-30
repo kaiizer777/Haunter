@@ -22,6 +22,7 @@ Security:
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import os
 import re
@@ -600,11 +601,16 @@ def sync_staged_patches_to_repo(
     When ``session_id`` is provided and a session-isolated directory exists
     under ``repo_root``, patches are synced to the session checkout instead.
 
-    ``staged_patches`` is ALWAYS authoritative: disk is overwritten with the
-    staged content even when disk diverges (e.g. direct ``sed -i`` edits).
-    The staged entries are never mutated with disk content during sync.
-    ``staged_authoritative`` is retained for backward compatibility but is
-    now a no-op (all sync paths are authoritative).
+    ``staged_authoritative`` selects the conflict winner when disk diverges
+    from the staged content. It is True only on the explicit staging path
+    (``_tool_stage_patch`` syncs the just-staged single-file dict): the staged
+    patch is written to disk as-is and never mutated. It is False on
+    pre-command syncs (terminal/linter/test runners): terminal commands and
+    formatters (ruff format, black) that modify a staged file on disk are
+    treated as ground truth — disk is preserved and the staged entry is
+    rebuilt from the on-disk content so tests/linters validate the updated
+    code. A disk that still equals the clean base was never touched after
+    staging, so the staged content is newer and is written to disk.
     """
     if not staged_patches or not repo_root or not os.path.isdir(repo_root):
         return
@@ -657,9 +663,26 @@ def sync_staged_patches_to_repo(
                         disk_content = f.read()
                     if disk_content == expected_content:
                         continue  # already synchronized, avoid rewriting
-                    # Staged patch is authoritative: fall through to overwrite
-                    # disk with the staged creation content. Never mutate the
-                    # staged patch with disk content.
+                    if not staged_authoritative:
+                        # Disk diverged (terminal command / formatter edited the
+                        # staged file after staging): preserve disk as ground
+                        # truth and refresh the staged patch from disk content
+                        # so tests/linters validate the updated code.
+                        staged_patches[rel_path] = "".join(
+                            difflib.unified_diff(
+                                [],
+                                disk_content.splitlines(keepends=True),
+                                fromfile="/dev/null",
+                                tofile=f"b/{rel_path}",
+                            )
+                        )
+                        logger.info(
+                            "sandbox: refreshed staged created file %r from disk edits",
+                            rel_path,
+                        )
+                        continue
+                    # Explicit staging path (staged_authoritative): fall through
+                    # to overwrite disk with the staged creation content.
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 with open(target_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(expected_content)
@@ -701,9 +724,28 @@ def sync_staged_patches_to_repo(
                         disk_content = f.read()
                     if disk_content == new_content:
                         continue  # already synchronized, avoid duplicate diff application
-                    # Staged patch is authoritative: fall through to overwrite
-                    # disk with new_content derived from clean_base + diff.
-                    # Never mutate the staged patch with disk content.
+                    if not staged_authoritative and disk_content != clean_base:
+                        # Disk differs from both the clean base and the staged
+                        # result: a terminal command / formatter edited the
+                        # staged file after staging. Preserve disk as ground
+                        # truth and refresh the staged patch from disk content
+                        # so tests/linters validate the updated code.
+                        # (When disk still equals the clean base it was never
+                        # touched after staging, so the staged content is newer
+                        # and is written to disk below.)
+                        staged_patches[rel_path] = "".join(
+                            difflib.unified_diff(
+                                clean_base.splitlines(keepends=True),
+                                disk_content.splitlines(keepends=True),
+                                fromfile=f"a/{rel_path}",
+                                tofile=f"b/{rel_path}",
+                            )
+                        )
+                        logger.info(
+                            "sandbox: refreshed staged patch for %r from disk edits",
+                            rel_path,
+                        )
+                        continue
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 with open(target_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(new_content)

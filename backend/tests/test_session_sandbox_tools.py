@@ -1052,8 +1052,10 @@ def test_sync_staged_patches_to_repo_git_repo_multi_edit(tmp_path: Path) -> None
 
 
 def test_sync_staged_patches_to_repo_created_file_staged_patch_authority(tmp_path: Path) -> None:
-    """Pre-command sync is authoritative: staged creation content wins over
-    divergent disk content and the staged patch is never mutated."""
+    """Pre-command sync preserves terminal/formatter edits to staged created
+    files: divergent disk content is kept and the staged patch is refreshed
+    from disk rather than overwriting disk."""
+    from app.sandbox.mirror import apply_unified_diff
     from app.services.session_tools.sandbox import sync_staged_patches_to_repo
 
     repo_dir = tmp_path / "repo"
@@ -1065,16 +1067,19 @@ def test_sync_staged_patches_to_repo_created_file_staged_patch_authority(tmp_pat
     created_file = repo_dir / "created.txt"
     assert created_file.read_text(encoding="utf-8") == "initial creation\n"
 
-    # Disk carries different (stale/terminal) content.
+    # Disk carries different (terminal/formatter) content.
     created_file.write_text("stale disk content\n", encoding="utf-8")
 
-    # Pre-command sync overwrites disk with the staged content...
+    # Pre-command sync preserves disk and refreshes the staged patch...
     sync_staged_patches_to_repo(str(repo_dir), staged)
-    assert created_file.read_text(encoding="utf-8") == "initial creation\n"
-    # ...and the staged patch is left untouched.
-    assert staged["created.txt"] == creation_diff
+    assert created_file.read_text(encoding="utf-8") == "stale disk content\n"
+    # ...so the refreshed patch rebuilds the disk content from /dev/null.
+    assert staged["created.txt"] != creation_diff
+    assert "+stale disk content" in staged["created.txt"]
+    assert apply_unified_diff("", staged["created.txt"]).strip() == "stale disk content"
 
-    # Authoritative staging path behaves identically.
+    # Explicit staging path (staged_authoritative=True) still lets the
+    # just-staged patch win over pre-existing disk content.
     staged_auth = {"created.txt": creation_diff}
     created_file.write_text("stale disk content\n", encoding="utf-8")
     sync_staged_patches_to_repo(str(repo_dir), staged_auth, staged_authoritative=True)
@@ -1083,10 +1088,11 @@ def test_sync_staged_patches_to_repo_created_file_staged_patch_authority(tmp_pat
 
 
 def test_sync_staged_patches_to_repo_adopts_terminal_mods(tmp_path: Path) -> None:
-    """Pre-command sync is authoritative for modify patches: disk is reset to
-    clean_base + staged diff even when terminal edits diverge."""
+    """Pre-command sync preserves terminal/formatter edits to staged modified
+    files: disk is kept and the staged patch is refreshed from disk content."""
     import subprocess
 
+    from app.sandbox.mirror import apply_unified_diff
     from app.services.session_tools.editor import _make_unified_diff
     from app.services.session_tools.sandbox import sync_staged_patches_to_repo
 
@@ -1119,9 +1125,56 @@ def test_sync_staged_patches_to_repo_adopts_terminal_mods(tmp_path: Path) -> Non
     terminal_content = staged_content + "# terminal edit\n"
     (repo_dir / "mod.py").write_text(terminal_content, encoding="utf-8")
     sync_staged_patches_to_repo(str(repo_dir), staged, base_sha=sha)
-    # Authoritative: disk is restored to staged content, staged patch untouched.
-    assert (repo_dir / "mod.py").read_text(encoding="utf-8") == staged_content
-    assert staged["mod.py"] == diff
+    # Disk edit preserved, staged patch refreshed from disk.
+    assert (repo_dir / "mod.py").read_text(encoding="utf-8") == terminal_content
+    assert staged["mod.py"] != diff
+    assert apply_unified_diff(base, staged["mod.py"]) == terminal_content
+
+
+def test_sync_staged_patches_to_repo_preserves_formatter_edits(tmp_path: Path) -> None:
+    """Formatter (ruff format/black) tweak to a staged file is refreshed into
+    staged_patches during pre-command sync rather than overwritten."""
+    import subprocess
+
+    from app.sandbox.mirror import apply_unified_diff
+    from app.services.session_tools.editor import _make_unified_diff
+    from app.services.session_tools.sandbox import sync_staged_patches_to_repo
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    base = "x=1\ny=2\n"
+    (repo_dir / "fmt.py").write_text(base, encoding="utf-8")
+    for cmd in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test User"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "init"],
+    ):
+        subprocess.run(cmd, cwd=str(repo_dir), check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    staged_content = "x = 10\ny = 2\n"
+    diff = _make_unified_diff(base, staged_content, "fmt.py")
+    staged = {"fmt.py": diff}
+    sync_staged_patches_to_repo(str(repo_dir), staged, base_sha=sha)
+    assert (repo_dir / "fmt.py").read_text(encoding="utf-8") == staged_content
+
+    # Simulate `ruff format`-style normalization applied on disk by the agent.
+    formatted_content = 'x = 10\ny = 2\n\n\n__all__ = ["x"]\n'
+    (repo_dir / "fmt.py").write_text(formatted_content, encoding="utf-8")
+    sync_staged_patches_to_repo(str(repo_dir), staged, base_sha=sha)
+
+    # Disk formatter output survives sync...
+    assert (repo_dir / "fmt.py").read_text(encoding="utf-8") == formatted_content
+    # ...and the staged patch now rebuilds the formatted content from the base.
+    assert apply_unified_diff(base, staged["fmt.py"]) == formatted_content
 
 
 
