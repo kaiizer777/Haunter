@@ -20,17 +20,20 @@ _VECTORS_PATH = Path(__file__).resolve().parent / "failure_signature_vectors.jso
 
 
 def _load_vectors() -> dict[str, Any]:
+    """Load the golden vector corpus that pins every expected signature."""
     with _VECTORS_PATH.open(encoding="utf-8") as fh:
         return json.load(fh)
 
 
 def test_empty_reason_maps_to_unknown() -> None:
+    """Absent, empty and whitespace-only reasons carry no signal."""
     assert normalize_failure_signature(None) == "unknown"
     assert normalize_failure_signature("") == "unknown"
     assert normalize_failure_signature("   \n  ") == "unknown"
 
 
 def test_strips_commit_sha() -> None:
+    """The same error at a different 40-char SHA must cluster together."""
     a = "fix_generator: ValueError: bad ref abc123def456789012345678901234567890abcd in main"
     # Same message with a different 40-char SHA must cluster together.
     b = "fix_generator: ValueError: bad ref ffffffffffffffffffffffffffffffffffffffff in main"
@@ -39,6 +42,7 @@ def test_strips_commit_sha() -> None:
 
 
 def test_strips_file_paths() -> None:
+    """The same error at a different file/line must cluster together."""
     a = "verification: AssertionError in backend/app/orchestrator.py:422 failed"
     b = "verification: AssertionError in backend/app/orchestrator.py:917 failed"
     assert normalize_failure_signature(a) == normalize_failure_signature(b)
@@ -46,6 +50,12 @@ def test_strips_file_paths() -> None:
 
 
 def test_strips_timestamps() -> None:
+    """The same failure at a different instant must cluster together.
+
+    Regression test: the ISO-8601 rule required an uppercase ``T`` separator
+    while the normalizer lowercased its input first, so it could never match
+    and every timestamp fell through to the date/time/number rules.
+    """
     a = "sandbox timeout at 2026-03-01T12:34:56Z after 120s"
     b = "sandbox timeout at 2026-03-02T01:02:03Z after 120s"
     assert normalize_failure_signature(a) == normalize_failure_signature(b)
@@ -53,6 +63,7 @@ def test_strips_timestamps() -> None:
 
 
 def test_distinct_errors_have_distinct_signatures() -> None:
+    """Different failures must not be collapsed into one cluster."""
     a = normalize_failure_signature("fix_generator: ValueError: bad patch")
     b = normalize_failure_signature("sandbox: TimeoutError: runner timed out")
     assert a != b
@@ -61,6 +72,7 @@ def test_distinct_errors_have_distinct_signatures() -> None:
 
 
 def test_signature_grouping_counts() -> None:
+    """Clustering is by normalized signature, not by raw text."""
     reasons = [
         "ValueError: bad ref aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa at 12:00:01",
         "ValueError: bad ref bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb at 13:00:02",
@@ -77,6 +89,7 @@ def test_signature_grouping_counts() -> None:
 
 
 def test_golden_vectors_match_expected_signatures() -> None:
+    """Every corpus input normalizes to its recorded signature."""
     doc = _load_vectors()
     mismatches = [
         f"{v['id']}: expected {v['expected']!r}, got {normalize_failure_signature(v['input'])!r}"
@@ -99,6 +112,7 @@ def test_golden_vectors_are_idempotent() -> None:
 
 
 def test_golden_vectors_keep_distinct_failures_distinct() -> None:
+    """Signatures the corpus declares distinct stay distinct."""
     doc = _load_vectors()
     by_id = {v["id"]: v for v in doc["vectors"]}
     collisions = [
@@ -110,6 +124,7 @@ def test_golden_vectors_keep_distinct_failures_distinct() -> None:
 
 
 def test_signature_length_is_bounded() -> None:
+    """No signature exceeds MAX_SIGNATURE_CHARS."""
     doc = _load_vectors()
     for v in doc["vectors"]:
         assert len(v["expected"]) <= MAX_SIGNATURE_CHARS, v["id"]
