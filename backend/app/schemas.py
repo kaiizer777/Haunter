@@ -216,8 +216,13 @@ class RunOut(BaseModel):
     cost: float = 0.0
     tokens: int = 0
     failure_reason: Optional[str] = None
+    # Stable grouping key for repeated failures (app.failure_signature).
     signature: str = "unknown"
+    # Runs in the whole filtered set sharing this signature. Falls back to 1
+    # when the filtered set exceeds SIGNATURE_CLUSTER_MAX_RUNS, so a client can
+    # treat 1 as "not clustered server-side" and group the page it holds.
     signature_count: int = 1
+    # Earliest run in the filtered set with this signature.
     sample_run_id: Optional[uuid.UUID] = None
     created_at: datetime
     updated_at: datetime

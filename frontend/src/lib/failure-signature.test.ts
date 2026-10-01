@@ -1,9 +1,49 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it, expect } from "vitest";
 import {
+  MAX_SIGNATURE_CHARS,
   normalizeFailureSignature,
   groupRunsBySignature,
   getRunSignature,
 } from "./failure-signature";
+
+interface Vector {
+  id: string;
+  why: string;
+  input: string;
+  expected: string;
+}
+
+interface Corpus {
+  vectors: Vector[];
+  mustDiffer: [string, string][];
+}
+
+const CORPUS_RELATIVE = path.join(
+  "shared",
+  "failure_signature_vectors.json"
+);
+
+/** Walks up from the runner cwd so the suite works from repo root or frontend/. */
+function resolveCorpusPath(): string {
+  let dir = process.cwd();
+  for (;;) {
+    const candidate = path.join(dir, CORPUS_RELATIVE);
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      throw new Error(`${CORPUS_RELATIVE} not found above ${process.cwd()}`);
+    }
+    dir = parent;
+  }
+}
+
+// Shared verbatim with backend/tests/test_failure_signature.py, so the two
+// implementations of the normalizer cannot drift apart.
+const CORPUS = JSON.parse(
+  readFileSync(resolveCorpusPath(), "utf8")
+) as Corpus;
 
 describe("failure-signature.ts", () => {
   describe("normalizeFailureSignature", () => {
@@ -52,6 +92,46 @@ describe("failure-signature.ts", () => {
       const b = normalizeFailureSignature("sandbox: TimeoutError: runner timed out");
       expect(a).not.toBe(b);
       expect(a).not.toBe("unknown");
+      expect(b).not.toBe("unknown");
+    });
+  });
+
+  describe("shared golden corpus", () => {
+    it.each(CORPUS.vectors.map((v) => [v.id, v] as const))(
+      "matches the backend for %s",
+      (_id, vector) => {
+        expect(normalizeFailureSignature(vector.input)).toBe(vector.expected);
+      }
+    );
+
+    it("is idempotent over the whole corpus", () => {
+      for (const vector of CORPUS.vectors) {
+        const once = normalizeFailureSignature(vector.input);
+        expect(normalizeFailureSignature(once)).toBe(once);
+      }
+    });
+
+    it("keeps distinct failures distinct", () => {
+      const byId = new Map(CORPUS.vectors.map((v) => [v.id, v]));
+      for (const [a, b] of CORPUS.mustDiffer) {
+        expect(byId.get(a)?.expected).not.toBe(byId.get(b)?.expected);
+      }
+    });
+
+    it("keeps every signature within the length bound", () => {
+      for (const vector of CORPUS.vectors) {
+        // Counted in code points, matching the backend's str slicing.
+        const codePoints = Array.from(vector.expected).length;
+        expect(codePoints).toBeLessThanOrEqual(MAX_SIGNATURE_CHARS);
+      }
+    });
+
+    it("truncates on a code-point boundary, not a UTF-16 boundary", () => {
+      const raw = "x".repeat(MAX_SIGNATURE_CHARS - 1) + "\u{1F680} tail";
+      const sig = normalizeFailureSignature(raw);
+      // Array.from() means 200 code points, so the surrogate pair stays whole.
+      expect(Array.from(sig)).toHaveLength(MAX_SIGNATURE_CHARS);
+      expect(sig.endsWith("\u{1F680}")).toBe(true);
     });
   });
 

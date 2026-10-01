@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from app.failure_signature import normalize_failure_signature
+from app.failure_signature import MAX_SIGNATURE_CHARS, normalize_failure_signature
+
+_VECTORS_PATH = (
+    Path(__file__).resolve().parents[2] / "shared" / "failure_signature_vectors.json"
+)
+
+
+def _load_vectors() -> dict[str, Any]:
+    with _VECTORS_PATH.open(encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 def test_empty_reason_maps_to_unknown() -> None:
@@ -54,6 +66,59 @@ def test_signature_grouping_counts() -> None:
     sigs = [normalize_failure_signature(r) for r in reasons]
     assert sigs[0] == sigs[1]
     assert sigs[0] != sigs[2]
+
+
+# ---------------------------------------------------------------------------
+# Golden corpus — shared verbatim with frontend/src/lib/failure-signature.test.ts
+# so the Python and TypeScript normalizers cannot drift.
+# ---------------------------------------------------------------------------
+
+
+def test_golden_vectors_match_expected_signatures() -> None:
+    doc = _load_vectors()
+    mismatches = [
+        f"{v['id']}: expected {v['expected']!r}, got {normalize_failure_signature(v['input'])!r}"
+        for v in doc["vectors"]
+        if normalize_failure_signature(v["input"]) != v["expected"]
+    ]
+    assert not mismatches, "\n".join(mismatches)
+
+
+def test_golden_vectors_are_idempotent() -> None:
+    """normalize(normalize(x)) == normalize(x) for the whole corpus."""
+    doc = _load_vectors()
+    not_idempotent = [
+        v["id"]
+        for v in doc["vectors"]
+        if normalize_failure_signature(normalize_failure_signature(v["input"]))
+        != v["expected"]
+    ]
+    assert not not_idempotent, f"not idempotent: {not_idempotent}"
+
+
+def test_golden_vectors_keep_distinct_failures_distinct() -> None:
+    doc = _load_vectors()
+    by_id = {v["id"]: v for v in doc["vectors"]}
+    collisions = [
+        f"{a} == {b} ({by_id[a]['expected']!r})"
+        for a, b in doc["mustDiffer"]
+        if by_id[a]["expected"] == by_id[b]["expected"]
+    ]
+    assert not collisions, "distinct failures collapsed: " + "; ".join(collisions)
+
+
+def test_signature_length_is_bounded() -> None:
+    doc = _load_vectors()
+    for v in doc["vectors"]:
+        assert len(v["expected"]) <= MAX_SIGNATURE_CHARS, v["id"]
+
+
+def test_truncation_counts_code_points_not_utf16_units() -> None:
+    """A non-BMP character on the truncation boundary must survive whole."""
+    raw = "x" * (MAX_SIGNATURE_CHARS - 1) + "\U0001F680 tail"
+    sig = normalize_failure_signature(raw)
+    assert len(sig) == MAX_SIGNATURE_CHARS
+    assert sig.endswith("\U0001F680")
 
 
 @pytest.mark.asyncio
@@ -111,3 +176,54 @@ async def test_list_runs_returns_signature_fields(
     assert by_id[str(runs[2].id)]["signature"] == other_sig
     assert by_id[str(runs[2].id)]["signature_count"] == 1
     assert by_id[str(runs[2].id)]["sample_run_id"] == str(runs[2].id)
+
+
+@pytest.mark.asyncio
+async def test_signature_counts_are_dropped_not_truncated_past_the_cap(
+    db, user_factory, make_auth_client, monkeypatch
+) -> None:
+    """Past SIGNATURE_CLUSTER_MAX_RUNS the scan is skipped, not silently cut off.
+
+    Truncating would report a count lower than the truth; returning 1 makes the
+    client fall back to grouping the page it already has.
+    """
+    from app.models import Repo, Run
+    from app.routers import traces
+    from tests.conftest import truncate_all
+
+    await truncate_all(db)
+    user = await user_factory(github_id=9502, username="sig_cap_user")
+    repo = Repo(user_id=user.id, owner="sigcap", name="repo")
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    runs: list[Run] = []
+    for reason in ("ValueError: shared", "ValueError: shared", "TypeError: other"):
+        run = Run(
+            repo_id=repo.id,
+            github_run_id=int(uuid.uuid4().int % 10_000_000_000) + 1,
+            github_delivery_id=str(uuid.uuid4()),
+            head_sha="b" * 40,
+            head_branch="main",
+            status="error",
+            failure_reason=reason,
+        )
+        db.add(run)
+        runs.append(run)
+    await db.commit()
+    for run in runs:
+        await db.refresh(run)
+
+    monkeypatch.setattr(traces, "SIGNATURE_CLUSTER_MAX_RUNS", 2)
+    async with make_auth_client(user.id) as client:
+        resp = await client.get("/runs")
+
+    assert resp.status_code == 200
+    by_id = {r["id"]: r for r in resp.json()["runs"]}
+    shared_sig = normalize_failure_signature("ValueError: shared")
+    assert by_id[str(runs[0].id)]["signature"] == shared_sig
+    # 3 matching runs > cap of 2 -> no clustering scan, so no partial count.
+    assert by_id[str(runs[0].id)]["signature_count"] == 1
+    assert by_id[str(runs[1].id)]["signature_count"] == 1
+    assert by_id[str(runs[0].id)]["sample_run_id"] == str(runs[0].id)

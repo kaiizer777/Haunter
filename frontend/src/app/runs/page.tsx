@@ -785,19 +785,24 @@ export default function RunsPage() {
                         >
                           {group.signature}
                         </span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono tabular-nums bg-zinc-800 text-zinc-300 border border-zinc-700/60">
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded-full font-mono tabular-nums bg-zinc-800 text-zinc-300 border border-zinc-700/60"
+                          title={`${group.count} run${group.count === 1 ? "" : "s"} in the current filters share this signature`}
+                        >
                           ×{group.count}
                         </span>
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => router.push(`/runs/detail?id=${sampleId}`)}
-                        className="h-7 px-2.5 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/60 transition-all inline-flex items-center gap-1.5"
-                      >
-                        <span>Sample {sampleId.slice(0, 8)}</span>
-                        <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500" />
-                      </Button>
+                      {sampleId && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => router.push(`/runs/detail?id=${sampleId}`)}
+                          className="h-7 px-2.5 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/60 transition-all inline-flex items-center gap-1.5"
+                        >
+                          <span>Sample {sampleId.slice(0, 8)}</span>
+                          <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500" />
+                        </Button>
+                      )}
                     </div>
                     <div className="mt-2 flex flex-wrap gap-1.5">
                       {group.runs.slice(0, 6).map((run) => (

@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["traces"])
 
+# Upper bound on the rows list_runs will scan to compute cross-page failure
+# signature counts. See the clustering block in list_runs for why exceeding it
+# disables the counts instead of truncating them.
+SIGNATURE_CLUSTER_MAX_RUNS = 5000
+
 # ---------------------------------------------------------------------------
 # Status allowlist (mirrors RunStatus enum values)
 # ---------------------------------------------------------------------------
@@ -287,23 +292,28 @@ async def list_runs(
     total_result = await db.execute(count_stmt)
     total: int = total_result.scalar_one() or 0
 
-    # Failure-signature clustering: normalize failure_reason across the full
-    # filtered set (bounded) so signature_count / sample_run_id are stable
-    # under pagination. Ordered ASC so the earliest run wins sample_run_id.
-    cluster_stmt = (
-        select(Run.id, Run.failure_reason, Run.created_at)
-        .where(*filters)
-        .order_by(Run.created_at.asc())
-        .limit(5000)
-    )
-    cluster_rows = (await db.execute(cluster_stmt)).all()
+    # Failure-signature clustering. Cross-page `signature_count` /
+    # `sample_run_id` need the whole filtered set, and the grouping key is a
+    # Python regex pipeline that SQL cannot express, so this costs one extra
+    # bounded statement - not an N+1, and no per-row query. It runs only when
+    # the matched set fits inside the cap: past the cap the counts would be
+    # silently truncated, so we skip the scan entirely and leave
+    # signature_count at 1, which tells the client to group the page it has.
+    # Ordered ASC so the earliest run wins sample_run_id.
     signature_counts: dict[str, int] = {}
     signature_samples: dict[str, uuid.UUID] = {}
-    for row_id, row_reason, _row_created in cluster_rows:
-        sig = normalize_failure_signature(row_reason)
-        signature_counts[sig] = signature_counts.get(sig, 0) + 1
-        if sig not in signature_samples:
-            signature_samples[sig] = row_id
+    if total <= SIGNATURE_CLUSTER_MAX_RUNS:
+        cluster_stmt = (
+            select(Run.id, Run.failure_reason)
+            .where(*filters)
+            .order_by(Run.created_at.asc())
+            .limit(SIGNATURE_CLUSTER_MAX_RUNS)
+        )
+        cluster_rows = (await db.execute(cluster_stmt)).all()
+        for row_id, row_reason in cluster_rows:
+            sig = normalize_failure_signature(row_reason)
+            signature_counts[sig] = signature_counts.get(sig, 0) + 1
+            signature_samples.setdefault(sig, row_id)
 
     # Fetch paginated results with aggregated cost and tokens.
     cost_expr = func.coalesce(func.sum(RunStep.cost_estimate), 0.0).label("cost")

@@ -1,0 +1,251 @@
+{
+  "_comment": "Golden corpus pinning the failure-signature normalizer. Consumed by backend/tests/test_failure_signature.py and frontend/src/lib/failure-signature.test.ts so the Python and TypeScript implementations cannot drift. `expected` is the exact signature for `input`; every vector is additionally asserted idempotent. Edit this file only together with both implementations.",
+  "vectors": [
+    {
+      "id": "empty-string",
+      "why": "empty / whitespace-only input maps to unknown",
+      "input": "",
+      "expected": "unknown"
+    },
+    {
+      "id": "whitespace-only",
+      "why": "blank lines only map to unknown",
+      "input": "   \n  ",
+      "expected": "unknown"
+    },
+    {
+      "id": "punctuation-only",
+      "why": "input that is only edge punctuation maps to unknown",
+      "input": "...\n--",
+      "expected": "unknown"
+    },
+    {
+      "id": "sha-full-lower",
+      "why": "40-char commit sha",
+      "input": "fix_generator: ValueError: bad ref abc123def456789012345678901234567890abcd in main",
+      "expected": "fix_generator: valueerror: bad ref <sha> in main"
+    },
+    {
+      "id": "sha-full-upper",
+      "why": "40-char commit sha, upper case",
+      "input": "fix_generator: ValueError: bad ref ABC123DEF456789012345678901234567890ABCD in main",
+      "expected": "fix_generator: valueerror: bad ref <sha> in main"
+    },
+    {
+      "id": "sha-full-other",
+      "why": "same error, different sha -> same signature",
+      "input": "fix_generator: ValueError: bad ref ffffffffffffffffffffffffffffffffffffffff in main",
+      "expected": "fix_generator: valueerror: bad ref <sha> in main"
+    },
+    {
+      "id": "sha-short-hex",
+      "why": "7-char short sha",
+      "input": "valueerror: bad ref deadbeef in main",
+      "expected": "valueerror: bad ref <sha> in main"
+    },
+    {
+      "id": "uuid-lower",
+      "why": "dashed uuid, lower case",
+      "input": "sandbox: run 550e8400-e29b-41d4-a716-446655440000 timed out",
+      "expected": "sandbox: run <id> timed out"
+    },
+    {
+      "id": "uuid-upper",
+      "why": "dashed uuid, upper case",
+      "input": "sandbox: run 550E8400-E29B-41D4-A716-446655440000 timed out",
+      "expected": "sandbox: run <id> timed out"
+    },
+    {
+      "id": "iso-z",
+      "why": "ISO-8601 with Z",
+      "input": "sandbox timeout at 2026-03-01T12:34:56Z after 120s",
+      "expected": "sandbox timeout at <ts> after 120s"
+    },
+    {
+      "id": "iso-z-other-day",
+      "why": "same error, different instant -> same signature",
+      "input": "sandbox timeout at 2026-03-02T01:02:03Z after 120s",
+      "expected": "sandbox timeout at <ts> after 120s"
+    },
+    {
+      "id": "iso-offset",
+      "why": "ISO-8601 with numeric offset",
+      "input": "sandbox timeout at 2026-03-02T01:02:03+05:30 after 120s",
+      "expected": "sandbox timeout at <ts> after 120s"
+    },
+    {
+      "id": "iso-fractional",
+      "why": "ISO-8601 with fractional seconds",
+      "input": "sandbox timeout at 2026-03-02T01:02:03.123456Z after 120s",
+      "expected": "sandbox timeout at <ts> after 120s"
+    },
+    {
+      "id": "iso-space-sep",
+      "why": "ISO-8601 with a space date/time separator",
+      "input": "sandbox timeout at 2026-03-02 01:02:03 after 120s",
+      "expected": "sandbox timeout at <ts> after 120s"
+    },
+    {
+      "id": "iso-lower-t",
+      "why": "ISO-8601 already lower-cased",
+      "input": "sandbox timeout at 2026-03-02t01:02:03z after 120s",
+      "expected": "sandbox timeout at <ts> after 120s"
+    },
+    {
+      "id": "iso-no-seconds",
+      "why": "ISO-8601 without seconds",
+      "input": "sandbox timeout at 2026-03-02T01:02 after 120s",
+      "expected": "sandbox timeout at <ts> after 120s"
+    },
+    {
+      "id": "date-only",
+      "why": "bare ISO date",
+      "input": "pr_writer: stale checkout dated 2026-03-01",
+      "expected": "pr_writer: stale checkout dated <ts>"
+    },
+    {
+      "id": "time-only",
+      "why": "bare clock time",
+      "input": "context_gatherer: log rotation at 23:59:59",
+      "expected": "context_gatherer: log rotation at <ts>"
+    },
+    {
+      "id": "ipv4-port",
+      "why": "ipv4 host with port",
+      "input": "sandbox: cannot reach 10.0.13.37:5432",
+      "expected": "sandbox: cannot reach <ip>"
+    },
+    {
+      "id": "windows-path",
+      "why": "windows absolute path",
+      "input": "build: MSBUILD error in C:\\build\\src\\Program.cs, line 42",
+      "expected": "build: msbuild error in <path> line <n>"
+    },
+    {
+      "id": "posix-abs-path",
+      "why": "posix absolute path",
+      "input": "verifier: no such file /usr/local/lib/python3.11/requests/api.py",
+      "expected": "verifier: no such file <path>"
+    },
+    {
+      "id": "file-line",
+      "why": "relative file with line number",
+      "input": "verification: AssertionError in backend/app/orchestrator.py:422 failed",
+      "expected": "verification: assertionerror in <path> failed"
+    },
+    {
+      "id": "file-line-other",
+      "why": "same error, different file/line -> same signature",
+      "input": "verification: AssertionError in backend/app/orchestrator.py:917 failed",
+      "expected": "verification: assertionerror in <path> failed"
+    },
+    {
+      "id": "file-line-col",
+      "why": "nested file with line and column",
+      "input": "verification: AssertionError in src/components/ui/select.tsx:12:5 failed",
+      "expected": "verification: assertionerror in <path> failed"
+    },
+    {
+      "id": "ci-run-url",
+      "why": "GitHub Actions run url keeps its host, drops the run id",
+      "input": "context_gatherer: https://github.com/acme/api/actions/runs/1234567890 returned 404",
+      "expected": "context_gatherer: https://github.com/acme/api/actions/runs/<n> returned <n>"
+    },
+    {
+      "id": "ci-run-url-other",
+      "why": "different run id -> same signature",
+      "input": "context_gatherer: https://github.com/acme/api/actions/runs/987654321 returned 500",
+      "expected": "context_gatherer: https://github.com/acme/api/actions/runs/<n> returned <n>"
+    },
+    {
+      "id": "multiline",
+      "why": "only the first non-empty line is used",
+      "input": "sandbox: TimeoutError: runner timed out\n  at backend/app/sandbox/runner.py:88\n  hint: raise it",
+      "expected": "sandbox: timeouterror: runner timed out"
+    },
+    {
+      "id": "double-slash-path",
+      "why": "a double slash is not a path",
+      "input": "runner: a//b/c token",
+      "expected": "runner: a//b/c token"
+    },
+    {
+      "id": "dot-relative-path",
+      "why": "a dot-relative path is not an absolute path",
+      "input": "runner: ../shared/cache hit",
+      "expected": "runner: ../shared/cache hit"
+    },
+    {
+      "id": "hex-in-path",
+      "why": "a hex segment inside a path stays inside the path",
+      "input": "build: cache miss on src/abcdef1234567/page.tsx:12",
+      "expected": "build: cache miss on <path>"
+    },
+    {
+      "id": "error-a",
+      "why": "distinct failure",
+      "input": "fix_generator: ValueError: bad patch",
+      "expected": "fix_generator: valueerror: bad patch"
+    },
+    {
+      "id": "error-b",
+      "why": "distinct failure",
+      "input": "sandbox: TimeoutError: runner timed out",
+      "expected": "sandbox: timeouterror: runner timed out"
+    },
+    {
+      "id": "error-c",
+      "why": "distinct failure",
+      "input": "pr_writer: GitHubError 403 forbidden",
+      "expected": "pr_writer: githuberror <n> forbidden"
+    },
+    {
+      "id": "truncation",
+      "why": "signature is truncated to MAX_SIGNATURE_CHARS counted in code points, so a non-BMP character sitting on the boundary is kept whole (a UTF-16 slice would split its surrogate pair)",
+      "input": "pr_writer: rollout blocked at step pr_writer: rollout blocked at step pr_writer: rollout blocked at step pr_writer: rollout blocked at step pr_writer: rollout blocked at step pr_writer: rollout bloc 🚀 tail",
+      "expected": "pr_writer: rollout blocked at step pr_writer: rollout blocked at step pr_writer: rollout blocked at step pr_writer: rollout blocked at step pr_writer: rollout blocked at step pr_writer: rollout bloc 🚀"
+    },
+    {
+      "id": "crlf-lines",
+      "why": "CRLF log lines break like LF",
+      "input": "runner: step one failed\r\nrunner: step one failed",
+      "expected": "runner: step one failed"
+    },
+    {
+      "id": "cr-only-lines",
+      "why": "a lone CR also breaks a line",
+      "input": "runner: step one failed\rstack: deep",
+      "expected": "runner: step one failed"
+    },
+    {
+      "id": "tabs-and-spaces",
+      "why": "tabs and runs of spaces collapse to one space",
+      "input": "runner:\t step   one   failed  ",
+      "expected": "runner: step one failed"
+    },
+    {
+      "id": "nbsp",
+      "why": "a non-breaking space is whitespace too",
+      "input": "runner: step one failed",
+      "expected": "runner: step one failed"
+    }
+  ],
+  "mustDiffer": [
+    [
+      "error-a",
+      "error-b"
+    ],
+    [
+      "error-a",
+      "error-c"
+    ],
+    [
+      "error-b",
+      "error-c"
+    ],
+    [
+      "file-line",
+      "posix-abs-path"
+    ]
+  ]
+}
