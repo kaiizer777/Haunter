@@ -42,6 +42,7 @@ from app.auth import _sign_user_id
 from app.models import Repo, RepoSettings, User
 from app.services.repo_settings import (
     ALLOWED_PRESETS,
+    PRESET_CONFIGURATIONS,
     apply_preset,
     create_default_repo_settings,
     get_repo_settings,
@@ -128,6 +129,7 @@ async def test_get_settings_default_fallback(seeded_env, make_fake_auth_client):
         assert data["enable_sandbox_verification"] is True
         assert data["enable_ci_sandbox"] is True
         assert data["enable_pr_comments"] is True
+        assert data["file_issue_on_fallback"] is True
         assert data["enable_live_sessions"] is True
         assert data["enable_webcontainer_preview"] is True
         assert data["audit_trigger_on_pr"] is True
@@ -260,6 +262,48 @@ async def test_patch_settings_flat_fields(seeded_env, make_fake_auth_client):
         assert data["max_cost_per_run_cents"] == 250
         assert data["allowed_branches"] == ["main", "staging"]
         assert data["settings_version"] == 2  # bumped due to auditor toggle change
+
+
+@pytest.mark.asyncio
+async def test_patch_settings_file_issue_on_fallback(
+    seeded_env, make_fake_auth_client
+):
+    """file_issue_on_fallback is readable and writable through the settings API.
+
+    Regression guard: RepoSettingsUpdate is extra="forbid", so while the field
+    was missing from that schema every attempt to opt out of fallback issue
+    filing was rejected with a 422 and the value was absent from the response.
+    Toggling it must not bump settings_version - it selects a notification
+    channel, it does not change governance or audit trigger semantics.
+    """
+    user_a, _, repo_a, _ = seeded_env
+    client = make_fake_auth_client(user_a.id)
+
+    async with client:
+        resp = await client.get(f"/api/repos/{repo_a.id}/settings")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["file_issue_on_fallback"] is True
+
+        resp = await client.patch(
+            f"/api/repos/{repo_a.id}/settings",
+            json={"file_issue_on_fallback": False},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["file_issue_on_fallback"] is False
+        assert resp.json()["settings_version"] == 1  # not a trigger-semantics change
+
+        # The opt-out survives a fresh read.
+        resp = await client.get(f"/api/repos/{repo_a.id}/settings")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["file_issue_on_fallback"] is False
+
+        # ...and can be turned back on.
+        resp = await client.patch(
+            f"/api/repos/{repo_a.id}/settings",
+            json={"file_issue_on_fallback": True},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["file_issue_on_fallback"] is True
 
 
 @pytest.mark.asyncio
@@ -688,6 +732,29 @@ def test_service_apply_preset_logic():
     assert settings.preset == "audit_only"
     assert settings.enable_sandbox_verification is False
     assert settings.settings_version == 3
+
+
+def test_every_preset_governs_file_issue_on_fallback():
+    """Every named preset pins file_issue_on_fallback explicitly.
+
+    apply_preset() setattrs each key of the preset config, so a preset that
+    omitted the field would silently keep whatever value the repo last had.
+    That is unpredictable for a setting controlling whether Haunter writes an
+    issue into the user's repository, so the invariant is pinned here rather
+    than left to the column default.
+    """
+    for name, cfg in PRESET_CONFIGURATIONS.items():
+        if name == "custom":
+            continue
+        assert "file_issue_on_fallback" in cfg, name
+        assert cfg["file_issue_on_fallback"] is True, name
+
+    # A repo that opted out has its choice reset by an explicit preset switch,
+    # matching how every other preset-governed flag behaves.
+    settings = create_default_repo_settings(uuid.uuid4())
+    settings.file_issue_on_fallback = False
+    apply_preset(settings, "conservative")
+    assert settings.file_issue_on_fallback is True
 
 
 @pytest.mark.asyncio
