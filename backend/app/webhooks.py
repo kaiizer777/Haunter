@@ -321,6 +321,29 @@ def _owned_repo_ids(user_id: uuid.UUID):
     return select(Repo.id).where(Repo.user_id == user_id).scalar_subquery()
 
 
+def _repo_lookup_stmt(
+    owner: Any, name: Any, replay_repo_id: Optional[uuid.UUID]
+):
+    """Resolve the Repo a delivery applies to.
+
+    Live ingestion resolves by owner/name, which is the only repository identity
+    GitHub's payload carries. Replay is different: the caller was already
+    authorized against one specific `repos` row, and `repos` allows two users to
+    register the SAME owner/name. An owner/name lookup during replay could
+    therefore resolve to another tenant's Repo, and the resolved row is what
+    selects repo settings, queues the audit/run/review, and receives the
+    persisted row — a cross-tenant write. During replay the authorized id is
+    therefore the constraint, so the decision cannot drift onto another
+    registration of the same name.
+
+    A replayed delivery whose repo has since been deleted resolves to None and
+    takes the same "unregistered repository" branch a live delivery would.
+    """
+    if replay_repo_id is not None:
+        return select(Repo).where(Repo.id == replay_repo_id)
+    return select(Repo).where(Repo.owner == owner, Repo.name == name)
+
+
 @router.get("/deliveries", response_model=WebhookDeliveryListOut)
 async def list_webhook_deliveries(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -430,7 +453,9 @@ async def replay_webhook_delivery(
         signature header was ever persisted.
       - Tenant scoping is enforced in SQL (repo_id -> repos.user_id) before any
         work happens; a non-owned row is a 404, indistinguishable from unknown,
-        so there is no cross-tenant existence oracle.
+        so there is no cross-tenant existence oracle. The authorized repo id is
+        then pinned into the re-run via replay_repo_id, so the handler cannot
+        resolve a different tenant's registration of the same owner/name.
       - Repeated calls are bounded: a second replay of the same row inside
         _REPLAY_COOLDOWN_SECONDS is refused with 409 + Retry-After, and the
         handler's own unique constraints make a replayed delivery land on
@@ -519,6 +544,7 @@ async def replay_webhook_delivery(
             x_github_delivery=original_delivery_id,
             x_github_event=original_event,
             x_hub_signature_256=signature,
+            replay_repo_id=original_repo_id,
         )
     finally:
         _replay_of_var.reset(token)
@@ -621,9 +647,15 @@ async def github_webhook(
     x_github_delivery: Optional[str] = Header(None, alias="X-GitHub-Delivery"),
     x_github_event: Optional[str] = Header(None, alias="X-GitHub-Event"),
     x_hub_signature_256: Optional[str] = Header(None, alias="X-Hub-Signature-256"),
+    replay_repo_id: Optional[uuid.UUID] = None,
 ) -> dict[str, Any]:
     """
     Ingest GitHub webhook events. Public endpoint secured exclusively via HMAC-SHA256.
+
+    `replay_repo_id` is set only by replay_webhook_delivery(), never by a real
+    GitHub request. It pins the Repo lookup to the row the caller was authorized
+    against so a replay cannot drift onto another tenant's registration of the
+    same owner/name — see _repo_lookup_stmt.
     """
     # 1. Early Content-Length check (cheap reject; not trusted on its own)
     content_length_header = request.headers.get("content-length")
@@ -726,7 +758,7 @@ async def github_webhook(
         owner = payload.repository.owner.login
         repo_name = payload.repository.name
 
-        stmt = select(Repo).where(Repo.owner == owner, Repo.name == repo_name)
+        stmt = _repo_lookup_stmt(owner, repo_name, replay_repo_id)
         result = await db.execute(stmt)
         repo = result.scalars().first()
 
@@ -888,6 +920,13 @@ async def github_webhook(
         adapter = await get_hosting_adapter()
         await adapter.schedule_pipeline(new_run.id, background_tasks)
 
+        # Snapshot before the recorder: its failure path rolls the session back,
+        # and a rollback expires every instance in it, so reading new_run.<attr>
+        # afterwards would raise MissingGreenlet and turn an already-scheduled
+        # run into a 500.
+        queued_run_id = str(new_run.id)
+        queued_github_run_id = new_run.github_run_id
+
         await _record_webhook_delivery(
             db,
             event="workflow_run",
@@ -901,8 +940,8 @@ async def github_webhook(
 
         return {
             "status": "queued",
-            "run_id": str(new_run.id),
-            "github_run_id": new_run.github_run_id,
+            "run_id": queued_run_id,
+            "github_run_id": queued_github_run_id,
             "delivery_id": x_github_delivery,
         }
 
@@ -935,7 +974,7 @@ async def github_webhook(
             )
             return {"status": "ignored", "reason": "invalid repository payload"}
 
-        stmt = select(Repo).where(Repo.owner == owner, Repo.name == repo_name)
+        stmt = _repo_lookup_stmt(owner, repo_name, replay_repo_id)
         result = await db.execute(stmt)
         repo = result.scalars().first()
 
@@ -1039,6 +1078,9 @@ async def github_webhook(
         existing_review_res = await db.execute(existing_review_stmt)
         existing_review = existing_review_res.scalars().first()
         if existing_review:
+            # Snapshotted before the recorder for the same rollback/expire reason
+            # as the queued branch below.
+            duplicate_review_id = str(existing_review.id)
             logger.info(
                 "Ignored duplicate pull_request review webhook for repo %s commit %s (review_id=%s)",
                 _log_repo(owner, repo_name),
@@ -1057,7 +1099,7 @@ async def github_webhook(
             )
             return {
                 "status": "duplicate",
-                "review_id": str(existing_review.id),
+                "review_id": duplicate_review_id,
                 "repo": f"{owner}/{repo_name}",
                 "pr_number": pr_number,
                 "commit_sha": commit_sha,
@@ -1127,6 +1169,9 @@ async def github_webhook(
         adapter = await get_hosting_adapter()
         await adapter.schedule_review(new_review.id, background_tasks)
 
+        # Snapshotted before the recorder — see the workflow_run branch.
+        queued_review_id = str(new_review.id)
+
         await _record_webhook_delivery(
             db,
             event="pull_request",
@@ -1140,7 +1185,7 @@ async def github_webhook(
 
         return {
             "status": "queued",
-            "review_id": str(new_review.id),
+            "review_id": queued_review_id,
             "repo": f"{owner}/{repo_name}",
             "pr_number": pr_number,
             "commit_sha": commit_sha,
@@ -1221,7 +1266,7 @@ async def github_webhook(
             )
             return {"status": "ignored", "reason": "invalid repository payload"}
 
-        stmt = select(Repo).where(Repo.owner == owner, Repo.name == repo_name)
+        stmt = _repo_lookup_stmt(owner, repo_name, replay_repo_id)
         result = await db.execute(stmt)
         repo = result.scalars().first()
 
@@ -1260,6 +1305,8 @@ async def github_webhook(
                 sanitize_log_value(commit_sha, 64),
                 existing_review.id,
             )
+            # Snapshotted before the recorder — see the workflow_run branch.
+            duplicate_review_id = str(existing_review.id)
             await _record_webhook_delivery(
                 db,
                 event="push",
@@ -1272,7 +1319,7 @@ async def github_webhook(
             )
             return {
                 "status": "duplicate",
-                "review_id": str(existing_review.id),
+                "review_id": duplicate_review_id,
                 "repo": f"{owner}/{repo_name}",
                 "commit_sha": commit_sha,
                 "delivery_id": x_github_delivery,
@@ -1296,6 +1343,9 @@ async def github_webhook(
         adapter = await get_hosting_adapter()
         await adapter.schedule_review(new_review.id, background_tasks)
 
+        # Snapshotted before the recorder — see the workflow_run branch.
+        queued_review_id = str(new_review.id)
+
         await _record_webhook_delivery(
             db,
             event="push",
@@ -1309,7 +1359,7 @@ async def github_webhook(
 
         return {
             "status": "queued",
-            "review_id": str(new_review.id),
+            "review_id": queued_review_id,
             "repo": f"{owner}/{repo_name}",
             "commit_sha": commit_sha,
             "delivery_id": x_github_delivery,
@@ -1397,7 +1447,7 @@ async def github_webhook(
         return {"status": "ignored", "reason": "unauthorized commenter"}
 
     # 5. Check repository registration in DB
-    stmt = select(Repo).where(Repo.owner == repo_owner, Repo.name == repo_name)
+    stmt = _repo_lookup_stmt(repo_owner, repo_name, replay_repo_id)
     result = await db.execute(stmt)
     repo = result.scalars().first()
     if not repo:

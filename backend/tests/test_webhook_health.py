@@ -663,9 +663,10 @@ async def test_replay_of_log_only_branch_is_anchored_and_rate_limited(
 ):
     """A replay whose decision branch records no row of its own is still audited.
 
-    The re-run below takes the "unregistered repository" branch, so the handler
-    appends nothing. Replay must still anchor a row, otherwise nothing would ever
-    satisfy `replay_of == <original>` and the cooldown could be replayed forever.
+    The re-run below takes the "haunter fix branch" feedback-loop guard, which
+    fires before the repo lookup and records nothing. Replay must still anchor a
+    row, otherwise nothing would ever satisfy `replay_of == <original>` and the
+    cooldown could be replayed forever.
     """
     await truncate_all(db)
     user = await user_factory(github_id=9118, username="wh_health_anchor")
@@ -674,11 +675,9 @@ async def test_replay_of_log_only_branch_is_anchored_and_rate_limited(
     await db.commit()
     await db.refresh(repo)
 
-    # Recorded against a registered repo, but its payload names a DIFFERENT
-    # repository, so the re-run resolves to "unregistered repository".
-    payload = workflow_run_payload(run_id=555301)
-    payload["repository"]["name"] = "not-registered"
-    payload["repository"]["full_name"] = "anchor-org/not-registered"
+    payload = workflow_run_payload(run_id=555301, branch="haunter/fix-thing")
+    payload["repository"]["name"] = "anchor-repo"
+    payload["repository"]["full_name"] = "anchor-org/anchor-repo"
     payload["repository"]["owner"]["login"] = "anchor-org"
     raw_body = json.dumps(payload).encode("utf-8")
 
@@ -701,7 +700,7 @@ async def test_replay_of_log_only_branch_is_anchored_and_rate_limited(
         assert first.status_code == 200
         body = first.json()
         assert body["decision"]["status"] == "ignored"
-        assert body["decision"]["reason"] == "unregistered repository"
+        assert "haunter fix branch" in body["decision"]["reason"]
         # The anchor row exists, so the audit trail and the cooldown both hold.
         assert body["replay_id"] is not None
         anchor = (
@@ -717,6 +716,141 @@ async def test_replay_of_log_only_branch_is_anchored_and_rate_limited(
         assert "Retry-After" in second.headers
     finally:
         await auth_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_replay_stays_pinned_to_the_authorized_repo(
+    client: httpx.AsyncClient, db: AsyncSession, user_factory, make_auth_client
+):
+    """Replay must not resolve another tenant's Repo for the same owner/name.
+
+    `repos` allows two users to register the SAME owner/name, so the handler's
+    owner/name lookup could land on the other user's row — which would then pick
+    their settings, queue their work, and persist into their repo. The authorized
+    repo id is pinned into the re-run, so the replay stays on the owner's own row
+    and the run it queues belongs to that repo.
+    """
+    await truncate_all(db)
+    owner = await user_factory(github_id=9119, username="wh_health_pin_owner")
+    intruder = await user_factory(github_id=9120, username="wh_health_pin_intruder")
+    # Same owner/name for both tenants — the ambiguity that used to leak.
+    repo_owner = Repo(user_id=owner.id, owner="pin-org", name="pin-repo")
+    repo_intruder = Repo(user_id=intruder.id, owner="pin-org", name="pin-repo")
+    # The intruder's row is inserted FIRST so that the handler's unordered
+    # `select(Repo).where(owner, name).scalars().first()` would pick it if the
+    # authorized id were not pinned in. That is precisely the ambiguity being
+    # pinned away — without the pin this test fails.
+    db.add_all([repo_intruder, repo_owner])
+    await db.commit()
+    await db.refresh(repo_owner)
+    await db.refresh(repo_intruder)
+
+    payload = workflow_run_payload(run_id=555401)
+    payload["repository"]["name"] = "pin-repo"
+    payload["repository"]["full_name"] = "pin-org/pin-repo"
+    payload["repository"]["owner"]["login"] = "pin-org"
+    raw_body = json.dumps(payload).encode("utf-8")
+
+    original = WebhookDelivery(
+        event="workflow_run",
+        delivery_id=str(uuid.uuid4()),
+        status="ignored",
+        reason="prior decision",
+        repo="pin-org/pin-repo",
+        repo_id=repo_owner.id,
+        payload=_encode_replay_buffer(raw_body),
+    )
+    db.add(original)
+    await db.commit()
+    await db.refresh(original)
+
+    auth_client = make_auth_client(owner.id)
+    try:
+        with patch(
+            "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+        ) as mock_get:
+            mock_get.return_value = _mock_adapter()
+            resp = await auth_client.post(f"/webhooks/deliveries/{original.id}/replay")
+        assert resp.status_code == 200
+        assert resp.json()["decision"]["status"] == "queued"
+    finally:
+        await auth_client.aclose()
+
+    from app.models import Run
+
+    # The queued Run belongs to the owner's repo, never the intruder's.
+    owner_runs = (
+        (await db.execute(select(Run).where(Run.repo_id == repo_owner.id))).scalars().all()
+    )
+    intruder_runs = (
+        (await db.execute(select(Run).where(Run.repo_id == repo_intruder.id)))
+        .scalars()
+        .all()
+    )
+    assert len(owner_runs) == 1
+    assert intruder_runs == []
+
+
+@pytest.mark.asyncio
+async def test_queued_workflow_run_survives_a_failing_health_log_insert(
+    client: httpx.AsyncClient, db: AsyncSession, user_factory
+):
+    """A health-log insert failure must not turn a scheduled run into a 500.
+
+    _record_webhook_delivery() rolls the session back when the insert fails, and
+    with production's `expire_on_commit=False` sessionmaker a rollback still
+    expires every attribute of every loaded instance — including primary keys —
+    so reading `new_run.<attr>` afterwards to build the response raises
+    MissingGreenlet. The pipeline would already be scheduled at that point, so a
+    500 also invites GitHub to redeliver and double the work.
+
+    This asserts the response contract under that failure: the identifiers the
+    caller needs are present. It does NOT reproduce MissingGreenlet itself — the
+    test harness's TestAsyncSession overrides expire_all() to preserve primary
+    keys, so the expiry is masked here even without the snapshot.
+    """
+    await truncate_all(db)
+    user = await user_factory(github_id=9121, username="wh_health_recorder_fail")
+    db.add(Repo(user_id=user.id, owner="recorder-org", name="recorder-repo"))
+    await db.commit()
+
+    delivery_id = str(uuid.uuid4())
+    payload = workflow_run_payload(run_id=555501)
+    payload["repository"]["name"] = "recorder-repo"
+    payload["repository"]["full_name"] = "recorder-org/recorder-repo"
+    payload["repository"]["owner"]["login"] = "recorder-org"
+    raw_body = json.dumps(payload).encode("utf-8")
+
+    with (
+        patch(
+            "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+        ) as mock_get,
+        patch(
+            "app.webhooks._record_webhook_delivery", new_callable=AsyncMock
+        ) as mock_record,
+    ):
+        mock_get.return_value = _mock_adapter()
+        # Reproduce the real failure mode: the insert raises, and the handler's
+        # own recovery path rolls the session back.
+        async def _failing_record(session: AsyncSession, **kwargs: object) -> None:
+            await session.rollback()
+
+        mock_record.side_effect = _failing_record
+
+        resp = await client.post(
+            "/webhooks/github",
+            headers=_gh_headers(
+                "workflow_run", delivery_id, sign_payload(TEST_SECRET, raw_body)
+            ),
+            content=raw_body,
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "queued"
+    # Both identifiers survived the rollback.
+    assert body["run_id"]
+    assert body["github_run_id"] == 555501
 
 
 def _mock_adapter() -> MagicMock:
