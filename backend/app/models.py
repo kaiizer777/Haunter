@@ -705,9 +705,19 @@ class WebhookDelivery(Base):
     _log_webhook_decision() log line — a logging failure must never break
     webhook ingestion, and a DB failure must never break the 2xx response.
 
-    Replay (POST /webhooks/{id}/replay) is audit-only: it inserts a new row
-    with status="replayed" referencing the original. It never re-executes the
-    pipeline, so replaying a delivery cannot create duplicate Runs.
+    Replay (POST /webhooks/deliveries/{id}/replay) re-drives the ORIGINAL raw
+    payload back through the normal `github_webhook` path — signature
+    verification, registration guards, branch guards, trigger evaluation and
+    the idempotency constraints all run again, so a replay reaches the same
+    decision the live path would reach today. `replay_of` links the row the
+    re-run appended back to the row that was replayed.
+
+    `payload` is the base64 of the exact bytes HMAC verification passed over.
+    It is the replay buffer: without it the decision cannot be re-evaluated,
+    so oversized deliveries are recorded with payload=NULL and report as not
+    replayable rather than silently replaying a truncated body. The signature
+    header itself is NEVER persisted — only the verified body, which contains
+    no credentials.
     """
 
     __tablename__ = "webhook_deliveries"
@@ -719,9 +729,20 @@ class WebhookDelivery(Base):
     delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Display-only denormalization of Repo.owner/Repo.name. Never an authz
+    # input: repos allows several users to register the same owner/name
+    # (uq_repo_user_owner_name is scoped per user), so matching on this string
+    # would let one tenant read another tenant's deliveries.
     repo: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     repo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         ForeignKey("repos.id", ondelete="SET NULL"), nullable=True
+    )
+    # Base64 of the raw body HMAC verification passed over. Replay buffer —
+    # never returned by any response model.
+    payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Set on the row appended by a replay, pointing at the replayed row.
+    replay_of: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("webhook_deliveries.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -731,4 +752,9 @@ class WebhookDelivery(Base):
         Index("ix_webhook_deliveries_delivery_id", "delivery_id"),
         Index("ix_webhook_deliveries_created_at", "created_at"),
         Index("ix_webhook_deliveries_repo_id", "repo_id"),
+        # Composite (repo_id, created_at) so the health list stays an index
+        # scan under the tenant scope + created_at DESC ordering it actually
+        # uses; the single-column repo_id index above still serves FK cascades.
+        Index("ix_webhook_deliveries_repo_created", "repo_id", "created_at"),
+        Index("ix_webhook_deliveries_replay_of", "replay_of"),
     )

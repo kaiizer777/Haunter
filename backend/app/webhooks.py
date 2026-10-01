@@ -14,12 +14,21 @@ Handles incoming GitHub webhook events with strict security controls:
    app.services.audit_pipeline triggers after signature verification,
    repo registration, branch guards, and the per-repo kill-switch, then
     dispatched through a durable, independent audit queue (never git push / PR creation).
+7. Feature 8 health log + replay: every decision is mirrored into the
+   webhook_deliveries table, and an authenticated owner of the affected repo can
+   re-drive a stored delivery through this same handler (see
+   replay_webhook_delivery).
 """
 
+import base64
+import binascii
+import contextvars
+import hashlib
+import hmac
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Optional
 
 from fastapi import (
@@ -33,7 +42,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict, ValidationError
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,6 +70,28 @@ MAX_PAYLOAD_SIZE_BYTES = 2 * 1024 * 1024
 _WEBHOOK_REASON_MAX_CHARS = 500
 _WEBHOOK_EVENT_MAX_CHARS = 64
 _WEBHOOK_STATUS_MAX_CHARS = 32
+
+# Replay buffer cap. Payloads larger than this are recorded with payload=NULL
+# and report as not replayable: a truncated body cannot be re-validated, and
+# replaying one would silently evaluate a different payload than the one GitHub
+# signed.
+_WEBHOOK_PAYLOAD_MAX_BYTES = 128 * 1024
+
+# Replay cooldown. A second replay of the same delivery inside this window is
+# refused with 409 + Retry-After so a double-click cannot enqueue the same work
+# twice. The underlying decision is already idempotent (unique constraints on
+# runs.github_run_id / github_delivery_id, audit_jobs delivery fingerprints);
+# this closes the window before those constraints are even consulted.
+_REPLAY_COOLDOWN_SECONDS = 30
+
+# Set for the duration of one replay_webhook_delivery() call so every
+# _record_webhook_delivery() executed inside the re-driven github_webhook()
+# stamps its row with replay_of=<replayed row>. ContextVar, not a parameter:
+# threading it through the handler would touch every decision branch for a
+# concern that only replay has.
+_replay_of_var: contextvars.ContextVar[Optional[uuid.UUID]] = contextvars.ContextVar(
+    "haunter_webhook_replay_of", default=None
+)
 
 # Collaborator authority allowlist for bot invocation
 ALLOWED_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
@@ -129,6 +160,29 @@ def _truncate_reason(reason: Any) -> Optional[str]:
     return text
 
 
+def _encode_replay_buffer(raw_body: Optional[bytes]) -> Optional[str]:
+    """Base64 the verified raw body so replay re-verifies the exact same bytes.
+
+    Base64 rather than a text column: HMAC verification runs over raw bytes,
+    so any decode/encode round-trip that is not byte-exact would produce a
+    signature mismatch on replay. Oversized bodies return None, which marks
+    the row not replayable instead of storing a body that cannot be trusted.
+    """
+    if raw_body is None or len(raw_body) > _WEBHOOK_PAYLOAD_MAX_BYTES:
+        return None
+    return base64.b64encode(raw_body).decode("ascii")
+
+
+def _decode_replay_buffer(payload: Optional[str]) -> Optional[bytes]:
+    if payload is None:
+        return None
+    try:
+        return base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        logger.warning("webhook replay buffer is not valid base64; refusing replay")
+        return None
+
+
 async def _record_webhook_delivery(
     db: AsyncSession,
     *,
@@ -138,6 +192,7 @@ async def _record_webhook_delivery(
     reason: Any,
     repo: Any = None,
     repo_id: Optional[uuid.UUID] = None,
+    payload: Optional[bytes] = None,
     level: str = "info",
 ) -> None:
     """Persist a webhook decision alongside the structured log line.
@@ -146,6 +201,13 @@ async def _record_webhook_delivery(
     _log_webhook_decision line AND best-effort inserts a WebhookDelivery row.
     DB failures are swallowed (rollback + warning) so ingestion latency and
     2xx responses are never affected by health-log pressure.
+
+    `payload` is the raw body whose HMAC already verified; it is stored as the
+    replay buffer only. The signature header is never accepted here, so no
+    credential material can reach the table.
+
+    Inside replay_webhook_delivery() this stamps replay_of automatically so the
+    re-driven handler's own record is linked to the delivery it re-ran.
     """
     _log_webhook_decision(
         event=event,
@@ -167,6 +229,8 @@ async def _record_webhook_delivery(
             reason=_truncate_reason(reason),
             repo=repo_text,
             repo_id=repo_id,
+            payload=_encode_replay_buffer(payload),
+            replay_of=_replay_of_var.get(),
         )
         db.add(row)
         await db.commit()
@@ -179,7 +243,7 @@ async def _record_webhook_delivery(
 
 
 class WebhookDeliveryOut(BaseModel):
-    """Explicit response DTO — never leaks raw payloads or tokens."""
+    """Explicit response DTO — never leaks the replay buffer or any credential."""
 
     id: uuid.UUID
     event: str
@@ -189,8 +253,26 @@ class WebhookDeliveryOut(BaseModel):
     repo: Optional[str] = None
     repo_id: Optional[uuid.UUID] = None
     created_at: datetime
+    # Whether this row can be replayed (a verified replay buffer was retained).
+    replayable: bool = False
+    replay_of: Optional[uuid.UUID] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @classmethod
+    def from_row(cls, row: WebhookDelivery) -> "WebhookDeliveryOut":
+        return cls(
+            id=row.id,
+            event=row.event,
+            delivery_id=row.delivery_id,
+            status=row.status,
+            reason=row.reason,
+            repo=row.repo,
+            repo_id=row.repo_id,
+            created_at=row.created_at,
+            replayable=row.payload is not None,
+            replay_of=row.replay_of,
+        )
 
 
 class WebhookDeliveryListOut(BaseModel):
@@ -200,15 +282,35 @@ class WebhookDeliveryListOut(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-async def _user_repo_scope(
-    db: AsyncSession, user: User
-) -> tuple[list[uuid.UUID], list[str]]:
-    """Return (repo_ids, repo_full_names) owned by the caller for tenant scoping."""
-    result = await db.execute(select(Repo).where(Repo.user_id == user.id))
-    repos = list(result.scalars().all())
-    ids = [r.id for r in repos]
-    names = [f"{r.owner}/{r.name}" for r in repos]
-    return ids, names
+class WebhookReplayResultOut(BaseModel):
+    """Result of re-driving one stored delivery through the live handler."""
+
+    original_id: uuid.UUID
+    # Row appended by the re-run. Null when the handler's decision path records
+    # no health row (the log-only "ignored" branches), which is itself part of
+    # the reported outcome.
+    replay_id: Optional[uuid.UUID] = None
+    delivery_id: str
+    event: str
+    # The exact body POST /webhooks/github returned for this re-run, so the UI
+    # shows the decision that was reached rather than "replay succeeded".
+    decision: dict[str, Any]
+    replayed_at: datetime
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def _owned_repo_ids(user: User):
+    """Subquery of repo ids owned by `user` — the single tenant boundary.
+
+    Scoped on repo_id only. `WebhookDelivery.repo` is a denormalized
+    owner/name string and is NOT a tenant boundary: repos permits two different
+    users to register the same owner/name (uq_repo_user_owner_name is per user),
+    so matching deliveries on that string would surface one tenant's webhook
+    history to another. Keep this as a subquery rather than materialising the
+    id list in Python so a user with many repos cannot inflate the IN clause.
+    """
+    return select(Repo.id).where(Repo.user_id == user.id).scalar_subquery()
 
 
 @router.get("/deliveries", response_model=WebhookDeliveryListOut)
@@ -221,86 +323,216 @@ async def list_webhook_deliveries(
 ) -> WebhookDeliveryListOut:
     """List webhook deliveries for repos owned by the caller (health history).
 
-    Tenant isolation: only rows whose repo_id or owner/name matches one of the
-    caller's repos are returned. Unknown repos return an empty list, never 404,
-    so the health tab renders an empty state instead of an error.
+    Tenant isolation is enforced in SQL via repo_id -> repos.user_id. A caller
+    with no repos gets an empty list (never 404) so the health tab renders its
+    empty state instead of an error.
     """
-    repo_ids, repo_names = await _user_repo_scope(db, current_user)
-    if not repo_ids and not repo_names:
-        return WebhookDeliveryListOut(deliveries=[], total=0)
-
-    scope_clauses: list[Any] = []
-    if repo_ids:
-        scope_clauses.append(WebhookDelivery.repo_id.in_(repo_ids))
-    if repo_names:
-        scope_clauses.append(WebhookDelivery.repo.in_(repo_names))
-    filters: list[Any] = [or_(*scope_clauses)]
+    filters: list[Any] = [WebhookDelivery.repo_id.in_(_owned_repo_ids(current_user))]
     if event is not None:
         filters.append(WebhookDelivery.event == event)
 
-    count_stmt = select(func.count(WebhookDelivery.id)).where(*filters)
-    total = (await db.execute(count_stmt)).scalar_one() or 0
-
-    stmt = (
-        select(WebhookDelivery)
-        .where(*filters)
-        .order_by(WebhookDelivery.created_at.desc())
-        .limit(limit)
-        .offset(offset)
+    total = (
+        await db.execute(select(func.count(WebhookDelivery.id)).where(*filters))
+    ).scalar_one()
+    rows = (
+        (
+            await db.execute(
+                select(WebhookDelivery)
+                .where(*filters)
+                .order_by(WebhookDelivery.created_at.desc(), WebhookDelivery.id.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
     )
-    rows = (await db.execute(stmt)).scalars().all()
     return WebhookDeliveryListOut(
-        deliveries=[WebhookDeliveryOut.model_validate(r) for r in rows],
-        total=total,
+        deliveries=[WebhookDeliveryOut.from_row(r) for r in rows],
+        total=total or 0,
     )
 
 
-@router.post("/deliveries/{delivery_row_id}/replay", response_model=WebhookDeliveryOut)
+def _synthetic_github_request(payload: bytes) -> Request:
+    """A minimal in-process Request carrying `payload` as the request body.
+
+    Replay re-enters github_webhook() directly instead of reimplementing any
+    of its logic, so the body has to arrive the same way it does on the wire:
+    one stream, a Content-Length header for the early size check, and no body
+    on any subsequent receive (Starlette's stream() stops at more_body=False).
+    """
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/webhooks/github",
+        "raw_path": b"/webhooks/github",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"localhost"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(payload)).encode("ascii")),
+        ],
+        "client": ("127.0.0.1", 0),
+        "server": ("localhost", 80),
+    }
+    sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": payload, "more_body": False}
+
+    return Request(scope, receive)
+
+
+@router.post(
+    "/deliveries/{delivery_row_id}/replay",
+    response_model=WebhookReplayResultOut,
+    status_code=status.HTTP_200_OK,
+)
 async def replay_webhook_delivery(
     delivery_row_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> WebhookDeliveryOut:
-    """Audit-only replay marker for a webhook delivery.
+) -> WebhookReplayResultOut:
+    """Re-drive a stored webhook delivery through the live ingestion handler.
 
-    Inserts a new WebhookDelivery row with status="replayed" referencing the
-    original. Never re-executes the pipeline, so replay cannot create duplicate
-    Runs or re-trigger background work. Returns 404 for unknown or non-owned rows
-    (no existence oracle across tenants).
+    Replay is not a reimplementation of the decision: it reconstructs the
+    original request from the stored, already-HMAC-verified body and calls
+    github_webhook() itself. Signature verification, registration guards, the
+    feedback-loop branch guard, trigger evaluation, and the idempotency
+    constraints all run again, so the outcome is the decision the live path
+    would reach today — which is why enabling a disabled trigger and replaying
+    an "ignored" delivery can legitimately queue work that did not run before.
+
+    Safety properties:
+      - Signature verification is NOT bypassed. The stored bytes are re-signed
+        with the server's own GITHUB_WEBHOOK_SECRET and github_webhook()
+        verifies that signature with the same hmac.compare_digest check the
+        public endpoint uses. The secret never leaves the server, and no
+        signature header was ever persisted.
+      - Tenant scoping is enforced in SQL (repo_id -> repos.user_id) before any
+        work happens; a non-owned row is a 404, indistinguishable from unknown,
+        so there is no cross-tenant existence oracle.
+      - Repeated calls are bounded: a second replay of the same row inside
+        _REPLAY_COOLDOWN_SECONDS is refused with 409 + Retry-After, and the
+        handler's own unique constraints make a replayed delivery land on
+        "duplicate" instead of creating a second Run.
     """
-    repo_ids, repo_names = await _user_repo_scope(db, current_user)
-    result = await db.execute(
-        select(WebhookDelivery).where(WebhookDelivery.id == delivery_row_id)
-    )
-    original = result.scalar_one_or_none()
+    original = (
+        await db.execute(
+            select(WebhookDelivery).where(
+                WebhookDelivery.id == delivery_row_id,
+                WebhookDelivery.repo_id.in_(_owned_repo_ids(current_user)),
+            )
+        )
+    ).scalar_one_or_none()
     if original is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery not found")
-    owned = (original.repo_id is not None and original.repo_id in repo_ids) or (
-        original.repo is not None and original.repo in repo_names
-    )
-    if not owned:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Delivery not found"
+        )
 
-    replay_reason = _truncate_reason(f"replay of {original.id}")
-    replay_row = WebhookDelivery(
-        event=original.event,
-        delivery_id=original.delivery_id,
-        status="replayed",
-        reason=replay_reason,
-        repo=original.repo,
-        repo_id=original.repo_id,
-    )
-    db.add(replay_row)
-    await db.commit()
-    await db.refresh(replay_row)
+    # Snapshot every value we still need into locals before re-entering the
+    # handler. github_webhook() may commit or roll back the shared session, and
+    # a rollback expires every instance in it — re-reading `original.<col>`
+    # afterwards would raise MissingGreenlet instead of returning the decision.
+    original_id = original.id
+    original_event = original.event
+    original_delivery_id = original.delivery_id
+    original_repo = original.repo
+
+    payload = _decode_replay_buffer(original.payload)
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This delivery cannot be replayed — its payload was too large to "
+                "retain, so the decision cannot be re-evaluated."
+            ),
+        )
+
+    webhook_secret = settings.github_webhook_secret
+    if not webhook_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook replay unavailable: GITHUB_WEBHOOK_SECRET is not configured",
+        )
+
+    cooldown_floor = datetime.now(timezone.utc) - timedelta(seconds=_REPLAY_COOLDOWN_SECONDS)
+    recent_replay = (
+        await db.execute(
+            select(WebhookDelivery.id).where(
+                WebhookDelivery.replay_of == original_id,
+                WebhookDelivery.created_at >= cooldown_floor,
+            )
+        )
+    ).first()
+    if recent_replay is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            # FastAPI builds a fresh JSONResponse from the exception, so a
+            # header set on the injected Response would be discarded — the
+            # Retry-After contract has to ride on the exception itself.
+            headers={"Retry-After": str(_REPLAY_COOLDOWN_SECONDS)},
+            detail=(
+                "This delivery was already replayed in the last "
+                f"{_REPLAY_COOLDOWN_SECONDS}s."
+            ),
+        )
+
+    # Re-sign the stored bytes so github_webhook() runs its real HMAC check.
+    # This is the server authenticating its own verified payload — not a forged
+    # GitHub request, and not a bypass: verification still executes and would
+    # still fail on any byte that differs from what was stored.
+    signature = "sha256=" + hmac.new(
+        webhook_secret.encode("utf-8"), payload, hashlib.sha256
+    ).hexdigest()
+
+    token = _replay_of_var.set(original_id)
+    try:
+        decision = await github_webhook(
+            request=_synthetic_github_request(payload),
+            background_tasks=background_tasks,
+            db=db,
+            x_github_delivery=original_delivery_id,
+            x_github_event=original_event,
+            x_hub_signature_256=signature,
+        )
+    finally:
+        _replay_of_var.reset(token)
+
+    replay_row = (
+        await db.execute(
+            select(WebhookDelivery)
+            .where(WebhookDelivery.replay_of == original_id)
+            .order_by(WebhookDelivery.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
     _log_webhook_decision(
-        event=replay_row.event,
-        delivery_id=replay_row.delivery_id,
+        event=original_event,
+        delivery_id=original_delivery_id,
         status="replayed",
-        reason=f"replay of {original.id}",
-        repo=replay_row.repo,
+        reason=f"replay of {original_id}",
+        repo=original_repo,
     )
-    return WebhookDeliveryOut.model_validate(replay_row)
+
+    return WebhookReplayResultOut(
+        original_id=original_id,
+        replay_id=replay_row.id if replay_row is not None else None,
+        delivery_id=original_delivery_id,
+        event=original_event,
+        decision=decision,
+        replayed_at=datetime.now(timezone.utc),
+    )
 
 
 async def _read_limited_body(request: Request) -> bytes:
@@ -551,8 +783,13 @@ async def github_webhook(
             return {"status": "skipped", "reason": auto_fix_decision.reason}
 
         # Idempotent Run creation backed by DB unique constraint
+        # repo.id is read BEFORE the commit: db.rollback() in the duplicate
+        # handler expires every instance in the session, and re-reading an
+        # expired ORM attribute outside a greenlet context raises
+        # MissingGreenlet — which would turn a duplicate delivery into a 500.
+        repo_id = repo.id
         new_run = Run(
-            repo_id=repo.id,
+            repo_id=repo_id,
             github_run_id=payload.workflow_run.id,
             github_delivery_id=x_github_delivery,
             head_sha=payload.workflow_run.head_sha,
@@ -579,7 +816,8 @@ async def github_webhook(
                 status_value="duplicate",
                 reason=f"github_run_id={payload.workflow_run.id}",
                 repo=f"{owner}/{repo_name}",
-                repo_id=repo.id,
+                repo_id=repo_id,
+                payload=raw_body,
             )
             return {
                 "status": "duplicate",
@@ -600,6 +838,7 @@ async def github_webhook(
             reason=f"github_run_id={payload.workflow_run.id} run_id={new_run.id}",
             repo=f"{owner}/{repo_name}",
             repo_id=repo.id,
+            payload=raw_body,
         )
 
         return {
@@ -729,6 +968,7 @@ async def github_webhook(
                 reason="missing head sha",
                 repo=f"{owner}/{repo_name}",
                 repo_id=repo.id,
+                payload=raw_body,
             )
             return {"status": "ignored", "reason": "missing head sha"}
 
@@ -755,6 +995,7 @@ async def github_webhook(
                 reason=f"commit={commit_sha} review_id={existing_review.id}",
                 repo=f"{owner}/{repo_name}",
                 repo_id=repo.id,
+                payload=raw_body,
             )
             return {
                 "status": "duplicate",
@@ -836,6 +1077,7 @@ async def github_webhook(
             reason=f"pr_number={pr_number} commit={commit_sha}",
             repo=f"{owner}/{repo_name}",
             repo_id=repo.id,
+            payload=raw_body,
         )
 
         return {
@@ -968,6 +1210,7 @@ async def github_webhook(
                 reason=f"commit={commit_sha} review_id={existing_review.id}",
                 repo=f"{owner}/{repo_name}",
                 repo_id=repo.id,
+                payload=raw_body,
             )
             return {
                 "status": "duplicate",
@@ -1003,6 +1246,7 @@ async def github_webhook(
             reason=f"commit={commit_sha}",
             repo=f"{owner}/{repo_name}",
             repo_id=repo.id,
+            payload=raw_body,
         )
 
         return {
@@ -1292,10 +1536,15 @@ async def github_webhook(
         return {"status": "ignored", "reason": "refinement limit reached"}
 
     # 9. Idempotent Child Run creation
+    # comment_obj.id is read BEFORE the commit for the same reason as the
+    # workflow_run branch above: db.rollback() expires every instance in the
+    # session, and re-reading an expired ORM attribute outside a greenlet
+    # context raises MissingGreenlet instead of returning the 200 duplicate.
+    comment_id = comment_obj.id
     new_run = Run(
         repo_id=repo.id,
         parent_run_id=initial_run.id,
-        github_run_id=comment_obj.id,
+        github_run_id=comment_id,
         github_delivery_id=x_github_delivery,
         head_sha=initial_run.head_sha,
         head_branch=pr_head_branch,
@@ -1314,12 +1563,12 @@ async def github_webhook(
         logger.info(
             "Duplicate webhook delivery %s for comment id %s dropped idempotently",
             x_github_delivery,
-            comment_obj.id,
+            comment_id,
         )
         return {
             "status": "duplicate",
             "delivery_id": x_github_delivery,
-            "comment_id": comment_obj.id,
+            "comment_id": comment_id,
         }
 
     # 10. Schedule pipeline asynchronously

@@ -133,6 +133,57 @@ async def truncate_all(db: AsyncSession) -> None:
     invalidate_provider_cache()
 
 
+_schema_checked = False
+
+
+async def _assert_test_db_schema_current(db: AsyncSession) -> None:
+    """Fail ONCE with an actionable message when the test DB is not migrated.
+
+    Without this, a test database whose alembic_version predates the current
+    head surfaces as a scatter of `UndefinedTableError: relation "..." does not
+    exist` failures — one per table touched by the missing revision — which
+    reads like broken application code instead of an unmigrated database.
+    Checked at most once per process so the default hermetic fast suite keeps
+    its zero-extra-I/O property when TEST_DATABASE_URL is unset.
+    """
+    global _schema_checked
+    if _schema_checked or not _TEST_DB_URL:
+        return
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    head = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+    try:
+        stamped = (
+            await db.execute(text("SELECT version_num FROM alembic_version"))
+        ).scalars().all()
+    except Exception as exc:  # table absent entirely
+        raise RuntimeError(
+            f"Test database {_redacted_db_label(db)} has no alembic_version table. "
+            f"Run `alembic upgrade head` against it before pytest."
+        ) from exc
+
+    if stamped != [head]:
+        raise RuntimeError(
+            f"Test database {_redacted_db_label(db)} is at alembic revision "
+            f"{stamped or ['<none>']}, but this checkout's head is {head}. "
+            f"Run `alembic upgrade head` with ALEMBIC_DATABASE_URL pointing at "
+            f"TEST_DATABASE_URL before pytest, otherwise every table added by "
+            f"the missing revisions fails with UndefinedTableError."
+        )
+    _schema_checked = True
+
+
+def _redacted_db_label(db: AsyncSession) -> str:
+    """Database name only — never the connection string or its credentials."""
+    try:
+        url = db.get_bind().url  # type: ignore[union-attr]
+    except Exception:
+        return "<test database>"
+    return url.database or "<test database>"
+
+
 @pytest.fixture
 async def db() -> AsyncGenerator[AsyncSession, None]:
     """Provide an isolated AsyncSession connected to the test database.
@@ -146,6 +197,7 @@ async def db() -> AsyncGenerator[AsyncSession, None]:
             "Export TEST_DATABASE_URL pointing at a Neon branch or local Postgres."
         )
     async with async_session_maker() as session:
+        await _assert_test_db_schema_current(session)
         await truncate_all(session)
         try:
             yield session
