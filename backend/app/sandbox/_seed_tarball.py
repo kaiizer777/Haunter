@@ -123,8 +123,9 @@ def _is_plain_tar(tar_bytes: bytes) -> bool:
 def _file_priority_tier(rel_path: str) -> int:
     """Return a priority tier for a repo file path (lower = higher priority).
 
-    Tier 0 — project config files that pytest/build tools discover at startup.
-              These MUST be in the sandbox or the test runner fails immediately.
+    Tier 0 — project config files that the test/build tools discover at startup
+              (pytest, npm, go, cargo, maven/gradle, docker).  These MUST be in
+              the sandbox or the test runner fails immediately.
     Tier 1 — dependency manifest files.  Without these the install step may be
               incomplete (wrong package versions).
     Tier 2 — test source files.  The primary artefacts being exercised.
@@ -132,8 +133,15 @@ def _file_priority_tier(rel_path: str) -> int:
 
     When the total file count exceeds max_files, files are selected in tier
     order so that tier-0 files are never crowded out by source code.
+
+    Matching is on the basename and is case-insensitive, and the tiers are
+    matched at *any* depth — a monorepo package's own manifest
+    (``packages/api/go.mod``) and its tests (``packages/api/internal/…_test.go``)
+    are tier-0/tier-2 exactly like their repo-root equivalents. That is what
+    makes ``RepoSettings.working_dir`` usable: the subtree the user scoped the
+    sandbox to is the subtree whose config and tests survive the cap.
     """
-    name = rel_path.split("/")[-1]  # basename only
+    name = rel_path.lower().split("/")[-1]  # basename only, case-insensitive
 
     _TIER0_NAMES: frozenset[str] = frozenset(
         {
@@ -144,27 +152,83 @@ def _file_priority_tier(rel_path: str) -> int:
             "tox.ini",
             "conftest.py",
             ".python-version",
+            # TypeScript / JavaScript. Lockfiles (package-lock.json,
+            # yarn.lock, pnpm-lock.yaml) are deliberately absent here — they are
+            # dependency manifests and stay in tier 1.
+            "package.json",
+            "tsconfig.json",
+            "pnpm-workspace.yaml",
+            "vitest.config.ts",
+            "vitest.config.js",
+            "jest.config.js",
+            "jest.config.ts",
+            # Go. go.sum is a dependency manifest -> tier 1.
+            "go.mod",
+            "go.work",
+            # Rust. Cargo.lock is a dependency manifest -> tier 1.
+            "cargo.toml",
+            "rust-toolchain.toml",
+            # Java / Kotlin
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "gradle.properties",
+            "gradlew",
+            "mvnw",
+            # Docker / containers
+            "dockerfile",
+            "docker-compose.yml",
+            "docker-compose.yaml",
+            "compose.yaml",
+            "compose.yml",
+            "makefile",
         }
     )
-    if name in _TIER0_NAMES:
+    # Dockerfile.prod, docker-compose.ci.yml, compose.dev.yaml, ... — matched
+    # by prefix so a variant name never falls out of tier 0 and silently loses
+    # the build step. Checked before the tier-1 globs because "package-lock.json"
+    # and friends are both a config the tool needs and a lockfile.
+    if (
+        name in _TIER0_NAMES
+        or name.startswith(("dockerfile", "docker-compose", "compose."))
+    ):
         return 0
 
     _TIER1_GLOBS: tuple[str, ...] = (
         "requirements",
-        "Pipfile",
+        "pipfile",
         "poetry.lock",
+        "yarn.lock",
+        "pnpm-lock",
+        "package-lock",
+        "gemfile",
+        "cargo.lock",
+        "go.sum",
     )
-    if any(name.startswith(g) for g in _TIER1_GLOBS) or name in ("Pipfile.lock",):
+    if any(name.startswith(g) for g in _TIER1_GLOBS) or name in ("pipfile.lock",):
         return 1
 
-    # Tier 2: test files anywhere in the tree
-    parts = rel_path.split("/")
+    # Tier 2: test files anywhere in the tree, in any supported language.
+    parts = rel_path.lower().split("/")
     if (
-        # top-level or nested tests/ / test/ directory
-        any(p in ("tests", "test") for p in parts[:-1])
-        # test_*.py or *_test.py filename pattern
+        # nested tests/ / test/ / __tests__ directory at any depth — this is
+        # what makes a monorepo package's tests survive the max_files cap even
+        # when the package lives under packages/<name>/src/.
+        any(p in ("tests", "test", "__tests__") for p in parts[:-1])
+        # Python: test_*.py / *_test.py
         or name.startswith("test_")
         or name.endswith("_test.py")
+        # Go: *_test.go
+        or name.endswith("_test.go")
+        # Rust: *_test.rs
+        or name.endswith("_test.rs")
+        # Java: FooTest.java / FooTests.java / FooTestCase.java
+        or name.endswith(("test.java", "tests.java", "testcase.java"))
+        # JS/TS: foo.test.ts / foo.spec.js
+        or ".test." in name
+        or ".spec." in name
     ):
         return 2
 

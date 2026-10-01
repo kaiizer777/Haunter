@@ -7,7 +7,16 @@ on:
 permissions:
   contents: read
 
-# No secrets. No env. No deploy. By design.
+# No secrets. No deploy. By design.
+env:
+  # Monorepo scoping. The server rewrites these two quoted literals from
+  # RepoSettings.working_dir / RepoSettings.test_command before pushing the
+  # workflow to the mirror (see render_workflow_content). The defaults below
+  # mean "repo root" and "language-default test command".
+  # tests/test_sandbox_lang_packs.py asserts every template keeps both markers,
+  # so template drift fails CI instead of silently ignoring a user's scope.
+  HAUNTER_WORKING_DIR: "."
+  HAUNTER_TEST_COMMAND: ""
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -24,6 +33,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          cd "${HAUNTER_WORKING_DIR:-.}"
           python -m pip install --upgrade pip
           # Always install pytest — required regardless of requirements.txt presence.
           pip install -q pytest
@@ -35,6 +45,7 @@ jobs:
 
       - name: Lint (ruff, best-effort)
         run: |
+          cd "${HAUNTER_WORKING_DIR:-.}"
           if command -v ruff >/dev/null 2>&1 || python -m pip install -q ruff; then
             python -m ruff check . || echo "::warning::ruff found issues"
           else
@@ -44,6 +55,7 @@ jobs:
 
       - name: Type check (mypy, best-effort)
         run: |
+          cd "${HAUNTER_WORKING_DIR:-.}"
           if grep -q "mypy" requirements.txt dev-requirements.txt 2>/dev/null; then
             python -m mypy . || echo "::warning::mypy found issues"
           else
@@ -53,6 +65,14 @@ jobs:
 
       - name: Run tests
         run: |
+          # A missing HAUNTER_WORKING_DIR aborts here: the runner invokes bash
+          # with `-e`, so a failing `cd` fails the step instead of testing root.
+          cd "${HAUNTER_WORKING_DIR:-.}"
+          if [ -n "${HAUNTER_TEST_COMMAND}" ]; then
+            echo "::notice::running RepoSettings.test_command"
+            eval "${HAUNTER_TEST_COMMAND}"
+            exit $?
+          fi
           # Priority 1: standard config file at root → let pytest auto-discover.
           if [ -f pytest.ini ] || [ -f pyproject.toml ] || [ -f setup.cfg ]; then
             python -m pytest -q --tb=short --maxfail=10
@@ -72,6 +92,7 @@ jobs:
 
       - name: Build (best-effort)
         run: |
+          cd "${HAUNTER_WORKING_DIR:-.}"
           if [ -f pyproject.toml ] && grep -q "build-system" pyproject.toml; then
             python -m pip install -q build && python -m build
           else

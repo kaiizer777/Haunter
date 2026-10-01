@@ -589,6 +589,8 @@ class RepoSettingsOut(BaseModel):
     ignore_draft_prs: bool = True
     max_cost_per_run_cents: int = 100
     model_override_scope: str = "inherit"
+    working_dir: Optional[str] = None
+    test_command: Optional[str] = None
     settings_version: int = 1
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -647,6 +649,8 @@ class RepoSettingsUpdate(BaseModel):
     ignore_draft_prs: Optional[bool] = None
     max_cost_per_run_cents: Optional[int] = None
     model_override_scope: Optional[str] = None
+    working_dir: Optional[str] = None
+    test_command: Optional[str] = None
 
     # Nested structures for future02.md payload compatibility
     features: Optional[dict[str, bool]] = None

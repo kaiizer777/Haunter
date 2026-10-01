@@ -1,0 +1,83 @@
+name: haunter-test-docker
+on:
+  push:
+    branches: ["sandbox/**", "haunter-flake-check-**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No secrets. No push. No deploy. By design.
+env:
+  # Monorepo scoping. The server rewrites these two quoted literals from
+  # RepoSettings.working_dir / RepoSettings.test_command before pushing the
+  # workflow to the mirror (see render_workflow_content). The defaults below
+  # mean "repo root" and "language-default test command".
+  # tests/test_sandbox_lang_packs.py asserts every template keeps both markers,
+  # so template drift fails CI instead of silently ignoring a user's scope.
+  HAUNTER_WORKING_DIR: "."
+  HAUNTER_TEST_COMMAND: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker
+        # Docker with the Compose v2 plugin ships with the runner image, so the
+        # only third-party actions this template uses are GitHub's own.
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Run tests
+        run: |
+          # A missing HAUNTER_WORKING_DIR aborts here: the runner invokes bash
+          # with `-e`, so a failing `cd` fails the step instead of testing root.
+          cd "${HAUNTER_WORKING_DIR:-.}"
+          if [ -n "${HAUNTER_TEST_COMMAND}" ]; then
+            echo "::notice::running RepoSettings.test_command"
+            eval "${HAUNTER_TEST_COMMAND}"
+            exit $?
+          fi
+          COMPOSE_FILE=""
+          for candidate in docker-compose.yml docker-compose.yaml compose.yaml compose.yml; do
+            if [ -f "$candidate" ]; then
+              COMPOSE_FILE="$candidate"
+              break
+            fi
+          done
+          if [ -n "$COMPOSE_FILE" ]; then
+            # Full interpolation/validation of the compose file, including the
+            # service and network graph — the container equivalent of a
+            # compile step. This validates the compose file without starting
+            # its services; `docker build` below does execute the repository's
+            # `RUN` instructions, and a configured HAUNTER_TEST_COMMAND is
+            # likewise executed on this ephemeral runner, so the sandbox is not
+            # a hermetic sandbox against the repository's own code.
+            echo "Validating $COMPOSE_FILE"
+            docker compose -f "$COMPOSE_FILE" config
+          elif [ -f Dockerfile ] || ls Dockerfile.* >/dev/null 2>&1; then
+            DOCKERFILE=$(ls Dockerfile Dockerfile.* 2>/dev/null | head -n 1)
+            echo "Building $DOCKERFILE (no push)"
+            docker build -f "$DOCKERFILE" -t haunter-test:ci .
+          else
+            echo "::error::no Dockerfile or compose file under ${HAUNTER_WORKING_DIR:-.} — nothing to verify"
+            exit 1
+          fi
+
+      - name: Build (best-effort)
+        run: |
+          # Only meaningful for a bare Dockerfile: a compose repository was
+          # already validated by the step above.
+          cd "${HAUNTER_WORKING_DIR:-.}"
+          if [ -f Dockerfile ] && [ ! -f docker-compose.yml ] && [ ! -f compose.yaml ]; then
+            docker build -f Dockerfile -t haunter-test:ci-verify . || echo "::warning::docker build found issues"
+          else
+            echo "Skipping — no standalone Dockerfile to build"
+          fi
+        continue-on-error: true
