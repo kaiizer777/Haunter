@@ -63,6 +63,7 @@ describe("SettingsPage (app/settings/page.tsx)", () => {
     enable_auditor_mode: false,
     enable_sandbox_verification: true,
     enable_pr_comments: true,
+    file_issue_on_fallback: true,
     enable_live_sessions: true,
     enable_webcontainer_preview: true,
     audit_trigger_on_pr: true,

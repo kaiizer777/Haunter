@@ -341,6 +341,7 @@ export interface RepoSettingsOut {
   enable_sandbox_verification: boolean;
   enable_ci_sandbox?: boolean;
   enable_pr_comments: boolean;
+  file_issue_on_fallback: boolean;
   enable_live_sessions: boolean;
   enable_webcontainer_preview: boolean;
   audit_trigger_on_pr: boolean;
@@ -366,6 +367,7 @@ export interface RepoSettingsUpdate {
   enable_sandbox_verification?: boolean;
   enable_ci_sandbox?: boolean;
   enable_pr_comments?: boolean;
+  file_issue_on_fallback?: boolean;
   enable_live_sessions?: boolean;
   enable_webcontainer_preview?: boolean;
   audit_trigger_on_pr?: boolean;

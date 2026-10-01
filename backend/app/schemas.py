@@ -591,6 +591,10 @@ class RepoSettingsOut(BaseModel):
     enable_sandbox_verification: bool = True
     enable_ci_sandbox: bool = True
     enable_pr_comments: bool = True
+    # Fallback-to-issue opt-in. Exposed so a user can read the current value
+    # and turn issue filing off; RepoSettingsUpdate is extra="forbid", so
+    # omitting it here made the documented opt-in unreachable via the API.
+    file_issue_on_fallback: bool = True
     enable_live_sessions: bool = True
     enable_webcontainer_preview: bool = True
     audit_trigger_on_pr: bool = True
@@ -651,6 +655,7 @@ class RepoSettingsUpdate(BaseModel):
     enable_sandbox_verification: Optional[bool] = None
     enable_ci_sandbox: Optional[bool] = None
     enable_pr_comments: Optional[bool] = None
+    file_issue_on_fallback: Optional[bool] = None
     enable_live_sessions: Optional[bool] = None
     enable_webcontainer_preview: Optional[bool] = None
     audit_trigger_on_pr: Optional[bool] = None
