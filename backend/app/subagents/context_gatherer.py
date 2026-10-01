@@ -539,7 +539,14 @@ async def gather_context(
     owner = repo.owner
     name = repo.name
     sha = run.head_sha
+    # Autonomous runs only. A conversational follow-up returns above via
+    # `gather_pr_feedback_context`; `github_run_id` is NULL for those, so
+    # passing it on would fetch logs for a workflow run that does not exist.
     github_run_id = run.github_run_id
+    if github_run_id is None:
+        raise ValueError(
+            f"run {run.id} has no github_run_id; it is not an autonomous workflow_run"
+        )
 
     # -------------------------------------------------------------------------
     # 1. Concurrent GitHub fetches — all 3 in one gather, each timeout-guarded

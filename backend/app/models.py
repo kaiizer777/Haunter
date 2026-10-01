@@ -142,7 +142,22 @@ class Run(Base):
     repo_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("repos.id", ondelete="CASCADE"), index=True
     )
-    github_run_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    # GitHub Actions workflow_run id. NULL for conversational follow-up runs
+    # triggered by an issue_comment / pull_request_review_comment — those carry
+    # `trigger_comment_id` instead. Kept as its own UNIQUE index because it is
+    # the idempotency key for autonomous CI-failure deliveries; overloading it
+    # with comment ids would put two unrelated GitHub id namespaces (and two
+    # unrelated uniqueness domains) in one column.
+    github_run_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, unique=True, index=True, nullable=True
+    )
+    # GitHub issue_comment / pull_request_review_comment id that carried the
+    # `@haunter` command. UNIQUE so a re-delivered comment (or a duplicated
+    # comment across GitHub's two comment id spaces) can never spawn a second
+    # agent run. NULL for autonomous workflow_run runs.
+    trigger_comment_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, unique=True, index=True, nullable=True
+    )
     github_delivery_id: Mapped[Optional[str]] = mapped_column(
         String(255), unique=True, nullable=True, index=True
     )

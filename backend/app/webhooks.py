@@ -1621,7 +1621,15 @@ async def github_webhook(
             x_github_event,
             x_github_delivery,
         )
-        return {"status": "ignored", "reason": "no @haunter fix command"}
+        # A skip the auditor already explained (`_auditor_skip_reason`, e.g. an
+        # issue_comment manual audit refused for lacking pinned PR endpoints)
+        # is the more specific diagnosis than the generic router reason — the
+        # caller needs to know *why* the auditor declined, so surface it here
+        # exactly as the sibling exits below do.
+        return {
+            "status": "ignored",
+            "reason": _auditor_skip_reason or "no @haunter fix command",
+        }
 
     # 6. Look up initial / parent Run for this PR
     run_stmt = (
@@ -1739,7 +1747,7 @@ async def github_webhook(
     # root fix run). `test-fix` runs are verify-only and must not commit to
     # the PR branch — the orchestrator keys that off the conclusion.
     #
-    # Every comment attribute is read BEFORE the commit: db.rollback() expires
+# Every comment attribute is read BEFORE the commit: db.rollback() expires
     # every instance in the session, and re-reading an expired ORM attribute
     # outside a greenlet context raises MissingGreenlet instead of returning
     # the 200 duplicate.

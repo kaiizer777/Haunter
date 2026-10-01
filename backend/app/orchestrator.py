@@ -371,24 +371,39 @@ async def _post_followup_reply(
     owner: str,
     repo: str,
     pr_number: Optional[int],
-    in_reply_to_comment_id: int,
+    in_reply_to_comment_id: Optional[int],
     body: str,
     token: str,
 ) -> str:
     """Answer a conversational follow-up in the thread that asked for it.
 
     ``in_reply_to_comment_id`` is the GitHub comment id that carried the
-    ``@haunter`` command, so a ``pull_request_review_comment`` trigger is
-    answered in place through the review-thread replies API. An
-    ``issue_comment`` trigger has no review thread: GitHub answers 404 and we
-    degrade to a pull request comment, which lands in the same conversation
-    the reviewer was reading.
+    ``@haunter`` command (recorded on the Run as ``trigger_comment_id``), so a
+    ``pull_request_review_comment`` trigger is answered in place through the
+    review-thread replies API. An ``issue_comment`` trigger has no review
+    thread: GitHub answers 404 and we degrade to a pull request comment, which
+    lands in the same conversation the reviewer was reading.
 
     Returns the delivery channel used so the caller can log the outcome:
     ``"review_thread"``, ``"pr_comment"`` or ``"no_pr"`` when the run carries
-    no PR number at all.
+    no PR number or no triggering comment to thread the answer onto. Only
+    ``pr_comment`` is ever a fresh, top-level comment.
     """
-    if not pr_number:
+    if not pr_number or not in_reply_to_comment_id:
+        if not pr_number:
+            logger.info(
+                "orchestrator: run=%s carries no PR number — no follow-up reply channel",
+                run_id,
+            )
+        else:
+            logger.info(
+                "orchestrator: run=%s carries no trigger_comment_id — "
+                "skipping review-thread reply on %s/%s PR #%s",
+                run_id,
+                owner,
+                repo,
+                pr_number,
+            )
         return "no_pr"
 
     from app.github_client import (
@@ -1033,7 +1048,7 @@ async def _orchestrator_pipeline_body(
                                         owner=repo.owner,
                                         repo=repo.name,
                                         pr_number=pr_number,
-                                        in_reply_to_comment_id=run.github_run_id,
+                                        in_reply_to_comment_id=run.trigger_comment_id,
                                         body=test_fix_body,
                                         token=token,
                                     )
@@ -1082,7 +1097,7 @@ async def _orchestrator_pipeline_body(
                                     owner=repo.owner,
                                     repo=repo.name,
                                     pr_number=pr_number,
-                                    in_reply_to_comment_id=run.github_run_id,
+                                    in_reply_to_comment_id=run.trigger_comment_id,
                                     body=confirmation_comment,
                                     token=token,
                                 )

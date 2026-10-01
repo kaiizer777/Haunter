@@ -254,9 +254,11 @@ async def test_fix_commands_queue_a_feedback_run(
     assert children[0].status == "pending"
     assert children[0].pr_number == 42
     assert children[0].repo_id == repo.id
-    # The triggering comment id is carried on the run so the pipeline can
-    # answer in the same thread.
-    assert children[0].github_run_id == TRIGGER_COMMENT_ID
+    # The triggering comment id is carried on its own column so the pipeline
+    # can answer in the same thread, and `github_run_id` stays reserved for
+    # real GitHub Actions workflow runs (a follow-up has none).
+    assert children[0].trigger_comment_id == TRIGGER_COMMENT_ID
+    assert children[0].github_run_id is None
 
 
 TEST_FIX_CASES = [
@@ -319,7 +321,7 @@ async def test_review_comment_uses_the_same_grammar(
     children = child_runs(audit_store, root_run)
     assert len(children) == 1
     assert children[0].conclusion == TEST_FIX_CONCLUSION
-    assert children[0].github_run_id == 6660002
+    assert children[0].trigger_comment_id == 6660002
 
 
 # ---------------------------------------------------------------------------

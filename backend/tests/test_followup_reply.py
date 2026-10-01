@@ -222,7 +222,7 @@ async def seed_followup(
     child = Run(
         repo_id=repo.id,
         parent_run_id=root.id,
-        github_run_id=comment_id,
+        trigger_comment_id=comment_id,
         head_sha=root.head_sha,
         head_branch=PR_BRANCH,
         pr_number=42,

@@ -208,6 +208,7 @@ class RunOut(BaseModel):
     repo_id: uuid.UUID
     parent_run_id: Optional[uuid.UUID] = None
     github_run_id: Optional[int] = None
+    trigger_comment_id: Optional[int] = None
     github_delivery_id: Optional[str] = None
     head_sha: str
     head_branch: str
