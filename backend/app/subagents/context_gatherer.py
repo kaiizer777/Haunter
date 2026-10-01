@@ -131,6 +131,11 @@ _DIFF_PATH_RE: re.Pattern[str] = re.compile(
 # real CI failures; anything more is noise.
 _MAX_FILE_PATHS_IN_SUMMARY: int = 50
 
+# Bound on how far resolve_workflow_run_id walks parent_run_id. Real chains
+# are 1–2 deep (retry of a retry); the cap only guards against a corrupted
+# self-referential parent_run_id cycle.
+_MAX_PARENT_WALK_DEPTH: int = 5
+
 
 def _extract_file_paths_from_diff(diff_text: str) -> list[str]:
     """
@@ -317,6 +322,49 @@ def extract_reviewer_feedback(diagnosis_summary: str) -> Optional[str]:
     if "\n## " in section:
         section = section.split("\n## ", 1)[0]
     return section.strip() or None
+
+
+async def _empty_result() -> str:
+    """Awaitable returning the empty-string result _safe_fetch would produce."""
+    return ""
+
+
+async def resolve_workflow_run_id(
+    run: Run,
+    db: AsyncSession,
+    max_depth: int = _MAX_PARENT_WALK_DEPTH,
+) -> Optional[int]:
+    """
+    Return the GitHub Actions workflow run id whose logs describe this run.
+
+    One-click retry children are synthetic: they re-diagnose a CI failure that
+    already happened, so they carry no workflow run of their own and store
+    ``github_run_id = NULL`` rather than fabricating an id that would squat on
+    the real GitHub id space. Walking ``parent_run_id`` up to the root run
+    recovers the id of the original CI run whose logs must be re-read.
+
+    Returns None only when the run has no id and no reachable ancestor with
+    one, in which case callers must degrade gracefully (skip the log fetch)
+    instead of issuing a request against ``/actions/runs/None/logs``.
+    """
+    if run.github_run_id is not None:
+        return run.github_run_id
+
+    # Bounded walk: parent_run_id is a self-FK, so a corrupted cycle must not
+    # spin forever. max_depth 1 == "look at the immediate parent only".
+    cursor: Optional[Run] = run
+    for _ in range(max_depth):
+        if cursor.parent_run_id is None or cursor.parent_run_id == cursor.id:
+            return None
+        parent = (
+            await db.scalars(select(Run).where(Run.id == cursor.parent_run_id))
+        ).first()
+        if parent is None:
+            return None
+        if parent.github_run_id is not None:
+            return parent.github_run_id
+        cursor = parent
+    return None
 
 
 async def gather_pr_feedback_context(
@@ -614,29 +662,43 @@ async def gather_context(
 
     Raw inputs are not stored anywhere — only the distilled summary propagates.
     """
-    if run.parent_run_id is not None:
+    # Route PR-feedback children to the reviewer-feedback gatherer. One-click
+    # retry children are NOT refinement children — they re-diagnose the same CI
+    # failure, so they take the CI-log path below. Imported lazily to avoid a
+    # module-level cycle (app.orchestrator imports this module).
+    from app.orchestrator import is_pr_refinement
+
+    if is_pr_refinement(run):
         return await gather_pr_feedback_context(run=run, repo=repo, db=db)
 
     owner = repo.owner
     name = repo.name
     sha = run.head_sha
-    # Autonomous runs only. A conversational follow-up returns above via
-    # `gather_pr_feedback_context`; `github_run_id` is NULL for those, so
-    # passing it on would fetch logs for a workflow run that does not exist.
-    github_run_id = run.github_run_id
-    if github_run_id is None:
-        raise ValueError(
-            f"run {run.id} has no github_run_id; it is not an autonomous workflow_run"
-        )
+    # Autonomous runs only — a conversational follow-up returned above via
+    # `gather_pr_feedback_context` and has no workflow run of its own. A
+    # one-click retry child is also NULL here by design, so the id is recovered
+    # by walking parent_run_id up to the root rather than read straight off the
+    # row. `None` is still tolerated (the log fetch is skipped below) for a
+    # thread whose whole ancestry predates the nullable column.
+    github_run_id = await resolve_workflow_run_id(run, db)
 
     # -------------------------------------------------------------------------
     # 1. Concurrent GitHub fetches — all 3 in one gather, each timeout-guarded
+    #
+    # The log fetch is skipped (not attempted with a null id) when no workflow
+    # run id is resolvable — a retry child whose entire ancestry predates the
+    # nullable column would otherwise request /actions/runs/None/logs.
     # -------------------------------------------------------------------------
-    logs_raw, diff_raw, meta_raw = await asyncio.gather(
+    logs_coroutine = (
         _safe_fetch(
             gh.fetch_workflow_run_logs(owner=owner, repo=name, run_id=github_run_id),
             label="logs",
-        ),
+        )
+        if github_run_id is not None
+        else _empty_result()
+    )
+    logs_raw, diff_raw, meta_raw = await asyncio.gather(
+        logs_coroutine,
         _safe_fetch(
             gh.fetch_diff(owner=owner, repo=name, sha=sha),
             label="diff",

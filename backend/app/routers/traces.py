@@ -7,6 +7,10 @@ Exposes:
   GET /repos/{repo_id}/stats — Aggregate success/cost/latency stats for a repo.
   DELETE /runs/{run_id}      — Delete a single run (scoped to caller).
   POST /runs/batch-delete    — Batch delete runs (scoped to caller).
+  POST /runs/{run_id}/retry  — One-click retry: clone a settled run into a
+                               fresh pending child (linked via parent_run_id +
+                               is_retry_child) and re-dispatch the
+                               orchestrator pipeline (Feature 1).
 
 Security invariants (match WORK.md Phase 9 spec):
   - Every endpoint requires get_current_user (signed session cookie).
@@ -28,7 +32,15 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -101,6 +113,9 @@ class RunSummaryOut(BaseModel):
     diagnosis_summary: Optional[str]
     created_at: datetime
     updated_at: datetime
+    # Feature 1 — one-click retry lineage. parent_run_id is None for root runs
+    # and set to the source run id for retry/refinement children.
+    parent_run_id: Optional[uuid.UUID] = None
     # Phase 8 — PR Writer results (optional, populated after a PR is opened).
     # Optional here so older runs that pre-date Phase 8 still serialize cleanly.
     pr_url: Optional[str] = None
@@ -125,6 +140,11 @@ class TraceOut(BaseModel):
     total_cost: float
     total_latency_ms: int
     failure_classification: Optional[str]
+    # Feature 1 — retry/refinement thread: the source run this run descends
+    # from (None for root runs or when the parent is not visible to the
+    # caller) plus every direct child, oldest first.
+    parent: Optional[RunSummaryOut] = None
+    children: list[RunSummaryOut] = Field(default_factory=list)
 
 
 class RunListOut(BaseModel):
@@ -226,6 +246,37 @@ async def get_run_trace(
     total_latency_ms: int = sum(s.latency_ms or 0 for s in steps)
     failure_classification: str | None = classify_failure(run, steps, attempts)
 
+    # Feature 1 — retry thread. Both lookups re-enforce ownership in the SQL
+    # WHERE clause rather than filtering in Python, so a crafted or
+    # cross-tenant parent_run_id can never leak another tenant's run summary.
+    parent_out: RunSummaryOut | None = None
+    if run.parent_run_id is not None:
+        parent_result = await db.execute(
+            select(Run)
+            .join(Repo, Run.repo_id == Repo.id)
+            .where(
+                Run.id == run.parent_run_id,
+                Repo.user_id == current_user.id,
+            )
+        )
+        parent_run = parent_result.scalar_one_or_none()
+        if parent_run is not None:
+            parent_out = RunSummaryOut.model_validate(parent_run)
+
+    children_result = await db.execute(
+        select(Run)
+        .join(Repo, Run.repo_id == Repo.id)
+        .where(
+            Run.parent_run_id == run_id,
+            Repo.user_id == current_user.id,
+        )
+        .order_by(Run.created_at.asc())
+    )
+    children_out = [
+        RunSummaryOut.model_validate(child)
+        for child in children_result.scalars().all()
+    ]
+
     return TraceOut(
         run=RunSummaryOut.model_validate(run),
         steps=[RunStepOut.model_validate(s) for s in steps],
@@ -233,7 +284,215 @@ async def get_run_trace(
         total_cost=round(total_cost, 8),
         total_latency_ms=total_latency_ms,
         failure_classification=failure_classification,
+        parent=parent_out,
+        children=children_out,
     )
+
+
+# ---------------------------------------------------------------------------
+# One-click retry (Feature 1)
+# ---------------------------------------------------------------------------
+
+# Only a settled (terminal) run may be cloned. Re-cloning a run that the
+# orchestrator is still mutating would fork the pipeline and race the
+# in-flight transitions on the source row.
+_RETRYABLE_STATUSES: frozenset[str] = frozenset(
+    {
+        "pr_opened",
+        "fallback_commented",
+        "flaky_detected",
+        "completed",
+        "error",
+    }
+)
+
+# A child in any of these statuses has settled, so a further retry of the same
+# source run is permitted. Same membership as _RETRYABLE_STATUSES — kept as a
+# named alias because the in-flight guard reads as the inverse condition.
+_SETTLED_STATUSES: frozenset[str] = _RETRYABLE_STATUSES
+
+# Upper bound on total children (retry + interactive PR refinement) per source
+# run. Matches the interactive refinement cap in app/webhooks.py so a single
+# run can never fan out into an unbounded pipeline storm.
+_MAX_RUN_CHILDREN = 5
+
+
+def build_retry_child(source: Run) -> Run:
+    """
+    Pure clone constructor for one-click retry. No I/O — hermetic and unit-testable.
+
+    Copies the tenant scope (repo_id) and the failure coordinates
+    (head_sha / head_branch / conclusion) from the source run, links lineage
+    via ``parent_run_id`` + ``is_retry_child``, and resets every
+    pipeline-owned field so the child starts clean in ``pending``.
+
+    ``github_run_id`` and ``github_delivery_id`` are deliberately left NULL:
+    the child corresponds to no new GitHub workflow run or webhook delivery.
+    Fabricating either would squat on real GitHub's id space and cause a
+    genuine delivery to be discarded as a duplicate by the UNIQUE index on
+    ``runs.github_run_id``. The context gatherer resolves the effective
+    workflow run id by walking ``parent_run_id`` to the root run.
+
+    PR coordinates are cleared so the child opens a fresh PR through the
+    normal PR-Writer path rather than committing onto the source run's branch.
+    """
+    return Run(
+        repo_id=source.repo_id,
+        parent_run_id=source.id,
+        is_retry_child=True,
+        github_run_id=None,
+        github_delivery_id=None,
+        head_sha=source.head_sha,
+        head_branch=source.head_branch,
+        status="pending",
+        conclusion=source.conclusion,
+        diagnosis_summary=None,
+        pr_url=None,
+        pr_number=None,
+        pr_branch=None,
+        final_summary=None,
+        failure_reason=None,
+    )
+
+
+async def _mark_dispatch_failed(db: AsyncSession, child: Run) -> None:
+    """
+    Move an undispatchable retry child to the terminal `error` state.
+
+    `_transition` is bypassed deliberately: the child never entered the
+    orchestrator's state machine, so this is not a pipeline transition. Writing
+    the terminal status directly keeps the run out of the in-flight set that
+    would otherwise block every subsequent retry of the source run.
+    """
+    child.status = "error"
+    child.failure_reason = "Retry dispatch failed: pipeline could not be scheduled"
+    child.updated_at = datetime.now(timezone.utc)
+    db.add(child)
+    try:
+        await db.commit()
+    except Exception as exc:  # pragma: no cover - DB write already failed above
+        await db.rollback()
+        logger.error(
+            "retry: failed to persist dispatch failure for run=%s (%s: %s)",
+            child.id,
+            type(exc).__name__,
+            exc,
+        )
+
+
+@router.post(
+    "/runs/{run_id}/retry",
+    response_model=RunOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def retry_run(
+    run_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RunOut:
+    """
+    One-click retry: clone a settled run into a fresh ``pending`` child.
+
+    The child copies repo_id/head_sha/head_branch/conclusion from the source,
+    links lineage via ``parent_run_id`` + ``is_retry_child``, and is dispatched
+    to the orchestrator through the hosting adapter so the pipeline runs
+    asynchronously (on Lambda via async self-invoke; locally via
+    BackgroundTasks) and the HTTP response returns immediately.
+
+    Guards:
+      - 404 on non-owned / non-existent run_id (no existence oracle).
+      - 409 when the source run is still in flight (not settled).
+      - 409 when a child of this run is still in flight.
+      - 429 when the run already has 5 children.
+    """
+    # SELECT FOR UPDATE on the source row (runs only, not repos) serialises
+    # concurrent retries of the same run. Without it two simultaneous requests
+    # both read child_count below, both pass the cap, and both insert — the
+    # check-then-act race the backend concurrency rules call out. The lock is
+    # released at the commit below, well before the pipeline is dispatched.
+    run_result = await db.execute(
+        select(Run)
+        .join(Repo, Run.repo_id == Repo.id)
+        .where(Run.id == run_id, Repo.user_id == current_user.id)
+        .with_for_update(of=Run)
+    )
+    source = run_result.scalar_one_or_none()
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Run not found"
+        )
+
+    if source.status not in _RETRYABLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Run status {source.status!r} is not retryable — "
+                "wait until the run settles before retrying."
+            ),
+        )
+
+    child_count = await db.scalar(
+        select(func.count(Run.id)).where(Run.parent_run_id == run_id)
+    )
+    if (child_count or 0) >= _MAX_RUN_CHILDREN:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Retry limit reached (max {_MAX_RUN_CHILDREN} per run).",
+        )
+
+    in_flight = await db.execute(
+        select(Run.id)
+        .where(
+            Run.parent_run_id == run_id,
+            Run.status.notin_(list(_SETTLED_STATUSES)),
+        )
+        .limit(1)
+    )
+    if in_flight.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A child run of this run is already in progress.",
+        )
+
+    child = build_retry_child(source)
+    db.add(child)
+    await db.commit()
+    await db.refresh(child)
+
+    # Re-dispatch through the hosting adapter so the pipeline runs out of band:
+    # on Lambda via async self-invoke (BackgroundTasks never execute there),
+    # locally via BackgroundTasks.
+    from app.adapters.hosting import get_hosting_adapter
+
+    try:
+        adapter = await get_hosting_adapter()
+        await adapter.schedule_pipeline(child.id, background_tasks)
+    except Exception as exc:
+        # The child is already committed but nothing will ever process it, so it
+        # would sit in `pending` forever and count as a phantom in-flight child
+        # that blocks every future retry of this run. Mark it terminal with a
+        # reason rather than leaving a stuck row or pretending the retry worked.
+        logger.error(
+            "retry: dispatch failed for child_run=%s source_run=%s (%s: %s)",
+            child.id,
+            run_id,
+            type(exc).__name__,
+            exc,
+        )
+        await _mark_dispatch_failed(db, child)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Retry could not be dispatched. Please try again.",
+        ) from exc
+
+    logger.info(
+        "retry: user=%s source_run=%s child_run=%s dispatched",
+        current_user.id,
+        run_id,
+        child.id,
+    )
+    return RunOut.model_validate(child)
 
 
 @router.get("/runs", response_model=RunListOut)

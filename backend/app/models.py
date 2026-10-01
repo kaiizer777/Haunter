@@ -144,8 +144,14 @@ class Run(Base):
     )
     # GitHub Actions workflow_run id. NULL for conversational follow-up runs
     # triggered by an issue_comment / pull_request_review_comment — those carry
-    # `trigger_comment_id` instead. Kept as its own UNIQUE index because it is
-    # the idempotency key for autonomous CI-failure deliveries; overloading it
+    # `trigger_comment_id` instead. Also NULL for one-click retry children
+    # (routers/traces.py POST /runs/{id}/retry): they inherit the failure
+    # coordinates of their source run and correspond to no workflow run of
+    # their own, so the effective id is resolved by walking parent_run_id to
+    # the root. Storing a fabricated id would squat on the real GitHub id
+    # space and cause a genuine workflow_run delivery to be silently discarded
+    # as a duplicate. Kept as its own UNIQUE index because it is the
+    # idempotency key for autonomous CI-failure deliveries; overloading it
     # with comment ids would put two unrelated GitHub id namespaces (and two
     # unrelated uniqueness domains) in one column.
     github_run_id: Mapped[Optional[int]] = mapped_column(
@@ -216,6 +222,28 @@ class Run(Base):
     fallback_issue_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     fallback_issue_number: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True
+    )
+
+    # Feature 1 — one-click retry lineage kind.
+    #
+    # parent_run_id alone is NOT a sufficient discriminator between the two
+    # kinds of child run, because the two take opposite branches downstream:
+    #
+    #   * Interactive PR refinement (webhooks.py) sets pr_number/pr_branch and
+    #     expects the patch to be committed back onto the existing PR branch.
+    #   * One-click retry (routers/traces.py) has no PR at all and MUST open a
+    #     fresh haunter/fix-* PR via the normal PR-Writer path.
+    #
+    # If a retry child were treated as a refinement child, orchestrator.py
+    # would resolve target_branch = run.pr_branch or run.head_branch — i.e.
+    # the user's own branch — and push the patch straight to it, violating the
+    # Human Merge Gate Invariant (HAUNTER.md §1.1: never push to a protected
+    # branch; the human is the sole merge authority).
+    #
+    # NULL/False => legacy refinement child (pre-dates this column).
+    # True        => one-click retry child.
+    is_retry_child: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
     )
 
     repo: Mapped["Repo"] = relationship("Repo", back_populates="runs")

@@ -47,7 +47,9 @@ export interface RunOut {
   id: string;
   repo_id: string;
   // Null for conversational follow-up runs, which are triggered by an
-  // issue_comment / pull_request_review_comment rather than a workflow run.
+  // issue_comment / pull_request_review_comment rather than a workflow run,
+  // and for one-click retry children, which map to no GitHub workflow run of
+  // their own.
   github_run_id: number | null;
   trigger_comment_id?: number | null;
   github_delivery_id: string | null;
@@ -55,6 +57,8 @@ export interface RunOut {
   head_branch: string;
   status: string;
   conclusion: string | null;
+  /** Source run for a retry / PR refinement child; null for root runs. */
+  parent_run_id?: string | null;
   cost?: number;
   tokens?: number;
   signature?: string | null;
@@ -96,6 +100,8 @@ export interface RunSummaryOut {
   diagnosis_summary: string | null;
   created_at: string;
   updated_at: string;
+  /** Source run for a one-click retry / PR refinement child; null for root runs. */
+  parent_run_id?: string | null;
   pr_url?: string | null;
   pr_number?: number | null;
   pr_branch?: string | null;
@@ -116,6 +122,13 @@ export interface TraceOut {
   total_cost: number;
   total_latency_ms: number;
   failure_classification: string | null;
+  /** Run this one descends from (retry or PR refinement), when visible to the caller. */
+  parent?: RunSummaryOut | null;
+  /**
+   * Direct children (retries / refinements) of this run, oldest first.
+   * Optional so fixtures written before the retry thread existed still type-check.
+   */
+  children?: RunSummaryOut[];
 }
 
 export interface RepoStatsOut {
@@ -686,6 +699,7 @@ export const api = {
   },
 
   getRunTrace: (runId: string) => api.get<TraceOut>(`/runs/${runId}/trace`),
+  retryRun: (runId: string) => api.post<RunOut>(`/runs/${runId}/retry`),
   deleteRun: (runId: string) => api.delete<void>(`/runs/${runId}`),
   deleteRuns: (runIds: string[]) =>
     api.post<{ deleted_count: number }>("/runs/batch-delete", { run_ids: runIds }),
