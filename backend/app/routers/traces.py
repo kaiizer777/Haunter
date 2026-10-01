@@ -35,7 +35,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.db import get_db
-from app.failure_signature import normalize_failure_signature
+from app.failure_signature import (
+    MAX_SIGNATURE_INPUT_CHARS,
+    normalize_failure_signature,
+)
 from app.models import Attempt, Repo, Run, RunStep, User
 from app.schemas import BatchDeleteRunsRequest, BatchDeleteRunsResponse, RunOut
 from app.traces.classify import classify_failure
@@ -299,12 +302,18 @@ async def list_runs(
     # the matched set fits inside the cap: past the cap the counts would be
     # silently truncated, so we skip the scan entirely and leave
     # signature_count at 1, which tells the client to group the page it has.
+    # `left()` caps the bytes each row puts on the wire - failure_reason is an
+    # unbounded Text column holding sanitized CI output, and the normalizer only
+    # ever reads the first MAX_SIGNATURE_INPUT_CHARS characters of it.
     # Ordered ASC so the earliest run wins sample_run_id.
     signature_counts: dict[str, int] = {}
     signature_samples: dict[str, uuid.UUID] = {}
     if total <= SIGNATURE_CLUSTER_MAX_RUNS:
         cluster_stmt = (
-            select(Run.id, Run.failure_reason)
+            select(
+                Run.id,
+                func.left(Run.failure_reason, MAX_SIGNATURE_INPUT_CHARS),
+            )
             .where(*filters)
             .order_by(Run.created_at.asc())
             .limit(SIGNATURE_CLUSTER_MAX_RUNS)

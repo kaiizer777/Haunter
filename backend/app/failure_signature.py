@@ -44,10 +44,12 @@ substring that a later, broader rule needed:
      whitespace, truncate
 ===  ======================  =========================================================
 
-This module is mirrored byte-for-byte in behaviour by
-``frontend/src/lib/failure-signature.ts``. Both implementations are pinned to
-the same golden corpus in ``shared/failure_signature_vectors.json`` so the two
-suites fail loudly the moment they diverge.
+This module is the single source of truth for failure signatures. The runs
+dashboard groups on the ``signature`` the API returns and never recomputes it
+client-side: a second implementation of this normalization is exactly how the
+original ISO-8601 defect ended up existing in two languages at once. The
+golden corpus in ``backend/tests/failure_signature_vectors.json`` pins the
+exact output for 40 representative inputs.
 """
 
 from __future__ import annotations
@@ -56,6 +58,14 @@ import re
 
 MAX_SIGNATURE_CHARS = 200
 UNKNOWN_SIGNATURE = "unknown"
+
+# `runs.failure_reason` is a `Text` column written by the orchestrator from
+# sanitized CI output and can hold millions of characters, but the signature
+# only ever uses the first non-empty line truncated to MAX_SIGNATURE_CHARS.
+# Clipping the input first keeps the cost of normalizing one run constant
+# instead of proportional to the stored log, which matters because
+# list_runs normalizes up to SIGNATURE_CLUSTER_MAX_RUNS runs per request.
+MAX_SIGNATURE_INPUT_CHARS = 1024
 
 # All patterns are case-insensitive so they stay correct regardless of where
 # lowercasing happens; the normalized output is lowercased regardless so that
@@ -86,11 +96,15 @@ _EDGE_PUNCTUATION = " -–—:;,.|"
 def normalize_failure_signature(reason: str | None) -> str:
     """Normalize a raw ``failure_reason`` into a stable clustering signature.
 
-    Only the first non-empty line is considered: it carries the error
+    At most ``MAX_SIGNATURE_INPUT_CHARS`` characters of input are examined, and
+    of those only the first non-empty line: it carries the error
     type/message, while later lines are stack frames and log noise. Returns
     ``UNKNOWN_SIGNATURE`` when nothing survives normalization.
     """
-    if not reason or not reason.strip():
+    if not reason:
+        return UNKNOWN_SIGNATURE
+    reason = reason[:MAX_SIGNATURE_INPUT_CHARS]
+    if not reason.strip():
         return UNKNOWN_SIGNATURE
 
     first_line = ""

@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from app.failure_signature import MAX_SIGNATURE_CHARS, normalize_failure_signature
-
-_VECTORS_PATH = (
-    Path(__file__).resolve().parents[2] / "shared" / "failure_signature_vectors.json"
+from app.failure_signature import (
+    MAX_SIGNATURE_CHARS,
+    MAX_SIGNATURE_INPUT_CHARS,
+    normalize_failure_signature,
 )
+
+_VECTORS_PATH = Path(__file__).resolve().parent / "failure_signature_vectors.json"
 
 
 def _load_vectors() -> dict[str, Any]:
@@ -69,8 +72,7 @@ def test_signature_grouping_counts() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Golden corpus — shared verbatim with frontend/src/lib/failure-signature.test.ts
-# so the Python and TypeScript normalizers cannot drift.
+# Golden corpus - pins the exact output for every interesting input shape.
 # ---------------------------------------------------------------------------
 
 
@@ -119,6 +121,31 @@ def test_truncation_counts_code_points_not_utf16_units() -> None:
     sig = normalize_failure_signature(raw)
     assert len(sig) == MAX_SIGNATURE_CHARS
     assert sig.endswith("\U0001F680")
+
+
+def test_input_is_clipped_before_normalizing() -> None:
+    """A multi-megabyte failure_reason must cost the same as a short one.
+
+    `runs.failure_reason` is an unbounded Text column, so the cost of
+    normalizing one run must not scale with the stored CI log.
+    """
+    prefix = "pr_writer: rollout blocked "
+    raw = prefix + ("x" * (MAX_SIGNATURE_INPUT_CHARS + 500_000))
+    started = time.perf_counter()
+    sig = normalize_failure_signature(raw)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    assert sig.startswith(prefix)
+    assert len(sig) <= MAX_SIGNATURE_CHARS
+    # A regex sweep over half a megabyte cannot plausibly finish this fast.
+    assert elapsed_ms < 250, f"normalizing a clipped input took {elapsed_ms:.1f}ms"
+
+
+def test_clipping_does_not_change_the_signature_of_a_short_first_line() -> None:
+    """Only the first line matters, so clipping past it is a no-op."""
+    short = "sandbox: TimeoutError: runner timed out"
+    with_tail = short + "\n" + ("stack noise " * 50_000)
+    assert normalize_failure_signature(with_tail) == normalize_failure_signature(short)
 
 
 @pytest.mark.asyncio

@@ -215,8 +215,10 @@ class RunOut(BaseModel):
     conclusion: Optional[str]
     cost: float = 0.0
     tokens: int = 0
-    failure_reason: Optional[str] = None
     # Stable grouping key for repeated failures (app.failure_signature).
+    # `failure_reason` is deliberately NOT exposed here: it is an unbounded Text
+    # column of sanitized CI output, and the dashboard groups on this field
+    # instead of re-normalizing the raw reason client-side.
     signature: str = "unknown"
     # Runs in the whole filtered set sharing this signature. Falls back to 1
     # when the filtered set exceeds SIGNATURE_CLUSTER_MAX_RUNS, so a client can
