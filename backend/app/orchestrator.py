@@ -1203,12 +1203,13 @@ async def _orchestrator_pipeline_body(
                 # an issue failure never blocks the fallback_commented terminal
                 # transition because the diagnosis comment above is the primary
                 # exhaust path.
-                file_issue_on_fallback = getattr(
-                    repo_settings, "file_issue_on_fallback", True
-                )
-                if file_issue_on_fallback is None:
-                    file_issue_on_fallback = True
-                if file_issue_on_fallback:
+                #
+                # No duplicate-issue guard is needed here: the exhaust block is
+                # only reachable via the `→ fallback` transition, and
+                # fallback_commented is terminal (_ALLOWED_TRANSITIONS), so a
+                # re-entrant invocation aborts on InvalidTransitionError before
+                # it can file a second issue for the same run.
+                if repo_settings.file_issue_on_fallback:
                     try:
                         from app.github_client import create_issue
                         from app.subagents.pr_writer import (
@@ -1225,9 +1226,9 @@ async def _orchestrator_pipeline_body(
                         issue = await create_issue(
                             owner=repo.owner,
                             repo=repo.name,
-                            title=str(issue_content["title"]),
-                            body=str(issue_content["body"]),
-                            labels=list(issue_content["labels"]),
+                            title=issue_content["title"],
+                            body=issue_content["body"],
+                            labels=issue_content["labels"],
                             token=github_token,
                         )
                         run.fallback_issue_url = issue["html_url"]

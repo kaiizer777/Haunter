@@ -262,6 +262,62 @@ def test_build_fallback_issue_content_caps():
     assert "z" * 5_000 not in content["body"]
 
 
+def test_build_fallback_issue_title_keeps_sha_and_stays_well_formed():
+    """A long branch truncates; the SHA and the backticks survive."""
+    run = _make_run(head_branch="feature/" + "long-monorepo-path-" * 30)
+    content = build_fallback_issue_content(
+        run=run,
+        diagnosis_summary="SomeError: boom",
+        attempts=[],
+        owner="acme",
+        repo="shop",
+    )
+    title = content["title"]
+    assert len(title) <= 120
+    # The SHA is the triage identifier — it must never be the thing cut off.
+    assert title.endswith("(0123456)")
+    assert title.count("`") == 2
+    assert title.startswith("Haunter: CI failure on `")
+
+
+def test_build_fallback_issue_title_without_sha():
+    """A run with no head_sha still yields a well-formed, capped title."""
+    run = _make_run(head_sha="")
+    content = build_fallback_issue_content(
+        run=run,
+        diagnosis_summary="SomeError: boom",
+        attempts=[],
+        owner="acme",
+        repo="shop",
+    )
+    title = content["title"]
+    assert len(title) <= 120
+    assert title == "Haunter: CI failure on `main` needs attention"
+    assert title.count("`") == 2
+
+
+def test_build_fallback_issue_content_caps_attempt_notes():
+    """Oversized strategy notes are truncated so the table row stays intact."""
+    run = _make_run()
+    attempt = _make_attempt(1, strategy_notes="n" * 9_000)
+    content = build_fallback_issue_content(
+        run=run,
+        diagnosis_summary="SomeError: boom",
+        attempts=[attempt],
+        owner="acme",
+        repo="shop",
+    )
+    assert "n" * 9_000 not in content["body"]
+    # Header + separator + one complete row must all be present.
+    assert "| Attempt | Confidence | Strategy | Failure reason |" in content["body"]
+    assert "| --- | --- | --- | --- |" in content["body"]
+    rows = [ln for ln in content["body"].splitlines() if ln.startswith("| 1 |")]
+    assert len(rows) == 1
+    # A row cut mid-cell would not have all four cells closed.
+    assert rows[0].count("|") == 5
+    assert rows[0].endswith("|")
+
+
 # ---------------------------------------------------------------------------
 # 3. Orchestrator exhaust path (DB)
 # ---------------------------------------------------------------------------

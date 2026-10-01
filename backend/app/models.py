@@ -184,6 +184,16 @@ class Run(Base):
         ForeignKey("runs.id", ondelete="CASCADE"), nullable=True, index=True
     )
 
+    # Feature 3 — Fallback to GitHub Issue lineage.
+    # fallback_issue_url / fallback_issue_number: set when the orchestrator
+    # files a tracking issue on the fix-exhaust path (repo setting
+    # file_issue_on_fallback). Both stay None for runs that succeeded, are
+    # still running, or whose repo opted out. Surfaced on the run detail page.
+    fallback_issue_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    fallback_issue_number: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+
     repo: Mapped["Repo"] = relationship("Repo", back_populates="runs")
     parent_run: Mapped[Optional["Run"]] = relationship(
         "Run", remote_side=lambda: [Run.id], back_populates="children_runs"
@@ -423,6 +433,15 @@ class RepoSettings(Base):
         Boolean, nullable=False, default=True, server_default="true"
     )
     enable_webcontainer_preview: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+
+    # Feature 3 — opt-in flag gating creation of a GitHub tracking issue on
+    # the fix-exhaust path. Independent of enable_pr_comments: the diagnosis
+    # comment and the issue are two channels of the same fallback, and either
+    # can be switched off without affecting the other. Defaults to enabled —
+    # an exhausted run with no diagnosis anywhere is the case this exists for.
+    file_issue_on_fallback: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
     )
 

@@ -20,7 +20,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence, TypedDict
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -324,12 +324,49 @@ async def generate_pr_text(
 
 # GitHub issue titles over ~120 chars get truncated in list views; bodies are
 # capped for readability (the full diagnosis stays on the run detail page).
+# Per-attempt text is capped so the per-attempt table stays intact when the
+# body cap is reached — a row cut mid-cell is worse than a shortened cell.
 _FALLBACK_ISSUE_TITLE_MAX_LEN = 120
 _FALLBACK_ISSUE_BODY_MAX_LEN = 8000
-_FALLBACK_ISSUE_ATTEMPT_REASON_MAX_LEN = 300
+_FALLBACK_ISSUE_ATTEMPT_FIELD_MAX_LEN = 300
 
 # Labels applied to every filed fallback issue for triage filtering.
 FALLBACK_ISSUE_LABELS: tuple[str, ...] = ("haunter", "ci-failure")
+
+# Fixed title scaffolding around the (truncatable) branch name.
+_FALLBACK_ISSUE_TITLE_PREFIX = "Haunter: CI failure on `"
+_FALLBACK_ISSUE_TITLE_SUFFIX = "` needs attention"
+
+
+class FallbackIssueContent(TypedDict):
+    """Payload for a filed fallback tracking issue."""
+
+    title: str
+    body: str
+    labels: list[str]
+
+
+def _build_fallback_issue_title(branch: str, sha7: str) -> str:
+    """
+    Assemble the issue title, truncating the branch rather than the title.
+
+    GitHub rejects titles over 256 chars and list views clip well before that,
+    so the title has to be capped. Truncating the assembled title instead
+    would cut the commit SHA — the one identifier a human needs to triage the
+    issue — and leave an unbalanced backtick. Reserving the scaffolding and the
+    SHA up front keeps the title well-formed at any branch length.
+    """
+    sha_suffix = f" ({sha7})" if sha7 else ""
+    budget = (
+        _FALLBACK_ISSUE_TITLE_MAX_LEN
+        - len(_FALLBACK_ISSUE_TITLE_PREFIX)
+        - len(_FALLBACK_ISSUE_TITLE_SUFFIX)
+        - len(sha_suffix)
+    )
+    return (
+        f"{_FALLBACK_ISSUE_TITLE_PREFIX}{branch[:budget]}"
+        f"{_FALLBACK_ISSUE_TITLE_SUFFIX}{sha_suffix}"
+    )
 
 
 def build_fallback_issue_content(
@@ -339,7 +376,7 @@ def build_fallback_issue_content(
     *,
     owner: str,
     repo: str,
-) -> dict[str, Any]:
+) -> FallbackIssueContent:
     """
     Build sanitized GitHub issue title/body/labels for the exhaust path.
 
@@ -382,12 +419,14 @@ def build_fallback_issue_content(
             confidence = attempt.confidence_score
             confidence_str = str(confidence) if confidence is not None else "n/a"
             notes = html.escape(
-                _redact_secrets(attempt.strategy_notes or "(no notes)"),
+                _redact_secrets(attempt.strategy_notes or "(no notes)")[
+                    :_FALLBACK_ISSUE_ATTEMPT_FIELD_MAX_LEN
+                ],
                 quote=False,
             )
             failure = html.escape(
                 _redact_secrets(attempt.failure_reason or "(no failure reason)")[
-                    :_FALLBACK_ISSUE_ATTEMPT_REASON_MAX_LEN
+                    :_FALLBACK_ISSUE_ATTEMPT_FIELD_MAX_LEN
                 ],
                 quote=False,
             )
@@ -404,12 +443,7 @@ def build_fallback_issue_content(
         attempts_table = "(no attempts recorded)"
         attempts_line = "No fix attempts were recorded."
 
-    title = (
-        f"Haunter: CI failure on `{safe_branch}` needs attention ({sha7})"
-        if sha7
-        else f"Haunter: CI failure on `{safe_branch}` needs attention"
-    )
-    title = title[:_FALLBACK_ISSUE_TITLE_MAX_LEN]
+    title = _build_fallback_issue_title(safe_branch, sha7)
 
     body = (
         "## Haunter diagnosis — automated fix exhausted\n\n"
