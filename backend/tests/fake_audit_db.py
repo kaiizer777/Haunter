@@ -602,6 +602,28 @@ class FakeAsyncSession:
         if instance not in rows:
             rows.append(instance)
 
+    async def flush(self, *args: Any, **kwargs: Any) -> None:
+        """No-op: `add` already applied column defaults and stored the row."""
+        return None
+
+    def get(self, entity: Any, ident: Any) -> Any:
+        """Primary-key lookup over the store, mirroring `AsyncSession.get`."""
+        mapper = sa_inspect(entity)
+        pk_keys = [prop.key for prop in mapper.primary_key]
+        keys = ident if isinstance(ident, tuple) else (ident,)
+        if len(keys) != len(pk_keys):
+            raise UnsupportedStatementError(
+                f"get({entity.__name__}) expects {len(pk_keys)} identity key(s), "
+                f"got {len(keys)}"
+            )
+        for row in self._store.rows(mapper.local_table):
+            if all(
+                getattr(row, key) == value
+                for key, value in zip(pk_keys, keys, strict=True)
+            ):
+                return row
+        return None
+
     async def commit(self) -> None:
         return None
 

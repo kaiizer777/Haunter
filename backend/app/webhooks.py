@@ -18,7 +18,9 @@ Handles incoming GitHub webhook events with strict security controls:
 
 import json
 import logging
-from typing import Any, Optional
+import uuid
+from datetime import datetime
+from typing import Annotated, Any, Optional
 
 from fastapi import (
     APIRouter,
@@ -26,18 +28,20 @@ from fastapi import (
     Depends,
     Header,
     HTTPException,
+    Query,
     Request,
     status,
 )
-from pydantic import ValidationError
-from sqlalchemy import func, select
+from pydantic import BaseModel, ConfigDict, ValidationError
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
 from app.log_hygiene import sanitize_log_value
-from app.models import CodeReview, Repo, Run
+from app.models import CodeReview, Repo, Run, User, WebhookDelivery
 from app.schemas import (
     IssueCommentWebhookPayload,
     PullRequestReviewCommentWebhookPayload,
@@ -52,6 +56,11 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 # 2MB payload size limit to prevent memory-exhaustion DoS attacks
 MAX_PAYLOAD_SIZE_BYTES = 2 * 1024 * 1024
+
+# Feature 8 — bounds for persisted webhook health rows.
+_WEBHOOK_REASON_MAX_CHARS = 500
+_WEBHOOK_EVENT_MAX_CHARS = 64
+_WEBHOOK_STATUS_MAX_CHARS = 32
 
 # Collaborator authority allowlist for bot invocation
 ALLOWED_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
@@ -108,6 +117,190 @@ def _log_webhook_decision(
         logger.warning(msg)
     else:
         logger.info(msg)
+
+
+def _truncate_reason(reason: Any) -> Optional[str]:
+    """Bound persisted reason length; attacker-influenced, never stored raw unbounded."""
+    if reason is None:
+        return None
+    text = str(reason)
+    if len(text) > _WEBHOOK_REASON_MAX_CHARS:
+        return text[:_WEBHOOK_REASON_MAX_CHARS]
+    return text
+
+
+async def _record_webhook_delivery(
+    db: AsyncSession,
+    *,
+    event: Any,
+    delivery_id: Any,
+    status_value: str,
+    reason: Any,
+    repo: Any = None,
+    repo_id: Optional[uuid.UUID] = None,
+    level: str = "info",
+) -> None:
+    """Persist a webhook decision alongside the structured log line.
+
+    Feature 8 health log: every call emits the CloudWatch-parseable
+    _log_webhook_decision line AND best-effort inserts a WebhookDelivery row.
+    DB failures are swallowed (rollback + warning) so ingestion latency and
+    2xx responses are never affected by health-log pressure.
+    """
+    _log_webhook_decision(
+        event=event,
+        delivery_id=delivery_id,
+        status=status_value,
+        reason=reason,
+        repo=repo,
+        level=level,
+    )
+    try:
+        event_text = str(event)[:_WEBHOOK_EVENT_MAX_CHARS] if event is not None else "unknown"
+        delivery_text = str(delivery_id)[:128] if delivery_id is not None else "unknown"
+        status_text = str(status_value)[:_WEBHOOK_STATUS_MAX_CHARS]
+        repo_text = str(repo)[:255] if repo is not None else None
+        row = WebhookDelivery(
+            event=event_text,
+            delivery_id=delivery_text,
+            status=status_text,
+            reason=_truncate_reason(reason),
+            repo=repo_text,
+            repo_id=repo_id,
+        )
+        db.add(row)
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.warning("webhook delivery health-log insert failed", exc_info=True)
+
+
+class WebhookDeliveryOut(BaseModel):
+    """Explicit response DTO — never leaks raw payloads or tokens."""
+
+    id: uuid.UUID
+    event: str
+    delivery_id: str
+    status: str
+    reason: Optional[str] = None
+    repo: Optional[str] = None
+    repo_id: Optional[uuid.UUID] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WebhookDeliveryListOut(BaseModel):
+    deliveries: list[WebhookDeliveryOut]
+    total: int
+
+    model_config = ConfigDict(extra="forbid")
+
+
+async def _user_repo_scope(
+    db: AsyncSession, user: User
+) -> tuple[list[uuid.UUID], list[str]]:
+    """Return (repo_ids, repo_full_names) owned by the caller for tenant scoping."""
+    result = await db.execute(select(Repo).where(Repo.user_id == user.id))
+    repos = list(result.scalars().all())
+    ids = [r.id for r in repos]
+    names = [f"{r.owner}/{r.name}" for r in repos]
+    return ids, names
+
+
+@router.get("/deliveries", response_model=WebhookDeliveryListOut)
+async def list_webhook_deliveries(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    event: Annotated[Optional[str], Query(max_length=64)] = None,
+) -> WebhookDeliveryListOut:
+    """List webhook deliveries for repos owned by the caller (health history).
+
+    Tenant isolation: only rows whose repo_id or owner/name matches one of the
+    caller's repos are returned. Unknown repos return an empty list, never 404,
+    so the health tab renders an empty state instead of an error.
+    """
+    repo_ids, repo_names = await _user_repo_scope(db, current_user)
+    if not repo_ids and not repo_names:
+        return WebhookDeliveryListOut(deliveries=[], total=0)
+
+    scope_clauses: list[Any] = []
+    if repo_ids:
+        scope_clauses.append(WebhookDelivery.repo_id.in_(repo_ids))
+    if repo_names:
+        scope_clauses.append(WebhookDelivery.repo.in_(repo_names))
+    filters: list[Any] = [or_(*scope_clauses)]
+    if event is not None:
+        filters.append(WebhookDelivery.event == event)
+
+    count_stmt = select(func.count(WebhookDelivery.id)).where(*filters)
+    total = (await db.execute(count_stmt)).scalar_one() or 0
+
+    stmt = (
+        select(WebhookDelivery)
+        .where(*filters)
+        .order_by(WebhookDelivery.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return WebhookDeliveryListOut(
+        deliveries=[WebhookDeliveryOut.model_validate(r) for r in rows],
+        total=total,
+    )
+
+
+@router.post("/deliveries/{delivery_row_id}/replay", response_model=WebhookDeliveryOut)
+async def replay_webhook_delivery(
+    delivery_row_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> WebhookDeliveryOut:
+    """Audit-only replay marker for a webhook delivery.
+
+    Inserts a new WebhookDelivery row with status="replayed" referencing the
+    original. Never re-executes the pipeline, so replay cannot create duplicate
+    Runs or re-trigger background work. Returns 404 for unknown or non-owned rows
+    (no existence oracle across tenants).
+    """
+    repo_ids, repo_names = await _user_repo_scope(db, current_user)
+    result = await db.execute(
+        select(WebhookDelivery).where(WebhookDelivery.id == delivery_row_id)
+    )
+    original = result.scalar_one_or_none()
+    if original is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery not found")
+    owned = (original.repo_id is not None and original.repo_id in repo_ids) or (
+        original.repo is not None and original.repo in repo_names
+    )
+    if not owned:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery not found")
+
+    replay_reason = _truncate_reason(f"replay of {original.id}")
+    replay_row = WebhookDelivery(
+        event=original.event,
+        delivery_id=original.delivery_id,
+        status="replayed",
+        reason=replay_reason,
+        repo=original.repo,
+        repo_id=original.repo_id,
+    )
+    db.add(replay_row)
+    await db.commit()
+    await db.refresh(replay_row)
+    _log_webhook_decision(
+        event=replay_row.event,
+        delivery_id=replay_row.delivery_id,
+        status="replayed",
+        reason=f"replay of {original.id}",
+        repo=replay_row.repo,
+    )
+    return WebhookDeliveryOut.model_validate(replay_row)
 
 
 async def _read_limited_body(request: Request) -> bytes:
@@ -379,12 +572,14 @@ async def github_webhook(
                 x_github_delivery,
                 payload.workflow_run.id,
             )
-            _log_webhook_decision(
+            await _record_webhook_delivery(
+                db,
                 event="workflow_run",
                 delivery_id=x_github_delivery,
-                status="duplicate",
+                status_value="duplicate",
                 reason=f"github_run_id={payload.workflow_run.id}",
                 repo=f"{owner}/{repo_name}",
+                repo_id=repo.id,
             )
             return {
                 "status": "duplicate",
@@ -396,6 +591,16 @@ async def github_webhook(
 
         adapter = await get_hosting_adapter()
         await adapter.schedule_pipeline(new_run.id, background_tasks)
+
+        await _record_webhook_delivery(
+            db,
+            event="workflow_run",
+            delivery_id=x_github_delivery,
+            status_value="queued",
+            reason=f"github_run_id={payload.workflow_run.id} run_id={new_run.id}",
+            repo=f"{owner}/{repo_name}",
+            repo_id=repo.id,
+        )
 
         return {
             "status": "queued",
@@ -516,12 +721,14 @@ async def github_webhook(
                 "Ignored pull_request (delivery_id=%s): missing head sha",
                 x_github_delivery,
             )
-            _log_webhook_decision(
+            await _record_webhook_delivery(
+                db,
                 event="pull_request",
                 delivery_id=x_github_delivery,
-                status="ignored",
+                status_value="ignored",
                 reason="missing head sha",
                 repo=f"{owner}/{repo_name}",
+                repo_id=repo.id,
             )
             return {"status": "ignored", "reason": "missing head sha"}
 
@@ -540,12 +747,14 @@ async def github_webhook(
                 sanitize_log_value(commit_sha, 64),
                 existing_review.id,
             )
-            _log_webhook_decision(
+            await _record_webhook_delivery(
+                db,
                 event="pull_request",
                 delivery_id=x_github_delivery,
-                status="duplicate",
+                status_value="duplicate",
                 reason=f"commit={commit_sha} review_id={existing_review.id}",
                 repo=f"{owner}/{repo_name}",
+                repo_id=repo.id,
             )
             return {
                 "status": "duplicate",
@@ -618,6 +827,16 @@ async def github_webhook(
 
         adapter = await get_hosting_adapter()
         await adapter.schedule_review(new_review.id, background_tasks)
+
+        await _record_webhook_delivery(
+            db,
+            event="pull_request",
+            delivery_id=x_github_delivery,
+            status_value="queued",
+            reason=f"pr_number={pr_number} commit={commit_sha}",
+            repo=f"{owner}/{repo_name}",
+            repo_id=repo.id,
+        )
 
         return {
             "status": "queued",
@@ -741,12 +960,14 @@ async def github_webhook(
                 sanitize_log_value(commit_sha, 64),
                 existing_review.id,
             )
-            _log_webhook_decision(
+            await _record_webhook_delivery(
+                db,
                 event="push",
                 delivery_id=x_github_delivery,
-                status="duplicate",
+                status_value="duplicate",
                 reason=f"commit={commit_sha} review_id={existing_review.id}",
                 repo=f"{owner}/{repo_name}",
+                repo_id=repo.id,
             )
             return {
                 "status": "duplicate",
@@ -773,6 +994,16 @@ async def github_webhook(
 
         adapter = await get_hosting_adapter()
         await adapter.schedule_review(new_review.id, background_tasks)
+
+        await _record_webhook_delivery(
+            db,
+            event="push",
+            delivery_id=x_github_delivery,
+            status_value="queued",
+            reason=f"commit={commit_sha}",
+            repo=f"{owner}/{repo_name}",
+            repo_id=repo.id,
+        )
 
         return {
             "status": "queued",

@@ -694,3 +694,41 @@ class AgentSession(Base):
         # Column order: equality first (user_id), then status.
         Index("ix_agent_sessions_user_id_status", "user_id", "status"),
     )
+
+
+class WebhookDelivery(Base):
+    """
+    Feature 8 — Webhook health log.
+
+    Append-only record of every webhook decision made in app/webhooks.py.
+    Written best-effort via _record_webhook_delivery() alongside the structured
+    _log_webhook_decision() log line — a logging failure must never break
+    webhook ingestion, and a DB failure must never break the 2xx response.
+
+    Replay (POST /webhooks/{id}/replay) is audit-only: it inserts a new row
+    with status="replayed" referencing the original. It never re-executes the
+    pipeline, so replaying a delivery cannot create duplicate Runs.
+    """
+
+    __tablename__ = "webhook_deliveries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    event: Mapped[str] = mapped_column(String(64), nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    repo: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    repo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("repos.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        Index("ix_webhook_deliveries_delivery_id", "delivery_id"),
+        Index("ix_webhook_deliveries_created_at", "created_at"),
+        Index("ix_webhook_deliveries_repo_id", "repo_id"),
+    )
