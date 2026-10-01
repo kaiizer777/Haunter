@@ -54,8 +54,11 @@ jobs:
           if [ -n "$COMPOSE_FILE" ]; then
             # Full interpolation/validation of the compose file, including the
             # service and network graph — the container equivalent of a
-            # compile step. Services are not started: the sandbox must not run
-            # untrusted code from the user's repository.
+            # compile step. This validates the compose file without starting
+            # its services; `docker build` below does execute the repository's
+            # `RUN` instructions, and a configured HAUNTER_TEST_COMMAND is
+            # likewise executed on this ephemeral runner, so the sandbox is not
+            # a hermetic sandbox against the repository's own code.
             echo "Validating $COMPOSE_FILE"
             docker compose -f "$COMPOSE_FILE" config
           elif [ -f Dockerfile ] || ls Dockerfile.* >/dev/null 2>&1; then

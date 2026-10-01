@@ -67,9 +67,12 @@ jobs:
             echo "::error::no Cargo.toml under ${HAUNTER_WORKING_DIR:-.} — cannot run cargo test"
             exit 1
           fi
-          if [ -f Cargo.lock ]; then
-            cargo test --locked || cargo test
+          # Probe dependency resolution with --locked first, so a genuinely
+          # failing test suite runs once rather than twice.
+          if cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
+            cargo test --locked
           else
+            echo "::warning::Cargo.lock is absent or out of date — running without --locked"
             cargo test
           fi
 

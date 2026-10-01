@@ -366,6 +366,50 @@ def test_resolve_sandbox_overrides_is_neutral_without_a_run() -> None:
     assert resolved.test_command is None
 
 
+def test_resolve_sandbox_overrides_propagates_a_stored_invalid_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed stored override must fail the attempt, not fall back.
+
+    Silently degrading to the repository root would verify the fix against a
+    different test suite than the user configured — the exact false "verified"
+    result this override exists to prevent.
+    """
+    import asyncio
+    import uuid as uuid_module
+
+    from types import SimpleNamespace
+
+    from app.db import async_session_maker
+
+    class _FakeSession:
+        async def __aenter__(self) -> "_FakeSession":
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def get(self, model: object, pk: object) -> object:
+            # First lookup is the Run, second the Repo; both must be non-None
+            # so the lookup reaches the RepoSettings validators.
+            return SimpleNamespace(
+                id=pk,
+                repo_id=uuid_module.uuid4(),
+                working_dir="../../etc",
+                test_command=None,
+            )
+
+        async def scalar(self, _stmt: object) -> object:
+            return SimpleNamespace(working_dir="../../etc", test_command=None)
+
+    monkeypatch.setattr(
+        "app.db.async_session_maker", lambda: _FakeSession(), raising=False
+    )
+
+    with pytest.raises(ValueError):
+        asyncio.run(resolve_sandbox_overrides(uuid_module.uuid4()))
+
+
 # ---------------------------------------------------------------------------
 # RepoSettings validators
 # ---------------------------------------------------------------------------

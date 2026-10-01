@@ -960,11 +960,17 @@ async def resolve_sandbox_overrides(run_id: Optional[uuid.UUID]) -> SandboxOverr
     Resolve ``(working_dir, test_command)`` for a run from its RepoSettings.
 
     Best-effort by design: the settings lookup must never be the reason a
-    verification attempt dies, so any failure is logged and degrades to
-    :data:`SANDBOX_OVERRIDES_NONE` (repo root + language-default test command).
-    Persisted values are re-validated on read, so a row written before a
-    validator tightened cannot inject a traversal or a NUL byte into a
-    rendered workflow.
+    verification attempt dies, so an infrastructure or query failure is logged
+    and degrades to :data:`SANDBOX_OVERRIDES_NONE` (repo root +
+    language-default test command).
+
+    A *validation* failure is deliberately not swallowed. Values are
+    re-validated on read so a row written before a validator tightened cannot
+    inject a traversal or a NUL byte into a rendered workflow, and silently
+    falling back to the repository root would verify the fix against a
+    different test suite than the user configured — which is exactly the false
+    "verified" result this override exists to prevent. That ``ValueError``
+    propagates to the callers, which fail the attempt with a sanitized reason.
     """
     if run_id is None:
         return SANDBOX_OVERRIDES_NONE
@@ -994,6 +1000,10 @@ async def resolve_sandbox_overrides(run_id: Optional[uuid.UUID]) -> SandboxOverr
                 working_dir=validate_working_dir(row.working_dir),
                 test_command=validate_test_command(row.test_command),
             )
+    except ValueError:
+        # A stored override is malformed. Re-raise so the caller reports it
+        # instead of quietly testing the wrong subtree.
+        raise
     except Exception as exc:
         logger.warning(
             "github_actions_runner: sandbox override lookup failed for run_id=%s (%s: %s)"
