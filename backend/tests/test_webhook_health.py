@@ -657,6 +657,68 @@ async def test_queued_workflow_run_persists_delivery_row(
     assert sign_payload(TEST_SECRET, raw_body) not in serialized
 
 
+@pytest.mark.asyncio
+async def test_replay_of_log_only_branch_is_anchored_and_rate_limited(
+    client: httpx.AsyncClient, db: AsyncSession, user_factory, make_auth_client
+):
+    """A replay whose decision branch records no row of its own is still audited.
+
+    The re-run below takes the "unregistered repository" branch, so the handler
+    appends nothing. Replay must still anchor a row, otherwise nothing would ever
+    satisfy `replay_of == <original>` and the cooldown could be replayed forever.
+    """
+    await truncate_all(db)
+    user = await user_factory(github_id=9118, username="wh_health_anchor")
+    repo = Repo(user_id=user.id, owner="anchor-org", name="anchor-repo")
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    # Recorded against a registered repo, but its payload names a DIFFERENT
+    # repository, so the re-run resolves to "unregistered repository".
+    payload = workflow_run_payload(run_id=555301)
+    payload["repository"]["name"] = "not-registered"
+    payload["repository"]["full_name"] = "anchor-org/not-registered"
+    payload["repository"]["owner"]["login"] = "anchor-org"
+    raw_body = json.dumps(payload).encode("utf-8")
+
+    original = WebhookDelivery(
+        event="workflow_run",
+        delivery_id=str(uuid.uuid4()),
+        status="ignored",
+        reason="unregistered repository",
+        repo="anchor-org/anchor-repo",
+        repo_id=repo.id,
+        payload=_encode_replay_buffer(raw_body),
+    )
+    db.add(original)
+    await db.commit()
+    await db.refresh(original)
+
+    auth_client = make_auth_client(user.id)
+    try:
+        first = await auth_client.post(f"/webhooks/deliveries/{original.id}/replay")
+        assert first.status_code == 200
+        body = first.json()
+        assert body["decision"]["status"] == "ignored"
+        assert body["decision"]["reason"] == "unregistered repository"
+        # The anchor row exists, so the audit trail and the cooldown both hold.
+        assert body["replay_id"] is not None
+        anchor = (
+            await db.execute(
+                select(WebhookDelivery).where(WebhookDelivery.id == body["replay_id"])
+            )
+        ).scalar_one()
+        assert anchor.replay_of == original.id
+        assert anchor.status == "replayed"
+
+        second = await auth_client.post(f"/webhooks/deliveries/{original.id}/replay")
+        assert second.status_code == 409
+        assert "Retry-After" in second.headers
+    finally:
+        await auth_client.aclose()
+
+
 def _mock_adapter() -> MagicMock:
     adapter = MagicMock()
     adapter.schedule_pipeline = AsyncMock()

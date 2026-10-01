@@ -700,10 +700,13 @@ class WebhookDelivery(Base):
     """
     Feature 8 — Webhook health log.
 
-    Append-only record of every webhook decision made in app/webhooks.py.
-    Written best-effort via _record_webhook_delivery() alongside the structured
+    Record of the webhook decisions that reached a registered repository,
+    written best-effort via _record_webhook_delivery() alongside the structured
     _log_webhook_decision() log line — a logging failure must never break
-    webhook ingestion, and a DB failure must never break the 2xx response.
+    webhook ingestion, and a DB failure must never break the 2xx response. The
+    log-only rejections that happen before a repository is resolved write no
+    row: there is no repo to attribute them to, and `repo_id` is the tenant
+    boundary the read endpoint scopes on.
 
     Replay (POST /webhooks/deliveries/{id}/replay) re-drives the ORIGINAL raw
     payload back through the normal `github_webhook` path — signature

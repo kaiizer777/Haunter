@@ -14,10 +14,13 @@ Handles incoming GitHub webhook events with strict security controls:
    app.services.audit_pipeline triggers after signature verification,
    repo registration, branch guards, and the per-repo kill-switch, then
     dispatched through a durable, independent audit queue (never git push / PR creation).
-7. Feature 8 health log + replay: every decision is mirrored into the
-   webhook_deliveries table, and an authenticated owner of the affected repo can
+7. Feature 8 health log + replay: the decision branches that reach a registered
+   repository also append a webhook_deliveries row (see
+   _record_webhook_delivery), and an authenticated owner of the affected repo can
    re-drive a stored delivery through this same handler (see
-   replay_webhook_delivery).
+   replay_webhook_delivery). The log-only early rejections above it do not write
+   rows — there is no repo to attribute them to, since a delivery for an
+   unregistered repository belongs to no tenant.
 """
 
 import base64
@@ -300,8 +303,13 @@ class WebhookReplayResultOut(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def _owned_repo_ids(user: User):
-    """Subquery of repo ids owned by `user` — the single tenant boundary.
+def _owned_repo_ids(user_id: uuid.UUID):
+    """Subquery of repo ids owned by `user_id` — the single tenant boundary.
+
+    Takes the id, not the ORM `User`, because the replay path needs this
+    subquery again AFTER github_webhook() has run, and that handler can commit
+    or roll back the shared session — a rollback expires every instance in it,
+    so re-reading `current_user.id` there would raise MissingGreenlet.
 
     Scoped on repo_id only. `WebhookDelivery.repo` is a denormalized
     owner/name string and is NOT a tenant boundary: repos permits two different
@@ -310,7 +318,7 @@ def _owned_repo_ids(user: User):
     history to another. Keep this as a subquery rather than materialising the
     id list in Python so a user with many repos cannot inflate the IN clause.
     """
-    return select(Repo.id).where(Repo.user_id == user.id).scalar_subquery()
+    return select(Repo.id).where(Repo.user_id == user_id).scalar_subquery()
 
 
 @router.get("/deliveries", response_model=WebhookDeliveryListOut)
@@ -327,7 +335,9 @@ async def list_webhook_deliveries(
     with no repos gets an empty list (never 404) so the health tab renders its
     empty state instead of an error.
     """
-    filters: list[Any] = [WebhookDelivery.repo_id.in_(_owned_repo_ids(current_user))]
+    filters: list[Any] = [
+        WebhookDelivery.repo_id.in_(_owned_repo_ids(current_user.id))
+    ]
     if event is not None:
         filters.append(WebhookDelivery.event == event)
 
@@ -424,13 +434,16 @@ async def replay_webhook_delivery(
       - Repeated calls are bounded: a second replay of the same row inside
         _REPLAY_COOLDOWN_SECONDS is refused with 409 + Retry-After, and the
         handler's own unique constraints make a replayed delivery land on
-        "duplicate" instead of creating a second Run.
+        "duplicate" instead of creating a second Run. Every accepted replay
+        anchors a row with replay_of=<original>, including one that re-ran a
+        branch the handler records nothing for, so the cooldown has an anchor on
+        every path.
     """
     original = (
         await db.execute(
             select(WebhookDelivery).where(
                 WebhookDelivery.id == delivery_row_id,
-                WebhookDelivery.repo_id.in_(_owned_repo_ids(current_user)),
+                WebhookDelivery.repo_id.in_(_owned_repo_ids(current_user.id)),
             )
         )
     ).scalar_one_or_none()
@@ -447,6 +460,8 @@ async def replay_webhook_delivery(
     original_event = original.event
     original_delivery_id = original.delivery_id
     original_repo = original.repo
+    original_repo_id = original.repo_id
+    current_user_id = current_user.id
 
     payload = _decode_replay_buffer(original.payload)
     if payload is None:
@@ -508,14 +523,57 @@ async def replay_webhook_delivery(
     finally:
         _replay_of_var.reset(token)
 
+    # Scoped to the caller for the same reason the row lookup above is: github_webhook()
+    # resolves Repo by owner/name alone, so a re-run can legitimately land on a
+    # different tenant's registration of the same owner/name. Without this scope
+    # the reported replay_id could name a row the caller cannot see.
     replay_row = (
         await db.execute(
             select(WebhookDelivery)
-            .where(WebhookDelivery.replay_of == original_id)
+            .where(
+                WebhookDelivery.replay_of == original_id,
+                WebhookDelivery.repo_id.in_(_owned_repo_ids(current_user_id)),
+            )
             .order_by(WebhookDelivery.created_at.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
+
+    if replay_row is None:
+        # The re-run took a decision branch that records no health row of its own
+        # (an unregistered repository, a bot PR, a tag push). Anchor the attempt
+        # so an accepted replay is always visible in the health log AND the
+        # cooldown above always has a row to find on the next call. Without this
+        # an ignored-branch delivery could be replayed unboundedly, because
+        # nothing would ever satisfy `replay_of == original_id`.
+        #
+        # The replay ContextVar was already reset when the handler returned, so
+        # re-arm it here or the anchor row lands with replay_of=NULL.
+        anchor_token = _replay_of_var.set(original_id)
+        try:
+            await _record_webhook_delivery(
+                db,
+                event=original_event,
+                delivery_id=original_delivery_id,
+                status_value="replayed",
+                reason=f"replay of {original_id}",
+                repo=original_repo,
+                repo_id=original_repo_id,
+            )
+        finally:
+            _replay_of_var.reset(anchor_token)
+
+        replay_row = (
+            await db.execute(
+                select(WebhookDelivery)
+                .where(
+                    WebhookDelivery.replay_of == original_id,
+                    WebhookDelivery.repo_id.in_(_owned_repo_ids(current_user_id)),
+                )
+                .order_by(WebhookDelivery.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
 
     _log_webhook_decision(
         event=original_event,
