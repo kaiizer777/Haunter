@@ -346,6 +346,18 @@ class FallbackIssueContent(TypedDict):
     labels: list[str]
 
 
+def _md_cell(text: str) -> str:
+    """
+    Flatten a value into a single Markdown table cell.
+
+    Sandbox failure reasons routinely contain newlines (pytest output) and
+    pipes. Either one terminates the cell early, so the remainder of the text
+    escapes the table and renders as free-form Markdown. Collapse all
+    whitespace to single spaces first, then neutralise the pipe delimiter.
+    """
+    return " ".join(text.split()).replace("|", "\\|")
+
+
 def _build_fallback_issue_title(branch: str, sha7: str) -> str:
     """
     Assemble the issue title, truncating the branch rather than the title.
@@ -418,17 +430,21 @@ def build_fallback_issue_content(
         for attempt in ordered:
             confidence = attempt.confidence_score
             confidence_str = str(confidence) if confidence is not None else "n/a"
-            notes = html.escape(
-                _redact_secrets(attempt.strategy_notes or "(no notes)")[
-                    :_FALLBACK_ISSUE_ATTEMPT_FIELD_MAX_LEN
-                ],
-                quote=False,
+            notes = _md_cell(
+                html.escape(
+                    _redact_secrets(attempt.strategy_notes or "(no notes)")[
+                        :_FALLBACK_ISSUE_ATTEMPT_FIELD_MAX_LEN
+                    ],
+                    quote=False,
+                )
             )
-            failure = html.escape(
-                _redact_secrets(attempt.failure_reason or "(no failure reason)")[
-                    :_FALLBACK_ISSUE_ATTEMPT_FIELD_MAX_LEN
-                ],
-                quote=False,
+            failure = _md_cell(
+                html.escape(
+                    _redact_secrets(attempt.failure_reason or "(no failure reason)")[
+                        :_FALLBACK_ISSUE_ATTEMPT_FIELD_MAX_LEN
+                    ],
+                    quote=False,
+                )
             )
             rows.append(
                 f"| {attempt.attempt_number} | {confidence_str} "

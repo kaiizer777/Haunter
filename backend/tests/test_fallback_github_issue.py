@@ -21,7 +21,8 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import respx
-from sqlalchemy import select
+from sqlalchemy import inspect as sa_inspect, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -296,6 +297,31 @@ def test_build_fallback_issue_title_without_sha():
     assert title.count("`") == 2
 
 
+def test_build_fallback_issue_content_escapes_table_delimiters():
+    """Newlines and pipes in attempt text cannot break the Markdown table."""
+    run = _make_run()
+    attempt = _make_attempt(
+        1,
+        strategy_notes="try A\nthen B | see docs",
+        failure_reason="FAILED tests/test_a.py::test_x\nE   assert 1 == 2 | col A",
+    )
+    content = build_fallback_issue_content(
+        run=run,
+        diagnosis_summary="SomeError: boom",
+        attempts=[attempt],
+        owner="acme",
+        repo="shop",
+    )
+    rows = [ln for ln in content["body"].splitlines() if ln.startswith("| 1 |")]
+    assert len(rows) == 1, "attempt row must not be split across lines"
+    row = rows[0]
+    # Every pipe is either a delimiter or escaped, so the cell count is stable.
+    assert row.count("|") - row.count("\\|") == 5
+    assert "col A" in row
+    assert "see docs" in row
+    assert "then B" in row
+
+
 def test_build_fallback_issue_content_caps_attempt_notes():
     """Oversized strategy notes are truncated so the table row stays intact."""
     run = _make_run()
@@ -486,6 +512,81 @@ async def test_exhaust_path_skips_issue_when_flag_disabled(db: AsyncSession) -> 
     assert db_run.fallback_issue_number is None
     mock_comment.assert_called_once()
     mock_issue.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_exhaust_path_reaches_terminal_state_when_issue_commit_fails(
+    db: AsyncSession,
+) -> None:
+    """
+    A commit failure while persisting the issue must not strand the run.
+
+    A failed commit() leaves the AsyncSession in a pending-rollback state, so
+    without recovery the terminal `-> fallback_commented` transition fails too
+    and the run is stuck in `fallback` with the issue URL never recorded.
+    """
+    await truncate_all(db)
+    user = await _create_test_user(db)
+    repo = await _create_test_repo(db, user)
+    run = await _create_test_run(db, repo)
+    run_id = run.id
+
+    counter = 0
+
+    async def mock_generate_fix(run, diagnosis_summary, prior_attempt, db, review_feedback=None):
+        nonlocal counter
+        counter += 1
+        attempt = _mock_attempt(run.id, counter)
+        db.add(attempt)
+        await db.commit()
+        return attempt
+
+    fail_results = [
+        {
+            "status": "fail",
+            "failure_reason": f"distinct tail #{i} " + chr(ord("A") + i) * 200,
+            "build_duration_ms": 100,
+        }
+        for i in range(1, settings.max_attempts + 1)
+    ]
+
+    real_commit = AsyncSession.commit
+
+    async def flaky_commit(self, *args, **kwargs):
+        """Fail exactly the commit that would persist the fallback issue."""
+        for obj in self.identity_map.values():
+            if isinstance(obj, Run) and sa_inspect(obj).attrs.fallback_issue_url.history.has_changes():
+                raise OperationalError("COMMIT", {}, Exception("simulated commit failure"))
+        return await real_commit(self, *args, **kwargs)
+
+    from app.orchestrator import handle_failed_run
+
+    with (
+        patch("app.orchestrator.gather_context", AsyncMock(return_value="Root cause W")),
+        patch("app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix),
+        patch("app.sandbox.verify", AsyncMock(side_effect=fail_results)),
+        patch("app.github.pr.get_installation_token", AsyncMock(return_value="ghs_tok")),
+        patch("app.github_client.post_commit_comment", new_callable=AsyncMock),
+        patch(
+            "app.github_client.create_issue",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/fb-org/fb-repo/issues/9",
+                    "number": 9,
+                }
+            ),
+        ),
+        patch.object(AsyncSession, "commit", flaky_commit),
+    ):
+        await handle_failed_run(run_id)
+
+    db.expire_all()
+    db_run = (await db.execute(select(Run).where(Run.id == run_id))).scalar_one()
+    # Terminal state reached despite the failed issue save.
+    assert db_run.status == "fallback_commented"
+    # The issue was created on GitHub but never persisted, so nothing to link.
+    assert db_run.fallback_issue_url is None
+    assert db_run.fallback_issue_number is None
 
 
 @pytest.mark.anyio

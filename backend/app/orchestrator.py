@@ -256,6 +256,42 @@ def _format_failure_reason(stage: str, exc: BaseException) -> str:
     return html_module.escape(truncated, quote=False)
 
 
+async def _recover_session(db: AsyncSession, run: Run, run_id: uuid.UUID) -> None:
+    """
+    Restore `db` to a usable state after a failed write.
+
+    A failed `commit()` leaves an AsyncSession in a pending-rollback state:
+    every later operation on it raises PendingRollbackError until a rollback
+    runs. Because rollback also expires every attribute on `run`, it is
+    re-loaded afterwards so the caller can still read and mutate it.
+
+    Used by the best-effort fallback-issue block, which must not strand a run
+    in a non-terminal state just because persisting the issue failed.
+
+    Never raises — recovery is best-effort observability, and the caller's own
+    error handling is what decides the run's fate.
+    """
+    try:
+        await db.rollback()
+    except Exception as rollback_exc:
+        logger.warning(
+            "orchestrator: rollback after failed issue save failed for run=%s (%s: %s)",
+            run_id,
+            type(rollback_exc).__name__,
+            rollback_exc,
+        )
+        return
+    try:
+        await db.refresh(run)
+    except Exception as refresh_exc:
+        logger.warning(
+            "orchestrator: refresh after failed issue save failed for run=%s (%s: %s)",
+            run_id,
+            type(refresh_exc).__name__,
+            refresh_exc,
+        )
+
+
 async def _persist_failure_reason(
     db: AsyncSession,
     run: Run,
@@ -1210,6 +1246,7 @@ async def _orchestrator_pipeline_body(
                 # re-entrant invocation aborts on InvalidTransitionError before
                 # it can file a second issue for the same run.
                 if repo_settings.file_issue_on_fallback:
+                    issue_url: Optional[str] = None
                     try:
                         from app.github_client import create_issue
                         from app.subagents.pr_writer import (
@@ -1231,6 +1268,7 @@ async def _orchestrator_pipeline_body(
                             labels=issue_content["labels"],
                             token=github_token,
                         )
+                        issue_url = str(issue["html_url"])
                         run.fallback_issue_url = issue["html_url"]
                         run.fallback_issue_number = issue["number"]
                         run.updated_at = datetime.now(timezone.utc)
@@ -1244,12 +1282,20 @@ async def _orchestrator_pipeline_body(
                             issue["html_url"],
                         )
                     except Exception as issue_exc:
+                        # A failed commit poisons the session, so the terminal
+                        # _transition below would fail too and strand the run
+                        # in `fallback`. Recover first. issue_url is logged so an
+                        # issue that was created but not persisted can still be
+                        # reconciled by hand.
+                        await _recover_session(fb_db, run, run_id)
                         logger.warning(
                             "orchestrator: run=%s failed to file fallback issue "
-                            "(%s: %s) — continuing to fallback_commented",
+                            "(%s: %s; issue_url=%s) — continuing to "
+                            "fallback_commented",
                             run_id,
                             type(issue_exc).__name__,
                             issue_exc,
+                            issue_url,
                         )
                 else:
                     logger.info(
