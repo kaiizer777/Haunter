@@ -80,6 +80,21 @@ describe("failure-signature.ts", () => {
       expect(groups[0]?.count).toBe(2);
     });
 
+    it("falls back to the page-local size when the server skipped clustering", () => {
+      // Past SIGNATURE_CLUSTER_MAX_RUNS the server leaves signature_count at
+      // its sentinel of 1. Rendering that verbatim would show every group as
+      // x1 and sort them all alike instead of by real recurrence.
+      const groups = groupRunsBySignature([
+        { id: "r1", signature: "sig-a", signature_count: 1 },
+        { id: "r2", signature: "sig-a", signature_count: 1 },
+        { id: "r3", signature: "sig-a", signature_count: 1 },
+        { id: "r4", signature: "sig-b", signature_count: 1 },
+      ]);
+      expect(groups.map((g) => g.signature)).toEqual(["sig-a", "sig-b"]);
+      expect(groups[0]?.count).toBe(3);
+      expect(groups[1]?.count).toBe(1);
+    });
+
     it("groups runs without a signature under unknown", () => {
       const groups = groupRunsBySignature([{ id: "r1" }, { id: "r2" }]);
       expect(groups).toHaveLength(1);

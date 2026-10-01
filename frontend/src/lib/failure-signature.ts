@@ -35,9 +35,14 @@ export function getRunSignature<T extends SignaturableRun>(run: T): string {
 
 /**
  * Group runs by failure signature, sorted by count desc then signature asc.
- * `count` prefers the server-computed `signature_count` when all members
- * agree, otherwise falls back to the local group size. `sampleRunId` prefers
- * the server's `sample_run_id`, falling back to the first member id.
+ *
+ * `count` prefers the server-computed `signature_count`, which counts every
+ * run in the filtered set and so can only be >= the number of runs held on this
+ * page. A smaller value means the server skipped clustering (the filtered set
+ * exceeded its cap), and the page-local size is then the honest number - using
+ * the sentinel directly would render every group as "x1" and sort them all
+ * alike. `sampleRunId` prefers the server's `sample_run_id`, falling back to
+ * the first member id.
  */
 export function groupRunsBySignature<T extends SignaturableRun>(
   runs: T[]
@@ -54,10 +59,12 @@ export function groupRunsBySignature<T extends SignaturableRun>(
     const serverCounts = members.map((m) =>
       typeof m.signature_count === "number" ? m.signature_count : null
     );
-    const count =
+    const agreed =
       serverCounts.every((c) => c !== null && c === serverCounts[0])
         ? (serverCounts[0] as number)
-        : members.length;
+        : null;
+    const count =
+      agreed !== null && agreed >= members.length ? agreed : members.length;
     const sampleRunId = members[0]?.sample_run_id || members[0]?.id || "";
     groups.push({ signature, count, sampleRunId, runs: members });
   }
