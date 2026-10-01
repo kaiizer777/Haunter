@@ -195,6 +195,55 @@ describe("RunDetailClient (app/runs/detail/RunDetailClient.tsx)", () => {
     expect(screen.queryByRole("link", { name: /view pull request/i })).not.toBeInTheDocument();
   });
 
+  it("renders fallback issue link on the exhaust path when an issue was filed", async () => {
+    const exhaustedTrace: TraceOut = {
+      ...fullMockTrace,
+      run: {
+        ...fullMockTrace.run,
+        status: "fallback_commented",
+        pr_url: null,
+        pr_number: null,
+        fallback_issue_url: "https://github.com/acme/repo/issues/77",
+        fallback_issue_number: 77,
+      },
+    };
+    vi.mocked(api.getRunTrace).mockResolvedValue(exhaustedTrace);
+
+    render(<RunDetailClient />);
+
+    const issueLink = await screen.findByRole("link", {
+      name: /view fallback issue #77/i,
+    });
+    expect(issueLink).toHaveAttribute(
+      "href",
+      "https://github.com/acme/repo/issues/77"
+    );
+    expect(issueLink).toHaveAttribute("target", "_blank");
+    expect(issueLink).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("omits the fallback issue link when no issue was filed", async () => {
+    const exhaustedNoIssue: TraceOut = {
+      ...fullMockTrace,
+      run: {
+        ...fullMockTrace.run,
+        status: "fallback_commented",
+        pr_url: null,
+        pr_number: null,
+        fallback_issue_url: null,
+        fallback_issue_number: null,
+      },
+    };
+    vi.mocked(api.getRunTrace).mockResolvedValue(exhaustedNoIssue);
+
+    render(<RunDetailClient />);
+
+    expect(await screen.findByText("Run ID: run-uuid-001")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /view fallback issue/i })
+    ).not.toBeInTheDocument();
+  });
+
   it("renders failure classification badge when failure_reason is null", async () => {
     const classifiedTrace: TraceOut = {
       ...fullMockTrace,

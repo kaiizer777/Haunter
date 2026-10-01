@@ -458,6 +458,15 @@ async def test_pipeline_exhausted_retries_posts_diagnosis_comment(
         patch(
             "app.github_client.post_commit_comment", new_callable=AsyncMock
         ) as mock_comment,
+        patch(
+            "app.github_client.create_issue",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/pipe-org/pipe-repo/issues/1",
+                    "number": 1,
+                }
+            ),
+        ),
     ):
         await handle_failed_run(run_id)
 
@@ -549,6 +558,15 @@ async def test_pipeline_fast_fail_repeated_sandbox_failure(db: AsyncSession) -> 
         patch(
             "app.github_client.post_commit_comment", new_callable=AsyncMock
         ) as mock_comment,
+        patch(
+            "app.github_client.create_issue",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/pipe-org/pipe-repo/issues/1",
+                    "number": 1,
+                }
+            ),
+        ),
     ):
         await handle_failed_run(run_id)
 

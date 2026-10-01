@@ -34,7 +34,7 @@ async def test_alembic_head_and_migration_check():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"Expected exactly 1 migration head, found {heads}"
-    assert heads[0] == "a1b2c3d4e5f7"
+    assert heads[0] == "f4a5b6c7d8e9"
     assert script.get_revision("a4b7c9d2e6f1").down_revision == "f2a9c4e7b1d3"
     assert script.get_revision("b6d8f0a2c4e6").down_revision == "a4b7c9d2e6f1"
     assert script.get_revision("c7a1b2c3d4e5").down_revision == "b6d8f0a2c4e6"
@@ -42,6 +42,7 @@ async def test_alembic_head_and_migration_check():
     assert script.get_revision("e9d1c2b3a405").down_revision == "d8e9f0a1b2c3"
     assert script.get_revision("f3a4b5c6d7e8").down_revision == "e9d1c2b3a405"
     assert script.get_revision("a1b2c3d4e5f7").down_revision == "f3a4b5c6d7e8"
+    assert script.get_revision("f4a5b6c7d8e9").down_revision == "a1b2c3d4e5f7"
 
 
 def test_to_asyncpg_url_variants():
@@ -255,6 +256,50 @@ async def test_runs_github_delivery_id_unique(db: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_runs_fallback_issue_columns_nullable_then_persisted(
+    db: AsyncSession,
+):
+    """Feature 3: runs.fallback_issue_url/number start NULL and are writable."""
+    await truncate_all(db)
+
+    user = User(github_id=908, github_username="fallback_run_user", access_token="t8")
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    repo = Repo(user_id=user.id, owner="fallback-org", name="fallback-repo")
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    run = Run(
+        repo_id=repo.id,
+        github_run_id=2001,
+        head_sha="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        head_branch="main",
+        status="pending",
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+
+    # A run that never reaches the exhaust path has no tracking issue.
+    assert run.fallback_issue_url is None
+    assert run.fallback_issue_number is None
+
+    run.fallback_issue_url = "https://github.com/fallback-org/fallback-repo/issues/12"
+    run.fallback_issue_number = 12
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+
+    assert run.fallback_issue_number == 12
+    assert run.fallback_issue_url == (
+        "https://github.com/fallback-org/fallback-repo/issues/12"
+    )
+
+
+@pytest.mark.asyncio
 async def test_timestamps_timezone_aware(db: AsyncSession):
     """Assert created_at and updated_at timestamps on models are timezone-aware."""
     await truncate_all(db)
@@ -316,6 +361,9 @@ async def test_repo_settings_safe_defaults_and_unique_repo(
     assert settings_row.audit_trigger_on_ci_failure is True
     assert settings_row.audit_trigger_on_ci_success is False
     assert settings_row.audit_trigger_on_manual_mention is True
+    # Feature 3 — fallback issue filing is opt-out, so a bare RepoSettings()
+    # must already have it enabled.
+    assert settings_row.file_issue_on_fallback is True
     assert repo.auditor_github_install_id == 987654
 
     db.add(RepoSettings(repo_id=repo.id))

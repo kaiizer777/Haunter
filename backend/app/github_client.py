@@ -1595,3 +1595,78 @@ async def create_pull_request(
         )
 
     return response.json()
+
+
+async def create_issue(
+    owner: str,
+    repo: str,
+    title: str,
+    body: str,
+    labels: Optional[list[str]] = None,
+    token: Optional[str] = None,
+    allow_global_token: bool = True,
+) -> dict[str, Any]:
+    """
+    Open a GitHub issue.
+
+    Used by the orchestrator exhaust path (Feature 3: fallback to GitHub
+    Issue) to file a tracking issue after all fix attempts fail verification.
+    POST /repos/{owner}/{repo}/issues
+    Returns the created issue dict (contains html_url, number, etc.).
+
+    Raises:
+        GitHubResourceNotFoundError: Repo not found (404).
+        GitHubAuthError: Authentication failure (401/403).
+        GitHubRateLimitError: API rate limit exceeded.
+        GitHubClientError: Network errors, validation failures (422),
+            or unexpected response structures.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        "/issues"
+    )
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
+    payload: dict[str, Any] = {"title": title, "body": body}
+    if labels:
+        payload["labels"] = list(labels)
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error("Network error creating issue for %s/%s", owner, repo)
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Repo not found for {owner}/{repo} to create issue"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
+
+    data = response.json()
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("html_url"), str)
+        or not isinstance(data.get("number"), int)
+    ):
+        raise GitHubClientError(
+            "Unexpected create-issue response structure from GitHub API"
+        )
+    return data

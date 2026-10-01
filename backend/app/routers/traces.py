@@ -110,6 +110,10 @@ class RunSummaryOut(BaseModel):
     # Phase 15 — short redacted reason a run ended in error/fallback.
     # None for runs that succeeded or are still in progress.
     failure_reason: Optional[str] = None
+    # Feature 3 - fallback tracking issue filed on the exhaust path.
+    # Both None until the issue is created; then the link to the issue.
+    fallback_issue_url: Optional[str] = None
+    fallback_issue_number: Optional[int] = None
 
     model_config = {"from_attributes": True}
 

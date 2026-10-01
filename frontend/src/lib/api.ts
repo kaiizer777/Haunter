@@ -100,6 +100,10 @@ export interface RunSummaryOut {
   // Phase 15 — short redacted reason a run ended in error/fallback. Set by the
   // orchestrator on every error path. Null for successful / in-progress runs.
   failure_reason?: string | null;
+  // Feature 3 - fallback tracking issue filed on the exhaust path. Both
+  // undefined until the issue is created; then the link to the issue.
+  fallback_issue_url?: string | null;
+  fallback_issue_number?: number | null;
 }
 
 export interface TraceOut {
