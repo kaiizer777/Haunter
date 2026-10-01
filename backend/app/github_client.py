@@ -786,6 +786,127 @@ async def post_pr_comment(
     return response.json()
 
 
+async def fetch_pr_review_comments(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Fetch inline review comments on a pull request (review thread context).
+
+    GET /repos/{owner}/{repo}/pulls/{pr_number}/comments
+
+    Complements :func:`fetch_pr_comments` (Issues API conversation thread)
+    with the diff-anchored review thread — path, line, diff_hunk, and
+    ``in_reply_to_id`` linkage used by the conversational follow-up router.
+
+    Returns an empty list when the PR has no review comments. Raises the
+    standard typed errors (auth / rate-limit / network) on failure so the
+    caller can degrade gracefully to the issue-thread context alone.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/pulls/{quote(str(pr_number), safe='')}/comments"
+    )
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await _bounded_get(
+                client,
+                url,
+                headers=headers,
+                max_bytes=MAX_API_RESPONSE_BYTES,
+            )
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error fetching PR review comments for %s/%s PR #%s",
+                owner,
+                repo,
+                pr_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"PR review comments not found for {owner}/{repo} PR #{pr_number}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    data = response.json()
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+async def post_review_thread_reply(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    in_reply_to_comment_id: int,
+    body: str,
+    token: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Post a reply inside a pull request review thread.
+
+    POST /repos/{owner}/{repo}/pulls/{pr_number}/comments/{comment_id}/replies
+
+    Used by the conversational follow-up pipeline (``@haunter fix`` /
+    ``test-fix``) to answer reviewer threads in place. Callers that only
+    have an issue-thread context should use :func:`post_pr_comment` instead;
+    on 404/422 the caller should fall back to :func:`post_pr_comment` so the
+    verdict is never silently dropped.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/pulls/{quote(str(pr_number), safe='')}"
+        f"/comments/{quote(str(in_reply_to_comment_id), safe='')}/replies"
+    )
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.post(url, headers=headers, json={"body": body})
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error posting review thread reply for %s/%s PR #%s",
+                owner,
+                repo,
+                pr_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Review thread not found for {owner}/{repo} PR #{pr_number} "
+            f"comment {in_reply_to_comment_id}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    result = response.json()
+    return result if isinstance(result, dict) else {}
+
+
 async def fetch_pull_request(
     owner: str,
     repo: str,

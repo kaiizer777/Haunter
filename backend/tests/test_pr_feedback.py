@@ -587,6 +587,11 @@ async def test_context_gatherer_pr_feedback_assembly(db: AsyncSession, user_fact
             return_value=mock_comments,
         ),
         patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
             "app.github_client.fetch_diff",
             new_callable=AsyncMock,
             return_value="diff --git a/calc.py b/calc.py",
@@ -689,6 +694,11 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
             new_callable=AsyncMock,
             return_value=mock_comments,
         ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
         patch("app.github_client.fetch_diff", new_callable=AsyncMock, return_value=""),
         patch(
             "app.llm.LLMClient.complete",
@@ -724,6 +734,9 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
             return_value=fake_commit_sha,
         ) as mock_commit_patch,
         patch(
+            "app.github_client.post_review_thread_reply", new_callable=AsyncMock
+        ) as mock_thread_reply,
+        patch(
             "app.github_client.post_pr_comment", new_callable=AsyncMock
         ) as mock_post_pr,
     ):
@@ -740,12 +753,17 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     mock_commit_patch.assert_called_once()
     assert mock_commit_patch.call_args[1]["branch"] == "haunter/fix-7b1c4e9f-1"
 
-    # Verify confirmation comment posted to PR
-    mock_post_pr.assert_called_once()
-    pr_comment_body = mock_post_pr.call_args[1]["body"]
-    assert "🤖 @haunter updated the PR based on your feedback" in pr_comment_body
-    assert fake_commit_sha[:7] in pr_comment_body
-    assert "Verified in sandbox CI" in pr_comment_body
+    # The confirmation is answered in the review thread that asked for it,
+    # addressed to the triggering comment (carried on the run as
+    # github_run_id), so no separate PR-level comment is needed.
+    mock_thread_reply.assert_called_once()
+    reply_kwargs = mock_thread_reply.call_args[1]
+    assert reply_kwargs["pr_number"] == 42
+    assert reply_kwargs["in_reply_to_comment_id"] == 778899
+    assert "🤖 @haunter updated the PR based on your feedback" in reply_kwargs["body"]
+    assert fake_commit_sha[:7] in reply_kwargs["body"]
+    assert "Verified in sandbox CI" in reply_kwargs["body"]
+    mock_post_pr.assert_not_called()
 
     # Verify attempt notes persisted reviewer critique
     stmt = select(Attempt).where(Attempt.run_id == child_run.id)
@@ -796,6 +814,11 @@ async def test_refinement_verification_failure_posts_diagnostic_pr_comment(
             "app.github_client.fetch_pr_comments",
             new_callable=AsyncMock,
             return_value=mock_comments,
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[],
         ),
         patch("app.github_client.fetch_diff", new_callable=AsyncMock, return_value=""),
         patch(

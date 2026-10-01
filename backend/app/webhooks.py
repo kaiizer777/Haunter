@@ -13,8 +13,14 @@ Handles incoming GitHub webhook events with strict security controls:
    issue_comment.created (@haunter audit) are evaluated against
    app.services.audit_pipeline triggers after signature verification,
    repo registration, branch guards, and the per-repo kill-switch, then
-    dispatched through a durable, independent audit queue (never git push / PR creation).
-7. Feature 8 health log + replay: the decision branches that reach a registered
+dispatched through a durable, independent audit queue (never git push / PR creation).
+7. Conversational follow-up router: issue_comment / pull_request_review_comment
+   mentions are classified by app.services.followup_commands into
+   `fix` / `address` (refine and commit) or `test-fix` (verify only), and the
+   resulting child Run is threaded to the originating run via parent_run_id.
+   A mention carrying no fix command (`@haunter audit`) never reaches the
+   fix pipeline.
+8. Feature 8 health log + replay: the decision branches that reach a registered
    repository also append a webhook_deliveries row (see
    _record_webhook_delivery), and an authenticated owner of the affected repo can
    re-drive a stored delivery through this same handler (see
@@ -60,6 +66,11 @@ from app.schemas import (
     WorkflowRunWebhookPayload,
 )
 from app.services import audit_pipeline, feature_enforcement
+from app.services.followup_commands import (
+    FEEDBACK_CONCLUSION,
+    TEST_FIX_CONCLUSION,
+    parse_followup_command,
+)
 from app.services.repo_settings import get_repo_settings
 
 logger = logging.getLogger(__name__)
@@ -654,6 +665,33 @@ async def _read_limited_body(request: Request) -> bytes:
             )
         buffer.extend(chunk)
     return bytes(buffer)
+
+
+def _audit_queued_payload(
+    *,
+    audit_id: Any,
+    audit_type: Any,
+    owner: Any,
+    repo_name: Any,
+    pr_number: Any,
+    comment_id: Any,
+    delivery_id: Any,
+) -> dict[str, Any]:
+    """Uniform response body for a queued manual-mention audit.
+
+    Shared by every branch-B exit that reports a dispatched audit so the
+    webhook contract (status, ids, repo) is identical whether the audit was
+    the only thing the mention asked for, or ran alongside a fix request.
+    """
+    return {
+        "status": "audit_queued",
+        "audit_id": audit_id,
+        "audit_type": audit_type,
+        "repo": f"{owner}/{repo_name}",
+        "pr_number": pr_number,
+        "comment_id": comment_id,
+        "delivery_id": delivery_id,
+    }
 
 
 @router.post("/github")
@@ -1451,6 +1489,22 @@ async def github_webhook(
         )
         return {"status": "ignored", "reason": "no @haunter mention"}
 
+    # 3b. Conversational follow-up command router: `@haunter fix`,
+    # `@haunter address`, `@haunter test-fix` (verify-only, no branch
+    # commit). A bare `@haunter` mention defaults to `fix` for backward
+    # compatibility with the pre-router pipeline; a mention addressed to
+    # another subsystem's command (`@haunter audit`) is not a fix request
+    # and is filtered out in step 5c — after the auditor has had its turn.
+    followup = parse_followup_command(comment_body)
+    if followup is not None:
+        logger.info(
+            "Followup command=%s test_only=%s pr=%s delivery_id=%s",
+            followup.command,
+            followup.test_only,
+            sanitize_log_value(pr_number, 16),
+            x_github_delivery,
+        )
+
     # 4. Collaborator Authority: author_association must be in OWNER, MEMBER, COLLABORATOR
     author_assoc = (comment_obj.author_association or "").upper()
     if author_assoc not in ALLOWED_AUTHOR_ASSOCIATIONS:
@@ -1547,6 +1601,28 @@ async def github_webhook(
             type(exc).__name__,
         )
 
+    # 5c. The follow-up router owns the fix pipeline. A mention that carries
+    # no fix command (`@haunter audit`) must never spawn a refinement Run —
+    # the auditor is read-only and nobody asked for a patch. Placed after the
+    # auditor block so a queued audit still answers the delivery.
+    if followup is None:
+        if _auditor_scheduled:
+            return _audit_queued_payload(
+                audit_id=_audit_id,
+                audit_type=_audit_type,
+                owner=repo_owner,
+                repo_name=repo_name,
+                pr_number=pr_number,
+                comment_id=comment_obj.id,
+                delivery_id=x_github_delivery,
+            )
+        logger.info(
+            "Ignored %s (delivery_id=%s): @haunter mention carries no fix command",
+            x_github_event,
+            x_github_delivery,
+        )
+        return {"status": "ignored", "reason": "no @haunter fix command"}
+
     # 6. Look up initial / parent Run for this PR
     run_stmt = (
         select(Run)
@@ -1560,15 +1636,15 @@ async def github_webhook(
         # A manual `@haunter audit` request is still served by the auditor
         # even when no fix-pipeline Run exists for this PR.
         if _auditor_scheduled:
-            return {
-                "status": "audit_queued",
-                "audit_id": _audit_id,
-                "audit_type": _audit_type,
-                "repo": f"{repo_owner}/{repo_name}",
-                "pr_number": pr_number,
-                "comment_id": comment_obj.id,
-                "delivery_id": x_github_delivery,
-            }
+            return _audit_queued_payload(
+                audit_id=_audit_id,
+                audit_type=_audit_type,
+                owner=repo_owner,
+                repo_name=repo_name,
+                pr_number=pr_number,
+                comment_id=comment_obj.id,
+                delivery_id=x_github_delivery,
+            )
         logger.info(
             "Ignored @haunter mention (delivery_id=%s): no matching Haunter run for %s PR #%d",
             x_github_delivery,
@@ -1597,15 +1673,15 @@ async def github_webhook(
         # Manual audit requests are branch-agnostic (read-only); the
         # haunter/* guard applies only to the fix pipeline below.
         if _auditor_scheduled:
-            return {
-                "status": "audit_queued",
-                "audit_id": _audit_id,
-                "audit_type": _audit_type,
-                "repo": f"{repo_owner}/{repo_name}",
-                "pr_number": pr_number,
-                "comment_id": comment_obj.id,
-                "delivery_id": x_github_delivery,
-            }
+            return _audit_queued_payload(
+                audit_id=_audit_id,
+                audit_type=_audit_type,
+                owner=repo_owner,
+                repo_name=repo_name,
+                pr_number=pr_number,
+                comment_id=comment_obj.id,
+                delivery_id=x_github_delivery,
+            )
         logger.warning(
             "Ignored @haunter mention on non-haunter branch %r for %s PR #%d",
             sanitize_log_value(pr_head_branch, 255),
@@ -1659,23 +1735,46 @@ async def github_webhook(
 
         return {"status": "ignored", "reason": "refinement limit reached"}
 
-    # 9. Idempotent Child Run creation
-    # comment_obj.id is read BEFORE the commit for the same reason as the
-    # workflow_run branch above: db.rollback() expires every instance in the
-    # session, and re-reading an expired ORM attribute outside a greenlet
-    # context raises MissingGreenlet instead of returning the 200 duplicate.
+# 9. Idempotent Child Run creation (parent_run_id lineage back to the
+    # root fix run). `test-fix` runs are verify-only and must not commit to
+    # the PR branch — the orchestrator keys that off the conclusion.
+    #
+    # Every comment attribute is read BEFORE the commit: db.rollback() expires
+    # every instance in the session, and re-reading an expired ORM attribute
+    # outside a greenlet context raises MissingGreenlet instead of returning
+    # the 200 duplicate.
     comment_id = comment_obj.id
+    # The triggering comment id goes in `trigger_comment_id`, NOT
+    # `github_run_id`: this run has no GitHub Actions workflow run, and
+    # sharing one UNIQUE index across both id spaces would let a comment id
+    # colliding with a workflow run id silently swallow a real @haunter
+    # request as a duplicate delivery. `trigger_comment_id` carries its own
+    # UNIQUE index, so re-delivery of the same comment is still deduplicated.
+    #
+    # `reply_to_comment_id` is the thread to answer in. GitHub's replies
+    # endpoint only accepts a top-level review comment, so a command posted
+    # as a reply to an earlier comment must address its ancestor — otherwise
+    # the API answers 422 and the verdict degrades to an unrelated
+    # PR-level comment. Only ever a review thread; an `issue_comment`
+    # trigger has none and falls back to the PR conversation.
+    reply_to_comment_id = (
+        comment_obj.in_reply_to_id
+        if x_github_event == "pull_request_review_comment"
+        else None
+    )
     new_run = Run(
         repo_id=repo.id,
         parent_run_id=initial_run.id,
-        github_run_id=comment_id,
+        github_run_id=None,
+        trigger_comment_id=comment_id,
+        reply_to_comment_id=reply_to_comment_id,
         github_delivery_id=x_github_delivery,
         head_sha=initial_run.head_sha,
         head_branch=pr_head_branch,
         pr_number=pr_number,
         pr_branch=pr_head_branch,
         status="pending",
-        conclusion="feedback",
+        conclusion=TEST_FIX_CONCLUSION if followup.test_only else FEEDBACK_CONCLUSION,
     )
 
     db.add(new_run)
@@ -1706,5 +1805,6 @@ async def github_webhook(
         "run_id": str(new_run.id),
         "parent_run_id": str(initial_run.id),
         "comment_id": comment_obj.id,
+        "command": followup.command,
         "delivery_id": x_github_delivery,
     }

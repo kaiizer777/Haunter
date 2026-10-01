@@ -367,16 +367,27 @@ async def gather_pr_feedback_context(
             prior_strategy_notes = prior_attempt.strategy_notes or ""
             prior_attempt_num = prior_attempt.attempt_number
 
-    # 2. Fetch PR comments & diff concurrently
+    # 2. Fetch PR conversation thread, review thread, & diff concurrently.
+    # The review thread (diff-anchored comments with path/line/diff_hunk) is
+    # the primary context for `pull_request_review_comment` follow-ups —
+    # the triggering `@haunter fix` instruction lives there, not in the
+    # issue thread.
     comments_raw: Any = []
+    review_thread_raw: Any = []
     diff_raw: str = ""
     if pr_number:
-        comments_raw, diff_raw = await asyncio.gather(
+        comments_raw, review_thread_raw, diff_raw = await asyncio.gather(
             _safe_fetch(
                 gh.fetch_pr_comments(
                     owner=owner, repo=name, pr_number=pr_number, token=token
                 ),
                 label="pr_comments",
+            ),
+            _safe_fetch(
+                gh.fetch_pr_review_comments(
+                    owner=owner, repo=name, pr_number=pr_number, token=token
+                ),
+                label="pr_review_thread",
             ),
             _safe_fetch(
                 gh.fetch_diff(owner=owner, repo=name, sha=pr_branch, token=token),
@@ -408,6 +419,37 @@ async def gather_pr_feedback_context(
     if not latest_reviewer_instruction and formatted_comments:
         latest_reviewer_instruction = formatted_comments[-1]
 
+    # 3b. Review thread context (diff-anchored). The triggering follow-up
+    # instruction for `pull_request_review_comment` events lives here, so a
+    # thread-local `@haunter` instruction takes precedence over the issue
+    # thread when present.
+    review_thread_list = (
+        review_thread_raw if isinstance(review_thread_raw, list) else []
+    )
+    formatted_review_thread: list[str] = []
+    thread_instruction = ""
+    for item in review_thread_list[-20:]:
+        if not isinstance(item, dict):
+            continue
+        c_body = str(item.get("body", "") or "")
+        author = (
+            item.get("user", {}).get("login", "unknown")
+            if isinstance(item.get("user"), dict)
+            else "unknown"
+        )
+        path = item.get("path") or item.get("file_path") or ""
+        line = item.get("line") or item.get("original_line") or ""
+        anchor = f" ({path}:{line})" if path else ""
+        snippet = c_body.strip()[:2000]
+        formatted_review_thread.append(
+            f"Comment by @{author}{anchor}:\n{snippet}\n"
+        )
+        if "@haunter" in c_body.lower():
+            thread_instruction = c_body.strip()[:2000]
+
+    if thread_instruction:
+        latest_reviewer_instruction = thread_instruction
+
     # 4. Redact secrets across all assembled sections
     clean_instruction = _redact_secrets(latest_reviewer_instruction)
     clean_comments = (
@@ -424,10 +466,16 @@ async def gather_pr_feedback_context(
         if diff_raw
         else "(no branch diff available)"
     )
+    clean_review_thread = (
+        _redact_secrets("\n---\n".join(formatted_review_thread))
+        if formatted_review_thread
+        else "(no review thread comments)"
+    )
 
     # Truncate to CAP_CHARS
     clean_instruction = clean_instruction[:CAP_CHARS]
     clean_comments = clean_comments[:CAP_CHARS]
+    clean_review_thread = clean_review_thread[:CAP_CHARS]
     clean_patch = clean_patch[:CAP_CHARS]
     clean_notes = clean_notes[:CAP_CHARS]
     clean_diff = clean_diff[:CAP_CHARS]
@@ -436,6 +484,7 @@ async def gather_pr_feedback_context(
     sections = [
         f"## Reviewer Feedback\n{clean_instruction}",
         f"## Preceding PR Comments\n{clean_comments}",
+        f"## Review Thread Context\n{clean_review_thread}",
         f"## Previous Verified Patch (Attempt #{prior_attempt_num})\n```diff\n{clean_patch}\n```",
         f"## Previous Strategy Notes\n{clean_notes}",
         f"## Existing PR Branch Diff\n```diff\n{clean_diff}\n```",
@@ -454,9 +503,11 @@ async def gather_pr_feedback_context(
     )
 
     logger.info(
-        "context_gatherer: run=%s assembled PR feedback context (comments=%d diff_len=%d)",
+        "context_gatherer: run=%s assembled PR feedback context "
+        "(comments=%d review_thread=%d diff_len=%d)",
         run.id,
         len(comments_list),
+        len(formatted_review_thread),
         len(clean_diff),
     )
     return summary
