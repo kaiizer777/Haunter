@@ -215,6 +215,19 @@ class RunOut(BaseModel):
     conclusion: Optional[str]
     cost: float = 0.0
     tokens: int = 0
+    # Stable grouping key for repeated failures (app.failure_signature).
+    # `failure_reason` is deliberately NOT exposed here: it is an unbounded Text
+    # column of sanitized CI output, and the dashboard groups on this field
+    # instead of re-normalizing the raw reason client-side.
+    signature: str = "unknown"
+    # Runs in the whole filtered set sharing this signature. Always >= the number of
+    # those runs on the current page, except when the filtered set exceeds
+    # SIGNATURE_CLUSTER_MAX_RUNS: clustering is then skipped and this stays at
+    # 1, which is a "not clustered" sentinel a client must not render as a
+    # count (it falls back to the size of the page it holds).
+    signature_count: int = 1
+    # Earliest run in the filtered set with this signature.
+    sample_run_id: Optional[uuid.UUID] = None
     created_at: datetime
     updated_at: datetime
 

@@ -35,6 +35,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.db import get_db
+from app.failure_signature import (
+    MAX_SIGNATURE_INPUT_CHARS,
+    normalize_failure_signature,
+)
 from app.models import Attempt, Repo, Run, RunStep, User
 from app.schemas import BatchDeleteRunsRequest, BatchDeleteRunsResponse, RunOut
 from app.traces.classify import classify_failure
@@ -42,6 +46,11 @@ from app.traces.classify import classify_failure
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["traces"])
+
+# Upper bound on the rows list_runs will scan to compute cross-page failure
+# signature counts. See the clustering block in list_runs for why exceeding it
+# disables the counts instead of truncating them.
+SIGNATURE_CLUSTER_MAX_RUNS = 5000
 
 # ---------------------------------------------------------------------------
 # Status allowlist (mirrors RunStatus enum values)
@@ -286,6 +295,35 @@ async def list_runs(
     total_result = await db.execute(count_stmt)
     total: int = total_result.scalar_one() or 0
 
+    # Failure-signature clustering. Cross-page `signature_count` /
+    # `sample_run_id` need the whole filtered set, and the grouping key is a
+    # Python regex pipeline that SQL cannot express, so this costs one extra
+    # bounded statement - not an N+1, and no per-row query. It runs only when
+    # the matched set fits inside the cap: past the cap the counts would be
+    # silently truncated, so we skip the scan entirely and leave
+    # signature_count at 1, which tells the client to group the page it has.
+    # `left()` caps the bytes each row puts on the wire - failure_reason is an
+    # unbounded Text column holding sanitized CI output, and the normalizer only
+    # ever reads the first MAX_SIGNATURE_INPUT_CHARS characters of it.
+    # Ordered ASC so the earliest run wins sample_run_id.
+    signature_counts: dict[str, int] = {}
+    signature_samples: dict[str, uuid.UUID] = {}
+    if total <= SIGNATURE_CLUSTER_MAX_RUNS:
+        cluster_stmt = (
+            select(
+                Run.id,
+                func.left(Run.failure_reason, MAX_SIGNATURE_INPUT_CHARS),
+            )
+            .where(*filters)
+            .order_by(Run.created_at.asc())
+            .limit(SIGNATURE_CLUSTER_MAX_RUNS)
+        )
+        cluster_rows = (await db.execute(cluster_stmt)).all()
+        for row_id, row_reason in cluster_rows:
+            sig = normalize_failure_signature(row_reason)
+            signature_counts[sig] = signature_counts.get(sig, 0) + 1
+            signature_samples.setdefault(sig, row_id)
+
     # Fetch paginated results with aggregated cost and tokens.
     cost_expr = func.coalesce(func.sum(RunStep.cost_estimate), 0.0).label("cost")
     tokens_expr = func.coalesce(
@@ -313,6 +351,10 @@ async def list_runs(
         run_out = RunOut.model_validate(run)
         run_out.cost = run_cost
         run_out.tokens = run_tokens
+        sig = normalize_failure_signature(run.failure_reason)
+        run_out.signature = sig
+        run_out.signature_count = signature_counts.get(sig, 1)
+        run_out.sample_run_id = signature_samples.get(sig, run.id)
         runs.append(run_out)
 
     return RunListOut(

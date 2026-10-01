@@ -54,6 +54,9 @@ export interface RunOut {
   conclusion: string | null;
   cost?: number;
   tokens?: number;
+  signature?: string | null;
+  signature_count?: number | null;
+  sample_run_id?: string | null;
   created_at: string;
   updated_at: string;
 }
