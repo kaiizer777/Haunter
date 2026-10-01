@@ -15,11 +15,12 @@ Security invariants:
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -315,3 +316,115 @@ async def generate_pr_text(
     )
 
     return {"title": pr_output.title, "body": pr_output.body}
+
+
+# ---------------------------------------------------------------------------
+# Fallback issue content — Feature 3 (exhaust path, no LLM)
+# ---------------------------------------------------------------------------
+
+# GitHub issue titles over ~120 chars get truncated in list views; bodies are
+# capped for readability (the full diagnosis stays on the run detail page).
+_FALLBACK_ISSUE_TITLE_MAX_LEN = 120
+_FALLBACK_ISSUE_BODY_MAX_LEN = 8000
+_FALLBACK_ISSUE_ATTEMPT_REASON_MAX_LEN = 300
+
+# Labels applied to every filed fallback issue for triage filtering.
+FALLBACK_ISSUE_LABELS: tuple[str, ...] = ("haunter", "ci-failure")
+
+
+def build_fallback_issue_content(
+    run: Run,
+    diagnosis_summary: Optional[str],
+    attempts: Sequence[Attempt],
+    *,
+    owner: str,
+    repo: str,
+) -> dict[str, Any]:
+    """
+    Build sanitized GitHub issue title/body/labels for the exhaust path.
+
+    Pure function — no I/O, no LLM calls, no DB writes. The caller
+    (orchestrator) POSTs the result via ``github_client.create_issue`` and
+    persists the returned URL/number on the run.
+
+    Sanitisation mirrors the commit-comment fallback path:
+      - Secrets redacted via ``context_gatherer._redact_secrets``.
+      - User-derived strings html-escaped to neutralise stored HTML/JS.
+      - NEVER includes raw patch text, full CI logs, or stack traces —
+        only the distilled diagnosis plus per-attempt strategy notes and
+        truncated failure reasons.
+
+    Args:
+        run:                The exhausted Run ORM object.
+        diagnosis_summary:  Distilled root-cause text (may be None).
+        attempts:           Attempts evaluated for this run (may be empty).
+        owner:              Repository owner login (for display only).
+        repo:               Repository name (for display only).
+
+    Returns:
+        {"title": str, "body": str, "labels": list[str]}.
+    """
+    from app.subagents.context_gatherer import _redact_secrets
+
+    sha7 = (run.head_sha or "")[:7]
+    branch = run.head_branch or "unknown branch"
+    safe_owner = html.escape(owner, quote=False)
+    safe_repo = html.escape(repo, quote=False)
+    safe_branch = html.escape(branch, quote=False)
+
+    raw_summary = diagnosis_summary or "(no diagnosis available)"
+    safe_summary = html.escape(_redact_secrets(raw_summary), quote=False)
+
+    ordered = sorted(attempts, key=lambda a: a.attempt_number)
+    if ordered:
+        rows: list[str] = []
+        for attempt in ordered:
+            confidence = attempt.confidence_score
+            confidence_str = str(confidence) if confidence is not None else "n/a"
+            notes = html.escape(
+                _redact_secrets(attempt.strategy_notes or "(no notes)"),
+                quote=False,
+            )
+            failure = html.escape(
+                _redact_secrets(attempt.failure_reason or "(no failure reason)")[
+                    :_FALLBACK_ISSUE_ATTEMPT_REASON_MAX_LEN
+                ],
+                quote=False,
+            )
+            rows.append(
+                f"| {attempt.attempt_number} | {confidence_str} "
+                f"| {notes} | {failure} |"
+            )
+        attempts_table = (
+            "| Attempt | Confidence | Strategy | Failure reason |\n"
+            "| --- | --- | --- | --- |\n" + "\n".join(rows)
+        )
+        attempts_line = f"{len(ordered)} attempt(s) evaluated, all failed verification."
+    else:
+        attempts_table = "(no attempts recorded)"
+        attempts_line = "No fix attempts were recorded."
+
+    title = (
+        f"Haunter: CI failure on `{safe_branch}` needs attention ({sha7})"
+        if sha7
+        else f"Haunter: CI failure on `{safe_branch}` needs attention"
+    )
+    title = title[:_FALLBACK_ISSUE_TITLE_MAX_LEN]
+
+    body = (
+        "## Haunter diagnosis — automated fix exhausted\n\n"
+        f"**Repo:** {safe_owner}/{safe_repo}\n"
+        f"**Branch:** `{safe_branch}` @ `{sha7 or 'unknown sha'}`\n"
+        f"**Run:** `{run.id}`\n"
+        f"**Attempts:** {attempts_line}\n\n"
+        "### Root cause\n\n"
+        f"{safe_summary}\n\n"
+        "### Attempted strategies\n\n"
+        f"{attempts_table}\n\n"
+        "---\n"
+        "*Posted by Haunter after all fix attempts failed verification. "
+        "No files were modified and no PR was opened.*"
+    )
+    body = body[:_FALLBACK_ISSUE_BODY_MAX_LEN]
+
+    return {"title": title, "body": body, "labels": list(FALLBACK_ISSUE_LABELS)}

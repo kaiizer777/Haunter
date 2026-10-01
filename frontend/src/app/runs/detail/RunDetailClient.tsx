@@ -192,6 +192,20 @@ export default function RunDetailClient() {
                     <ExternalLink className="h-3 w-3 ml-0.5 text-emerald-200" />
                   </a>
                 )}
+
+                {/* Fallback Issue Link (if filed on exhaust) */}
+                {trace.run.fallback_issue_url && (
+                  <a
+                    href={trace.run.fallback_issue_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-[6px] border-t border-t-amber-300/60 border-x border-x-amber-600/60 border-b border-b-amber-950 bg-gradient-to-b from-amber-600/90 via-amber-700 to-amber-800 px-3.5 py-1.5 text-xs font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_8px_rgba(245,158,11,0.25)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.3),0_3px_12px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all"
+                  >
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-100" />
+                    <span>View Fallback Issue #{trace.run.fallback_issue_number ?? ""}</span>
+                    <ExternalLink className="h-3 w-3 ml-0.5 text-amber-200" />
+                  </a>
+                )}
               </div>
 
               {/* Failure Reason */}

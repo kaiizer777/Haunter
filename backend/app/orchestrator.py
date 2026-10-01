@@ -1197,6 +1197,65 @@ async def _orchestrator_pipeline_body(
                         "orchestrator: run=%s PR comments disabled by repo settings — suppressing fallback comment",
                         run_id,
                     )
+
+                # Feature 3: Fallback to GitHub Issue — file a tracking issue
+                # when the repo opts in via file_issue_on_fallback. Best-effort:
+                # an issue failure never blocks the fallback_commented terminal
+                # transition because the diagnosis comment above is the primary
+                # exhaust path.
+                file_issue_on_fallback = getattr(
+                    repo_settings, "file_issue_on_fallback", True
+                )
+                if file_issue_on_fallback is None:
+                    file_issue_on_fallback = True
+                if file_issue_on_fallback:
+                    try:
+                        from app.github_client import create_issue
+                        from app.subagents.pr_writer import (
+                            build_fallback_issue_content,
+                        )
+
+                        issue_content = build_fallback_issue_content(
+                            run=run,
+                            diagnosis_summary=run.diagnosis_summary,
+                            attempts=list(all_attempts),
+                            owner=repo.owner,
+                            repo=repo.name,
+                        )
+                        issue = await create_issue(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            title=str(issue_content["title"]),
+                            body=str(issue_content["body"]),
+                            labels=list(issue_content["labels"]),
+                            token=github_token,
+                        )
+                        run.fallback_issue_url = issue["html_url"]
+                        run.fallback_issue_number = issue["number"]
+                        run.updated_at = datetime.now(timezone.utc)
+                        fb_db.add(run)
+                        await fb_db.commit()
+                        state["decisions"].append("fallback_issue_filed")
+                        logger.info(
+                            "orchestrator: run=%s fallback issue #%s filed %s",
+                            run_id,
+                            issue["number"],
+                            issue["html_url"],
+                        )
+                    except Exception as issue_exc:
+                        logger.warning(
+                            "orchestrator: run=%s failed to file fallback issue "
+                            "(%s: %s) — continuing to fallback_commented",
+                            run_id,
+                            type(issue_exc).__name__,
+                            issue_exc,
+                        )
+                else:
+                    logger.info(
+                        "orchestrator: run=%s file_issue_on_fallback disabled by "
+                        "repo settings — skipping fallback issue",
+                        run_id,
+                    )
                 await _transition(run, RunStatus.fallback_commented, fb_db)
                 state["step"] = RunStatus.fallback_commented.value
             except Exception as e:
