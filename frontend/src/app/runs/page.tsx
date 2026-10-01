@@ -11,6 +11,7 @@ import { StatusBadge } from "@/components/runs/status-badge";
 import { SelectDropdown } from "@/components/ui/select-dropdown";
 import { api, RepoOut, RunOut } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
+import { groupRunsBySignature } from "@/lib/failure-signature";
 import {
   Activity,
   ChevronLeft,
@@ -92,6 +93,7 @@ export default function RunsPage() {
   const [selectedRepoId, setSelectedRepoId] = useState("");
   const [selectedStatus, setSelectedStatus] = useState("");
   const [page, setPage] = useState(0);
+  const [grouped, setGrouped] = useState(false);
 
   // Fetch Repos list for dropdown and name lookup
   useEffect(() => {
@@ -228,14 +230,23 @@ export default function RunsPage() {
       const repoLabel = repo ? `${repo.owner}/${repo.name}` : `repo-${run.repo_id.slice(0, 8)}`;
       const branchName = run.head_branch || "";
       const commitSha = run.head_sha || "";
+      const signature = (run.signature || "").toLowerCase();
 
       const matchRepo = repoLabel.toLowerCase().includes(q);
       const matchBranch = branchName.toLowerCase().includes(q);
       const matchSha = commitSha.toLowerCase().includes(q);
+      const matchSignature = signature.includes(q);
 
-      return matchRepo || matchBranch || matchSha;
+      return matchRepo || matchBranch || matchSha || matchSignature;
     });
   }, [runs, reposMap, searchQuery]);
+
+  // Failure-signature clustering (grouped toggle): cluster the filtered page
+  // by server-computed signature, falling back to client normalization.
+  const signatureGroups = useMemo(
+    () => groupRunsBySignature(filteredRuns),
+    [filteredRuns]
+  );
 
   const hasActiveFilters = Boolean(searchQuery || selectedRepoId || selectedStatus);
 
@@ -519,6 +530,27 @@ export default function RunsPage() {
                 <span className="font-mono text-[11px] tracking-wide text-zinc-400 uppercase">Filters</span>
               </div>
 
+              {/* Grouped-by-signature toggle */}
+              <button
+                type="button"
+                onClick={() => setGrouped((g) => !g)}
+                aria-pressed={grouped}
+                title="Group runs by failure signature"
+                className={`flex items-center gap-1.5 h-8.5 px-2.5 text-xs font-mono rounded-[6px] border transition-all ${
+                  grouped
+                    ? "bg-amber-500/15 text-amber-200 border-amber-500/40"
+                    : "bg-zinc-900/60 text-zinc-400 border-zinc-800/80 hover:text-zinc-200 hover:border-zinc-700"
+                }`}
+              >
+                <Layers className="h-3.5 w-3.5" />
+                <span className="hidden md:inline">{grouped ? "Grouped" : "Group"}</span>
+                {grouped && (
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-full font-mono tabular-nums bg-amber-500/20 text-amber-100 border border-amber-500/30">
+                    {signatureGroups.length}
+                  </span>
+                )}
+              </button>
+
               {/* Search input */}
               <div className="relative flex-1 min-w-[220px] max-w-sm">
                 <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-zinc-500 pointer-events-none" />
@@ -734,6 +766,63 @@ export default function RunsPage() {
                   Reset Filters
                 </Button>
               )}
+            </div>
+          ) : grouped ? (
+            <div className="p-3 space-y-2.5">
+              {signatureGroups.map((group) => {
+                const sampleId = group.sampleRunId;
+                return (
+                  <div
+                    key={group.signature}
+                    className="rounded-[7px] border border-zinc-800/80 bg-zinc-900/40 px-3.5 py-3"
+                  >
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Layers className="h-3.5 w-3.5 text-amber-400/80 shrink-0" />
+                        <span
+                          className="font-mono text-xs text-zinc-200 truncate max-w-[420px]"
+                          title={group.signature}
+                        >
+                          {group.signature}
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono tabular-nums bg-zinc-800 text-zinc-300 border border-zinc-700/60">
+                          ×{group.count}
+                        </span>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => router.push(`/runs/detail?id=${sampleId}`)}
+                        className="h-7 px-2.5 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-zinc-800/60 hover:bg-zinc-800 border border-zinc-700/60 transition-all inline-flex items-center gap-1.5"
+                      >
+                        <span>Sample {sampleId.slice(0, 8)}</span>
+                        <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500" />
+                      </Button>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {group.runs.slice(0, 6).map((run) => (
+                        <button
+                          key={run.id}
+                          type="button"
+                          onClick={() => router.push(`/runs/detail?id=${run.id}`)}
+                          title={`${run.head_branch} • ${run.head_sha.slice(0, 7)} • ${run.status}`}
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[5px] bg-zinc-800/60 border border-zinc-700/50 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 transition-all"
+                        >
+                          <StatusBadge status={run.status} />
+                          <span className="text-zinc-500">{run.head_branch}</span>
+                          <span className="text-zinc-600">•</span>
+                          <span>{run.head_sha.slice(0, 7)}</span>
+                        </button>
+                      ))}
+                      {group.runs.length > 6 && (
+                        <span className="text-[11px] font-mono text-zinc-500">
+                          +{group.runs.length - 6} more
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div className="overflow-x-auto">

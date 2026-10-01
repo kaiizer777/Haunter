@@ -215,6 +215,10 @@ class RunOut(BaseModel):
     conclusion: Optional[str]
     cost: float = 0.0
     tokens: int = 0
+    failure_reason: Optional[str] = None
+    signature: str = "unknown"
+    signature_count: int = 1
+    sample_run_id: Optional[uuid.UUID] = None
     created_at: datetime
     updated_at: datetime
 

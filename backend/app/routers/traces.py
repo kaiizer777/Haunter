@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.db import get_db
+from app.failure_signature import normalize_failure_signature
 from app.models import Attempt, Repo, Run, RunStep, User
 from app.schemas import BatchDeleteRunsRequest, BatchDeleteRunsResponse, RunOut
 from app.traces.classify import classify_failure
@@ -286,6 +287,24 @@ async def list_runs(
     total_result = await db.execute(count_stmt)
     total: int = total_result.scalar_one() or 0
 
+    # Failure-signature clustering: normalize failure_reason across the full
+    # filtered set (bounded) so signature_count / sample_run_id are stable
+    # under pagination. Ordered ASC so the earliest run wins sample_run_id.
+    cluster_stmt = (
+        select(Run.id, Run.failure_reason, Run.created_at)
+        .where(*filters)
+        .order_by(Run.created_at.asc())
+        .limit(5000)
+    )
+    cluster_rows = (await db.execute(cluster_stmt)).all()
+    signature_counts: dict[str, int] = {}
+    signature_samples: dict[str, uuid.UUID] = {}
+    for row_id, row_reason, _row_created in cluster_rows:
+        sig = normalize_failure_signature(row_reason)
+        signature_counts[sig] = signature_counts.get(sig, 0) + 1
+        if sig not in signature_samples:
+            signature_samples[sig] = row_id
+
     # Fetch paginated results with aggregated cost and tokens.
     cost_expr = func.coalesce(func.sum(RunStep.cost_estimate), 0.0).label("cost")
     tokens_expr = func.coalesce(
@@ -313,6 +332,10 @@ async def list_runs(
         run_out = RunOut.model_validate(run)
         run_out.cost = run_cost
         run_out.tokens = run_tokens
+        sig = normalize_failure_signature(run.failure_reason)
+        run_out.signature = sig
+        run_out.signature_count = signature_counts.get(sig, 1)
+        run_out.sample_run_id = signature_samples.get(sig, run.id)
         runs.append(run_out)
 
     return RunListOut(
