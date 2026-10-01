@@ -1,0 +1,75 @@
+name: haunter-test-java
+on:
+  push:
+    branches: ["sandbox/**", "haunter-flake-check-**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No secrets. No push. No deploy. By design.
+env:
+  # Monorepo scoping. The server rewrites these two quoted literals from
+  # RepoSettings.working_dir / RepoSettings.test_command before pushing the
+  # workflow to the mirror (see render_workflow_content). The defaults below
+  # mean "repo root" and "language-default test command".
+  # tests/test_sandbox_lang_packs.py asserts every template keeps both markers,
+  # so template drift fails CI instead of silently ignoring a user's scope.
+  HAUNTER_WORKING_DIR: "."
+  HAUNTER_TEST_COMMAND: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          # No dependency cache: setup-java errors out when the manifest of the
+          # cached package manager cannot be resolved, which is always the case
+          # for a Gradle project asked to cache maven (or the reverse). Both
+          # build tools are preinstalled on the runner image.
+
+      - name: Run tests
+        run: |
+          # A missing HAUNTER_WORKING_DIR aborts here: the runner invokes bash
+          # with `-e`, so a failing `cd` fails the step instead of testing root.
+          cd "${HAUNTER_WORKING_DIR:-.}"
+          if [ -n "${HAUNTER_TEST_COMMAND}" ]; then
+            echo "::notice::running RepoSettings.test_command"
+            eval "${HAUNTER_TEST_COMMAND}"
+            exit $?
+          fi
+          if [ -f pom.xml ]; then
+            mvn -B test
+          elif [ -f gradlew ]; then
+            # `sh gradlew`, not `./gradlew`: the mirror is seeded through the
+            # Git Data API, which does not carry the executable file mode.
+            sh ./gradlew test --no-daemon
+          elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+            gradle test --no-daemon
+          else
+            echo "::error::no pom.xml or gradle build under ${HAUNTER_WORKING_DIR:-.} — cannot run java tests"
+            exit 1
+          fi
+
+      - name: Build (best-effort)
+        run: |
+          cd "${HAUNTER_WORKING_DIR:-.}"
+          if [ -f pom.xml ]; then
+            mvn -B -DskipTests package || echo "::warning::maven package found issues"
+          elif [ -f gradlew ]; then
+            sh ./gradlew assemble --no-daemon || echo "::warning::gradle assemble found issues"
+          elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+            gradle assemble --no-daemon || echo "::warning::gradle assemble found issues"
+          else
+            echo "No build config — skipping"
+          fi
+        continue-on-error: true

@@ -1,4 +1,4 @@
-name: haunter-test-ts
+name: haunter-test-go
 on:
   push:
     branches: ["sandbox/**", "haunter-flake-check-**"]
@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 
-# No secrets. No deploy. By design.
+# No secrets. No push. No deploy. By design.
 env:
   # Monorepo scoping. The server rewrites these two quoted literals from
   # RepoSettings.working_dir / RepoSettings.test_command before pushing the
@@ -17,6 +17,7 @@ env:
   # so template drift fails CI instead of silently ignoring a user's scope.
   HAUNTER_WORKING_DIR: "."
   HAUNTER_TEST_COMMAND: ""
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -26,36 +27,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          node-version: "20"
+          go-version: "1.22"
+          # Caching is off on purpose: the mirror is a priority-truncated seed
+          # (settings.seed_max_files), so a module with no dependencies may
+          # legitimately have no go.sum, and setup-go's cache step fails the
+          # whole job when its dependency file cannot be resolved.
+          cache: false
 
       - name: Install dependencies
         run: |
           cd "${HAUNTER_WORKING_DIR:-.}"
-          if [ -f package.json ]; then
-            npm ci --ignore-scripts
+          if [ -f go.mod ]; then
+            go mod download
+          else
+            echo "::warning::no go.mod under ${HAUNTER_WORKING_DIR:-.} — skipping module download"
           fi
 
-      - name: Type check
+      - name: Vet (best-effort)
         run: |
           cd "${HAUNTER_WORKING_DIR:-.}"
-          if [ -f tsconfig.json ]; then
-            npx --no-install tsc --noEmit || echo "::warning::tsc found issues"
-          else
-            echo "No tsconfig.json — skipping"
-          fi
-        continue-on-error: true
-
-      - name: Lint (eslint, best-effort)
-        run: |
-          cd "${HAUNTER_WORKING_DIR:-.}"
-          if grep -q "eslint" package.json 2>/dev/null; then
-            npx --no-install eslint . --ext .ts,.tsx || echo "::warning::eslint found issues"
-          else
-            echo "eslint not configured — skipping"
-          fi
+          go vet ./... || echo "::warning::go vet found issues"
         continue-on-error: true
 
       - name: Run tests
@@ -68,19 +62,10 @@ jobs:
             eval "${HAUNTER_TEST_COMMAND}"
             exit $?
           fi
-          if grep -q '"test"' package.json 2>/dev/null; then
-            npm test --silent
-          else
-            echo "No test script in package.json"
-            exit 1
-          fi
+          go test ./... -count=1
 
-      - name: Build
+      - name: Build (best-effort)
         run: |
           cd "${HAUNTER_WORKING_DIR:-.}"
-          if grep -q '"build"' package.json 2>/dev/null; then
-            npm run build --silent
-          else
-            echo "No build script — skipping"
-          fi
+          go build ./... || echo "::warning::go build found issues"
         continue-on-error: true

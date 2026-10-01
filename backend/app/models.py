@@ -455,6 +455,16 @@ class RepoSettings(Base):
         String(50), nullable=False, default="inherit", server_default="inherit"
     )
 
+    # Monorepo scope for the sandbox verification runner. Both are optional and
+    # NULL means "no override" — the language detected from the repository tree
+    # runs at the repo root with that language's default test command.
+    #   working_dir:  repo-relative POSIX directory, e.g. "packages/api".
+    #   test_command: shell command replacing the language-default test step.
+    # Validated by app.services.repo_settings.validate_working_dir /
+    # validate_test_command on every write; NULL/empty clears the override.
+    working_dir: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    test_command: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # Monotonic counter bumped whenever trigger semantics change. Persisted on
     # each audit job so a replayed delivery under changed settings is detected
     # as a payload conflict instead of silently deduplicating.

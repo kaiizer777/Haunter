@@ -55,7 +55,8 @@ import logging
 import os
 import re
 import time
-from typing import Any, Optional
+import uuid
+from typing import Any, NamedTuple, Optional
 
 import httpx
 
@@ -805,6 +806,224 @@ def _load_workflow_template(filename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Language pack selection + monorepo rendering
+# ---------------------------------------------------------------------------
+
+# Marker lines every template must carry for monorepo rendering to work.
+# They are quoted YAML scalars so a substituted value can never change the
+# document's structure. ``tests/test_sandbox_lang_packs.py`` asserts every
+# template keeps both markers.
+_WORKING_DIR_MARKER: str = '  HAUNTER_WORKING_DIR: "."'
+_TEST_COMMAND_MARKER: str = '  HAUNTER_TEST_COMMAND: ""'
+
+# Rendering bounds live in app/services/repo_settings.py
+# (validate_working_dir / validate_test_command); the renderer calls those same
+# validators rather than keeping a second copy of the limits.
+
+# language -> (settings attribute, built-in default filename). Kept in one
+# place so a new pack needs exactly one entry here plus one template file.
+_WORKFLOW_FILENAME_BY_LANGUAGE: dict[str, tuple[str, str]] = {
+    "py": ("github_sandbox_workflow_filename_py", "haunter-test-py.yml"),
+    "ts": ("github_sandbox_workflow_filename_ts", "haunter-test-ts.yml"),
+    "go": ("github_sandbox_workflow_filename_go", "haunter-test-go.yml"),
+    "rust": ("github_sandbox_workflow_filename_rust", "haunter-test-rust.yml"),
+    "java": ("github_sandbox_workflow_filename_java", "haunter-test-java.yml"),
+    "docker": (
+        "github_sandbox_workflow_filename_docker",
+        "haunter-test-docker.yml",
+    ),
+}
+
+
+class SandboxOverrides(NamedTuple):
+    """Monorepo scope applied to a rendered workflow template.
+
+    ``working_dir`` is a repo-relative POSIX directory (``None``/``.`` means the
+    repository root) and ``test_command`` replaces the language-default test
+    invocation when set.
+    """
+
+    working_dir: Optional[str] = None
+    test_command: Optional[str] = None
+
+
+#: Neutral scope — repo root, language-default test command. A NamedTuple is
+#: immutable, so this single instance is safe to share.
+SANDBOX_OVERRIDES_NONE: SandboxOverrides = SandboxOverrides()
+
+
+def select_workflow_filename(language: str, settings: Any) -> str:
+    """Map a :func:`detect_language` key to its workflow template filename.
+
+    An unknown key falls back to the default language (``py``) rather than
+    raising: detection is heuristic and a verification run must still get a
+    runnable template. A configured-but-empty attribute value also falls back
+    to the built-in filename so a misconfigured env var cannot point the
+    sandbox at a missing file.
+    """
+    attribute, default_filename = _WORKFLOW_FILENAME_BY_LANGUAGE.get(
+        language, _WORKFLOW_FILENAME_BY_LANGUAGE["py"]
+    )
+    configured = getattr(settings, attribute, None)
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    return default_filename
+
+
+def _yaml_double_quoted(value: str) -> str:
+    """Quote ``value`` as a YAML double-quoted scalar, escaping as needed."""
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
+def render_workflow_content(
+    content: str,
+    *,
+    working_dir: Optional[str] = None,
+    test_command: Optional[str] = None,
+) -> str:
+    """
+    Render monorepo scoping overrides into a loaded workflow template.
+
+    Templates declare the two markers in :data:`_WORKING_DIR_MARKER` /
+    :data:`_TEST_COMMAND_MARKER`; a non-default override replaces its marker
+    with a quoted YAML scalar. ``None``/empty/``.`` overrides leave the
+    language-default behaviour untouched.
+
+    Raises:
+        ValueError: an override is malformed (too long, traversing, or holding
+            a NUL byte) or a template is missing a required marker. Silently
+            dropping an override would run the wrong test suite and could
+            therefore mark a broken fix as verified, so drift and bad input
+            both fail the verification attempt loudly instead.
+    """
+    rendered = content
+    if working_dir is not None and working_dir.strip() not in ("", "."):
+        rendered = _replace_marker(
+            rendered, _WORKING_DIR_MARKER, _render_working_dir(working_dir)
+        )
+    if test_command is not None and test_command.strip():
+        rendered = _replace_marker(
+            rendered, _TEST_COMMAND_MARKER, _render_test_command(test_command)
+        )
+    return rendered
+
+
+def _replace_marker(content: str, marker: str, replacement: str) -> str:
+    if marker not in content:
+        raise ValueError(
+            f"workflow template is missing the render marker {marker.strip()!r}; "
+            "every template in app/sandbox/workflow_templates/ must declare it"
+        )
+    return content.replace(marker, replacement, 1)
+
+
+def _render_working_dir(working_dir: str) -> str:
+    """Validate a monorepo working directory and render it as a YAML scalar.
+
+    Re-validates with the RepoSettings validator so the API boundary and the
+    render boundary can never disagree about what a safe path is.
+    """
+    from app.services.repo_settings import validate_working_dir
+
+    clean = validate_working_dir(working_dir)
+    if clean is None or clean == ".":
+        raise ValueError(
+            f"invalid sandbox working_dir {working_dir!r}: expected a "
+            "repo-relative directory"
+        )
+    return f'  HAUNTER_WORKING_DIR: {_yaml_double_quoted(clean)}'
+
+
+def _render_test_command(test_command: str) -> str:
+    """Validate a custom test command and render it as a YAML scalar.
+
+    Re-validates with the RepoSettings validator so the API boundary and the
+    render boundary can never disagree about what a safe command is.
+    """
+    from app.services.repo_settings import validate_test_command
+
+    clean = validate_test_command(test_command)
+    if clean is None:
+        raise ValueError("invalid sandbox test_command: expected a command to run")
+    return f'  HAUNTER_TEST_COMMAND: {_yaml_double_quoted(clean)}'
+
+
+async def resolve_sandbox_overrides(run_id: Optional[uuid.UUID]) -> SandboxOverrides:
+    """
+    Resolve ``(working_dir, test_command)`` for a run from its RepoSettings.
+
+    Best-effort by design: the settings lookup must never be the reason a
+    verification attempt dies, so any failure is logged and degrades to
+    :data:`SANDBOX_OVERRIDES_NONE` (repo root + language-default test command).
+    Persisted values are re-validated on read, so a row written before a
+    validator tightened cannot inject a traversal or a NUL byte into a
+    rendered workflow.
+    """
+    if run_id is None:
+        return SANDBOX_OVERRIDES_NONE
+    try:
+        from sqlalchemy import select
+
+        from app.db import async_session_maker
+        from app.models import Repo, RepoSettings, Run
+        from app.services.repo_settings import (
+            validate_test_command,
+            validate_working_dir,
+        )
+
+        async with async_session_maker() as session:
+            run = await session.get(Run, run_id)
+            if run is None:
+                return SANDBOX_OVERRIDES_NONE
+            repo = await session.get(Repo, run.repo_id)
+            if repo is None:
+                return SANDBOX_OVERRIDES_NONE
+            row = await session.scalar(
+                select(RepoSettings).where(RepoSettings.repo_id == repo.id)
+            )
+            if row is None:
+                return SANDBOX_OVERRIDES_NONE
+            return SandboxOverrides(
+                working_dir=validate_working_dir(row.working_dir),
+                test_command=validate_test_command(row.test_command),
+            )
+    except Exception as exc:
+        logger.warning(
+            "github_actions_runner: sandbox override lookup failed for run_id=%s (%s: %s)"
+            " — continuing with language defaults",
+            run_id,
+            type(exc).__name__,
+            sanitize_log_value(str(exc))[:200],
+        )
+        return SANDBOX_OVERRIDES_NONE
+
+
+async def render_workflow_for_run(
+    content: str, run_id: Optional[uuid.UUID]
+) -> str:
+    """
+    Resolve the run's monorepo scope and render it into a loaded template.
+
+    Thin composition of :func:`resolve_sandbox_overrides` and
+    :func:`render_workflow_content` so both sandbox entry points (``verify`` and
+    ``verify_determinism``) apply the same scope by construction.
+    """
+    overrides = await resolve_sandbox_overrides(run_id)
+    return render_workflow_content(
+        content,
+        working_dir=overrides.working_dir,
+        test_command=overrides.test_command,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main runner
 # ---------------------------------------------------------------------------
 
@@ -844,16 +1063,8 @@ class GitHubActionsSandboxRunner(SandboxRunner):
         poll_timeout: float = float(
             getattr(settings, "github_sandbox_poll_timeout_seconds", 120.0) or 120.0
         )
-        workflow_filename_py: str = getattr(
-            settings,
-            "github_sandbox_workflow_filename_py",
-            "haunter-test-py.yml",
-        )
-        workflow_filename_ts: str = getattr(
-            settings,
-            "github_sandbox_workflow_filename_ts",
-            "haunter-test-ts.yml",
-        )
+        # Workflow filenames are resolved per attempt by
+        # select_workflow_filename() once the language is detected.
 
         if not app_id:
             return make_result(
@@ -975,11 +1186,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                     if not file_paths and seed_files:
                         file_paths = list(seed_files.keys())
                     language = detect_language(file_paths)
-                    workflow_filename = (
-                        workflow_filename_py
-                        if language == "py"
-                        else workflow_filename_ts
-                    )
+                    workflow_filename = select_workflow_filename(language, settings)
                     try:
                         workflow_content = _load_workflow_template(workflow_filename)
                     except FileNotFoundError as exc:
@@ -988,6 +1195,21 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                             reason=_sanitize_failure_reason(
                                 f"Workflow template not found on disk: "
                                 f"{workflow_filename} ({exc})"
+                            ),
+                            duration_ms=int((time.monotonic() - t_start) * 1000),
+                        )
+                    # Monorepo scoping from RepoSettings. A malformed override is
+                    # a configuration error: fail the attempt loudly instead of
+                    # silently verifying against the wrong test suite.
+                    try:
+                        workflow_content = await render_workflow_for_run(
+                            workflow_content, inp.run_id
+                        )
+                    except ValueError as exc:
+                        return make_result(
+                            passed=False,
+                            reason=_sanitize_failure_reason(
+                                f"[non-retryable] {exc}"
                             ),
                             duration_ms=int((time.monotonic() - t_start) * 1000),
                         )
@@ -1156,12 +1378,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
         poll_timeout: float = float(
             getattr(settings, "github_sandbox_poll_timeout_seconds", 120.0) or 120.0
         )
-        workflow_filename_py: str = getattr(
-            settings, "github_sandbox_workflow_filename_py", "haunter-test-py.yml"
-        )
-        workflow_filename_ts: str = getattr(
-            settings, "github_sandbox_workflow_filename_ts", "haunter-test-ts.yml"
-        )
+        # Workflow filename is resolved per run by select_workflow_filename().
 
         iteration_results: list[dict[str, Any]] = []
         consecutive_passes = 0
@@ -1247,9 +1464,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         )
 
                 language = detect_language(list(seed_files.keys()))
-                workflow_filename = (
-                    workflow_filename_py if language == "py" else workflow_filename_ts
-                )
+                workflow_filename = select_workflow_filename(language, settings)
                 try:
                     workflow_content = _load_workflow_template(workflow_filename)
                 except FileNotFoundError as exc:
@@ -1257,6 +1472,24 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         "verify_determinism: workflow template %s not found: %s",
                         workflow_filename,
                         exc,
+                    )
+                    return DeterminismResult(
+                        is_flaky=False,
+                        consecutive_passes=0,
+                        iteration_results=[],
+                    )
+                # Monorepo scoping from RepoSettings. The same validation the
+                # verification path applies: a malformed override must not be
+                # reported as "flaky", it is a configuration error.
+                try:
+                    workflow_content = await render_workflow_for_run(
+                        workflow_content, getattr(run, "id", None)
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "verify_determinism: %s: %s",
+                        type(exc).__name__,
+                        sanitize_log_value(str(exc))[:200],
                     )
                     return DeterminismResult(
                         is_flaky=False,

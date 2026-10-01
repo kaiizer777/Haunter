@@ -160,6 +160,13 @@ class Settings(BaseSettings):
     github_sandbox_poll_timeout_seconds: float = 120.0
     github_sandbox_workflow_filename_py: str = "haunter-test-py.yml"
     github_sandbox_workflow_filename_ts: str = "haunter-test-ts.yml"
+    # Language packs. One template per detect_language() key; the key set is
+    # app.sandbox.mirror.SUPPORTED_LANGUAGES and every value names a file in
+    # app/sandbox/workflow_templates/ (asserted by tests/test_sandbox_lang_packs.py).
+    github_sandbox_workflow_filename_go: str = "haunter-test-go.yml"
+    github_sandbox_workflow_filename_rust: str = "haunter-test-rust.yml"
+    github_sandbox_workflow_filename_java: str = "haunter-test-java.yml"
+    github_sandbox_workflow_filename_docker: str = "haunter-test-docker.yml"
 
     # Phase 14 — Hosting provider selection.
     # "aws" uses Lambda + Function URL (always-free 1M req + 400k GB-s/mo).

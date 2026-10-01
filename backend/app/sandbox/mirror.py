@@ -21,7 +21,7 @@ Public API:
     get_or_create_test_mirror(gh, org, [name], *, token) -> str  (org/name)
     push_patch_to_mirror(gh, repo_full, *, branch, patch_text, workflow_filename,
                          workflow_content, commit_message, token, [seed_files]) -> str
-    detect_language(file_paths)                -> str  ("py" | "ts")
+    detect_language(file_paths)                -> str  (see SUPPORTED_LANGUAGES)
     test_repo_name(user_github_id)             -> str  (deprecated)
     get_or_create_test_repo(...)               -> str  (deprecated alias)
     push_patch_as_commit(...)                  -> str  (deprecated wrapper)
@@ -56,7 +56,7 @@ import hashlib
 import logging
 import os
 import re
-from typing import Any, Iterable, Optional
+from typing import Any, Final, Iterable, NamedTuple, Optional
 
 import httpx
 
@@ -138,35 +138,175 @@ def test_repo_name(user_github_id: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def detect_language(file_paths: list[str]) -> str:
+# Every supported key must have a matching template at
+# ``workflow_templates/haunter-test-{key}.yml``. The order of this tuple IS the
+# tie-break precedence (see ``detect_language``) and is asserted against the
+# template directory by ``tests/test_sandbox_lang_packs.py``.
+SUPPORTED_LANGUAGES: Final[tuple[str, ...]] = (
+    "py",
+    "ts",
+    "go",
+    "rust",
+    "java",
+    "docker",
+)
+
+# Language used when a repository carries no recognisable evidence at all.
+# Python is the historical default of this engine and stays the safe fallback:
+# it is the only language whose template degrades to a neutral "no tests
+# found" pass instead of failing the verification attempt.
+DEFAULT_LANGUAGE: Final[str] = "py"
+
+# The container pack is only ever selected for container-only repositories
+# (Dockerfile / compose file and no source language evidence at all).
+_CONTAINER_LANGUAGE: Final[str] = "docker"
+
+# A manifest declares the project's build/test system; a source file merely
+# lives in it. Weighting manifests above source files keeps detection stable
+# for monorepos, where a handful of tool scripts in another language must not
+# outvote the manifest that the repository actually builds with.
+_MANIFEST_WEIGHT: Final[int] = 4
+_SOURCE_WEIGHT: Final[int] = 1
+
+
+class _LanguageEvidence(NamedTuple):
+    """Deterministic evidence for one language, matched on the basename."""
+
+    manifest_names: frozenset[str]
+    manifest_prefixes: tuple[str, ...]
+    source_suffixes: tuple[str, ...]
+
+
+# All names are compared lower-cased: GitHub tarballs and diff paths are
+# case-sensitive on disk but detection must not be.
+_LANGUAGE_EVIDENCE: Final[dict[str, _LanguageEvidence]] = {
+    "py": _LanguageEvidence(
+        manifest_names=frozenset(
+            {
+                "pyproject.toml",
+                "setup.py",
+                "setup.cfg",
+                "tox.ini",
+                "pytest.ini",
+                "pipfile",
+                "pipfile.lock",
+                "poetry.lock",
+                "requirements.txt",
+            }
+        ),
+        manifest_prefixes=("requirements-", "requirements."),
+        source_suffixes=(".py", ".pyi"),
+    ),
+    "ts": _LanguageEvidence(
+        manifest_names=frozenset(
+            {
+                "package.json",
+                "package-lock.json",
+                "tsconfig.json",
+                "pnpm-workspace.yaml",
+            }
+        ),
+        manifest_prefixes=("yarn.lock", "pnpm-lock"),
+        source_suffixes=(".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"),
+    ),
+    "go": _LanguageEvidence(
+        manifest_names=frozenset({"go.mod", "go.sum", "go.work"}),
+        manifest_prefixes=(),
+        source_suffixes=(".go",),
+    ),
+    "rust": _LanguageEvidence(
+        manifest_names=frozenset(
+            {"cargo.toml", "cargo.lock", "rust-toolchain.toml", "rust-toolchain"}
+        ),
+        manifest_prefixes=(),
+        source_suffixes=(".rs",),
+    ),
+    "java": _LanguageEvidence(
+        manifest_names=frozenset(
+            {
+                "pom.xml",
+                "build.gradle",
+                "build.gradle.kts",
+                "settings.gradle",
+                "settings.gradle.kts",
+                "gradlew",
+                "mvnw",
+            }
+        ),
+        manifest_prefixes=(),
+        source_suffixes=(".java", ".kt", ".kts"),
+    ),
+    "docker": _LanguageEvidence(
+        manifest_names=frozenset({".dockerignore"}),
+        # Dockerfile, Dockerfile.prod, docker-compose.yml,
+        # docker-compose.production.yaml, compose.yaml, ...
+        manifest_prefixes=("dockerfile", "docker-compose", "compose."),
+        source_suffixes=(),
+    ),
+}
+
+
+def _score_languages(file_paths: Iterable[str]) -> dict[str, int]:
+    """Return the weighted evidence score per supported language."""
+    scores: dict[str, int] = {lang: 0 for lang in SUPPORTED_LANGUAGES}
+    for raw_path in file_paths:
+        normalized = str(raw_path).replace("\\", "/").lower()
+        basename = normalized.rsplit("/", 1)[-1]
+        if not basename:
+            continue
+        for language, evidence in _LANGUAGE_EVIDENCE.items():
+            if (
+                basename in evidence.manifest_names
+                or basename.startswith(evidence.manifest_prefixes)
+            ):
+                scores[language] += _MANIFEST_WEIGHT
+            elif normalized.endswith(evidence.source_suffixes):
+                scores[language] += _SOURCE_WEIGHT
+    return scores
+
+
+def detect_language(file_paths: Optional[Iterable[str]]) -> str:
     """
     Return the workflow-template language key for the given file list.
 
-    MVP: returns ``"py"`` or ``"ts"`` only (the two workflow templates we
-    ship in ``workflow_templates/``). Defaults to ``"py"`` when both are
-    present or when the list is empty/None-equivalent — Python is the more
-    common case for the repos this is initially validated against.
+    Returns one of :data:`SUPPORTED_LANGUAGES`, always backed by a template in
+    ``app/sandbox/workflow_templates/``.
 
-    Rules:
-      - Any ``.ts`` / ``.tsx`` file AND no ``.py`` file → ``"ts"``.
-      - Otherwise → ``"py"`` (default).
+    Detection is deterministic and evidence-based. Each path is scored against
+    :data:`_LANGUAGE_EVIDENCE` on its basename (case-insensitive, ``/`` and
+    ``\\`` normalised) with manifests weighted above source files, and the
+    highest total wins:
 
-    TODO(future-work): replace the "any .py file trumps .ts" heuristic
-    with a "first primary manifest wins" rule:
-      - If ``package.json`` is present and ``pyproject.toml`` is not,
-        prefer ``"ts"`` (avoids the false positive where a tooling
-        repo has one stray ``.py`` and many ``.ts`` files).
-      - If both manifests are present, count file extensions in the
-        actual diff and pick the majority.
-    Out of scope for Phase 2 — the current heuristic works for every
-    repo validated so far, and the fix_generator prompt can be tightened
-    to emit a language hint that overrides this fallback.
+      1. **Highest score wins.** A repository declaring ``go.mod`` scores 4
+         for ``go`` and 1 for every ``.go`` file, so the declared build system
+         outvotes incidental tooling scripts in another language.
+      2. **Ties break by :data:`SUPPORTED_LANGUAGES` order**
+         (``py`` > ``ts`` > ``go`` > ``rust`` > ``java`` > ``docker``), which
+         preserves the historical "Python wins ties" behaviour.
+      3. **The container pack is a fallback only.** ``docker`` is selected
+         when no code language scored at all, i.e. for container-only repos.
+      4. **No evidence → ``DEFAULT_LANGUAGE``** (``"py"``). The empty-file-list
+         and unrecognised-language cases both land here.
+
+    Callers may override the *execution* scope of the detected template via
+    ``RepoSettings.working_dir`` / ``RepoSettings.test_command`` (monorepo
+    scoping); detection itself is never overridden by user settings.
     """
-    has_py = any(f.endswith(".py") for f in (file_paths or []))
-    has_ts = any(f.endswith((".ts", ".tsx")) for f in (file_paths or []))
-    if has_ts and not has_py:
-        return "ts"
-    return "py"
+    scores = _score_languages(file_paths or ())
+    code_scores = {
+        language: score
+        for language, score in scores.items()
+        if language != _CONTAINER_LANGUAGE
+    }
+    if max(code_scores.values(), default=0) <= 0:
+        if scores[_CONTAINER_LANGUAGE] > 0:
+            return _CONTAINER_LANGUAGE
+        return DEFAULT_LANGUAGE
+    precedence = {language: index for index, language in enumerate(SUPPORTED_LANGUAGES)}
+    return min(
+        code_scores,
+        key=lambda language: (-code_scores[language], precedence[language]),
+    )
 
 
 # ---------------------------------------------------------------------------

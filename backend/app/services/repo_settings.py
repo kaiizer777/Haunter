@@ -186,6 +186,86 @@ def validate_cost_bounds(cost_cents: int) -> int:
     return cost_cents
 
 
+# Mirrors RepoSettings.working_dir (String(255)).
+_MAX_WORKING_DIR_CHARS: int = 255
+
+# Bounds the test command that gets embedded into a sandbox workflow template.
+# 1000 characters is far above any real `pytest`/`npm test`/`go test` invocation
+# and keeps the rendered workflow small.
+_MAX_TEST_COMMAND_CHARS: int = 1000
+
+# Conservative allowlist for a repo-relative path: no shell metacharacters, no
+# spaces, no globs. Anything outside this is rejected rather than escaped,
+# because the value is interpolated into a shell `cd` in the sandbox workflow.
+_WORKING_DIR_RE: re.Pattern[str] = re.compile(r"[A-Za-z0-9_./\-]+")
+
+
+def validate_working_dir(value: str | None) -> str | None:
+    """
+    Validate the monorepo ``working_dir`` override.
+
+    Returns ``None`` for ``None``/empty (no override), ``"."`` for a
+    repo-root request, or a normalized repo-relative POSIX path. Raises
+    ``ValueError`` on absolute paths, ``..`` traversal, unsupported
+    characters, or over-length input.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("working_dir must be a string.")
+    clean = value.strip().replace("\\", "/")
+    if not clean or clean in (".", "./"):
+        return "."
+    if clean.startswith("/"):
+        raise ValueError(
+            "working_dir must be relative to the repository root, not absolute."
+        )
+    clean = clean.rstrip("/")
+    if len(clean) > _MAX_WORKING_DIR_CHARS:
+        raise ValueError(
+            f"working_dir exceeds maximum length of {_MAX_WORKING_DIR_CHARS} characters."
+        )
+    segments = clean.split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        raise ValueError(
+            "working_dir must be a relative path without empty, '.' or '..' segments."
+        )
+    if not _WORKING_DIR_RE.fullmatch(clean):
+        raise ValueError(
+            "working_dir may only contain letters, digits, '_', '-', '.' and '/'."
+        )
+    return clean
+
+
+def validate_test_command(value: str | None) -> str | None:
+    """
+    Validate the monorepo ``test_command`` override.
+
+    Returns ``None`` for ``None``/blank (clears the override) or the stripped
+    command. Raises ``ValueError`` on over-length input or NUL bytes, which
+    would otherwise truncate or corrupt the rendered workflow document.
+
+    The command is intentionally *not* sanitised against shell syntax: it is
+    run by the sandbox as the repository owner configured it, and escaping it
+    would break legitimate invocations (``npm test -- --run``, ``go test -race``).
+    The blast radius is the repository's own private CI mirror.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("test_command must be a string.")
+    clean = value.strip()
+    if not clean:
+        return None
+    if len(clean) > _MAX_TEST_COMMAND_CHARS:
+        raise ValueError(
+            f"test_command exceeds maximum length of {_MAX_TEST_COMMAND_CHARS} characters."
+        )
+    if "\x00" in clean:
+        raise ValueError("test_command must not contain NUL bytes.")
+    return clean
+
+
 def create_default_repo_settings(
     repo_id: uuid.UUID,
     preset: str = DEFAULT_PRESET,
@@ -214,6 +294,8 @@ def create_default_repo_settings(
         ignore_draft_prs=cfg.get("ignore_draft_prs", True),
         max_cost_per_run_cents=cfg.get("max_cost_per_run_cents", 100),
         model_override_scope=cfg.get("model_override_scope", "inherit"),
+        working_dir=None,
+        test_command=None,
         settings_version=1,
         created_at=now,
         updated_at=now,
@@ -323,6 +405,15 @@ async def update_repo_settings(
                 bump_version = True
 
     for key, value in updates.items():
+        if key in ("working_dir", "test_command"):
+            # Handled before the None-skip below: these two are optional
+            # overrides, so an explicit null is how a caller *clears* one.
+            if key == "working_dir":
+                settings.working_dir = validate_working_dir(value)
+            else:
+                settings.test_command = validate_test_command(value)
+            continue
+
         if value is None or key in ("preset_profile", "preset"):
             continue
 
@@ -392,4 +483,6 @@ __all__ = [
     "validate_branch_name",
     "validate_branches",
     "validate_cost_bounds",
+    "validate_test_command",
+    "validate_working_dir",
 ]

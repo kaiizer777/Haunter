@@ -5,3 +5,7 @@
 
 ruff==0.7.4
 pytest-timeout==2.4.0
+# Parses app/sandbox/workflow_templates/*.yml in the template-parity tests so a
+# malformed CI template fails the suite instead of a live verification run.
+# Test-only: the backend never parses YAML at runtime.
+PyYAML==6.0.3

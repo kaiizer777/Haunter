@@ -1,4 +1,4 @@
-name: haunter-test-ts
+name: haunter-test-rust
 on:
   push:
     branches: ["sandbox/**", "haunter-flake-check-**"]
@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 
-# No secrets. No deploy. By design.
+# No secrets. No push. No deploy. By design.
 env:
   # Monorepo scoping. The server rewrites these two quoted literals from
   # RepoSettings.working_dir / RepoSettings.test_command before pushing the
@@ -17,6 +17,7 @@ env:
   # so template drift fails CI instead of silently ignoring a user's scope.
   HAUNTER_WORKING_DIR: "."
   HAUNTER_TEST_COMMAND: ""
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -26,36 +27,30 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - name: Set up Rust
+        # ubuntu-latest ships rustup with a stable toolchain preinstalled, and
+        # rustup honours a committed rust-toolchain[.toml] on first use — so no
+        # third-party toolchain action (and no unpinned action ref) is needed.
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
         with:
-          node-version: "20"
+          # Glob from the repo root, so a monorepo crate in a subdirectory is
+          # still covered by HAUNTER_WORKING_DIR.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Install dependencies
+      - name: Lint (clippy, best-effort)
         run: |
           cd "${HAUNTER_WORKING_DIR:-.}"
-          if [ -f package.json ]; then
-            npm ci --ignore-scripts
-          fi
-
-      - name: Type check
-        run: |
-          cd "${HAUNTER_WORKING_DIR:-.}"
-          if [ -f tsconfig.json ]; then
-            npx --no-install tsc --noEmit || echo "::warning::tsc found issues"
-          else
-            echo "No tsconfig.json — skipping"
-          fi
-        continue-on-error: true
-
-      - name: Lint (eslint, best-effort)
-        run: |
-          cd "${HAUNTER_WORKING_DIR:-.}"
-          if grep -q "eslint" package.json 2>/dev/null; then
-            npx --no-install eslint . --ext .ts,.tsx || echo "::warning::eslint found issues"
-          else
-            echo "eslint not configured — skipping"
-          fi
+          cargo clippy --all-targets -- -D warnings || echo "::warning::clippy found issues"
         continue-on-error: true
 
       - name: Run tests
@@ -68,19 +63,18 @@ jobs:
             eval "${HAUNTER_TEST_COMMAND}"
             exit $?
           fi
-          if grep -q '"test"' package.json 2>/dev/null; then
-            npm test --silent
-          else
-            echo "No test script in package.json"
+          if [ ! -f Cargo.toml ]; then
+            echo "::error::no Cargo.toml under ${HAUNTER_WORKING_DIR:-.} — cannot run cargo test"
             exit 1
           fi
+          if [ -f Cargo.lock ]; then
+            cargo test --locked || cargo test
+          else
+            cargo test
+          fi
 
-      - name: Build
+      - name: Build (best-effort)
         run: |
           cd "${HAUNTER_WORKING_DIR:-.}"
-          if grep -q '"build"' package.json 2>/dev/null; then
-            npm run build --silent
-          else
-            echo "No build script — skipping"
-          fi
+          cargo build || echo "::warning::cargo build found issues"
         continue-on-error: true
