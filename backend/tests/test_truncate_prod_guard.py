@@ -11,13 +11,45 @@ here opens a socket.
 """
 
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 import pytest
 
-from tests.conftest import _is_loopback_url, _is_prod_url
+from tests.conftest import _is_loopback_url, _is_prod_url, truncate_all
 
 PROD_URL = "postgresql+asyncpg://u:p@ep-square-sun-azk3knbd.c-3.ap-southeast-1.aws.neon.tech/neondb"
 CI_URL = "postgresql+asyncpg://haunter_test:haunter_test@localhost:5432/haunter_test"
+
+
+class _FakeUrl:
+    def __init__(self, url: str) -> None:
+        self._url = url
+        self.database = urlparse(url).path.lstrip("/")
+
+    def __str__(self) -> str:
+        return self._url
+
+
+class _FakeBind:
+    def __init__(self, url: str) -> None:
+        self.url = _FakeUrl(url)
+
+
+class _FakeSession:
+    """Minimal AsyncSession stand-in: records the DELETEs truncate_all issues."""
+
+    def __init__(self, url: str) -> None:
+        self._bind = _FakeBind(url)
+        self.executed: list[str] = []
+
+    def get_bind(self) -> _FakeBind:
+        return self._bind
+
+    async def execute(self, stmt: object) -> None:
+        self.executed.append(str(stmt))
+
+    async def commit(self) -> None:
+        return None
 
 
 @pytest.mark.parametrize(
@@ -82,60 +114,81 @@ def test_credentials_in_the_url_cannot_change_the_verdict() -> None:
 
 
 @pytest.mark.asyncio
-async def test_truncate_all_blocks_a_real_prod_session() -> None:
-    """The regression that matters: prod must still refuse to be truncated."""
+@pytest.mark.parametrize("is_ci", [True, False])
+async def test_truncate_all_blocks_a_real_prod_session(is_ci: bool) -> None:
+    """The regression that matters: prod must refuse to be truncated everywhere.
 
-    class _FakeUrl:
-        database = "neondb"
-
-        def __str__(self) -> str:
-            return PROD_URL
-
-    class _FakeBind:
-        url = _FakeUrl()
-
-    class _FakeSession:
-        def get_bind(self) -> _FakeBind:
-            return _FakeBind()
-
+    Parametrised over both environments so the exemption provably cannot
+    weaken the prod block, not merely avoid touching it in one of them.
+    """
     from tests.conftest import truncate_all
 
+    session = _FakeSession(PROD_URL)
     with patch("app.config.settings.database_url", PROD_URL):
-        with pytest.raises(RuntimeError, match="truncate_all\\(\\) blocked"):
-            await truncate_all(_FakeSession())  # type: ignore[arg-type]
+        with patch("tests.conftest._IS_GITHUB_ACTIONS", is_ci):
+            with pytest.raises(RuntimeError, match="truncate_all\\(\\) blocked"):
+                await truncate_all(session)  # type: ignore[arg-type]
+
+    assert session.executed == []
 
 
 @pytest.mark.asyncio
 async def test_truncate_all_permits_the_ci_loopback_container() -> None:
-    class _FakeUrl:
-        database = "haunter_test"
+    """On GitHub Actions the throwaway container must be truncatable.
 
-        def __str__(self) -> str:
-            return CI_URL
-
-    class _FakeBind:
-        url = _FakeUrl()
-
-    class _FakeSession:
-        def __init__(self) -> None:
-            self.executed: list[str] = []
-
-        def get_bind(self) -> _FakeBind:
-            return _FakeBind()
-
-        async def execute(self, stmt: object) -> None:
-            self.executed.append(str(stmt))
-
-        async def commit(self) -> None:
-            return None
-
-    from tests.conftest import truncate_all
-
-    session = _FakeSession()
+    This is the case #35 broke: both URLs are localhost:5432, so plain host
+    equality calls the container production and blocks every DB test.
+    """
+    session = _FakeSession(CI_URL)
     with patch("app.config.settings.database_url", CI_URL):
-        await truncate_all(session)  # type: ignore[arg-type]
+        with patch("tests.conftest._IS_GITHUB_ACTIONS", True):
+            await truncate_all(session)  # type: ignore[arg-type]
 
     # Every table was actually cleared — the exemption permits the DELETEs
     # rather than silently skipping them.
     assert len(session.executed) == 13
     assert any("DELETE FROM users" in stmt for stmt in session.executed)
+
+
+@pytest.mark.asyncio
+async def test_truncate_all_blocks_a_localhost_port_forward_to_prod() -> None:
+    """Loopback is NOT proof of isolation, outside GitHub Actions.
+
+    A developer port-forwarding production (`ssh -L 5432:ep-...:5432`) and
+    pointing DATABASE_URL at localhost produces the same loopback + matching
+    host shape as the CI container. That was blocked before this change and
+    must stay blocked — it is how prod got wiped once
+    (backend/scripts/restore_repos.py).
+    """
+    port_forward_url = (
+        "postgresql+asyncpg://u:p@localhost:5432/neondb"
+    )
+    session = _FakeSession(port_forward_url)
+    with patch("app.config.settings.database_url", port_forward_url):
+        with patch("tests.conftest._IS_GITHUB_ACTIONS", False):
+            with pytest.raises(RuntimeError, match="truncate_all\\(\\) blocked"):
+                await truncate_all(session)  # type: ignore[arg-type]
+
+    assert session.executed == []
+
+
+@pytest.mark.asyncio
+async def test_the_exemption_is_withheld_for_a_non_loopback_host_on_ci() -> None:
+    """CI must never exempt anything that is not genuinely loopback."""
+    session = _FakeSession(PROD_URL)
+    with patch("app.config.settings.database_url", PROD_URL):
+        with patch("tests.conftest._IS_GITHUB_ACTIONS", True):
+            with pytest.raises(RuntimeError, match="truncate_all\\(\\) blocked"):
+                await truncate_all(session)  # type: ignore[arg-type]
+
+    assert session.executed == []
+
+
+def test_loopback_exemption_requires_github_actions() -> None:
+    """The exemption is unavailable outside GitHub Actions by construction."""
+    import tests.conftest as conftest
+
+    with patch("tests.conftest._IS_GITHUB_ACTIONS", True):
+        assert conftest._loopback_exemption_allowed() is True
+    with patch("tests.conftest._IS_GITHUB_ACTIONS", False):
+        assert conftest._loopback_exemption_allowed() is False
