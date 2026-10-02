@@ -881,8 +881,13 @@ async def test_public_webhook_endpoint_exposes_no_repository_pin(
     owner = await user_factory(github_id=9122, username="wh_health_no_pin")
     intruder = await user_factory(github_id=9123, username="wh_health_no_pin_intruder")
     repo_owner = Repo(user_id=owner.id, owner="nopin-org", name="nopin-repo")
-    repo_intruder = Repo(user_id=intruder.id, owner="nopin-org", name="nopin-repo")
-    db.add_all([repo_intruder, repo_owner])
+    # A DIFFERENT owner/name, so the payload's identity matches only repo_owner.
+    # If the query parameter were honoured and forced resolution onto
+    # repo_intruder, the run would land there and the assertions below fail —
+    # which an intruder sharing repo_owner's name could not detect, because the
+    # unordered owner/name lookup would have returned repo_owner anyway.
+    repo_intruder = Repo(user_id=intruder.id, owner="nopin-intruder", name="other-repo")
+    db.add_all([repo_owner, repo_intruder])
     await db.commit()
     await db.refresh(repo_owner)
     await db.refresh(repo_intruder)
@@ -910,13 +915,19 @@ async def test_public_webhook_endpoint_exposes_no_repository_pin(
 
     from app.models import Run
 
-    # The intruder-supplied pin had no effect: the run follows normal owner/name
-    # resolution instead of being forced onto repo_intruder.
+    # The intruder-supplied pin had no effect. The payload names
+    # nopin-org/nopin-repo, which resolves to repo_owner, so the run must be
+    # there and nowhere else — a strict assertion, not "either repo".
     runs = (
         (await db.execute(select(Run).where(Run.github_run_id == 555601))).scalars().all()
     )
     assert len(runs) == 1
-    assert runs[0].repo_id in (repo_owner.id, repo_intruder.id)
+    assert runs[0].repo_id == repo_owner.id
+    assert (
+        await db.execute(
+            select(Run).where(Run.repo_id == repo_intruder.id)
+        )
+    ).scalars().all() == []
 
 
 def _mock_adapter() -> MagicMock:
