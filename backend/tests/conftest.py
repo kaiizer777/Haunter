@@ -44,12 +44,52 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 _TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "")
 
+# Hosts that can only be a developer's machine or a CI service container, never
+# a managed production endpoint. Prod is Neon/RDS; it is never on loopback.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+# True on GitHub Actions. Used ONLY to decide whether the loopback exemption in
+# truncate_all() may apply — see _loopback_exemption_allowed().
+_IS_GITHUB_ACTIONS = os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+def _is_loopback_url(url: str) -> bool:
+    """True if url's host is a loopback address (credentials/port stripped)."""
+    host = urlparse(url).hostname
+    return host is not None and host in _LOOPBACK_HOSTS
+
+
+def _loopback_exemption_allowed() -> bool:
+    """Whether a loopback session may skip the production check.
+
+    Loopback alone does NOT prove a throwaway database. A developer port-forwarding
+    production (`ssh -L 5432:ep-....neon.tech:5432`) and pointing DATABASE_URL at
+    localhost produces exactly the loopback + matching-host shape this exemption
+    would otherwise wave through, and that case was blocked before this change.
+    Truncating there is how prod got wiped once (backend/scripts/restore_repos.py).
+
+    So the exemption is confined to GitHub Actions, where the workflow itself
+    provisions the Postgres container it points at (see
+    .github/workflows/ci.yml) — a guarantee no developer machine can claim. Any
+    other environment keeps the original host-equality check and its block.
+    """
+    return _IS_GITHUB_ACTIONS
+
 
 def _is_prod_url(url: str) -> bool:
-    """True if url points to the production database host configured in settings."""
-    prod_host = urlparse(settings.database_url).netloc.split("@")[-1]
-    url_host = urlparse(url).netloc.split("@")[-1]
-    return bool(prod_host and prod_host == url_host)
+    """True if url points at the production database host configured in settings.
+
+    Compares hostname only, so neither credentials nor a differing port can
+    hide a prod host. Fails closed (True) when the authority cannot be parsed:
+    refusing to truncate an unrecognised target is the safe direction.
+    """
+    url_host = urlparse(url).hostname
+    if url_host is None:
+        return True
+    prod_host = urlparse(settings.database_url).hostname
+    if not prod_host:
+        return False
+    return prod_host == url_host
 
 
 if _TEST_DB_URL:
@@ -104,9 +144,20 @@ async def truncate_all(db: AsyncSession) -> None:
 
     Safety: raises RuntimeError if called against a production Neon URL.
     Always set TEST_DATABASE_URL before running pytest.
+
+    On GitHub Actions only, a loopback engine is exempt from the host-equality
+    check. CI points both TEST_DATABASE_URL and DATABASE_URL at one throwaway
+    container on localhost:5432 (Settings requires DATABASE_URL, so it cannot
+    simply be unset), which makes the two hosts identical — and host equality
+    alone would read that throwaway container as production and block every DB
+    test. Everywhere else the exemption is withheld, because loopback does not
+    prove isolation: a port-forward to prod is loopback too. See
+    _loopback_exemption_allowed().
     """
     engine_url = str(db.get_bind().url)  # type: ignore[union-attr]
-    if _is_prod_url(engine_url):
+    if _is_prod_url(engine_url) and not (
+        _loopback_exemption_allowed() and _is_loopback_url(engine_url)
+    ):
         raise RuntimeError(
             f"truncate_all() blocked: session is connected to production database. "
             "Set TEST_DATABASE_URL to a dedicated test/branch database before running pytest."
