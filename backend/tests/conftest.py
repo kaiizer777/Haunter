@@ -44,12 +44,31 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 _TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "")
 
+# Hosts that can only ever be a developer's machine or a CI service container,
+# never a managed production endpoint. Prod is Neon/RDS; it is never on loopback.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def _is_loopback_url(url: str) -> bool:
+    """True if url's host is a loopback address (credentials/port stripped)."""
+    host = urlparse(url).hostname
+    return host is not None and host in _LOOPBACK_HOSTS
+
 
 def _is_prod_url(url: str) -> bool:
-    """True if url points to the production database host configured in settings."""
-    prod_host = urlparse(settings.database_url).netloc.split("@")[-1]
-    url_host = urlparse(url).netloc.split("@")[-1]
-    return bool(prod_host and prod_host == url_host)
+    """True if url points at the production database host configured in settings.
+
+    Compares hostname only, so neither credentials nor a differing port can
+    hide a prod host. Fails closed (True) when the authority cannot be parsed:
+    refusing to truncate an unrecognised target is the safe direction.
+    """
+    url_host = urlparse(url).hostname
+    if url_host is None:
+        return True
+    prod_host = urlparse(settings.database_url).hostname
+    if not prod_host:
+        return False
+    return prod_host == url_host
 
 
 if _TEST_DB_URL:
@@ -104,9 +123,15 @@ async def truncate_all(db: AsyncSession) -> None:
 
     Safety: raises RuntimeError if called against a production Neon URL.
     Always set TEST_DATABASE_URL before running pytest.
+
+    A loopback engine is exempt from the host-equality check. CI points both
+    TEST_DATABASE_URL and DATABASE_URL at one throwaway container on
+    localhost:5432 (Settings requires DATABASE_URL, so it cannot simply be
+    unset), which makes the two hosts identical — and host equality alone would
+    read that throwaway container as production and block every DB test.
     """
     engine_url = str(db.get_bind().url)  # type: ignore[union-attr]
-    if _is_prod_url(engine_url):
+    if _is_prod_url(engine_url) and not _is_loopback_url(engine_url):
         raise RuntimeError(
             f"truncate_all() blocked: session is connected to production database. "
             "Set TEST_DATABASE_URL to a dedicated test/branch database before running pytest."
