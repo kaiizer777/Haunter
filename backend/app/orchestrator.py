@@ -72,7 +72,27 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+
 logger = logging.getLogger(__name__)
+
+
+def is_pr_refinement(run: Run) -> bool:
+    """
+    True when `run` is an interactive PR-feedback refinement child.
+
+    A run with a parent is NOT automatically a refinement child. One-click
+    retry children (Feature 1) also carry ``parent_run_id`` but must take the
+    normal PR-Writer path — committing them onto ``run.pr_branch or
+    run.head_branch`` would push a fix to the user's own branch and breach
+    the Human Merge Gate Invariant (HAUNTER.md §1.1).
+
+    Refinement children are exactly those that reference a PR. The explicit
+    ``is_retry_child`` flag short-circuits that check so a retry of a run that
+    itself carried a stale ``pr_number`` can never be mistaken for refinement.
+    """
+    if run.is_retry_child:
+        return False
+    return run.parent_run_id is not None and run.pr_number is not None
 
 
 # ---------------------------------------------------------------------------
@@ -648,7 +668,7 @@ async def _orchestrator_pipeline_body(
     # ----------------------------------------------------------------
     # Flaky Test Detective & Quarantine Engine (Feature 2)
     # ----------------------------------------------------------------
-    if run.parent_run_id is not None:
+    if is_pr_refinement(run):
         logger.info(
             "orchestrator: run=%s is an interactive PR refinement run (parent_run_id=%s) "
             "— bypassing flake verification directly to fix_generation",
@@ -883,7 +903,7 @@ async def _orchestrator_pipeline_body(
                 # ---- Generate fix ----
                 try:
                     review_feedback: Optional[str] = None
-                    if run.parent_run_id is not None:
+                    if is_pr_refinement(run):
                         from app.subagents.context_gatherer import (
                             extract_reviewer_feedback,
                         )
@@ -1060,8 +1080,12 @@ async def _orchestrator_pipeline_body(
                     state["step"] = RunStatus.pending_pr.value
                     state["decisions"].append("verification_passed")
 
-                    # Feature 1: Refinement run on existing PR branch
-                    if run.parent_run_id is not None:
+                    # Feature 1: Refinement run on existing PR branch.
+                    # Guarded by is_pr_refinement (not a bare parent_run_id
+                    # check) so a one-click retry child opens a fresh PR via
+                    # the PR-Writer path instead of committing onto the
+                    # user's own branch.
+                    if is_pr_refinement(run):
                         try:
                             from app.github.pr import (
                                 commit_patch,
@@ -1403,7 +1427,7 @@ async def _orchestrator_pipeline_body(
 
                 if repo_settings.enable_pr_comments:
                     # Feature 1: If interactive PR refinement, post diagnostic comment to PR
-                    if run.parent_run_id is not None and run.pr_number:
+                    if is_pr_refinement(run):
                         from app.github_client import post_pr_comment
 
                         pr_fallback_body = (

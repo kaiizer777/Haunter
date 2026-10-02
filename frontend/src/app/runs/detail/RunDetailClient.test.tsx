@@ -1,16 +1,18 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import RunDetailClient from "./RunDetailClient";
 import { api, TraceOut } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 
 let mockRunId: string | null = "run-uuid-001";
+const mockPush = vi.fn();
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
     replace: vi.fn(),
-    push: vi.fn(),
+    push: mockPush,
   }),
   usePathname: () => "/runs/detail",
   useSearchParams: () => ({
@@ -25,6 +27,7 @@ vi.mock("@/lib/auth-context", () => ({
 vi.mock("@/lib/api", () => ({
   api: {
     getRunTrace: vi.fn(),
+    retryRun: vi.fn(),
     getModelConfig: vi.fn().mockResolvedValue({
       id: "cfg_1",
       provider: "opencode_zen",
@@ -79,6 +82,8 @@ describe("RunDetailClient (app/runs/detail/RunDetailClient.tsx)", () => {
     total_cost: 0.0055,
     total_latency_ms: 4800,
     failure_classification: null,
+    parent: null,
+    children: [],
   };
 
   beforeEach(() => {
@@ -258,5 +263,135 @@ describe("RunDetailClient (app/runs/detail/RunDetailClient.tsx)", () => {
     render(<RunDetailClient />);
 
     expect(await screen.findByText("sandbox_timeout")).toBeInTheDocument();
+  });
+
+  describe("one-click retry", () => {
+    it("offers a retry for a settled run and navigates to the new child", async () => {
+      vi.mocked(api.retryRun).mockResolvedValue({
+        id: "run-uuid-002",
+        repo_id: "repo-999",
+        github_run_id: null,
+        github_delivery_id: null,
+        head_sha: "a".repeat(40),
+        head_branch: "main",
+        status: "pending",
+        conclusion: "success",
+        parent_run_id: "run-uuid-001",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      render(<RunDetailClient />);
+
+      const retryButton = await screen.findByRole("button", { name: /retry this run/i });
+      await userEvent.click(retryButton);
+
+      await waitFor(() =>
+        expect(api.retryRun).toHaveBeenCalledWith("run-uuid-001")
+      );
+      await waitFor(() =>
+        expect(mockPush).toHaveBeenCalledWith("/runs/detail?id=run-uuid-002")
+      );
+    });
+
+    it("does not offer a retry for a run that is still in flight", async () => {
+      vi.mocked(api.getRunTrace).mockResolvedValue({
+        ...fullMockTrace,
+        run: { ...fullMockTrace.run, status: "fix_generation" },
+      });
+
+      render(<RunDetailClient />);
+
+      expect(await screen.findByText("Run ID: run-uuid-001")).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /retry this run/i })
+      ).not.toBeInTheDocument();
+    });
+
+    it("surfaces the backend rejection inline without navigating away", async () => {
+      vi.mocked(api.retryRun).mockRejectedValue(
+        new Error("Retry limit reached (max 5 per run).")
+      );
+
+      render(<RunDetailClient />);
+
+      await userEvent.click(await screen.findByRole("button", { name: /retry this run/i }));
+
+      expect(
+        await screen.findByText("Retry limit reached (max 5 per run).")
+      ).toBeInTheDocument();
+      expect(mockPush).not.toHaveBeenCalled();
+    });
+
+    it("hides the retry control while the trace is still loading", () => {
+      vi.mocked(api.getRunTrace).mockImplementation(() => new Promise(() => {}));
+
+      render(<RunDetailClient />);
+
+      expect(
+        screen.queryByRole("button", { name: /retry this run/i })
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("retry lineage", () => {
+    it("shows the source run when this run is a retry child", async () => {
+      const childTrace: TraceOut = {
+        ...fullMockTrace,
+        run: {
+          ...fullMockTrace.run,
+          id: "run-uuid-002",
+          status: "error",
+          pr_url: null,
+          parent_run_id: "run-uuid-001",
+        },
+        parent: {
+          ...fullMockTrace.run,
+          id: "run-uuid-001",
+          status: "fallback_commented",
+        },
+        children: [],
+      };
+      vi.mocked(api.getRunTrace).mockResolvedValue(childTrace);
+
+      render(<RunDetailClient />);
+
+      expect(await screen.findByText("Retried from")).toBeInTheDocument();
+      // fallback_commented renders as "Fallback Comment" in StatusBadge.
+      expect(
+        screen.getByRole("link", { name: /fallback comment/i })
+      ).toHaveAttribute("href", "/runs/detail?id=run-uuid-001");
+    });
+
+    it("lists the retries spawned from this run", async () => {
+      vi.mocked(api.getRunTrace).mockResolvedValue({
+        ...fullMockTrace,
+        children: [
+          {
+            ...fullMockTrace.run,
+            id: "run-uuid-003",
+            status: "error",
+            parent_run_id: "run-uuid-001",
+          },
+        ],
+      });
+
+      render(<RunDetailClient />);
+
+      expect(await screen.findByText("1 retry of this run")).toBeInTheDocument();
+      // error renders as "Failed" in StatusBadge.
+      expect(
+        screen.getByRole("link", { name: /failed/i })
+      ).toHaveAttribute("href", "/runs/detail?id=run-uuid-003");
+    });
+
+    it("omits the retry thread section for a root run with no lineage", async () => {
+      render(<RunDetailClient />);
+
+      await screen.findByText("Run ID: run-uuid-001");
+      expect(
+        screen.queryByRole("region", { name: /run retry lineage/i })
+      ).not.toBeInTheDocument();
+    });
   });
 });

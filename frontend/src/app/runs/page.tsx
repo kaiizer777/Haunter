@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/runs/status-badge";
+import RetryRunButton from "@/components/runs/retry-run-button";
 import { SelectDropdown } from "@/components/ui/select-dropdown";
 import { api, RepoOut, RunOut } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
@@ -885,7 +886,7 @@ export default function RunsPage() {
                     </TableHead>
 
                     {/* Column 7: ACTIONS */}
-                    <TableHead className="w-[90px] text-right pr-4 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-3">
+                    <TableHead className="w-[170px] text-right pr-4 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-3">
                       Actions
                     </TableHead>
                   </TableRow>
@@ -1033,18 +1034,29 @@ export default function RunsPage() {
 
                         {/* Column 7: ACTIONS */}
                         <TableCell className="text-right pr-4 py-3 align-middle whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              router.push(`/runs/detail?id=${run.id}`);
-                            }}
-                            className="group/btn h-7 px-2.5 text-xs font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-800/80 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all inline-flex items-center gap-1.5"
-                          >
-                            <span>Trace</span>
-                            <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500 group-hover/btn:text-amber-400 group-hover/btn:translate-x-0.5 group-hover/btn:-translate-y-0.5 transition-all" />
-                          </Button>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <RetryRunButton
+                              runId={run.id}
+                              status={run.status}
+                              label="Retry"
+                              // Land on the freshly dispatched child rather than
+                              // silently leaving the user on a settled row.
+                              onRetried={(child) => router.push(`/runs/detail?id=${child.id}`)}
+                            />
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                router.push(`/runs/detail?id=${run.id}`);
+                              }}
+                              aria-label={`Open trace for run ${run.id}`}
+                              className="group/btn h-7 px-2.5 text-xs font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-800/80 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all inline-flex items-center gap-1.5"
+                            >
+                              <span>Trace</span>
+                              <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500 group-hover/btn:text-amber-400 group-hover/btn:translate-x-0.5 group-hover/btn:-translate-y-0.5 transition-all" />
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     );

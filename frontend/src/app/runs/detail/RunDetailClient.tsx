@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AppLayout } from "@/components/layout/app-layout";
 import { StatusBadge } from "@/components/runs/status-badge";
@@ -10,6 +10,8 @@ import { TraceTimeline } from "@/components/trace/trace-timeline";
 import { DiagnosisView } from "@/components/trace/diagnosis-view";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
+import RetryRunButton from "@/components/runs/retry-run-button";
+import RunLineage from "@/components/runs/run-lineage";
 import { api, TraceOut } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
 import {
@@ -29,6 +31,7 @@ import { Badge } from "@/components/ui/badge";
 export default function RunDetailClient() {
   // Run id is carried in the `?id=<uuid>` query string so this can be a
   // plain static page under `output: "export"`.
+  const router = useRouter();
   const searchParams = useSearchParams();
   const runId = useMemo(() => searchParams.get("id") ?? "", [searchParams]);
 
@@ -75,6 +78,17 @@ export default function RunDetailClient() {
       subtitle={runId ? `Run ID: ${runId}` : "Run Trace"}
       actions={
         <div className="flex items-center gap-2">
+          {runId && trace && (
+            <RetryRunButton
+              runId={trace.run.id}
+              status={trace.run.status}
+              // Navigate to the newly dispatched child so the user lands on the
+              // run that is actually progressing instead of a settled trace.
+              onRetried={(child) => router.push(`/runs/detail?id=${child.id}`)}
+              aria-label="Retry this run"
+            />
+          )}
+
           {runId && (
             <Button
               variant="outline"
@@ -226,6 +240,13 @@ export default function RunDetailClient() {
                 <DiagnosisView summary={trace.run.diagnosis_summary} />
               )}
             </div>
+
+            {/* Retry / PR-refinement thread */}
+            <RunLineage
+              runId={trace.run.id}
+              parent={trace.parent}
+              childRuns={trace.children}
+            />
 
             {/* Stat Overview Cards */}
             <CostBreakdown trace={trace} />

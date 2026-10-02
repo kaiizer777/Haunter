@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -319,17 +320,99 @@ def extract_reviewer_feedback(diagnosis_summary: str) -> Optional[str]:
     return section.strip() or None
 
 
+async def _empty_result() -> str:
+    """Awaitable returning the empty-string result _safe_fetch would produce."""
+    return ""
+
+
+async def resolve_workflow_run_id(
+    run: Run,
+    db: AsyncSession,
+) -> Optional[int]:
+    """
+    Return the GitHub Actions workflow run id whose logs describe this run.
+
+    One-click retry children are synthetic: they re-diagnose a CI failure that
+    already happened, so they carry no workflow run of their own and store
+    ``github_run_id = NULL`` rather than fabricating an id that would squat on
+    the real GitHub id space. Walking ``parent_run_id`` up to the root run
+    recovers the id of the original CI run whose logs must be re-read.
+
+    Returns None only when the run has no id and no reachable ancestor with
+    one, in which case callers must degrade gracefully (skip the log fetch)
+    instead of issuing a request against ``/actions/runs/None/logs``.
+
+    The walk is bounded by a *visited set* rather than a fixed hop count. A
+    fixed count was wrong in both directions: ``parent_run_id`` chains are not
+    depth-limited (retrying a settled retry child is allowed, so the cap on
+    direct children does not bound total depth), so any fixed bound silently
+    dropped the CI logs for a deep chain. ``parent_run_id`` is a self-FK, so a
+    cycle must not spin forever, and the visited set is what guarantees
+    termination — it terminates on any cycle, not just a self-reference.
+    """
+    if run.github_run_id is not None:
+        return run.github_run_id
+
+    seen: set[uuid.UUID] = {run.id}
+    cursor: Optional[Run] = run
+    while cursor is not None:
+        parent_id = cursor.parent_run_id
+        if parent_id is None or parent_id in seen:
+            return None
+        seen.add(parent_id)
+        parent = (
+            await db.scalars(select(Run).where(Run.id == parent_id))
+        ).first()
+        if parent is None:
+            return None
+        if parent.github_run_id is not None:
+            return parent.github_run_id
+        cursor = parent
+    return None
+
+
+async def _resolve_pr_opening_run_id(run: Run, db: AsyncSession) -> Optional[uuid.UUID]:
+    """
+    Return the id of the run whose verified patch is on this run's PR branch.
+
+    A PR is identified by ``(repo_id, pr_number)``, and the run that opened it is
+    the earliest run carrying that pair — a refinement inherits the same
+    ``pr_number`` from the PR it is refining, so "earliest" is what separates
+    the opener from its own descendants. Falls back to ``parent_run_id`` when
+    the PR cannot be attributed (no ``pr_number``, or no other run claims it),
+    which preserves the previous parent-based behaviour for legacy threads.
+    """
+    if run.pr_number is not None:
+        owner = (
+            await db.scalars(
+                select(Run)
+                .where(
+                    Run.repo_id == run.repo_id,
+                    Run.pr_number == run.pr_number,
+                    Run.id != run.id,
+                )
+                .order_by(Run.created_at.asc())
+            )
+        ).first()
+        if owner is not None:
+            return owner.id
+    return run.parent_run_id
+
+
 async def gather_pr_feedback_context(
     run: Run,
     repo: Repo,
     db: AsyncSession,
 ) -> str:
     """
-    Context gatherer for interactive PR feedback loop (run.parent_run_id is set).
+    Context gatherer for interactive PR feedback loop (an interactive PR
+    refinement child — see orchestrator.is_pr_refinement).
 
     Fetches:
       1. Reviewer comment body and preceding PR comment thread via GitHub Issues API.
-      2. Previous verified attempt patch and strategy notes from parent run's Attempt.
+      2. Previous verified attempt patch and strategy notes from the run that
+         opened this PR (see _resolve_pr_opening_run_id — not necessarily
+         run.parent_run_id, which points at the thread root).
       3. File diff of the existing PR branch.
     Redacts all secrets via _redact_secrets() before assembling into diagnosis_summary.
     """
@@ -347,20 +430,35 @@ async def gather_pr_feedback_context(
     except Exception:
         token = None
 
-    # 1. Fetch parent run's attempt
+    # 1. Fetch the prior verified attempt.
+    #
+    # The prior attempt must come from the run that actually opened this PR,
+    # which is NOT always `run.parent_run_id`. The webhook links a refinement to
+    # the thread *root* on purpose (that is where the 5-child cap is counted),
+    # but a PR opened by a one-click retry child is owned by that child — the
+    # root may have ended on the exhaust path with no passing attempt at all.
+    # Reading the root's attempts would hand the fix generator a patch that is
+    # not on `haunter/fix-*`, and committing a refinement generated from it can
+    # conflict with, or revert, the fix the retry child already verified.
+    #
+    # Resolving by (repo_id, pr_number) — the key that identifies the PR —
+    # and taking the earliest match is correct for both shapes: on a legacy
+    # refinement the opener is also the parent, so this is unchanged; on a
+    # retry-produced PR the opener is the retry child.
     prior_patch = ""
     prior_strategy_notes = ""
     prior_attempt_num = 1
-    if run.parent_run_id:
+    prior_source_id = await _resolve_pr_opening_run_id(run, db)
+    if prior_source_id is not None:
         stmt = (
             select(Attempt)
-            .where(Attempt.run_id == run.parent_run_id)
+            .where(Attempt.run_id == prior_source_id)
             .order_by(Attempt.attempt_number.desc())
         )
-        parent_attempts = (await db.scalars(stmt)).all()
+        source_attempts = (await db.scalars(stmt)).all()
         prior_attempt = next(
-            (a for a in parent_attempts if a.verification_status == "pass"),
-            parent_attempts[0] if parent_attempts else None,
+            (a for a in source_attempts if a.verification_status == "pass"),
+            source_attempts[0] if source_attempts else None,
         )
         if prior_attempt:
             prior_patch = prior_attempt.patch_text or ""
@@ -614,29 +712,43 @@ async def gather_context(
 
     Raw inputs are not stored anywhere — only the distilled summary propagates.
     """
-    if run.parent_run_id is not None:
+    # Route PR-feedback children to the reviewer-feedback gatherer. One-click
+    # retry children are NOT refinement children — they re-diagnose the same CI
+    # failure, so they take the CI-log path below. Imported lazily to avoid a
+    # module-level cycle (app.orchestrator imports this module).
+    from app.orchestrator import is_pr_refinement
+
+    if is_pr_refinement(run):
         return await gather_pr_feedback_context(run=run, repo=repo, db=db)
 
     owner = repo.owner
     name = repo.name
     sha = run.head_sha
-    # Autonomous runs only. A conversational follow-up returns above via
-    # `gather_pr_feedback_context`; `github_run_id` is NULL for those, so
-    # passing it on would fetch logs for a workflow run that does not exist.
-    github_run_id = run.github_run_id
-    if github_run_id is None:
-        raise ValueError(
-            f"run {run.id} has no github_run_id; it is not an autonomous workflow_run"
-        )
+    # Autonomous runs only — a conversational follow-up returned above via
+    # `gather_pr_feedback_context` and has no workflow run of its own. A
+    # one-click retry child is also NULL here by design, so the id is recovered
+    # by walking parent_run_id up to the root rather than read straight off the
+    # row. `None` is still tolerated (the log fetch is skipped below) for a
+    # thread whose whole ancestry predates the nullable column.
+    github_run_id = await resolve_workflow_run_id(run, db)
 
     # -------------------------------------------------------------------------
     # 1. Concurrent GitHub fetches — all 3 in one gather, each timeout-guarded
+    #
+    # The log fetch is skipped (not attempted with a null id) when no workflow
+    # run id is resolvable — a retry child whose entire ancestry predates the
+    # nullable column would otherwise request /actions/runs/None/logs.
     # -------------------------------------------------------------------------
-    logs_raw, diff_raw, meta_raw = await asyncio.gather(
+    logs_coroutine = (
         _safe_fetch(
             gh.fetch_workflow_run_logs(owner=owner, repo=name, run_id=github_run_id),
             label="logs",
-        ),
+        )
+        if github_run_id is not None
+        else _empty_result()
+    )
+    logs_raw, diff_raw, meta_raw = await asyncio.gather(
+        logs_coroutine,
         _safe_fetch(
             gh.fetch_diff(owner=owner, repo=name, sha=sha),
             label="diff",
