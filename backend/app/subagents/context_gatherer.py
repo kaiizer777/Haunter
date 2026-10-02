@@ -399,6 +399,11 @@ async def gather_pr_feedback_context(
     comments_list = comments_raw if isinstance(comments_raw, list) else []
     formatted_comments: list[str] = []
     latest_reviewer_instruction = ""
+    # The exact comment that asked for this run, when it is present in the
+    # issue thread. Preferred over "the last @haunter mention" because a
+    # thread can hold several, and acting on a stale one would answer the
+    # wrong request.
+    triggering_instruction = ""
 
     for item in comments_list:
         if not isinstance(item, dict):
@@ -413,10 +418,16 @@ async def gather_pr_feedback_context(
         formatted_comments.append(
             f"Comment by @{author} ({assoc}):\n{c_body.strip()}\n"
         )
+        if run.trigger_comment_id is not None and (
+            item.get("id") == run.trigger_comment_id
+        ):
+            triggering_instruction = str(c_body).strip()
         if "@haunter" in c_body.lower():
             latest_reviewer_instruction = c_body.strip()
 
-    if not latest_reviewer_instruction and formatted_comments:
+    if triggering_instruction:
+        latest_reviewer_instruction = triggering_instruction
+    elif not latest_reviewer_instruction and formatted_comments:
         latest_reviewer_instruction = formatted_comments[-1]
 
     # 3b. Review thread context (diff-anchored). The triggering follow-up
@@ -428,6 +439,7 @@ async def gather_pr_feedback_context(
     )
     formatted_review_thread: list[str] = []
     thread_instruction = ""
+    thread_trigger_instruction = ""
     for item in review_thread_list[-20:]:
         if not isinstance(item, dict):
             continue
@@ -444,11 +456,17 @@ async def gather_pr_feedback_context(
         formatted_review_thread.append(
             f"Comment by @{author}{anchor}:\n{snippet}\n"
         )
+        if run.trigger_comment_id is not None and (
+            item.get("id") == run.trigger_comment_id
+        ):
+            thread_trigger_instruction = snippet
         if "@haunter" in c_body.lower():
-            thread_instruction = c_body.strip()[:2000]
+            thread_instruction = snippet
 
-    if thread_instruction:
-        latest_reviewer_instruction = thread_instruction
+    if thread_trigger_instruction or thread_instruction:
+        latest_reviewer_instruction = (
+            thread_trigger_instruction or thread_instruction
+        )
 
     # 4. Redact secrets across all assembled sections
     clean_instruction = _redact_secrets(latest_reviewer_instruction)

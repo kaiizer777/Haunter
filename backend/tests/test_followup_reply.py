@@ -21,6 +21,8 @@ Covers:
       successful run to `error`.
  10. `fetch_pr_review_comments` paginates, stays bounded, and refuses to
       follow an off-host `Link`.
+ 11. The triggering comment id selects the instruction, so a thread holding
+      several `@haunter` comments still acts on the one that asked.
 
 The end-to-end cases drive the real orchestrator against the in-process store
 from `tests/fake_audit_db.py`, so they are hermetic: no network, no
@@ -600,6 +602,63 @@ async def test_review_thread_instruction_wins_over_the_issue_thread(
     # The review thread is also reported in full, with its diff anchor.
     assert "## Review Thread Context" in summary
     assert "calc.py:12" in summary
+
+
+@pytest.mark.asyncio
+async def test_triggering_comment_is_selected_over_the_last_mention(
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """The instruction used must be the one that asked, not the newest mention.
+
+    A thread can carry several `@haunter` comments. Answering the newest one
+    would silently act on a different request than the Run was created for,
+    so the triggering comment id wins over positional guessing.
+    """
+    repo, child = await seed_followup(
+        fake_audit_db,
+        fake_audit_user_factory,
+        conclusion="feedback",
+        comment_id=5550001,
+    )
+    issue_thread = [
+        {
+            "id": 5550001,
+            "user": {"login": "reviewer"},
+            "author_association": "MEMBER",
+            "body": "@haunter handle the AUTH_TOKEN retry loop",
+        },
+        {
+            "id": 5550009,
+            "user": {"login": "other"},
+            "author_association": "MEMBER",
+            "body": "@haunter actually please rename the module instead",
+        },
+    ]
+
+    with (
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=issue_thread,
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.github_client.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="diff --git a/auth.py b/auth.py",
+        ),
+    ):
+        summary = await gather_context(run=child, repo=repo, db=fake_audit_db)
+
+    instruction = extract_reviewer_feedback(summary)
+    assert instruction is not None
+    assert "AUTH_TOKEN retry loop" in instruction
+    assert "rename the module" not in instruction
 
 
 @pytest.mark.asyncio

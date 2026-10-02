@@ -22,7 +22,9 @@ None input"``) keeps the pre-router contract and is treated as ``fix``.
 A mention whose command word belongs to another subsystem (``audit``, handled
 by the read-only auditor) is *not* a fix request: the fix pipeline must stay a
 strict no-op for it, because the auditor's zero-mutation invariant forbids
-committing a patch nobody asked for.
+committing a patch nobody asked for. Audit intent is matched anywhere in the
+body for the same reason — otherwise ``@haunter please audit ...`` would queue
+a read-only audit *and* a committing refinement.
 
 The router is total and pure — no I/O, no DB, no exceptions — so it is
 unit-testable hermetically and can never fail a webhook delivery.
@@ -56,6 +58,13 @@ FOLLOWUP_COMMANDS: frozenset[str] = frozenset(_COMMAND_ALIASES.values())
 #: with one of these is never a fix request.
 RESERVED_COMMANDS: frozenset[str] = frozenset({"audit"})
 
+#: Audit intent anywhere in the body. ``audit_pipeline`` reads prose such as
+#: ``@haunter please audit why the job hangs`` as a manual audit request, so
+#: the fix router must agree: otherwise one comment queues a read-only audit
+#: *and* a committing fix Run. Checked only after an explicit fix command has
+#: matched, so ``@haunter fix the audit log`` still gets its fix run.
+_AUDIT_INTENT_RE: re.Pattern[str] = re.compile(r"\baudit\b", re.IGNORECASE)
+
 #: Conclusion stored on child ``Run`` rows for verify-only follow-ups.
 #: ``fix``/``address`` runs keep the historical ``"feedback"`` value.
 TEST_FIX_CONCLUSION: str = "test-fix"
@@ -84,8 +93,9 @@ def parse_followup_command(body: Union[str, None]) -> Optional[FollowupCommand]:
     """Classify a comment body as a Haunter fix request.
 
     Returns ``None`` — meaning "the fix pipeline must not act on this" — when
-    the body carries no ``@haunter`` mention at all, or when the mention is
-    addressed to a command owned by another subsystem (``@haunter audit``).
+    the body carries no ``@haunter`` mention at all, or when the mention asks
+    for an audit (whether as the first word or in prose such as ``@haunter
+    please audit ...``, which ``audit_pipeline`` also reads as a manual audit).
     Never raises, whatever the input.
     """
     if not isinstance(body, str) or _MENTION_RE.search(body) is None:
@@ -102,6 +112,12 @@ def parse_followup_command(body: Union[str, None]) -> Optional[FollowupCommand]:
                 command=command,
                 test_only=command in TEST_ONLY_COMMANDS,
             )
+
+    # Audit intent belongs to the read-only auditor even when prose precedes
+    # the word, so it never falls through to the `fix` default below. An
+    # explicit fix/address/test-fix command has already returned above.
+    if _AUDIT_INTENT_RE.search(body) is not None:
+        return None
 
     # No command word (or an unknown one that is not reserved): the mention
     # itself is the request. This is the pre-router behaviour and is what

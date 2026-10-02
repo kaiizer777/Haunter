@@ -91,20 +91,24 @@ def test_non_string_body_is_no_op() -> None:
     assert parse_followup_command(["@haunter fix"]) is None  # type: ignore[arg-type]
 
 
-def test_reserved_command_word_does_not_swallow_a_later_fix_ask() -> None:
-    """`audit` only reserves the first word after the mention.
+def test_audit_intent_never_falls_through_to_fix() -> None:
+    """`audit_pipeline` reads prose audit requests as manual audits.
 
-    A reviewer asking to fix audit-log parsing must still get a fix run, and
-    a request that mentions the auditor mid-sentence must not be hijacked.
+    If the fix router disagreed, one comment would queue a read-only audit
+    *and* a committing refinement. An explicit fix command still wins, so a
+    reviewer asking to fix audit-log parsing must still get a fix run.
     """
-    parsed = parse_followup_command("@haunter fix the audit log rotation")
-    assert parsed is not None
-    assert parsed.command == "fix"
+    fixed = parse_followup_command("@haunter fix the audit log rotation")
+    assert fixed is not None
+    assert fixed.command == "fix"
 
-    prose = parse_followup_command("@haunter please audit why the job hangs")
-    assert prose is not None
-    assert prose.command == "fix"
-    assert prose.test_only is False
+    for body in (
+        "@haunter please audit why the job hangs",
+        "@haunter could you take an audit of this PR",
+        "@haunter AUDIT the retry logic",
+        "@haunter audit",
+    ):
+        assert parse_followup_command(body) is None, body
 
 
 def test_parsed_commands_are_declared_in_the_public_sets() -> None:
