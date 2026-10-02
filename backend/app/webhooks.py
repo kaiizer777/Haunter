@@ -24,9 +24,14 @@ dispatched through a durable, independent audit queue (never git push / PR creat
    repository also append a webhook_deliveries row (see
    _record_webhook_delivery), and an authenticated owner of the affected repo can
    re-drive a stored delivery through this same handler (see
-   replay_webhook_delivery). The log-only early rejections above it do not write
-   rows — there is no repo to attribute them to, since a delivery for an
-   unregistered repository belongs to no tenant.
+   replay_webhook_delivery). The log-only early rejections above it write no rows
+   — there is no repo to attribute them to, since a delivery for an unregistered
+   repository belongs to no tenant. The one exception is an AMBIGUOUS
+   registration: `repos` is unique per (user_id, owner, name), so several tenants
+   may register the same owner/name, and such a delivery is refused rather than
+   guessed at (see _resolve_repo_for_delivery). That refusal is recorded with
+   repo_id=NULL, which keeps it visible to an operator without asserting a
+   tenancy the delivery does not have — so it appears in no tenant's history.
 """
 
 import base64
@@ -97,6 +102,16 @@ _WEBHOOK_PAYLOAD_MAX_BYTES = 128 * 1024
 # runs.github_run_id / github_delivery_id, audit_jobs delivery fingerprints);
 # this closes the window before those constraints are even consulted.
 _REPLAY_COOLDOWN_SECONDS = 30
+
+# Decision reasons for a delivery that does not resolve to exactly one repos row.
+# Kept as two distinct strings because they are two different operational
+# problems — "nobody registered this repository" versus "several tenants
+# registered it" — and collapsing them into one message is exactly the silent
+# drop this module refuses to perform. The ambiguous case is logged and recorded
+# at warning level; the unregistered case keeps its existing info-level,
+# log-only treatment.
+_REASON_UNREGISTERED = "unregistered repository"
+_REASON_AMBIGUOUS_REGISTRATION = "ambiguous repository registration"
 
 # Set for the duration of one replay_webhook_delivery() call so every
 # _record_webhook_delivery() executed inside the re-driven github_webhook()
@@ -347,7 +362,7 @@ def _owned_repo_ids(user_id: uuid.UUID):
 def _repo_lookup_stmt(
     owner: Any, name: Any, replay_repo_id: Optional[uuid.UUID]
 ):
-    """Resolve the Repo a delivery applies to.
+    """Select the Repo candidates a delivery may apply to.
 
     Live ingestion resolves by owner/name, which is the only repository identity
     GitHub's payload carries. Replay is different: the caller was already
@@ -363,12 +378,92 @@ def _repo_lookup_stmt(
     set by a caller that has already been authorized against that id; it is not
     reachable as a query parameter on the public webhook endpoint.
 
-    A replayed delivery whose repo has since been deleted resolves to None and
-    takes the same "unregistered repository" branch a live delivery would.
+    Returns EVERY match, never a first-match slice: the live branch can match
+    more than one row and _resolve_repo_for_delivery decides what to do with
+    that. A replayed delivery whose repo has since been deleted matches nothing
+    and takes the same "unregistered repository" branch a live delivery would.
     """
     if replay_repo_id is not None:
         return select(Repo).where(Repo.id == replay_repo_id)
     return select(Repo).where(Repo.owner == owner, Repo.name == name)
+
+
+async def _resolve_repo_for_delivery(
+    db: AsyncSession,
+    *,
+    event: Any,
+    delivery_id: Any,
+    owner: Any,
+    name: Any,
+    replay_repo_id: Optional[uuid.UUID],
+) -> tuple[Optional[Repo], Optional[str]]:
+    """Resolve the one Repo a delivery applies to, or the reason it cannot.
+
+    Returns `(repo, None)` only when EXACTLY ONE registration matches. Every
+    other outcome returns `(None, reason)` where `reason` is
+    `_REASON_UNREGISTERED` or `_REASON_AMBIGUOUS_REGISTRATION` — exactly one of
+    the two tuple members is ever set.
+
+    Why "exactly one" and not "the first one": `repos` enforces
+    `uq_repo_user_owner_name`, so uniqueness is per (user_id, owner, name) and two
+    tenants MAY register the same owner/name. That is a supported configuration,
+    not a race to be closed — see add_repo, models.Repo, and the migration whose
+    downgrade restores the older global constraint. A GitHub payload carries no
+    tenant, so once more than one row matches there is no correct row to choose,
+    and the row that came back is what selects repo settings, reads the
+    per-repo auditor kill switch and model config, queues the run/review/audit,
+    and owns the persisted delivery row. `select()` without ORDER BY has no
+    defined row order, so even the "winner" is not stable across deliveries and
+    a row update can change it. Picking one is therefore a coin flip that
+    silently drives one tenant's delivery through another tenant's pipeline and
+    leaves the loser with nothing and no error anywhere. Refusing dispatches
+    nothing and records why, which is the only outcome that cannot mis-route.
+
+    Both outcomes are logged here rather than at each call site so the four
+    live branches cannot drift apart. The unregistered case keeps its existing
+    info-level, log-only behaviour — there is no repo to attribute a row to, and
+    recording every unregistered delivery would grow the health table with rows
+    no tenant can read. The two rejection reasons are deliberately distinct
+    strings, so an operator reading the log can tell "nobody registered this"
+    from "several tenants did" without inspecting the database.
+
+    A replay is pinned to one authorized `repos.id` and therefore matches at most
+    one row: the ambiguous branch is unreachable through replay, which is what
+    keeps its response body out of reach of every tenant-facing surface.
+    """
+    stmt = _repo_lookup_stmt(owner, name, replay_repo_id)
+    matches = (await db.execute(stmt)).scalars().all()
+    if len(matches) == 1:
+        return matches[0], None
+    if not matches:
+        logger.info(
+            "Ignored webhook (delivery_id=%s): repository %s is not registered in Haunter",
+            delivery_id,
+            _log_repo(owner, name),
+        )
+        return None, _REASON_UNREGISTERED
+
+    # Ambiguous. Refuse, and deliberately attribute the diagnostic to NO repo:
+    # `repo_id` is the tenant boundary the delivery listing and the replay route
+    # both scope on, so a row written against any one of the matching rows would
+    # assert a tenancy this delivery does not have and would put this decision
+    # inside that tenant's health history. Same reason the replay buffer is not
+    # retained: the row describes work that was never performed and there is no
+    # repo to re-drive it onto.
+    #
+    # The response body reaches the HMAC-authenticated sender (GitHub), never a
+    # tenant: the one tenant-reachable route that returns a decision body is
+    # replay, which pins `repos.id` and therefore matches at most one row.
+    await _record_webhook_delivery(
+        db,
+        event=event,
+        delivery_id=delivery_id,
+        status_value="ignored",
+        reason=_REASON_AMBIGUOUS_REGISTRATION,
+        repo=_log_repo(owner, name),
+        level="warning",
+    )
+    return None, _REASON_AMBIGUOUS_REGISTRATION
 
 
 @router.get("/deliveries", response_model=WebhookDeliveryListOut)
@@ -577,10 +672,12 @@ async def replay_webhook_delivery(
         _replay_repo_id_var.reset(repo_token)
         _replay_of_var.reset(token)
 
-    # Scoped to the caller for the same reason the row lookup above is: github_webhook()
-    # resolves Repo by owner/name alone, so a re-run can legitimately land on a
-    # different tenant's registration of the same owner/name. Without this scope
-    # the reported replay_id could name a row the caller cannot see.
+    # Scoped to the caller. A re-run is pinned to the authorized repos.id, so the
+    # handler resolves to that row or to nothing, and any row it appends carries
+    # either that repo_id or none — but this is the tenant boundary of the
+    # endpoint, not a property of one code path: keeping the scope means the
+    # reported replay_id can never name a row the caller cannot see, whatever the
+    # handler decides inside the re-run.
     replay_row = (
         await db.execute(
             select(WebhookDelivery)
@@ -812,17 +909,16 @@ async def github_webhook(
         owner = payload.repository.owner.login
         repo_name = payload.repository.name
 
-        stmt = _repo_lookup_stmt(owner, repo_name, replay_repo_id)
-        result = await db.execute(stmt)
-        repo = result.scalars().first()
-
-        if not repo:
-            logger.info(
-                "Ignored webhook (delivery_id=%s): repository %s is not registered in Haunter",
-                x_github_delivery,
-                _log_repo(owner, repo_name),
-            )
-            return {"status": "ignored", "reason": "unregistered repository"}
+        repo, rejection_reason = await _resolve_repo_for_delivery(
+            db,
+            event="workflow_run",
+            delivery_id=x_github_delivery,
+            owner=owner,
+            name=repo_name,
+            replay_repo_id=replay_repo_id,
+        )
+        if repo is None:
+            return {"status": "ignored", "reason": rejection_reason}
 
         repo_settings = await get_repo_settings(db, repo.id)
 
@@ -1028,17 +1124,16 @@ async def github_webhook(
             )
             return {"status": "ignored", "reason": "invalid repository payload"}
 
-        stmt = _repo_lookup_stmt(owner, repo_name, replay_repo_id)
-        result = await db.execute(stmt)
-        repo = result.scalars().first()
-
-        if not repo:
-            logger.info(
-                "Ignored webhook (delivery_id=%s): repository %s is not registered in Haunter",
-                x_github_delivery,
-                _log_repo(owner, repo_name),
-            )
-            return {"status": "ignored", "reason": "unregistered repository"}
+        repo, rejection_reason = await _resolve_repo_for_delivery(
+            db,
+            event="pull_request",
+            delivery_id=x_github_delivery,
+            owner=owner,
+            name=repo_name,
+            replay_repo_id=replay_repo_id,
+        )
+        if repo is None:
+            return {"status": "ignored", "reason": rejection_reason}
 
         repo_settings = await get_repo_settings(db, repo.id)
 
@@ -1320,17 +1415,16 @@ async def github_webhook(
             )
             return {"status": "ignored", "reason": "invalid repository payload"}
 
-        stmt = _repo_lookup_stmt(owner, repo_name, replay_repo_id)
-        result = await db.execute(stmt)
-        repo = result.scalars().first()
-
-        if not repo:
-            logger.info(
-                "Ignored webhook (delivery_id=%s): repository %s is not registered in Haunter",
-                x_github_delivery,
-                _log_repo(owner, repo_name),
-            )
-            return {"status": "ignored", "reason": "unregistered repository"}
+        repo, rejection_reason = await _resolve_repo_for_delivery(
+            db,
+            event="push",
+            delivery_id=x_github_delivery,
+            owner=owner,
+            name=repo_name,
+            replay_repo_id=replay_repo_id,
+        )
+        if repo is None:
+            return {"status": "ignored", "reason": rejection_reason}
 
         repo_settings = await get_repo_settings(db, repo.id)
         branch_decision = feature_enforcement.is_branch_allowed(
@@ -1517,16 +1611,16 @@ async def github_webhook(
         return {"status": "ignored", "reason": "unauthorized commenter"}
 
     # 5. Check repository registration in DB
-    stmt = _repo_lookup_stmt(repo_owner, repo_name, replay_repo_id)
-    result = await db.execute(stmt)
-    repo = result.scalars().first()
-    if not repo:
-        logger.info(
-            "Ignored webhook (delivery_id=%s): repository %s is not registered",
-            x_github_delivery,
-            _log_repo(repo_owner, repo_name),
-        )
-        return {"status": "ignored", "reason": "unregistered repository"}
+    repo, rejection_reason = await _resolve_repo_for_delivery(
+        db,
+        event=x_github_event,
+        delivery_id=x_github_delivery,
+        owner=repo_owner,
+        name=repo_name,
+        replay_repo_id=replay_repo_id,
+    )
+    if repo is None:
+        return {"status": "ignored", "reason": rejection_reason}
 
     # 5b. Phase 5.1 Auditor Mode manual-mention filter (after HMAC
     # verification, mention gate, and collaborator check above).
