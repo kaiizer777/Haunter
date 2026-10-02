@@ -13,6 +13,7 @@ import {
   Cpu,
   Zap,
   Settings,
+  Webhook,
 } from "lucide-react";
 import { api, ModelConfigOut } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -100,6 +101,11 @@ export function Sidebar() {
       name: "Repositories",
       href: "/repos",
       icon: GitBranch,
+    },
+    {
+      name: "Webhook Health",
+      href: "/webhooks",
+      icon: Webhook,
     },
     {
       name: "Settings",

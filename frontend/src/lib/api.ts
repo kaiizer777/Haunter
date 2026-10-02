@@ -383,6 +383,44 @@ export interface RepoSettingsUpdate {
   audit_triggers?: Record<string, boolean>;
 }
 
+// ---------------------------------------------------------------------------
+// Webhook health (Feature 8 -- GET /webhooks/deliveries + replay)
+// ---------------------------------------------------------------------------
+
+export interface WebhookDeliveryOut {
+  id: string;
+  event: string;
+  delivery_id: string;
+  status: string;
+  reason: string | null;
+  repo: string | null;
+  repo_id: string | null;
+  created_at: string;
+  /** False when the verified payload was too large to retain for replay. */
+  replayable: boolean;
+  /** Set when this row was appended by replaying another delivery. */
+  replay_of: string | null;
+}
+
+export interface WebhookDeliveryListOut {
+  deliveries: WebhookDeliveryOut[];
+  total: number;
+}
+
+/**
+ * `decision` is the response body the live ingestion handler returned for the
+ * replayed delivery, so the UI reports what was actually decided instead of a
+ * generic success.
+ */
+export interface WebhookReplayResultOut {
+  original_id: string;
+  replay_id: string | null;
+  delivery_id: string;
+  event: string;
+  decision: Record<string, unknown>;
+  replayed_at: string;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -743,5 +781,26 @@ export const api = {
     api.patch<RepoSettingsOut>(`/repos/${repoId}/settings`, data),
   applyRepoPreset: (repoId: string, presetName: string) =>
     api.post<RepoSettingsOut>(`/repos/${repoId}/settings/preset/${presetName}`, {}),
+
+  // Webhook health endpoints (Feature 8)
+  getWebhookDeliveries: (params?: {
+    event?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.event) query.append("event", params.event);
+    if (params?.limit !== undefined) query.append("limit", params.limit.toString());
+    if (params?.offset !== undefined) query.append("offset", params.offset.toString());
+    const qs = query.toString();
+    return api.get<WebhookDeliveryListOut>(`/webhooks/deliveries${qs ? `?${qs}` : ""}`);
+  },
+
+  replayWebhookDelivery: (deliveryId: string) =>
+    api.post<WebhookReplayResultOut>(
+      `/webhooks/deliveries/${deliveryId}/replay`,
+      {},
+      { silent: true }
+    ),
 };
 
