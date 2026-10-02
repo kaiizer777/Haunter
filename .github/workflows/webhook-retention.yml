@@ -1,0 +1,109 @@
+name: Webhook Retention
+
+# Drives the split-window retention sweep for `webhook_deliveries` (issue #36).
+#
+# WHY A CRON, AND WHY IT CALLS THE APP INSTEAD OF THE DATABASE DIRECTLY
+#
+# The backend is Lambda behind a Function URL with authorization_type = "NONE"
+# (infra/aws/lambda.tf) — stateless by construction. There is no resident
+# process to host an interval task: it cannot survive between invocations, and
+# concurrent cold starts would each schedule their own copy. The only two real
+# options are (a) an out-of-band scheduler, or (b) a probabilistic sweep inside
+# a hot request path. (b) was rejected — it puts an unbounded DELETE on the
+# latency of GET /webhooks/deliveries, which is the dashboard's health tab, and
+# its "when did it last run" answer is unknowable. So: GitHub Actions `schedule:`,
+# which the repo already uses for everything else in CI.
+#
+# The workflow holds TWO secrets — the Function URL and AUDIT_SELF_INVOKE_SECRET
+# — and deliberately does NOT hold DATABASE_URL. Running the SQL directly from
+# CI would mean giving a third-party runner full read/write credentials on every
+# table in production; the retention token can only trigger one idempotent,
+# domain-separated operation.
+#
+# Required repository secrets:
+#   HAUNTER_API_URL            - the Lambda Function URL (infra output `lambda_function_url`)
+#   AUDIT_SELF_INVOKE_SECRET   - same value the backend is configured with
+#
+# GitHub disables scheduled workflows on repos with no activity for 60 days and
+# queues them at the top of the hour, so this is a best-effort daily sweep, not an
+# SLA. That is acceptable: the sweeper is idempotent and a missed day only means
+# the payload window slips by 24h. It is ALSO the reason the payload window is
+# enforced by a sweep rather than by a per-request check — a missed sweep degrades
+# cost, never correctness.
+
+on:
+  schedule:
+    # 03:17 UTC daily. Off the hour on purpose: every repo's cron that lands on
+    # :00 is queued into the same burst, and GitHub's scheduler is explicitly
+    # best-effort under load.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: webhook-retention
+  # Never cancel a sweep mid-flight: a cancelled run can leave a batch uncommitted.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: Sweep expired webhook delivery payloads
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      HAUNTER_API_URL: ${{ secrets.HAUNTER_API_URL }}
+      AUDIT_SELF_INVOKE_SECRET: ${{ secrets.AUDIT_SELF_INVOKE_SECRET }}
+      # Mirrors RETENTION_SWEEP_IDENTIFIER in backend/app/services/webhook_retention.py.
+      # If that constant changes, this string must change with it — the HMAC is
+      # computed over "retention:<identifier>" (see backend/app/self_invocation.py).
+      RETENTION_SWEEP_IDENTIFIER: webhook-delivery-retention
+    steps:
+      - name: Mint the retention token and POST it to the sweeper
+        env:
+          PYTHON: /usr/bin/python3
+        run: |
+          set -euo pipefail
+
+          if [ -z "${HAUNTER_API_URL}" ] || [ -z "${AUDIT_SELF_INVOKE_SECRET}" ]; then
+            echo "HAUNTER_API_URL and/or AUDIT_SELF_INVOKE_SECRET is not set on this repository." >&2
+            exit 1
+          fi
+
+          # Same construction the verifier uses: HMAC-SHA256(secret,
+          # "<kind>:<identifier>"), hex. `kind` is hardcoded to "retention" to
+          # match KIND_RETENTION in backend/app/self_invocation.py — the token is
+          # domain-separated, so a token minted for the audit/pipeline kinds does
+          # not authenticate here.
+          #
+          # The message is piped in on stdin rather than passed as argv so the
+          # secret never reaches the process table, and the Python source is a
+          # single -c argument so there is no heredoc nested inside a command
+          # substitution (where the YAML block-scalar indent, not the shell,
+          # decides whether `PY` lands in column 0).
+          TOKEN="$(printf '%s' "retention:${RETENTION_SWEEP_IDENTIFIER}" \
+            | "$PYTHON" -c '
+          import hashlib, hmac, os, sys
+          print(hmac.new(
+              os.environ["AUDIT_SELF_INVOKE_SECRET"].encode("utf-8"),
+              sys.stdin.buffer.read(),
+              hashlib.sha256,
+          ).hexdigest())
+          ')"
+
+          # Never echo the token: -v would print the request headers.
+          HTTP_STATUS="$(curl --silent --show-error --output /tmp/sweep.json \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header "X-Haunter-Retention-Token: ${TOKEN}" \
+            "${HAUNTER_API_URL%/}/webhooks/deliveries/retention-sweep")"
+
+          echo "HTTP ${HTTP_STATUS}"
+          cat /tmp/sweep.json
+          echo
+
+          case "${HTTP_STATUS}" in
+            2*) exit 0 ;;
+            *) echo "retention sweep failed" >&2; exit 1 ;;
+          esac

@@ -35,7 +35,7 @@ async def test_alembic_head_and_migration_check():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"Expected exactly 1 migration head, found {heads}"
-    assert heads[0] == "a5c6d7e8f9b0"
+    assert heads[0] == "d5e6f7a8b9c0"
     assert script.get_revision("a4b7c9d2e6f1").down_revision == "f2a9c4e7b1d3"
     assert script.get_revision("b6d8f0a2c4e6").down_revision == "a4b7c9d2e6f1"
     assert script.get_revision("c7a1b2c3d4e5").down_revision == "b6d8f0a2c4e6"
@@ -47,6 +47,7 @@ async def test_alembic_head_and_migration_check():
     assert script.get_revision("e8f9a0b1c2d3").down_revision == "f4a5b6c7d8e9"
     assert script.get_revision("b7c8d9e0f1a2").down_revision == "e8f9a0b1c2d3"
     assert script.get_revision("a5c6d7e8f9b0").down_revision == "b7c8d9e0f1a2"
+    assert script.get_revision("d5e6f7a8b9c0").down_revision == "a5c6d7e8f9b0"
 
 
 def test_to_asyncpg_url_variants():

@@ -820,4 +820,19 @@ class WebhookDelivery(Base):
         # uses; the single-column repo_id index above still serves FK cascades.
         Index("ix_webhook_deliveries_repo_created", "repo_id", "created_at"),
         Index("ix_webhook_deliveries_replay_of", "replay_of"),
+        # DB-level half of the replay-buffer cap. The application already refuses
+        # to encode a body over _WEBHOOK_PAYLOAD_MAX_BYTES (128 KiB -> 174,764
+        # base64 chars), but that guarantee lived in exactly one Python `if`;
+        # without this constraint a future refactor of _encode_replay_buffer
+        # could write an arbitrarily large body into an unbounded Text column and
+        # Postgres would accept up to ~1 GB. Mirrors migration d5e6f7a8b9c0.
+        #
+        # octet_length, not char_length: the bound is on BYTES stored, which is
+        # what the storage cost is. The explicit `payload IS NULL` arm is
+        # redundant — a CHECK passes on NULL — and is kept so the allowance for
+        # swept/oversized rows is legible at the point the rule is declared.
+        CheckConstraint(
+            "payload IS NULL OR octet_length(payload) <= 262144",
+            name="ck_webhook_deliveries_payload_octet_length",
+        ),
     )
