@@ -33,6 +33,7 @@ from app.config import settings
 from app.models import Attempt, Repo, Run, User
 from app.orchestrator import is_pr_refinement
 from app.routers.traces import _MAX_RUN_CHILDREN, build_retry_child
+from app.services.followup_commands import FEEDBACK_CONCLUSION, TEST_FIX_CONCLUSION
 from app.subagents.context_gatherer import resolve_workflow_run_id
 from tests.conftest import truncate_all
 from tests.test_pr_feedback import make_issue_comment_payload, sign_payload
@@ -805,15 +806,17 @@ def test_build_retry_child_resets_every_pipeline_owned_field():
 
 @pytest.mark.parametrize(
     "source_conclusion",
-    ["flaky_test", "feedback"],
+    ["flaky_test", FEEDBACK_CONCLUSION, TEST_FIX_CONCLUSION],
 )
 def test_build_retry_child_drops_internal_conclusion(source_conclusion: str):
     """A retry child never inherits a pipeline-internal conclusion.
 
-    `Run.conclusion` is overwritten in place with Haunter's own classification
-    ("flaky_test" on the quarantine path, "feedback" on PR-refinement
-    children). Copying that onto a brand-new pending run would render a stale
-    verdict badge on a diagnosis that has not started yet.
+    `Run.conclusion` is overwritten in place with Haunter's own classification:
+    "flaky_test" on the quarantine path, and FEEDBACK_CONCLUSION /
+    TEST_FIX_CONCLUSION on conversational follow-up children. Copying one of
+    those onto a brand-new pending run would render a stale verdict badge on a
+    diagnosis that has not started yet. The three values are read from their
+    defining modules so a rename upstream cannot silently leave one behind.
     """
     source = Run(
         id=uuid.uuid4(),

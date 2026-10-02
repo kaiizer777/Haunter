@@ -52,8 +52,8 @@ from app.failure_signature import (
     normalize_failure_signature,
 )
 from app.models import Attempt, Repo, Run, RunStep, User
-from app.orchestrator import _TERMINAL_STATUSES
 from app.schemas import BatchDeleteRunsRequest, BatchDeleteRunsResponse, RunOut
+from app.services.followup_commands import FEEDBACK_CONCLUSION, TEST_FIX_CONCLUSION
 from app.traces.classify import classify_failure
 
 logger = logging.getLogger(__name__)
@@ -303,7 +303,12 @@ _MAX_RUN_CHILDREN = 5
 # classification, overwriting the GitHub conclusion the run was created with.
 # A retry child must not inherit one of these: it is a brand new CI diagnosis,
 # not a continuation of the flaky quarantine or the PR feedback loop.
-_INTERNAL_CONCLUSIONS: frozenset[str] = frozenset({"flaky_test", "feedback"})
+#   * "flaky_test"  — written by app/orchestrator.py on the quarantine path
+#   * FEEDBACK_CONCLUSION / TEST_FIX_CONCLUSION — written on conversational
+#     follow-up children (app/services/followup_commands.py)
+_INTERNAL_CONCLUSIONS: frozenset[str] = frozenset(
+    {"flaky_test", FEEDBACK_CONCLUSION, TEST_FIX_CONCLUSION}
+)
 
 # The GitHub conclusion every Haunter run is created with. The webhook filter
 # only admits `conclusion == "failure"` (app/webhooks.py), so this is the only
@@ -336,6 +341,8 @@ def build_retry_child(source: Run) -> Run:
 
     PR coordinates are cleared so the child opens a fresh PR through the
     normal PR-Writer path rather than committing onto the source run's branch.
+    A tracking issue filed on the source run's exhaust path is not carried over
+    either — it describes that run's attempts, not this child's.
     """
     return Run(
         repo_id=source.repo_id,
@@ -410,6 +417,10 @@ async def retry_run(
     in-flight transitions on the source row. Terminality is read from the
     orchestrator's own ``_TERMINAL_STATUSES`` rather than restated here, so a
     newly added terminal status cannot silently drift out of the allowlist.
+    That import is function-local because app.orchestrator transitively reaches
+    app.services.repo_settings, which imports back into
+    app.services.feature_enforcement — a cycle that only resolves when some
+    other module loads repo_settings first.
 
     Guards:
       - 404 on non-owned / non-existent run_id (no existence oracle).
@@ -417,6 +428,8 @@ async def retry_run(
       - 409 when a child of this run is still in flight.
       - 429 when the run already has 5 children.
     """
+    from app.orchestrator import _TERMINAL_STATUSES
+
     # SELECT FOR UPDATE on the source row (runs only, not repos) serialises
     # concurrent retries of the same run. Without it two simultaneous requests
     # both read child_count below, both pass the cap, and both insert — the

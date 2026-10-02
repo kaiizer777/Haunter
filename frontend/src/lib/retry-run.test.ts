@@ -3,8 +3,8 @@ import { isRetryableStatus, RETRYABLE_RUN_STATUSES } from "./retry-run";
 
 describe("retry-run (lib/retry-run.ts)", () => {
   it("treats every orchestrator terminal status as retryable", () => {
-    // Mirrors _TERMINAL_STATUSES / _RETRYABLE_STATUSES in app/orchestrator.py
-    // and app/routers/traces.py.
+    // Mirrors _TERMINAL_STATUSES in app/orchestrator.py, which
+    // POST /runs/{id}/retry reads to decide retryability.
     expect([...RETRYABLE_RUN_STATUSES].sort()).toEqual(
       ["completed", "error", "fallback_commented", "flaky_detected", "pr_opened"].sort()
     );
