@@ -20,18 +20,24 @@ Covers:
 """
 
 import asyncio
+import json
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import Attempt, Repo, Run, User
 from app.orchestrator import is_pr_refinement
 from app.routers.traces import _MAX_RUN_CHILDREN, build_retry_child
 from app.subagents.context_gatherer import resolve_workflow_run_id
 from tests.conftest import truncate_all
+from tests.test_pr_feedback import make_issue_comment_payload, sign_payload
+
+TEST_SECRET = settings.github_webhook_secret or "test_webhook_secret_key_12345"
 
 
 # ---------------------------------------------------------------------------
@@ -516,35 +522,67 @@ async def test_trace_exposes_parent_and_children(db: AsyncSession, make_auth_cli
 
 @pytest.mark.asyncio
 async def test_trace_children_tenant_scoped(db: AsyncSession, make_auth_client):
-    """A child whose repo belongs to another tenant is never surfaced."""
+    """A child or parent belonging to another tenant is never surfaced.
+
+    Two directions are checked, because the two lookups are separate queries
+    with separate WHERE clauses:
+
+      * tenant A viewing its own run must not see tenant B's run sitting in
+        B's repo as one of its `children`, even though parent_run_id points
+        straight at it.
+      * tenant B viewing its own run must not see tenant A's run as its
+        `parent`, even though parent_run_id points straight at it.
+
+    Both would still pass if the `Repo.user_id == current_user.id` filter were
+    dropped from the lineage queries, which is what this asserts against.
+    """
     await truncate_all(db)
-    user, _repo_a = await _seed_user_repo(db, 9510, "lineage_owner")
-    _other, repo_b = await _seed_user_repo(db, 9511, "lineage_other")
+    owner, repo_a = await _seed_user_repo(db, 9510, "lineage_owner")
+    other, repo_b = await _seed_user_repo(db, 9511, "lineage_other")
 
-    foreign_parent = _make_run(repo_b, status="error", github_run_id=555001000)
-    db.add(foreign_parent)
+    # A run in tenant A's repo, whose child row was (corruptly or otherwise)
+    # written into tenant B's repo.
+    run_a = _make_run(repo_a, status="error", github_run_id=555001000)
+    db.add(run_a)
     await db.commit()
-    await db.refresh(foreign_parent)
+    await db.refresh(run_a)
 
-    # A row that points parent_run_id at another tenant's run — exactly the
-    # corrupted-data case the SQL-level tenant filter must survive.
-    hostile_child = Run(
+    cross_tenant_child = Run(
         repo_id=repo_b.id,
-        parent_run_id=foreign_parent.id,
+        parent_run_id=run_a.id,
         is_retry_child=True,
         head_sha="b" * 40,
         head_branch="main",
         status="error",
         conclusion="failure",
     )
-    db.add(hostile_child)
+    db.add(cross_tenant_child)
     await db.commit()
+    await db.refresh(cross_tenant_child)
 
-    async with make_auth_client(user.id) as client:
-        resp = await client.get(f"/runs/{foreign_parent.id}/trace")
+    async with make_auth_client(owner.id) as client_a:
+        a_view = await client_a.get(f"/runs/{run_a.id}/trace")
+    # The child is in another tenant's repo, so it is not a child of this run
+    # as far as tenant A is concerned.
+    assert a_view.status_code == 200
+    assert a_view.json()["children"] == []
 
-    # The parent itself is not visible to this caller at all.
+    async with make_auth_client(other.id) as client_b:
+        b_view = await client_b.get(f"/runs/{cross_tenant_child.id}/trace")
+    # The parent is in another tenant's repo, so no parent summary leaks.
+    assert b_view.status_code == 200
+    assert b_view.json()["parent"] is None
+
+    # Neither tenant may retry the other's run either.
+    mock_adapter = AsyncMock()
+    async with make_auth_client(owner.id) as client_a:
+        with patch(
+            "app.adapters.hosting.get_hosting_adapter",
+            new=AsyncMock(return_value=mock_adapter),
+        ):
+            resp = await client_a.post(f"/runs/{cross_tenant_child.id}/retry")
     assert resp.status_code == 404
+    mock_adapter.schedule_pipeline.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +644,87 @@ async def test_resolve_workflow_run_id_none_without_reachable_ancestor(
     assert await resolve_workflow_run_id(orphan, db) is None
 
 
+@pytest.mark.asyncio
+async def test_resolve_workflow_run_id_terminates_on_self_cycle(db: AsyncSession):
+    """A self-referential parent_run_id must not spin the walk forever.
+
+    parent_run_id is a self-FK, so a corrupted or hand-edited row can point at
+    itself. The walk is depth-bounded and additionally refuses to follow a
+    parent that is the cursor itself, so it returns None rather than looping.
+    """
+    await truncate_all(db)
+    _user, repo = await _seed_user_repo(db, 9518, "resolve_cycle_user")
+
+    looped = Run(
+        repo_id=repo.id,
+        github_run_id=None,
+        head_sha="9" * 40,
+        head_branch="main",
+        status="error",
+        conclusion="failure",
+    )
+    db.add(looped)
+    await db.commit()
+    await db.refresh(looped)
+
+    # Point the run at itself, then re-read so the attribute reflects the row.
+    looped.parent_run_id = looped.id
+    db.add(looped)
+    await db.commit()
+    await db.refresh(looped)
+
+    assert looped.parent_run_id == looped.id
+    assert await resolve_workflow_run_id(looped, db) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_workflow_run_id_stops_at_depth_bound(db: AsyncSession):
+    """The walk gives up at the depth bound instead of chasing an idless chain.
+
+    A chain longer than the bound that holds no workflow run id anywhere
+    returns None — the caller then skips the log fetch rather than requesting
+    /actions/runs/None/logs.
+    """
+    await truncate_all(db)
+    _user, repo = await _seed_user_repo(db, 9519, "resolve_depth_user")
+
+    # root <- a <- b <- c <- d, none of them carrying a workflow run id.
+    root = Run(
+        repo_id=repo.id,
+        github_run_id=None,
+        head_sha="1" * 40,
+        head_branch="main",
+        status="error",
+        conclusion="failure",
+    )
+    db.add(root)
+    await db.commit()
+    await db.refresh(root)
+
+    cursor_id = root.id
+    for _ in range(6):
+        link = Run(
+            repo_id=repo.id,
+            parent_run_id=cursor_id,
+            is_retry_child=True,
+            github_run_id=None,
+            head_sha="1" * 40,
+            head_branch="main",
+            status="error",
+            conclusion="failure",
+        )
+        db.add(link)
+        await db.commit()
+        await db.refresh(link)
+        cursor_id = link.id
+
+    leaf = (await db.execute(select(Run).where(Run.id == cursor_id))).scalar_one()
+    assert await resolve_workflow_run_id(leaf, db) is None
+
+    # max_depth=1 restricts the walk to the immediate parent only.
+    assert await resolve_workflow_run_id(leaf, db, max_depth=1) is None
+
+
 # ---------------------------------------------------------------------------
 # Pure constructor
 # ---------------------------------------------------------------------------
@@ -639,6 +758,122 @@ def test_build_retry_child_is_pure_and_no_io():
     # Source run must not be mutated.
     assert source.status == "pr_opened"
     assert source.pr_number == 3
+
+
+def test_build_retry_child_resets_every_pipeline_owned_field():
+    """No verdict, artefact or PR coordinate may survive into the child.
+
+    Anything the source accumulated — diagnosis, PR, final summary, failure
+    reason, tracking issue — is owned by that run's own pipeline pass and must
+    not be presented as if the fresh child had produced it.
+    """
+    source = Run(
+        id=uuid.uuid4(),
+        repo_id=uuid.uuid4(),
+        github_run_id=1,
+        github_delivery_id="d",
+        head_sha="e" * 40,
+        head_branch="main",
+        status="fallback_commented",
+        conclusion="failure",
+        diagnosis_summary="root cause",
+        pr_url="https://github.com/o/r/pull/1",
+        pr_number=1,
+        pr_branch="haunter/fix-x-1",
+        final_summary="summary",
+        failure_reason="attempts exhausted",
+        fallback_issue_url="https://github.com/o/r/issues/9",
+        fallback_issue_number=9,
+    )
+
+    child = build_retry_child(source)
+
+    for reset in (
+        "diagnosis_summary",
+        "pr_url",
+        "pr_number",
+        "pr_branch",
+        "final_summary",
+        "failure_reason",
+        "fallback_issue_url",
+        "fallback_issue_number",
+        "github_run_id",
+        "github_delivery_id",
+    ):
+        assert getattr(child, reset) is None, f"{reset} leaked into the retry child"
+
+
+@pytest.mark.parametrize(
+    "source_conclusion",
+    ["flaky_test", "feedback"],
+)
+def test_build_retry_child_drops_internal_conclusion(source_conclusion: str):
+    """A retry child never inherits a pipeline-internal conclusion.
+
+    `Run.conclusion` is overwritten in place with Haunter's own classification
+    ("flaky_test" on the quarantine path, "feedback" on PR-refinement
+    children). Copying that onto a brand-new pending run would render a stale
+    verdict badge on a diagnosis that has not started yet.
+    """
+    source = Run(
+        id=uuid.uuid4(),
+        repo_id=uuid.uuid4(),
+        head_sha="f" * 40,
+        head_branch="main",
+        status="flaky_detected",
+        conclusion=source_conclusion,
+    )
+
+    assert build_retry_child(source).conclusion == "failure"
+
+
+def test_build_retry_child_keeps_ci_conclusion():
+    """The GitHub conclusion the source was created with is carried forward."""
+    source = Run(
+        id=uuid.uuid4(),
+        repo_id=uuid.uuid4(),
+        github_run_id=9,
+        head_sha="a" * 40,
+        head_branch="main",
+        status="error",
+        conclusion="failure",
+    )
+
+    assert build_retry_child(source).conclusion == "failure"
+
+
+@pytest.mark.parametrize(
+    ("is_retry_child", "has_parent", "pr_number", "expected"),
+    [
+        # Root run: no parent at all.
+        (False, False, None, False),
+        # Interactive PR refinement: parent + a PR to commit back onto.
+        (False, True, 42, True),
+        # A parent with no PR yet is not a refinement either.
+        (False, True, None, False),
+        # One-click retry of a run that itself opened PR 42: the stale pr_number
+        # must NOT make it a refinement, or the fix lands on the user's branch.
+        (True, True, 42, False),
+        (True, True, None, False),
+    ],
+)
+def test_is_pr_refinement_matrix(
+    is_retry_child: bool, has_parent: bool, pr_number: int | None, expected: bool
+):
+    """parent_run_id alone must never select the PR-refinement path."""
+    run = Run(
+        id=uuid.uuid4(),
+        repo_id=uuid.uuid4(),
+        head_sha="b" * 40,
+        head_branch="main",
+        status="pending",
+        conclusion="failure",
+        is_retry_child=is_retry_child,
+        parent_run_id=uuid.uuid4() if has_parent else None,
+        pr_number=pr_number,
+    )
+
+    assert is_pr_refinement(run) is expected
 
 
 @pytest.mark.asyncio
@@ -729,3 +964,94 @@ async def test_retry_dispatch_failure_does_not_leave_phantom_run(
         ):
             retry_again = await client.post(f"/runs/{source.id}/retry")
     assert retry_again.status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# 12 — composition with the interactive PR-feedback loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pr_feedback_on_a_retry_produced_pr_is_not_dropped(
+    db: AsyncSession, client: httpx.AsyncClient
+):
+    """`@haunter` feedback on a PR opened by a retry child still schedules a run.
+
+    The webhook walks parent_run_id up to the root to enforce the 5-child cap
+    and to read head_sha. The root of this thread ended on the exhaust path,
+    so its pr_branch is still NULL while the retry child owns the live
+    haunter/fix-* branch. Resolving the branch from the root alone would fall
+    back to the user's own `main` and silently ignore the request with
+    "non-haunter branch" — the retry feature would be a dead end the moment a
+    human wanted to iterate on its output.
+    """
+    await truncate_all(db)
+    user, repo = await _seed_user_repo(db, 9520, "retry_feedback_user")
+
+    root = _make_run(
+        repo,
+        status="fallback_commented",
+        github_run_id=555003000,
+        github_delivery_id="delivery-root",
+        head_branch="main",
+        conclusion="failure",
+    )
+    db.add(root)
+    await db.commit()
+    await db.refresh(root)
+
+    # The retry child opened a fresh PR on its own haunter/* branch. The root
+    # still has pr_branch=None — that is the state under test.
+    retry_child = build_retry_child(root)
+    retry_child.status = "pr_opened"
+    retry_child.pr_number = 77
+    retry_child.pr_branch = "haunter/fix-retry-1"
+    retry_child.pr_url = f"https://github.com/{repo.owner}/{repo.name}/pull/77"
+    db.add(retry_child)
+    await db.commit()
+    await db.refresh(retry_child)
+    assert root.pr_branch is None
+
+    payload = make_issue_comment_payload(
+        owner=repo.owner,
+        repo=repo.name,
+        comment_id=990001,
+        comment_body="@haunter also guard the empty-string case",
+        author_association="COLLABORATOR",
+        pr_number=77,
+    )
+    raw_body = json.dumps(payload).encode("utf-8")
+
+    mock_adapter = MagicMock()
+    mock_adapter.schedule_pipeline = AsyncMock()
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter",
+        new=AsyncMock(return_value=mock_adapter),
+    ):
+        resp = await client.post(
+            "/webhooks/github",
+            headers={
+                "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Id": str(user.github_id),
+                "X-GitHub-Delivery": str(uuid.uuid4()),
+                "X-Hub-Signature-256": sign_payload(TEST_SECRET, raw_body),
+            },
+            content=raw_body,
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "queued", body
+
+    # The refinement child hangs off the thread root (where the cap lives) but
+    # commits onto the retry child's PR branch — never onto `main`.
+    refinement = (await db.execute(select(Run).where(Run.id == uuid.UUID(body["run_id"])))).scalar_one()
+    assert refinement.parent_run_id == root.id
+    assert refinement.head_branch == "haunter/fix-retry-1"
+    assert refinement.pr_branch == "haunter/fix-retry-1"
+    assert refinement.pr_number == 77
+    # It is an interactive refinement, not another retry child.
+    assert refinement.is_retry_child is False
+    assert is_pr_refinement(refinement) is True
+
+    mock_adapter.schedule_pipeline.assert_awaited_once()

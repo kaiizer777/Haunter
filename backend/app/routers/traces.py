@@ -52,6 +52,7 @@ from app.failure_signature import (
     normalize_failure_signature,
 )
 from app.models import Attempt, Repo, Run, RunStep, User
+from app.orchestrator import _TERMINAL_STATUSES
 from app.schemas import BatchDeleteRunsRequest, BatchDeleteRunsResponse, RunOut
 from app.traces.classify import classify_failure
 
@@ -293,28 +294,21 @@ async def get_run_trace(
 # One-click retry (Feature 1)
 # ---------------------------------------------------------------------------
 
-# Only a settled (terminal) run may be cloned. Re-cloning a run that the
-# orchestrator is still mutating would fork the pipeline and race the
-# in-flight transitions on the source row.
-_RETRYABLE_STATUSES: frozenset[str] = frozenset(
-    {
-        "pr_opened",
-        "fallback_commented",
-        "flaky_detected",
-        "completed",
-        "error",
-    }
-)
-
-# A child in any of these statuses has settled, so a further retry of the same
-# source run is permitted. Same membership as _RETRYABLE_STATUSES — kept as a
-# named alias because the in-flight guard reads as the inverse condition.
-_SETTLED_STATUSES: frozenset[str] = _RETRYABLE_STATUSES
-
 # Upper bound on total children (retry + interactive PR refinement) per source
 # run. Matches the interactive refinement cap in app/webhooks.py so a single
 # run can never fan out into an unbounded pipeline storm.
 _MAX_RUN_CHILDREN = 5
+
+# Conclusions the pipeline writes onto `Run.conclusion` as its own
+# classification, overwriting the GitHub conclusion the run was created with.
+# A retry child must not inherit one of these: it is a brand new CI diagnosis,
+# not a continuation of the flaky quarantine or the PR feedback loop.
+_INTERNAL_CONCLUSIONS: frozenset[str] = frozenset({"flaky_test", "feedback"})
+
+# The GitHub conclusion every Haunter run is created with. The webhook filter
+# only admits `conclusion == "failure"` (app/webhooks.py), so this is the only
+# external value that can legitimately appear on a source run.
+_CI_FAILURE_CONCLUSION: str = "failure"
 
 
 def build_retry_child(source: Run) -> Run:
@@ -322,9 +316,16 @@ def build_retry_child(source: Run) -> Run:
     Pure clone constructor for one-click retry. No I/O — hermetic and unit-testable.
 
     Copies the tenant scope (repo_id) and the failure coordinates
-    (head_sha / head_branch / conclusion) from the source run, links lineage
-    via ``parent_run_id`` + ``is_retry_child``, and resets every
-    pipeline-owned field so the child starts clean in ``pending``.
+    (head_sha / head_branch) from the source run, links lineage via
+    ``parent_run_id`` + ``is_retry_child``, and resets every pipeline-owned
+    field so the child starts clean in ``pending``.
+
+    ``conclusion`` is NOT copied verbatim: the pipeline overwrites that column
+    with its own classification (``flaky_test`` on the quarantine path,
+    ``feedback`` on PR-refinement children), and inheriting one of those would
+    stamp a stale badge onto a run that has not been diagnosed at all. A retry
+    child re-diagnoses the same CI failure, so it carries the GitHub
+    conclusion that run was created with instead.
 
     ``github_run_id`` and ``github_delivery_id`` are deliberately left NULL:
     the child corresponds to no new GitHub workflow run or webhook delivery.
@@ -345,7 +346,11 @@ def build_retry_child(source: Run) -> Run:
         head_sha=source.head_sha,
         head_branch=source.head_branch,
         status="pending",
-        conclusion=source.conclusion,
+        conclusion=(
+            source.conclusion
+            if source.conclusion not in _INTERNAL_CONCLUSIONS
+            else _CI_FAILURE_CONCLUSION
+        ),
         diagnosis_summary=None,
         pr_url=None,
         pr_number=None,
@@ -394,11 +399,17 @@ async def retry_run(
     """
     One-click retry: clone a settled run into a fresh ``pending`` child.
 
-    The child copies repo_id/head_sha/head_branch/conclusion from the source,
-    links lineage via ``parent_run_id`` + ``is_retry_child``, and is dispatched
+    The child copies repo_id/head_sha/head_branch from the source, links
+    lineage via ``parent_run_id`` + ``is_retry_child``, and is dispatched
     to the orchestrator through the hosting adapter so the pipeline runs
     asynchronously (on Lambda via async self-invoke; locally via
     BackgroundTasks) and the HTTP response returns immediately.
+
+    Only a settled (terminal) run may be cloned: re-cloning one the
+    orchestrator is still mutating would fork the pipeline and race the
+    in-flight transitions on the source row. Terminality is read from the
+    orchestrator's own ``_TERMINAL_STATUSES`` rather than restated here, so a
+    newly added terminal status cannot silently drift out of the allowlist.
 
     Guards:
       - 404 on non-owned / non-existent run_id (no existence oracle).
@@ -423,7 +434,7 @@ async def retry_run(
             status_code=status.HTTP_404_NOT_FOUND, detail="Run not found"
         )
 
-    if source.status not in _RETRYABLE_STATUSES:
+    if source.status not in _TERMINAL_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -445,7 +456,7 @@ async def retry_run(
         select(Run.id)
         .where(
             Run.parent_run_id == run_id,
-            Run.status.notin_(list(_SETTLED_STATUSES)),
+            Run.status.notin_(list(_TERMINAL_STATUSES)),
         )
         .limit(1)
     )

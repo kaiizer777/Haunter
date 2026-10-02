@@ -1664,6 +1664,11 @@ async def github_webhook(
             "reason": _auditor_skip_reason or "no matching run for PR",
         }
 
+    # The run that actually carries this PR's number. Retained across the walk
+    # to the root below, because the branch that owns the PR lives on THIS run,
+    # not necessarily on the root.
+    pr_owner_run = initial_run
+
     # If initial_run is a child run, traverse up to the root parent run
     while initial_run.parent_run_id:
         parent_stmt = select(Run).where(Run.id == initial_run.parent_run_id)
@@ -1674,8 +1679,17 @@ async def github_webhook(
         initial_run = root_parent
 
     # 7. Branch Guard: PR branch must start with haunter/
+    #
+    # Prefer the PR-owning run's branch. A one-click retry child (Feature 1)
+    # opens its own fresh haunter/fix-* PR while its root run may have ended on
+    # the exhaust path with pr_branch still NULL — reading the root alone would
+    # fall back to the user's own head_branch and silently drop the refinement.
     if not pr_head_branch:
-        pr_head_branch = initial_run.pr_branch or initial_run.head_branch
+        pr_head_branch = (
+            pr_owner_run.pr_branch
+            or initial_run.pr_branch
+            or initial_run.head_branch
+        )
 
     if not pr_head_branch or not pr_head_branch.startswith("haunter/"):
         # Manual audit requests are branch-agnostic (read-only); the
