@@ -25,6 +25,8 @@ Covers:
       several `@haunter` comments still acts on the one that asked, and an
       exact match in one channel is never displaced by the other channel's
       `@haunter` fallback.
+ 12. The trigger is resolved from the whole review-comment list, so the
+      20-comment context window cannot hide it on a busy PR.
 
 The end-to-end cases drive the real orchestrator against the in-process store
 from `tests/fake_audit_db.py`, so they are hermetic: no network, no
@@ -721,6 +723,65 @@ async def test_issue_trigger_is_not_hijacked_by_a_review_thread_mention(
     assert instruction is not None
     assert "NULL deref" in instruction
     assert "rewrite the entire module" not in instruction
+
+
+@pytest.mark.asyncio
+async def test_trigger_is_found_outside_the_review_context_window(
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """The 20-comment context window must not hide the triggering comment.
+
+    Only the last 20 review comments are formatted for context, but the
+    trigger is resolved from the whole fetched list first. Otherwise a busy
+    PR pushes the triggering comment out of the window and a newer
+    `@haunter` comment is silently acted on instead.
+    """
+    repo, child = await seed_followup(
+        fake_audit_db,
+        fake_audit_user_factory,
+        conclusion="feedback",
+        comment_id=5550001,
+    )
+    review_thread = [
+        {"id": 5550001, "path": "parser.py", "line": 9, "body": "@haunter fix the NULL deref"}
+    ]
+    # 25 newer comments, so the trigger sits outside [-20:].
+    review_thread += [
+        {
+            "id": 7000000 + n,
+            "path": f"f{n}.py",
+            "line": n,
+            "body": "@haunter unrelated nit, ignore" if n == 24 else f"nit {n}",
+        }
+        for n in range(25)
+    ]
+
+    with (
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=review_thread,
+        ),
+        patch(
+            "app.github_client.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="diff --git a/parser.py b/parser.py",
+        ),
+    ):
+        summary = await gather_context(run=child, repo=repo, db=fake_audit_db)
+
+    instruction = extract_reviewer_feedback(summary)
+    assert instruction is not None
+    assert "NULL deref" in instruction
+    assert "unrelated nit" not in instruction
+    # The context window is still applied to the reported thread.
+    assert "nit 4\n" not in summary
 
 
 @pytest.mark.asyncio

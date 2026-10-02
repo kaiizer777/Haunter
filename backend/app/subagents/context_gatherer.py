@@ -434,6 +434,17 @@ async def gather_pr_feedback_context(
     formatted_review_thread: list[str] = []
     thread_instruction = ""
     thread_trigger_instruction = ""
+    # Resolve the triggering comment over the WHOLE list first. Applying the
+    # context window before this lookup would drop the trigger on a busy PR
+    # and let a newer `@haunter` comment stand in for it. Cheap: a dict id
+    # comparison per already-fetched item, no extra request.
+    if run.trigger_comment_id is not None:
+        for item in review_thread_list:
+            if isinstance(item, dict) and item.get("id") == run.trigger_comment_id:
+                thread_trigger_instruction = (
+                    str(item.get("body", "") or "").strip()[:2000]
+                )
+                break
     for item in review_thread_list[-20:]:
         if not isinstance(item, dict):
             continue
@@ -450,10 +461,6 @@ async def gather_pr_feedback_context(
         formatted_review_thread.append(
             f"Comment by @{author}{anchor}:\n{snippet}\n"
         )
-        if run.trigger_comment_id is not None and (
-            item.get("id") == run.trigger_comment_id
-        ):
-            thread_trigger_instruction = snippet
         if "@haunter" in c_body.lower():
             thread_instruction = snippet
 
