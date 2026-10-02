@@ -445,6 +445,55 @@ async def gather_pr_feedback_context(
                     str(item.get("body", "") or "").strip()[:2000]
                 )
                 break
+        # A review trigger missing from a *full* fetched window means the PR has
+        # more review comments than the fetch ceiling. Recover the exact
+        # comment by id rather than let the fallback act on an older,
+        # unrelated `@haunter` request. Gated on a full window on purpose: a
+        # transient fetch failure yields an empty list, and failing the run
+        # for that would be worse than the fallback.
+        # `reply_to_comment_id` is only ever set for review comments, so an
+        # issue-comment trigger - which by definition is not in this list -
+        # never takes this path.
+        truncated_window = len(review_thread_list) >= (
+            gh.MAX_REVIEW_COMMENT_PAGES * gh.REVIEW_COMMENTS_PER_PAGE
+        )
+        if (
+            not thread_trigger_instruction
+            and run.reply_to_comment_id is not None
+            and truncated_window
+        ):
+            try:
+                fetched = await gh.fetch_review_comment(
+                    owner=owner,
+                    repo=name,
+                    comment_id=run.trigger_comment_id,
+                    token=token,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "context_gatherer: run=%s could not fetch triggering review "
+                    "comment %s (%s)",
+                    run.id,
+                    run.trigger_comment_id,
+                    type(exc).__name__,
+                )
+                fetched = None
+            if isinstance(fetched, dict):
+                thread_trigger_instruction = (
+                    str(fetched.get("body", "") or "").strip()[:2000]
+                )
+                logger.info(
+                    "context_gatherer: run=%s recovered triggering review comment "
+                    "%s by id; it was outside the fetched review window",
+                    run.id,
+                    run.trigger_comment_id,
+                )
+            else:
+                raise ValueError(
+                    f"run {run.id} was triggered by review comment "
+                    f"{run.trigger_comment_id}, which is not retrievable; "
+                    "refusing to act on a different review instruction"
+                )
     for item in review_thread_list[-20:]:
         if not isinstance(item, dict):
             continue

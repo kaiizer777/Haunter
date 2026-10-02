@@ -26,7 +26,10 @@ Covers:
       exact match in one channel is never displaced by the other channel's
       `@haunter` fallback.
  12. The trigger is resolved from the whole review-comment list, so the
-      20-comment context window cannot hide it on a busy PR.
+      20-comment context window cannot hide it on a busy PR; if the bounded
+      fetch cannot supply it at all, a review trigger is fetched by id, an
+      unretrievable one fails the run rather than acting on another request,
+      and an issue trigger never makes that request at all.
 
 The end-to-end cases drive the real orchestrator against the in-process store
 from `tests/fake_audit_db.py`, so they are hermetic: no network, no
@@ -782,6 +785,180 @@ async def test_trigger_is_found_outside_the_review_context_window(
     assert "unrelated nit" not in instruction
     # The context window is still applied to the reported thread.
     assert "nit 4\n" not in summary
+
+
+@pytest.mark.asyncio
+async def test_trigger_outside_the_fetch_ceiling_is_recovered_by_id(
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """A review trigger beyond the fetch ceiling is fetched by id.
+
+    The bounded review fetch keeps only the oldest window, so on a PR with a
+    very long review history the triggering comment can be absent from it.
+    Acting on an older `@haunter` request instead would patch the wrong thing.
+    """
+    repo, child = await seed_followup(
+        fake_audit_db,
+        fake_audit_user_factory,
+        conclusion="feedback",
+        comment_id=5550001,
+        reply_to_comment_id=5550000,
+    )
+    # A window the size of the fetch ceiling: the trigger is outside it, and the
+    # ceiling is what makes a by-id recovery the correct response.
+    review_thread = [
+        {
+            "id": 7000000 + n,
+            "path": f"f{n}.py",
+            "line": n,
+            "body": f"@haunter stale request {n}" if n == 499 else f"nit {n}",
+        }
+        for n in range(500)
+    ]
+
+    with (
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=review_thread,
+        ),
+        patch(
+            "app.github_client.fetch_review_comment",
+            new_callable=AsyncMock,
+            return_value={
+                "id": 5550001,
+                "body": "@haunter fix the actual reported defect",
+                "path": "real.py",
+                "line": 4,
+            },
+        ) as by_id,
+        patch(
+            "app.github_client.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="diff --git a/real.py b/real.py",
+        ),
+    ):
+        summary = await gather_context(run=child, repo=repo, db=fake_audit_db)
+
+    by_id.assert_called_once()
+    assert by_id.call_args[1]["comment_id"] == 5550001
+    instruction = extract_reviewer_feedback(summary)
+    assert instruction is not None
+    assert "actual reported defect" in instruction
+    assert "stale request" not in instruction
+
+
+@pytest.mark.asyncio
+async def test_unretrievable_review_trigger_refuses_to_act(
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """If the trigger cannot be retrieved, fail loudly instead of guessing.
+
+    Silently falling back would commit a patch for a request the reviewer
+    never made on this run.
+    """
+    repo, child = await seed_followup(
+        fake_audit_db,
+        fake_audit_user_factory,
+        conclusion="feedback",
+        comment_id=5550001,
+        reply_to_comment_id=5550000,
+    )
+
+    with (
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "id": 7000000 + n,
+                    "path": f"f{n}.py",
+                    "line": n,
+                    "body": f"@haunter stale request {n}" if n == 499 else f"nit {n}",
+                }
+                for n in range(500)
+            ],
+        ),
+        patch(
+            "app.github_client.fetch_review_comment",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "app.github_client.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="diff --git a/f.py b/f.py",
+        ),
+        pytest.raises(ValueError, match="refusing to act on a different"),
+    ):
+        await gather_context(run=child, repo=repo, db=fake_audit_db)
+
+
+@pytest.mark.asyncio
+async def test_issue_trigger_never_fetches_review_comments_by_id(
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """An issue-comment trigger is never in the review list; no id lookup.
+
+    `reply_to_comment_id` is only set for review comments, so this path must
+    stay closed for issue comments rather than firing a pointless request.
+    """
+    repo, child = await seed_followup(
+        fake_audit_db,
+        fake_audit_user_factory,
+        conclusion="feedback",
+        comment_id=5550001,
+        reply_to_comment_id=None,
+    )
+
+    with (
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "id": 5550001,
+                    "user": {"login": "reviewer"},
+                    "author_association": "MEMBER",
+                    "body": "@haunter fix the issue-thread defect",
+                }
+            ],
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.github_client.fetch_review_comment",
+            new_callable=AsyncMock,
+            return_value={"id": 5550001, "body": "should not be used"},
+        ) as by_id,
+        patch(
+            "app.github_client.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="diff --git a/x.py b/x.py",
+        ),
+    ):
+        summary = await gather_context(run=child, repo=repo, db=fake_audit_db)
+
+    by_id.assert_not_called()
+    instruction = extract_reviewer_feedback(summary)
+    assert instruction is not None
+    assert "issue-thread defect" in instruction
 
 
 @pytest.mark.asyncio

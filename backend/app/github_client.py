@@ -918,6 +918,66 @@ async def fetch_pr_review_comments(
     return collected
 
 
+async def fetch_review_comment(
+    owner: str,
+    repo: str,
+    comment_id: int,
+    token: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """
+    Fetch one pull request review comment by its id.
+
+    GET /repos/{owner}/{repo}/pulls/comments/{comment_id}
+
+    :func:`fetch_pr_review_comments` is deliberately bounded, so on a PR with
+    a very long review history the comment that actually triggered a run can
+    fall outside the fetched window. This single-comment lookup is how the
+    caller recovers the exact instruction instead of silently falling back to
+    an older, unrelated ``@haunter`` request.
+
+    Returns ``None`` when the comment is not found (deleted, or not a review
+    comment). Raises the standard typed errors on other failures.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/pulls/comments/{quote(str(comment_id), safe='')}"
+    )
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await _bounded_get(
+                client,
+                url,
+                headers=headers,
+                max_bytes=MAX_API_RESPONSE_BYTES,
+            )
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error fetching review comment %s on %s/%s",
+                comment_id,
+                owner,
+                repo,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        return None
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    data = response.json()
+    return data if isinstance(data, dict) else None
+
+
 async def post_review_thread_reply(
     owner: str,
     repo: str,
