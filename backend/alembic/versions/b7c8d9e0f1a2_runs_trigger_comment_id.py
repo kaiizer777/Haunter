@@ -83,15 +83,40 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
-    # Contract order matters: the column that carried the comment id is
-    # removed first so `github_run_id` can be made NOT NULL again.
+    """Downgrade schema.
+
+    Order is load-bearing. Once the new code is deployed, follow-up runs carry
+    ``github_run_id = NULL`` and their comment id in ``trigger_comment_id``, so
+    the pre-split representation has to be restored *before* NOT NULL is
+    re-imposed, and the source column has to be gone before that as well:
+
+      1. copy ``trigger_comment_id`` back into the NULL ``github_run_id``s;
+      2. drop the split columns, so nothing can repopulate a NULL;
+      3. re-impose NOT NULL last.
+
+    A row that cannot be represented in the pre-split schema (both columns
+    NULL) makes step 3 fail loudly rather than silently discarding the row.
+
+    Collapsing two id namespaces back into one is inherently lossy: a
+    follow-up comment id that happens to equal an existing workflow run id
+    trips ``ix_runs_github_run_id`` here. That ambiguity is exactly what the
+    split exists to remove going forward, and it can only affect this
+    downgrade path, so it is left to fail loudly rather than papered over.
+    """
+    op.execute(
+        """
+        UPDATE runs
+           SET github_run_id = trigger_comment_id
+         WHERE github_run_id IS NULL
+           AND trigger_comment_id IS NOT NULL
+        """
+    )
+    op.drop_index(op.f("ix_runs_trigger_comment_id"), table_name="runs")
+    op.drop_column("runs", "trigger_comment_id")
+    op.drop_column("runs", "reply_to_comment_id")
     op.alter_column(
         "runs",
         "github_run_id",
         existing_type=sa.BigInteger(),
         nullable=False,
     )
-    op.drop_index(op.f("ix_runs_trigger_comment_id"), table_name="runs")
-    op.drop_column("runs", "trigger_comment_id")
-    op.drop_column("runs", "reply_to_comment_id")
