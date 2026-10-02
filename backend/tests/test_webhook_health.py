@@ -18,6 +18,9 @@ DB (require TEST_DATABASE_URL, run in CI / --all / explicit target):
 - corrupt / un-retained replay buffer -> 409, no handler invocation
 - queued workflow_run persists a webhook_deliveries row WITH the replay buffer,
   and persists no signature header or secret
+- two tenants registered on the same owner/name: the live delivery is refused
+  with an unattributed diagnostic row and dispatches nothing, and redelivering it
+  (in either insert order) yields the identical decision
 """
 
 import base64
@@ -928,6 +931,146 @@ async def test_public_webhook_endpoint_exposes_no_repository_pin(
             select(Run).where(Run.repo_id == repo_intruder.id)
         )
     ).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_registration_is_refused_and_dispatches_nothing(
+    client: httpx.AsyncClient, db: AsyncSession, user_factory
+):
+    """Two tenants on the SAME owner/name must not be resolved by guesswork.
+
+    Against a real database, so the row set the unordered lookup returns — and
+    therefore the insert order the pre-fix `.scalars().first()` would have
+    favoured — is genuinely whatever Postgres produced. `repos` is unique per
+    (user_id, owner, name), so this state is legal; the delivery must be refused,
+    not delivered into whichever row came back first.
+    """
+    await truncate_all(db)
+    tenant_a = await user_factory(github_id=9130, username="wh_health_amb_a")
+    tenant_b = await user_factory(github_id=9131, username="wh_health_amb_b")
+    repo_a = Repo(user_id=tenant_a.id, owner="amb-org", name="amb-repo")
+    repo_b = Repo(user_id=tenant_b.id, owner="amb-org", name="amb-repo")
+    db.add_all([repo_a, repo_b])
+    await db.commit()
+    await db.refresh(repo_a)
+    await db.refresh(repo_b)
+
+    delivery_id = str(uuid.uuid4())
+    payload = workflow_run_payload(run_id=555701)
+    payload["repository"]["name"] = "amb-repo"
+    payload["repository"]["full_name"] = "amb-org/amb-repo"
+    payload["repository"]["owner"]["login"] = "amb-org"
+    raw_body = json.dumps(payload).encode("utf-8")
+
+    adapter = _mock_adapter()
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+    ) as mock_get:
+        mock_get.return_value = adapter
+        resp = await client.post(
+            "/webhooks/github",
+            headers=_gh_headers(
+                "workflow_run", delivery_id, sign_payload(TEST_SECRET, raw_body)
+            ),
+            content=raw_body,
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ignored",
+        "reason": "ambiguous repository registration",
+    }
+    adapter.schedule_pipeline.assert_not_called()
+
+    from app.models import Run
+
+    assert (
+        await db.execute(select(Run).where(Run.github_run_id == 555701))
+    ).scalars().all() == []
+    for repo in (repo_a, repo_b):
+        assert (
+            await db.execute(select(Run).where(Run.repo_id == repo.id))
+        ).scalars().all() == []
+
+    # One diagnostic row, attributed to no tenant — neither tenant may see it in
+    # its own delivery history, and it must name neither of them.
+    rows = (
+        (
+            await db.execute(
+                select(WebhookDelivery).where(
+                    WebhookDelivery.delivery_id == delivery_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].status == "ignored"
+    assert rows[0].reason == "ambiguous repository registration"
+    assert rows[0].repo_id is None
+    assert rows[0].payload is None
+    assert str(repo_a.id) not in (rows[0].reason or "")
+    assert str(repo_b.id) not in (rows[0].reason or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reverse_insert_order", [False, True])
+async def test_ambiguous_registration_outcome_is_stable_across_redeliveries(
+    client: httpx.AsyncClient,
+    db: AsyncSession,
+    user_factory,
+    reverse_insert_order: bool,
+):
+    """Redelivering the same ambiguous delivery N times changes nothing.
+
+    Run for both insert orders, because the pre-fix lookup had no ORDER BY: which
+    tenant won was whatever Postgres returned first, so the losing tenant could
+    change from one delivery to the next. Refusing is deterministic, so every
+    redelivery must produce the identical decision and the identical absence of
+    work, whichever row was inserted first.
+    """
+    await truncate_all(db)
+    tenant_a = await user_factory(github_id=9132, username="wh_health_stable_a")
+    tenant_b = await user_factory(github_id=9133, username="wh_health_stable_b")
+    repos = [
+        Repo(user_id=tenant_a.id, owner="stable-org", name="stable-repo"),
+        Repo(user_id=tenant_b.id, owner="stable-org", name="stable-repo"),
+    ]
+    db.add_all(list(reversed(repos)) if reverse_insert_order else repos)
+    await db.commit()
+
+    decisions = []
+    for _ in range(5):
+        delivery_id = str(uuid.uuid4())
+        payload = workflow_run_payload(run_id=555702)
+        payload["repository"]["name"] = "stable-repo"
+        payload["repository"]["full_name"] = "stable-org/stable-repo"
+        payload["repository"]["owner"]["login"] = "stable-org"
+        raw_body = json.dumps(payload).encode("utf-8")
+        with patch(
+            "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+        ) as mock_get:
+            mock_get.return_value = _mock_adapter()
+            resp = await client.post(
+                "/webhooks/github",
+                headers=_gh_headers(
+                    "workflow_run", delivery_id, sign_payload(TEST_SECRET, raw_body)
+                ),
+                content=raw_body,
+            )
+        decisions.append((resp.status_code, json.dumps(resp.json(), sort_keys=True)))
+
+    assert len(set(decisions)) == 1, decisions
+    assert decisions[0][1] == json.dumps(
+        {"reason": "ambiguous repository registration", "status": "ignored"},
+        sort_keys=True,
+    )
+
+    # Nothing ran, on either tenant, in any of the five deliveries.
+    from app.models import Run
+
+    assert (await db.execute(select(Run))).scalars().all() == []
 
 
 def _mock_adapter() -> MagicMock:

@@ -760,6 +760,14 @@ class WebhookDelivery(Base):
     row: there is no repo to attribute them to, and `repo_id` is the tenant
     boundary the read endpoint scopes on.
 
+    An AMBIUOUS registration is the one pre-resolution decision that does write a
+    row, and it writes it with `repo_id = NULL`: `repos` is unique per
+    (user_id, owner, name), so several tenants may register the same owner/name
+    and a payload carrying no tenant cannot be attributed to one of them.
+    Attributing the row to any single match would both invent that tenancy and
+    place the decision in that tenant's history, so the row stays unattributed
+    and operator-facing. See _resolve_repo_for_delivery in app/webhooks.py.
+
     Replay (POST /webhooks/deliveries/{id}/replay) re-drives the ORIGINAL raw
     payload back through the normal `github_webhook` path — signature
     verification, registration guards, branch guards, trigger evaluation and
