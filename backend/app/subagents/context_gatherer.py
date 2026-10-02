@@ -425,15 +425,9 @@ async def gather_pr_feedback_context(
         if "@haunter" in c_body.lower():
             latest_reviewer_instruction = c_body.strip()
 
-    if triggering_instruction:
-        latest_reviewer_instruction = triggering_instruction
-    elif not latest_reviewer_instruction and formatted_comments:
-        latest_reviewer_instruction = formatted_comments[-1]
-
-    # 3b. Review thread context (diff-anchored). The triggering follow-up
-    # instruction for `pull_request_review_comment` events lives here, so a
-    # thread-local `@haunter` instruction takes precedence over the issue
-    # thread when present.
+    # 3b. Review thread context (diff-anchored). A
+    # `pull_request_review_comment` instruction lives here, so the review
+    # thread is also searched for the exact triggering comment.
     review_thread_list = (
         review_thread_raw if isinstance(review_thread_raw, list) else []
     )
@@ -463,10 +457,23 @@ async def gather_pr_feedback_context(
         if "@haunter" in c_body.lower():
             thread_instruction = snippet
 
-    if thread_trigger_instruction or thread_instruction:
-        latest_reviewer_instruction = (
-            thread_trigger_instruction or thread_instruction
-        )
+    # Instruction selection, in strict precedence:
+    #   1. the comment whose id is run.trigger_comment_id, from either
+    #      channel - this run exists because of that exact comment;
+    #   2. the newest `@haunter` review-thread comment (a review comment is
+    #      invisible to the Issues API, so it may be the only carrier);
+    #   3. the newest `@haunter` issue comment;
+    #   4. the last issue comment of any kind.
+    # An exact match must never be displaced by the other channel's
+    # fallback, or an issue-triggered run would act on a stale, unrelated
+    # review request.
+    latest_reviewer_instruction = (
+        thread_trigger_instruction
+        or triggering_instruction
+        or thread_instruction
+        or latest_reviewer_instruction
+        or (formatted_comments[-1] if formatted_comments else "")
+    )
 
     # 4. Redact secrets across all assembled sections
     clean_instruction = _redact_secrets(latest_reviewer_instruction)

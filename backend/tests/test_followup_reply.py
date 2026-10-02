@@ -22,7 +22,9 @@ Covers:
  10. `fetch_pr_review_comments` paginates, stays bounded, and refuses to
       follow an off-host `Link`.
  11. The triggering comment id selects the instruction, so a thread holding
-      several `@haunter` comments still acts on the one that asked.
+      several `@haunter` comments still acts on the one that asked, and an
+      exact match in one channel is never displaced by the other channel's
+      `@haunter` fallback.
 
 The end-to-end cases drive the real orchestrator against the in-process store
 from `tests/fake_audit_db.py`, so they are hermetic: no network, no
@@ -659,6 +661,66 @@ async def test_triggering_comment_is_selected_over_the_last_mention(
     assert instruction is not None
     assert "AUTH_TOKEN retry loop" in instruction
     assert "rename the module" not in instruction
+
+
+@pytest.mark.asyncio
+async def test_issue_trigger_is_not_hijacked_by_a_review_thread_mention(
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """An exact issue-comment match outranks any review-thread mention.
+
+    The run was created for one specific comment. A review thread that also
+    contains `@haunter` must not displace it, or the fix generator answers a
+    request nobody made for this run.
+    """
+    repo, child = await seed_followup(
+        fake_audit_db,
+        fake_audit_user_factory,
+        conclusion="feedback",
+        comment_id=5550001,
+    )
+    issue_thread = [
+        {
+            "id": 5550001,
+            "user": {"login": "reviewer"},
+            "author_association": "MEMBER",
+            "body": "@haunter fix the NULL deref in parser.py",
+        }
+    ]
+    review_thread = [
+        {
+            "id": 8880001,
+            "user": {"login": "someone-else"},
+            "path": "other.py",
+            "line": 3,
+            "body": "@haunter please rewrite the entire module",
+        }
+    ]
+
+    with (
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=issue_thread,
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=review_thread,
+        ),
+        patch(
+            "app.github_client.fetch_diff",
+            new_callable=AsyncMock,
+            return_value="diff --git a/parser.py b/parser.py",
+        ),
+    ):
+        summary = await gather_context(run=child, repo=repo, db=fake_audit_db)
+
+    instruction = extract_reviewer_feedback(summary)
+    assert instruction is not None
+    assert "NULL deref" in instruction
+    assert "rewrite the entire module" not in instruction
 
 
 @pytest.mark.asyncio
