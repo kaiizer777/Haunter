@@ -115,9 +115,14 @@ jobs:
       - name: Run backend tests
         working-directory: backend
         env:
+          # DATABASE_URL / DATABASE_URL_UNPOOLED are required (no default) by
+          # Settings, so they cannot be dropped here — but they must point at the
+          # same local container as TEST_DATABASE_URL. A production-shaped value in
+          # this job builds a live engine against prod at import time
+          # (app/db.py) and leaves a prod URL one paste away from being real.
           TEST_DATABASE_URL: postgresql+asyncpg://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
-          DATABASE_URL: postgresql+asyncpg://haunter_prod:haunter_prod@ep-prod.neon.tech:5432/haunter_prod?sslmode=require
-          DATABASE_URL_UNPOOLED: postgresql://haunter_prod:haunter_prod@ep-prod.neon.tech:5432/haunter_prod?sslmode=require
+          DATABASE_URL: postgresql+asyncpg://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
+          DATABASE_URL_UNPOOLED: postgresql://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
         run: |
           pytest --all -v --tb=short --maxfail=10
         timeout-minutes: 30

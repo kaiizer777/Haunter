@@ -1757,11 +1757,11 @@ async def github_webhook(
 
         return {"status": "ignored", "reason": "refinement limit reached"}
 
-# 9. Idempotent Child Run creation (parent_run_id lineage back to the
+    # 9. Idempotent Child Run creation (parent_run_id lineage back to the
     # root fix run). `test-fix` runs are verify-only and must not commit to
     # the PR branch — the orchestrator keys that off the conclusion.
     #
-# Every comment attribute is read BEFORE the commit: db.rollback() expires
+    # Every comment attribute is read BEFORE the commit: db.rollback() expires
     # every instance in the session, and re-reading an expired ORM attribute
     # outside a greenlet context raises MissingGreenlet instead of returning
     # the 200 duplicate.
