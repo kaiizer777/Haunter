@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import Sequence, Union
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision = "a5c6d7e8f9b0"
 down_revision = "b7c8d9e0f1a2"
@@ -56,10 +56,36 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Re-imposing NOT NULL on github_run_id is refused by Postgres if any
-    # retry child (or conversational follow-up) row still holds NULL. That is
-    # the correct outcome — this migration must not invent a workflow run id to
-    # make a rollback succeed — so the operator deletes those child runs first.
+    # Preflight: re-imposing NOT NULL on github_run_id is impossible while any
+    # retry child (or conversational follow-up) row still holds NULL. Fail with
+    # an actionable message *before* touching anything, rather than letting
+    # Postgres abort the ALTER with a bare not_null_violation.
+    #
+    # This deliberately refuses to invent an id or delete rows to make the
+    # rollback succeed. A retry child is real diagnostic history: deleting one
+    # would cascade to its run steps and attempts, and a fabricated workflow run
+    # id would squat on the real GitHub id space. Resolving those rows is an
+    # operator decision, so the migration stops and says so.
+    #
+    # In offline mode (`alembic downgrade --sql`) there is no connection to
+    # inspect, so the check is skipped rather than refused — the generated SQL
+    # is still emitted for review, and applying it remains the operator's call.
+    if not context.is_offline_mode():
+        bind = op.get_bind()
+        if bind is not None:
+            null_rows = bind.execute(
+                sa.text("SELECT count(*) FROM runs WHERE github_run_id IS NULL")
+            ).scalar()
+            if null_rows:
+                raise RuntimeError(
+                    f"refusing to downgrade a5c6d7e8f9b0: {null_rows} run row(s) "
+                    "have github_run_id IS NULL (one-click retry children and "
+                    "conversational follow-ups). Export or explicitly resolve "
+                    "those runs before retrying the downgrade — this migration "
+                    "will not fabricate a workflow run id or delete retry "
+                    "history to make the rollback succeed."
+                )
+
     op.alter_column(
         "runs", "github_run_id", existing_type=sa.BigInteger(), nullable=False
     )

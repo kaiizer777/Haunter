@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -130,11 +131,6 @@ _DIFF_PATH_RE: re.Pattern[str] = re.compile(
 # within the LLM's input window for fix_generator. 50 files is generous for
 # real CI failures; anything more is noise.
 _MAX_FILE_PATHS_IN_SUMMARY: int = 50
-
-# Bound on how far resolve_workflow_run_id walks parent_run_id. Real chains
-# are 1–2 deep (retry of a retry); the cap only guards against a corrupted
-# self-referential parent_run_id cycle.
-_MAX_PARENT_WALK_DEPTH: int = 5
 
 
 def _extract_file_paths_from_diff(diff_text: str) -> list[str]:
@@ -332,7 +328,6 @@ async def _empty_result() -> str:
 async def resolve_workflow_run_id(
     run: Run,
     db: AsyncSession,
-    max_depth: int = _MAX_PARENT_WALK_DEPTH,
 ) -> Optional[int]:
     """
     Return the GitHub Actions workflow run id whose logs describe this run.
@@ -346,18 +341,27 @@ async def resolve_workflow_run_id(
     Returns None only when the run has no id and no reachable ancestor with
     one, in which case callers must degrade gracefully (skip the log fetch)
     instead of issuing a request against ``/actions/runs/None/logs``.
+
+    The walk is bounded by a *visited set* rather than a fixed hop count. A
+    fixed count was wrong in both directions: ``parent_run_id`` chains are not
+    depth-limited (retrying a settled retry child is allowed, so the cap on
+    direct children does not bound total depth), so any fixed bound silently
+    dropped the CI logs for a deep chain. ``parent_run_id`` is a self-FK, so a
+    cycle must not spin forever, and the visited set is what guarantees
+    termination — it terminates on any cycle, not just a self-reference.
     """
     if run.github_run_id is not None:
         return run.github_run_id
 
-    # Bounded walk: parent_run_id is a self-FK, so a corrupted cycle must not
-    # spin forever. max_depth 1 == "look at the immediate parent only".
+    seen: set[uuid.UUID] = {run.id}
     cursor: Optional[Run] = run
-    for _ in range(max_depth):
-        if cursor.parent_run_id is None or cursor.parent_run_id == cursor.id:
+    while cursor is not None:
+        parent_id = cursor.parent_run_id
+        if parent_id is None or parent_id in seen:
             return None
+        seen.add(parent_id)
         parent = (
-            await db.scalars(select(Run).where(Run.id == cursor.parent_run_id))
+            await db.scalars(select(Run).where(Run.id == parent_id))
         ).first()
         if parent is None:
             return None
@@ -367,17 +371,48 @@ async def resolve_workflow_run_id(
     return None
 
 
+async def _resolve_pr_opening_run_id(run: Run, db: AsyncSession) -> Optional[uuid.UUID]:
+    """
+    Return the id of the run whose verified patch is on this run's PR branch.
+
+    A PR is identified by ``(repo_id, pr_number)``, and the run that opened it is
+    the earliest run carrying that pair — a refinement inherits the same
+    ``pr_number`` from the PR it is refining, so "earliest" is what separates
+    the opener from its own descendants. Falls back to ``parent_run_id`` when
+    the PR cannot be attributed (no ``pr_number``, or no other run claims it),
+    which preserves the previous parent-based behaviour for legacy threads.
+    """
+    if run.pr_number is not None:
+        owner = (
+            await db.scalars(
+                select(Run)
+                .where(
+                    Run.repo_id == run.repo_id,
+                    Run.pr_number == run.pr_number,
+                    Run.id != run.id,
+                )
+                .order_by(Run.created_at.asc())
+            )
+        ).first()
+        if owner is not None:
+            return owner.id
+    return run.parent_run_id
+
+
 async def gather_pr_feedback_context(
     run: Run,
     repo: Repo,
     db: AsyncSession,
 ) -> str:
     """
-    Context gatherer for interactive PR feedback loop (run.parent_run_id is set).
+    Context gatherer for interactive PR feedback loop (an interactive PR
+    refinement child — see orchestrator.is_pr_refinement).
 
     Fetches:
       1. Reviewer comment body and preceding PR comment thread via GitHub Issues API.
-      2. Previous verified attempt patch and strategy notes from parent run's Attempt.
+      2. Previous verified attempt patch and strategy notes from the run that
+         opened this PR (see _resolve_pr_opening_run_id — not necessarily
+         run.parent_run_id, which points at the thread root).
       3. File diff of the existing PR branch.
     Redacts all secrets via _redact_secrets() before assembling into diagnosis_summary.
     """
@@ -395,20 +430,35 @@ async def gather_pr_feedback_context(
     except Exception:
         token = None
 
-    # 1. Fetch parent run's attempt
+    # 1. Fetch the prior verified attempt.
+    #
+    # The prior attempt must come from the run that actually opened this PR,
+    # which is NOT always `run.parent_run_id`. The webhook links a refinement to
+    # the thread *root* on purpose (that is where the 5-child cap is counted),
+    # but a PR opened by a one-click retry child is owned by that child — the
+    # root may have ended on the exhaust path with no passing attempt at all.
+    # Reading the root's attempts would hand the fix generator a patch that is
+    # not on `haunter/fix-*`, and committing a refinement generated from it can
+    # conflict with, or revert, the fix the retry child already verified.
+    #
+    # Resolving by (repo_id, pr_number) — the key that identifies the PR —
+    # and taking the earliest match is correct for both shapes: on a legacy
+    # refinement the opener is also the parent, so this is unchanged; on a
+    # retry-produced PR the opener is the retry child.
     prior_patch = ""
     prior_strategy_notes = ""
     prior_attempt_num = 1
-    if run.parent_run_id:
+    prior_source_id = await _resolve_pr_opening_run_id(run, db)
+    if prior_source_id is not None:
         stmt = (
             select(Attempt)
-            .where(Attempt.run_id == run.parent_run_id)
+            .where(Attempt.run_id == prior_source_id)
             .order_by(Attempt.attempt_number.desc())
         )
-        parent_attempts = (await db.scalars(stmt)).all()
+        source_attempts = (await db.scalars(stmt)).all()
         prior_attempt = next(
-            (a for a in parent_attempts if a.verification_status == "pass"),
-            parent_attempts[0] if parent_attempts else None,
+            (a for a in source_attempts if a.verification_status == "pass"),
+            source_attempts[0] if source_attempts else None,
         )
         if prior_attempt:
             prior_patch = prior_attempt.patch_text or ""

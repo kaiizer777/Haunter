@@ -34,7 +34,10 @@ from app.models import Attempt, Repo, Run, User
 from app.orchestrator import is_pr_refinement
 from app.routers.traces import _MAX_RUN_CHILDREN, build_retry_child
 from app.services.followup_commands import FEEDBACK_CONCLUSION, TEST_FIX_CONCLUSION
-from app.subagents.context_gatherer import resolve_workflow_run_id
+from app.subagents.context_gatherer import (
+    _resolve_pr_opening_run_id,
+    resolve_workflow_run_id,
+)
 from tests.conftest import truncate_all
 from tests.test_pr_feedback import make_issue_comment_payload, sign_payload
 
@@ -679,20 +682,25 @@ async def test_resolve_workflow_run_id_terminates_on_self_cycle(db: AsyncSession
 
 
 @pytest.mark.asyncio
-async def test_resolve_workflow_run_id_stops_at_depth_bound(db: AsyncSession):
-    """The walk gives up at the depth bound instead of chasing an idless chain.
+async def test_resolve_workflow_run_id_walks_past_any_fixed_depth(
+    db: AsyncSession,
+):
+    """The walk finds the root's id however deep the retry chain is.
 
-    A chain longer than the bound that holds no workflow run id anywhere
-    returns None — the caller then skips the log fetch rather than requesting
-    /actions/runs/None/logs.
+    The 5-children-per-run cap bounds direct children, not total chain depth —
+    retrying a settled retry child is allowed — so a chain can be arbitrarily
+    deep. A fixed hop bound silently dropped the CI logs for the deepest chains,
+    which is exactly when the run most needs them.
+
+    A chain longer than any former bound still resolves to the root's id, and a
+    chain with no id anywhere still returns None.
     """
     await truncate_all(db)
     _user, repo = await _seed_user_repo(db, 9519, "resolve_depth_user")
 
-    # root <- a <- b <- c <- d, none of them carrying a workflow run id.
     root = Run(
         repo_id=repo.id,
-        github_run_id=None,
+        github_run_id=888777666,
         head_sha="1" * 40,
         head_branch="main",
         status="error",
@@ -702,8 +710,10 @@ async def test_resolve_workflow_run_id_stops_at_depth_bound(db: AsyncSession):
     await db.commit()
     await db.refresh(root)
 
+    # root <- a <- b <- ... <- leaf, eight links deep, only the root carrying
+    # a workflow run id (as a real retry chain does).
     cursor_id = root.id
-    for _ in range(6):
+    for _ in range(8):
         link = Run(
             repo_id=repo.id,
             parent_run_id=cursor_id,
@@ -720,10 +730,49 @@ async def test_resolve_workflow_run_id_stops_at_depth_bound(db: AsyncSession):
         cursor_id = link.id
 
     leaf = (await db.execute(select(Run).where(Run.id == cursor_id))).scalar_one()
-    assert await resolve_workflow_run_id(leaf, db) is None
+    assert await resolve_workflow_run_id(leaf, db) == 888777666
 
-    # max_depth=1 restricts the walk to the immediate parent only.
-    assert await resolve_workflow_run_id(leaf, db, max_depth=1) is None
+
+@pytest.mark.asyncio
+async def test_resolve_workflow_run_id_none_when_no_ancestor_has_one(
+    db: AsyncSession,
+):
+    """No id anywhere in the ancestry → None, so the caller skips the log fetch."""
+    await truncate_all(db)
+    _user, repo = await _seed_user_repo(db, 9521, "resolve_noid_user")
+
+    # root <- a <- b <- c, none of them carrying a workflow run id.
+    root = Run(
+        repo_id=repo.id,
+        github_run_id=None,
+        head_sha="2" * 40,
+        head_branch="main",
+        status="error",
+        conclusion="failure",
+    )
+    db.add(root)
+    await db.commit()
+    await db.refresh(root)
+
+    cursor_id = root.id
+    for _ in range(3):
+        link = Run(
+            repo_id=repo.id,
+            parent_run_id=cursor_id,
+            is_retry_child=True,
+            github_run_id=None,
+            head_sha="2" * 40,
+            head_branch="main",
+            status="error",
+            conclusion="failure",
+        )
+        db.add(link)
+        await db.commit()
+        await db.refresh(link)
+        cursor_id = link.id
+
+    leaf = (await db.execute(select(Run).where(Run.id == cursor_id))).scalar_one()
+    assert await resolve_workflow_run_id(leaf, db) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1058,3 +1107,79 @@ async def test_pr_feedback_on_a_retry_produced_pr_is_not_dropped(
     assert is_pr_refinement(refinement) is True
 
     mock_adapter.schedule_pipeline.assert_awaited_once()
+
+    # The prior *verified patch* must come from the run that opened the PR, not
+    # from `refinement.parent_run_id` (the root). The root ended on the exhaust
+    # path with no passing attempt, so reading it would feed the fix generator a
+    # patch that is not on `haunter/fix-retry-1` — and committing a refinement
+    # generated from that could conflict with, or revert, the retry child's fix.
+    assert await _resolve_pr_opening_run_id(refinement, db) == retry_child.id
+
+    # ...while the refinement still hangs off the root, where the cap is counted.
+    assert refinement.parent_run_id == root.id
+
+
+@pytest.mark.asyncio
+async def test_resolve_pr_opening_run_id_prefers_the_pr_opener(
+    db: AsyncSession,
+):
+    """The prior attempt is read from the run that opened the PR, not the parent.
+
+    Two shapes, both asserted:
+      * a PR opened by a one-click retry child, refined from the thread root —
+        must resolve to the retry child;
+      * a legacy refinement thread where the root itself opened the PR — must
+        still resolve to the root, i.e. the change is behaviour-preserving.
+    """
+    await truncate_all(db)
+    _user, repo = await _seed_user_repo(db, 9522, "pr_opener_user")
+
+    root = _make_run(repo, status="fallback_commented", github_run_id=555004000)
+    db.add(root)
+    await db.commit()
+    await db.refresh(root)
+
+    # Retry child opens PR 91 on its own branch; the root's pr_branch stays NULL.
+    opener = build_retry_child(root)
+    opener.status = "pr_opened"
+    opener.pr_number = 91
+    opener.pr_branch = "haunter/fix-retry-9"
+    db.add(opener)
+    await db.commit()
+    await db.refresh(opener)
+
+    refinement = Run(
+        repo_id=repo.id,
+        parent_run_id=root.id,
+        is_retry_child=False,
+        github_run_id=None,
+        head_sha=root.head_sha,
+        head_branch="haunter/fix-retry-9",
+        pr_number=91,
+        pr_branch="haunter/fix-retry-9",
+        status="pending",
+        conclusion="feedback",
+    )
+    db.add(refinement)
+    await db.commit()
+    await db.refresh(refinement)
+
+    assert await _resolve_pr_opening_run_id(refinement, db) == opener.id
+
+    # Legacy shape: the root opened the PR, so it is still the prior source.
+    legacy_refinement = Run(
+        repo_id=repo.id,
+        parent_run_id=root.id,
+        is_retry_child=False,
+        github_run_id=None,
+        head_sha=root.head_sha,
+        head_branch="haunter/fix-legacy-1",
+        pr_number=None,
+        pr_branch="haunter/fix-legacy-1",
+        status="pending",
+        conclusion="feedback",
+    )
+    db.add(legacy_refinement)
+    await db.commit()
+    await db.refresh(legacy_refinement)
+    assert await _resolve_pr_opening_run_id(legacy_refinement, db) == root.id
