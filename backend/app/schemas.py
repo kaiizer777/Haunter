@@ -291,6 +291,11 @@ class IssueCommentObj(BaseModel):
     body: str = Field(..., min_length=1)
     author_association: str = Field(default="NONE", max_length=50)
     user: Optional[IssueCommentUser] = None
+    #: Set by GitHub on a `pull_request_review_comment` that is itself a reply.
+    #: The review-thread replies endpoint requires the *top-level* comment id,
+    #: so the conversational follow-up replies to this ancestor instead of to
+    #: `id`. Always None on `issue_comment` payloads.
+    in_reply_to_id: Optional[int] = None
 
     model_config = {"extra": "ignore"}
 

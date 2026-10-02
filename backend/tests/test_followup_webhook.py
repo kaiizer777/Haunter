@@ -122,7 +122,16 @@ def review_comment_payload(
     head_ref: str = PR_BRANCH,
     owner: str = OWNER,
     repo: str = REPO,
+    in_reply_to_id: int | None = None,
 ) -> dict[str, Any]:
+    comment: dict[str, Any] = {
+        "id": comment_id,
+        "body": body,
+        "author_association": author_association,
+        "user": {"login": "staff-engineer"},
+    }
+    if in_reply_to_id is not None:
+        comment["in_reply_to_id"] = in_reply_to_id
     return {
         "action": "created",
         "pull_request": {
@@ -130,12 +139,7 @@ def review_comment_payload(
             "head": {"ref": head_ref, "sha": "1" * 40},
             "base": {"ref": "main", "sha": "2" * 40},
         },
-        "comment": {
-            "id": comment_id,
-            "body": body,
-            "author_association": author_association,
-            "user": {"login": "staff-engineer"},
-        },
+        "comment": comment,
         "repository": {
             "name": repo,
             "full_name": f"{owner}/{repo}",
@@ -322,6 +326,95 @@ async def test_review_comment_uses_the_same_grammar(
     assert len(children) == 1
     assert children[0].conclusion == TEST_FIX_CONCLUSION
     assert children[0].trigger_comment_id == 6660002
+    # A top-level review comment has no ancestor to answer into.
+    assert children[0].reply_to_comment_id is None
+
+
+@pytest.mark.asyncio
+async def test_nested_review_comment_records_the_thread_root(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """A command sent as a reply must record the thread to answer in.
+
+    GitHub's replies endpoint only accepts a top-level review comment id, so
+    the run has to remember the ancestor. `trigger_comment_id` still holds the
+    command's own id and keeps its uniqueness, or the second command in a
+    thread would be dropped as a duplicate delivery.
+    """
+    _, root_run = await seed(fake_audit_db, fake_audit_user_factory)
+    payload = review_comment_payload(
+        body="@haunter also handle the zero divisor",
+        comment_id=7770003,
+        in_reply_to_id=6660002,
+    )
+
+    resp = await post_comment(
+        client,
+        "pull_request_review_comment",
+        payload,
+        signature=signed(TEST_SECRET, payload),
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    children = child_runs(audit_store, root_run)
+    assert len(children) == 1
+    assert children[0].trigger_comment_id == 7770003
+    assert children[0].reply_to_comment_id == 6660002
+
+
+@pytest.mark.asyncio
+async def test_two_commands_in_one_thread_are_not_treated_as_duplicates(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Sharing a thread root must not collide, since only the command id is unique."""
+    _, root_run = await seed(fake_audit_db, fake_audit_user_factory)
+    for comment_id in (7770010, 7770011):
+        payload = review_comment_payload(
+            body="@haunter fix this line",
+            comment_id=comment_id,
+            in_reply_to_id=6660002,
+        )
+        resp = await post_comment(
+            client,
+            "pull_request_review_comment",
+            payload,
+            signature=signed(TEST_SECRET, payload),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "queued"
+
+    children = child_runs(audit_store, root_run)
+    assert len(children) == 2
+    assert {c.trigger_comment_id for c in children} == {7770010, 7770011}
+    assert {c.reply_to_comment_id for c in children} == {6660002}
+
+
+@pytest.mark.asyncio
+async def test_issue_comment_records_no_review_thread(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """An issue-thread comment has no review thread; the verdict degrades to a PR comment."""
+    _, root_run = await seed(fake_audit_db, fake_audit_user_factory)
+    payload = issue_comment_payload(body="@haunter fix the None deref")
+
+    resp = await post_comment(
+        client, "issue_comment", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    children = child_runs(audit_store, root_run)
+    assert len(children) == 1
+    assert children[0].reply_to_comment_id is None
 
 
 # ---------------------------------------------------------------------------

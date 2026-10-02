@@ -7,12 +7,18 @@ Consecutive follow-up runs created from an `issue_comment` /
 `github_run_id`, a column documented (and typed) as the GitHub Actions
 `workflow_run` id. The reply path only worked because of that coincidence,
 and a single UNIQUE index was enforcing idempotency across two unrelated
-GitHub id namespaces — so a comment id colliding with a workflow run id
+GitHub id namespaces - so a comment id colliding with a workflow run id
 silently dropped a legitimate `@haunter` request as a duplicate delivery.
 
-This revision adds a dedicated `trigger_comment_id` column carrying its own
-UNIQUE index, and relaxes `github_run_id` to nullable so follow-up runs no
-longer impersonate a workflow run.
+This revision adds:
+  * `trigger_comment_id` - the comment that carried the `@haunter` command,
+    with its own UNIQUE index, so re-delivery is still deduplicated;
+  * `reply_to_comment_id` - the review thread to answer in. GitHub's replies
+    endpoint only accepts a *top-level* review comment id, so a command sent
+    as a reply must address its ancestor. Intentionally NOT unique, because
+    several commands in one thread legitimately share a thread root;
+  * relaxes `github_run_id` to nullable so follow-up runs no longer
+    impersonate a workflow run.
 
 Expand-only and backward compatible:
   * adding a nullable column takes no lock that blocks reads/writes;
@@ -44,6 +50,10 @@ def upgrade() -> None:
     op.add_column(
         "runs",
         sa.Column("trigger_comment_id", sa.BigInteger(), nullable=True),
+    )
+    op.add_column(
+        "runs",
+        sa.Column("reply_to_comment_id", sa.BigInteger(), nullable=True),
     )
     op.create_index(
         op.f("ix_runs_trigger_comment_id"),
@@ -84,3 +94,4 @@ def downgrade() -> None:
     )
     op.drop_index(op.f("ix_runs_trigger_comment_id"), table_name="runs")
     op.drop_column("runs", "trigger_comment_id")
+    op.drop_column("runs", "reply_to_comment_id")

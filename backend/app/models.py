@@ -158,6 +158,15 @@ class Run(Base):
     trigger_comment_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, unique=True, index=True, nullable=True
     )
+    # Review thread the follow-up must be answered in. GitHub's
+    # `POST /pulls/{n}/comments/{comment_id}/replies` only accepts the
+    # *top-level* review comment id, so a command posted as a reply to an
+    # earlier comment (e.g. to Haunter's own) has to address the ancestor.
+    # Deliberately NOT unique: several commands in one thread share a root,
+    # and uniqueness there would drop every one after the first as a duplicate.
+    reply_to_comment_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
     github_delivery_id: Mapped[Optional[str]] = mapped_column(
         String(255), unique=True, nullable=True, index=True
     )

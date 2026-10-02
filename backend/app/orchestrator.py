@@ -365,6 +365,52 @@ async def _persist_error_step(
             pass
 
 
+async def _reply_or_log_failure(
+    *,
+    run_id: Any,
+    owner: str,
+    repo: str,
+    pr_number: Optional[int],
+    run: Run,
+    body: str,
+    token: str,
+    label: str,
+) -> Optional[str]:
+    """Deliver a follow-up reply without ever failing the surrounding run.
+
+    Reporting a verdict is a courtesy, not the point of the run. By the time
+    either call site gets here the work is already done — a verified
+    ``test-fix`` never had to commit anything, and a ``fix`` already has its
+    commit on the branch — so a failed comment must not push the Run into
+    ``error`` and report work that succeeded as failed.
+
+    Returns the channel used, or ``None`` when delivery failed (logged) or was
+    impossible. Never raises.
+    """
+    try:
+        return await _post_followup_reply(
+            run_id=run_id,
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            in_reply_to_comment_id=run.reply_to_comment_id or run.trigger_comment_id,
+            body=body,
+            token=token,
+        )
+    except Exception as reply_exc:
+        logger.warning(
+            "orchestrator: run=%s could not deliver %s on %s/%s PR #%s (%s) — "
+            "the run outcome is unaffected",
+            run_id,
+            label,
+            owner,
+            repo,
+            pr_number,
+            type(reply_exc).__name__,
+        )
+        return None
+
+
 async def _post_followup_reply(
     *,
     run_id: Any,
@@ -1043,18 +1089,20 @@ async def _orchestrator_pipeline_body(
                                     "fix to the PR."
                                 )
                                 if repo_settings.enable_pr_comments:
-                                    channel = await _post_followup_reply(
+                                    channel = await _reply_or_log_failure(
                                         run_id=run_id,
                                         owner=repo.owner,
                                         repo=repo.name,
                                         pr_number=pr_number,
-                                        in_reply_to_comment_id=run.trigger_comment_id,
+                                        run=run,
                                         body=test_fix_body,
                                         token=token,
+                                        label="test-fix verdict",
                                     )
-                                    state["decisions"].append(
-                                        f"test_fix_reply_via_{channel}"
-                                    )
+                                    if channel is not None:
+                                        state["decisions"].append(
+                                            f"test_fix_reply_via_{channel}"
+                                        )
                                 else:
                                     logger.info(
                                         "orchestrator: run=%s PR comments disabled by repo settings — suppressing test-fix verdict",
@@ -1092,16 +1140,20 @@ async def _orchestrator_pipeline_body(
                                 "- Verified in sandbox CI."
                             )
                             if repo_settings.enable_pr_comments:
-                                channel = await _post_followup_reply(
+                                channel = await _reply_or_log_failure(
                                     run_id=run_id,
                                     owner=repo.owner,
                                     repo=repo.name,
                                     pr_number=pr_number,
-                                    in_reply_to_comment_id=run.trigger_comment_id,
+                                    run=run,
                                     body=confirmation_comment,
                                     token=token,
+                                    label="refinement confirmation",
                                 )
-                                state["decisions"].append(f"fix_reply_via_{channel}")
+                                if channel is not None:
+                                    state["decisions"].append(
+                                        f"fix_reply_via_{channel}"
+                                    )
                             else:
                                 logger.info(
                                     "orchestrator: run=%s PR comments disabled by repo settings — suppressing refinement comment",
