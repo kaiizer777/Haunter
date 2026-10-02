@@ -192,7 +192,7 @@ async def test_webhook_hmac_and_mention_extraction(
     assert data["parent_run_id"] == str(initial_run.id)
 
     # Verify Child Run in DB
-    stmt = select(Run).where(Run.github_run_id == 123456)
+    stmt = select(Run).where(Run.trigger_comment_id == 123456)
     child_run = (await db.execute(stmt)).scalar_one_or_none()
     assert child_run is not None
     assert child_run.parent_run_id == initial_run.id
@@ -239,7 +239,7 @@ async def test_webhook_ignores_comment_without_mention(
     assert resp.json() == {"status": "ignored", "reason": "no @haunter mention"}
 
     # No run created
-    stmt = select(Run).where(Run.github_run_id == 222333)
+    stmt = select(Run).where(Run.trigger_comment_id == 222333)
     assert (await db.execute(stmt)).scalar_one_or_none() is None
 
 
@@ -410,7 +410,7 @@ async def test_max_5_iterations_rate_limiting_enforcement(
         child = Run(
             repo_id=repo.id,
             parent_run_id=initial_run.id,
-            github_run_id=1000 + i,
+            trigger_comment_id=1000 + i,
             head_sha=initial_run.head_sha,
             head_branch=initial_run.head_branch,
             pr_number=42,
@@ -520,7 +520,7 @@ async def test_pull_request_review_comment_event(
     assert resp.status_code == 200
     assert resp.json()["status"] == "queued"
 
-    stmt = select(Run).where(Run.github_run_id == 55667788)
+    stmt = select(Run).where(Run.trigger_comment_id == 55667788)
     child_run = (await db.execute(stmt)).scalar_one_or_none()
     assert child_run is not None
     assert child_run.parent_run_id == initial_run.id
@@ -557,7 +557,7 @@ async def test_context_gatherer_pr_feedback_assembly(db: AsyncSession, user_fact
     child_run = Run(
         repo_id=repo.id,
         parent_run_id=initial_run.id,
-        github_run_id=889900,
+        trigger_comment_id=889900,
         head_sha=initial_run.head_sha,
         head_branch=initial_run.head_branch,
         pr_number=42,
@@ -585,6 +585,11 @@ async def test_context_gatherer_pr_feedback_assembly(db: AsyncSession, user_fact
             "app.github_client.fetch_pr_comments",
             new_callable=AsyncMock,
             return_value=mock_comments,
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[],
         ),
         patch(
             "app.github_client.fetch_diff",
@@ -652,7 +657,7 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     child_run = Run(
         repo_id=repo.id,
         parent_run_id=initial_run.id,
-        github_run_id=778899,
+        trigger_comment_id=778899,
         head_sha=initial_run.head_sha,
         head_branch="haunter/fix-7b1c4e9f-1",
         pr_number=42,
@@ -689,6 +694,11 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
             new_callable=AsyncMock,
             return_value=mock_comments,
         ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
         patch("app.github_client.fetch_diff", new_callable=AsyncMock, return_value=""),
         patch(
             "app.llm.LLMClient.complete",
@@ -724,6 +734,9 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
             return_value=fake_commit_sha,
         ) as mock_commit_patch,
         patch(
+            "app.github_client.post_review_thread_reply", new_callable=AsyncMock
+        ) as mock_thread_reply,
+        patch(
             "app.github_client.post_pr_comment", new_callable=AsyncMock
         ) as mock_post_pr,
     ):
@@ -740,12 +753,17 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     mock_commit_patch.assert_called_once()
     assert mock_commit_patch.call_args[1]["branch"] == "haunter/fix-7b1c4e9f-1"
 
-    # Verify confirmation comment posted to PR
-    mock_post_pr.assert_called_once()
-    pr_comment_body = mock_post_pr.call_args[1]["body"]
-    assert "🤖 @haunter updated the PR based on your feedback" in pr_comment_body
-    assert fake_commit_sha[:7] in pr_comment_body
-    assert "Verified in sandbox CI" in pr_comment_body
+    # The confirmation is answered in the review thread that asked for it,
+    # addressed to the triggering comment (carried on the run as
+    # trigger_comment_id), so no separate PR-level comment is needed.
+    mock_thread_reply.assert_called_once()
+    reply_kwargs = mock_thread_reply.call_args[1]
+    assert reply_kwargs["pr_number"] == 42
+    assert reply_kwargs["in_reply_to_comment_id"] == 778899
+    assert "🤖 @haunter updated the PR based on your feedback" in reply_kwargs["body"]
+    assert fake_commit_sha[:7] in reply_kwargs["body"]
+    assert "Verified in sandbox CI" in reply_kwargs["body"]
+    mock_post_pr.assert_not_called()
 
     # Verify attempt notes persisted reviewer critique
     stmt = select(Attempt).where(Attempt.run_id == child_run.id)
@@ -773,7 +791,7 @@ async def test_refinement_verification_failure_posts_diagnostic_pr_comment(
     child_run = Run(
         repo_id=repo.id,
         parent_run_id=initial_run.id,
-        github_run_id=667788,
+        trigger_comment_id=667788,
         head_sha=initial_run.head_sha,
         head_branch="haunter/fix-7b1c4e9f-1",
         pr_number=42,
@@ -796,6 +814,11 @@ async def test_refinement_verification_failure_posts_diagnostic_pr_comment(
             "app.github_client.fetch_pr_comments",
             new_callable=AsyncMock,
             return_value=mock_comments,
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[],
         ),
         patch("app.github_client.fetch_diff", new_callable=AsyncMock, return_value=""),
         patch(

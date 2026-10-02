@@ -34,6 +34,7 @@ from app.config import settings
 from app.db import async_session_maker
 from app.models import Repo, Run, RunStep
 from app.services import feature_enforcement
+from app.services.followup_commands import TEST_FIX_CONCLUSION
 from app.services.repo_settings import get_repo_settings
 from app.subagents.context_gatherer import gather_context
 from sqlalchemy.exc import InterfaceError, OperationalError
@@ -133,7 +134,15 @@ _ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
         RunStatus.fix_generation,
         RunStatus.error,
     },
-    RunStatus.pending_pr: {RunStatus.pr_opened, RunStatus.error},
+    # `completed` is reachable from `pending_pr` for verify-only
+    # conversational follow-ups (`@haunter test-fix`): the patch passed the
+    # sandbox but was intentionally never committed to a branch, so neither
+    # `pr_opened` nor `fallback_commented` describes the outcome.
+    RunStatus.pending_pr: {
+        RunStatus.pr_opened,
+        RunStatus.completed,
+        RunStatus.error,
+    },
     RunStatus.fallback: {RunStatus.fallback_commented, RunStatus.error},
     # Terminal states — no transitions out
     RunStatus.pr_opened: set(),
@@ -354,6 +363,138 @@ async def _persist_error_step(
             await db.rollback()
         except Exception:
             pass
+
+
+async def _reply_or_log_failure(
+    *,
+    run_id: Any,
+    owner: str,
+    repo: str,
+    pr_number: Optional[int],
+    run: Run,
+    body: str,
+    token: str,
+    label: str,
+) -> Optional[str]:
+    """Deliver a follow-up reply without ever failing the surrounding run.
+
+    Reporting a verdict is a courtesy, not the point of the run. By the time
+    either call site gets here the work is already done — a verified
+    ``test-fix`` never had to commit anything, and a ``fix`` already has its
+    commit on the branch — so a failed comment must not push the Run into
+    ``error`` and report work that succeeded as failed.
+
+    Returns the channel used, or ``None`` when delivery failed (logged) or was
+    impossible. Never raises.
+    """
+    try:
+        return await _post_followup_reply(
+            run_id=run_id,
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            in_reply_to_comment_id=run.reply_to_comment_id or run.trigger_comment_id,
+            body=body,
+            token=token,
+        )
+    except Exception as reply_exc:
+        logger.warning(
+            "orchestrator: run=%s could not deliver %s on %s/%s PR #%s (%s) — "
+            "the run outcome is unaffected",
+            run_id,
+            label,
+            owner,
+            repo,
+            pr_number,
+            type(reply_exc).__name__,
+        )
+        return None
+
+
+async def _post_followup_reply(
+    *,
+    run_id: Any,
+    owner: str,
+    repo: str,
+    pr_number: Optional[int],
+    in_reply_to_comment_id: Optional[int],
+    body: str,
+    token: str,
+) -> str:
+    """Answer a conversational follow-up in the thread that asked for it.
+
+    ``in_reply_to_comment_id`` is the GitHub comment id that carried the
+    ``@haunter`` command (recorded on the Run as ``trigger_comment_id``), so a
+    ``pull_request_review_comment`` trigger is answered in place through the
+    review-thread replies API. An ``issue_comment`` trigger has no review
+    thread: GitHub answers 404 and we degrade to a pull request comment, which
+    lands in the same conversation the reviewer was reading.
+
+    Returns the delivery channel used so the caller can log the outcome:
+    ``"review_thread"``, ``"pr_comment"`` or ``"no_pr"`` when the run carries
+    no PR number or no triggering comment to thread the answer onto. Only
+    ``pr_comment`` is ever a fresh, top-level comment.
+    """
+    if not pr_number or not in_reply_to_comment_id:
+        if not pr_number:
+            logger.info(
+                "orchestrator: run=%s carries no PR number — no follow-up reply channel",
+                run_id,
+            )
+        else:
+            logger.info(
+                "orchestrator: run=%s carries no trigger_comment_id — "
+                "skipping review-thread reply on %s/%s PR #%s",
+                run_id,
+                owner,
+                repo,
+                pr_number,
+            )
+        return "no_pr"
+
+    from app.github_client import (
+        GitHubResourceNotFoundError,
+        post_pr_comment,
+        post_review_thread_reply,
+    )
+
+    try:
+        await post_review_thread_reply(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            in_reply_to_comment_id=in_reply_to_comment_id,
+            body=body,
+            token=token,
+        )
+        return "review_thread"
+    except GitHubResourceNotFoundError:
+        logger.info(
+            "orchestrator: run=%s reply target on %s/%s PR #%s is not a review "
+            "thread — delivering as a pull request comment",
+            run_id,
+            owner,
+            repo,
+            pr_number,
+        )
+    except Exception as reply_exc:
+        logger.warning(
+            "orchestrator: run=%s review thread reply failed for %s/%s PR #%s "
+            "(%s) — falling back to a pull request comment",
+            run_id,
+            owner,
+            repo,
+            pr_number,
+            type(reply_exc).__name__,
+        )
+    await post_pr_comment(
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        body=body,
+        token=token,
+    )
+    return "pr_comment"
 
 
 def check_fast_fail(
@@ -926,11 +1067,63 @@ async def _orchestrator_pipeline_body(
                                 commit_patch,
                                 get_installation_token,
                             )
-                            from app.github_client import post_pr_comment
 
                             token = await get_installation_token(repo)
                             target_branch = run.pr_branch or run.head_branch
                             pr_number = run.pr_number
+
+                            # Conversational `test-fix` (conclusion == "test-fix"):
+                            # verify-only. The candidate patch passed
+                            # fix_generator validation and the GitHub Actions
+                            # sandbox — report the verdict in the thread that
+                            # asked WITHOUT committing to the PR branch, then
+                            # terminate as `completed`.
+                            if (run.conclusion or "") == TEST_FIX_CONCLUSION:
+                                test_fix_body = (
+                                    "🤖 @haunter `test-fix` verdict: "
+                                    "✅ verified in sandbox CI "
+                                    f"(attempt #{attempt.attempt_number}).\n\n"
+                                    "- No commit was made to the PR branch "
+                                    "(verify-only run).\n"
+                                    "- Reply `@haunter fix` to apply this "
+                                    "fix to the PR."
+                                )
+                                if repo_settings.enable_pr_comments:
+                                    channel = await _reply_or_log_failure(
+                                        run_id=run_id,
+                                        owner=repo.owner,
+                                        repo=repo.name,
+                                        pr_number=pr_number,
+                                        run=run,
+                                        body=test_fix_body,
+                                        token=token,
+                                        label="test-fix verdict",
+                                    )
+                                    if channel is not None:
+                                        state["decisions"].append(
+                                            f"test_fix_reply_via_{channel}"
+                                        )
+                                else:
+                                    logger.info(
+                                        "orchestrator: run=%s PR comments disabled by repo settings — suppressing test-fix verdict",
+                                        run_id,
+                                    )
+
+                                run.updated_at = datetime.now(timezone.utc)
+                                attempt_db.add(run)
+                                await attempt_db.commit()
+
+                                await _transition(
+                                    run, RunStatus.completed, attempt_db
+                                )
+                                state["step"] = RunStatus.completed.value
+                                state["decisions"].append("test_fix_verified_no_commit")
+                                logger.info(
+                                    "orchestrator: run=%s test-fix verified (attempt=%d) — no branch commit",
+                                    run_id,
+                                    attempt.attempt_number,
+                                )
+                                return
 
                             commit_sha = await commit_patch(
                                 owner=repo.owner,
@@ -946,20 +1139,26 @@ async def _orchestrator_pipeline_body(
                                 f"- Refined fix committed: `{commit_sha[:7]}`\n"
                                 "- Verified in sandbox CI."
                             )
-                            if pr_number:
-                                if repo_settings.enable_pr_comments:
-                                    await post_pr_comment(
-                                        owner=repo.owner,
-                                        repo=repo.name,
-                                        pr_number=pr_number,
-                                        body=confirmation_comment,
-                                        token=token,
+                            if repo_settings.enable_pr_comments:
+                                channel = await _reply_or_log_failure(
+                                    run_id=run_id,
+                                    owner=repo.owner,
+                                    repo=repo.name,
+                                    pr_number=pr_number,
+                                    run=run,
+                                    body=confirmation_comment,
+                                    token=token,
+                                    label="refinement confirmation",
+                                )
+                                if channel is not None:
+                                    state["decisions"].append(
+                                        f"fix_reply_via_{channel}"
                                     )
-                                else:
-                                    logger.info(
-                                        "orchestrator: run=%s PR comments disabled by repo settings — suppressing refinement comment",
-                                        run_id,
-                                    )
+                            else:
+                                logger.info(
+                                    "orchestrator: run=%s PR comments disabled by repo settings — suppressing refinement comment",
+                                    run_id,
+                                )
 
                             run.updated_at = datetime.now(timezone.utc)
                             attempt_db.add(run)

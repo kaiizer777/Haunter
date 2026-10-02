@@ -46,7 +46,10 @@ export interface AvailableRepoOut {
 export interface RunOut {
   id: string;
   repo_id: string;
-  github_run_id: number;
+  // Null for conversational follow-up runs, which are triggered by an
+  // issue_comment / pull_request_review_comment rather than a workflow run.
+  github_run_id: number | null;
+  trigger_comment_id?: number | null;
   github_delivery_id: string | null;
   head_sha: string;
   head_branch: string;

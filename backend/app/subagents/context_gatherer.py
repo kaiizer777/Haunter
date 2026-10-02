@@ -367,16 +367,27 @@ async def gather_pr_feedback_context(
             prior_strategy_notes = prior_attempt.strategy_notes or ""
             prior_attempt_num = prior_attempt.attempt_number
 
-    # 2. Fetch PR comments & diff concurrently
+    # 2. Fetch PR conversation thread, review thread, & diff concurrently.
+    # The review thread (diff-anchored comments with path/line/diff_hunk) is
+    # the primary context for `pull_request_review_comment` follow-ups —
+    # the triggering `@haunter fix` instruction lives there, not in the
+    # issue thread.
     comments_raw: Any = []
+    review_thread_raw: Any = []
     diff_raw: str = ""
     if pr_number:
-        comments_raw, diff_raw = await asyncio.gather(
+        comments_raw, review_thread_raw, diff_raw = await asyncio.gather(
             _safe_fetch(
                 gh.fetch_pr_comments(
                     owner=owner, repo=name, pr_number=pr_number, token=token
                 ),
                 label="pr_comments",
+            ),
+            _safe_fetch(
+                gh.fetch_pr_review_comments(
+                    owner=owner, repo=name, pr_number=pr_number, token=token
+                ),
+                label="pr_review_thread",
             ),
             _safe_fetch(
                 gh.fetch_diff(owner=owner, repo=name, sha=pr_branch, token=token),
@@ -388,6 +399,11 @@ async def gather_pr_feedback_context(
     comments_list = comments_raw if isinstance(comments_raw, list) else []
     formatted_comments: list[str] = []
     latest_reviewer_instruction = ""
+    # The exact comment that asked for this run, when it is present in the
+    # issue thread. Preferred over "the last @haunter mention" because a
+    # thread can hold several, and acting on a stale one would answer the
+    # wrong request.
+    triggering_instruction = ""
 
     for item in comments_list:
         if not isinstance(item, dict):
@@ -402,11 +418,118 @@ async def gather_pr_feedback_context(
         formatted_comments.append(
             f"Comment by @{author} ({assoc}):\n{c_body.strip()}\n"
         )
+        if run.trigger_comment_id is not None and (
+            item.get("id") == run.trigger_comment_id
+        ):
+            triggering_instruction = str(c_body).strip()
         if "@haunter" in c_body.lower():
             latest_reviewer_instruction = c_body.strip()
 
-    if not latest_reviewer_instruction and formatted_comments:
-        latest_reviewer_instruction = formatted_comments[-1]
+    # 3b. Review thread context (diff-anchored). A
+    # `pull_request_review_comment` instruction lives here, so the review
+    # thread is also searched for the exact triggering comment.
+    review_thread_list = (
+        review_thread_raw if isinstance(review_thread_raw, list) else []
+    )
+    formatted_review_thread: list[str] = []
+    thread_instruction = ""
+    thread_trigger_instruction = ""
+    # Resolve the triggering comment over the WHOLE list first. Applying the
+    # context window before this lookup would drop the trigger on a busy PR
+    # and let a newer `@haunter` comment stand in for it. Cheap: a dict id
+    # comparison per already-fetched item, no extra request.
+    if run.trigger_comment_id is not None:
+        for item in review_thread_list:
+            if isinstance(item, dict) and item.get("id") == run.trigger_comment_id:
+                thread_trigger_instruction = (
+                    str(item.get("body", "") or "").strip()[:2000]
+                )
+                break
+        # A review trigger missing from a *full* fetched window means the PR has
+        # more review comments than the fetch ceiling. Recover the exact
+        # comment by id rather than let the fallback act on an older,
+        # unrelated `@haunter` request. Gated on a full window on purpose: a
+        # transient fetch failure yields an empty list, and failing the run
+        # for that would be worse than the fallback.
+        # `reply_to_comment_id` is only ever set for review comments, so an
+        # issue-comment trigger - which by definition is not in this list -
+        # never takes this path.
+        truncated_window = len(review_thread_list) >= (
+            gh.MAX_REVIEW_COMMENT_PAGES * gh.REVIEW_COMMENTS_PER_PAGE
+        )
+        if (
+            not thread_trigger_instruction
+            and run.reply_to_comment_id is not None
+            and truncated_window
+        ):
+            try:
+                fetched = await gh.fetch_review_comment(
+                    owner=owner,
+                    repo=name,
+                    comment_id=run.trigger_comment_id,
+                    token=token,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "context_gatherer: run=%s could not fetch triggering review "
+                    "comment %s (%s)",
+                    run.id,
+                    run.trigger_comment_id,
+                    type(exc).__name__,
+                )
+                fetched = None
+            if isinstance(fetched, dict):
+                thread_trigger_instruction = (
+                    str(fetched.get("body", "") or "").strip()[:2000]
+                )
+                logger.info(
+                    "context_gatherer: run=%s recovered triggering review comment "
+                    "%s by id; it was outside the fetched review window",
+                    run.id,
+                    run.trigger_comment_id,
+                )
+            else:
+                raise ValueError(
+                    f"run {run.id} was triggered by review comment "
+                    f"{run.trigger_comment_id}, which is not retrievable; "
+                    "refusing to act on a different review instruction"
+                )
+    for item in review_thread_list[-20:]:
+        if not isinstance(item, dict):
+            continue
+        c_body = str(item.get("body", "") or "")
+        author = (
+            item.get("user", {}).get("login", "unknown")
+            if isinstance(item.get("user"), dict)
+            else "unknown"
+        )
+        path = item.get("path") or item.get("file_path") or ""
+        line = item.get("line") or item.get("original_line") or ""
+        anchor = f" ({path}:{line})" if path else ""
+        snippet = c_body.strip()[:2000]
+        formatted_review_thread.append(
+            f"Comment by @{author}{anchor}:\n{snippet}\n"
+        )
+        if "@haunter" in c_body.lower():
+            thread_instruction = snippet
+
+    # Instruction selection, in strict precedence:
+    #   1. the comment whose id is run.trigger_comment_id, from either
+    #      channel - this run exists because of that exact comment;
+    #   2. the newest `@haunter` review-thread comment (a review comment is
+    #      invisible to the Issues API, so it may be the only carrier);
+    #   3. the newest `@haunter` issue comment;
+    #   4. the last issue comment of any kind.
+    # An exact match must never be displaced by the other channel's
+    # fallback, or an issue-triggered run would act on a stale, unrelated
+    # review request.
+    latest_reviewer_instruction = (
+        thread_trigger_instruction
+        or triggering_instruction
+        or thread_instruction
+        or latest_reviewer_instruction
+        or (formatted_comments[-1] if formatted_comments else "")
+    )
 
     # 4. Redact secrets across all assembled sections
     clean_instruction = _redact_secrets(latest_reviewer_instruction)
@@ -424,10 +547,16 @@ async def gather_pr_feedback_context(
         if diff_raw
         else "(no branch diff available)"
     )
+    clean_review_thread = (
+        _redact_secrets("\n---\n".join(formatted_review_thread))
+        if formatted_review_thread
+        else "(no review thread comments)"
+    )
 
     # Truncate to CAP_CHARS
     clean_instruction = clean_instruction[:CAP_CHARS]
     clean_comments = clean_comments[:CAP_CHARS]
+    clean_review_thread = clean_review_thread[:CAP_CHARS]
     clean_patch = clean_patch[:CAP_CHARS]
     clean_notes = clean_notes[:CAP_CHARS]
     clean_diff = clean_diff[:CAP_CHARS]
@@ -436,6 +565,7 @@ async def gather_pr_feedback_context(
     sections = [
         f"## Reviewer Feedback\n{clean_instruction}",
         f"## Preceding PR Comments\n{clean_comments}",
+        f"## Review Thread Context\n{clean_review_thread}",
         f"## Previous Verified Patch (Attempt #{prior_attempt_num})\n```diff\n{clean_patch}\n```",
         f"## Previous Strategy Notes\n{clean_notes}",
         f"## Existing PR Branch Diff\n```diff\n{clean_diff}\n```",
@@ -454,9 +584,11 @@ async def gather_pr_feedback_context(
     )
 
     logger.info(
-        "context_gatherer: run=%s assembled PR feedback context (comments=%d diff_len=%d)",
+        "context_gatherer: run=%s assembled PR feedback context "
+        "(comments=%d review_thread=%d diff_len=%d)",
         run.id,
         len(comments_list),
+        len(formatted_review_thread),
         len(clean_diff),
     )
     return summary
@@ -488,7 +620,14 @@ async def gather_context(
     owner = repo.owner
     name = repo.name
     sha = run.head_sha
+    # Autonomous runs only. A conversational follow-up returns above via
+    # `gather_pr_feedback_context`; `github_run_id` is NULL for those, so
+    # passing it on would fetch logs for a workflow run that does not exist.
     github_run_id = run.github_run_id
+    if github_run_id is None:
+        raise ValueError(
+            f"run {run.id} has no github_run_id; it is not an autonomous workflow_run"
+        )
 
     # -------------------------------------------------------------------------
     # 1. Concurrent GitHub fetches — all 3 in one gather, each timeout-guarded

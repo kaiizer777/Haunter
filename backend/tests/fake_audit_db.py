@@ -606,8 +606,12 @@ class FakeAsyncSession:
         """No-op: `add` already applied column defaults and stored the row."""
         return None
 
-    def get(self, entity: Any, ident: Any) -> Any:
-        """Primary-key lookup over the store, mirroring `AsyncSession.get`."""
+    async def get(self, entity: Any, ident: Any) -> Any:
+        """Primary-key lookup over the store, mirroring `AsyncSession.get`.
+
+        Async because the real method is a coroutine: a sync double would let
+        production code call it without `await` and still pass its tests.
+        """
         mapper = sa_inspect(entity)
         pk_keys = [prop.key for prop in mapper.primary_key]
         keys = ident if isinstance(ident, tuple) else (ident,)
