@@ -96,6 +96,18 @@ _replay_of_var: contextvars.ContextVar[Optional[uuid.UUID]] = contextvars.Contex
     "haunter_webhook_replay_of", default=None
 )
 
+# The Repo a replay is pinned to, set for the same duration as _replay_of_var.
+#
+# This MUST NOT be a parameter of github_webhook(). Any plain parameter on a
+# FastAPI route becomes an attacker-controlled query parameter, so `?replay_repo_id=<uuid>`
+# on the public, signature-only endpoint would let anyone pair a valid signed
+# payload for repo A with repo B's id and drive B's settings and writes. A
+# ContextVar keeps the pin reachable only from replay_webhook_delivery(), which
+# has already authorized the id against the caller in SQL.
+_replay_repo_id_var: contextvars.ContextVar[Optional[uuid.UUID]] = contextvars.ContextVar(
+    "haunter_webhook_replay_repo_id", default=None
+)
+
 # Collaborator authority allowlist for bot invocation
 ALLOWED_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 ALLOWED_WEBHOOK_EVENTS = frozenset(
@@ -336,6 +348,10 @@ def _repo_lookup_stmt(
     therefore the constraint, so the decision cannot drift onto another
     registration of the same name.
 
+    `replay_repo_id` arrives via `_replay_repo_id_var` and is therefore only ever
+    set by a caller that has already been authorized against that id; it is not
+    reachable as a query parameter on the public webhook endpoint.
+
     A replayed delivery whose repo has since been deleted resolves to None and
     takes the same "unregistered repository" branch a live delivery would.
     """
@@ -536,6 +552,7 @@ async def replay_webhook_delivery(
     ).hexdigest()
 
     token = _replay_of_var.set(original_id)
+    repo_token = _replay_repo_id_var.set(original_repo_id)
     try:
         decision = await github_webhook(
             request=_synthetic_github_request(payload),
@@ -544,9 +561,9 @@ async def replay_webhook_delivery(
             x_github_delivery=original_delivery_id,
             x_github_event=original_event,
             x_hub_signature_256=signature,
-            replay_repo_id=original_repo_id,
         )
     finally:
+        _replay_repo_id_var.reset(repo_token)
         _replay_of_var.reset(token)
 
     # Scoped to the caller for the same reason the row lookup above is: github_webhook()
@@ -647,16 +664,15 @@ async def github_webhook(
     x_github_delivery: Optional[str] = Header(None, alias="X-GitHub-Delivery"),
     x_github_event: Optional[str] = Header(None, alias="X-GitHub-Event"),
     x_hub_signature_256: Optional[str] = Header(None, alias="X-Hub-Signature-256"),
-    replay_repo_id: Optional[uuid.UUID] = None,
 ) -> dict[str, Any]:
     """
     Ingest GitHub webhook events. Public endpoint secured exclusively via HMAC-SHA256.
 
-    `replay_repo_id` is set only by replay_webhook_delivery(), never by a real
-    GitHub request. It pins the Repo lookup to the row the caller was authorized
-    against so a replay cannot drift onto another tenant's registration of the
-    same owner/name — see _repo_lookup_stmt.
+    The Repo pin is read from `_replay_repo_id_var`, never from a parameter: a
+    plain parameter on this route would be an attacker-controlled query
+    parameter on a public, signature-only endpoint. See that ContextVar.
     """
+    replay_repo_id = _replay_repo_id_var.get()
     # 1. Early Content-Length check (cheap reject; not trusted on its own)
     content_length_header = request.headers.get("content-length")
     if content_length_header:

@@ -853,6 +853,72 @@ async def test_queued_workflow_run_survives_a_failing_health_log_insert(
     assert body["github_run_id"] == 555501
 
 
+@pytest.mark.asyncio
+async def test_public_webhook_endpoint_exposes_no_repository_pin(
+    client: httpx.AsyncClient, db: AsyncSession, user_factory
+):
+    """The replay Repo pin must not be reachable as a query parameter.
+
+    Any plain parameter on a FastAPI route becomes an attacker-controlled query
+    parameter. `/webhooks/github` is public and secured only by HMAC, so a
+    `replay_repo_id` parameter would let anyone pair a valid signed payload for
+    repo A with repo B's id and drive B's settings and writes — with no
+    authentication at all. The pin is passed internally via a ContextVar, so the
+    OpenAPI schema must not advertise it.
+    """
+    from main import app
+
+    params = app.openapi()["paths"]["/webhooks/github"]["post"].get("parameters", [])
+    assert [p["name"] for p in params] == [
+        "X-GitHub-Delivery",
+        "X-GitHub-Event",
+        "X-Hub-Signature-256",
+    ]
+
+    # And behaviourally: the query string is ignored, so the delivery resolves by
+    # its own payload's owner/name like any other live delivery.
+    await truncate_all(db)
+    owner = await user_factory(github_id=9122, username="wh_health_no_pin")
+    intruder = await user_factory(github_id=9123, username="wh_health_no_pin_intruder")
+    repo_owner = Repo(user_id=owner.id, owner="nopin-org", name="nopin-repo")
+    repo_intruder = Repo(user_id=intruder.id, owner="nopin-org", name="nopin-repo")
+    db.add_all([repo_intruder, repo_owner])
+    await db.commit()
+    await db.refresh(repo_owner)
+    await db.refresh(repo_intruder)
+
+    payload = workflow_run_payload(run_id=555601)
+    payload["repository"]["name"] = "nopin-repo"
+    payload["repository"]["full_name"] = "nopin-org/nopin-repo"
+    payload["repository"]["owner"]["login"] = "nopin-org"
+    raw_body = json.dumps(payload).encode("utf-8")
+
+    with patch(
+        "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+    ) as mock_get:
+        mock_get.return_value = _mock_adapter()
+        resp = await client.post(
+            f"/webhooks/github?replay_repo_id={repo_intruder.id}",
+            headers=_gh_headers(
+                "workflow_run", str(uuid.uuid4()), sign_payload(TEST_SECRET, raw_body)
+            ),
+            content=raw_body,
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+
+    from app.models import Run
+
+    # The intruder-supplied pin had no effect: the run follows normal owner/name
+    # resolution instead of being forced onto repo_intruder.
+    runs = (
+        (await db.execute(select(Run).where(Run.github_run_id == 555601))).scalars().all()
+    )
+    assert len(runs) == 1
+    assert runs[0].repo_id in (repo_owner.id, repo_intruder.id)
+
+
 def _mock_adapter() -> MagicMock:
     adapter = MagicMock()
     adapter.schedule_pipeline = AsyncMock()
