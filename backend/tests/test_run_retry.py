@@ -1125,11 +1125,14 @@ async def test_resolve_pr_opening_run_id_prefers_the_pr_opener(
 ):
     """The prior attempt is read from the run that opened the PR, not the parent.
 
-    Two shapes, both asserted:
+    Three shapes, all asserted:
       * a PR opened by a one-click retry child, refined from the thread root —
         must resolve to the retry child;
       * a legacy refinement thread where the root itself opened the PR — must
-        still resolve to the root, i.e. the change is behaviour-preserving.
+        still resolve to the root, i.e. the change is behaviour-preserving;
+      * a second refinement on that same PR — must STILL resolve to the root,
+        which is what makes the earliest-carrier ordering load-bearing rather
+        than incidental (see the inline note below).
     """
     await truncate_all(db)
     _user, repo = await _seed_user_repo(db, 9522, "pr_opener_user")
@@ -1166,20 +1169,63 @@ async def test_resolve_pr_opening_run_id_prefers_the_pr_opener(
 
     assert await _resolve_pr_opening_run_id(refinement, db) == opener.id
 
-    # Legacy shape: the root opened the PR, so it is still the prior source.
+    # Legacy shape: the root itself opened the PR, so it is still the prior
+    # source. The refinement carries the SAME pr_number, which is what makes
+    # this the meaningful case — the resolver must pick the root (the opener)
+    # over the refinement itself, and the root is also the parent, so the
+    # assertion is identical to the pre-change behaviour.
+    legacy_root = _make_run(
+        repo,
+        status="pr_opened",
+        github_run_id=555004001,
+        pr_number=92,
+        pr_branch="haunter/fix-legacy-1",
+    )
+    db.add(legacy_root)
+    await db.commit()
+    await db.refresh(legacy_root)
+
     legacy_refinement = Run(
         repo_id=repo.id,
-        parent_run_id=root.id,
+        parent_run_id=legacy_root.id,
         is_retry_child=False,
         github_run_id=None,
-        head_sha=root.head_sha,
+        head_sha=legacy_root.head_sha,
         head_branch="haunter/fix-legacy-1",
-        pr_number=None,
+        pr_number=92,
         pr_branch="haunter/fix-legacy-1",
         status="pending",
-        conclusion="feedback",
+        conclusion=FEEDBACK_CONCLUSION,
     )
     db.add(legacy_refinement)
     await db.commit()
     await db.refresh(legacy_refinement)
-    assert await _resolve_pr_opening_run_id(legacy_refinement, db) == root.id
+
+    # The webhook only ever builds this shape for a real refinement child.
+    assert is_pr_refinement(legacy_refinement) is True
+    assert await _resolve_pr_opening_run_id(legacy_refinement, db) == legacy_root.id
+
+    # A SECOND refinement on the same PR makes the "earliest run carrying this
+    # pr_number" ordering load-bearing: legacy_refinement is now itself a
+    # candidate (same repo, same pr_number, not self), and it is newer than the
+    # root. Resolving to it would hand the fix generator its sibling's patch
+    # instead of the one actually on the branch.
+    second_refinement = Run(
+        repo_id=repo.id,
+        parent_run_id=legacy_root.id,
+        is_retry_child=False,
+        github_run_id=None,
+        head_sha=legacy_root.head_sha,
+        head_branch="haunter/fix-legacy-1",
+        pr_number=92,
+        pr_branch="haunter/fix-legacy-1",
+        status="pending",
+        conclusion=FEEDBACK_CONCLUSION,
+    )
+    db.add(second_refinement)
+    await db.commit()
+    await db.refresh(second_refinement)
+
+    assert (
+        await _resolve_pr_opening_run_id(second_refinement, db) == legacy_root.id
+    )
