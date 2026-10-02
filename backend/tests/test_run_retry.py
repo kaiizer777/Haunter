@@ -36,6 +36,7 @@ from app.routers.traces import _MAX_RUN_CHILDREN, build_retry_child
 from app.services.followup_commands import FEEDBACK_CONCLUSION, TEST_FIX_CONCLUSION
 from app.subagents.context_gatherer import (
     _resolve_pr_opening_run_id,
+    gather_pr_feedback_context,
     resolve_workflow_run_id,
 )
 from tests.conftest import truncate_all
@@ -1117,6 +1118,102 @@ async def test_pr_feedback_on_a_retry_produced_pr_is_not_dropped(
 
     # ...while the refinement still hangs off the root, where the cap is counted.
     assert refinement.parent_run_id == root.id
+
+
+@pytest.mark.asyncio
+async def test_gathered_pr_feedback_context_carries_the_retry_childs_patch(
+    db: AsyncSession,
+):
+    """The prior verified patch in the gathered context comes from the PR owner.
+
+    `test_pr_feedback_on_a_retry_produced_pr_is_not_dropped` proves the resolver
+    returns the retry child, and this proves the resolver's answer actually
+    reaches the Fix Generator. It is the end-to-end statement of the same
+    invariant: the refinement hangs off the thread ROOT (where the 5-child cap
+    is counted) but the patch it is refined against lives on the run that
+    opened the PR. Reading the root instead would feed the generator a patch
+    that is not on `haunter/fix-retry-1`, and `commit_patch` would then
+    conflict with, or revert, the fix the retry child already verified.
+    """
+    await truncate_all(db)
+    _user, repo = await _seed_user_repo(db, 9523, "pr_context_user")
+
+    root = _make_run(repo, status="fallback_commented", github_run_id=555005000)
+    db.add(root)
+    await db.commit()
+    await db.refresh(root)
+
+    # The root ended on the exhaust path and DID produce an attempt, but it
+    # failed — this is the decoy. A regression that read the root's attempts
+    # would surface this marker instead of the retry child's.
+    db.add(
+        Attempt(
+            run_id=root.id,
+            attempt_number=1,
+            patch_text="--- a/decoy.py\n+++ b/decoy.py\nROOTPATCHMARKERABC\n",
+            strategy_notes="root exhausted, never verified",
+            verification_status="fail",
+        )
+    )
+
+    retry_child = build_retry_child(root)
+    retry_child.status = "pr_opened"
+    retry_child.pr_number = 77
+    retry_child.pr_branch = "haunter/fix-retry-ctx"
+    db.add(retry_child)
+    await db.commit()
+    await db.refresh(retry_child)
+
+    db.add(
+        Attempt(
+            run_id=retry_child.id,
+            attempt_number=1,
+            patch_text=(
+                "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n"
+                "-def add(): pass\n+def add(a, b): return a + b\n"
+                "RETRYCHILDPATCHMARKERXYZ\n"
+            ),
+            strategy_notes="verified fix for the retry child",
+            verification_status="pass",
+        )
+    )
+
+    refinement = Run(
+        repo_id=repo.id,
+        parent_run_id=root.id,
+        is_retry_child=False,
+        github_run_id=None,
+        head_sha=retry_child.head_sha,
+        head_branch="haunter/fix-retry-ctx",
+        pr_number=77,
+        pr_branch="haunter/fix-retry-ctx",
+        status="pending",
+        conclusion=FEEDBACK_CONCLUSION,
+    )
+    db.add(refinement)
+    await db.commit()
+    await db.refresh(refinement)
+
+    assert is_pr_refinement(refinement) is True
+
+    with (
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "app.github_client.fetch_diff",
+            new=AsyncMock(return_value=""),
+        ),
+    ):
+        ctx = await gather_pr_feedback_context(refinement, repo, db)
+
+    assert "RETRYCHILDPATCHMARKERXYZ" in ctx, ctx
+    assert "ROOTPATCHMARKERABC" not in ctx, ctx
 
 
 @pytest.mark.asyncio

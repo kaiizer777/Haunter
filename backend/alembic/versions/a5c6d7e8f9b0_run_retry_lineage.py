@@ -73,6 +73,16 @@ def downgrade() -> None:
     if not context.is_offline_mode():
         bind = op.get_bind()
         if bind is not None:
+            # Take the lock BEFORE counting, otherwise the check is advisory: a
+            # retry child inserted between the SELECT and the ALTER below would
+            # still abort the rollback with a bare not_null_violation, which is
+            # exactly the outcome this preflight exists to prevent. EXCLUSIVE
+            # conflicts with the row inserts on `runs` and with the ACCESS
+            # EXCLUSIVE the ALTER needs, so it covers both statements.
+            # lock_timeout keeps a busy table from parking the downgrade behind
+            # someone else's long transaction — it fails fast and loudly.
+            bind.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
+            bind.execute(sa.text("LOCK TABLE runs IN EXCLUSIVE MODE"))
             null_rows = bind.execute(
                 sa.text("SELECT count(*) FROM runs WHERE github_run_id IS NULL")
             ).scalar()
