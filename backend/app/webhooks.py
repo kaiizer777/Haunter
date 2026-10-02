@@ -77,6 +77,12 @@ from app.services.followup_commands import (
     parse_followup_command,
 )
 from app.services.repo_settings import get_repo_settings
+from app.services.webhook_retention import (
+    RETENTION_SWEEP_IDENTIFIER,
+    RetentionSweepResult,
+    sweep_webhook_delivery_retention,
+)
+from app.self_invocation import KIND_RETENTION, verify_self_invocation
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +345,28 @@ class WebhookReplayResultOut(BaseModel):
     replayed_at: datetime
 
     model_config = ConfigDict(extra="forbid")
+
+
+class WebhookRetentionSweepOut(BaseModel):
+    """Result of one retention sweep — counts only, never any stored content."""
+
+    payloads_cleared: int
+    rows_deleted: int
+    payload_cutoff: datetime
+    row_cutoff: datetime
+    batches_run: int
+
+    model_config = ConfigDict(extra="forbid")
+
+    @classmethod
+    def from_result(cls, result: RetentionSweepResult) -> "WebhookRetentionSweepOut":
+        return cls(
+            payloads_cleared=result.payloads_cleared,
+            rows_deleted=result.rows_deleted,
+            payload_cutoff=result.payload_cutoff,
+            row_cutoff=result.row_cutoff,
+            batches_run=result.batches_run,
+        )
 
 
 def _owned_repo_ids(user_id: uuid.UUID):
@@ -742,6 +770,62 @@ async def replay_webhook_delivery(
         decision=decision,
         replayed_at=datetime.now(timezone.utc),
     )
+
+
+@router.post(
+    "/deliveries/retention-sweep",
+    response_model=WebhookRetentionSweepOut,
+    status_code=status.HTTP_200_OK,
+)
+async def sweep_webhook_deliveries(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    x_haunter_retention_token: Annotated[
+        Optional[str], Header(alias="X-Haunter-Retention-Token")
+    ] = None,
+) -> WebhookRetentionSweepOut:
+    """Apply the split retention windows to `webhook_deliveries`.
+
+    Machine-triggered, NOT a user-facing endpoint: there is no UI for it and no
+    dashboard button should ever be added — it NULLs payloads and deletes rows,
+    which is an operator/lifecycle action, not something a tenant user gets to
+    trigger at will.
+
+    Auth is the self-invocation HMAC (`app.self_invocation`) under the
+    `retention` kind, NOT a session cookie. Two reasons:
+
+      * The Function URL this backend is served from is public
+        (`authorization_type = "NONE"`, infra/aws/lambda.tf). A cookie-gated
+        variant would be a session-authenticated destructive endpoint on a
+        public origin, and the cron would have to be handed a real user's
+        long-lived session cookie to call it.
+      * The token is domain-separated, so it cannot be exchanged for a token
+        that mints LLM work or for access to another tenant's deliveries. Its
+        worst case is "trigger one idempotent retention pass again".
+
+    `verify_self_invocation` returns False for a missing header, a malformed
+    token, AND an unconfigured `AUDIT_SELF_INVOKE_SECRET`, so an unconfigured
+    deployment fails closed instead of running an unauthenticated sweep. The
+    response carries counts and cutoffs only — never a stored payload.
+    """
+    if not verify_self_invocation(
+        KIND_RETENTION, RETENTION_SWEEP_IDENTIFIER, x_haunter_retention_token
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing retention sweep token",
+        )
+
+    result = await sweep_webhook_delivery_retention(db)
+    logger.info(
+        "webhook_retention_sweep payloads_cleared=%d rows_deleted=%d batches=%d "
+        "payload_cutoff=%s row_cutoff=%s",
+        result.payloads_cleared,
+        result.rows_deleted,
+        result.batches_run,
+        result.payload_cutoff.isoformat(),
+        result.row_cutoff.isoformat(),
+    )
+    return WebhookRetentionSweepOut.from_result(result)
 
 
 async def _read_limited_body(request: Request) -> bytes:

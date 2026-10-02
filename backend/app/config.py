@@ -3,7 +3,7 @@ import sys
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -225,6 +225,77 @@ class Settings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # Feature 8 — retention windows for `webhook_deliveries`.
+    #
+    # ROW retention and PAYLOAD retention are separate knobs on purpose. The row
+    # is the audit record the health tab queries (`event` / `status` / `reason` /
+    # `delivery_id` / `repo_id`); the payload is the replay buffer and is ~99% of
+    # the bytes a delivery costs. A single window would force a choice between
+    # dropping the audit trail early and paying for the bodies forever, so the
+    # sweeper (app.services.webhook_retention) NULLs the payload on the short
+    # window and DELETEs the row on the long one.
+    #
+    # Default payload window matches the 90-day range cap the traces API already
+    # enforces (app/routers/traces.py RunListParams), so "how far back can a user
+    # look" stays one mental model. The row window is a full year: the row is
+    # ~100 bytes, so a year of history costs nothing measurable while still
+    # bounding the table (see the growth model in issue #36).
+    webhook_payload_retention_days: int = Field(
+        default=90,
+        gt=0,
+        validation_alias=AliasChoices(
+            "webhook_payload_retention_days", "HAUNTER_WEBHOOK_PAYLOAD_RETENTION_DAYS"
+        ),
+    )
+    webhook_row_retention_days: int = Field(
+        default=365,
+        gt=0,
+        validation_alias=AliasChoices(
+            "webhook_row_retention_days", "HAUNTER_WEBHOOK_ROW_RETENTION_DAYS"
+        ),
+    )
+    # Each sweep runs bounded batches instead of one unbounded statement: a
+    # single UPDATE/DELETE over the whole table would take a long-lived row lock
+    # and produce a large amount of dead tuples in one transaction, stalling
+    # concurrent inserts from webhook ingestion. Batches are index-friendly on
+    # ix_webhook_deliveries_created_at and each one commits on its own.
+    webhook_retention_sweep_batch_size: int = Field(
+        default=1000,
+        gt=0,
+        validation_alias=AliasChoices(
+            "webhook_retention_sweep_batch_size",
+            "HAUNTER_WEBHOOK_RETENTION_SWEEP_BATCH_SIZE",
+        ),
+    )
+    # Hard ceiling on batches per sweep, so one invocation can drain at most
+    # batch_size * max_batches rows and cannot run unbounded if a predicate
+    # ever matches more than expected. A daily cron at 1000 x 20 clears 20k
+    # rows/day, three orders of magnitude above the observed write rate.
+    webhook_retention_sweep_max_batches: int = Field(
+        default=20,
+        gt=0,
+        validation_alias=AliasChoices(
+            "webhook_retention_sweep_max_batches",
+            "HAUNTER_WEBHOOK_RETENTION_SWEEP_MAX_BATCHES",
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_webhook_retention_windows(self) -> "Settings":
+        """Reject a row window shorter than the payload window.
+
+        Nothing breaks if it is — the delete predicate is a superset of the
+        NULL-out predicate, so the rows would simply vanish instead of being
+        kept — but it silently discards the audit history the payload window was
+        deliberately separate to preserve. Fail at boot instead of at sweep time.
+        """
+        if self.webhook_row_retention_days < self.webhook_payload_retention_days:
+            raise ValueError(
+                "webhook_row_retention_days must be >= webhook_payload_retention_days: "
+                "the row is the audit record and must outlive the payload it carries"
+            )
+        return self
 
     @property
     def async_database_url(self) -> str:
