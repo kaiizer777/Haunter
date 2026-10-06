@@ -1351,8 +1351,35 @@ async def github_webhook(
 
         # Phase 5.1 Auditor Mode trigger filter (after HMAC verification and
         # sentinel guards above). Disabled features exit here with no audit
-        # scheduled (<50ms, no DB mutation); enabled repos dispatch a
-        # read-only background audit in parallel with the review pipeline.
+        # scheduled (<50ms, no DB mutation).
+        #
+        # B5 — one publisher per pull_request delivery. The auditor
+        # (audit_pipeline.execute_audit_job -> audit_publisher
+        # .publish_audit_review) and the code-review sentinel below
+        # (review_orchestrator.run_code_review_pipeline ->
+        # create_pull_request_review) both POST a formal review to
+        # POST /pulls/{n}/reviews. A delivery that ran both left the PR with
+        # two competing reviews from two publishers with no coordination, and
+        # spent two of GitHub's secondary-rate-limit budget on one webhook.
+        #
+        # The owner is decided HERE, once, for the whole delivery:
+        #
+        #   * the repo's persisted auditor settings are the admin override.
+        #     `enable_auditor_mode` ships False (every default `autonomous`
+        #     repo) and `audit_trigger_on_pr` is only consulted once it is on,
+        #     so a repo that opted the auditor into PR reviews has asked for a
+        #     read-only audit of its PRs and the auditor owns the delivery;
+        #   * every other repo is owned by the code-review sentinel, the
+        #     unconditional path whose CodeReview row is what the reviews API
+        #     and the dashboard read.
+        #
+        # The auditor's own gates (audit_pipeline.evaluate_pr) and its other
+        # trigger paths (workflow_run, `@haunter audit`) are untouched; only
+        # the pull_request double-publish is removed.
+        _auditor_owns_delivery = False
+        _audit_id: Optional[str] = None
+        _audit_type: Optional[str] = None
+        _audit_suppressed_reason: Optional[str] = None
         try:
             _trigger = await audit_pipeline.get_auditor_trigger(db, repo.id)
             _decision = audit_pipeline.evaluate_pr(_trigger, action)
@@ -1369,15 +1396,18 @@ async def github_webhook(
                     head_sha=commit_sha,
                     settings_version=_trigger.settings_version,
                 )
+                _auditor_owns_delivery = True
+                _audit_type = _decision.audit_type
                 logger.info(
                     "Auditor queued audit_id=%s type=%s repo=%s pr=%s delivery_id=%s",
                     _audit_id,
-                    _decision.audit_type,
+                    _audit_type,
                     _log_repo(owner, repo_name),
                     sanitize_log_value(pr_number, 16),
                     x_github_delivery,
                 )
             else:
+                _audit_suppressed_reason = _decision.reason
                 logger.info(
                     "Auditor skipped pull_request (delivery_id=%s): %s",
                     x_github_delivery,
@@ -1389,10 +1419,51 @@ async def github_webhook(
                 detail="Delivery conflicts with a previously recorded audit payload",
             )
         except Exception as exc:
+            _audit_suppressed_reason = "auditor trigger evaluation failed"
             logger.warning(
                 "Auditor trigger evaluation failed (pull_request): %s",
                 type(exc).__name__,
             )
+
+        # The one structured line that names the publisher for this delivery.
+        logger.info(
+            "pull_request review_owner=%s suppressed=%s reason=%s repo=%s pr=%s "
+            "delivery_id=%s",
+            "auditor" if _auditor_owns_delivery else "code_review",
+            "code_review" if _auditor_owns_delivery else "none",
+            sanitize_log_value(
+                _audit_type if _auditor_owns_delivery else _audit_suppressed_reason,
+                255,
+            ),
+            _log_repo(owner, repo_name),
+            sanitize_log_value(pr_number, 16),
+            sanitize_log_value(x_github_delivery, 64),
+        )
+
+        if _auditor_owns_delivery:
+            await _record_webhook_delivery(
+                db,
+                event="pull_request",
+                delivery_id=x_github_delivery,
+                status_value="queued",
+                reason=(
+                    f"review_owner=auditor audit_id={_audit_id} "
+                    f"audit_type={_audit_type} pr_number={pr_number}"
+                ),
+                repo=f"{owner}/{repo_name}",
+                repo_id=repo.id,
+                payload=raw_body,
+            )
+            return {
+                "status": "queued",
+                "reason": "auditor pr audit owns this delivery",
+                "audit_id": _audit_id,
+                "audit_type": _audit_type,
+                "repo": f"{owner}/{repo_name}",
+                "pr_number": pr_number,
+                "commit_sha": commit_sha,
+                "delivery_id": x_github_delivery,
+            }
 
         new_review = CodeReview(
             repo_id=repo.id,

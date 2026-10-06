@@ -682,11 +682,31 @@ async def test_audit_pr_opened_dispatches(
 
 
 @pytest.mark.asyncio
-async def test_slow_audit_worker_does_not_block_existing_review_work(
+async def test_slow_audit_worker_does_not_serialize_subsequent_webhook_deliveries(
     client: httpx.AsyncClient,
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
+    """A slow auditor must never sit on the webhook's critical path.
+
+    The property this test owns is *independence*, and it is a concurrency claim:
+    while an auditor job is blocked mid-flight inside its diff fetch, a later
+    ``pull_request`` delivery must still be accepted and answered, and the audit
+    work must still be durable in the outbox rather than executed by the webhook
+    request. ``adapter.schedule_audit`` raises if the webhook path ever schedules
+    audit execution itself, and the worker task is asserted still-unfinished when
+    the second delivery is answered, so the two deliveries are provably concurrent
+    rather than merely both eventually completing.
+
+    What this test must no longer assert is that *both* publishers fire for a
+    delivery. B5 made them mutually exclusive: exactly one publisher owns a
+    ``pull_request`` delivery, chosen by the repo's persisted auditor opt-in. This
+    repo has that opt-in on, so the auditor owns both deliveries here and the
+    code-review publisher must not fire for either. Single-dispatch itself is
+    covered by ``tests/test_review_webhook_b5_single_publish.py``; what stays
+    unique to this test is that the two deliveries do not serialise behind a slow
+    audit.
+    """
     repo = await seed_repo(
         fake_audit_db, fake_audit_user_factory, "independent-org", "independent-repo"
     )
@@ -708,21 +728,17 @@ async def test_slow_audit_worker_does_not_block_existing_review_work(
     )
     audit_started = asyncio.Event()
     release_audit = asyncio.Event()
-    review_scheduled = asyncio.Event()
     adapter = MagicMock()
     adapter.schedule_audit = AsyncMock(
         side_effect=AssertionError("webhook path must not schedule audit execution")
     )
-
-    async def slow_review(*_args, **_kwargs):
-        review_scheduled.set()
 
     async def slow_diff(**_kwargs):
         audit_started.set()
         await release_audit.wait()
         return ""
 
-    adapter.schedule_review = AsyncMock(side_effect=slow_review)
+    adapter.schedule_review = AsyncMock()
     llm_complete = AsyncMock()
     with (
         patch(
@@ -751,7 +767,6 @@ async def test_slow_audit_worker_does_not_block_existing_review_work(
         patch("app.subagents.auditor.LLMClient.complete", llm_complete),
     ):
         first_response = await post_signed(client, "pull_request", first_payload)
-        review_scheduled.clear()
         dispatch_claim = await audit_pipeline.claim_next_queued_job()
         assert dispatch_claim is not None
         worker = asyncio.create_task(
@@ -764,13 +779,22 @@ async def test_slow_audit_worker_does_not_block_existing_review_work(
             post_signed(client, "pull_request", second_payload),
             timeout=10.0,
         )
-        await asyncio.wait_for(review_scheduled.wait(), timeout=2.0)
+        # The delivery above was answered while the worker is still parked inside
+        # its diff fetch, so the audit path demonstrably did not serialise behind
+        # it. `release_audit` is only set further down, so this cannot pass by
+        # accident.
+        assert not worker.done(), (
+            "the auditor worker was already finished, so the second delivery was "
+            "not answered concurrently with a slow in-flight audit"
+        )
         release_audit.set()
         assert await asyncio.wait_for(worker, timeout=5.0) is True
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
-    adapter.schedule_review.assert_awaited()
+    # B5: this repo opted into the auditor, so it owns the deliveries and the
+    # code-review publisher must not also fire. Both deliveries, neither one.
+    adapter.schedule_review.assert_not_awaited()
     adapter.schedule_audit.assert_not_awaited()
     llm_complete.assert_not_awaited()
     jobs = list(
