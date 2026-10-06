@@ -93,6 +93,15 @@ class LLMClient:
                 - ``usage`` (dict): ``{"input_tokens": int, "output_tokens": int}``
                 - ``latency_ms`` (int): Execution latency in milliseconds
                 - ``model`` (str): Model identifier that produced the response
+                - ``finish_reason`` (str | None): The provider's verbatim reason for
+                  ending generation (``stop``/``length`` for OpenAI-compatible
+                  providers, ``end_turn``/``max_tokens`` for Anthropic, which names
+                  the field ``stop_reason`` and is normalised here). The key is
+                  always present; ``None`` means the provider did not report one,
+                  never "stopped cleanly". Callers that parse structured output must
+                  treat ``None`` as unknown and cross-check ``usage.output_tokens``
+                  against the ``max_tokens`` they requested — a response truncated at
+                  the budget is otherwise indistinguishable from a complete one.
         """
         config = await get_active_model_config(db=db, repo_id=repo_id)
         target_provider = kwargs.pop("provider", config.provider)

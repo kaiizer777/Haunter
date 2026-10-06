@@ -24,10 +24,12 @@ from app import github_client
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
     MAX_CATEGORY_CHARS,
+    MAX_GITHUB_COMMENT_CHARS,
     MAX_INLINE_FIELD_CHARS,
     MAX_SUGGESTED_FIX_CHARS,
     MAX_TITLE_CHARS,
     redact_sensitive_text,
+    sanitize_output_markdown,
     sanitize_output_path,
     sanitize_output_text,
 )
@@ -214,6 +216,25 @@ def build_inline_review_comments(
     return comments, suppressed_count
 
 
+def _bound_github_body(body: Any, fallback: Any = "") -> str:
+    """Clamp a rendered body to what GitHub will accept on a comment/review.
+
+    Every field is already bounded individually, but the *total* was not: a
+    report with 25 findings, each within its per-field budget, can still exceed
+    GitHub's 65 536-character ceiling and be rejected with HTTP 422. Because the
+    review body and its inline comments are one atomic request, that rejection
+    discards every inline comment with it — a per-field bound cannot protect
+    them. This is the publish-boundary clamp the auditor was missing.
+    """
+    text = sanitize_output_markdown(str(body or fallback or ""), MAX_GITHUB_COMMENT_CHARS)
+    # sanitize_output_markdown counts its truncation marker *inside* `maximum` and
+    # only shortens afterwards (control strip, CRLF normalisation), so this clamp
+    # cannot change the value. It is kept as an unconditional slice rather than a
+    # dead `if len(...) <= MAX` branch so the ceiling GitHub enforces stays
+    # visible here, at the one boundary that has to honour it.
+    return text[:MAX_GITHUB_COMMENT_CHARS]
+
+
 async def publish_audit_review(
     *,
     result: AuditResult,
@@ -320,7 +341,9 @@ async def publish_audit_review(
                 comments = []
                 suppressed_count = len(result.findings)
 
-            review_body = result.report_markdown or result.executive_summary
+            review_body = _bound_github_body(
+                result.report_markdown, result.executive_summary
+            )
 
             resp = await github_client.create_pr_review(
                 owner=resolved_owner,
@@ -364,7 +387,9 @@ async def publish_audit_review(
                     error="Missing head_sha for commit comment",
                 )
 
-            comment_body = result.report_markdown or result.executive_summary
+            comment_body = _bound_github_body(
+                result.report_markdown, result.executive_summary
+            )
             resp = await github_client.create_commit_comment(
                 owner=resolved_owner,
                 repo=resolved_repo,

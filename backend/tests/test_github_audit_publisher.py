@@ -39,6 +39,7 @@ from app.github_client import (
 )
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
+    MAX_GITHUB_COMMENT_CHARS,
     format_audit_report,
 )
 from app.models import Repo
@@ -643,6 +644,75 @@ async def test_audit_pipeline_wiring_tolerates_publisher_failure():
 # ==============================================================================
 # 6. Direct GitHub Client Methods Tests
 # ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_oversized_report_is_clamped_to_github_comment_limit():
+    """The clamp is pinned at GitHub's real limit, not the internal report budget.
+
+    `MAX_REPORT_CHARS` (100_000) is what we are willing to ask a model for;
+    `MAX_GITHUB_COMMENT_CHARS` (65_536) is what GitHub will accept. A report over
+    the second is rejected whole with HTTP 422, taking every inline comment with
+    it, so the published body must respect the smaller of the two.
+    """
+    oversized = "# Report\n\n" + ("x" * (MAX_GITHUB_COMMENT_CHARS + 5_000))
+    result = _make_audit_result(confidence=90, publish_allowed=True)
+    object.__setattr__(result, "report_markdown", oversized)
+
+    mock_pr = AsyncMock()
+    mock_pr.return_value = {"id": 3001}
+
+    with patch("app.github.audit_publisher.github_client.create_pr_review", mock_pr):
+        outcome = await publish_audit_review(
+            result=result,
+            owner="octocat",
+            repo="hello-world",
+            pr_number=42,
+            head_sha="a" * 40,
+            diff_text=SAMPLE_DIFF,
+            token="ghs_test123",
+        )
+
+    assert outcome.published is True
+    body = mock_pr.call_args.kwargs["body"]
+    assert len(body) <= MAX_GITHUB_COMMENT_CHARS, (
+        f"published review body of {len(body)} chars exceeds GitHub's "
+        f"{MAX_GITHUB_COMMENT_CHARS}-character comment limit"
+    )
+    # Truncation, not rejection: the audit still publishes what fits.
+    assert body.endswith("\n[TRUNCATED]")
+
+
+@pytest.mark.asyncio
+async def test_oversized_report_is_clamped_on_commit_comment_path():
+    """Same clamp on the commit-comment fallback, the second publish site."""
+    oversized = "# Report\n\n" + ("x" * (MAX_GITHUB_COMMENT_CHARS + 5_000))
+    result = _make_audit_result(
+        audit_type="ci_failure_audit", confidence=90, publish_allowed=True
+    )
+    object.__setattr__(result, "report_markdown", oversized)
+
+    mock_commit = AsyncMock()
+    mock_commit.return_value = {"id": 3002}
+
+    with patch(
+        "app.github.audit_publisher.github_client.create_commit_comment", mock_commit
+    ):
+        outcome = await publish_audit_review(
+            result=result,
+            owner="octocat",
+            repo="hello-world",
+            pr_number=None,
+            head_sha="b" * 40,
+            token="ghs_test123",
+        )
+
+    assert outcome.published is True
+    body = mock_commit.call_args.kwargs["body"]
+    assert len(body) <= MAX_GITHUB_COMMENT_CHARS, (
+        f"published commit comment of {len(body)} chars exceeds GitHub's "
+        f"{MAX_GITHUB_COMMENT_CHARS}-character comment limit"
+    )
 
 
 @pytest.mark.asyncio

@@ -24,10 +24,16 @@ import time
 from typing import Literal, Optional
 import uuid
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import LLMClient
+from app.llm.prompts.audit_prompts import (
+    MAX_GITHUB_COMMENT_CHARS,
+    MAX_INLINE_FIELD_CHARS,
+    MAX_SUGGESTED_FIX_CHARS,
+    sanitize_output_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +44,50 @@ logger = logging.getLogger(__name__)
 ReviewCategory = Literal["security", "logic", "performance", "api_compatibility"]
 ReviewSeverity = Literal["low", "medium", "high", "critical"]
 
+#: Output-token budget requested per review attempt.
+#:
+#: A truncation is only detectable if the provider says so, so every adapter now
+#: reports ``finish_reason`` and this module refuses to guess from the token
+#: count alone (see :func:`_detect_truncation`).
+REVIEW_MAX_TOKENS = 4096
+
+#: Provider finish/stop reasons that mean "the model stopped on its own".
+#: Union of the OpenAI-style (``stop``, ``tool_calls``) and Anthropic-style
+#: (``end_turn``, ``stop_sequence``, ``tool_use``, ``refusal``) vocabularies:
+#: Anthropic's ``tool_use`` is the counterpart of OpenAI's ``tool_calls``, and
+#: both mean the turn ended deliberately, not that the budget ran out.
+COMPLETION_FINISH_REASONS = frozenset(
+    {"stop", "end_turn", "stop_sequence", "tool_calls", "tool_use", "refusal"}
+)
+
+
+def _bound_model_text(value: object, maximum: int) -> object:
+    """Clamp a model-authored string, redacting and normalizing on the way.
+
+    Uses the repo's canonical structured-output boundary
+    (:func:`sanitize_output_markdown`) so redaction, control-character stripping
+    and the truncation marker are identical to every other place a model's prose
+    is bounded. ``MAX_REPORT_CHARS``-class markdown is deliberately not escaped
+    here: these fields end up inside fenced code blocks, and HTML-escaping a code
+    snippet corrupts it.
+    """
+    if not isinstance(value, str):
+        return value
+    return sanitize_output_markdown(value, maximum)
+
 
 class ReviewFinding(BaseModel):
-    """An individual actionable review finding tied to specific file lines."""
+    """An individual actionable review finding tied to specific file lines.
+
+    Every model-authored string is bounded, and bounded by *truncation* rather
+    than by rejection. These bounds are not cosmetic: the fields are concatenated
+    verbatim into a GitHub review body, and that body is one atomic request
+    together with every inline comment, so a single oversized field 422s the
+    whole review and discards every other finding with it. Rejecting oversized
+    output instead would turn a length problem into a parse failure — the retry
+    asks the same model for the same thing and fails identically — so the value
+    is clamped and the finding still ships.
+    """
 
     file_path: str = Field(
         ..., min_length=1, description="Relative path of the touched file"
@@ -62,6 +109,18 @@ class ReviewFinding(BaseModel):
         None, description="Replacement code snippet for GitHub suggestion block"
     )
 
+    @field_validator("critique", mode="before")
+    @classmethod
+    def _bound_critique(cls, value: object) -> object:
+        return _bound_model_text(value, MAX_INLINE_FIELD_CHARS)
+
+    @field_validator("suggested_patch", mode="before")
+    @classmethod
+    def _bound_suggested_patch(cls, value: object) -> object:
+        if value is None:
+            return None
+        return _bound_model_text(value, MAX_SUGGESTED_FIX_CHARS)
+
     @model_validator(mode="after")
     def validate_lines(self) -> "ReviewFinding":
         if self.line_end < self.line_start:
@@ -77,6 +136,11 @@ class CodeReviewOutput(BaseModel):
     )
     summary: str = Field(..., min_length=5, description="Executive review summary")
     findings: list[ReviewFinding] = Field(default_factory=list)
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _bound_summary(cls, value: object) -> object:
+        return _bound_model_text(value, MAX_GITHUB_COMMENT_CHARS)
 
 
 @dataclass
@@ -122,10 +186,21 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
     Format a ReviewFinding into a GitHub comment markdown string.
     Embeds a ```suggestion ... ``` block if suggested_patch is provided.
     Strips any existing markdown code fences from the patch to prevent nested broken formatting.
+
+    Every field is clamped again here, not just at parse time: the finding may
+    have been loaded out of ``code_reviews.findings`` (JSONB written by an older
+    build, or by a caller that bypassed the schema), and a suggestion block that
+    GitHub rejects takes down every other inline comment in the same atomic
+    request with it.
     """
-    header = f"**[{finding.category.upper()}] [{finding.severity.upper()}]**: {finding.critique}"
+    critique = sanitize_output_markdown(finding.critique, MAX_INLINE_FIELD_CHARS)
+    header = (
+        f"**[{finding.category.upper()}] [{finding.severity.upper()}]**: {critique}"
+    )
     if finding.suggested_patch is not None and finding.suggested_patch.strip():
-        patch_clean = finding.suggested_patch.strip("\r\n")
+        patch_clean = sanitize_output_markdown(
+            finding.suggested_patch, MAX_SUGGESTED_FIX_CHARS
+        ).strip("\r\n")
         # Strip outer code fences if the model wrapped its patch in ```suggestion or ```lang
         if patch_clean.startswith("```"):
             lines = patch_clean.splitlines()
@@ -139,6 +214,17 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
                 patch_clean = "\n".join(lines[1:]).strip("\r\n")
         return f"{header}\n\n```suggestion\n{patch_clean}\n```"
     return header
+
+
+def bound_github_body(body: str) -> str:
+    """Clamp a rendered review/commit-comment body to what GitHub will accept.
+
+    ``POST /pulls/{n}/reviews`` and ``POST /commits/{sha}/comments`` reject a body
+    past 65 536 characters with HTTP 422. Bounding each field is not enough: the
+    per-finding blocks are concatenated, so the total is a separate quantity with
+    its own limit and needs its own clamp at the publish boundary.
+    """
+    return sanitize_output_markdown(str(body or ""), MAX_GITHUB_COMMENT_CHARS)
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +305,54 @@ class ReviewAnalysisError(Exception):
     """Raised when review generation fails completely after retries."""
 
 
+class ReviewOutputTruncatedError(ReviewAnalysisError):
+    """Raised when the model stopped mid-object because it hit the token budget.
+
+    Distinct from :class:`ReviewAnalysisError` because the remedy is different:
+    the output was well-formed until the budget ran out, so asking the same model
+    the same question with the same budget truncates at the same place. The
+    budget-invariant retry is therefore skipped for this error and only for this
+    error — retrying a genuine schema violation is exactly what the retry is for.
+    """
+
+
+def _detect_truncation(response: dict, max_tokens: int) -> Optional[str]:
+    """Return the provider's reason for ending generation early, or ``None``.
+
+    Order of evidence:
+
+    1. ``finish_reason`` / ``stop_reason`` — authoritative, and reported by every
+       adapter. Any value outside :data:`COMPLETION_FINISH_REASONS` (``length``,
+       ``max_tokens``, ``model_length``, …) means the generation was cut off.
+       ``stop_reason`` is the raw Anthropic field name; adapters normalise it to
+       ``finish_reason``, and reading it too means a raw provider payload handed
+       straight to this function is judged the same way as a normalised one.
+
+    2. ``usage.output_tokens >= max_tokens`` — the fallback for a provider that
+       omits the field. A response that consumed the entire budget is treated as
+       truncated even if it happens to parse: a JSON object that ends exactly at
+       the budget boundary is indistinguishable from one that was cut, and
+       shipping it as complete is the failure this exists to prevent.
+
+    An absent reason is *unknown*, never "ok" — the token heuristic still
+    applies, and the log line at the call site says which signal decided it.
+    """
+    finish_reason = response.get("finish_reason")
+    if not isinstance(finish_reason, str) or not finish_reason.strip():
+        finish_reason = response.get("stop_reason")
+    if isinstance(finish_reason, str) and finish_reason.strip():
+        reason = finish_reason.strip().lower()
+        if reason not in COMPLETION_FINISH_REASONS:
+            return reason
+        return None
+    usage = response.get("usage") or {}
+    output_tokens = usage.get("output_tokens")
+    if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+        if output_tokens >= max_tokens:
+            return "length (inferred from usage.output_tokens)"
+    return None
+
+
 async def analyze_diff(
     diff_text: str,
     repo_context: str = "",
@@ -229,6 +363,11 @@ async def analyze_diff(
     Execute autonomous code review on a unified diff.
     Invokes LLMClient, parses CodeReviewOutput with 1 retry on ValidationError,
     and returns ReviewResult with telemetry.
+
+    A response the provider reports as truncated raises
+    :class:`ReviewOutputTruncatedError` without the retry: the retry re-requests
+    the identical budget, so it truncates identically and the run would end as a
+    generic parse failure that says nothing about the real cause.
     """
     # Short-circuit if diff is empty or whitespace
     if not diff_text or not diff_text.strip():
@@ -251,7 +390,7 @@ async def analyze_diff(
         messages=messages,
         db=db,
         repo_id=repo_id,
-        max_tokens=4096,
+        max_tokens=REVIEW_MAX_TOKENS,
     )
 
     content = response.get("content") or ""
@@ -260,6 +399,20 @@ async def analyze_diff(
     u1 = response.get("usage") or {}
     total_input = u1.get("input_tokens", 0)
     total_output = u1.get("output_tokens", 0)
+
+    truncation = _detect_truncation(response, REVIEW_MAX_TOKENS)
+    if truncation is not None:
+        logger.error(
+            "code_reviewer: model output truncated (reason=%s max_tokens=%d) — "
+            "skipping the budget-invariant retry",
+            truncation,
+            REVIEW_MAX_TOKENS,
+        )
+        raise ReviewOutputTruncatedError(
+            f"Code reviewer output was truncated by the provider "
+            f"(finish_reason={truncation}, max_tokens={REVIEW_MAX_TOKENS}). "
+            "The review JSON is incomplete."
+        )
 
     try:
         output = CodeReviewOutput.model_validate_json(cleaned_json)
@@ -285,7 +438,7 @@ async def analyze_diff(
         messages=retry_messages,
         db=db,
         repo_id=repo_id,
-        max_tokens=4096,
+        max_tokens=REVIEW_MAX_TOKENS,
     )
     retry_content = retry_response.get("content") or ""
     retry_cleaned = _strip_markdown_fences(retry_content)
@@ -293,6 +446,19 @@ async def analyze_diff(
     u2 = retry_response.get("usage") or {}
     total_input += u2.get("input_tokens", 0)
     total_output += u2.get("output_tokens", 0)
+
+    retry_truncation = _detect_truncation(retry_response, REVIEW_MAX_TOKENS)
+    if retry_truncation is not None:
+        logger.error(
+            "code_reviewer: retry output truncated (reason=%s max_tokens=%d)",
+            retry_truncation,
+            REVIEW_MAX_TOKENS,
+        )
+        raise ReviewOutputTruncatedError(
+            f"Code reviewer retry output was truncated by the provider "
+            f"(finish_reason={retry_truncation}, max_tokens={REVIEW_MAX_TOKENS}). "
+            "The review JSON is incomplete."
+        )
 
     try:
         output = CodeReviewOutput.model_validate_json(retry_cleaned)
