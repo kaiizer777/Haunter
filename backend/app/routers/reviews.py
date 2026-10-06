@@ -175,6 +175,13 @@ async def get_repo_reviews(
             for r in mapped_reviews
             if any(f.severity.lower() == sev_lower for f in r.findings)
         ]
+        # `severity` lives inside the findings JSONB column (app/models.py:438-440),
+        # so it cannot be expressed in the COUNT above and is applied as a Python
+        # post-filter here. That count was taken before this filter ran and so
+        # contradicted the rows returned; report the number of rows this page
+        # actually carries instead. A server-wide filtered total would require
+        # severity to be a real, queryable column.
+        total = len(mapped_reviews)
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
 
@@ -237,6 +244,11 @@ async def list_all_reviews(
             for r in mapped_reviews
             if any(f.severity.lower() == sev_lower for f in r.findings)
         ]
+        # Same ordering problem as in get_repo_reviews: the COUNT above cannot see
+        # `severity` (it lives inside the findings JSONB), so this Python
+        # post-filter runs after it and the count it produced contradicts the rows.
+        # Report the number of rows this page actually carries instead.
+        total = len(mapped_reviews)
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
 

@@ -18,7 +18,7 @@ Security invariants (match WORK.md Phase 9 spec):
   - Non-owned / non-existent resources → 404, not 403 (no existence oracle).
   - All filter parameters are Pydantic-bounded:
       limit  ∈ [1, 100]
-      status ∈ exact allowlist (Literal)
+      status ∈ the orchestrator's RunStatus values (derived, not transcribed)
       from/to datetime range ≤ 90 days, to ≥ from
       repo_id must be UUID (auto-validated by FastAPI path param type)
   - run_steps rows contain only token counts / latency (Phase 5 stores no raw
@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Optional
 
 from fastapi import (
     APIRouter,
@@ -66,19 +66,29 @@ router = APIRouter(tags=["traces"])
 SIGNATURE_CLUSTER_MAX_RUNS = 5000
 
 # ---------------------------------------------------------------------------
-# Status allowlist (mirrors RunStatus enum values)
+# Status allowlist (derived from the orchestrator's own state machine)
 # ---------------------------------------------------------------------------
 
-RunStatusLiteral = Literal[
-    "pending",
-    "context_gathering",
-    "fix_generation",
-    "verification",
-    "pending_pr",
-    "fallback",
-    "completed",
-    "error",
-]
+
+def _allowed_run_statuses() -> tuple[str, ...]:
+    """
+    The status values ``GET /runs?status=`` accepts, read from
+    ``app.orchestrator.RunStatus`` instead of being transcribed here.
+
+    Transcribing the set is what let it drift: the filter listed 8 values while the
+    pipeline wrote 13, and every status added to the state machine afterwards
+    surfaced as HTTP 422 on a filter that exists precisely to list those runs.
+
+    The import is function-local for the same reason it is inside ``retry_run``:
+    ``app.orchestrator`` transitively reaches ``app.services.repo_settings``, which
+    imports back into ``app.services.feature_enforcement`` — a cycle that only
+    resolves when some other module loads repo_settings first. A module-level
+    import from traces.py into app.orchestrator breaks app startup. By the time a
+    request is being validated every module has loaded, so the import resolves.
+    """
+    from app.orchestrator import RunStatus
+
+    return tuple(status.value for status in RunStatus)
 
 # ---------------------------------------------------------------------------
 # Response schemas
@@ -98,6 +108,12 @@ class RunStepOut(BaseModel):
 
 class AttemptOut(BaseModel):
     attempt_number: int
+    # The unified diff the Fix Generator produced for this attempt. It is NOT NULL
+    # on the column (app/models.py:298) and is populated on every read from the
+    # ORM row, but stays optional on the wire so it matches the frontend contract
+    # (`patch_text?: string`) and an attempt that somehow carries no diff still
+    # serialises instead of 500-ing the whole trace.
+    patch_text: Optional[str] = None
     confidence_score: Optional[int]
     verification_status: Optional[str]
     failure_reason: Optional[str]
@@ -174,11 +190,13 @@ class RunListParams(BaseModel):
       limit  ∈ [1, 100]           — prevents unbounded SELECT DoS
       offset ≥ 0
       from/to datetime range ≤ 90d, and to ≥ from when both supplied
-      status in Literal allowlist  — rejects free-text SQL injection vector
+      status in the RunStatus allowlist — rejects the free-text SQL injection
+             vector; see _allowed_run_statuses for why the set is derived
+             rather than transcribed
     """
 
     repo_id: Optional[uuid.UUID] = None
-    status: Optional[RunStatusLiteral] = None
+    status: Optional[str] = None
     from_: Optional[datetime] = Field(None, alias="from")
     to: Optional[datetime] = None
     limit: int = Field(20, ge=1, le=100)
@@ -195,6 +213,15 @@ class RunListParams(BaseModel):
                 raise ValueError("'to' must be >= 'from'")
             if (to - from_) > timedelta(days=90):
                 raise ValueError("date range must not exceed 90 days")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> "RunListParams":
+        if self.status is None:
+            return self
+        allowed = _allowed_run_statuses()
+        if self.status not in allowed:
+            raise ValueError(f"status must be one of: {', '.join(allowed)}")
         return self
 
 
@@ -543,7 +570,7 @@ async def list_runs(
     try:
         params = RunListParams(
             repo_id=repo_id,
-            status=status_filter,  # type: ignore[arg-type]
+            status=status_filter,
             **{"from": from_},
             to=to,
             limit=limit,
