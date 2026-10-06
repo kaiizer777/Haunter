@@ -22,7 +22,7 @@ jobs:
   # Backend: lint (ruff) + migration check + pytest
   # ---------------------------------------------------------------------------
   backend:
-    name: Backend (lint + migrations + 787 tests)
+    name: Backend (lint + migrations + 2049 tests)
     runs-on: ubuntu-latest
     env:
       GITHUB_CLIENT_ID: ci_test_client_id
@@ -131,7 +131,7 @@ jobs:
   # Frontend: lint (eslint) + tsc + vitest + next build
   # ---------------------------------------------------------------------------
   frontend:
-    name: Frontend (lint + tsc + 219 tests + build)
+    name: Frontend (lint + tsc + 370 tests + build)
     runs-on: ubuntu-latest
     defaults:
       run:
