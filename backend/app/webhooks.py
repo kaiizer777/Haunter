@@ -1870,6 +1870,39 @@ async def github_webhook(
         )
         if _decision.should_audit and _decision.audit_type:
             if not pr_base_sha or not pr_head_sha:
+                # Attempt to fetch PR endpoints from GitHub API
+                try:
+                    from app.github.auditor import get_auditor_installation_token
+                    from app.github.pr import get_installation_token
+                    from app.github_client import fetch_pull_request
+
+                    token = None
+                    try:
+                        token = await get_auditor_installation_token(repo)
+                    except Exception:
+                        try:
+                            token = await get_installation_token(repo)
+                        except Exception:
+                            token = None
+
+                    pr_meta = await fetch_pull_request(
+                        owner=repo_owner,
+                        repo=repo_name,
+                        pr_number=pr_number,
+                        token=token,
+                    )
+                    pr_head_sha = pr_meta.get("head", {}).get("sha")
+                    pr_base_sha = pr_meta.get("base", {}).get("sha")
+                    pr_head_branch = pr_meta.get("head", {}).get("ref")
+                except Exception as exc:
+                    logger.info(
+                        "Failed to resolve PR endpoints for %s PR #%s: %s",
+                        _log_repo(repo_owner, repo_name),
+                        sanitize_log_value(pr_number, 16),
+                        type(exc).__name__,
+                    )
+
+            if not pr_base_sha or not pr_head_sha:
                 _auditor_skip_reason = (
                     "manual audit requires pinned pull request endpoints, "
                     "which this event type does not provide"
