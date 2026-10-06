@@ -12,7 +12,8 @@ Exposes:
                                is_retry_child) and re-dispatch the
                                orchestrator pipeline (Feature 1).
 
-Security invariants (match WORK.md Phase 9 spec):
+Security invariants (HAUNTER.md §7 "Security Architecture & Invariants"; note
+that WORK.md is NOT tracked in this repository, so this docstring is the contract):
   - Every endpoint requires get_current_user (signed session cookie).
   - Ownership is enforced at the SQL WHERE clause — never fetch-then-filter.
   - Non-owned / non-existent resources → 404, not 403 (no existence oracle).
@@ -76,15 +77,23 @@ def _allowed_run_statuses() -> tuple[str, ...]:
     ``app.orchestrator.RunStatus`` instead of being transcribed here.
 
     Transcribing the set is what let it drift: the filter listed 8 values while the
-    pipeline wrote 13, and every status added to the state machine afterwards
+    pipeline wrote 12, and every status added to the state machine afterwards
     surfaced as HTTP 422 on a filter that exists precisely to list those runs.
 
-    The import is function-local for the same reason it is inside ``retry_run``:
-    ``app.orchestrator`` transitively reaches ``app.services.repo_settings``, which
-    imports back into ``app.services.feature_enforcement`` — a cycle that only
-    resolves when some other module loads repo_settings first. A module-level
-    import from traces.py into app.orchestrator breaks app startup. By the time a
-    request is being validated every module has loaded, so the import resolves.
+    The import is function-local because of a real cycle, not out of caution:
+    ``app.orchestrator:36`` -> ``app.services.feature_enforcement:25`` ->
+    ``app.services.repo_settings:456`` -> ``app.services.feature_enforcement``
+    again. Loading ``app.orchestrator`` first raises
+    ``ImportError: cannot import name 'EnforcementDecision' from partially
+    initialized module 'app.services.feature_enforcement'``, and a module-level
+    import here would make traces.py exactly that first loader. It resolves
+    because app startup loads both ends of the cycle first (``main.py:23``
+    imports ``app.services.audit_pipeline``, which imports
+    ``app.services.feature_enforcement``), so by the time a request triggers
+    this validator the cycle is already closed. Note that this is not "every
+    module has loaded": after ``import main``, ``'app.orchestrator' in
+    sys.modules`` is False, and this function is what performs that deferred
+    import -- the first ``/runs`` request that carries ``status=`` pays it.
     """
     from app.orchestrator import RunStatus
 

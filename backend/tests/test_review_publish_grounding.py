@@ -34,6 +34,7 @@ from app.github.audit_publisher import PublishResult
 from app.github_client import GitHubAuthError
 from app.llm.prompts.audit_prompts import (
     MAX_CATEGORY_CHARS,
+    MAX_GITHUB_COMMENT_CHARS,
     MAX_INLINE_FIELD_CHARS,
     MAX_REPORT_CHARS,
     MAX_SUGGESTED_FIX_CHARS,
@@ -61,6 +62,15 @@ from tests.fake_audit_db import (  # noqa: F401
 #   MAX_REPORT_CHARS          app/llm/prompts/audit_prompts.py:29 -- enforced on
 #                             the auditor report by `_bound_report` (:560-565),
 #                             which `audit_publisher` then POSTs (:323).
+#   MAX_GITHUB_COMMENT_CHARS  app/llm/prompts/audit_prompts.py:42 -- the smaller
+#                             of the two, and the one that governs anything
+#                             posted to GitHub: a body past it is rejected whole
+#                             with 422. Every publish-boundary assertion below
+#                             is pinned to THIS value, not to
+#                             MAX_REPORT_CHARS; the two differ by ~34k chars, so
+#                             an assertion against MAX_REPORT_CHARS would still
+#                             pass with the clamp regressed to the internal
+#                             budget and the 422 back.
 #   MAX_TITLE_CHARS           app/llm/prompts/audit_prompts.py:32
 #   MAX_CATEGORY_CHARS        app/llm/prompts/audit_prompts.py:33
 #   MAX_INLINE_FIELD_CHARS    app/llm/prompts/audit_prompts.py:31
@@ -761,9 +771,14 @@ async def test_b4_fallback_summary_body_is_bounded(
     assert fallback["comments"] == [], "the retry must be summary-only"
 
     body = fallback["body"]
-    assert len(body) <= MAX_REPORT_CHARS, (
-        f"fallback body is {len(body)} chars, above the repo's own report bound "
-        f"of {MAX_REPORT_CHARS} (audit_prompts.py:29)"
+    # Pinned to GitHub's ceiling, NOT to MAX_REPORT_CHARS. The two differ by
+    # 34_464 chars, so an assertion against the internal report budget would
+    # still pass with the clamp regressed to 100_000 -- i.e. it would not guard
+    # the regression it claims to. `bound_github_body` is the clamp under test
+    # (code_reviewer.py:219-227, called at review_orchestrator.py:906).
+    assert len(body) <= MAX_GITHUB_COMMENT_CHARS, (
+        f"fallback body is {len(body)} chars, above GitHub's own {MAX_GITHUB_COMMENT_CHARS}"
+        f"-character comment limit (audit_prompts.py:42), which 422s the whole review"
     )
     assert "c" * UNBOUNDED_RUN not in body, (
         "the summary-only fallback shipped an unbounded critique verbatim"
@@ -771,6 +786,151 @@ async def test_b4_fallback_summary_body_is_bounded(
     assert "p" * UNBOUNDED_RUN not in body, (
         "the summary-only fallback shipped an unbounded suggested_patch verbatim"
     )
+
+
+async def test_b4_fallback_summary_body_is_truncated_at_the_github_limit(
+    pending_review: CodeReview,
+) -> None:
+    """B4 (clamp precision): an over-limit fallback body must be truncated AT
+    ``MAX_GITHUB_COMMENT_CHARS``, not merely held under ``MAX_REPORT_CHARS``.
+
+    ``bound_github_body`` (code_reviewer.py:219-227) is the only thing standing
+    between a 422 and a lost review. Its ceiling is GitHub's 65 536, which is
+    34_464 chars *below* ``MAX_REPORT_CHARS``. A `len(body) <= MAX_REPORT_CHARS`
+    assertion is therefore satisfied by a clamp that has silently regressed to the
+    internal report budget -- the exact regression this pair of tests exists to
+    catch. So the over-limit case pins the ceiling by **equality**, and the
+    under-limit case (below) pins that the clamp does not fire early.
+
+    Non-vacuity: the first attempt's body already measures exactly
+    ``MAX_GITHUB_COMMENT_CHARS`` (its own pre-image exceeded the ceiling), and the
+    retry appends a non-empty ``findings_detail`` on top of it. The retry's
+    pre-image is therefore strictly over the limit, so it cannot be equal to the
+    ceiling unless the clamp fired.
+    """
+    review = pending_review
+    attempts: list[dict[str, Any]] = []
+
+    async def _reject_inline_then_accept(**kwargs: Any) -> dict[str, Any]:
+        attempts.append(kwargs)
+        if kwargs.get("comments"):
+            raise Exception("GitHub API returned error 422: Review body is too long")
+        return {"id": 9001}
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=SAMPLE_DIFF,
+        ),
+        patch(
+            "app.subagents.code_reviewer.LLMClient",
+            _llm_patch_target(
+                _llm_response(
+                    # `summary` is itself clamped to MAX_GITHUB_COMMENT_CHARS
+                    # (code_reviewer.py:143), so this saturates the first body
+                    # and leaves the retry over the ceiling by construction.
+                    summary="s" * (MAX_GITHUB_COMMENT_CHARS + 50_000),
+                    findings=[_finding_payload()],
+                )
+            ),
+        ),
+        patch(
+            "app.services.review_orchestrator.create_pull_request_review",
+            new_callable=AsyncMock,
+            side_effect=_reject_inline_then_accept,
+        ),
+        _install_token_patch(),
+    ):
+        await run_code_review_pipeline(review.id)
+
+    assert len(attempts) == 2, (
+        f"expected the inline attempt plus one summary-only retry, got {len(attempts)}"
+    )
+    inline_body, fallback_body = attempts[0]["body"], attempts[1]["body"]
+
+    # Non-vacuity precondition: the first body already sits on the ceiling, so the
+    # retry's pre-image (first body + findings_detail) is strictly over it.
+    assert len(inline_body) == MAX_GITHUB_COMMENT_CHARS, (
+        f"first body is {len(inline_body)} chars; the fixture is only meaningful "
+        f"if it saturates GitHub's {MAX_GITHUB_COMMENT_CHARS}-char ceiling"
+    )
+
+    assert len(fallback_body) == MAX_GITHUB_COMMENT_CHARS, (
+        f"fallback body is {len(fallback_body)} chars. Equality with "
+        f"{MAX_GITHUB_COMMENT_CHARS} is the point: a clamp regressed to "
+        f"MAX_REPORT_CHARS ({MAX_REPORT_CHARS}) yields {MAX_REPORT_CHARS} here and "
+        f"fails this assertion, where `<= MAX_REPORT_CHARS` would have passed."
+    )
+    # Belt-and-braces: the ceiling itself must be the smaller of the two, or the
+    # equality above proves nothing.
+    assert MAX_GITHUB_COMMENT_CHARS < MAX_REPORT_CHARS
+    assert fallback_body.endswith("\n[TRUNCATED]"), (
+        "the over-limit fallback body was silently shortened rather than marked as "
+        "truncated, so a reader cannot tell the review was cut off"
+    )
+
+
+async def test_b4_fallback_summary_body_under_the_limit_is_published_verbatim(
+    pending_review: CodeReview,
+) -> None:
+    """The clamp is two-sided: a body already under the ceiling must not be cut.
+
+    A clamp implemented as "always append the marker" or one that fires at the
+    wrong threshold passes the over-limit test while quietly losing findings on
+    every ordinary review. This pins the other direction on the same code path:
+    small model output reaches GitHub byte-for-byte.
+    """
+    review = pending_review
+    attempts: list[dict[str, Any]] = []
+
+    async def _reject_inline_then_accept(**kwargs: Any) -> dict[str, Any]:
+        attempts.append(kwargs)
+        if kwargs.get("comments"):
+            raise Exception("GitHub API returned error 422: Review body is too long")
+        return {"id": 9002}
+
+    summary = "Unchecked user input reaches the render path."
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=SAMPLE_DIFF,
+        ),
+        patch(
+            "app.subagents.code_reviewer.LLMClient",
+            _llm_patch_target(
+                _llm_response(summary=summary, findings=[_finding_payload()])
+            ),
+        ),
+        patch(
+            "app.services.review_orchestrator.create_pull_request_review",
+            new_callable=AsyncMock,
+            side_effect=_reject_inline_then_accept,
+        ),
+        _install_token_patch(),
+    ):
+        await run_code_review_pipeline(review.id)
+
+    assert len(attempts) == 2, (
+        f"expected the inline attempt plus one summary-only retry, got {len(attempts)}"
+    )
+    fallback_body = attempts[1]["body"]
+
+    assert len(fallback_body) < MAX_GITHUB_COMMENT_CHARS, (
+        f"fixture produced a {len(fallback_body)}-char body; this test needs input "
+        f"under GitHub's {MAX_GITHUB_COMMENT_CHARS}-char ceiling"
+    )
+    assert not fallback_body.endswith("\n[TRUNCATED]"), (
+        "a body well under GitHub's ceiling was marked truncated, so the clamp "
+        "fires below the limit and drops findings on ordinary reviews"
+    )
+    assert summary in fallback_body, (
+        "the under-limit fallback body lost the model-authored summary"
+    )
+    assert (
+        "Unvalidated uid reaches the render path unchecked." in fallback_body
+    ), "the under-limit fallback body dropped a finding's critique verbatim"
 
 
 # ---------------------------------------------------------------------------

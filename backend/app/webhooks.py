@@ -78,6 +78,10 @@ from app.services.followup_commands import (
     parse_followup_command,
 )
 from app.services.repo_settings import get_repo_settings
+from app.services.review_orchestrator import (
+    REVIEW_STATUS_COMPLETED,
+    REVIEW_STATUS_SUPPRESSED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +214,35 @@ def _truncate_reason(reason: Any) -> Optional[str]:
 #: sanitized and bounded rather than stored raw.
 _CODE_REVIEW_FAILURE_MAX_CHARS = 500
 
+#: code_reviews.status values that mean "this (repo, commit, target) review has
+#: already been handled; a redelivery of the delivery must not mint a second
+#: one". Consumed by BOTH dedup guards — the `pull_request` branch and the
+#: `push` branch — through a single definition, because two hand-copied lists of
+#: the same three literals is precisely how this drifted once: the change that
+#: introduced REVIEW_STATUS_SUPPRESSED (a repo whose `enable_pr_comments` is
+#: False) updated neither guard, so every GitHub redelivery of that event — and
+#: every POST /webhooks/deliveries/{id}/replay — minted a NEW CodeReview and ran
+#: the whole pipeline again, diff fetch plus a paid analyze_diff call, and was
+#: suppressed again. Unbounded spend on work that can never be published. Before
+#: that change the same path wrote "completed", which this set does contain, so
+#: the redelivery was a no-op.
+#:
+#: The terminal literals are imported from app.services.review_orchestrator, the
+#: module that WRITES them, so a new terminal status added there cannot be added
+#: here by forgetting: it shows up as an unused import instead.
+#:
+#: REVIEW_STATUS_ERROR is deliberately NOT here. It is the one terminal outcome
+#: whose correct answer to a redelivery is "do the work again" — _dispatch_review
+#: below writes it when the hosting adapter refuses the dispatch, and
+#: review_orchestrator writes it for every pipeline failure. Counting it as
+#: handled would swallow the retry and lose the review for good.
+_HANDLED_REVIEW_STATUSES: tuple[str, ...] = (
+    "pending",
+    "in_progress",
+    REVIEW_STATUS_COMPLETED,
+    REVIEW_STATUS_SUPPRESSED,
+)
+
 
 async def _dispatch_review(
     db: AsyncSession,
@@ -236,14 +269,27 @@ async def _dispatch_review(
     deliberately *not* recorded as handled: the guard's status list excludes
     ``error``, so the redelivery is free to queue and schedule the review for
     real.
+
+    ``HTTPException`` is deliberately NOT exempted from that. It used to be
+    re-raised by its own ``except`` clause, which sat ABOVE the terminal write —
+    so the row stayed ``pending``, a status the dedup guard counts as handled,
+    and every later delivery of the event was answered ``duplicate``. The review
+    was lost permanently with a 5xx as the only trace and nothing on the row to
+    say it was never dispatched: exactly the stuck state this function exists to
+    eliminate, one ``except`` clause away. Nothing in app/adapters/hosting.py
+    raises one today, which is exactly why it is unsafe to leave.
+
+    Normalising it to the same 503 rather than re-raising the adapter's own
+    status keeps the response and the row in agreement — a dispatch that did not
+    happen always answers with the one status GitHub retries — and costs no
+    information, because the adapter's status and detail are not lost: the type
+    and message go into ``failure_reason`` and into both log records below.
     """
     from app.adapters.hosting import get_hosting_adapter
 
     try:
         adapter = await get_hosting_adapter()
         await adapter.schedule_review(review.id, background_tasks)
-    except HTTPException:
-        raise
     except Exception as exc:
         reason = sanitize_log_value(
             f"Review dispatch failed: {type(exc).__name__}: {exc}",
@@ -1311,12 +1357,12 @@ async def github_webhook(
         # formal PR review) — and GitHub fires both for the same commit whenever a
         # PR head advances. Without this predicate whichever delivery arrived first
         # suppressed the other, and a push winning the race meant the PR was never
-        # reviewed at all.
+        # reviewed at all. The status set is the shared _HANDLED_REVIEW_STATUSES.
         existing_review_stmt = select(CodeReview).where(
             CodeReview.repo_id == repo.id,
             CodeReview.commit_sha == commit_sha,
             CodeReview.pr_number == pr_number,
-            CodeReview.status.in_(["pending", "in_progress", "completed"]),
+            CodeReview.status.in_(_HANDLED_REVIEW_STATUSES),
         )
         existing_review_res = await db.execute(existing_review_stmt)
         existing_review = existing_review_res.scalars().first()
@@ -1611,12 +1657,14 @@ async def github_webhook(
         # Deduplication guard: ignore redundant deliveries for the same commit
         # AND the same (commit-scoped) target. See the pull_request branch above
         # for why `pr_number` is part of the key; here it is always NULL, so this
-        # is `pr_number IS NULL` and matches commit-scoped reviews only.
+        # is `pr_number IS NULL` and matches commit-scoped reviews only. The
+        # status set is the shared _HANDLED_REVIEW_STATUSES — this guard drifted
+        # once already when it held its own copy of the list.
         existing_review_stmt = select(CodeReview).where(
             CodeReview.repo_id == repo.id,
             CodeReview.commit_sha == commit_sha,
             CodeReview.pr_number.is_(None),
-            CodeReview.status.in_(["pending", "in_progress", "completed"]),
+            CodeReview.status.in_(_HANDLED_REVIEW_STATUSES),
         )
         existing_review_res = await db.execute(existing_review_stmt)
         existing_review = existing_review_res.scalars().first()

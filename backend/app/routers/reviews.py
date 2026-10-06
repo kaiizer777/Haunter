@@ -21,7 +21,8 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, and_, case, cast, column, func, literal, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -69,6 +70,16 @@ class CodeReviewOut(BaseModel):
 
 
 class CodeReviewListOut(BaseModel):
+    """
+    A page of reviews plus the size of the whole matching result set.
+
+    ``total`` counts every review matching the request's filters across all
+    pages, never the length of ``reviews``: the dashboard paginates on it
+    (``frontend/src/app/reviews/page.tsx`` — ``totalCount`` at :432, the
+    pagination block rendered only while ``totalCount > PAGE_SIZE`` at :661,
+    ``Next`` disabled at ``(page + 1) * PAGE_SIZE >= totalCount`` at :679).
+    """
+
     reviews: list[CodeReviewOut]
     total: int
 
@@ -76,6 +87,54 @@ class CodeReviewListOut(BaseModel):
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
+
+def _severity_predicate(severity: str) -> ColumnElement[bool]:
+    """
+    SQL predicate for "this review has at least one finding of ``severity``".
+
+    ``severity`` sits one key deep inside the ``findings`` JSONB array
+    (app/models.py:438-440), so it is not a column comparison. Postgres can still
+    evaluate it *before* LIMIT/OFFSET — the only place a count of matching
+    reviews can be produced — by expanding the array and testing each element,
+    so this needs no new column, no migration and no backfill.
+
+    The normalisation mirrors the Python post-filter this replaced
+    (``any(f.severity.lower() == severity.lower())`` over findings built by
+    :func:`_map_review_to_out`, where a missing key becomes ``"low"``):
+
+    * ``severity.lower()`` — the caller's value, case-insensitive;
+    * ``lower(... ->> 'severity')`` — the stored value, case-insensitive;
+    * ``coalesce(..., 'low')`` — a finding with no severity counts as low;
+    * ``jsonb_typeof(finding) = 'object'`` — non-dict elements are skipped
+      rather than matched, mirroring ``isinstance(f, dict)``;
+    * ``jsonb_typeof(findings) = 'array'`` — a non-array value is skipped, which
+      is what the Python filter did with a non-list ``findings``: no findings,
+      no match.
+
+    The array expansion substitutes ``'[]'`` for a non-array value rather than
+    relying on the guard above to be evaluated first: Postgres does not promise
+    an evaluation order for ``AND`` operands, and ``jsonb_array_elements`` on a
+    jsonb scalar is an error, not an empty set.
+    """
+    finding = func.jsonb_array_elements(
+        case(
+            (func.jsonb_typeof(CodeReview.findings) == "array", CodeReview.findings),
+            else_=cast(literal("[]"), JSONB),
+        )
+    ).table_valued(column("finding", JSONB), name="sev_finding")
+    element = finding.c["finding"]
+    return and_(
+        func.jsonb_typeof(CodeReview.findings) == "array",
+        select(literal(1))
+        .select_from(finding)
+        .where(
+            func.jsonb_typeof(element) == "object",
+            func.lower(func.coalesce(element["severity"].astext, "low"))
+            == severity.lower(),
+        )
+        .exists(),
+    )
 
 
 def _map_review_to_out(
@@ -155,6 +214,15 @@ async def get_repo_reviews(
         base_query = base_query.where(CodeReview.risk_score >= min_risk)
         count_query = count_query.where(CodeReview.risk_score >= min_risk)
 
+    if severity:
+        predicate = _severity_predicate(severity)
+        base_query = base_query.where(predicate)
+        count_query = count_query.where(predicate)
+
+    # `total` is the number of reviews matching every filter above, counted by
+    # the COUNT query — not the length of the page below. The severity predicate
+    # is on both statements, so the two cannot disagree, and the dashboard (which
+    # renders pagination only while total > PAGE_SIZE) can still reach page 2.
     total = await db.scalar(count_query) or 0
 
     query = (
@@ -175,13 +243,6 @@ async def get_repo_reviews(
             for r in mapped_reviews
             if any(f.severity.lower() == sev_lower for f in r.findings)
         ]
-        # `severity` lives inside the findings JSONB column (app/models.py:438-440),
-        # so it cannot be expressed in the COUNT above and is applied as a Python
-        # post-filter here. That count was taken before this filter ran and so
-        # contradicted the rows returned; report the number of rows this page
-        # actually carries instead. A server-wide filtered total would require
-        # severity to be a real, queryable column.
-        total = len(mapped_reviews)
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
 
@@ -224,6 +285,14 @@ async def list_all_reviews(
         base_query = base_query.where(CodeReview.risk_score >= min_risk)
         count_query = count_query.where(CodeReview.risk_score >= min_risk)
 
+    if severity:
+        predicate = _severity_predicate(severity)
+        base_query = base_query.where(predicate)
+        count_query = count_query.where(predicate)
+
+    # Same contract as get_repo_reviews: `total` counts every matching review
+    # across all pages, and the severity predicate is on the COUNT as well as the
+    # page, so the count and the rows cannot contradict each other.
     total = await db.scalar(count_query) or 0
 
     query = (
@@ -244,11 +313,6 @@ async def list_all_reviews(
             for r in mapped_reviews
             if any(f.severity.lower() == sev_lower for f in r.findings)
         ]
-        # Same ordering problem as in get_repo_reviews: the COUNT above cannot see
-        # `severity` (it lives inside the findings JSONB), so this Python
-        # post-filter runs after it and the count it produced contradicts the rows.
-        # Report the number of rows this page actually carries instead.
-        total = len(mapped_reviews)
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
 

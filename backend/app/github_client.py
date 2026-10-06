@@ -161,6 +161,63 @@ async def _bounded_get(
         )
 
 
+async def _bounded_post(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    json: dict[str, Any],
+    max_bytes: int = MAX_API_RESPONSE_BYTES,
+) -> BoundedResponse:
+    """POST a JSON body with the same byte ceiling :func:`_bounded_get` applies.
+
+    A write path has no smaller response than a read path: a GraphQL endpoint
+    answers with an errors array whose messages come from the upstream service,
+    and a diff/media endpoint with a body this module streams. Binding the cap at
+    the transport rather than at the call site means no future caller can opt out
+    of it by accident.
+
+    Content-Length is treated as a hint, not a guarantee — it is checked first so
+    an oversized body is refused before it is transferred, but the streamed total
+    is what actually decides, because that is the only number a lying or absent
+    header cannot understate.
+    """
+    content_length = None
+    chunks = bytearray()
+    async with client.stream("POST", url, headers=headers, json=json) as response:
+        raw_length = response.headers.get("content-length")
+        if raw_length is not None:
+            try:
+                content_length = int(raw_length)
+            except ValueError:
+                content_length = None
+        if content_length is not None and content_length > max_bytes:
+            logger.warning(
+                "github response_limit resource=http content_length=%d byte_cap=%d",
+                content_length,
+                max_bytes,
+            )
+            raise GitHubResponseLimitError(
+                f"GitHub response exceeded {max_bytes} bytes"
+            )
+        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+            if len(chunks) + len(chunk) > max_bytes:
+                logger.warning(
+                    "github response_limit resource=http streamed_bytes=%d byte_cap=%d",
+                    len(chunks) + len(chunk),
+                    max_bytes,
+                )
+                raise GitHubResponseLimitError(
+                    f"GitHub response exceeded {max_bytes} bytes"
+                )
+            chunks.extend(chunk)
+        return BoundedResponse(
+            status_code=response.status_code,
+            headers=response.headers,
+            content=bytes(chunks),
+        )
+
+
 def _parse_next_page_url(headers: httpx.Headers) -> Optional[str]:
     """Return the RFC5988 ``Link: rel="next"`` target, or ``None``.
 
@@ -1165,12 +1222,21 @@ async def create_pr_review(
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
         raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
     if response.status_code == 422:
+        # The 422 body is upstream-controlled text, and it names the offending
+        # field — which is the only thing that makes this error actionable. So it
+        # is logged, but through `sanitize_log_value` like every other new line in
+        # this module: a newline in the body forges a second log record, a
+        # zero-width or bidi character hides the offending field from the
+        # operator reading the line, a token-shaped literal in the echoed payload
+        # persists a credential outside every rotation path, and the body is
+        # unbounded. The exception message keeps the raw text because it is
+        # consumed as data by the retry classifier, not written to a log.
         logger.error(
             "GitHub API rejected the review payload for %s/%s PR #%s: %s",
             owner,
             repo,
             pr_number,
-            response.text,
+            sanitize_log_value(response.text),
         )
         raise GitHubUnprocessableEntityError(
             f"GitHub API returned error 422: {response.text}"
@@ -1443,11 +1509,6 @@ BOT_IDENTITY_CACHE_MAX_ENTRIES = 64
 _bot_identity_cache: dict[str, tuple[float, str]] = {}
 
 
-def clear_bot_identity_cache() -> None:
-    """Drop every cached bot identity. For tests and credential rotation only."""
-    _bot_identity_cache.clear()
-
-
 def _identity_cache_key(token: Optional[str]) -> str:
     """Stable per-credential cache key.
 
@@ -1507,11 +1568,7 @@ async def _request_bot_login(token: Optional[str]) -> str:
     return login.strip()[:128]
 
 
-async def fetch_bot_identity(
-    token: Optional[str] = None,
-    *,
-    force_refresh: bool = False,
-) -> Optional[str]:
+async def fetch_bot_identity(token: Optional[str] = None) -> Optional[str]:
     """Resolve the login the given GitHub credential authenticates as.
 
     There is no configured Haunter bot slug anywhere in this codebase, and none
@@ -1528,16 +1585,21 @@ async def fetch_bot_identity(
     ``asyncio.Lock`` held across event loops is a hard ``RuntimeError`` — inside
     a path that must never fail a review.
 
+    No ``force_refresh`` escape hatch, deliberately. This function's cache is keyed
+    per credential, so a rotated installation token is a different key and cannot
+    read a stale entry; the only staleness a caller could be defending against is
+    GitHub changing an existing bot's login, which is not a thing that happens.
+    A knob nothing passes is a knob nothing has reasoned about.
+
     Returns the bot login, or ``None`` when it cannot be established. Never
     raises: the caller skips thread resolution on ``None``, so a metadata
     endpoint GitHub is refusing can never fail a review.
     """
     cache_key = _identity_cache_key(token)
     now = time.monotonic()
-    if not force_refresh:
-        cached = _bot_identity_cache.get(cache_key)
-        if cached is not None and now < cached[0]:
-            return cached[1]
+    cached = _bot_identity_cache.get(cache_key)
+    if cached is not None and now < cached[0]:
+        return cached[1]
 
     try:
         login = await _request_bot_login(token)
@@ -1599,11 +1661,17 @@ async def fetch_review_threads(
     threads: list[dict[str, Any]] = []
     cursor: Optional[str] = None
     pages = 0
-    while pages < MAX_REVIEW_THREAD_PAGES:
-        pages += 1
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+    # One client for the whole walk, not one per page: the pages are sequential
+    # and the connection is reused between them, and a client-per-page loop makes
+    # the number of TLS handshakes scale with the page cap for no benefit.
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        while pages < MAX_REVIEW_THREAD_PAGES:
+            pages += 1
             try:
-                response = await client.post(
+                response = await _bounded_post(
+                    client,
                     url,
                     headers=headers,
                     json={
@@ -1611,55 +1679,56 @@ async def fetch_review_threads(
                         "variables": {**variables, "cursor": cursor},
                     },
                 )
-            except httpx.RequestError as exc:
+            except (httpx.RequestError, GitHubResponseLimitError) as exc:
                 logger.warning(
-                    "github review_threads network_error repo=%s pr=%s error_type=%s",
+                    "github review_threads fetch_error repo=%s pr=%s error_type=%s",
                     owner,
                     repo,
-                    pr_number,
                     type(exc).__name__,
                 )
                 return []
-        if response.is_error:
-            logger.warning(
-                "github review_threads http_error repo=%s pr=%s status=%s",
-                owner,
-                repo,
-                pr_number,
-                response.status_code,
-            )
-            return []
-        try:
-            payload = response.json()
-        except ValueError:
-            logger.warning(
-                "github review_threads malformed_body repo=%s pr=%s", owner, repo
-            )
-            return []
-        if not isinstance(payload, dict):
-            return []
-        if payload.get("errors"):
-            logger.warning(
-                "github review_threads graphql_errors repo=%s pr=%s",
-                owner,
-                repo,
-            )
-            return []
-        try:
-            connection = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
-            nodes = connection["nodes"]
-        except (KeyError, TypeError):
-            logger.warning(
-                "github review_threads unexpected_shape repo=%s pr=%s", owner, repo
-            )
-            return []
-        threads.extend(node for node in nodes if isinstance(node, dict))
-        page_info = connection.get("pageInfo") or {}
-        if not page_info.get("hasNextPage"):
-            break
-        cursor = page_info.get("endCursor")
-        if not cursor:
-            break
+            if response.is_error:
+                logger.warning(
+                    "github review_threads http_error repo=%s pr=%s status=%s",
+                    owner,
+                    repo,
+                    pr_number,
+                    response.status_code,
+                )
+                return []
+            try:
+                payload = response.json()
+            except ValueError:
+                logger.warning(
+                    "github review_threads malformed_body repo=%s pr=%s", owner, repo
+                )
+                return []
+            if not isinstance(payload, dict):
+                return []
+            if payload.get("errors"):
+                logger.warning(
+                    "github review_threads graphql_errors repo=%s pr=%s",
+                    owner,
+                    repo,
+                )
+                return []
+            try:
+                connection = payload["data"]["repository"]["pullRequest"][
+                    "reviewThreads"
+                ]
+                nodes = connection["nodes"]
+            except (KeyError, TypeError):
+                logger.warning(
+                    "github review_threads unexpected_shape repo=%s pr=%s", owner, repo
+                )
+                return []
+            threads.extend(node for node in nodes if isinstance(node, dict))
+            page_info = connection.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                break
     if len(threads) >= MAX_REVIEW_THREAD_PAGES * 100:
         logger.info(
             "github review_threads truncated repo=%s pr=%s threads=%d",
@@ -1706,10 +1775,18 @@ async def resolve_review_threads(
     url = "https://api.github.com/graphql"
     headers = _graphql_headers(token)
     resolved = 0
-    for thread_id in unique_ids:
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+    # One client for the whole sweep: `resolveReviewThread` takes a single thread
+    # per mutation, so this is a per-thread round trip and a client-per-thread
+    # loop pays a fresh TLS handshake for every one of them, bounded at
+    # MAX_REVIEW_THREAD_RESOLVES. Reusing the connection changes nothing
+    # observable.
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        for thread_id in unique_ids:
             try:
-                response = await client.post(
+                response = await _bounded_post(
+                    client,
                     url,
                     headers=headers,
                     json={
@@ -1717,39 +1794,46 @@ async def resolve_review_threads(
                         "variables": {"threadId": thread_id},
                     },
                 )
-            except httpx.RequestError as exc:
+            except (httpx.RequestError, GitHubResponseLimitError) as exc:
                 logger.warning(
-                    "github resolve_review_threads network_error repo=%s error_type=%s",
+                    "github resolve_review_threads fetch_error repo=%s error_type=%s",
                     owner,
                     type(exc).__name__,
                 )
                 return resolved
-        if response.is_error:
-            logger.warning(
-                "github resolve_review_threads http_error repo=%s status=%s",
-                owner,
-                response.status_code,
+            if response.is_error:
+                logger.warning(
+                    "github resolve_review_threads http_error repo=%s status=%s",
+                    owner,
+                    response.status_code,
+                )
+                return resolved
+            try:
+                payload = response.json()
+            except ValueError:
+                logger.warning(
+                    "github resolve_review_threads malformed_body repo=%s", owner
+                )
+                return resolved
+            if not isinstance(payload, dict):
+                return resolved
+            if payload.get("errors"):
+                # The id, not `len(thread_id)`. A GraphQL node id is a public,
+                # non-secret handle on a review thread, so it is safe to log and is
+                # the one thing an operator needs to act on the failure; its
+                # length identifies nothing. Bounded and sanitized anyway, because
+                # the value is echoed back from an upstream response.
+                logger.warning(
+                    "github resolve_review_threads graphql_errors repo=%s thread_id=%s",
+                    owner,
+                    sanitize_log_value(thread_id, 64),
+                )
+                return resolved
+            thread = ((payload.get("data") or {}).get("resolveReviewThread") or {}).get(
+                "thread"
             )
-            return resolved
-        try:
-            payload = response.json()
-        except ValueError:
-            logger.warning("github resolve_review_threads malformed_body repo=%s", owner)
-            return resolved
-        if not isinstance(payload, dict):
-            return resolved
-        if payload.get("errors"):
-            logger.warning(
-                "github resolve_review_threads graphql_errors repo=%s thread=%d",
-                owner,
-                len(thread_id),
-            )
-            return resolved
-        thread = ((payload.get("data") or {}).get("resolveReviewThread") or {}).get(
-            "thread"
-        )
-        if isinstance(thread, dict) and thread.get("isResolved") is True:
-            resolved += 1
+            if isinstance(thread, dict) and thread.get("isResolved") is True:
+                resolved += 1
     return resolved
 
 

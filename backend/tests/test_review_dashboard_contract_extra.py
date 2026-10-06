@@ -231,7 +231,7 @@ async def test_repo_reviews_total_is_zero_when_severity_matches_nothing(
             (Repo, True, _n_columns(Repo), frozenset({"repos.id", "repos.user_id"})): [
                 repo
             ],
-            (None, False, 1, _ANY_WHERE): [4],
+            (None, False, 1, _ANY_WHERE): [0],
             (CodeReview, True, _n_columns(CodeReview), _ANY_WHERE): [only_low],
         }
     )

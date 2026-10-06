@@ -127,6 +127,23 @@ if _TEST_DB_URL:
     db_module.engine = _test_engine
     db_module.async_session_maker = async_session_maker
 
+    # Services that import async_session_maker directly at module scope:
+    import sys
+    for mod_name in (
+        "app.services.review_orchestrator",
+        "app.orchestrator",
+        "app.llm.config",
+        "app.adapters.hosting",
+        "app.sandbox.github_actions_runner",
+    ):
+        if mod_name in sys.modules:
+            setattr(sys.modules[mod_name], "async_session_maker", async_session_maker)
+
+    import app.services.review_orchestrator as ro
+    ro.async_session_maker = async_session_maker
+    import app.orchestrator as orch
+    orch.async_session_maker = async_session_maker
+
     async def _test_get_db() -> AsyncGenerator[AsyncSession, None]:
         async with async_session_maker() as session:
             try:

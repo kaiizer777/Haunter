@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import logging
 import re
 import time
-from typing import Literal, Optional
+from typing import Literal, NoReturn, Optional
 import uuid
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -46,19 +46,43 @@ ReviewSeverity = Literal["low", "medium", "high", "critical"]
 
 #: Output-token budget requested per review attempt.
 #:
-#: A truncation is only detectable if the provider says so, so every adapter now
-#: reports ``finish_reason`` and this module refuses to guess from the token
-#: count alone (see :func:`_detect_truncation`).
+#: Every adapter reports ``finish_reason`` verbatim, so a truncation is usually
+#: directly observable. When it is not, ``usage.output_tokens`` is the fallback
+#: evidence — see :func:`_detect_truncation` for why that fallback is a
+#: *suspicion* to be confirmed by parsing rather than a verdict of its own.
 REVIEW_MAX_TOKENS = 4096
 
-#: Provider finish/stop reasons that mean "the model stopped on its own".
-#: Union of the OpenAI-style (``stop``, ``tool_calls``) and Anthropic-style
-#: (``end_turn``, ``stop_sequence``, ``tool_use``, ``refusal``) vocabularies:
-#: Anthropic's ``tool_use`` is the counterpart of OpenAI's ``tool_calls``, and
-#: both mean the turn ended deliberately, not that the budget ran out.
-COMPLETION_FINISH_REASONS = frozenset(
-    {"stop", "end_turn", "stop_sequence", "tool_calls", "tool_use", "refusal"}
-)
+#: Provider finish/stop reasons that are **positive evidence the output budget
+#: ran out**. Anything outside this set is not truncation — see
+#: :func:`_detect_truncation` for why that is the only safe default.
+#:
+#: Verified against the vocabularies this pipeline actually talks to:
+#:
+#: * ``length`` — OpenAI-compatible chat completions. Confirmed from the
+#:   installed SDK's own enum: ``openai.types.chat.chat_completion.Choice``'s
+#:   ``finish_reason`` is ``Literal["stop", "length", "tool_calls",
+#:   "content_filter", "function_call"]``, i.e. exactly one of its five members
+#:   is a truncation. ``app/llm/openai.py:124``, ``groq.py:114`` and
+#:   ``opencode_zen.py:127`` all surface that field verbatim.
+#: * ``max_tokens`` — Anthropic's native spelling. ``app/llm/anthropic.py:258``
+#:   reads ``data["stop_reason"]`` and reports it under ``finish_reason``;
+#:   ``max_tokens`` is the budget-cut member of Anthropic's ``stop_reason``.
+#: * ``max_output_tokens`` — the OpenAI Responses API / Gemini-style spelling,
+#:   reachable through an OpenAI-compatible gateway, which the Zen provider is.
+#:
+#: Deliberately *not* here: ``content_filter`` and ``function_call`` (OpenAI),
+#: ``pause_turn``, ``refusal`` and ``model_context_window_exceeded`` (Anthropic),
+#: and any gateway spelling (``eos``, ``COMPLETED``,
+#: ``FINISH_REASON_UNSPECIFIED``). None of them means "the budget ran out", and
+#: the Zen vocabulary is not knowable from this repo.
+TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
+
+#: Ceiling on a model-authored ``file_path``. Matches the repo's own
+#: repo-relative-path limit (``_validated_repo_relative_path`` in
+#: ``app/llm/prompts/audit_prompts.py``, which rejects anything over 512 chars),
+#: so the bound here and the validation at the render boundary agree instead of
+#: disagreeing about the same string.
+MAX_FILE_PATH_CHARS = 512
 
 
 def _bound_model_text(value: object, maximum: int) -> object:
@@ -79,18 +103,21 @@ def _bound_model_text(value: object, maximum: int) -> object:
 class ReviewFinding(BaseModel):
     """An individual actionable review finding tied to specific file lines.
 
-    Every model-authored string is bounded, and bounded by *truncation* rather
-    than by rejection. These bounds are not cosmetic: the fields are concatenated
-    verbatim into a GitHub review body, and that body is one atomic request
-    together with every inline comment, so a single oversized field 422s the
-    whole review and discards every other finding with it. Rejecting oversized
-    output instead would turn a length problem into a parse failure — the retry
-    asks the same model for the same thing and fails identically — so the value
-    is clamped and the finding still ships.
+    Every model-authored string — ``file_path`` included — is bounded, and bounded
+    by *truncation* rather than by rejection. These bounds are not cosmetic: the
+    fields are concatenated verbatim into a GitHub review body, and that body is
+    one atomic request together with every inline comment, so a single oversized
+    field 422s the whole review and discards every other finding with it.
+    Rejecting oversized output instead would turn a length problem into a parse
+    failure — the retry asks the same model for the same thing and fails
+    identically — so the value is clamped and the finding still ships.
     """
 
     file_path: str = Field(
-        ..., min_length=1, description="Relative path of the touched file"
+        ...,
+        min_length=1,
+        max_length=MAX_FILE_PATH_CHARS,
+        description="Relative path of the touched file",
     )
     line_start: int = Field(
         ..., ge=1, description="Starting line of the finding (1-indexed)"
@@ -108,6 +135,22 @@ class ReviewFinding(BaseModel):
     suggested_patch: Optional[str] = Field(
         None, description="Replacement code snippet for GitHub suggestion block"
     )
+
+    @field_validator("file_path", mode="before")
+    @classmethod
+    def _bound_file_path(cls, value: object) -> object:
+        """Clamp a model-authored path to the repo's own path ceiling.
+
+        Clamped rather than rejected, like every other field here. A clamped
+        path is a path that will not match any diff hunk, so the finding is
+        dropped and counted as ungrounded by the publish layer — a lost finding,
+        which is the correct outcome. Rejecting instead would fail the whole
+        findings object over one over-long string and take every other finding
+        in it with it.
+        """
+        if not isinstance(value, str) or len(value) <= MAX_FILE_PATH_CHARS:
+            return value
+        return value[:MAX_FILE_PATH_CHARS]
 
     @field_validator("critique", mode="before")
     @classmethod
@@ -181,6 +224,13 @@ def _strip_markdown_fences(content: str) -> str:
     return s
 
 
+#: Every placeholder ``redact_sensitive_text`` can emit: the named forms
+#: (``[REDACTED_API_KEY]``) and the bare assignment form (``[REDACTED]``).
+_REDACTION_PLACEHOLDER_RE: re.Pattern[str] = re.compile(
+    r"\[REDACTED(?:_[A-Z0-9_]+)?\]"
+)
+
+
 def format_github_suggestion(finding: ReviewFinding) -> str:
     """
     Format a ReviewFinding into a GitHub comment markdown string.
@@ -192,6 +242,22 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
     build, or by a caller that bypassed the schema), and a suggestion block that
     GitHub rejects takes down every other inline comment in the same atomic
     request with it.
+
+    Redaction and applyability are in direct conflict inside a ``suggestion``
+    block, and safety wins. ``suggested_patch`` goes through
+    ``sanitize_output_markdown``, which applies the repo's canonical
+    ``redact_sensitive_text`` — so a fix that legitimately contains a
+    token-shaped literal (a Stripe test key in a fixture, a placeholder in a
+    redaction test) comes back carrying ``[REDACTED_STRIPE_KEY]``. A
+    ``suggestion`` block is *machine-applied*: one click commits its contents
+    verbatim into the caller's source. Publishing one would be a supply-chain
+    hazard the reviewer never sees coming, and a silently wrong fix is worse
+    than no fix.
+
+    So when redaction actually fired, the patch is still shown — redacted, as
+    every other part of the comment is — but in a plain fenced block the reader
+    must copy by hand, with the reason stated inline. The direction of the
+    failure is deliberate: downgrade when in doubt.
     """
     critique = sanitize_output_markdown(finding.critique, MAX_INLINE_FIELD_CHARS)
     header = (
@@ -212,6 +278,22 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
                 patch_clean = "\n".join(lines[1:-1]).strip("\r\n")
             elif lines[0].startswith("```"):
                 patch_clean = "\n".join(lines[1:]).strip("\r\n")
+        if _REDACTION_PLACEHOLDER_RE.search(patch_clean):
+            # A bare ``` is not enough on its own: the patch may contain a fence
+            # run of its own, which would close the block early and dump the
+            # remainder into the comment as prose. Size the fence past the
+            # longest run present, exactly as audit_prompts._fence_for does.
+            longest_run = max(
+                (len(run) for run in re.findall(r"`+", patch_clean)), default=0
+            )
+            fence = "`" * max(3, longest_run + 1)
+            return (
+                f"{header}\n\n"
+                "Not offered as an applyable suggestion: a value in the proposed "
+                "change matched Haunter's secret-redaction patterns and was "
+                "replaced with a placeholder below. Applying this block as-is "
+                f"would commit the placeholder.\n\n{fence}\n{patch_clean}\n{fence}"
+            )
         return f"{header}\n\n```suggestion\n{patch_clean}\n```"
     return header
 
@@ -316,40 +398,124 @@ class ReviewOutputTruncatedError(ReviewAnalysisError):
     """
 
 
-def _detect_truncation(response: dict, max_tokens: int) -> Optional[str]:
-    """Return the provider's reason for ending generation early, or ``None``.
+def _raise_truncated(
+    reason: str,
+    max_tokens: int,
+    *,
+    attempt: str,
+    prefix: str = "",
+    cause: Optional[BaseException] = None,
+) -> NoReturn:
+    """Log and raise :class:`ReviewOutputTruncatedError` for one attempt.
 
-    Order of evidence:
+    ``NoReturn`` rather than ``None`` so a caller cannot read past the call: both
+    truncation sites sit inside an ``except`` handler where falling through would
+    silently continue a path the code has just decided is unrecoverable.
 
-    1. ``finish_reason`` / ``stop_reason`` — authoritative, and reported by every
-       adapter. Any value outside :data:`COMPLETION_FINISH_REASONS` (``length``,
-       ``max_tokens``, ``model_length``, …) means the generation was cut off.
-       ``stop_reason`` is the raw Anthropic field name; adapters normalise it to
-       ``finish_reason``, and reading it too means a raw provider payload handed
-       straight to this function is judged the same way as a normalised one.
-
-    2. ``usage.output_tokens >= max_tokens`` — the fallback for a provider that
-       omits the field. A response that consumed the entire budget is treated as
-       truncated even if it happens to parse: a JSON object that ends exactly at
-       the budget boundary is indistinguishable from one that was cut, and
-       shipping it as complete is the failure this exists to prevent.
-
-    An absent reason is *unknown*, never "ok" — the token heuristic still
-    applies, and the log line at the call site says which signal decided it.
+    ``prefix`` distinguishes the retry's message from the first attempt's; the
+    operator reading the log needs to know which call produced the cut, because
+    whether the *first* attempt also came back truncated is what says whether the
+    budget is too small for this diff at all.
     """
-    finish_reason = response.get("finish_reason")
-    if not isinstance(finish_reason, str) or not finish_reason.strip():
-        finish_reason = response.get("stop_reason")
-    if isinstance(finish_reason, str) and finish_reason.strip():
-        reason = finish_reason.strip().lower()
-        if reason not in COMPLETION_FINISH_REASONS:
-            return reason
-        return None
-    usage = response.get("usage") or {}
+    logger.error(
+        "code_reviewer: %soutput truncated (%s, reason=%s max_tokens=%d) — "
+        "skipping the budget-invariant retry",
+        prefix,
+        attempt,
+        reason,
+        max_tokens,
+    )
+    raise ReviewOutputTruncatedError(
+        f"Code reviewer {prefix}output was truncated by the provider "
+        f"(finish_reason={reason}, max_tokens={max_tokens}). "
+        "The review JSON is incomplete."
+    ) from cause
+
+
+def _reported_finish_reason(response: dict) -> Optional[str]:
+    """The provider's own reason for ending generation, normalised, or ``None``.
+
+    ``stop_reason`` is Anthropic's raw field name; adapters normalise it to
+    ``finish_reason``, and reading it too means a raw provider payload handed
+    straight to this function is judged the same way as a normalised one.
+
+    ``None`` means *unknown* — the field was absent, blank, or not a string. It
+    never means "ok": an absent reason is the case the budget heuristic exists
+    for.
+    """
+    for key in ("finish_reason", "stop_reason"):
+        value = response.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return None
+
+
+def _budget_exhausted(response: dict, max_tokens: int) -> bool:
+    """True when the response consumed the entire requested output budget.
+
+    The only signal available from a provider that omits ``finish_reason``. It
+    is a *suspicion*, not a verdict: a generation that stops exactly on the
+    budget boundary is indistinguishable from one that was cut there, and the
+    two are only separable by parsing the payload.
+    """
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return False
     output_tokens = usage.get("output_tokens")
     if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
-        if output_tokens >= max_tokens:
-            return "length (inferred from usage.output_tokens)"
+        return output_tokens >= max_tokens
+    return False
+
+
+def _provider_reported_truncation(response: dict) -> bool:
+    """True when the provider itself named a reason in :data:`TRUNCATION_FINISH_REASONS`.
+
+    The distinction the caller needs, and the reason ``_detect_truncation``
+    cannot express on its own: a *reported* cut is a verdict that fails the
+    review before the payload is even looked at, while an *inferred* one is only
+    a suspicion that has to be confirmed by the parse failing.
+    """
+    reason = _reported_finish_reason(response)
+    return reason is not None and reason in TRUNCATION_FINISH_REASONS
+
+
+def _detect_truncation(response: dict, max_tokens: int) -> Optional[str]:
+    """Return the reason this response looks truncated, or ``None``.
+
+    Truncation is detected by *positive* evidence only — the provider naming a
+    member of :data:`TRUNCATION_FINISH_REASONS`, or the budget being spent to the
+    last token. An absent or unrecognised ``finish_reason`` is **unknown**, and
+    unknown is never truncation.
+
+    That default is the whole point. The previous policy asked the inverse
+    question — "is this reason one of the strings I recognise as a clean stop?"
+    — and called everything else truncated. It was unfixable by editing the list:
+    the default provider is OpenCode Zen, which fronts multiple upstreams, so its
+    vocabulary is not knowable from this repo. One unlisted-but-benign value
+    (``content_filter``, ``pause_turn``, a gateway's ``COMPLETED``) turned a
+    publishable review into a terminal error labelled "truncated", with no retry
+    and a diagnosis that pointed at the wrong cause. An allow-list of *truncation*
+    reasons cannot do that: a value nobody anticipated cannot be mistaken for a
+    budget cut, it just falls through to normal parsing.
+
+    When the provider does speak, its word is final — including against the
+    heuristic. A response that reports ``stop`` or ``content_filter`` while
+    spending the entire budget is complete, and the budget being spent is
+    incidental.
+
+    Returns one of:
+
+    * the normalised reason, when the provider named a truncation reason;
+    * ``"length (inferred from usage.output_tokens)"``, when no reason was
+      reported and the whole budget was spent — the caller's cue that this is
+      inferred rather than confirmed;
+    * ``None``, when there is no evidence of a budget cut.
+    """
+    reason = _reported_finish_reason(response)
+    if reason is not None:
+        return reason if reason in TRUNCATION_FINISH_REASONS else None
+    if _budget_exhausted(response, max_tokens):
+        return "length (inferred from usage.output_tokens)"
     return None
 
 
@@ -364,10 +530,18 @@ async def analyze_diff(
     Invokes LLMClient, parses CodeReviewOutput with 1 retry on ValidationError,
     and returns ReviewResult with telemetry.
 
-    A response the provider reports as truncated raises
-    :class:`ReviewOutputTruncatedError` without the retry: the retry re-requests
-    the identical budget, so it truncates identically and the run would end as a
-    generic parse failure that says nothing about the real cause.
+    A response the provider *reports* as truncated raises
+    :class:`ReviewOutputTruncatedError` without the retry: the retry
+    re-requests the identical budget, so it truncates identically and the run
+    would end as a generic parse failure that says nothing about the real cause.
+
+    A truncation merely *suspected* from the token count is not a verdict. It
+    only becomes one when the payload in fact fails to parse — which is the one
+    situation where "truncated" and "schema violation" are the same observable
+    outcome and the truncated label is the actionable one. A complete JSON
+    object that happens to end on the budget boundary is a review worth
+    publishing, and discarding it costs a publishable review for a cosmetic
+    mislabel.
     """
     # Short-circuit if diff is empty or whitespace
     if not diff_text or not diff_text.strip():
@@ -401,18 +575,10 @@ async def analyze_diff(
     total_output = u1.get("output_tokens", 0)
 
     truncation = _detect_truncation(response, REVIEW_MAX_TOKENS)
-    if truncation is not None:
-        logger.error(
-            "code_reviewer: model output truncated (reason=%s max_tokens=%d) — "
-            "skipping the budget-invariant retry",
-            truncation,
-            REVIEW_MAX_TOKENS,
-        )
-        raise ReviewOutputTruncatedError(
-            f"Code reviewer output was truncated by the provider "
-            f"(finish_reason={truncation}, max_tokens={REVIEW_MAX_TOKENS}). "
-            "The review JSON is incomplete."
-        )
+    if _provider_reported_truncation(response):
+        # The provider named a truncation reason. That is a verdict, not a
+        # suspicion: the review cannot be trusted and the retry cannot change it.
+        _raise_truncated(truncation, REVIEW_MAX_TOKENS, attempt="first attempt")
 
     try:
         output = CodeReviewOutput.model_validate_json(cleaned_json)
@@ -424,6 +590,16 @@ async def analyze_diff(
             latency_ms=latency,
         )
     except ValidationError as first_err:
+        # A suspected budget cut is confirmed here, by the parse failing. Until
+        # this point the suspicion was worth logging but not worth losing a
+        # review over.
+        if truncation is not None:
+            _raise_truncated(
+                truncation,
+                REVIEW_MAX_TOKENS,
+                attempt="first attempt",
+                cause=first_err,
+            )
         err_msg = str(first_err)
         logger.warning(
             "code_reviewer: first parse failed (%s) — retrying with error context",
@@ -448,16 +624,9 @@ async def analyze_diff(
     total_output += u2.get("output_tokens", 0)
 
     retry_truncation = _detect_truncation(retry_response, REVIEW_MAX_TOKENS)
-    if retry_truncation is not None:
-        logger.error(
-            "code_reviewer: retry output truncated (reason=%s max_tokens=%d)",
-            retry_truncation,
-            REVIEW_MAX_TOKENS,
-        )
-        raise ReviewOutputTruncatedError(
-            f"Code reviewer retry output was truncated by the provider "
-            f"(finish_reason={retry_truncation}, max_tokens={REVIEW_MAX_TOKENS}). "
-            "The review JSON is incomplete."
+    if _provider_reported_truncation(retry_response):
+        _raise_truncated(
+            retry_truncation, REVIEW_MAX_TOKENS, attempt="retry", prefix="retry "
         )
 
     try:
@@ -470,6 +639,14 @@ async def analyze_diff(
             latency_ms=latency,
         )
     except ValidationError as second_err:
+        if retry_truncation is not None:
+            _raise_truncated(
+                retry_truncation,
+                REVIEW_MAX_TOKENS,
+                attempt="retry",
+                prefix="retry ",
+                cause=second_err,
+            )
         logger.error("code_reviewer: retry also failed validation: %s", second_err)
         raise ReviewAnalysisError(
             f"Code reviewer output failed validation on both attempts. Details: {second_err}"

@@ -1862,23 +1862,136 @@ def test_audit_pipeline_has_no_write_capable_credential_reference():
     borrowing a `frozenset[str]` of action names mints no credential and grants
     no write capability. The guard below names the credential-bearing surface
     instead, which the substring ban could not distinguish from inert data.
+
+    It must therefore close every import spelling, not just `ast.ImportFrom`:
+    an `ImportFrom`-only walk is evaded outright by
+    ``import app.github.pr`` + ``app.github.pr.get_installation_token(repo)``,
+    and a residual literal check for that one call spelling catches nothing else.
+    ``_reached_from_pr_module`` below resolves both `from`-imports and attribute
+    reads, so the answer depends on the SET of borrowed/reached names rather than
+    on how they were spelled.
     """
     source = inspect.getsource(audit_pipeline)
-    borrowed = {
-        alias.name
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.ImportFrom) and node.module == "app.github.pr"
-        for alias in node.names
-    }
-    # Everything borrowed from the write-capable module must be inert vocabulary.
-    assert borrowed <= _READ_ONLY_PR_VOCABULARY
-    # The write-capable token provider is unreachable by any spelling.
-    assert "get_installation_token" not in borrowed
+
+    def _dotted(node: ast.AST) -> str | None:
+        """Render a `Name`/`Attribute` chain as a dotted string, else `None`."""
+        parts: list[str] = []
+        current: ast.AST = node
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if not isinstance(current, ast.Name):
+            return None
+        parts.append(current.id)
+        return ".".join(reversed(parts))
+
+    def _reached_from_pr_module(src: str) -> set[str]:
+        """Names borrowed from, or read through, the module `app.github.pr`.
+
+        Handles every import form the AST can express:
+
+        * ``from app.github.pr import X`` / ``... import X as Y``  → `X`/`Y`
+        * ``from app.github import pr``                           → reads `pr.X`
+        * ``from app import github``                              → reads `github.pr.X`
+        * ``import app.github.pr``                                → binds `app`, reads `app.github.pr.X`
+        * ``import app.github.pr as prmod``                       → reads `prmod.X`
+        * ``import app.github.pr.get_installation_token``         → borrows that name
+        * ``import app.github`` / ``import app``                  → reads `<name>.github.pr.X`
+
+        Attribute reads are what close the evasion above: the set is built from
+        what the module actually touches, not from import nodes alone.
+        """
+        tree = ast.parse(src)
+        borrowed: set[str] = set()
+        # Dotted paths that resolve to the module object `app.github.pr`, written
+        # as (local name, *sub-path within the local binding). Each is a spelling
+        # under which `app.github.pr.<name>` can be reached from this source.
+        bindings: set[tuple[str, ...]] = set()
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "app.github.pr":
+                        # `import app.github.pr as m` binds the module itself;
+                        # without `asname`, Python binds the root name `app`.
+                        bindings.add((alias.asname,) if alias.asname else ("app", "github", "pr"))
+                    elif alias.name.startswith("app.github.pr."):
+                        borrowed.add(alias.name.rsplit(".", 1)[1])
+                    elif alias.name == "app.github":
+                        bindings.add((alias.asname, "pr") if alias.asname else ("app", "github", "pr"))
+                    elif alias.name == "app":
+                        bindings.add((alias.asname or "app", "github", "pr"))
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                for alias in node.names:
+                    if module == "app.github.pr":
+                        borrowed.add(alias.asname or alias.name)
+                    elif module == "app.github" and alias.name == "pr":
+                        bindings.add((alias.asname or alias.name,))
+                    elif module == "app" and alias.name == "github":
+                        bindings.add((alias.asname or alias.name, "pr"))
+
+        reached = set(borrowed)
+        for node in ast.walk(tree):
+            dotted = _dotted(node)
+            if dotted is None:
+                continue
+            segments = dotted.split(".")
+            for bound in bindings:
+                depth = len(bound)
+                if len(segments) > depth and tuple(segments[:depth]) == bound:
+                    reached.add(segments[depth])
+        return reached
+
+    reached = _reached_from_pr_module(source)
+
+    # Everything reached from the write-capable module must be inert vocabulary.
+    assert reached <= _READ_ONLY_PR_VOCABULARY, (
+        "audit_pipeline reaches names from app.github.pr that are not inert "
+        f"vocabulary: {sorted(reached - _READ_ONLY_PR_VOCABULARY)}"
+    )
+    # The write-capable token provider specifically, for a failure message that
+    # names the credential rather than the set difference.
+    assert "get_installation_token" not in reached
+    # Defence in depth for a spelling no static walk can see (e.g. built by
+    # `getattr` on a dynamically composed module path).
     assert "get_installation_token(repo)" not in source
     # And the PR-action vocabulary is the one shared definition rather than a
     # second hand-copied frozenset, which is what let `ready_for_review` be
     # reviewed by neither publisher.
     assert audit_pipeline.AUDIT_PR_ACTIONS is pr.REVIEWABLE_PR_ACTIONS
+
+    # Non-vacuity: every spelling of a credential borrow must trip the guard. If
+    # a future refactor narrows `_reached_from_pr_module`, these fail loudly
+    # rather than silently reopening the hole.
+    evasions = {
+        "import app.github.pr": "import app.github.pr\nawait app.github.pr.get_installation_token(repo)\n",
+        "import app.github.pr as m": "import app.github.pr as m\nawait m.commit_patch(repo, 'x')\n",
+        "from app.github.pr import get_installation_token": (
+            "from app.github.pr import get_installation_token\n"
+            "await get_installation_token(repo)\n"
+        ),
+        "aliased from-import": (
+            "from app.github.pr import get_installation_token as mint\nawait mint(repo)\n"
+        ),
+        "from app.github import pr": (
+            "from app.github import pr\nawait pr.open_pr(repo)\n"
+        ),
+        "from app import github": (
+            "from app import github\nawait github.pr.get_installation_token(repo)\n"
+        ),
+        "deep import": "import app.github.pr.get_installation_token\n",
+        "star import": "from app.github.pr import *\n",
+    }
+    for label, evader in evasions.items():
+        assert _reached_from_pr_module(evader) - _READ_ONLY_PR_VOCABULARY, (
+            f"the guard does not catch a credential borrow spelled as: {label}"
+        )
+    # The one legitimate borrow must stay clean, or the guard is vacuous in the
+    # other direction (everything trips it, so it asserts nothing).
+    assert _reached_from_pr_module(
+        "from app.github.pr import REVIEWABLE_PR_ACTIONS\nX = REVIEWABLE_PR_ACTIONS\n"
+    ) == {"REVIEWABLE_PR_ACTIONS"}
 
 
 @pytest.mark.asyncio
