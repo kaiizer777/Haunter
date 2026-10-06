@@ -10,12 +10,14 @@ Security guarantees:
 - Enforces strict timeouts and handles HTTP error statuses cleanly.
 """
 
+import hashlib
 import io
 import json
 import logging
+import time
 import zipfile
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -1360,6 +1362,395 @@ async def fetch_commits(
             }
         )
     return commits
+
+
+#: Review-thread pages walked per fetch. A thread is only resolvable while the
+#: PR is open, so this is bounded for the same reason MAX_REVIEW_COMMENT_PAGES
+#: is: an unbounded thread list must not be able to inflate a request.
+MAX_REVIEW_THREAD_PAGES = 5
+
+_REVIEW_THREADS_QUERY = """
+query HaunterReviewThreads(
+  $owner: String!
+  $repo: String!
+  $number: Int!
+  $cursor: String
+) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          isCollapsed
+          path
+          line
+          originalLine
+          comments(first: 1) {
+            nodes {
+              databaseId
+              author { login }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+#: GitHub's ``resolveReviewThread`` takes exactly one thread per mutation, so
+#: this is a per-thread round trip. Bounded so a PR with an unbounded number of
+#: open Haunter threads cannot turn one publish into an unbounded request storm.
+MAX_REVIEW_THREAD_RESOLVES = 25
+
+_RESOLVE_REVIEW_THREAD_MUTATION = """
+mutation HaunterResolveReviewThread($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}
+"""
+
+
+def _graphql_headers(token: Optional[str]) -> dict[str, str]:
+    resolved_token = token or settings.github_token
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Haunter-Autonomous-Agent/1.0",
+        "Content-Type": "application/json",
+    }
+    if resolved_token:
+        headers["Authorization"] = f"Bearer {resolved_token}"
+    return headers
+
+
+#: How long a resolved bot identity is reused, mirroring the model-discovery
+#: TTL the repo already relies on (``app/llm/discovery.py:37``): long enough that
+#: a PR reviewed N times costs one identity call rather than N, short enough that
+#: a rotated App bot login is picked up without a redeploy.
+BOT_IDENTITY_CACHE_TTL_SECONDS: float = 900.0
+
+#: Ceiling on the identity cache. Entries are keyed per credential, and GitHub
+#: expires installation tokens hourly, so this is a safety valve against
+#: unbounded growth rather than a policy.
+BOT_IDENTITY_CACHE_MAX_ENTRIES = 64
+
+#: token-fingerprint -> (expiry_monotonic, login). Only the fingerprint is kept;
+#: the credential itself is never stored, here or anywhere else.
+_bot_identity_cache: dict[str, tuple[float, str]] = {}
+
+
+def clear_bot_identity_cache() -> None:
+    """Drop every cached bot identity. For tests and credential rotation only."""
+    _bot_identity_cache.clear()
+
+
+def _identity_cache_key(token: Optional[str]) -> str:
+    """Stable per-credential cache key.
+
+    Keying per credential is what makes the cache sound: one warm Lambda
+    container serves many installations, and a single-slot cache would hand one
+    repo's identity to another repo's review — which would let it resolve threads
+    that are not its own. The key is a truncated SHA-256 of the token, a one-way
+    digest of a high-entropy secret, so the cache never holds the credential.
+    """
+    if not isinstance(token, str) or not token.strip():
+        return "no-token"
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()[:32]
+
+
+async def _request_bot_login(token: Optional[str]) -> str:
+    """``GET /user`` and return the bot login. Raises a typed client error."""
+    headers = _build_headers(token=token)
+    url = f"{GITHUB_API_BASE}/user"
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await _bounded_get(client, url, headers=headers)
+        except httpx.RequestError as exc:
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise GitHubClientError("GitHub GET /user returned a non-JSON body") from exc
+    if not isinstance(payload, dict):
+        raise GitHubClientError("GitHub GET /user returned a non-object body")
+    # An installation access token authenticates as the App's bot user, whose
+    # account type is "Bot". A personal access token (the dev fallback in
+    # `app.github.pr.get_installation_token`) also authenticates successfully
+    # here, and adopting a human's login would make the caller treat that human's
+    # own review threads as ours to resolve. Only a bot identity is ever accepted.
+    if payload.get("type") != "Bot":
+        raise GitHubAuthError(
+            "GitHub credential authenticates as a non-bot account type "
+            f"{sanitize_log_value(payload.get('type'), 64)!r}; refusing to treat a "
+            "human account as this pipeline's own identity"
+        )
+    login = payload.get("login")
+    if not isinstance(login, str) or not login.strip():
+        raise GitHubClientError("GitHub GET /user returned no login")
+    # GitHub logins are capped at 39 chars; the bound only stops a malformed
+    # body from smuggling an unbounded string into the cache and the log.
+    return login.strip()[:128]
+
+
+async def fetch_bot_identity(
+    token: Optional[str] = None,
+    *,
+    force_refresh: bool = False,
+) -> Optional[str]:
+    """Resolve the login the given GitHub credential authenticates as.
+
+    There is no configured Haunter bot slug anywhere in this codebase, and none
+    is needed: an installation access token *is* the App's bot user, so
+    ``GET /user`` is the authoritative answer to "which account are we". That
+    also keeps the caller off ``login.endswith("[bot]")``, which would match
+    Dependabot, Codecov and every other bot whose threads are not ours.
+
+    The result is cached per credential for
+    :data:`BOT_IDENTITY_CACHE_TTL_SECONDS`, so a PR with several review runs
+    costs one identity call rather than one per run. The cache is written
+    without a lock on purpose: the value is idempotent, so the only thing a
+    concurrent pair can do is duplicate one identical ``GET /user``, and an
+    ``asyncio.Lock`` held across event loops is a hard ``RuntimeError`` — inside
+    a path that must never fail a review.
+
+    Returns the bot login, or ``None`` when it cannot be established. Never
+    raises: the caller skips thread resolution on ``None``, so a metadata
+    endpoint GitHub is refusing can never fail a review.
+    """
+    cache_key = _identity_cache_key(token)
+    now = time.monotonic()
+    if not force_refresh:
+        cached = _bot_identity_cache.get(cache_key)
+        if cached is not None and now < cached[0]:
+            return cached[1]
+
+    try:
+        login = await _request_bot_login(token)
+    except Exception as exc:
+        # Not cached: a transient refusal must be able to clear on the next run
+        # rather than pinning this container to "no identity" for a full TTL.
+        logger.info(
+            "github bot_identity unavailable error_type=%s error=%s",
+            type(exc).__name__,
+            sanitize_log_value(exc),
+        )
+        return None
+
+    if len(_bot_identity_cache) >= BOT_IDENTITY_CACHE_MAX_ENTRIES:
+        for key in [
+            key
+            for key, (expires_at, _) in _bot_identity_cache.items()
+            if now >= expires_at
+        ]:
+            _bot_identity_cache.pop(key, None)
+        while len(_bot_identity_cache) >= BOT_IDENTITY_CACHE_MAX_ENTRIES:
+            oldest = min(_bot_identity_cache.items(), key=lambda item: item[1][0])
+            _bot_identity_cache.pop(oldest[0], None)
+    _bot_identity_cache[cache_key] = (
+        time.monotonic() + BOT_IDENTITY_CACHE_TTL_SECONDS,
+        login,
+    )
+    logger.info("github bot_identity resolved login=%s", sanitize_log_value(login, 128))
+    return login
+
+
+async def fetch_review_threads(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Fetch a PR's review threads through the GraphQL API.
+
+    ``GET /pulls/{n}/comments`` returns ``PullRequestReviewComment`` rows, and a
+    comment's ``node_id`` is **not** a ``PullRequestReviewThread`` id — they are
+    different node types, and passing one where the other is expected fails the
+    mutation. Resolving a thread is only possible with the real thread id, so
+    the thread list has to come from GraphQL.
+
+    Returns raw thread dicts (``id``, ``isResolved``, ``isOutdated``, ``path``,
+    ``line``, ``originalLine``, and the first comment's ``databaseId`` /
+    ``author.login``). Returns ``[]`` on any failure: thread resolution is a
+    courtesy to the reviewer, and must never fail a publish. Raises nothing.
+    """
+    url = "https://api.github.com/graphql"
+    headers = _graphql_headers(token)
+    variables: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "number": int(pr_number),
+    }
+
+    threads: list[dict[str, Any]] = []
+    cursor: Optional[str] = None
+    pages = 0
+    while pages < MAX_REVIEW_THREAD_PAGES:
+        pages += 1
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+            try:
+                response = await client.post(
+                    url,
+                    headers=headers,
+                    json={
+                        "query": _REVIEW_THREADS_QUERY,
+                        "variables": {**variables, "cursor": cursor},
+                    },
+                )
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "github review_threads network_error repo=%s pr=%s error_type=%s",
+                    owner,
+                    repo,
+                    pr_number,
+                    type(exc).__name__,
+                )
+                return []
+        if response.is_error:
+            logger.warning(
+                "github review_threads http_error repo=%s pr=%s status=%s",
+                owner,
+                repo,
+                pr_number,
+                response.status_code,
+            )
+            return []
+        try:
+            payload = response.json()
+        except ValueError:
+            logger.warning(
+                "github review_threads malformed_body repo=%s pr=%s", owner, repo
+            )
+            return []
+        if not isinstance(payload, dict):
+            return []
+        if payload.get("errors"):
+            logger.warning(
+                "github review_threads graphql_errors repo=%s pr=%s",
+                owner,
+                repo,
+            )
+            return []
+        try:
+            connection = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes = connection["nodes"]
+        except (KeyError, TypeError):
+            logger.warning(
+                "github review_threads unexpected_shape repo=%s pr=%s", owner, repo
+            )
+            return []
+        threads.extend(node for node in nodes if isinstance(node, dict))
+        page_info = connection.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            break
+    if len(threads) >= MAX_REVIEW_THREAD_PAGES * 100:
+        logger.info(
+            "github review_threads truncated repo=%s pr=%s threads=%d",
+            owner,
+            repo,
+            len(threads),
+        )
+    return threads
+
+
+async def resolve_review_threads(
+    owner: str,
+    repo: str,
+    thread_ids: Sequence[str],
+    token: Optional[str] = None,
+) -> int:
+    """Resolve review threads through the GraphQL ``resolveReviewThread`` mutation.
+
+    ``thread_ids`` must be real ``PullRequestReviewThread`` ids — see
+    :func:`fetch_review_threads` for why a review-comment id will not do.
+
+    Returns the number of threads GitHub confirmed resolved. Never raises: a
+    failed resolve leaves the thread open, which is the state the reviewer can
+    still act on, so it is strictly better than failing the publish.
+    """
+    unique_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in thread_ids:
+        thread_id = str(raw or "").strip()
+        if thread_id and thread_id not in seen:
+            seen.add(thread_id)
+            unique_ids.append(thread_id)
+    if not unique_ids:
+        return 0
+    if len(unique_ids) > MAX_REVIEW_THREAD_RESOLVES:
+        logger.info(
+            "github resolve_review_threads bounded repo=%s requested=%d cap=%d",
+            owner,
+            len(unique_ids),
+            MAX_REVIEW_THREAD_RESOLVES,
+        )
+        unique_ids = unique_ids[:MAX_REVIEW_THREAD_RESOLVES]
+
+    url = "https://api.github.com/graphql"
+    headers = _graphql_headers(token)
+    resolved = 0
+    for thread_id in unique_ids:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+            try:
+                response = await client.post(
+                    url,
+                    headers=headers,
+                    json={
+                        "query": _RESOLVE_REVIEW_THREAD_MUTATION,
+                        "variables": {"threadId": thread_id},
+                    },
+                )
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "github resolve_review_threads network_error repo=%s error_type=%s",
+                    owner,
+                    type(exc).__name__,
+                )
+                return resolved
+        if response.is_error:
+            logger.warning(
+                "github resolve_review_threads http_error repo=%s status=%s",
+                owner,
+                response.status_code,
+            )
+            return resolved
+        try:
+            payload = response.json()
+        except ValueError:
+            logger.warning("github resolve_review_threads malformed_body repo=%s", owner)
+            return resolved
+        if not isinstance(payload, dict):
+            return resolved
+        if payload.get("errors"):
+            logger.warning(
+                "github resolve_review_threads graphql_errors repo=%s thread=%d",
+                owner,
+                len(thread_id),
+            )
+            return resolved
+        thread = ((payload.get("data") or {}).get("resolveReviewThread") or {}).get(
+            "thread"
+        )
+        if isinstance(thread, dict) and thread.get("isResolved") is True:
+            resolved += 1
+    return resolved
 
 
 async def fetch_blame(
