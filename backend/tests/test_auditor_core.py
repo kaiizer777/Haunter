@@ -1624,7 +1624,13 @@ async def test_full_worker_path_fetches_context_and_calls_core_read_only():
             token="installation-token",
         )
 
-    assert result.status == "completed"
+    # The publish really does fail here: `create_commit_comment` is not patched, so
+    # the HTTP guard in `deny_external_http` refuses the POST to api.github.com. A
+    # refused publish is a visible publish failure, not a completed audit — the model
+    # ran and its report exists, but GitHub never received it, so recording
+    # "completed" would report a success that did not happen. The report survives
+    # on the outcome either way.
+    assert result.status == "publish_failed"
     assert result.result.audit_id == "audit-888888888888"
     mock_fetch.assert_awaited_once_with(
         owner="o",

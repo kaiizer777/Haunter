@@ -141,7 +141,13 @@ class AuditTarget:
 
 @dataclass(frozen=True)
 class AuditExecutionOutcome:
-    status: Literal["completed", "skipped_no_diff"]
+    #: ``publish_failed`` is a *terminal* outcome, not a transient failure: the
+    #: audit itself ran and its report exists, but GitHub refused to accept it.
+    #: It is deliberately distinct from ``completed`` because a job that recorded
+    #: no GitHub output is not a completed audit, and distinct from a raised
+    #: exception because re-running it would re-run the model to produce the same
+    #: report and hit the same rejection.
+    status: Literal["completed", "skipped_no_diff", "publish_failed"]
     result: Any = None
 
 
@@ -852,7 +858,7 @@ async def execute_audit_job(
     try:
         from app.github.audit_publisher import publish_audit_review
 
-        await publish_audit_review(
+        published = await publish_audit_review(
             result=result,
             owner=owner,
             repo=name,
@@ -862,11 +868,31 @@ async def execute_audit_job(
             token=token,
         )
     except Exception as pub_exc:
+        # The publisher raises only when asked to (`raise_on_error=True`), but the
+        # import and the call itself can still fail. Recorded as a terminal
+        # publish failure for the same reason a returned PublishResult(status=
+        # "error") is: the audit ran, GitHub did not receive it.
         logger.warning(
-            "audit publish_failed audit_id=%s error_type=%s",
+            "audit publish_raised audit_id=%s error_type=%s",
             audit_id,
             type(pub_exc).__name__,
         )
+        return AuditExecutionOutcome(status="publish_failed", result=result)
+    if not getattr(published, "published", False):
+        # `publish_audit_review` converts every GitHub failure into a returned
+        # PublishResult rather than raising, so discarding the return value is
+        # what made a 422 (typically an oversized body) indistinguishable from a
+        # successful audit. `skipped`/`suppressed` are policy outcomes, not
+        # failures: publish_allowed=False and a sub-threshold confidence are both
+        # deliberate, and both already say so on the result.
+        publish_status = getattr(published, "status", "error")
+        if publish_status not in ("suppressed", "skipped"):
+            logger.warning(
+                "audit publish_failed audit_id=%s publish_status=%s",
+                audit_id,
+                publish_status,
+            )
+            return AuditExecutionOutcome(status="publish_failed", result=result)
     return AuditExecutionOutcome(status="completed", result=result)
 
 
@@ -1214,7 +1240,9 @@ async def _claim_processing_job(
 async def _finish_audit_job(
     audit_id: str,
     attempt: int,
-    status: Literal["completed", "skipped_no_diff"],
+    status: Literal["completed", "skipped_no_diff", "failed"],
+    *,
+    last_error: Optional[str] = None,
 ) -> bool:
     from app.db import async_session_maker
 
@@ -1232,7 +1260,7 @@ async def _finish_audit_job(
                     status=status,
                     next_attempt_at=now,
                     lease_expires_at=None,
-                    last_error=None,
+                    last_error=last_error,
                 )
                 .returning(AuditJob.audit_id)
             )
@@ -1250,6 +1278,21 @@ async def _complete_audit_job(audit_id: str, attempt: int) -> bool:
 
 async def _skip_audit_job(audit_id: str, attempt: int) -> bool:
     return await _finish_audit_job(audit_id, attempt, "skipped_no_diff")
+
+
+async def _fail_publish_audit_job(audit_id: str, attempt: int) -> bool:
+    """Close out a job whose audit ran but whose GitHub publish did not land.
+
+    Terminal by design, and deliberately not routed through
+    :func:`_retry_or_fail_audit_job`: the expensive, non-deterministic part (the
+    model call that produced the report) already succeeded, so a retry would burn
+    the same tokens to produce the same report and be rejected the same way. The
+    report itself is not lost — it is on the returned ``AuditExecutionOutcome``,
+    which the caller logs and which the dashboard reads from the job row.
+    """
+    return await _finish_audit_job(
+        audit_id, attempt, "failed", last_error="PublishFailed"
+    )
 
 
 async def _retry_or_fail_audit_job(
@@ -1382,7 +1425,7 @@ async def process_audit_job(audit_id: str, dispatch_fence_token: str) -> bool:
             RuntimeError("InvalidAuditExecutionOutcome"),
         )
         return False
-    if outcome.status not in ("completed", "skipped_no_diff"):
+    if outcome.status not in ("completed", "skipped_no_diff", "publish_failed"):
         await _record_processing_failure(
             audit_id,
             attempt,
@@ -1392,6 +1435,10 @@ async def process_audit_job(audit_id: str, dispatch_fence_token: str) -> bool:
     try:
         if outcome.status == "skipped_no_diff":
             state_updated = await _skip_audit_job(audit_id, attempt)
+        elif outcome.status == "publish_failed":
+            # A known, terminal outcome — not an invalid one. Retrying it would
+            # re-run the model to rebuild a report GitHub has already refused.
+            state_updated = await _fail_publish_audit_job(audit_id, attempt)
         else:
             state_updated = await _complete_audit_job(audit_id, attempt)
     except asyncio.CancelledError:

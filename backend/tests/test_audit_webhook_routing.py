@@ -861,6 +861,16 @@ async def test_real_outbox_worker_runs_read_only_report_path_without_core_patche
             new_callable=AsyncMock,
             return_value=source,
         ) as fetch_source,
+        # The audit completes only if the publish genuinely succeeds. The
+        # publisher resolves `github_client.create_pr_review` at call time
+        # (audit_publisher.py:348), so the module attribute is the patch point --
+        # its module-level `create_pr_review` alias (audit_publisher.py:46) is
+        # never called and patching that would silently no-op.
+        patch(
+            "app.github_client.create_pr_review",
+            new_callable=AsyncMock,
+            return_value={"id": 1},
+        ) as create_review,
         patch("app.subagents.auditor.LLMClient.complete", llm_complete),
     ):
         summary = await audit_pipeline.dispatch_audit_jobs(
@@ -888,6 +898,13 @@ async def test_real_outbox_worker_runs_read_only_report_path_without_core_patche
         token="read-only-token",
         allow_global_token=False,
     )
+    # The report is published with the same read-only installation token and no
+    # fallback to the global PAT, so the job only reaches "completed" because the
+    # publish really went out rather than being swallowed.
+    create_review.assert_awaited_once()
+    assert create_review.await_args.kwargs["token"] == "read-only-token"
+    assert create_review.await_args.kwargs["allow_global_token"] is False
+    assert create_review.await_args.kwargs["pr_number"] == 42
     assert llm_complete.await_count == 4
     fake_audit_db.expire_all()
     job = await fake_audit_db.scalar(

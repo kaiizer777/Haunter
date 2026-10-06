@@ -582,7 +582,7 @@ async def test_github_api_error_raises_when_requested():
 
 
 @pytest.mark.asyncio
-async def test_audit_pipeline_wiring_tolerates_publisher_failure():
+async def test_audit_pipeline_wiring_surfaces_publisher_failure():
     repo = cast(Repo, SimpleNamespace(id="repo-1", owner="octocat", name="hello-world"))
     target = audit_pipeline.AuditTarget(base_sha="b" * 40, head_sha="a" * 40)
     fake_result = _make_audit_result(confidence=90, publish_allowed=True)
@@ -620,7 +620,7 @@ async def test_audit_pipeline_wiring_tolerates_publisher_failure():
             "app.subagents.auditor.run_audit",
             new_callable=AsyncMock,
             return_value=fake_result,
-        ),
+        ) as mock_run_audit,
         patch("app.github.audit_publisher.publish_audit_review", mock_pub),
     ):
         outcome = await audit_pipeline.execute_audit_job(
@@ -635,10 +635,84 @@ async def test_audit_pipeline_wiring_tolerates_publisher_failure():
             token="test-token",
         )
 
-    # The audit job completed normally despite the publisher encountering a failure
-    assert outcome.status == "completed"
+    # A publish failure is a visible publish failure, not a completed audit: the
+    # model ran and its report exists, but GitHub never received it, so recording
+    # "completed" would report a success that did not happen.
+    assert outcome.status == "publish_failed"
+    # The report survives the failure. The job row is closed out, not discarded,
+    # so the audit record still identifies what was analysed.
+    assert outcome.result is fake_result
     assert outcome.result.audit_id == "audit-1234567890ab"
+    # The failure is neither swallowed nor re-analysed: the publisher was reached
+    # exactly once and the model ran exactly once, so nothing here loops back
+    # through the analysis to rebuild a report GitHub has already refused.
     mock_pub.assert_awaited_once()
+    mock_run_audit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_audit_job_routes_publish_failure_terminal_without_retry():
+    """A publish failure must close the job out, never requeue it.
+
+    Retrying would re-run the model to rebuild a report GitHub has already
+    refused, burning tokens to hit the same rejection. Pin both halves of that:
+    the terminal close-out is taken, and neither retry path is.
+    """
+    job = SimpleNamespace(
+        audit_id="audit-1234567890ab",
+        audit_type="pr_audit",
+        ref="main",
+        pr_number=42,
+        base_sha="b" * 40,
+        head_sha="a" * 40,
+        workflow_run_id=None,
+    )
+    repo = cast(Repo, SimpleNamespace(id="repo-1", owner="octocat", name="hello-world"))
+    publish_failed = audit_pipeline.AuditExecutionOutcome(
+        status="publish_failed", result=_make_audit_result(publish_allowed=True)
+    )
+
+    mock_fail_publish = AsyncMock(return_value=True)
+    mock_retry_or_fail = AsyncMock()
+    mock_record_failure = AsyncMock()
+
+    with (
+        patch(
+            "app.services.audit_pipeline._claim_processing_job",
+            new_callable=AsyncMock,
+            return_value=(job, repo, 1),
+        ),
+        patch(
+            "app.services.audit_pipeline.get_auditor_installation_token",
+            new_callable=AsyncMock,
+            return_value="ghs_token",
+        ),
+        patch(
+            "app.services.audit_pipeline.execute_audit_job",
+            new_callable=AsyncMock,
+            return_value=publish_failed,
+        ),
+        patch("app.services.audit_pipeline._fail_publish_audit_job", mock_fail_publish),
+        patch(
+            "app.services.audit_pipeline._retry_or_fail_audit_job",
+            mock_retry_or_fail,
+        ),
+        patch(
+            "app.services.audit_pipeline._record_processing_failure",
+            mock_record_failure,
+        ),
+    ):
+        handled = await audit_pipeline.process_audit_job(
+            "audit-1234567890ab", "fence-token-1234"
+        )
+
+    assert handled is True
+    mock_fail_publish.assert_awaited_once_with("audit-1234567890ab", 1)
+    # `_record_processing_failure` is the invalid-outcome path: reaching it would
+    # mean `publish_failed` was not recognised as a known outcome and the whole
+    # audit was treated as a defect to retry.
+    mock_record_failure.assert_not_called()
+    mock_retry_or_fail.assert_not_called()
 
 
 # ==============================================================================
