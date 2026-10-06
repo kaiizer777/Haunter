@@ -248,7 +248,7 @@ _LANGUAGE_EVIDENCE: Final[dict[str, _LanguageEvidence]] = {
 
 def _score_languages(file_paths: Iterable[str]) -> dict[str, int]:
     """Return the weighted evidence score per supported language."""
-    scores: dict[str, int] = {lang: 0 for lang in SUPPORTED_LANGUAGES}
+    scores: dict[str, int] = dict.fromkeys(SUPPORTED_LANGUAGES, 0)
     for raw_path in file_paths:
         normalized = str(raw_path).replace("\\", "/").lower()
         basename = normalized.rsplit("/", 1)[-1]
