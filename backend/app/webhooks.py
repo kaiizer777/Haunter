@@ -202,6 +202,85 @@ def _truncate_reason(reason: Any) -> Optional[str]:
     return text
 
 
+#: Maximum chars stored in code_reviews.failure_reason. Mirrors the bound the
+#: review orchestrator applies (app.services.review_orchestrator
+#: ._FAILURE_REASON_MAX_CHARS): the column is the only durable signal that a
+#: review was never dispatched, so it must hold a readable reason and nothing
+#: more. Text is attacker-influenced (it embeds a provider error message), hence
+#: sanitized and bounded rather than stored raw.
+_CODE_REVIEW_FAILURE_MAX_CHARS = 500
+
+
+async def _dispatch_review(
+    db: AsyncSession,
+    review: CodeReview,
+    background_tasks: BackgroundTasks,
+    *,
+    event: str,
+    delivery_id: Any,
+    owner: str,
+    repo_name: str,
+) -> None:
+    """Hand a committed CodeReview to the hosting adapter, durably.
+
+    The row is already committed when this is called, which is what makes this
+    ordering safe and what makes a failure here expensive: AWSHostingAdapter
+    re-raises ``SelfInvocationError`` bare and the Lambda invoke helper raises
+    ``RuntimeError`` on a non-202, so the review existed as ``pending`` with no
+    ``failure_reason`` and nothing would ever run it. The dedup guard counts
+    ``pending`` as "already handled", so every GitHub redelivery of that event
+    was answered ``duplicate`` and the review was silently lost.
+
+    So the dispatch failure is recorded on the row itself — terminal status plus
+    a bounded, sanitized reason — and re-raised as a 503. The delivery is
+    deliberately *not* recorded as handled: the guard's status list excludes
+    ``error``, so the redelivery is free to queue and schedule the review for
+    real.
+    """
+    from app.adapters.hosting import get_hosting_adapter
+
+    try:
+        adapter = await get_hosting_adapter()
+        await adapter.schedule_review(review.id, background_tasks)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        reason = sanitize_log_value(
+            f"Review dispatch failed: {type(exc).__name__}: {exc}",
+            _CODE_REVIEW_FAILURE_MAX_CHARS,
+        )
+        review.status = "error"
+        review.failure_reason = reason
+        try:
+            await db.commit()
+        except Exception:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+        logger.error(
+            "webhook review_dispatch_failed event=%s delivery_id=%s repo=%s "
+            "review_id=%s error_type=%s",
+            event,
+            delivery_id,
+            _log_repo(owner, repo_name),
+            review.id,
+            type(exc).__name__,
+        )
+        _log_webhook_decision(
+            event=event,
+            delivery_id=delivery_id,
+            status="dispatch_failed",
+            reason=f"review_id={review.id} error_type={type(exc).__name__}",
+            repo=f"{owner}/{repo_name}",
+            level="warning",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Code review could not be dispatched. Please retry.",
+        ) from exc
+
+
 def _encode_replay_buffer(raw_body: Optional[bytes]) -> Optional[str]:
     """Base64 the verified raw body so replay re-verifies the exact same bytes.
 
@@ -1226,9 +1305,17 @@ async def github_webhook(
             return {"status": "ignored", "reason": "missing head sha"}
 
         # Deduplication guard: ignore redundant deliveries for the same commit
+        # AND the same review target. `pr_number` is part of the key because a
+        # push review and a pull_request review for one head SHA are different
+        # units of work — they publish to different places (a commit comment vs a
+        # formal PR review) — and GitHub fires both for the same commit whenever a
+        # PR head advances. Without this predicate whichever delivery arrived first
+        # suppressed the other, and a push winning the race meant the PR was never
+        # reviewed at all.
         existing_review_stmt = select(CodeReview).where(
             CodeReview.repo_id == repo.id,
             CodeReview.commit_sha == commit_sha,
+            CodeReview.pr_number == pr_number,
             CodeReview.status.in_(["pending", "in_progress", "completed"]),
         )
         existing_review_res = await db.execute(existing_review_stmt)
@@ -1320,10 +1407,15 @@ async def github_webhook(
         await db.commit()
         await db.refresh(new_review)
 
-        from app.adapters.hosting import get_hosting_adapter
-
-        adapter = await get_hosting_adapter()
-        await adapter.schedule_review(new_review.id, background_tasks)
+        await _dispatch_review(
+            db,
+            new_review,
+            background_tasks,
+            event="pull_request",
+            delivery_id=x_github_delivery,
+            owner=owner,
+            repo_name=repo_name,
+        )
 
         # Snapshotted before the recorder — see the workflow_run branch.
         queued_review_id = str(new_review.id)
@@ -1446,9 +1538,13 @@ async def github_webhook(
             return {"status": "skipped", "reason": branch_decision.reason}
 
         # Deduplication guard: ignore redundant deliveries for the same commit
+        # AND the same (commit-scoped) target. See the pull_request branch above
+        # for why `pr_number` is part of the key; here it is always NULL, so this
+        # is `pr_number IS NULL` and matches commit-scoped reviews only.
         existing_review_stmt = select(CodeReview).where(
             CodeReview.repo_id == repo.id,
             CodeReview.commit_sha == commit_sha,
+            CodeReview.pr_number.is_(None),
             CodeReview.status.in_(["pending", "in_progress", "completed"]),
         )
         existing_review_res = await db.execute(existing_review_stmt)
@@ -1493,10 +1589,15 @@ async def github_webhook(
         await db.commit()
         await db.refresh(new_review)
 
-        from app.adapters.hosting import get_hosting_adapter
-
-        adapter = await get_hosting_adapter()
-        await adapter.schedule_review(new_review.id, background_tasks)
+        await _dispatch_review(
+            db,
+            new_review,
+            background_tasks,
+            event="push",
+            delivery_id=x_github_delivery,
+            owner=owner,
+            repo_name=repo_name,
+        )
 
         # Snapshotted before the recorder — see the workflow_run branch.
         queued_review_id = str(new_review.id)
