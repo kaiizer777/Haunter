@@ -39,6 +39,29 @@ GITHUB_API_BASE = "https://api.github.com"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
 # ---------------------------------------------------------------------------
+# Pull request actions that make a PR reviewable
+# ---------------------------------------------------------------------------
+# One definition, shared by every consumer that has to answer "is this delivery
+# a change to the PR's content?": the webhook's code-review branch
+# (app.webhooks.github_webhook) and the auditor's PR trigger
+# (app.services.audit_pipeline.evaluate_pr). Two hand-copied frozensets of
+# GitHub action names is how `ready_for_review` ended up reviewed by neither:
+# a PR opened as a draft is dropped by the draft guard, and then dropped again
+# when it is promoted, so it is never reviewed at all.
+#
+# `edited` is deliberately absent: it fires on title/body/label edits, which do
+# not change the diff, and reviewing on it would re-post the same findings for
+# every typo fix in the description.
+REVIEWABLE_PR_ACTIONS: frozenset[str] = frozenset(
+    {"opened", "synchronize", "ready_for_review", "reopened"}
+)
+
+
+def is_reviewable_pr_action(action: Optional[str]) -> bool:
+    """True when a ``pull_request`` action changes what a review must analyse."""
+    return action in REVIEWABLE_PR_ACTIONS
+
+# ---------------------------------------------------------------------------
 # Validation regexes
 # ---------------------------------------------------------------------------
 

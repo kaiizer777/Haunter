@@ -63,6 +63,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
+from app.github.pr import REVIEWABLE_PR_ACTIONS, is_reviewable_pr_action
 from app.log_hygiene import sanitize_log_value
 from app.models import CodeReview, Repo, Run, User, WebhookDelivery
 from app.schemas import (
@@ -1100,11 +1101,17 @@ async def github_webhook(
     # -----------------------------------------------------------------------
     if x_github_event == "pull_request":
         action = data.get("action")
-        if action not in ("opened", "synchronize"):
+        # Shared with the auditor's PR trigger (app.github.pr) so a draft promoted
+        # to ready, or a reopened PR, is reviewable work for both — previously
+        # this branch accepted only opened/synchronize, so with the default
+        # `ignore_draft_prs=True` a draft PR was dropped at open time and again at
+        # ready_for_review and was never reviewed at all.
+        if not is_reviewable_pr_action(action):
             logger.info(
-                "Ignored pull_request (delivery_id=%s): action=%s (expected opened or synchronize)",
+                "Ignored pull_request (delivery_id=%s): action=%s (expected one of %s)",
                 x_github_delivery,
                 action,
+                sorted(REVIEWABLE_PR_ACTIONS),
             )
             return {"status": "ignored", "reason": f"unsupported PR action: {action}"}
 

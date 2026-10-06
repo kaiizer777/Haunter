@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.github.auditor import get_auditor_installation_token
+from app.github.pr import REVIEWABLE_PR_ACTIONS
 from app.models import AuditJob, Repo, RepoSettings
 from app.self_invocation import (
     KIND_AUDIT,
@@ -34,7 +35,10 @@ logger = logging.getLogger(__name__)
 
 AuditType = Literal["pr_audit", "ci_failure_audit", "ci_success_audit", "manual_audit"]
 
-AUDIT_PR_ACTIONS = frozenset({"opened", "synchronize"})
+#: Actions that make a PR's diff reviewable. Shared with the code-review
+#: webhook branch (app.webhooks) so the two can never disagree about which
+#: delivery is reviewable work — see app.github.pr.REVIEWABLE_PR_ACTIONS.
+AUDIT_PR_ACTIONS = REVIEWABLE_PR_ACTIONS
 AUDIT_WORKFLOW_CONCLUSIONS = frozenset({"failure", "success"})
 AUDIT_TYPES = frozenset(
     {"pr_audit", "ci_failure_audit", "ci_success_audit", "manual_audit"}

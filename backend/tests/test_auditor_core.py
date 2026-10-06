@@ -26,6 +26,7 @@ fully hermetic (no TEST_DATABASE_URL required).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import json
@@ -45,6 +46,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.github import pr
 from app.github_client import (
     GitHubAuthError,
     GitHubNetworkError,
@@ -411,6 +413,13 @@ _READ_ONLY_FORBIDDEN_TOKENS = (
     "git push",
     "create_branch",
 )
+
+#: The only names the audit pipeline may borrow from `app.github.pr`, whose other
+#: public surface (`get_installation_token`, `resolve_installation_id`,
+#: `create_branch`, `commit_patch`, `open_pr`) is write-capable. These two are
+#: inert vocabulary: a `frozenset` of GitHub action names and a pure predicate
+#: over it. Neither mints a credential nor performs a write.
+_READ_ONLY_PR_VOCABULARY = {"REVIEWABLE_PR_ACTIONS", "is_reviewable_pr_action"}
 
 
 @pytest.mark.parametrize(
@@ -1833,9 +1842,43 @@ async def test_worker_credential_failure_does_not_fall_back_or_execute():
 
 
 def test_audit_pipeline_has_no_write_capable_credential_reference():
+    """The invariant is credential isolation, not module isolation.
+
+    This module's own docstring states it: *"Read-only invariant: auditor + prompt
+    sources reference no write APIs (no push / branch / PR / comment publishing
+    calls)"* — enforced for `audit_pipeline.py` against the concrete write-API list
+    in `test_read_only_no_write_api_references`. The narrower guarantee here is
+    that the worker never reaches for the *write-capable credential* provider
+    (`app.github.pr.get_installation_token`, which mints a contents:write /
+    pull_requests:write token); it must mint its read-only token through
+    `get_auditor_installation_token` only, which
+    `test_worker_resolves_auditor_credentials_only_through_read_only_provider`
+    pins at runtime via `write_credentials.assert_not_awaited()`.
+
+    The previous assertion banned the whole `app.github.pr` module by substring.
+    That was an over-broad proxy: `app.github.pr` is also where the single shared
+    `REVIEWABLE_PR_ACTIONS` vocabulary lives (de-duplicated so `app.webhooks` and
+    this trigger cannot disagree about which delivery is reviewable), and
+    borrowing a `frozenset[str]` of action names mints no credential and grants
+    no write capability. The guard below names the credential-bearing surface
+    instead, which the substring ban could not distinguish from inert data.
+    """
     source = inspect.getsource(audit_pipeline)
-    assert "app.github.pr" not in source
+    borrowed = {
+        alias.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom) and node.module == "app.github.pr"
+        for alias in node.names
+    }
+    # Everything borrowed from the write-capable module must be inert vocabulary.
+    assert borrowed <= _READ_ONLY_PR_VOCABULARY
+    # The write-capable token provider is unreachable by any spelling.
+    assert "get_installation_token" not in borrowed
     assert "get_installation_token(repo)" not in source
+    # And the PR-action vocabulary is the one shared definition rather than a
+    # second hand-copied frozenset, which is what let `ready_for_review` be
+    # reviewed by neither publisher.
+    assert audit_pipeline.AUDIT_PR_ACTIONS is pr.REVIEWABLE_PR_ACTIONS
 
 
 @pytest.mark.asyncio
