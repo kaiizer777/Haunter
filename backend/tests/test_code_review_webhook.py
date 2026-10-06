@@ -335,7 +335,14 @@ async def test_orchestrator_pipeline_pr_request_changes(
     await db.commit()
     await db.refresh(review)
 
-    mock_diff = "diff --git a/app.py b/app.py\n+os.system(user_input)"
+    mock_diff = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " def run():\n"
+        "+os.system(user_input)\n"
+    )
     mock_llm_response = {
         "content": json.dumps(
             {
@@ -845,11 +852,23 @@ async def test_orchestrator_422_inline_fallback_drops_comments_keeps_summary(
             raise Exception("GitHub API returned error 422: inline comment line out of range")
         return {"id": 1}
 
+    mock_diff = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -0,0 +1,5 @@\n"
+        "+line 1\n"
+        "+line 2\n"
+        "+line 3\n"
+        "+line 4\n"
+        "+line 5\n"
+    )
+
     with (
         patch(
             "app.services.review_orchestrator.fetch_pull_request_diff",
             new_callable=AsyncMock,
-            return_value="diff",
+            return_value=mock_diff,
         ),
         patch("app.subagents.code_reviewer.LLMClient") as mock_llm_cls,
         patch(

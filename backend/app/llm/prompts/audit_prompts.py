@@ -28,6 +28,18 @@ MAX_SYSTEM_PROMPT_CHARS = 12_000
 MAX_USER_PROMPT_CHARS = 90_000
 MAX_REPORT_CHARS = 100_000
 MAX_REPORT_FINDINGS = 25
+#: Hard ceiling GitHub enforces on a submitted comment body, independent of what
+#: we are willing to ask a model for: GitHub stores comment bodies in a mediumblob
+#: and rejects anything past 65 536 characters with HTTP 422
+#: ("body is too long (maximum is 65536 characters)"), for review bodies and
+#: commit comments alike. ``MAX_REPORT_CHARS`` is deliberately *not* lowered to
+#: this value: it is an internal prompt/report budget, and a report longer than
+#: what GitHub will accept is still worth rendering inside Haunter. The clamp
+#: belongs at the publish boundary, which is the only place the external limit
+#: applies. Evidence: docs.github.com REST API has no documented body-length
+#: parameter for `POST /pulls/{n}/reviews`, so the limit is only observable in
+#: GitHub's own 422 response text.
+MAX_GITHUB_COMMENT_CHARS = 65_536
 MAX_INLINE_FIELD_CHARS = 1_200
 MAX_TITLE_CHARS = 240
 MAX_CATEGORY_CHARS = 160
