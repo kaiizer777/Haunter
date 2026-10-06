@@ -69,6 +69,20 @@ class GitHubResourceNotFoundError(GitHubClientError):
     """Raised on 404 Not Found from GitHub API."""
 
 
+class GitHubUnprocessableEntityError(GitHubClientError):
+    """Raised on 422 Unprocessable Entity from GitHub API.
+
+    The only 422 the write paths produce is "GitHub rejected this payload":
+    a review comment anchored to a line outside the diff, or a body past
+    GitHub's 65 536-character ceiling. It is the one GitHub status a caller can
+    act on by *changing the request* (drop the inline comments, clamp the body),
+    which is why it is a distinct type rather than the base error: retrying a
+    422 unchanged cannot succeed, while retrying an auth or network failure
+    sometimes can. Additive — every existing ``except GitHubClientError`` still
+    catches it.
+    """
+
+
 class GitHubRateLimitError(GitHubClientError):
     """Raised when GitHub API rate limits are hit (403/429 with rate limit headers)."""
 
@@ -1148,6 +1162,17 @@ async def create_pr_review(
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
         raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 422:
+        logger.error(
+            "GitHub API rejected the review payload for %s/%s PR #%s: %s",
+            owner,
+            repo,
+            pr_number,
+            response.text,
+        )
+        raise GitHubUnprocessableEntityError(
+            f"GitHub API returned error 422: {response.text}"
+        )
     if response.is_error:
         logger.error(
             "GitHub API error %d submitting review: %s",
