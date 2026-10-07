@@ -26,6 +26,31 @@ MAX_DIFF_CHARS = 1_500_000
 #: first MAX_DIFF_LINES lines; everything below it ships in full (up to
 #: MAX_DIFF_CHARS). Previous 60_000-char cap dropped real review surface.
 MAX_DIFF_LINES = 30_000
+#: Diff-ceiling coherence matrix — read before touching any ceiling here.
+#:
+#: * ``MAX_DIFF_CHARS`` (1.5M) + ``MAX_DIFF_LINES`` (30k) are the
+#:   *fetch/grounding* ceiling: how much diff text Haunter keeps locally for
+#:   storage, grounding and review surface. Both caps apply independently and
+#:   in sequence — a diff past EITHER bound is clipped. Per-consumer mapping:
+#:   ``auditor.AUDIT_MAX_DIFF_CHARS`` is an alias of ``MAX_DIFF_CHARS`` and
+#:   drives grounding, ``_truncate_diff`` and diff-prefix spans;
+#:   ``build_perspective_messages`` below redacts via ``_safe_model_text``
+#:   then clamps the composed user message to ``MAX_USER_PROMPT_CHARS``;
+#:   ``code_reviewer.analyze_diff`` line-clips (streaming) then char-clips,
+#:   and its ``_build_review_messages`` applies the same redact + prompt
+#:   bound. The 1.5M chars (~375k tokens) deliberately exceed any single LLM
+#:   call: this constant is NEVER sent to a model verbatim — the prompt
+#:   bound, not this constant, is what the model sees.
+#: * ``MAX_USER_PROMPT_CHARS`` (90k) is the *model-input* bound: the only
+#:   number that must fit the provider timeout/token budget. Both review
+#:   paths (auditor perspectives, push-level code reviewer) clamp their
+#:   composed user message to it.
+#: * Separate 40k tool/report budgets, deliberately NOT unified with the
+#:   above — different surfaces, different callers, so unifying them would
+#:   couple unrelated limits: ``session_tools.git._MAX_DIFF_CHARS`` (agentic
+#:   git-tool output), ``webhooks._AUDITOR_DIFF_MAX_CHARS`` (webhook comment
+#:   context) and ``MAX_REMEDIATION_DIFF_CHARS`` below (rendered remediation
+#:   block). Leave all three untouched when changing the review ceilings.
 MAX_AST_CONTEXT_CHARS = 10_000
 MAX_REPO_CONTEXT_CHARS = 10_000
 MAX_SYSTEM_PROMPT_CHARS = 12_000

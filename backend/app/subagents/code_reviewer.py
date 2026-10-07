@@ -18,10 +18,11 @@ Strict invariants:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import itertools
 import logging
 import re
 import time
-from typing import Literal, NoReturn, Optional
+from typing import Iterator, Literal, NoReturn, Optional
 import uuid
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -34,6 +35,8 @@ from app.llm.prompts.audit_prompts import (
     MAX_GITHUB_COMMENT_CHARS,
     MAX_INLINE_FIELD_CHARS,
     MAX_SUGGESTED_FIX_CHARS,
+    MAX_USER_PROMPT_CHARS,
+    _safe_model_text,
     sanitize_output_markdown,
 )
 
@@ -369,13 +372,69 @@ STRICT DIRECTIVES:
 }"""
 
 
+#: Marker appended when the storage-level diff clip fires. Distinct from the
+#: ``[TRUNCATED]`` marker ``_safe_model_text`` appends at the prompt bound, so
+#: a reader can tell which ceiling cut the text.
+_DIFF_TRUNCATION_MARKER = "\n[...DIFF TRUNCATED...]\n"
+
+
+def _iter_diff_lines(diff_text: str) -> Iterator[str]:
+    """Yield ``\\n``-separated lines in a single pass without building a list.
+
+    ``str.splitlines()`` materializes every line at once, so slicing the first
+    30k lines of a multi-MB diff still holds the whole diff in memory twice
+    (the list plus the joined copy). Scanning for ``\\n`` keeps memory
+    proportional to the lines actually kept.
+    """
+    start = 0
+    find = diff_text.find
+    while True:
+        end = find("\n", start)
+        if end == -1:
+            yield diff_text[start:]
+            return
+        yield diff_text[start:end]
+        start = end + 1
+
+
+def _clip_diff_lines(diff_text: str, max_lines: int = MAX_DIFF_LINES) -> str:
+    """Keep the first ``max_lines`` lines of a diff (storage-level clip).
+
+    Streams via :func:`itertools.islice`, so only ``max_lines + 1`` lines are
+    ever held no matter how large the input is. Returns the input unchanged
+    when it already fits.
+    """
+    kept = list(itertools.islice(_iter_diff_lines(diff_text), max_lines + 1))
+    if len(kept) <= max_lines:
+        return diff_text
+    return "\n".join(kept[:max_lines]) + _DIFF_TRUNCATION_MARKER
+
+
+def _bound_diff_for_storage(diff_text: str) -> str:
+    """Apply BOTH storage caps (lines, then chars) to a raw diff.
+
+    Split out of :func:`analyze_diff` so the ceiling is directly testable.
+    This is the fetch/grounding budget only — the model-input bound lives in
+    :func:`_build_review_messages`.
+    """
+    clipped = _clip_diff_lines(diff_text)
+    if len(clipped) > MAX_DIFF_CHARS:
+        clipped = clipped[:MAX_DIFF_CHARS] + _DIFF_TRUNCATION_MARKER
+    return clipped
+
+
 def _build_review_messages(
     diff_text: str,
     repo_context: str = "",
     validation_error_context: Optional[str] = None,
 ) -> list[dict[str, str]]:
-    user_content = (
-        f"Repository Context:\n{repo_context}\n\nGit Diff to Review:\n{diff_text}"
+    # The storage-level ``bounded_diff`` above stays full-fidelity for
+    # grounding; only what the model sees is redacted and clamped — the same
+    # contract as the auditor's ``build_perspective_messages`` (redact via
+    # ``_safe_model_text``, compose, then bound to ``MAX_USER_PROMPT_CHARS``).
+    user_content = _safe_model_text(
+        f"Repository Context:\n{repo_context}\n\nGit Diff to Review:\n{diff_text}",
+        MAX_USER_PROMPT_CHARS,
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -578,15 +637,15 @@ async def analyze_diff(
             latency_ms=0,
         )
 
-    # Massive ceiling: ship the full diff up to 1.5M chars / 30k lines.
-    # Clip only past those bounds so real review surface is never dropped.
-    bounded_diff = diff_text
-    line_count = bounded_diff.count("\n") + 1 if bounded_diff else 0
-    if line_count > MAX_DIFF_LINES:
-        kept = "\n".join(bounded_diff.splitlines()[:MAX_DIFF_LINES])
-        bounded_diff = kept + "\n[...DIFF TRUNCATED...]\n"
-    elif len(bounded_diff) > MAX_DIFF_CHARS:
-        bounded_diff = bounded_diff[:MAX_DIFF_CHARS] + "\n[...DIFF TRUNCATED...]\n"
+    # Storage-level ceiling (see the ceiling matrix on MAX_DIFF_CHARS in
+    # ``app/llm/prompts/audit_prompts.py``): keep up to MAX_DIFF_LINES lines
+    # AND up to MAX_DIFF_CHARS chars so real review surface is never dropped,
+    # but a diff past EITHER bound is clipped. The two caps apply sequentially
+    # inside ``_bound_diff_for_storage`` on purpose — the old ``elif`` skipped
+    # the char cap whenever the line cap fired, shipping multi-MB payloads.
+    # Neither cap is what the model sees: ``_build_review_messages`` redacts
+    # secrets and clamps the composed prompt to MAX_USER_PROMPT_CHARS.
+    bounded_diff = _bound_diff_for_storage(diff_text)
 
     llm = LLMClient(timeout=60.0)
     start_time = time.monotonic()
