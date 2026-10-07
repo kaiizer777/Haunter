@@ -33,7 +33,7 @@ class GroqProvider:
         raw_base_url = base_url or settings.groq_base_url
         self.base_url = raw_base_url.rstrip("/") + "/"
         self._api_key = api_key or settings.groq_api_key
-        self.default_model = model or settings.groq_model_name or "llama-3.3-70b-versatile"
+        self.default_model = model or settings.groq_model_name or "openai/gpt-oss-120b"
         self.timeout = timeout
 
     async def complete(
