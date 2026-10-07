@@ -190,6 +190,7 @@ async def test_checkpoint_restore_success() -> None:
     queue.put_checkpoint_restored = AsyncMock()
 
     db = AsyncMock(spec=AsyncSession)
+    db.flush = AsyncMock()
     db.commit = AsyncMock()
 
     result = await tool_checkpoint_restore(
@@ -208,8 +209,9 @@ async def test_checkpoint_restore_success() -> None:
         checkpoint_id=cp_id,
         staged_patches={"src/main.py": "+original patch"},
     )
-    # DB committed.
-    db.commit.assert_awaited_once()
+    # DB flushed in active transaction (not committed mid-turn).
+    db.flush.assert_awaited_once()
+    db.commit.assert_not_called()
     assert "Successfully restored" in result
     assert cp_id in result
 

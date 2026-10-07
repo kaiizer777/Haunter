@@ -33,6 +33,7 @@ import httpx
 
 from app.config import settings
 from app.github_client import GitHubResourceNotFoundError
+from app.schemas import validate_repo_ident
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +114,13 @@ _CACHE_TTL_SECONDS = 50 * 60  # 50 min (GitHub expires at 60 min)
 
 def _validate_ident(value: str, label: str) -> None:
     """Validate an owner or repo name. Raises GitHubPRValidationError on mismatch."""
-    if not _REPO_IDENT_RE.match(value):
+    try:
+        validate_repo_ident(value, label)
+    except ValueError as exc:
         raise GitHubPRValidationError(
-            f"{label} {value!r} contains invalid characters. "
+            f"{label} {value!r} contains invalid characters or traversal segments. "
             "Only [a-zA-Z0-9_.-] are allowed."
-        )
+        ) from exc
 
 
 def _validate_branch(branch: str, allow_protected: bool = True) -> None:
@@ -736,10 +739,13 @@ async def update_branch_ref(
     _validate_ident(repo, "repo")
     _validate_branch(branch, allow_protected=False)
 
+    if force:
+        raise GitHubPRValidationError("Force-updating branch ref is not permitted")
+
     clean_branch = branch.removeprefix("refs/heads/")
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
     headers = _build_auth_headers(token)
-    payload = {"sha": sha, "force": force}
+    payload = {"sha": sha, "force": False}
 
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
         try:
@@ -1083,7 +1089,15 @@ async def commit_patch(
                 patch_lines = file_patch.splitlines()
                 if len(patch_lines) >= 2:
                     second_line = patch_lines[1].strip()
-                    if second_line in ("+++ /dev/null", "+++ b//dev/null", "+++ dev/null"):
+                    if (
+                        second_line in (
+                            "+++ /dev/null",
+                            "+++ b/dev/null",
+                            "+++ b//dev/null",
+                            "+++ dev/null",
+                        )
+                        or "/dev/null" in second_line
+                    ):
                         is_deletion = True
 
                 # Fetch current file content (may be new file → 404)
@@ -1094,12 +1108,11 @@ async def commit_patch(
                 )
                 if content_resp.status_code == 404:
                     if is_deletion:
-                        logger.warning(
-                            "github.pr: deletion target %r not found (404) — fallback",
+                        logger.info(
+                            "github.pr: deletion target %r not found (404) — already absent, skipping without fallback",
                             file_path,
                         )
-                        use_fallback = True
-                        break
+                        continue
                     original_text = ""
                 elif content_resp.is_error:
                     logger.warning(

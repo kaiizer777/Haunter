@@ -1367,6 +1367,24 @@ class SessionOrchestrator:
                         staged_patches.update(dict(session.staged_patches or {}))
                         conversation_history = list(session.conversation_history or [])
 
+                        # Truncate current-turn intermediate tool entries in new_entries
+                        # (retaining only the user message and the checkpoint restore tool interaction)
+                        # so intermediate rolled-back tool executions are not left in conversation history.
+                        user_entry = new_entries[0] if new_entries else {"role": "user", "content": user_message}
+                        restore_tc = [
+                            c
+                            for c in assistant_entry.get("tool_calls", [])
+                            if c.get("id") == tc_id
+                            or c.get("function", {}).get("name") == "checkpoint_restore"
+                        ]
+                        restore_assistant_entry: dict[str, Any] = {
+                            "role": "assistant",
+                            "content": assistant_entry.get("content", ""),
+                            "tool_calls": restore_tc or assistant_entry.get("tool_calls", []),
+                        }
+                        new_entries.clear()
+                        new_entries.extend([user_entry, restore_assistant_entry])
+
                         # Rebuild messages LLM context from the restored session.conversation_history
                         # so subsequent iterations in the turn use the restored history.
                         restored_system_msg: dict[str, Any] = {

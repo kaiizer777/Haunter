@@ -417,18 +417,14 @@ function SessionsContent() {
           return;
         }
 
-        // 2. If no active session, auto-create a new session using the primary repo on an isolated topic branch
+        // 2. If no active session, auto-create a new session using the primary repo on default branch
         if (reposData.length > 0) {
           if (cancelledRef.current) return;
           const defaultRepo = reposData[0];
           setAutoLoadStatus(`Creating new session on ${defaultRepo.owner}/${defaultRepo.name}…`);
-          const branchSuffix = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-            ? crypto.randomUUID().slice(0, 8)
-            : Math.random().toString(36).slice(2, 10);
-          const branchName = `haunter/session-${branchSuffix}`;
           const newSession = await api.createSession({
             repo_id: defaultRepo.id,
-            branch_name: branchName,
+            branch_name: defaultRepo.default_branch || "main",
             title: `Pairing on ${defaultRepo.name}`,
           });
           if (cancelledRef.current) {
@@ -483,13 +479,9 @@ function SessionsContent() {
     try {
       setLoading(true);
       setError(null);
-      const branchSuffix = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID().slice(0, 8)
-        : Math.random().toString(36).slice(2, 10);
-      const branchName = `haunter/session-${branchSuffix}`;
       const newSession = await api.createSession({
         repo_id: defaultRepo.id,
-        branch_name: branchName,
+        branch_name: defaultRepo.default_branch || "main",
         title: `Pairing on ${defaultRepo.name}`,
       });
       router.push(`/sessions/workspace?id=${newSession.id}`);

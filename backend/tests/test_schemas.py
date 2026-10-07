@@ -24,6 +24,7 @@ from app.schemas import (
     HostingConfigOut,
     HostingConfigUpdate,
     ModelConfigUpdate,
+    PullRequestBranchRef,
     RepoCreate,
     RepoOut,
     SessionCommitIn,
@@ -33,6 +34,7 @@ from app.schemas import (
     WorkflowRunRepo,
     WorkflowRunRepoOwner,
     WorkflowRunWebhookPayload,
+    validate_repo_ident,
 )
 
 
@@ -471,3 +473,55 @@ def test_validate_git_branch_cleanly_strips_refs_heads_prefix() -> None:
     r = RepoCreate(owner="owner", name="repo", default_branch="refs/heads/main")
     assert r.default_branch == "main"
 
+
+def test_validate_repo_ident_direct() -> None:
+    """validate_repo_ident allows valid identifiers including foo..bar and rejects exact dot segments/traversals."""
+    assert validate_repo_ident("kaiizer777") == "kaiizer777"
+    assert validate_repo_ident("Haunter") == "Haunter"
+    assert validate_repo_ident("foo..bar") == "foo..bar"
+    assert validate_repo_ident("repo-1.0_beta") == "repo-1.0_beta"
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        validate_repo_ident("")
+
+    for bad in (".", "..", "../evil", "evil/..", "foo/bar", "foo\x00bar", "foo\nbar"):
+        with pytest.raises(ValueError):
+            validate_repo_ident(bad)
+
+
+def test_repo_create_allows_double_dots_in_names() -> None:
+    """RepoCreate allows valid identifiers containing '..' like 'foo..bar' without triggering traversal rejection."""
+    r = RepoCreate(owner="foo..bar", name="my..repo")
+    assert r.owner == "foo..bar"
+    assert r.name == "my..repo"
+
+
+def test_branch_normalization_before_max_length_check() -> None:
+    """refs/heads/ prefix is normalized BEFORE length <= 255 validation across all schemas."""
+    # 250 characters + 11 chars 'refs/heads/' = 261 total characters
+    valid_stripped_branch = "b" * 250
+    branch_with_prefix = f"refs/heads/{valid_stripped_branch}"
+
+    r = RepoCreate(owner="owner", name="repo", default_branch=branch_with_prefix)
+    assert r.default_branch == valid_stripped_branch
+
+    s = SessionCreate(repo_id=uuid.uuid4(), branch_name=branch_with_prefix)
+    assert s.branch_name == valid_stripped_branch
+
+    c = CommitRequest(title="fix: something", branch_name=branch_with_prefix)
+    assert c.branch_name == valid_stripped_branch
+
+    pr = PullRequestBranchRef(ref=branch_with_prefix)
+    assert pr.ref == valid_stripped_branch
+
+    wf = WorkflowRunObj(id=1, head_sha="a" * 40, head_branch=branch_with_prefix)
+    assert wf.head_branch == valid_stripped_branch
+
+    # Branch exceeding 255 characters even after prefix removal must fail
+    too_long_branch = "refs/heads/" + ("b" * 256)
+    with pytest.raises(ValidationError):
+        RepoCreate(owner="owner", name="repo", default_branch=too_long_branch)
+    with pytest.raises(ValidationError):
+        SessionCreate(repo_id=uuid.uuid4(), branch_name=too_long_branch)
+    with pytest.raises(ValidationError):
+        CommitRequest(title="fix", branch_name=too_long_branch)

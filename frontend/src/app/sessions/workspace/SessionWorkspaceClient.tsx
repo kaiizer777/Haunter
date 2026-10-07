@@ -1938,15 +1938,17 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
               (tc.args?.output as string) ||
               (tc.args?.summary as string) ||
               "";
-            const { hasViolations, isClean } = parseSecurityScanResult(scanResult);
-            if (hasViolations) {
-              setSecurityViolations(
-                scanResult || "Security violations detected in repository scan."
-              );
-              return;
-            } else if (isClean) {
-              setSecurityViolations(null);
-              return;
+            if (scanResult && scanResult.trim().length > 0) {
+              const { hasViolations, isClean } = parseSecurityScanResult(scanResult);
+              if (hasViolations) {
+                setSecurityViolations(
+                  scanResult || "Security violations detected in repository scan."
+                );
+                return;
+              } else if (isClean) {
+                setSecurityViolations(null);
+                return;
+              }
             }
           }
         }

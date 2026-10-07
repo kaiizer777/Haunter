@@ -318,4 +318,31 @@ describe("useSessionStream — Audit SSE Events Handling", () => {
     expect(assistantMsg).toBeDefined();
     expect(assistantMsg?.content).toBe("Calling this function is the standard pattern across the repo.");
   });
+
+  it("promotes thought starting with the tool name when it is long prose (>150 chars) or multi-line", async () => {
+    const longProseThought =
+      "Calling read_file is the standard pattern across the whole repo to inspect configuration files and ensure all environments are synced properly with verified configurations.";
+    expect(longProseThought.length).toBeGreaterThan(150);
+
+    const sseChunk = [
+      "event: tool_call\n",
+      'data: {"name": "read_file", "args": {"path": "src/config.py"}}\n\n',
+      "event: thought\n",
+      `data: ${JSON.stringify({ delta: longProseThought })}\n\n`,
+      "event: done\n",
+      "data: {}\n\n",
+    ].join("");
+
+    globalThis.fetch = vi.fn().mockResolvedValue(createMockStreamResponse([sseChunk]));
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    await act(async () => {
+      await result.current.sendChatMessage("inspect config");
+    });
+
+    const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg?.content).toBe(longProseThought);
+  });
 });

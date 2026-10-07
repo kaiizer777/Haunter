@@ -20,6 +20,35 @@ _REPO_IDENT_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 _PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "develop", "dev"})
 
 
+def validate_repo_ident(value: str, label: str = "identifier") -> str:
+    """Validate repository identifier (owner or name).
+
+    Checks ^[a-zA-Z0-9_.\-]+$ and rejects exact dot segments
+    (value in ('.', '..') or containing '/../'), without rejecting
+    valid names like 'foo..bar'.
+    """
+    if not value or not isinstance(value, str):
+        raise ValueError(f"Invalid repository {label}: cannot be empty.")
+    if not _REPO_IDENT_RE.match(value):
+        raise ValueError(
+            f"Invalid repository {label}: {value!r}. Only alphanumeric characters, '.', '_', and '-' are allowed."
+        )
+    if (
+        value in (".", "..")
+        or "/../" in value
+        or value.startswith("../")
+        or value.endswith("/..")
+    ):
+        raise ValueError(
+            f"Invalid repository {label}: {value!r}. Path traversal segments are not allowed."
+        )
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError(
+            f"Invalid repository {label}: {value!r}. Control characters are not allowed."
+        )
+    return value
+
+
 def _validate_git_branch(
     branch: Optional[str], allow_protected: bool = True
 ) -> Optional[str]:
@@ -95,21 +124,9 @@ class RepoCreate(BaseModel):
     @field_validator("owner", "name")
     @classmethod
     def validate_repo_ident_field(cls, v: str) -> str:
-        if (
-            not v
-            or not _REPO_IDENT_RE.match(v)
-            or v in (".", "..")
-            or ".." in v
-            or "/" in v
-            or "\\" in v
-            or any(ord(c) < 32 or ord(c) == 127 for c in v)
-        ):
-            raise ValueError(
-                f"Invalid repository identifier: {v!r}. Only alphanumeric characters, '.', '_', and '-' are allowed."
-            )
-        return v
+        return validate_repo_ident(v)
 
-    @field_validator("default_branch")
+    @field_validator("default_branch", mode="before")
     @classmethod
     def validate_default_branch(cls, v: Optional[str]) -> Optional[str]:
         return _validate_git_branch(v, allow_protected=True)
@@ -354,6 +371,13 @@ class WorkflowRunObj(BaseModel):
 
     model_config = {"extra": "ignore"}
 
+    @field_validator("head_branch", mode="before")
+    @classmethod
+    def normalize_head_branch(cls, v: Optional[str]) -> Optional[str]:
+        if isinstance(v, str):
+            return v.removeprefix("refs/heads/")
+        return v
+
 
 class WorkflowRunWebhookPayload(BaseModel):
     action: str
@@ -402,6 +426,13 @@ class PullRequestBranchRef(BaseModel):
     sha: Optional[str] = None
 
     model_config = {"extra": "ignore"}
+
+    @field_validator("ref", mode="before")
+    @classmethod
+    def normalize_ref(cls, v: str) -> str:
+        if isinstance(v, str):
+            return v.removeprefix("refs/heads/")
+        return v
 
 
 class PullRequestObj(BaseModel):
@@ -527,7 +558,7 @@ class SessionCreateIn(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    @field_validator("branch_name")
+    @field_validator("branch_name", mode="before")
     @classmethod
     def validate_session_branch_name(cls, v: Optional[str]) -> Optional[str]:
         return _validate_git_branch(v, allow_protected=True)
@@ -660,7 +691,7 @@ class SessionCommitIn(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    @field_validator("branch_name")
+    @field_validator("branch_name", mode="before")
     @classmethod
     def validate_commit_branch_name(cls, v: Optional[str]) -> Optional[str]:
         return _validate_git_branch(v, allow_protected=False)

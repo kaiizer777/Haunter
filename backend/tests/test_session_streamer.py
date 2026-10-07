@@ -173,7 +173,6 @@ async def test_sse_queue_streaming_flow() -> None:
         action="modify",
     )
     await queue.put_done("session-123", staged_files_count=1, model_used="test-llm")
-    await queue.close()
 
     events: list[str] = []
     async for chunk in queue.stream():

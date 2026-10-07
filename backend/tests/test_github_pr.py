@@ -775,3 +775,113 @@ async def test_update_branch_ref_rejects_protected_branches(branch: str) -> None
             token="fake_token",
         )
 
+
+@pytest.mark.anyio
+async def test_update_branch_ref_disallows_force_true() -> None:
+    """update_branch_ref rejects force=True with GitHubPRValidationError."""
+    with pytest.raises(GitHubPRValidationError, match="Force-updating branch ref is not permitted"):
+        await update_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-1",
+            sha="a" * 40,
+            token="fake_token",
+            force=True,
+        )
+
+
+@pytest.mark.anyio
+async def test_update_branch_ref_always_sends_force_false() -> None:
+    """update_branch_ref always sends force: False over the wire."""
+    captured = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"object": {"sha": "a" * 40}})
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").mock(side_effect=_handler)
+        await update_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-1",
+            sha="a" * 40,
+            token="fake_token",
+        )
+
+    assert len(captured) == 1
+    assert captured[0] == {"sha": "a" * 40, "force": False}
+
+
+@pytest.mark.anyio
+async def test_commit_patch_with_deletion_404_does_not_trigger_fallback() -> None:
+    """commit_patch does NOT set use_fallback=True when a deleted file is 404 (already absent)."""
+    import base64
+
+    multi_file_patch = (
+        "--- a/already_gone.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,2 +0,0 @@\n"
+        "-line1\n"
+        "-line2\n"
+        "--- a/hello.py\n"
+        "+++ b/hello.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    captured_tree_payload = []
+
+    def _mock_trees(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        captured_tree_payload.append(data)
+        return httpx.Response(201, json={"sha": "tree_sha_xyz"})
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
+        )
+        rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
+            return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        # Deletion target returns 404
+        rx.get("/repos/test-org/test-repo/contents/already_gone.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(404, json={"message": "Not Found"})
+        )
+        # Surviving file returns 200
+        rx.get("/repos/test-org/test-repo/contents/hello.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"old\n").decode("ascii")},
+            )
+        )
+        rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha_hello"})
+        )
+        rx.post("/repos/test-org/test-repo/git/trees").mock(
+            side_effect=_mock_trees
+        )
+        rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "new_commit_sha_clean"})
+        )
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "new_commit_sha_clean"}})
+        )
+
+        commit_sha = await commit_patch(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-test",
+            patch_text=multi_file_patch,
+            commit_msg="fix: test commit",
+            token="fake_token",
+        )
+
+    assert commit_sha == "new_commit_sha_clean"
+    # Ensure fallback haunter.patch was NOT used
+    assert len(captured_tree_payload) == 1
+    tree_entries = captured_tree_payload[0]["tree"]
+    assert len(tree_entries) == 1
+    assert tree_entries[0]["path"] == "hello.py"
+    assert tree_entries[0]["sha"] == "blob_sha_hello"

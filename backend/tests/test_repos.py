@@ -58,6 +58,12 @@ def test_validate_repo_ident_rejects_path_traversal_and_invalid_chars(bad_owner:
     assert exc_info.value.status_code == 400
 
 
+def test_validate_repo_ident_accepts_names_with_double_dots() -> None:
+    """_validate_repo_ident accepts valid repository names containing '..' like 'foo..bar'."""
+    _validate_repo_ident("foo..bar", "owner")
+    _validate_repo_ident("my..repo", "name")
+
+
 @pytest.mark.anyio
 async def test_verify_user_repo_permission_rejects_invalid_identifiers() -> None:
     """_verify_user_repo_permission validates identifiers before constructing GitHub URLs."""

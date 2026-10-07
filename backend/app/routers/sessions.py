@@ -34,7 +34,11 @@ from sqlalchemy.orm import selectinload
 
 from app.auth import get_current_user
 from app.db import get_db
-from app.github.pr import _validate_branch, get_installation_token
+from app.github.pr import (
+    GitHubPRValidationError,
+    _validate_branch,
+    get_installation_token,
+)
 from app.github_client import (
     GitHubClientError,
     GitHubResourceNotFoundError,
@@ -174,10 +178,43 @@ async def create_session(
             token=gh_token,
         )
     except GitHubResourceNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Branch '{branch_name}' not found in repository {repo.owner}/{repo.name}",
-        )
+        # If the requested branch does not exist on GitHub (e.g. topic branch to be created),
+        # initialize base SHA from repo.default_branch or fallback branches without raising 422.
+        fallback_candidates = [repo.default_branch or "main", "main", "master"]
+        resolved_base_sha: Optional[str] = None
+        for candidate in fallback_candidates:
+            if candidate == branch_name:
+                continue
+            try:
+                resolved_base_sha = await fetch_branch_sha(
+                    owner=repo.owner,
+                    repo=repo.name,
+                    branch=candidate,
+                    token=gh_token,
+                )
+                if resolved_base_sha:
+                    break
+            except GitHubResourceNotFoundError:
+                continue
+            except GitHubClientError as exc:
+                logger.error(
+                    "GitHub API error resolving fallback branch SHA for %s/%s branch %s: %s",
+                    repo.owner,
+                    repo.name,
+                    candidate,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Failed to resolve branch SHA from GitHub. Please try again.",
+                )
+        if resolved_base_sha:
+            base_sha = resolved_base_sha
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Branch '{branch_name}' not found in repository {repo.owner}/{repo.name}",
+            )
     except GitHubClientError as exc:
         logger.error(
             "GitHub API error resolving branch SHA for %s/%s branch %s: %s",
@@ -676,6 +713,15 @@ async def commit_session(
     target_branch = session.branch_name
     if not target_branch or target_branch == default_branch:
         target_branch = f"haunter/session-{str(session.id)[:8]}"
+
+    try:
+        _validate_branch(target_branch, allow_protected=False)
+    except GitHubPRValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
     session.branch_name = target_branch
 
     # ------------------------------------------------------------------

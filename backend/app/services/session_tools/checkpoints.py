@@ -94,7 +94,7 @@ async def tool_checkpoint_restore(
     - Reverts session.staged_patches to the snapshot.
     - Truncates session.conversation_history to the snapshotted length.
     - Emits checkpoint_restored SSE event so Monaco editor buffers sync.
-    - Persists and commits changes to the DB.
+    - Flushes restored state to the active DB transaction (committed at turn end).
 
     Returns a human-readable result string for the LLM.
     """
@@ -117,8 +117,9 @@ async def tool_checkpoint_restore(
         staged_patches=dict(session.staged_patches),
     )
 
-    # Persist.
-    await db.commit()
+    # Stage changes in the active transaction without prematurely releasing row locks.
+    # The orchestrator commits the transaction at the end of the turn.
+    await db.flush()
 
     return (
         f"Successfully restored session to checkpoint '{checkpoint_id}' "

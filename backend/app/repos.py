@@ -27,7 +27,12 @@ from app.auth import _decrypt_token, get_current_user
 from app.db import get_db
 from app.github.pr import resolve_installation_id
 from app.models import Repo, User
-from app.schemas import RepoAuditorInstallUpdate, RepoCreate, RepoOut
+from app.schemas import (
+    RepoAuditorInstallUpdate,
+    RepoCreate,
+    RepoOut,
+    validate_repo_ident,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,19 +46,13 @@ _REPO_IDENT_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 
 def _validate_repo_ident(value: str, label: str) -> None:
     """Validate owner or repo name to prevent SSRF / path traversal."""
-    if (
-        not value
-        or not _REPO_IDENT_RE.match(value)
-        or value in (".", "..")
-        or ".." in value
-        or "/" in value
-        or "\\" in value
-        or any(ord(c) < 32 or ord(c) == 127 for c in value)
-    ):
+    try:
+        validate_repo_ident(value, label)
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid repository {label}: {value!r}. Only alphanumeric characters, '.', '_', and '-' are allowed without path traversal segments.",
-        )
+        ) from exc
 
 
 async def _verify_user_repo_permission(

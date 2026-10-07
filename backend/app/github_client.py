@@ -2327,14 +2327,18 @@ async def update_branch_ref(
     PATCH /repos/{owner}/{repo}/git/refs/heads/{branch}
 
     Raises:
-        GitHubResourceNotFoundError: Branch not found (404).
+        GitHubResourceNotFoundError: Branch not found (404) or reference does not exist (422).
         GitHubAuthError, GitHubRateLimitError, GitHubClientError.
     """
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{branch}"
+    if force:
+        raise GitHubClientError("Force update is not permitted")
+
+    clean_branch = branch.removeprefix("refs/heads/")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
     headers = _build_headers(
         token=installation_token, accept="application/vnd.github+json"
     )
-    payload = {"sha": commit_sha, "force": force}
+    payload = {"sha": commit_sha, "force": False}
 
     async with httpx.AsyncClient(
         timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
@@ -2354,8 +2358,17 @@ async def update_branch_ref(
 
     if response.status_code == 404:
         raise GitHubResourceNotFoundError(
-            f"Branch ref not found: {owner}/{repo}/heads/{branch}"
+            f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
         )
+    if response.status_code == 422:
+        error_msg = response.text
+        if (
+            "reference does not exist" in error_msg.lower()
+            or "not found" in error_msg.lower()
+        ):
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+            )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")

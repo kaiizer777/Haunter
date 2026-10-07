@@ -16,15 +16,18 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.exc import OperationalError, DBAPIError
 
 from app.github.pr import GitHubPRValidationError
-from app.routers.sessions import commit_session
-from app.schemas import SessionCommitIn
+from app.github_client import GitHubResourceNotFoundError
+from app.routers.sessions import commit_session, create_session
+from app.schemas import SessionCommitIn, SessionCreateIn
 
 from app.sandbox.mirror import apply_unified_diff as mirror_apply_unified_diff
 from app.services.patch_applier import apply_unified_diff as patch_applier_apply_diff
@@ -364,17 +367,20 @@ async def test_commit_session_blocks_existing_protected_branch() -> None:
     body = SessionCommitIn(title="Fix bug")
 
     mock_update_ref = AsyncMock()
+    mock_create_blob = AsyncMock(return_value="blob_sha")
+    mock_create_tree = AsyncMock(return_value="tree_sha")
+    mock_create_commit = AsyncMock(return_value="commit_sha")
 
     with (
         patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="tok"),
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="a\n"),
         patch("app.services.patch_applier.apply_unified_diff", return_value="b\n"),
-        patch("app.github_client.create_blob", new_callable=AsyncMock, return_value="blob_sha"),
-        patch("app.github_client.create_git_tree", new_callable=AsyncMock, return_value="tree_sha"),
-        patch("app.github_client.create_git_commit", new_callable=AsyncMock, return_value="commit_sha"),
+        patch("app.github_client.create_blob", mock_create_blob),
+        patch("app.github_client.create_git_tree", mock_create_tree),
+        patch("app.github_client.create_git_commit", mock_create_commit),
         patch("app.github_client.update_branch_ref", mock_update_ref),
     ):
-        with pytest.raises(GitHubPRValidationError, match="Cannot target protected branch 'main' directly"):
+        with pytest.raises(HTTPException) as exc_info:
             await commit_session(
                 session_id=session_id,
                 body=body,
@@ -382,6 +388,11 @@ async def test_commit_session_blocks_existing_protected_branch() -> None:
                 db=mock_db,
             )
 
+    assert exc_info.value.status_code == 400
+    assert "Cannot target protected branch 'main' directly" in exc_info.value.detail
+    mock_create_blob.assert_not_called()
+    mock_create_tree.assert_not_called()
+    mock_create_commit.assert_not_called()
     mock_update_ref.assert_not_called()
 
 
@@ -598,4 +609,185 @@ def test_session_streamer_expanded_patterns_and_refinements() -> None:
     pg_url = "postgresql://myuser:realpass123@neon.tech/db"
     assert "realpass123" not in _redact_secrets(pg_url)
     assert "postgresql://myuser:[REDACTED_PASSWORD]@neon.tech/db" in _redact_secrets(pg_url)
+
+
+# ---------------------------------------------------------------------------
+# 13. Topic branch initialization fallback to default_branch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_session_topic_branch_initializes_with_base_default_branch() -> None:
+    """When client requests a topic branch that doesn't exist on GitHub, base_sha is resolved from default_branch."""
+    user_id = uuid.uuid4()
+    mock_user = MagicMock(id=user_id)
+    repo_id = uuid.uuid4()
+    mock_repo = MagicMock()
+    mock_repo.id = repo_id
+    mock_repo.user_id = user_id
+    mock_repo.owner = "test-org"
+    mock_repo.name = "test-repo"
+    mock_repo.default_branch = "main"
+
+    mock_db = AsyncMock()
+    mock_db.add = MagicMock()
+    mock_repo_result = MagicMock()
+    mock_repo_result.scalars.return_value.first.return_value = mock_repo
+    mock_db.execute.return_value = mock_repo_result
+    mock_db.scalar.return_value = 0
+
+    body = SessionCreateIn(
+        repo_id=repo_id,
+        branch_name="feat/new-topic",
+        title="Topic Session",
+    )
+
+    async def _mock_fetch_branch_sha(owner, repo, branch, token=None):
+        if branch == "feat/new-topic":
+            raise GitHubResourceNotFoundError("Branch feat/new-topic not found")
+        if branch == "main":
+            return "base-sha-12345"
+        raise GitHubResourceNotFoundError(f"Branch {branch} not found")
+
+    async def _fake_refresh(obj):
+        obj.id = uuid.uuid4()
+        obj.created_at = datetime.now(timezone.utc)
+        obj.updated_at = datetime.now(timezone.utc)
+
+    mock_db.refresh.side_effect = _fake_refresh
+
+    with (
+        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="mock-token"),
+        patch("app.routers.sessions.fetch_branch_sha", side_effect=_mock_fetch_branch_sha),
+    ):
+        session_out = await create_session(body=body, current_user=mock_user, db=mock_db)
+
+    assert session_out.branch_name == "feat/new-topic"
+    assert session_out.base_sha == "base-sha-12345"
+    assert session_out.status == "active"
+    mock_db.add.assert_called_once()
+    mock_db.commit.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# 14. Checkpoint restore truncates current-turn intermediate tool entries
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_truncates_current_turn_intermediate_tool_entries() -> None:
+    """On successful checkpoint_restore mid-turn, intermediate tool entries from that turn are pruned from history."""
+    session_id = uuid.uuid4()
+    mock_db = AsyncMock()
+
+    cp_id = "cp_clean"
+    cp_patches = {"clean.py": "+clean"}
+    initial_history = [{"role": "user", "content": "turn 0"}]
+
+    mock_session = MagicMock()
+    mock_session.id = session_id
+    mock_session.branch_name = "feat/test"
+    mock_session.base_sha = "a" * 40
+    mock_session.staged_patches = dict(cp_patches)
+    mock_session.conversation_history = list(initial_history)
+    mock_session.checkpoints = [
+        {
+            "checkpoint_id": cp_id,
+            "turn": 1,
+            "timestamp": "2026-10-01T00:00:00Z",
+            "description": "clean checkpoint",
+            "staged_patches": cp_patches,
+            "history_length": 1,
+        }
+    ]
+    mock_session.repo = MagicMock(owner="org", name="repo")
+
+    orchestrator = SessionOrchestrator(session_id=session_id, db=mock_db)
+
+    tc_stage = {
+        "id": "tc_stage_1",
+        "type": "function",
+        "function": {
+            "name": "stage_patch",
+            "arguments": json.dumps({"path": "bad.py", "patch": "+bad"}),
+        },
+    }
+    tc_restore = {
+        "id": "tc_restore_2",
+        "type": "function",
+        "function": {
+            "name": "checkpoint_restore",
+            "arguments": json.dumps({"checkpoint_id": cp_id}),
+        },
+    }
+
+    orchestrator._llm = AsyncMock()
+    orchestrator._llm.complete.side_effect = [
+        {"content": None, "tool_calls": [tc_stage], "model": "test-model"},
+        {"content": None, "tool_calls": [tc_restore], "model": "test-model"},
+        {"content": "Restored successfully.", "tool_calls": None, "model": "test-model"},
+    ]
+
+    orchestrator._load_session = AsyncMock(return_value=mock_session)
+    orchestrator._persist = AsyncMock()
+
+    queue = AsyncMock()
+
+    await orchestrator._execute(
+        user_message="stage then rollback",
+        queue=queue,
+    )
+
+    orchestrator._persist.assert_awaited_once()
+    persisted_history = orchestrator._persist.call_args[0][1]
+
+    # Verify that the intermediate stage_patch is NOT in persisted history
+    persisted_tool_names = []
+    for msg in persisted_history:
+        if "tool_calls" in msg:
+            for tc in msg["tool_calls"]:
+                persisted_tool_names.append(tc.get("function", {}).get("name"))
+
+    assert "stage_patch" not in persisted_tool_names
+    assert "checkpoint_restore" in persisted_tool_names
+    assert any(m.get("content") == "Restored successfully." for m in persisted_history)
+
+
+# ---------------------------------------------------------------------------
+# 15. Checkpoint restore flushes without committing mid-turn
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_flushes_without_committing_mid_turn() -> None:
+    """tool_checkpoint_restore must use db.flush() instead of db.commit() to avoid releasing row locks mid-turn."""
+    session = MagicMock()
+    session.staged_patches = {"bad.py": "+bad"}
+    session.conversation_history = [{"role": "user", "content": "1"}, {"role": "assistant", "content": "2"}]
+    cp_id = "cp_flush_test"
+    session.checkpoints = [
+        {
+            "checkpoint_id": cp_id,
+            "turn": 1,
+            "timestamp": "2026-10-01T00:00:00Z",
+            "description": "cp",
+            "staged_patches": {"good.py": "+good"},
+            "history_length": 1,
+        }
+    ]
+
+    queue = AsyncMock()
+    mock_db = AsyncMock()
+
+    result = await tool_checkpoint_restore(
+        checkpoint_id=cp_id,
+        session=session,
+        queue=queue,
+        db=mock_db,
+    )
+
+    assert "Successfully restored" in result
+    mock_db.flush.assert_awaited_once()
+    mock_db.commit.assert_not_called()
+
 
