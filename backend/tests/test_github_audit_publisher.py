@@ -912,3 +912,75 @@ def test_auditor_publisher_never_calls_code_mutation_apis():
         assert (
             token not in source
         ), f"audit_publisher.py violates read-only invariant: contains {token!r}"
+
+
+# ==============================================================================
+# 8. Visual Polish & Layout Hierarchy Tests
+# ==============================================================================
+
+
+def test_audit_report_markdown_visual_hierarchy_and_tables():
+    """Verify executive summary table, badges, alert callout, findings table, and details blocks."""
+    f1 = _make_finding(
+        id="AUD-SEC-01",
+        file_path="backend/app/auth.py",
+        line_start=84,
+        line_end=84,
+        severity="BLOCKER",
+        category="Timing Attack",
+        title="Non-Constant-Time Token Comparison",
+        description="Timing side-channel in token validation.",
+        suggested_fix="hmac.compare_digest(token, stored_token)",
+        confidence=95,
+    )
+    result = _make_audit_result(
+        confidence=95,
+        publish_allowed=True,
+        findings=[f1],
+        target_label="PR `#42` (`a8f3b21`)",
+    )
+
+    report = result.report_markdown
+
+    # 1. Executive Summary Header with status badges and table
+    assert "## 🛡️ Haunter Autonomous Audit Report" in report
+    assert "| Status | Confidence Score | Audit Target | Engine |" in report
+    assert "| :--- | :--- | :--- | :--- |" in report
+    assert "`95%`" in report
+
+    # 2. Executive Summary Callout
+    assert "### 🔍 Executive Summary" in report
+    assert "> [!NOTE]" in report
+
+    # 3. Scannable Findings Table
+    assert "### 📋 Findings Overview" in report
+    assert "| Severity | Perspective | File & Line | Summary | Confidence |" in report
+    assert "[BLOCKER]" in report
+    assert "`backend/app/auth.py#L84`" in report
+
+    # 4. Collapsible Deep-Dives
+    assert "<details open>" in report
+    assert "<b>Detailed Findings Breakdown</b>" in report
+    assert "</details>" in report
+
+    # 5. Collapsible Remediation Diff
+    assert "<b>Proposed Remediation Unified Diff</b>" in report
+    assert "```diff" in report
+
+    # 6. Polished Footer
+    assert "Generated autonomously by Haunter Guardian Mode" in report
+
+
+def test_format_inline_comment_body_renders_suggestion_block():
+    """Verify inline comments render single-click suggestion blocks with bolded Problem and Remediation."""
+    finding = _make_finding(
+        description="Comparing tokens with == leaks timing info.",
+        suggested_fix="return hmac.compare_digest(token, stored_token)",
+    )
+    body = format_inline_comment_body(finding)
+
+    assert "**Problem:**" in body
+    assert "**Suggested Remediation:**" in body
+    assert "```suggestion\nreturn hmac.compare_digest(token, stored_token)\n```" in body
+    assert "> [!WARNING]" in body
+

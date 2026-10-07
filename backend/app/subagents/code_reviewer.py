@@ -260,9 +260,20 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
     failure is deliberate: downgrade when in doubt.
     """
     critique = sanitize_output_markdown(finding.critique, MAX_INLINE_FIELD_CHARS)
-    header = (
-        f"**[{finding.category.upper()}] [{finding.severity.upper()}]**: {critique}"
-    )
+    severity_icon = {
+        "critical": "🛑",
+        "high": "🚨",
+        "medium": "⚠️",
+        "low": "💡",
+    }.get(finding.severity.lower(), "🔍")
+
+    header = f"{severity_icon} **[{finding.category.upper()}] [{finding.severity.upper()}]**"
+    sections = [
+        header,
+        "",
+        f"**Problem:**\n{critique}",
+    ]
+
     if finding.suggested_patch is not None and finding.suggested_patch.strip():
         patch_clean = sanitize_output_markdown(
             finding.suggested_patch, MAX_SUGGESTED_FIX_CHARS
@@ -287,15 +298,24 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
                 (len(run) for run in re.findall(r"`+", patch_clean)), default=0
             )
             fence = "`" * max(3, longest_run + 1)
-            return (
-                f"{header}\n\n"
-                "Not offered as an applyable suggestion: a value in the proposed "
+            sections.extend([
+                "",
+                "**Remediation:**",
+                "> [!WARNING]\n"
+                "> Not offered as an applyable suggestion: a value in the proposed "
                 "change matched Haunter's secret-redaction patterns and was "
                 "replaced with a placeholder below. Applying this block as-is "
-                f"would commit the placeholder.\n\n{fence}\n{patch_clean}\n{fence}"
-            )
-        return f"{header}\n\n```suggestion\n{patch_clean}\n```"
-    return header
+                "would commit the placeholder.\n",
+                f"{fence}\n{patch_clean}\n{fence}",
+            ])
+        else:
+            sections.extend([
+                "",
+                "**Remediation:**",
+                f"```suggestion\n{patch_clean}\n```",
+            ])
+
+    return "\n".join(sections)
 
 
 def bound_github_body(body: str) -> str:

@@ -306,6 +306,61 @@ def _build_grounded_comments(
     )
 
 
+def _count_findings_by_severity(
+    findings: Sequence[ReviewFinding],
+) -> tuple[int, int, int]:
+    """Returns (blockers, warnings, suggestions)."""
+    blockers = sum(1 for f in findings if f.severity.lower() in ("critical", "high"))
+    warnings = sum(1 for f in findings if f.severity.lower() == "medium")
+    suggestions = sum(1 for f in findings if f.severity.lower() == "low")
+    return blockers, warnings, suggestions
+
+
+def _render_findings_table(findings: Sequence[ReviewFinding]) -> str:
+    """Render a clean, scannable GFM table of findings."""
+    if not findings:
+        return ""
+    severity_icons = {
+        "critical": "🛑 Critical",
+        "high": "🚨 High",
+        "medium": "⚠️ Warning",
+        "low": "💡 Note",
+    }
+    rows = [
+        "| Severity | Category | File & Line | Summary |",
+        "| :--- | :--- | :--- | :--- |",
+    ]
+    for f in findings:
+        icon_sev = severity_icons.get(f.severity.lower(), f.severity.upper())
+        cat = f.category.replace("_", " ").title()
+        loc = (
+            f"`{f.file_path}:{f.line_start}`"
+            if f.line_start == f.line_end
+            else f"`{f.file_path}:{f.line_start}-{f.line_end}`"
+        )
+        summary_first_line = f.critique.splitlines()[0].strip()
+        if len(summary_first_line) > 85:
+            summary_first_line = summary_first_line[:82] + "..."
+        summary_clean = summary_first_line.replace("|", "\\|")
+        rows.append(f"| {icon_sev} | {cat} | {loc} | {summary_clean} |")
+    return "\n".join(rows)
+
+
+def _render_review_footer(review_id: uuid.UUID, target_sha: str) -> str:
+    commit_short = target_sha[:7] if target_sha else "head"
+    dashboard_base = (
+        settings.frontend_url.rstrip("/")
+        if settings.frontend_url
+        else "https://haunter.dev"
+    )
+    dashboard_link = f"{dashboard_base}/reviews/{review_id}"
+    return (
+        "---\n"
+        f"<sub>⚡ Powered by **Haunter** • Commit: `{commit_short}` • "
+        f"[View Run Trace in Dashboard]({dashboard_link})</sub>"
+    )
+
+
 def _render_findings_section(
     header: str,
     findings: Sequence[ReviewFinding],
@@ -331,14 +386,36 @@ def _render_findings_section(
     # is prepended to the fitted result afterwards, so the finding list has to
     # leave room for it either way.
     remaining = max(0, budget - len(prefix) - _DISCLOSURE_RESERVE_CHARS)
+
+    severity_icons = {
+        "critical": "🛑",
+        "high": "🚨",
+        "medium": "⚠️",
+        "low": "💡",
+    }
+
     for index, finding in enumerate(findings, 1):
-        block = (
-            f"\n{index}. **{finding.file_path}:{finding.line_start}-{finding.line_end}**"
-            f" ({finding.category.upper()} / {finding.severity.upper()}):\n"
-            f"   {finding.critique}\n"
+        icon = severity_icons.get(finding.severity.lower(), "🔍")
+        cat = finding.category.replace("_", " ").title()
+        sev = finding.severity.upper()
+        loc = (
+            f"{finding.file_path}:{finding.line_start}"
+            if finding.line_start == finding.line_end
+            else f"{finding.file_path}:{finding.line_start}-{finding.line_end}"
         )
+
+        block_parts = [
+            f"\n<details open>\n<summary>{icon} <b>[{sev} · {cat}]</b> <code>{loc}</code></summary>\n",
+            f"\n**Problem:**\n{finding.critique}\n",
+        ]
         if finding.suggested_patch:
-            block += f"\n   ```\n   {finding.suggested_patch.strip()}\n   ```\n"
+            clean_patch = finding.suggested_patch.strip()
+            block_parts.append(
+                f"\n**Suggested Remediation:**\n```suggestion\n{clean_patch}\n```\n"
+            )
+        block_parts.append("\n</details>\n")
+
+        block = "".join(block_parts)
         if len(block) > remaining:
             dropped = len(findings) - index + 1
             break
@@ -866,12 +943,20 @@ async def _ensure_install_id(session: Any, repo: Any) -> None:
     )
 
 
+def _build_status_badge(risk_score: int) -> str:
+    if risk_score >= 80:
+        return "🛑 `Changes Required`"
+    elif risk_score > 30:
+        return "⚠️ `Changes Recommended`"
+    return "✅ `Approved`"
+
+
 def _build_risk_badge(risk_score: int) -> str:
     if risk_score <= 30:
-        return "🟢 **Low Risk**"
+        return "🟢 `Low Risk`"
     elif risk_score <= 70:
-        return "🟡 **Moderate Risk**"
-    return "🔴 **Critical / High Risk**"
+        return "🟡 `Moderate Risk`"
+    return "🔴 `Critical / High Risk`"
 
 
 async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
@@ -1200,16 +1285,51 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 )
 
             review_event = "REQUEST_CHANGES" if review.risk_score >= 80 else "COMMENT"
-            # Per-field bounds hold (every finding goes through
-            # `CodeReviewOutput.model_validate`), but the concatenation of N
-            # findings is a separate quantity with its own ceiling — bound the
-            # whole body, or one oversized body 422s the request and takes every
-            # inline comment down with it.
+
+            blockers, warnings, suggestions = _count_findings_by_severity(
+                result.output.findings
+            )
+            findings_breakdown = (
+                f"{blockers} Blockers • {warnings} Warnings • {suggestions} Suggestions"
+            )
+            status_badge = _build_status_badge(review.risk_score)
+
+            if review.risk_score >= 80:
+                alert_callout = (
+                    "> [!CAUTION]\n"
+                    f"> **Action Required**: {blockers} blocker finding(s) detected. Please resolve critical issues before merge.\n"
+                )
+            elif review.risk_score > 30:
+                alert_callout = (
+                    "> [!WARNING]\n"
+                    f"> **Action Recommended**: {warnings} warning(s) detected. Review the proposed remediations below.\n"
+                )
+            else:
+                alert_callout = (
+                    "> [!TIP]\n"
+                    "> **Clean Review**: No blocking issues detected. Changes look safe and well-structured.\n"
+                )
+
+            table_md = _render_findings_table(result.output.findings)
+            table_section = (
+                f"\n### 📋 Findings Summary\n\n{table_md}\n" if table_md else ""
+            )
+            footer_md = _render_review_footer(review.id, target_sha)
+
+            body_content = (
+                f"## ⚡ Haunter Code Review\n\n"
+                f"| Status | Risk Score | Findings Breakdown |\n"
+                f"| :--- | :--- | :--- |\n"
+                f"| {status_badge} | `{review.risk_score}/100` ({risk_badge}) | {findings_breakdown} |\n\n"
+                f"{alert_callout}\n"
+                f"### 📝 Executive Summary\n\n"
+                f"{review.summary}\n"
+                f"{table_section}\n"
+                f"{footer_md}"
+            )
+
             body = _bound_review_body(
-                f"### 🛡️ Haunter Autonomous Code Review\n\n"
-                f"**Risk Score**: {review.risk_score}/100 — {risk_badge}\n\n"
-                f"{review.summary}\n\n"
-                f"*Actionable findings: {len(comments)} flagged across 4 engineering dimensions.*",
+                body_content,
                 _suppression_disclosure(
                     report=suppression,
                     findings_total=len(result.output.findings),
@@ -1269,11 +1389,22 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 # for its inline comments, and it carries every finding
                 # inline in the body instead — so it needs the same total
                 # bound the first one had, or it 422s for the same reason.
-                fallback_body, dropped = _render_findings_section(
-                    body,
-                    result.output.findings,
-                    heading="\n\n### 🔍 Detailed Findings\n",
+                fallback_header = (
+                    f"## ⚡ Haunter Code Review (Summary)\n\n"
+                    f"| Status | Risk Score | Findings Breakdown |\n"
+                    f"| :--- | :--- | :--- |\n"
+                    f"| {status_badge} | `{review.risk_score}/100` ({risk_badge}) | {findings_breakdown} |\n\n"
+                    f"{alert_callout}\n"
+                    f"### 📝 Executive Summary\n\n"
+                    f"{review.summary}\n"
+                    f"{table_section}"
                 )
+                fallback_body, dropped = _render_findings_section(
+                    fallback_header,
+                    result.output.findings,
+                    heading="\n### 🔍 Detailed Findings & Remediations\n",
+                )
+                fallback_body = f"{fallback_body}\n\n{footer_md}"
                 # The suppression block already rides at the top of `body`, so
                 # prepending the length-bound disclosure here keeps both
                 # statements above anything the bound can trim.
@@ -1385,13 +1516,53 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
             # thing that can drop one. Same total bound as the PR review body:
             # N findings concatenated exceed GitHub's comment ceiling long
             # before any single field does.
-            body, dropped = _render_findings_section(
-                f"### 🛡️ Haunter Push-Level Code Review\n\n"
-                f"**Risk Score**: {review.risk_score}/100 — {risk_badge}\n\n"
-                f"{review.summary}",
-                result.output.findings,
-                heading="\n\n### 🔍 Actionable Findings\n",
+            blockers, warnings, suggestions = _count_findings_by_severity(
+                result.output.findings
             )
+            findings_breakdown = (
+                f"{blockers} Blockers • {warnings} Warnings • {suggestions} Suggestions"
+            )
+            status_badge = _build_status_badge(review.risk_score)
+
+            if review.risk_score >= 80:
+                alert_callout = (
+                    "> [!CAUTION]\n"
+                    f"> **Action Required**: {blockers} blocker finding(s) detected.\n"
+                )
+            elif review.risk_score > 30:
+                alert_callout = (
+                    "> [!WARNING]\n"
+                    f"> **Action Recommended**: {warnings} warning finding(s) detected.\n"
+                )
+            else:
+                alert_callout = (
+                    "> [!TIP]\n"
+                    "> **Clean Review**: No blocking issues detected.\n"
+                )
+
+            table_md = _render_findings_table(result.output.findings)
+            table_section = (
+                f"\n### 📋 Findings Summary\n\n{table_md}\n" if table_md else ""
+            )
+            footer_md = _render_review_footer(review.id, review.commit_sha)
+
+            push_header = (
+                f"## ⚡ Haunter Push Review\n\n"
+                f"| Status | Risk Score | Findings Breakdown |\n"
+                f"| :--- | :--- | :--- |\n"
+                f"| {status_badge} | `{review.risk_score}/100` ({risk_badge}) | {findings_breakdown} |\n\n"
+                f"{alert_callout}\n"
+                f"### 📝 Executive Summary\n\n"
+                f"{review.summary}\n"
+                f"{table_section}"
+            )
+
+            body, dropped = _render_findings_section(
+                push_header,
+                result.output.findings,
+                heading="\n### 🔍 Actionable Findings & Remediations\n",
+            )
+            body = f"{body}\n\n{footer_md}"
             body = _bound_review_body(
                 body,
                 _DROPPED_FINDINGS_TEMPLATE.format(

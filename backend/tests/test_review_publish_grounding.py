@@ -1167,3 +1167,78 @@ async def test_b6_rereview_after_new_commits_supersedes_prior_findings(
         "resolveReviewThread; only a PullRequestReviewThread id (PRRT_) "
         "resolves, so this would have been a silent no-op in production"
     )
+
+
+async def test_review_markdown_visual_hierarchy_and_badges(
+    pending_review: CodeReview,
+) -> None:
+    """Verify PR code review layout features clean banner, badges, alerts, tables, and footer."""
+    mock_pr_review = AsyncMock(return_value={"id": 9999})
+    findings = [
+        _finding_payload(
+            file_path="app.py",
+            line_start=10,
+            line_end=10,
+            critique="Unvalidated user input reaches render path.",
+            suggested_patch="uid = str(request.args['uid'])",
+            severity="high",
+            category="security",
+        ),
+        _finding_payload(
+            file_path="other.py",
+            line_start=40,
+            line_end=40,
+            critique="Loop could be optimized with sum().",
+            suggested_patch="return sum(values)",
+            severity="low",
+            category="performance",
+        ),
+    ]
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=SAMPLE_DIFF,
+        ),
+        patch(
+            "app.subagents.code_reviewer.LLMClient",
+            _llm_patch_target(
+                _llm_response(
+                    risk_score=85,
+                    summary="High risk security defect detected.",
+                    findings=findings,
+                )
+            ),
+        ),
+        patch(
+            "app.services.review_orchestrator.create_pull_request_review",
+            mock_pr_review,
+        ),
+        _install_token_patch(),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    body = mock_pr_review.call_args.kwargs["body"]
+
+    # 1. Executive Summary Header & Badges
+    assert "## ⚡ Haunter Code Review" in body
+    assert "| Status | Risk Score | Findings Breakdown |" in body
+    assert "🛑 `Changes Required`" in body
+    assert "`85/100`" in body
+    assert "1 Blockers • 0 Warnings • 1 Suggestions" in body
+
+    # 2. Native Alert Callout
+    assert "> [!CAUTION]" in body
+
+    # 3. Structured Findings Table
+    assert "### 📋 Findings Summary" in body
+    assert "| Severity | Category | File & Line | Summary |" in body
+    assert "🚨 High" in body
+    assert "`app.py:10`" in body
+
+    # 4. Polished Footer
+    assert "⚡ Powered by **Haunter**" in body
+    assert "View Run Trace in Dashboard" in body
+

@@ -577,6 +577,40 @@ def _bound_report(report: str) -> str:
     return report[:available].rstrip() + footer
 
 
+def _render_audit_findings_table(
+    findings: Sequence[Mapping[str, Any]],
+    overall_confidence: int,
+) -> str:
+    """Render a concise markdown table summarizing audit findings."""
+    if not findings:
+        return ""
+    rows = [
+        "| Severity | Perspective | File & Line | Summary | Confidence |",
+        "| :--- | :--- | :--- | :--- | :--- |",
+    ]
+    for f in findings:
+        sev = str(f.get("severity", "NOTE")).upper()
+        icon = _SEVERITY_ICON.get(sev, "ℹ️")
+        persp = _sanitize_inline(f.get("perspective", "General"), 40).title()
+
+        line_start = _bounded_integer(f.get("line_start"), 1, 10_000_000, 1)
+        line_end = _bounded_integer(
+            f.get("line_end"), line_start, 10_000_000, line_start
+        )
+        loc = f"`{_safe_path(f.get('file_path'))}#L{line_start}`"
+        if line_end != line_start:
+            loc = f"`{_safe_path(f.get('file_path'))}#L{line_start}-L{line_end}`"
+
+        title = _sanitize_heading_text(f.get("title", ""), 70)
+        if len(title) > 65:
+            title = title[:62] + "..."
+        title_clean = title.replace("|", "\\|")
+
+        conf = _clamp_confidence(f.get("confidence"), overall_confidence)
+        rows.append(f"| {icon} [{sev}] | {persp} | {loc} | {title_clean} | `{conf}%` |")
+    return "\n".join(rows)
+
+
 def format_audit_report(
     *,
     executive_summary: str,
@@ -609,40 +643,89 @@ def format_audit_report(
         total_findings = len(findings)
     except TypeError:
         total_findings = len(bounded_findings)
+
+    status_sanitized = _escape_markdown(
+        _sanitize_inline(status, MAX_STATUS_CHARS, escape_markdown=False),
+        escape_backticks=False,
+    )
+    audit_target_sanitized = _escape_markdown(
+        _sanitize_inline(audit_target, MAX_TARGET_CHARS, escape_markdown=False),
+        escape_backticks=False,
+    )
+    engine_sanitized = _safe_inline_code(engine, MAX_ENGINE_CHARS, "unknown")
+    pub_policy_sanitized = _escape_markdown(
+        _sanitize_inline(publication_policy, 200, escape_markdown=False),
+        escape_backticks=False,
+    )
+
     prefix = [
         "## 🛡️ Haunter Autonomous Audit Report",
         "",
-        f"**Status:** {_escape_markdown(_sanitize_inline(status, MAX_STATUS_CHARS, escape_markdown=False), escape_backticks=False)}  ",
+        "| Status | Confidence Score | Audit Target | Engine |",
+        "| :--- | :--- | :--- | :--- |",
+        f"| {status_sanitized} | `{confidence_value}%` | {audit_target_sanitized} | `{engine_sanitized}` |",
+        "",
+        f"**Status:** {status_sanitized}  ",
         f"**Confidence Score:** `{confidence_value}%`  ",
-        f"**Publication Policy:** {_escape_markdown(_sanitize_inline(publication_policy, 200, escape_markdown=False), escape_backticks=False)}  ",
-        f"**Audit Target:** {_escape_markdown(_sanitize_inline(audit_target, MAX_TARGET_CHARS, escape_markdown=False), escape_backticks=False)}  ",
-        f"**Engine:** `{_safe_inline_code(engine, MAX_ENGINE_CHARS, 'unknown')}`",
+        f"**Publication Policy:** {pub_policy_sanitized}  ",
+        f"**Audit Target:** {audit_target_sanitized}  ",
+        f"**Engine:** `{engine_sanitized}`",
         f"**Structural Analysis:** {_escape_markdown(_sanitize_inline(analysis_metadata or 'No analysis metadata was supplied.', 2_000, escape_markdown=False), escape_backticks=False)}",
         "",
         "---",
         "",
         "### 🔍 Executive Summary",
-        _sanitize_inline(executive_summary),
+        f"> [!NOTE]\n> {_sanitize_inline(executive_summary)}",
         "",
+    ]
+
+    findings_table = _render_audit_findings_table(
+        bounded_findings[:MAX_REPORT_FINDINGS], confidence_value
+    )
+    if findings_table:
+        prefix.extend([
+            "---",
+            "",
+            "### 📋 Findings Overview",
+            "",
+            findings_table,
+            "",
+        ])
+
+    prefix.extend([
         "---",
         "",
         "### 🚨 Findings & Recommendations",
         "",
-    ]
+        "<details open>",
+        f"<summary>🔍 <b>Detailed Findings Breakdown</b> ({total_findings} items)</summary>",
+        "",
+    ])
+
     if effective_allowed:
         remediation_heading = "### 🛠️ Remediation Unified Diff"
-        remediation = _fenced_block(
-            "diff",
-            _sanitize_code(remediation_diff, MAX_REMEDIATION_DIFF_CHARS),
+        remediation = (
+            "<details open>\n"
+            "<summary>🛠️ <b>Proposed Remediation Unified Diff</b> (Click to inspect)</summary>\n\n"
+            + _fenced_block(
+                "diff",
+                _sanitize_code(remediation_diff, MAX_REMEDIATION_DIFF_CHARS),
+            )
+            + "\n</details>"
         )
     else:
         remediation_heading = "### ℹ️ Informational Audit Result"
         remediation = "Informational only — no automated remediation was generated."
+
     suffix = [
+        "</details>",
+        "",
         "---",
         "",
         remediation_heading,
         remediation,
+        "",
+        "---",
         "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*",
     ]
     finding_budget = (

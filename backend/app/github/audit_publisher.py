@@ -126,33 +126,54 @@ def format_inline_comment_body(
     description = sanitize_output_text(finding.description, MAX_INLINE_FIELD_CHARS)
 
     lines: list[str] = []
+    lines.append(f"### {severity_icon} [{finding.severity}] {title}")
+    lines.append("")
+
     if is_informational or finding.informational_only:
         lines.append(
-            f"> ℹ️ **[INFORMATIONAL NOTE]** (Confidence: `{finding.confidence}%`)"
+            f"> [!NOTE]\n"
+            f"> **Informational Note** (Confidence: `{finding.confidence}%`) — Manual verification advised.\n"
         )
-        lines.append(f"### {severity_icon} [{finding.severity}] {title}")
-        lines.append(f"**Category:** {category}")
+        lines.append(f"**Category:** `{category}`")
     else:
-        lines.append(f"### {severity_icon} [{finding.severity}] {title}")
+        if finding.severity == "BLOCKER":
+            lines.append(
+                "> [!CAUTION]\n> **Blocker Finding** — Requires resolution before merge.\n"
+            )
+        elif finding.severity == "WARNING":
+            lines.append(
+                "> [!WARNING]\n> **Action Recommended** — Review proposed remediation.\n"
+            )
         lines.append(
-            f"**Category:** {category} | **Confidence:** `{finding.confidence}%`"
+            f"**Category:** `{category}` • **Confidence:** `{finding.confidence}%`"
         )
 
     lines.append("")
-    lines.append(description)
+    lines.append(f"**Problem:**\n{description}")
 
     if finding.suggested_fix and not (is_informational or finding.informational_only):
         clean_fix = redact_sensitive_text(finding.suggested_fix).strip()
         if clean_fix:
             bounded_fix = sanitize_output_text(clean_fix, MAX_SUGGESTED_FIX_CHARS)
+            # Strip outer code fences if present
+            if bounded_fix.startswith("```"):
+                lines_fix = bounded_fix.splitlines()
+                if (
+                    len(lines_fix) >= 2
+                    and lines_fix[0].startswith("```")
+                    and lines_fix[-1].strip() == "```"
+                ):
+                    bounded_fix = "\n".join(lines_fix[1:-1]).strip()
             lines.append("")
             lines.append("**Suggested Remediation:**")
-            lines.append("```python" if "\n" in bounded_fix else "```")
-            lines.append(bounded_fix)
-            lines.append("```")
+            if bounded_fix.startswith("--- ") or bounded_fix.startswith("@@ "):
+                lines.append(f"```diff\n{bounded_fix}\n```")
+            else:
+                lines.append(f"```suggestion\n{bounded_fix}\n```")
 
     lines.append("")
-    lines.append(f"*Haunter Auditor Finding ID: `{finding.id}`*")
+    lines.append("---")
+    lines.append(f"*⚡ Haunter Auditor Finding ID: `{finding.id}`*")
 
     return redact_sensitive_text("\n".join(lines))
 
