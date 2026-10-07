@@ -227,6 +227,31 @@ describe("auth-context.tsx", () => {
         expect(screen.getByTestId("username")).toHaveTextContent("anonymous");
       });
       expect(window.location.href).toBe("/login");
+      expect(localStorage.getItem("haunter_token")).toBeNull();
+    });
+
+    it("extracts token from URL search params on initial mount and updates history", async () => {
+      window.location = {
+        href: "https://example.com/dashboard?token=xyz_jwt_token_999",
+        pathname: "/dashboard",
+        search: "?token=xyz_jwt_token_999",
+        hash: "",
+      } as any;
+      const replaceStateSpy = vi.spyOn(window.history, "replaceState");
+      vi.spyOn(api, "getMe").mockResolvedValue(mockUser);
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId("username")).toHaveTextContent("kaiizer777");
+      });
+
+      expect(localStorage.getItem("haunter_token")).toBe("xyz_jwt_token_999");
+      expect(replaceStateSpy).toHaveBeenCalledWith({}, document.title, "/dashboard");
     });
   });
 });

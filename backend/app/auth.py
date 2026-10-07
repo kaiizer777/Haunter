@@ -82,10 +82,11 @@ import secrets
 import uuid
 from datetime import timedelta
 from typing import Annotated
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 from authlib.integrations.httpx_client import AsyncOAuth2Client
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
 from pydantic import BaseModel
@@ -323,18 +324,34 @@ class UserOut(BaseModel):
 
 async def get_current_user(
     db: Annotated[AsyncSession, Depends(get_db)],
+    authorization: Annotated[str | None, Header()] = None,
     haunter_session: Annotated[str | None, Cookie()] = None,
 ) -> User:
     """
-    FastAPI dependency. Reads the signed session cookie, verifies signature + max_age
-    (14d, enforced by itsdangerous), and returns the User ORM object.
-    Raises 401 if cookie is missing, invalid, expired, or the user no longer exists.
+    FastAPI dependency. Reads either:
+    1. 'Authorization: Bearer <token>' header (preferred for cross-domain / strict 3P cookie blocking browsers)
+    2. 'haunter_session' signed session cookie (fallback for backwards compatibility)
+
+    Verifies signature + max_age (14d, enforced by itsdangerous), and returns the User ORM object.
+    Raises 401 if missing, invalid, expired, or the user no longer exists.
     Supports key rotation via _signers() pool — old sessions remain valid through rotation.
     """
-    if haunter_session is None:
+    raw_session_token: str | None = None
+
+    if authorization is not None:
+        parts = authorization.strip().split(maxsplit=1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            raw_session_token = parts[1].strip()
+        elif len(parts) == 1 and not parts[0].lower().startswith("bearer"):
+            raw_session_token = parts[0].strip()
+
+    if raw_session_token is None and haunter_session is not None:
+        raw_session_token = haunter_session
+
+    if raw_session_token is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    user_id = _verify_session_cookie(haunter_session)
+    user_id = _verify_session_cookie(raw_session_token)
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -498,7 +515,18 @@ async def callback(
         return _error("DB upsert failed")
 
     # --- Step 6: Set session cookie, clear state cookie (single-use), redirect ---
-    redirect = RedirectResponse(settings.frontend_url, status_code=302)
+    session_token = _sign_user_id(user.id)
+
+    # Append ?token=<session_token> to frontend redirect URL
+    parsed = urlsplit(settings.frontend_url)
+    query_params = parse_qsl(parsed.query, keep_blank_values=True)
+    query_params.append(("token", session_token))
+    new_query = urlencode(query_params)
+    redirect_url = urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment)
+    )
+
+    redirect = RedirectResponse(redirect_url, status_code=302)
     _set_session_cookie(redirect, user.id)
     _clear_state_cookie(redirect)
     return redirect

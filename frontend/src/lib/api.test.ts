@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { api, ApiError, API_BASE, isGithubTokenError } from "./api";
+import {
+  api,
+  ApiError,
+  API_BASE,
+  isGithubTokenError,
+  getStoredToken,
+  setStoredToken,
+  removeStoredToken,
+} from "./api";
 
 describe("api.ts", () => {
   const originalFetch = globalThis.fetch;
@@ -87,6 +95,38 @@ describe("api.ts", () => {
       );
       expect(passedHeaders?.get("Content-Type")).toBe("text/plain");
       expect(passedHeaders?.get("Authorization")).toBe("Bearer token-123");
+    });
+
+    it("automatically injects Authorization: Bearer <token> when haunter_token is in localStorage", async () => {
+      localStorage.setItem("haunter_token", "saved_token_abc");
+      let passedHeaders: Headers | undefined;
+      globalThis.fetch = vi.fn().mockImplementation(async (_url, options) => {
+        passedHeaders = options?.headers as Headers;
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+
+      await api.get("/repos");
+      expect(passedHeaders?.get("Authorization")).toBe("Bearer saved_token_abc");
+      localStorage.removeItem("haunter_token");
+    });
+
+    it("getStoredToken, setStoredToken, removeStoredToken manage localStorage correctly", () => {
+      removeStoredToken();
+      expect(getStoredToken()).toBeNull();
+      setStoredToken("test_token_xyz");
+      expect(getStoredToken()).toBe("test_token_xyz");
+      removeStoredToken();
+      expect(getStoredToken()).toBeNull();
+    });
+
+    it("api.logout removes haunter_token from localStorage", async () => {
+      localStorage.setItem("haunter_token", "token_to_remove");
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: "Logged out" }), { status: 200 })
+      );
+
+      await api.logout();
+      expect(localStorage.getItem("haunter_token")).toBeNull();
     });
 
     it("maps network fetch failure to ApiError with status 0", async () => {
