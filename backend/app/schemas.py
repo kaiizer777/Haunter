@@ -21,7 +21,7 @@ _PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "develop", "d
 
 
 def validate_repo_ident(value: str, label: str = "identifier") -> str:
-    """Validate repository identifier (owner or name).
+    r"""Validate repository identifier (owner or name).
 
     Checks ^[a-zA-Z0-9_.\-]+$ and rejects exact dot segments
     (value in ('.', '..') or containing '/../'), without rejecting
