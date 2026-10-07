@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import LLMClient
 from app.llm.prompts.audit_prompts import (
+    MAX_DIFF_CHARS,
     MAX_GITHUB_COMMENT_CHARS,
     MAX_INLINE_FIELD_CHARS,
     MAX_SUGGESTED_FIX_CHARS,
@@ -576,10 +577,15 @@ async def analyze_diff(
             latency_ms=0,
         )
 
+    # Bound diff length to MAX_DIFF_CHARS so model context budget is respected
+    bounded_diff = diff_text
+    if len(bounded_diff) > MAX_DIFF_CHARS:
+        bounded_diff = bounded_diff[:MAX_DIFF_CHARS] + "\n[...DIFF TRUNCATED...]\n"
+
     llm = LLMClient(timeout=60.0)
     start_time = time.monotonic()
 
-    messages = _build_review_messages(diff_text, repo_context)
+    messages = _build_review_messages(bounded_diff, repo_context)
     response = await llm.complete(
         messages=messages,
         db=db,
@@ -628,7 +634,7 @@ async def analyze_diff(
 
     # Retry once with error feedback
     retry_messages = _build_review_messages(
-        diff_text, repo_context, validation_error_context=err_msg
+        bounded_diff, repo_context, validation_error_context=err_msg
     )
     retry_response = await llm.complete(
         messages=retry_messages,

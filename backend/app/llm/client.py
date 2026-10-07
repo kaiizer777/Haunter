@@ -113,7 +113,7 @@ class LLMClient:
 
         if target_provider == "groq":
             groq_model = (
-                explicit_model or settings.groq_model_name or "openai/gpt-oss-120b"
+                explicit_model or settings.groq_model_name or "llama-3.3-70b-versatile"
             )
             provider = GroqProvider(
                 base_url=settings.groq_base_url,
@@ -340,19 +340,20 @@ class LLMClient:
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Fall back to Groq provider when OpenCode Zen is unavailable, exhausted, or blocked."""
+        fallback_model = settings.groq_model_name or "llama-3.3-70b-versatile"
         logger.warning(
             "All OpenCode Zen models failed/blocked. Falling back to Groq provider with model=%s",
-            settings.groq_model_name,
+            fallback_model,
         )
         provider = GroqProvider(
             base_url=settings.groq_base_url,
             api_key=settings.groq_api_key,
-            model=settings.groq_model_name,
+            model=fallback_model,
             timeout=self.timeout,
         )
         return await provider.complete(
             messages=messages,
-            model=settings.groq_model_name,
+            model=fallback_model,
             tools=tools,
             **kwargs,
         )
