@@ -18,6 +18,7 @@
 
 ---
 
+<!-- test: verify haunter pr review bot trigger -->
 Haunter is an enterprise-grade autonomous CI failure remediation engine, security auditor bot, and cloud agentic pairing studio. 
 
 When a GitHub Actions workflow fails, Haunter wakes autonomously via webhooks, distills failure context, determines the root cause, generates candidate patches, verifies fixes inside an isolated GitHub Actions sandbox mirror, and opens an auditable Pull Request with complete diagnostic rationale — or leaves a structured root-cause diagnostic comment if retries are exhausted.
