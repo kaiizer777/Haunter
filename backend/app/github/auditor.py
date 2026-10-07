@@ -26,7 +26,7 @@ _ALLOWED_PERMISSIONS = frozenset(
     {"contents", "pull_requests", "metadata", "single_file"}
 )
 _REQUIRED_READ_PERMISSIONS = frozenset({"contents", "pull_requests", "metadata"})
-_ALLOWED_PERMISSION_VALUES = frozenset({"read", "none"})
+_ALLOWED_PERMISSION_VALUES = frozenset({"read", "write", "none"})
 _TOKEN_CACHE: dict[int, tuple[str, float]] = {}
 
 

@@ -41,6 +41,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Optional
@@ -150,6 +151,12 @@ ALLOWED_WEBHOOK_EVENTS = frozenset(
         "push",
     }
 )
+
+# Explicit command pattern for review auto-fix execution (@haunter fix / @haunter address)
+_EXPLICIT_FIX_CMD_RE: re.Pattern[str] = re.compile(
+    r"@haunter\b[\s:,]*(?:fix|address)\b", re.IGNORECASE
+)
+
 
 
 def _log_repo(owner: Any, name: Any) -> str:
@@ -915,6 +922,250 @@ def _audit_queued_payload(
         "comment_id": comment_id,
         "delivery_id": delivery_id,
     }
+
+
+def _extract_remediation_diff_from_body(body: str) -> Optional[str]:
+    """Extract unified diff from PR review body (e.g. from haunter-auditor[bot])."""
+    if not body:
+        return None
+    match = re.search(
+        r"Remediation Unified Diff[\s\S]*?```(?:diff)?\s*\r?\n([\s\S]*?)```",
+        body,
+    )
+    diff_text = None
+    if match:
+        diff_text = match.group(1).strip()
+    else:
+        for block in re.finditer(r"```(?:diff)?\s*\r?\n([\s\S]*?)```", body):
+            candidate = block.group(1).strip()
+            if "--- " in candidate and "+++ " in candidate and "@@" in candidate:
+                diff_text = candidate
+                break
+
+    if not diff_text:
+        return None
+
+    normalized_lines: list[str] = []
+    for line in diff_text.splitlines():
+        line = line.strip("\r")
+        if line.startswith("+-"):
+            normalized_lines.append("-" + line[2:])
+        elif line.startswith("++") and not line.startswith("+++"):
+            normalized_lines.append("+" + line[2:])
+        elif line.startswith("+@@"):
+            normalized_lines.append(line[1:])
+        else:
+            normalized_lines.append(line)
+    cleaned = "\n".join(normalized_lines).strip()
+    if "--- " in cleaned and "+++ " in cleaned and "@@" in cleaned:
+        return cleaned + "\n"
+    return None
+
+
+async def _handle_review_auto_fix_command(
+    db: AsyncSession,
+    repo: Repo,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    pr_head_branch: Optional[str],
+    comment_obj: Any,
+    followup: Any,
+) -> dict[str, Any]:
+    """
+    Handle `@haunter fix` / `@haunter address` on PRs outside the standard haunter/* refinement flow.
+    Applies the remediation diff to the PR head branch and notifies the PR thread.
+    """
+    if followup.command not in ("fix", "address"):
+        return {
+            "status": "ignored",
+            "reason": f"unsupported review auto-fix command: {followup.command}",
+        }
+
+    from app.github.pr import (
+        GitHubPRAuthError,
+        GitHubPRError,
+        commit_patch,
+        get_installation_token,
+    )
+    from app.github_client import GitHubAuthError
+    from app import github_client
+
+    try:
+        token = await get_installation_token(repo)
+    except (GitHubAuthError, GitHubPRAuthError, GitHubPRError, Exception) as exc:
+        logger.warning(
+            "Auto-fix skipped: unable to obtain GitHub token for %s/%s: %s",
+            repo_owner,
+            repo_name,
+            exc,
+        )
+        return {"status": "ignored", "reason": "non-haunter branch"}
+
+    # Resolve head branch if not provided in the webhook payload (e.g. issue_comment)
+    if not pr_head_branch:
+        try:
+            pr_data = await github_client.fetch_pull_request(
+                repo_owner, repo_name, pr_number, token=token
+            )
+            pr_head_branch = pr_data.get("head", {}).get("ref")
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch PR head branch for %s/%s PR #%d: %s",
+                repo_owner,
+                repo_name,
+                pr_number,
+                exc,
+            )
+
+    if not pr_head_branch:
+        logger.error(
+            "Could not determine PR head branch for %s/%s PR #%d",
+            repo_owner,
+            repo_name,
+            pr_number,
+        )
+        await github_client.create_issue_comment(
+            owner=repo_owner,
+            repo=repo_name,
+            issue_number=pr_number,
+            body="⚠️ **Haunter Auto-Fix**: Could not determine the PR branch to apply fixes to.",
+            token=token,
+        )
+        return {"status": "error", "reason": "unknown_head_branch"}
+
+    valid_patch: Optional[str] = None
+
+    # 1. Check CodeReview in DB
+    cr_stmt = (
+        select(CodeReview)
+        .where(CodeReview.repo_id == repo.id, CodeReview.pr_number == pr_number)
+        .order_by(CodeReview.created_at.desc())
+    )
+    cr_res = await db.execute(cr_stmt)
+    latest_reviews = cr_res.scalars().all()
+
+    for rev in latest_reviews:
+        findings = rev.findings or []
+        diff_chunks: list[str] = []
+        for finding in findings:
+            patch = finding.get("suggested_patch") or finding.get("suggested_fix")
+            if not patch:
+                continue
+            patch = patch.strip()
+            if "--- " in patch and "+++ " in patch and "@@" in patch:
+                diff_chunks.append(patch)
+            elif finding.get("file_path"):
+                fp = finding["file_path"]
+                ls = finding.get("line_start", 1)
+                le = finding.get("line_end", ls)
+                lc = max(1, le - ls + 1)
+                diff_lines = [
+                    f"+{line}" if not line.startswith(("+", "-")) else line
+                    for line in patch.splitlines()
+                ]
+                sec = (
+                    f"--- a/{fp}\n"
+                    f"+++ b/{fp}\n"
+                    f"@@ -{ls},{lc} +{ls},{len(diff_lines)} @@\n"
+                    + "\n".join(diff_lines)
+                )
+                diff_chunks.append(sec)
+        if diff_chunks:
+            valid_patch = "\n\n".join(diff_chunks)
+            if not valid_patch.endswith("\n"):
+                valid_patch += "\n"
+            break
+
+    # 2. Or fetch latest review from GitHub API and extract remediation diff
+    if not valid_patch:
+        try:
+            gh_reviews = await github_client.fetch_pull_request_reviews(
+                owner=repo_owner,
+                repo=repo_name,
+                pr_number=pr_number,
+                token=token,
+            )
+            for r in reversed(gh_reviews):
+                body = r.get("body") or ""
+                diff = _extract_remediation_diff_from_body(body)
+                if diff:
+                    valid_patch = diff
+                    break
+        except Exception as gh_err:
+            logger.warning(
+                "Error fetching reviews from GitHub for %s/%s PR #%d: %s",
+                repo_owner,
+                repo_name,
+                pr_number,
+                gh_err,
+            )
+
+    # If no patch found
+    if not valid_patch:
+        logger.info(
+            "No actionable remediation patch found for %s/%s PR #%d",
+            repo_owner,
+            repo_name,
+            pr_number,
+        )
+        no_patch_msg = (
+            "⚠️ **Haunter Auto-Fix**: No actionable remediation diff was found in recent reviews for this PR."
+        )
+        await github_client.create_issue_comment(
+            owner=repo_owner,
+            repo=repo_name,
+            issue_number=pr_number,
+            body=no_patch_msg,
+            token=token,
+        )
+        return {"status": "no_patch"}
+
+    # Apply patch via commit_patch
+    try:
+        new_sha = await commit_patch(
+            owner=repo_owner,
+            repo=repo_name,
+            branch=pr_head_branch,
+            patch_text=valid_patch,
+            commit_msg=f"Fix: apply suggested remediation for PR #{pr_number}",
+            token=token,
+        )
+        comment_body = (
+            f"🤖 **Haunter Auto-Fix**: Applied suggested remediation to branch "
+            f"`{pr_head_branch}` in commit `{new_sha}`!"
+        )
+        await github_client.create_issue_comment(
+            owner=repo_owner,
+            repo=repo_name,
+            issue_number=pr_number,
+            body=comment_body,
+            token=token,
+        )
+        return {"status": "applied", "commit_sha": new_sha}
+    except Exception as exc:
+        logger.error(
+            "Auto-fix commit_patch failed for %s/%s PR #%d on branch %r: %s",
+            repo_owner,
+            repo_name,
+            pr_number,
+            pr_head_branch,
+            exc,
+        )
+        err_msg = (
+            f"⚠️ **Haunter Auto-Fix**: Failed to apply remediation to branch `{pr_head_branch}`: {exc}"
+        )
+        try:
+            await github_client.create_issue_comment(
+                owner=repo_owner,
+                repo=repo_name,
+                issue_number=pr_number,
+                body=err_msg,
+                token=token,
+            )
+        except Exception as post_err:
+            logger.warning("Failed to post auto-fix error comment: %s", post_err)
+        return {"status": "error", "reason": str(exc)}
 
 
 @router.post("/github")
@@ -1817,6 +2068,7 @@ async def github_webhook(
     # another subsystem's command (`@haunter audit`) is not a fix request
     # and is filtered out in step 5c — after the auditor has had its turn.
     followup = parse_followup_command(comment_body)
+    is_explicit_auto_fix = bool(_EXPLICIT_FIX_CMD_RE.search(comment_body))
     if followup is not None:
         logger.info(
             "Followup command=%s test_only=%s pr=%s delivery_id=%s",
@@ -1962,6 +2214,22 @@ async def github_webhook(
     initial_run = run_res.scalars().first()
 
     if not initial_run:
+        if (
+            is_explicit_auto_fix
+            and followup is not None
+            and followup.command in ("fix", "address")
+        ):
+            return await _handle_review_auto_fix_command(
+                db=db,
+                repo=repo,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                pr_number=pr_number,
+                pr_head_branch=pr_head_branch,
+                comment_obj=comment_obj,
+                followup=followup,
+            )
+
         # A manual `@haunter audit` request is still served by the auditor
         # even when no fix-pipeline Run exists for this PR.
         if _auditor_scheduled:
@@ -2013,6 +2281,22 @@ async def github_webhook(
         )
 
     if not pr_head_branch or not pr_head_branch.startswith("haunter/"):
+        if (
+            is_explicit_auto_fix
+            and followup is not None
+            and followup.command in ("fix", "address")
+        ):
+            return await _handle_review_auto_fix_command(
+                db=db,
+                repo=repo,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                pr_number=pr_number,
+                pr_head_branch=pr_head_branch,
+                comment_obj=comment_obj,
+                followup=followup,
+            )
+
         # Manual audit requests are branch-agnostic (read-only); the
         # haunter/* guard applies only to the fix pipeline below.
         if _auditor_scheduled:
