@@ -21,7 +21,11 @@ PERSPECTIVES: tuple[PerspectiveName, ...] = (
 SEVERITIES: tuple[AuditSeverity, ...] = ("BLOCKER", "WARNING", "NOTE")
 INFORMATIONAL_CONFIDENCE_THRESHOLD = 75
 
-MAX_DIFF_CHARS = 60_000
+MAX_DIFF_CHARS = 1_500_000
+#: Line ceiling for diff intake. Diffs past this many lines are clipped to the
+#: first MAX_DIFF_LINES lines; everything below it ships in full (up to
+#: MAX_DIFF_CHARS). Previous 60_000-char cap dropped real review surface.
+MAX_DIFF_LINES = 30_000
 MAX_AST_CONTEXT_CHARS = 10_000
 MAX_REPO_CONTEXT_CHARS = 10_000
 MAX_SYSTEM_PROMPT_CHARS = 12_000

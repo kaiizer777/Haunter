@@ -65,6 +65,11 @@ from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
 from app.github.pr import REVIEWABLE_PR_ACTIONS, is_reviewable_pr_action
+from app.llm import LLMClient
+from app.llm.prompts.audit_prompts import (
+    MAX_GITHUB_COMMENT_CHARS,
+    sanitize_output_markdown,
+)
 from app.log_hygiene import sanitize_log_value
 from app.models import CodeReview, Repo, Run, User, WebhookDelivery
 from app.schemas import (
@@ -156,6 +161,259 @@ ALLOWED_WEBHOOK_EVENTS = frozenset(
 _EXPLICIT_FIX_CMD_RE: re.Pattern[str] = re.compile(
     r"@haunter\b[\s:,]*(?:fix|address)\b", re.IGNORECASE
 )
+
+# Interactive auditor Q&A mention (@haunter-auditor / @haunter-auditor[bot]).
+# Trailing negative lookahead (not \b) so the [bot] suffix form still matches:
+# after "]" there is no word boundary before a space, but the mention is real.
+_AUDITOR_MENTION_RE: re.Pattern[str] = re.compile(
+    r"@haunter-auditor(?:\[bot\])?(?![A-Za-z0-9_-])", re.IGNORECASE
+)
+
+_AUDITOR_QUESTION_MAX_CHARS = 2_000
+_AUDITOR_CONTEXT_MAX_CHARS = 12_000
+_AUDITOR_DIFF_MAX_CHARS = 40_000
+_AUDITOR_THREAD_COMMENTS = 20
+
+AUDITOR_QA_SYSTEM_PROMPT = (
+    "You are Haunter Auditor, a senior production engineer answering a "
+    "reviewer question on a GitHub pull request. Be concise (under 300 words), "
+    "specific, and grounded in the provided PR context, thread history, and "
+    "diff. Name files and lines when relevant. Never claim to push, merge, or "
+    "open PRs. If the context is insufficient, say what is missing."
+)
+
+
+def has_auditor_mention(body: object) -> bool:
+    """True when a comment body addresses @haunter-auditor / @haunter-auditor[bot].
+
+    Pure and total: never raises, returns False for non-string input.
+    Case-insensitive. Does not fire on bare @haunter or @haunterbot.
+    """
+    if not isinstance(body, str):
+        return False
+    return _AUDITOR_MENTION_RE.search(body) is not None
+
+
+def _extract_auditor_question(body: str) -> str:
+    """Strip auditor mention tokens to isolate the reviewer's question."""
+    cleaned = _AUDITOR_MENTION_RE.sub(" ", body)
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) > _AUDITOR_QUESTION_MAX_CHARS:
+        cleaned = cleaned[: _AUDITOR_QUESTION_MAX_CHARS - 3].rstrip() + "..."
+    return cleaned or "(no question provided)"
+
+
+def _bound_auditor_text(value: object, maximum: int) -> str:
+    text = value if isinstance(value, str) else str(value or "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if len(text) > maximum:
+        text = text[: max(0, maximum - 14)].rstrip() + "\n[TRUNCATED]"
+    return text
+
+
+def _format_auditor_thread(
+    comments: object, *, limit: int = _AUDITOR_THREAD_COMMENTS
+) -> str:
+    if not isinstance(comments, list) or not comments:
+        return "(no thread history)"
+    tail = [c for c in comments if isinstance(c, dict)][-limit:]
+    lines: list[str] = []
+    for c in tail:
+        user = c.get("user") or {}
+        login = user.get("login") if isinstance(user, dict) else None
+        body = _bound_auditor_text(c.get("body") or "", 1_000)
+        path = c.get("path")
+        anchor = f" ({path})" if isinstance(path, str) and path else ""
+        lines.append(f"- {login or 'unknown'}{anchor}: {body}")
+    return "\n".join(lines) if lines else "(no thread history)"
+
+
+async def _handle_auditor_mention(
+    db: AsyncSession,
+    repo: Repo,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    comment_obj: Any,
+    event: str,
+    delivery_id: Any,
+) -> dict[str, Any]:
+    """Answer an @haunter-auditor question in the same thread.
+
+    Fetches PR context + thread history + diff (best-effort, degraded to
+    empty on failure), asks LLMClient for a concise senior-engineer answer,
+    and posts it via create_issue_comment (issue_comment) or
+    post_review_thread_reply with PR-comment fallback (review_comment).
+    Respects the repo enable_pr_comments kill switch. Never raises for
+    transport/LLM failures: they return an error status instead.
+    """
+    from app import github_client
+
+    comment_id = getattr(comment_obj, "id", None)
+    question_raw = getattr(comment_obj, "body", "") or ""
+    question = _extract_auditor_question(question_raw)
+    login = getattr(getattr(comment_obj, "user", None), "login", "reviewer")
+
+    try:
+        repo_settings = await get_repo_settings(db, repo.id)
+    except Exception:
+        repo_settings = None
+    if repo_settings is not None and not getattr(
+        repo_settings, "enable_pr_comments", True
+    ):
+        logger.info(
+            "Auditor mention suppressed (PR comments disabled) pr=%s delivery_id=%s",
+            sanitize_log_value(pr_number, 16),
+            sanitize_log_value(delivery_id, 64),
+        )
+        return {"status": "ignored", "reason": "pr comments disabled"}
+
+    try:
+        from app.github.pr import get_installation_token
+
+        token = await get_installation_token(repo)
+    except Exception as exc:
+        logger.warning(
+            "Auditor mention skipped: no GitHub token for %s pr=%s (%s)",
+            _log_repo(repo_owner, repo_name),
+            sanitize_log_value(pr_number, 16),
+            type(exc).__name__,
+        )
+        return {"status": "ignored", "reason": "no github token"}
+
+    try:
+        pr_data = await github_client.fetch_pull_request(
+            repo_owner, repo_name, pr_number, token=token
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auditor mention: PR fetch failed for %s PR #%s (%s)",
+            _log_repo(repo_owner, repo_name),
+            sanitize_log_value(pr_number, 16),
+            type(exc).__name__,
+        )
+        pr_data = {}
+
+    try:
+        issue_thread = await github_client.fetch_pr_comments(
+            repo_owner, repo_name, pr_number, token=token
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auditor mention: issue thread fetch failed (%s)", type(exc).__name__
+        )
+        issue_thread = []
+    try:
+        review_thread = await github_client.fetch_pr_review_comments(
+            repo_owner, repo_name, pr_number, token=token
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auditor mention: review thread fetch failed (%s)", type(exc).__name__
+        )
+        review_thread = []
+    try:
+        diff_text = await github_client.fetch_pull_request_diff(
+            repo_owner, repo_name, pr_number, token=token
+        )
+    except Exception as exc:
+        logger.warning("Auditor mention: diff fetch failed (%s)", type(exc).__name__)
+        diff_text = ""
+
+    pr_title = pr_data.get("title", "") if isinstance(pr_data, dict) else ""
+    pr_body = pr_data.get("body", "") if isinstance(pr_data, dict) else ""
+    pr_context = _bound_auditor_text(
+        f"Title: {pr_title}\nBody: {pr_body or '(empty)'}",
+        _AUDITOR_CONTEXT_MAX_CHARS,
+    )
+    thread_context = _bound_auditor_text(
+        "Issue thread:\n"
+        + _format_auditor_thread(issue_thread)
+        + "\n\nReview thread:\n"
+        + _format_auditor_thread(review_thread),
+        _AUDITOR_CONTEXT_MAX_CHARS,
+    )
+    diff_context = _bound_auditor_text(diff_text or "(diff unavailable)", _AUDITOR_DIFF_MAX_CHARS)
+
+    messages = [
+        {"role": "system", "content": AUDITOR_QA_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"PR {repo_owner}/{repo_name}#{pr_number}\n"
+                f"Question from @{login}: {question}\n\n"
+                f"PR context:\n{pr_context}\n\n"
+                f"Thread history:\n{thread_context}\n\n"
+                f"Diff:\n{diff_context}\n\n"
+                "Answer concisely as a senior engineer."
+            ),
+        },
+    ]
+    try:
+        llm = LLMClient(timeout=60.0)
+        response = await llm.complete(
+            messages=messages,
+            db=db,
+            repo_id=getattr(repo, "id", None),
+            max_tokens=1500,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auditor mention: LLM failed pr=%s (%s)",
+            sanitize_log_value(pr_number, 16),
+            type(exc).__name__,
+        )
+        return {"status": "error", "reason": "llm failed"}
+
+    answer = (response.get("content") or "").strip() if isinstance(response, dict) else ""
+    if not answer:
+        return {"status": "error", "reason": "empty llm answer"}
+    safe_answer = sanitize_output_markdown(answer, MAX_GITHUB_COMMENT_CHARS)
+    reply_body = f"🤖 **Haunter Auditor** (reply to @{login}):\n\n{safe_answer}"
+
+    if event == "pull_request_review_comment":
+        reply_to = getattr(comment_obj, "in_reply_to_id", None) or comment_id
+        try:
+            await github_client.post_review_thread_reply(
+                owner=repo_owner,
+                repo=repo_name,
+                pr_number=pr_number,
+                in_reply_to_comment_id=int(reply_to),
+                body=reply_body,
+                token=token,
+            )
+            return {
+                "status": "auditor_replied",
+                "channel": "review_thread",
+                "pr_number": pr_number,
+                "comment_id": comment_id,
+                "delivery_id": delivery_id,
+            }
+        except Exception as exc:
+            logger.warning(
+                "Auditor mention: thread reply failed, falling back to PR comment (%s)",
+                type(exc).__name__,
+            )
+    try:
+        await github_client.create_issue_comment(
+            owner=repo_owner,
+            repo=repo_name,
+            issue_number=pr_number,
+            body=reply_body,
+            token=token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auditor mention: PR comment post failed (%s)", type(exc).__name__
+        )
+        return {"status": "error", "reason": "post failed"}
+    return {
+        "status": "auditor_replied",
+        "channel": "pr_comment",
+        "pr_number": pr_number,
+        "comment_id": comment_id,
+        "delivery_id": delivery_id,
+    }
 
 
 
@@ -2100,6 +2358,29 @@ async def github_webhook(
     )
     if repo is None:
         return {"status": "ignored", "reason": rejection_reason}
+
+    # 5a. Interactive @haunter-auditor Q&A (after HMAC, mention gate,
+    # collaborator check, and repo resolution). Answers in the same thread via
+    # LLM + create_issue_comment / post_review_thread_reply. Exclusive: a Q&A
+    # mention never spawns a fix Run (the followup router would otherwise read
+    # "@haunter-auditor ..." as bare "@haunter" -> fix).
+    if has_auditor_mention(comment_body):
+        logger.info(
+            "Auditor mention pr=%s delivery_id=%s event=%s",
+            sanitize_log_value(pr_number, 16),
+            x_github_delivery,
+            x_github_event,
+        )
+        return await _handle_auditor_mention(
+            db,
+            repo,
+            repo_owner,
+            repo_name,
+            pr_number,
+            comment_obj,
+            x_github_event,
+            x_github_delivery,
+        )
 
     # 5b. Phase 5.1 Auditor Mode manual-mention filter (after HMAC
     # verification, mention gate, and collaborator check above).

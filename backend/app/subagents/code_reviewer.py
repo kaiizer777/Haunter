@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.llm import LLMClient
 from app.llm.prompts.audit_prompts import (
     MAX_DIFF_CHARS,
+    MAX_DIFF_LINES,
     MAX_GITHUB_COMMENT_CHARS,
     MAX_INLINE_FIELD_CHARS,
     MAX_SUGGESTED_FIX_CHARS,
@@ -577,9 +578,14 @@ async def analyze_diff(
             latency_ms=0,
         )
 
-    # Bound diff length to MAX_DIFF_CHARS so model context budget is respected
+    # Massive ceiling: ship the full diff up to 1.5M chars / 30k lines.
+    # Clip only past those bounds so real review surface is never dropped.
     bounded_diff = diff_text
-    if len(bounded_diff) > MAX_DIFF_CHARS:
+    line_count = bounded_diff.count("\n") + 1 if bounded_diff else 0
+    if line_count > MAX_DIFF_LINES:
+        kept = "\n".join(bounded_diff.splitlines()[:MAX_DIFF_LINES])
+        bounded_diff = kept + "\n[...DIFF TRUNCATED...]\n"
+    elif len(bounded_diff) > MAX_DIFF_CHARS:
         bounded_diff = bounded_diff[:MAX_DIFF_CHARS] + "\n[...DIFF TRUNCATED...]\n"
 
     llm = LLMClient(timeout=60.0)
