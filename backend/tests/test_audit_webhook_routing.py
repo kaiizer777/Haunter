@@ -1288,6 +1288,7 @@ async def test_issue_comment_manual_audit_dispatches_with_live_pr_endpoints(
         repo="live-audit-repo",
         pr_number=80,
         token="ghs_auditor_token",
+        allow_global_token=False,
     )
     job = await fake_audit_db.scalar(
         select(AuditJob).where(
@@ -1319,27 +1320,34 @@ async def test_issue_comment_manual_audit_falls_back_when_fetch_pull_request_fai
         pr_number=81,
         comment_id=9101006,
     )
-    # 1. fetch_pull_request raises an exception
     with patch(
-        "app.github_client.fetch_pull_request",
+        "app.github.auditor.get_auditor_installation_token",
         new_callable=AsyncMock,
-        side_effect=RuntimeError("GitHub API timeout"),
+        return_value="ghs_auditor_token",
     ):
-        resp = await post_signed(client, "issue_comment", payload)
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
-    assert "pinned pull request endpoints" in resp.json()["reason"]
+        # 1. fetch_pull_request raises an exception
+        with patch(
+            "app.github_client.fetch_pull_request",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("GitHub API timeout"),
+        ) as mock_fetch:
+            resp = await post_signed(client, "issue_comment", payload)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ignored"
+        assert "pinned pull request endpoints" in resp.json()["reason"]
+        mock_fetch.assert_awaited_once()
 
-    # 2. fetch_pull_request returns empty / missing head and base SHAs
-    with patch(
-        "app.github_client.fetch_pull_request",
-        new_callable=AsyncMock,
-        return_value={"head": {}, "base": {}},
-    ):
-        resp2 = await post_signed(client, "issue_comment", payload)
-    assert resp2.status_code == 200
-    assert resp2.json()["status"] == "ignored"
-    assert "pinned pull request endpoints" in resp2.json()["reason"]
+        # 2. fetch_pull_request returns empty / missing head and base SHAs
+        with patch(
+            "app.github_client.fetch_pull_request",
+            new_callable=AsyncMock,
+            return_value={"head": {}, "base": {}},
+        ) as mock_fetch:
+            resp2 = await post_signed(client, "issue_comment", payload)
+        assert resp2.status_code == 200
+        assert resp2.json()["status"] == "ignored"
+        assert "pinned pull request endpoints" in resp2.json()["reason"]
+        mock_fetch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
