@@ -34,7 +34,7 @@ from sqlalchemy.orm import selectinload
 
 from app.auth import get_current_user
 from app.db import get_db
-from app.github.pr import get_installation_token
+from app.github.pr import _validate_branch, get_installation_token
 from app.github_client import (
     GitHubClientError,
     GitHubResourceNotFoundError,
@@ -796,6 +796,7 @@ async def commit_session(
     # ------------------------------------------------------------------
     # 7. Update or create branch ref.
     # ------------------------------------------------------------------
+    _validate_branch(target_branch, allow_protected=False)
     try:
         await _update_ref(
             owner=repo.owner,

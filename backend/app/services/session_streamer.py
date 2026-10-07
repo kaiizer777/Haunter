@@ -61,12 +61,16 @@ _ALLOWED_EVENTS: frozenset[str] = frozenset(
     }
 )
 
-_REDACTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # AWS access key
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
     # GitHub PAT / OAuth / fine-grained tokens
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,}\b"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{50,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    # GitHub runner / recovery codes (ghr_)
+    (re.compile(r"\bghr_[A-Za-z0-9_]{10,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    # Neon / Supabase keys (npg_)
+    (re.compile(r"\bnpg_[A-Za-z0-9_]{16,}\b"), "[REDACTED_API_KEY]"),
     # OpenAI / Anthropic / general API keys (sk-...)
     (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "[REDACTED_API_KEY]"),
     # Private keys
@@ -75,20 +79,38 @@ _REDACTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "[REDACTED_PRIVATE_KEY]",
     ),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[^\n\r]*"), "[REDACTED_PRIVATE_KEY]"),
-    # Database connection strings with embedded passwords
+    # Database connection strings with embedded passwords (PostgreSQL, MySQL, MongoDB)
     (
-        re.compile(r"(postgres(?:ql)?(?:\+[a-z0-9]+)?://[^:]+:)([^@]+)(@)"),
+        re.compile(r"(postgres(?:ql)?(?:\+[a-z0-9]+)?://[^:/\s]+:)([^@/\s]+)(@)"),
         r"\g<1>[REDACTED_PASSWORD]\g<3>",
     ),
-    # Bearer tokens
-    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
+    (
+        re.compile(r"(mysql(?:\+[a-z0-9]+)?://[^:/\s]+:)([^@/\s]+)(@)"),
+        r"\g<1>[REDACTED_PASSWORD]\g<3>",
+    ),
+    (
+        re.compile(r"(mongodb(?:\+srv)?://[^:/\s]+:)([^@/\s]+)(@)"),
+        r"\g<1>[REDACTED_PASSWORD]\g<3>",
+    ),
+    # Authorization: Bearer headers
+    (
+        re.compile(r"(?i)\bAuthorization:\s*Bearer\s+[A-Za-z0-9\-._~+/]{16,}=*"),
+        "Authorization: Bearer [REDACTED]",
+    ),
+    # Bearer tokens (min length 16+ chars to prevent over-redacting prose)
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]{16,}=*"), "Bearer [REDACTED]"),
+    # Query parameter tokens (e.g. ?token=... or &token=...)
+    (re.compile(r"(?i)\btoken=[A-Za-z0-9\-._~+/]{16,}=*"), "token=[REDACTED]"),
 ]
+
+# Backwards compatibility alias
+_REDACTION_PATTERNS = _SECRET_PATTERNS
 
 
 def _redact_string(text: str) -> str:
     """Apply secret redaction patterns to a string."""
     result = text
-    for pattern, replacement in _REDACTION_PATTERNS:
+    for pattern, replacement in _SECRET_PATTERNS:
         result = pattern.sub(replacement, result)
     return result
 

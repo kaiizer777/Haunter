@@ -431,7 +431,10 @@ function SessionsContent() {
             branch_name: branchName,
             title: `Pairing on ${defaultRepo.name}`,
           });
-          if (cancelledRef.current) return;
+          if (cancelledRef.current) {
+            await loadSessions();
+            return;
+          }
           clearTimeout(safetyTimer);
           router.replace(`/sessions/workspace?id=${newSession.id}`);
           return;

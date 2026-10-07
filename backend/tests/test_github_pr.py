@@ -28,6 +28,7 @@ from app.github.pr import (
     GitHubPRAuthError,
     GitHubPRError,
     GitHubPRValidationError,
+    GitHubResourceNotFoundError,
     _TOKEN_CACHE,
     _build_jwt,
     _clear_pem_cache_for_tests,
@@ -39,6 +40,7 @@ from app.github.pr import (
     create_branch,
     get_installation_token,
     open_pr,
+    update_branch_ref,
 )
 
 
@@ -603,6 +605,8 @@ def test_parse_patch_files_with_deletion() -> None:
 @pytest.mark.anyio
 async def test_commit_patch_with_deletion_produces_null_sha_tree_entry() -> None:
     """commit_patch for deleted file creates tree entry with sha=None without creating blob."""
+    import base64
+
     deletion_patch = (
         "--- a/obsolete_module.py\n"
         "+++ /dev/null\n"
@@ -623,6 +627,12 @@ async def test_commit_patch_with_deletion_produces_null_sha_tree_entry() -> None
         )
         rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
             return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        rx.get("/repos/test-org/test-repo/contents/obsolete_module.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"old_code_1\nold_code_2\n").decode("ascii")},
+            )
         )
         rx.post("/repos/test-org/test-repo/git/trees").mock(
             side_effect=_mock_trees
@@ -653,4 +663,115 @@ async def test_commit_patch_with_deletion_produces_null_sha_tree_entry() -> None
         "type": "blob",
         "sha": None,
     }
+
+
+@pytest.mark.anyio
+async def test_commit_patch_with_deletion_mismatched_hunk_falls_back() -> None:
+    """commit_patch with mismatched deletion hunk falls back to haunter.patch."""
+    import base64
+
+    deletion_patch = (
+        "--- a/obsolete_module.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,2 +0,0 @@\n"
+        "-expected_code_1\n"
+        "-expected_code_2\n"
+    )
+    captured_tree_payload = []
+
+    def _mock_trees(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        captured_tree_payload.append(data)
+        return httpx.Response(201, json={"sha": "new_tree_sha_fallback"})
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
+        )
+        rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
+            return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        rx.get("/repos/test-org/test-repo/contents/obsolete_module.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"completely_different_code\n").decode("ascii")},
+            )
+        )
+        rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha_fallback"})
+        )
+        rx.post("/repos/test-org/test-repo/git/trees").mock(
+            side_effect=_mock_trees
+        )
+        rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "new_commit_fallback"})
+        )
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "new_commit_fallback"}})
+        )
+
+        commit_sha = await commit_patch(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-test",
+            patch_text=deletion_patch,
+            commit_msg="chore: delete obsolete module",
+            token="fake_token",
+        )
+
+    assert commit_sha == "new_commit_fallback"
+    assert len(captured_tree_payload) == 1
+    tree_entries = captured_tree_payload[0]["tree"]
+    assert len(tree_entries) == 1
+    assert tree_entries[0]["path"] == "haunter.patch"
+
+
+@pytest.mark.anyio
+async def test_update_branch_ref_404_raises_resource_not_found() -> None:
+    """update_branch_ref maps 404 to GitHubResourceNotFoundError."""
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").mock(
+            return_value=httpx.Response(404, json={"message": "Not Found"})
+        )
+        with pytest.raises(GitHubResourceNotFoundError, match="Branch ref not found"):
+            await update_branch_ref(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-1",
+                sha="a" * 40,
+                token="fake_token",
+            )
+
+
+@pytest.mark.anyio
+async def test_update_branch_ref_422_reference_not_exist_raises_resource_not_found() -> None:
+    """update_branch_ref maps 422 with 'Reference does not exist' to GitHubResourceNotFoundError."""
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").mock(
+            return_value=httpx.Response(
+                422, json={"message": "Reference does not exist", "documentation_url": "https://docs.github.com"}
+            )
+        )
+        with pytest.raises(GitHubResourceNotFoundError, match="Branch ref not found"):
+            await update_branch_ref(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-1",
+                sha="a" * 40,
+                token="fake_token",
+            )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("branch", ["main", "master", "dev", "develop", "refs/heads/main"])
+async def test_update_branch_ref_rejects_protected_branches(branch: str) -> None:
+    """update_branch_ref rejects direct updates to protected branches."""
+    with pytest.raises(GitHubPRValidationError, match="protected branch"):
+        await update_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch=branch,
+            sha="a" * 40,
+            token="fake_token",
+        )
 

@@ -22,6 +22,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.exc import OperationalError, DBAPIError
 
+from app.github.pr import GitHubPRValidationError
+from app.routers.sessions import commit_session
+from app.schemas import SessionCommitIn
+
 from app.sandbox.mirror import apply_unified_diff as mirror_apply_unified_diff
 from app.services.patch_applier import apply_unified_diff as patch_applier_apply_diff
 from app.services.session_orchestrator import (
@@ -324,3 +328,274 @@ async def test_orchestrator_load_session_raises_session_busy_error_on_lock_confl
 
     with pytest.raises(SessionBusyError):
         await orchestrator._load_session()
+
+
+# ---------------------------------------------------------------------------
+# 8. Block existing protected branch on commit_session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_session_blocks_existing_protected_branch() -> None:
+    """commit_session must invoke _validate_branch(target_branch, allow_protected=False) before _update_ref."""
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    mock_db = AsyncMock()
+    mock_user = MagicMock(id=user_id)
+
+    mock_repo = MagicMock()
+    mock_repo.owner = "test-org"
+    mock_repo.name = "test-repo"
+    mock_repo.default_branch = "dev"  # default_branch is dev
+
+    mock_session = MagicMock()
+    mock_session.id = session_id
+    mock_session.user_id = user_id
+    mock_session.status = "active"
+    mock_session.branch_name = "main"  # protected branch!
+    mock_session.base_sha = "a" * 40
+    mock_session.staged_patches = {"foo.py": "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n"}
+    mock_session.repo = mock_repo
+
+    mock_db_result = MagicMock()
+    mock_db_result.scalars.return_value.first.return_value = mock_session
+    mock_db.execute.return_value = mock_db_result
+
+    body = SessionCommitIn(title="Fix bug")
+
+    mock_update_ref = AsyncMock()
+
+    with (
+        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="a\n"),
+        patch("app.services.patch_applier.apply_unified_diff", return_value="b\n"),
+        patch("app.github_client.create_blob", new_callable=AsyncMock, return_value="blob_sha"),
+        patch("app.github_client.create_git_tree", new_callable=AsyncMock, return_value="tree_sha"),
+        patch("app.github_client.create_git_commit", new_callable=AsyncMock, return_value="commit_sha"),
+        patch("app.github_client.update_branch_ref", mock_update_ref),
+    ):
+        with pytest.raises(GitHubPRValidationError, match="Cannot target protected branch 'main' directly"):
+            await commit_session(
+                session_id=session_id,
+                body=body,
+                current_user=mock_user,
+                db=mock_db,
+            )
+
+    mock_update_ref.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 9. Checkpoint restore failure does not sync orchestrator state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_failure_does_not_sync_orchestrator_state() -> None:
+    """When checkpoint_restore fails, local staged_patches and conversation_history must NOT sync."""
+    session_id = uuid.uuid4()
+    mock_db = AsyncMock()
+
+    mock_session = MagicMock()
+    mock_session.id = session_id
+    mock_session.branch_name = "feat/test"
+    mock_session.base_sha = "a" * 40
+    mock_session.staged_patches = {"restored.py": "+restored"}
+    mock_session.conversation_history = [{"role": "user", "content": "restored history"}]
+    mock_session.checkpoints = []
+    mock_session.repo = MagicMock(owner="org", name="repo")
+
+    orchestrator = SessionOrchestrator(session_id=session_id, db=mock_db)
+
+    fake_tool_call = {
+        "id": "tc_restore_fail",
+        "type": "function",
+        "function": {
+            "name": "checkpoint_restore",
+            "arguments": json.dumps({"checkpoint_id": "non_existent_cp"}),
+        },
+    }
+
+    orchestrator._llm = AsyncMock()
+    orchestrator._llm.complete.side_effect = [
+        {"content": None, "tool_calls": [fake_tool_call], "model": "test-model"},
+        {"content": "Understood, restore failed.", "tool_calls": None, "model": "test-model"},
+    ]
+
+    orchestrator._load_session = AsyncMock(return_value=mock_session)
+    orchestrator._persist = AsyncMock()
+
+    original_staged = {"pre_turn.py": "+local"}
+    original_history = [{"role": "user", "content": "original 1"}, {"role": "assistant", "content": "reply 1"}]
+    mock_session.staged_patches = dict(original_staged)
+    mock_session.conversation_history = list(original_history)
+
+    queue = AsyncMock()
+
+    await orchestrator._execute(
+        user_message="restore bad checkpoint",
+        queue=queue,
+    )
+
+    orchestrator._persist.assert_awaited_once()
+    persisted_patches = orchestrator._persist.call_args[0][2]
+    assert "pre_turn.py" in persisted_patches
+    assert "restored.py" not in persisted_patches
+
+
+# ---------------------------------------------------------------------------
+# 10. Checkpoint restore success rebuilds messages LLM context
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_success_rebuilds_messages_context() -> None:
+    """When checkpoint_restore succeeds, messages LLM context is rebuilt from restored conversation_history."""
+    session_id = uuid.uuid4()
+    mock_db = AsyncMock()
+
+    cp_id = "cp_good"
+    cp_patches = {"restored.py": "+restored_code"}
+
+    mock_session = MagicMock()
+    mock_session.id = session_id
+    mock_session.branch_name = "feat/test"
+    mock_session.base_sha = "a" * 40
+    mock_session.staged_patches = {"bloat.py": "+bloat"}
+    mock_session.conversation_history = [
+        {"role": "user", "content": "turn 1 request"},
+        {"role": "assistant", "content": "turn 1 reply"},
+        {"role": "user", "content": "turn 2 request"},
+        {"role": "assistant", "content": "turn 2 reply"},
+        {"role": "user", "content": "turn 3 request"},
+        {"role": "assistant", "content": "turn 3 reply"},
+    ]
+    mock_session.checkpoints = [
+        {
+            "checkpoint_id": cp_id,
+            "turn": 1,
+            "timestamp": "2026-10-01T00:00:00Z",
+            "description": "turn 1 checkpoint",
+            "staged_patches": cp_patches,
+            "history_length": 2,
+        }
+    ]
+    mock_session.repo = MagicMock(owner="org", name="repo")
+
+    orchestrator = SessionOrchestrator(session_id=session_id, db=mock_db)
+
+    fake_tool_call = {
+        "id": "tc_restore_ok",
+        "type": "function",
+        "function": {
+            "name": "checkpoint_restore",
+            "arguments": json.dumps({"checkpoint_id": cp_id}),
+        },
+    }
+
+    orchestrator._llm = AsyncMock()
+    orchestrator._llm.complete.side_effect = [
+        {"content": None, "tool_calls": [fake_tool_call], "model": "test-model"},
+        {"content": "Session restored.", "tool_calls": None, "model": "test-model"},
+    ]
+
+    orchestrator._load_session = AsyncMock(return_value=mock_session)
+    orchestrator._persist = AsyncMock()
+
+    queue = AsyncMock()
+
+    await orchestrator._execute(
+        user_message="rollback to turn 1",
+        queue=queue,
+    )
+
+    assert orchestrator._llm.complete.call_count == 2
+    second_call_messages = orchestrator._llm.complete.call_args_list[1].kwargs["messages"]
+
+    messages_content = [m.get("content", "") for m in second_call_messages if m.get("content")]
+    all_content_str = " ".join(str(c) for c in messages_content)
+
+    assert "turn 1 request" in all_content_str
+    assert "turn 2 request" not in all_content_str
+    assert "turn 3 request" not in all_content_str
+
+
+# ---------------------------------------------------------------------------
+# 11. DB connection failure raises normally without SessionBusyError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_load_session_db_connection_failure_raises_normally() -> None:
+    """_load_session must allow standard DB connection failures to raise OperationalError/DBAPIError."""
+    session_id = uuid.uuid4()
+    mock_db = AsyncMock()
+
+    orchestrator = SessionOrchestrator(
+        session_id=session_id,
+        db=mock_db,
+    )
+
+    mock_db.execute.side_effect = OperationalError(
+        statement="SELECT ...",
+        params={},
+        orig=Exception("connection to server on socket failed: Connection refused"),
+    )
+
+    with pytest.raises(OperationalError):
+        await orchestrator._load_session()
+
+
+# ---------------------------------------------------------------------------
+# 12. Expanded secret redaction patterns and refined Bearer/Postgres regexes
+# ---------------------------------------------------------------------------
+
+
+def test_session_streamer_expanded_patterns_and_refinements() -> None:
+    """session_streamer._SECRET_PATTERNS redacts ghr, npg, mysql/mongo, auth headers, token query params, and preserves prose."""
+    # 1. ghr_ (GitHub recovery / runner codes)
+    res = _redact_secrets("ghr_1234567890abcdef")
+    assert "ghr_1234567890abcdef" not in res
+    assert "[REDACTED_GITHUB_TOKEN]" in res
+
+    # 2. npg_ (Neon Postgres keys)
+    res = _redact_secrets("npg_1234567890abcdef1234")
+    assert "npg_1234567890abcdef1234" not in res
+    assert "[REDACTED_API_KEY]" in res
+
+    # 3. MySQL URLs with credentials
+    res = _redact_secrets("mysql://dbuser:mypassword123@db.example.com:3306/haunter")
+    assert "mypassword123" not in res
+    assert "mysql://dbuser:[REDACTED_PASSWORD]@db.example.com:3306/haunter" in res
+
+    # 4. Mongo URLs with credentials (mongodb:// and mongodb+srv://)
+    res_mongo = _redact_secrets("mongodb://mongouser:secretpass456@cluster.mongodb.net/prod")
+    assert "secretpass456" not in res_mongo
+    assert "mongodb://mongouser:[REDACTED_PASSWORD]@cluster.mongodb.net/prod" in res_mongo
+
+    res_srv = _redact_secrets("mongodb+srv://admin:clusterpass789@prod.mongodb.net/test")
+    assert "clusterpass789" not in res_srv
+    assert "mongodb+srv://admin:[REDACTED_PASSWORD]@prod.mongodb.net/test" in res_srv
+
+    # 5. Authorization: Bearer ... headers
+    res_auth = _redact_secrets("Authorization: Bearer secrettoken1234567890")
+    assert "secrettoken1234567890" not in res_auth
+    assert "Authorization: Bearer [REDACTED]" in res_auth
+
+    # 6. token=... query parameters
+    res_query = _redact_secrets("https://api.example.com/v1?token=querysecret1234567890&page=1")
+    assert "querysecret1234567890" not in res_query
+    assert "token=[REDACTED]" in res_query
+
+    # 7. Refined Bearer token pattern: preserves prose "bearer token handling"
+    prose = "Please review the bearer token handling and validation logic."
+    assert _redact_secrets(prose) == prose
+
+    # 8. Refined PostgreSQL password regex: excludes whitespace and '/' from user and password classes
+    not_url = "postgresql:// /path/to/file:notpassword@example.com"
+    assert "notpassword" in _redact_secrets(not_url)
+
+    pg_url = "postgresql://myuser:realpass123@neon.tech/db"
+    assert "realpass123" not in _redact_secrets(pg_url)
+    assert "postgresql://myuser:[REDACTED_PASSWORD]@neon.tech/db" in _redact_secrets(pg_url)
+

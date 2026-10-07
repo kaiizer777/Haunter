@@ -14,8 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.models import UserRole
 
-# Branch name validation regex and protected branch names
+# Branch name and repo ident validation regexes and protected branch names
 _BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9/_.-]+$")
+_REPO_IDENT_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 _PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "develop", "dev"})
 
 
@@ -28,28 +29,50 @@ def _validate_git_branch(
     b = branch.strip()
     if not b:
         return None
-    if len(b) > 255:
+    clean = b.removeprefix("refs/heads/")
+    if not clean:
+        raise ValueError("Branch name cannot be empty.")
+    if len(clean) > 255:
         raise ValueError("Branch name cannot exceed 255 characters.")
     if (
-        not _BRANCH_NAME_RE.match(b)
-        or b.startswith("/")
-        or b.endswith("/")
-        or b.startswith(".")
-        or b.endswith(".")
-        or ".." in b
-        or "//" in b
+        not _BRANCH_NAME_RE.match(clean)
+        or clean.startswith("/")
+        or clean.endswith("/")
+        or "//" in clean
     ):
         raise ValueError(
             f"Invalid Git branch name format: {branch!r}. "
             "Only alphanumeric characters, '/', '_', '-', and '.' are allowed."
         )
-    clean = b.removeprefix("refs/heads/")
+    components = clean.split("/")
+    for comp in components:
+        if not comp:
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Empty path components are not allowed."
+            )
+        if comp.startswith("."):
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot start with '.': {comp!r}."
+            )
+        if comp.endswith("."):
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot end with '.': {comp!r}."
+            )
+        if comp.endswith(".lock"):
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot end with '.lock': {comp!r}."
+            )
+        if ".." in comp:
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot contain '..': {comp!r}."
+            )
+
     if not allow_protected and clean.lower() in _PROTECTED_BRANCHES:
         raise ValueError(
             f"Target branch cannot be a protected branch: {branch!r}. "
             f"Protected branches: {sorted(_PROTECTED_BRANCHES)}"
         )
-    return b
+    return clean
 
 
 class UserRoleUpdate(BaseModel):
@@ -68,6 +91,23 @@ class RepoCreate(BaseModel):
     language_hint: Optional[str] = Field(None, max_length=255)
     active_model_config_id: Optional[uuid.UUID] = None
     github_install_id: Optional[int] = Field(default=None, gt=0)
+
+    @field_validator("owner", "name")
+    @classmethod
+    def validate_repo_ident_field(cls, v: str) -> str:
+        if (
+            not v
+            or not _REPO_IDENT_RE.match(v)
+            or v in (".", "..")
+            or ".." in v
+            or "/" in v
+            or "\\" in v
+            or any(ord(c) < 32 or ord(c) == 127 for c in v)
+        ):
+            raise ValueError(
+                f"Invalid repository identifier: {v!r}. Only alphanumeric characters, '.', '_', and '-' are allowed."
+            )
+        return v
 
     @field_validator("default_branch")
     @classmethod

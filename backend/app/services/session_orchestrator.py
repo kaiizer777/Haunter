@@ -1100,6 +1100,37 @@ class SessionBusyError(Exception):
     """Raised when a concurrent prompt is already in flight for this session."""
 
 
+def _is_lock_conflict(exc: Exception) -> bool:
+    """Check if exception represents a DB row lock contention (e.g. Postgres 55P03 / lock_not_available)."""
+    orig = getattr(exc, "orig", exc)
+    code = (
+        getattr(orig, "pgcode", None)
+        or getattr(orig, "sqlstate", None)
+        or getattr(exc, "pgcode", None)
+        or getattr(exc, "sqlstate", None)
+    )
+    if code and str(code).upper() == "55P03":
+        return True
+
+    orig_cls_name = type(orig).__name__
+    if "LockNotAvailable" in orig_cls_name:
+        return True
+
+    msg = f"{exc} {orig}".lower()
+    if any(
+        s in msg
+        for s in (
+            "55p03",
+            "lock_not_available",
+            "could not obtain lock",
+            "database is locked",
+        )
+    ):
+        return True
+
+    return False
+
+
 # ------------------------------------------------------------------
 # Main orchestrator
 # ------------------------------------------------------------------
@@ -1330,11 +1361,26 @@ class SessionOrchestrator:
 
                 if tool_name == "checkpoint_restore":
                     # Checkpoint restore state synchronization:
-                    # Sync local staged_patches and conversation_history from session
-                    # so post-turn persistence does not overwrite with stale pre-restore snapshot variables.
-                    staged_patches.clear()
-                    staged_patches.update(dict(session.staged_patches or {}))
-                    conversation_history = list(session.conversation_history or [])
+                    # Only synchronize staged_patches and conversation_history if the restore operation actually succeeded (not on error/failure).
+                    if not tool_result.startswith("Error"):
+                        staged_patches.clear()
+                        staged_patches.update(dict(session.staged_patches or {}))
+                        conversation_history = list(session.conversation_history or [])
+
+                        # Rebuild messages LLM context from the restored session.conversation_history
+                        # so subsequent iterations in the turn use the restored history.
+                        restored_system_msg: dict[str, Any] = {
+                            "role": "system",
+                            "content": _build_system_prompt(
+                                repo_owner=repo.owner,
+                                repo_name=repo.name,
+                                branch_name=session.branch_name,
+                                base_sha=session.base_sha,
+                                staged_patches=staged_patches,
+                            ),
+                        }
+                        restored_pruned_history = _prune_conversation_history(conversation_history)
+                        messages = [restored_system_msg] + restored_pruned_history + list(new_entries)
 
                 if tool_name == "ask_user_clarification":
                     paused_for_clarification = True
@@ -2866,6 +2912,8 @@ class SessionOrchestrator:
             result = await self.db.execute(stmt)
             return result.scalars().first()
         except (OperationalError, DBAPIError) as exc:
+            if not _is_lock_conflict(exc):
+                raise
             logger.warning(
                 "session_orchestrator: session=%s lock conflict: %s",
                 self.session_id,

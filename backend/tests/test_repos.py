@@ -30,7 +30,41 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ModelConfig, Repo, User
+from app.repos import _validate_repo_ident, _verify_user_repo_permission
+from fastapi import HTTPException
 from tests.conftest import truncate_all
+
+
+@pytest.mark.parametrize(
+    ("bad_owner", "bad_name"),
+    [
+        ("../evil", "repo"),
+        ("owner", "../evil"),
+        ("owner/sub", "repo"),
+        ("owner", "repo/sub"),
+        ("owner\x00", "repo"),
+        ("owner", "repo\n"),
+        ("..", "repo"),
+        ("owner", ".."),
+        (".", "repo"),
+        ("owner", "."),
+    ],
+)
+def test_validate_repo_ident_rejects_path_traversal_and_invalid_chars(bad_owner: str, bad_name: str) -> None:
+    """_validate_repo_ident raises HTTPException 400 for path traversal, slashes, and control chars."""
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_repo_ident(bad_owner, "owner")
+        _validate_repo_ident(bad_name, "name")
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_verify_user_repo_permission_rejects_invalid_identifiers() -> None:
+    """_verify_user_repo_permission validates identifiers before constructing GitHub URLs."""
+    user = User(id=uuid.uuid4(), github_id=123, github_username="test", access_token="enc_token")
+    with pytest.raises(HTTPException) as exc_info:
+        await _verify_user_repo_permission(user, "../traversal", "repo")
+    assert exc_info.value.status_code == 400
 
 
 @pytest.fixture(autouse=True)
@@ -90,7 +124,10 @@ async def test_post_repo_forbidden_without_access_token(
 ):
     """POST /repos without access token returns 403 Forbidden."""
     await truncate_all(db)
-    user = await user_factory(github_id=740, username="no_token_user", access_token=None)
+    user = await user_factory(github_id=740, username="no_token_user")
+    user.access_token = None
+    await db.commit()
+    await db.refresh(user)
     client = make_auth_client(user.id)
 
     async with client:
@@ -100,6 +137,36 @@ async def test_post_repo_forbidden_without_access_token(
         )
         assert resp.status_code == 403
         assert "Push or admin permissions" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bad_owner", "bad_name"),
+    [
+        ("../evil_org", "repo1"),
+        ("evil_org", "../evil_repo"),
+        ("evil/org", "repo1"),
+        ("org", "repo/sub"),
+        ("org\x00", "repo1"),
+        ("org", "repo1\n"),
+        ("..", "repo1"),
+        ("org", ".."),
+    ],
+)
+async def test_post_repo_rejects_path_traversal_and_invalid_ident(
+    db: AsyncSession, user_factory, make_auth_client, bad_owner: str, bad_name: str
+):
+    """POST /repos rejects path traversal, slashes, control chars, and invalid ident chars."""
+    await truncate_all(db)
+    user = await user_factory(github_id=746, username="traversal_user")
+    client = make_auth_client(user.id)
+
+    async with client:
+        resp = await client.post(
+            "/repos",
+            json={"owner": bad_owner, "name": bad_name},
+        )
+        assert resp.status_code in (400, 422)
 
 
 @pytest.mark.asyncio

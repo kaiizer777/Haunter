@@ -898,13 +898,22 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
                 const lastThought = nonHeartbeatThoughts.at(-1) ?? "";
                 const isToolReasoning =
                   toolCalls.length > 0 &&
-                  toolCalls.some(
-                    (tc) =>
-                      lastThought.toLowerCase().startsWith(`calling ${tc.name.toLowerCase()}`) ||
-                      lastThought.toLowerCase().startsWith(`executing ${tc.name.toLowerCase()}`) ||
-                      lastThought.toLowerCase().startsWith(`running ${tc.name.toLowerCase()}`) ||
-                      lastThought.toLowerCase() === tc.name.toLowerCase()
-                  );
+                  toolCalls.some((tc) => {
+                    const name = tc.name.toLowerCase().trim();
+                    if (!name) return false;
+                    const lower = lastThought.toLowerCase().trim();
+                    if (lower === name) return true;
+                    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                    const pattern = new RegExp(
+                      `^(?:calling|executing|running)\\s+${escaped}(?:\\b|[\\(:\\s]|$)`,
+                      "i"
+                    );
+                    return (
+                      pattern.test(lower) &&
+                      !lower.includes("\n") &&
+                      lower.length < 150
+                    );
+                  });
                 if (!isToolReasoning) {
                   contentThought = lastThought;
                 }

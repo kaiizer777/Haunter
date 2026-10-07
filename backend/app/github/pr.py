@@ -32,6 +32,7 @@ from typing import Any, Optional
 import httpx
 
 from app.config import settings
+from app.github_client import GitHubResourceNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -675,14 +676,107 @@ async def _get_repo_default_branch_sha(
     owner: str, repo: str, branch: str, token: str
 ) -> str:
     """Fetch the HEAD SHA of `branch` in the repo."""
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/ref/heads/{branch}"
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    _validate_branch(branch, allow_protected=True)
+    clean_branch = branch.removeprefix("refs/heads/")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/ref/heads/{clean_branch}"
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = await client.get(url, headers=_build_auth_headers(token))
+        try:
+            resp = await client.get(url, headers=_build_auth_headers(token))
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error fetching ref heads/{clean_branch}: {exc.__class__.__name__}"
+            ) from exc
+
+    if resp.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+        )
+    if resp.status_code == 422:
+        error_msg = resp.text
+        if "reference does not exist" in error_msg.lower() or "not found" in error_msg.lower():
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+            )
+        raise GitHubPRError(
+            f"Failed to fetch ref heads/{clean_branch} (422): {error_msg[:200]}"
+        )
+    if resp.status_code in (401, 403):
+        raise GitHubPRAuthError(f"Auth failed fetching branch ref ({resp.status_code}).")
     if resp.is_error:
         raise GitHubPRError(
-            f"Failed to fetch ref heads/{branch}: HTTP {resp.status_code}"
+            f"Failed to fetch ref heads/{clean_branch}: HTTP {resp.status_code}"
         )
     return resp.json()["object"]["sha"]
+
+
+async def update_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    sha: str,
+    token: str,
+    force: bool = False,
+) -> None:
+    """
+    Update a branch ref to point at a new commit SHA.
+
+    PATCH /repos/{owner}/{repo}/git/refs/heads/{branch}
+
+    Rejects protected branches directly (allow_protected=False).
+
+    Raises:
+        GitHubPRValidationError: On invalid owner, repo, or branch, or protected branch.
+        GitHubResourceNotFoundError: On 404 or 422 ("Reference does not exist").
+        GitHubPRAuthError: On 401/403.
+        GitHubPRError: On other HTTP / network errors.
+    """
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    _validate_branch(branch, allow_protected=False)
+
+    clean_branch = branch.removeprefix("refs/heads/")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_auth_headers(token)
+    payload = {"sha": sha, "force": force}
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        try:
+            resp = await client.patch(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error updating branch ref {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+    if resp.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+        )
+    if resp.status_code == 422:
+        error_msg = resp.text
+        if "reference does not exist" in error_msg.lower() or "not found" in error_msg.lower():
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+            )
+        raise GitHubPRError(
+            f"Failed to update ref heads/{clean_branch} (422): {error_msg[:200]}"
+        )
+    if resp.status_code in (401, 403):
+        raise GitHubPRAuthError(f"Auth failed updating branch ref ({resp.status_code}).")
+    if resp.is_error:
+        raise GitHubPRError(
+            f"Failed to update ref heads/{clean_branch}: HTTP {resp.status_code}"
+        )
+
+    logger.info(
+        "github.pr: updated ref %s/%s:%s to sha=%s (force=%s)",
+        owner,
+        repo,
+        clean_branch,
+        sha[:8],
+        force,
+    )
 
 
 async def create_branch(
@@ -924,10 +1018,28 @@ async def commit_patch(
 
     headers = _build_auth_headers(token)
     api = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+    clean_branch = branch.removeprefix("refs/heads/")
 
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
         # 1. Fetch the current HEAD SHA for branch
-        ref_resp = await client.get(f"{api}/git/ref/heads/{branch}", headers=headers)
+        try:
+            ref_resp = await client.get(f"{api}/git/ref/heads/{clean_branch}", headers=headers)
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error fetching HEAD for branch {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+        if ref_resp.status_code == 404:
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+            )
+        if ref_resp.status_code == 422:
+            if "reference does not exist" in ref_resp.text.lower() or "not found" in ref_resp.text.lower():
+                raise GitHubResourceNotFoundError(
+                    f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+                )
+        if ref_resp.status_code in (401, 403):
+            raise GitHubPRAuthError(f"Auth failed fetching branch ref ({ref_resp.status_code}).")
         if ref_resp.is_error:
             raise GitHubPRError(
                 f"Cannot fetch HEAD for branch {branch!r}: HTTP {ref_resp.status_code}"
@@ -974,17 +1086,6 @@ async def commit_patch(
                     if second_line in ("+++ /dev/null", "+++ b//dev/null", "+++ dev/null"):
                         is_deletion = True
 
-                if is_deletion:
-                    tree_entries.append(
-                        {
-                            "path": file_path,
-                            "mode": "100644",
-                            "type": "blob",
-                            "sha": None,
-                        }
-                    )
-                    continue
-
                 # Fetch current file content (may be new file → 404)
                 content_resp = await client.get(
                     f"{api}/contents/{file_path}",
@@ -992,6 +1093,13 @@ async def commit_patch(
                     params={"ref": head_sha},
                 )
                 if content_resp.status_code == 404:
+                    if is_deletion:
+                        logger.warning(
+                            "github.pr: deletion target %r not found (404) — fallback",
+                            file_path,
+                        )
+                        use_fallback = True
+                        break
                     original_text = ""
                 elif content_resp.is_error:
                     logger.warning(
@@ -1040,6 +1148,17 @@ async def commit_patch(
                     )
                     use_fallback = True
                     break
+
+                if is_deletion:
+                    tree_entries.append(
+                        {
+                            "path": file_path,
+                            "mode": "100644",
+                            "type": "blob",
+                            "sha": None,
+                        }
+                    )
+                    continue
 
                 # Create blob for new file content
                 blob_resp = await client.post(
@@ -1128,14 +1247,31 @@ async def commit_patch(
         new_commit_sha = new_commit_resp.json()["sha"]
 
         # 6. Update the branch ref — force=False (default for PATCH)
-        update_resp = await client.patch(
-            f"{api}/git/refs/heads/{branch}",
-            headers=headers,
-            json={"sha": new_commit_sha, "force": False},
-        )
+        try:
+            update_resp = await client.patch(
+                f"{api}/git/refs/heads/{clean_branch}",
+                headers=headers,
+                json={"sha": new_commit_sha, "force": False},
+            )
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error updating branch ref {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+        if update_resp.status_code == 404:
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+            )
+        if update_resp.status_code == 422:
+            if "reference does not exist" in update_resp.text.lower() or "not found" in update_resp.text.lower():
+                raise GitHubResourceNotFoundError(
+                    f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+                )
+        if update_resp.status_code in (401, 403):
+            raise GitHubPRAuthError(f"Auth failed updating branch ref ({update_resp.status_code}).")
         if update_resp.is_error:
             raise GitHubPRError(
-                f"Failed to update ref heads/{branch}: HTTP {update_resp.status_code}"
+                f"Failed to update ref heads/{clean_branch}: HTTP {update_resp.status_code}"
             )
 
     logger.info(

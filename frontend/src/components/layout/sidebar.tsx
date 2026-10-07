@@ -249,7 +249,7 @@ export function Sidebar() {
             </div>
             <div className="flex items-center gap-1 rounded-[5px] bg-gradient-to-b from-emerald-500/15 via-emerald-500/10 to-emerald-500/5 border-t border-t-emerald-400/40 border-x border-x-emerald-500/25 border-b border-b-emerald-600/20 px-1.5 py-0.5 text-[10px] font-mono text-emerald-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_1px_2px_rgba(0,0,0,0.3)]">
               <ShieldCheck className="h-3 w-3" />
-              <span>Active</span>
+              <span>System Ready</span>
             </div>
           </div>
 

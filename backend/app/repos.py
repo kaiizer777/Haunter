@@ -13,6 +13,7 @@ Security invariant (multi-tenant isolation):
 """
 
 import logging
+import re
 import uuid
 from typing import Annotated, Optional
 
@@ -35,14 +36,36 @@ router = APIRouter(tags=["repos"])
 _GITHUB_API_BASE = "https://api.github.com"
 _DEFAULT_TIMEOUT_SECONDS = 15.0
 
+_REPO_IDENT_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+
+
+def _validate_repo_ident(value: str, label: str) -> None:
+    """Validate owner or repo name to prevent SSRF / path traversal."""
+    if (
+        not value
+        or not _REPO_IDENT_RE.match(value)
+        or value in (".", "..")
+        or ".." in value
+        or "/" in value
+        or "\\" in value
+        or any(ord(c) < 32 or ord(c) == 127 for c in value)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid repository {label}: {value!r}. Only alphanumeric characters, '.', '_', and '-' are allowed without path traversal segments.",
+        )
+
 
 async def _verify_user_repo_permission(
     current_user: User, owner: str, name: str
 ) -> None:
     """
     Verify that the authenticated user has push or admin permissions on GitHub for owner/name.
+    Raises HTTPException(400) if owner or name is invalid.
     Raises HTTPException(403) if access is unauthorized or token is missing/invalid.
     """
+    _validate_repo_ident(owner, "owner")
+    _validate_repo_ident(name, "name")
     if not current_user.access_token:
         logger.warning(
             "repos: user %s has no access token to verify repo %s/%s",
@@ -163,7 +186,9 @@ async def add_repo(
     by two different tenants independently.
     Verifies user push/admin permissions on GitHub and validates GitHub App installation.
     """
-    # 1. Verify user's push/admin access on GitHub
+    # 1. Validate repository identifiers and verify user's push/admin access on GitHub
+    _validate_repo_ident(body.owner, "owner")
+    _validate_repo_ident(body.name, "name")
     await _verify_user_repo_permission(current_user, body.owner, body.name)
 
     # 2. Check for duplicate under this user before insert.

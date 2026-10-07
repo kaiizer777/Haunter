@@ -103,6 +103,27 @@ def test_repo_create_extra_fields_ignored() -> None:
     assert "unrecognized_extra_key" not in dumped
 
 
+@pytest.mark.parametrize(
+    ("bad_owner", "bad_name"),
+    [
+        ("../evil", "valid_name"),
+        ("valid_owner", "../evil"),
+        ("evil/org", "valid_name"),
+        ("valid_owner", "evil/repo"),
+        ("owner\x00", "valid_name"),
+        ("valid_owner", "name\n"),
+        ("..", "valid_name"),
+        ("valid_owner", ".."),
+        (".", "valid_name"),
+        ("valid_owner", "."),
+    ],
+)
+def test_repo_create_invalid_owner_and_name_rejected(bad_owner: str, bad_name: str) -> None:
+    """RepoCreate rejects path traversal, slashes, control chars, and invalid ident chars."""
+    with pytest.raises(ValidationError):
+        RepoCreate(owner=bad_owner, name=bad_name)
+
+
 # ---------------------------------------------------------------------------
 # RepoOut
 # ---------------------------------------------------------------------------
@@ -424,4 +445,29 @@ def test_commit_request_rejects_protected_branches(protected: str) -> None:
     """CommitRequest rejects protected branches."""
     with pytest.raises(ValidationError, match="protected branch"):
         CommitRequest(title="fix: something", branch_name=protected)
+
+
+@pytest.mark.parametrize(
+    "invalid_branch",
+    [
+        "feature/.hidden",
+        "fix/.env",
+        ".hidden/branch",
+        "feature.lock",
+        "feature/task.lock",
+        "fix/my.lock/branch",
+    ],
+)
+def test_validate_git_branch_rejects_hidden_components_and_lock_suffixes(invalid_branch: str) -> None:
+    """_validate_git_branch rejects branch paths with hidden components or .lock suffix components."""
+    with pytest.raises(ValidationError):
+        SessionCreate(repo_id=uuid.uuid4(), branch_name=invalid_branch)
+
+
+def test_validate_git_branch_cleanly_strips_refs_heads_prefix() -> None:
+    """_validate_git_branch cleanly strips refs/heads/ prefix."""
+    s = SessionCreate(repo_id=uuid.uuid4(), branch_name="refs/heads/feature/awesome")
+    assert s.branch_name == "feature/awesome"
+    r = RepoCreate(owner="owner", name="repo", default_branch="refs/heads/main")
+    assert r.default_branch == "main"
 

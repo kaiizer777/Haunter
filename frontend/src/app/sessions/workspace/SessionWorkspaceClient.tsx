@@ -824,17 +824,7 @@ function ToolExecutionAccordion({
                 (chip.args?.output as string) ||
                 (chip.args?.summary as string) ||
                 "";
-              const hasViolations =
-                scanResult.toLowerCase().includes("violation") ||
-                scanResult.toLowerCase().includes("vulnerabilit") ||
-                scanResult.toLowerCase().includes("failed") ||
-                scanResult.toLowerCase().includes("critical") ||
-                scanResult.toLowerCase().includes("high");
-              const isClean =
-                !hasViolations &&
-                (scanResult.toLowerCase().includes("passed") ||
-                  scanResult.toLowerCase().includes("clean") ||
-                  scanResult === "");
+              const { isClean } = parseSecurityScanResult(scanResult);
               icon = isClean ? (
                 <ShieldCheck className="h-3.5 w-3.5 text-emerald-400/80 shrink-0" />
               ) : (
@@ -1934,11 +1924,13 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   const initialScrolledRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Wire security violations detection from messages (tool calls & audit scans)
+  // Wire security violations detection from messages (tool calls & audit scans) — scan newest first
   useEffect(() => {
-    for (const msg of messages) {
-      if (msg.toolCalls) {
-        for (const tc of msg.toolCalls) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.toolCalls && msg.toolCalls.length > 0) {
+        for (let j = msg.toolCalls.length - 1; j >= 0; j--) {
+          const tc = msg.toolCalls[j];
           if (tc.name === "scan_security_vulnerabilities") {
             const scanResult =
               (tc.args?.scan_result as string) ||
@@ -1946,16 +1938,14 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
               (tc.args?.output as string) ||
               (tc.args?.summary as string) ||
               "";
-            const hasViolations =
-              scanResult.toLowerCase().includes("violation") ||
-              scanResult.toLowerCase().includes("vulnerabilit") ||
-              scanResult.toLowerCase().includes("failed") ||
-              scanResult.toLowerCase().includes("critical") ||
-              scanResult.toLowerCase().includes("high");
+            const { hasViolations, isClean } = parseSecurityScanResult(scanResult);
             if (hasViolations) {
               setSecurityViolations(
                 scanResult || "Security violations detected in repository scan."
               );
+              return;
+            } else if (isClean) {
+              setSecurityViolations(null);
               return;
             }
           }
@@ -1972,9 +1962,13 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
             `${blockers.length} critical security blocker(s) detected.`
           );
           return;
+        } else {
+          setSecurityViolations(null);
+          return;
         }
       }
     }
+    setSecurityViolations(null);
   }, [messages]);
 
   // -------------------------------------------------------------------------
@@ -2140,10 +2134,14 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
   const handleStageAuditFix = useCallback(
     async (finding: AuditFinding, diff?: string) => {
+      const cleanDiff = stripCodeFences(diff);
+      const cleanRemediation = stripCodeFences(finding.remediation_diff);
+      const cleanSuggested = stripCodeFences(finding.suggested_fix);
+
       const candidateDiff =
-        (isUnifiedDiff(diff) ? diff : null) ||
-        (isUnifiedDiff(finding.remediation_diff) ? finding.remediation_diff : null) ||
-        (isUnifiedDiff(finding.suggested_fix) ? finding.suggested_fix : null);
+        (isUnifiedDiff(cleanDiff) ? cleanDiff : null) ||
+        (isUnifiedDiff(cleanRemediation) ? cleanRemediation : null) ||
+        (isUnifiedDiff(cleanSuggested) ? cleanSuggested : null);
 
       if (candidateDiff && finding.file_path) {
         setStagedPatches((prev) => ({
@@ -2152,7 +2150,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
         }));
         setActiveFile(finding.file_path);
       } else {
-        const fixProse = finding.suggested_fix || finding.description || "";
+        const fixProse = cleanSuggested || finding.description || "";
         const prompt = `Apply surgical fix for finding ${finding.id || finding.title || "audit issue"} in ${finding.file_path}${finding.line_start ? `:${finding.line_start}` : ""}${finding.line_end ? `-${finding.line_end}` : ""}${fixProse ? `: ${fixProse}` : ""}`;
         await handleSendChat(prompt);
       }
@@ -3546,9 +3544,44 @@ function guessLanguage(filePath: string): string {
   return map[ext] ?? "plaintext";
 }
 
+function stripCodeFences(text?: string): string {
+  if (!text || typeof text !== "string") return "";
+  let clean = text.trim();
+  if (clean.startsWith("```")) {
+    clean = clean.replace(/^```[a-zA-Z0-9_-]*\r?\n?/, "").replace(/\r?\n?```$/, "");
+  }
+  return clean.trim();
+}
+
+function parseSecurityScanResult(scanResult: string): { hasViolations: boolean; isClean: boolean } {
+  if (!scanResult) return { hasViolations: false, isClean: true };
+  const lower = scanResult.toLowerCase().trim();
+
+  // Explicit clean phrases / 0 violations
+  const isCleanPhrase =
+    lower === "" ||
+    /\b(?:clean|passed|passed\s+cleanly|passed\s+all\s+checks|success(?:ful)?)\b/.test(lower) ||
+    /(?:no|0|zero)\s+(?:security\s+)?(?:vulnerabilit\w*|violation\w*|flaws?|secrets?|issues?|findings?|alerts?)/.test(lower) ||
+    /0\s+(?:secrets?|sql\s+injection\s+flaws?|flaws?|vulnerabilit\w*|violations?|critical|high)/.test(lower) ||
+    lower.includes("no vulnerabilities found") ||
+    lower.includes("no violations found") ||
+    lower.includes("0 secrets or sql injection flaws detected");
+
+  if (isCleanPhrase) {
+    return { hasViolations: false, isClean: true };
+  }
+
+  const hasViolations =
+    /(?:found|detected|\d+)\s+(?:security\s+)?(?:vulnerabilit\w*|violation\w*|flaws?|secrets?|issues?|findings?|alerts?)/.test(lower) ||
+    /\b(?:failed|critical|high|blocker|violation|vulnerabilit\w*)\b/.test(lower);
+
+  return { hasViolations, isClean: !hasViolations };
+}
+
 function isUnifiedDiff(text?: string): boolean {
   if (!text || typeof text !== "string") return false;
-  const trimmed = text.trim();
+  const stripped = stripCodeFences(text);
+  const trimmed = stripped.trim();
   return (
     trimmed.startsWith("diff --git") ||
     trimmed.startsWith("--- ") ||
