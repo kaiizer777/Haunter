@@ -49,7 +49,7 @@ async def _seed_user_and_repo(db: AsyncSession, *, github_id: int) -> tuple[User
     repo = Repo(
         user_id=user.id,
         owner="test-org",
-        name="test-repo",
+        name=f"test-repo-{github_id}",
         default_branch="main",
         github_install_id=999,
     )

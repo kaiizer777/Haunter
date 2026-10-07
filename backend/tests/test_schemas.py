@@ -20,11 +20,15 @@ from pydantic import ValidationError
 from app.models import Repo
 from app.schemas import (
     AvailableRepoOut,
+    CommitRequest,
     HostingConfigOut,
     HostingConfigUpdate,
     ModelConfigUpdate,
     RepoCreate,
     RepoOut,
+    SessionCommitIn,
+    SessionCreate,
+    SessionCreateIn,
     WorkflowRunObj,
     WorkflowRunRepo,
     WorkflowRunRepoOwner,
@@ -365,3 +369,59 @@ def test_hosting_config_out(source: str) -> None:
     assert out.hosting_provider == "aws"
     assert out.sandbox_provider == "github_actions"
     assert out.source == source
+
+
+# ---------------------------------------------------------------------------
+# Branch Name Validation & Protected Branches
+# ---------------------------------------------------------------------------
+
+
+def test_repo_create_default_branch_allows_main() -> None:
+    """RepoCreate allows standard default branch names like 'main' and 'master'."""
+    r1 = RepoCreate(owner="owner", name="repo", default_branch="main")
+    assert r1.default_branch == "main"
+    r2 = RepoCreate(owner="owner", name="repo", default_branch="master")
+    assert r2.default_branch == "master"
+
+
+@pytest.mark.parametrize(
+    "invalid_branch",
+    ["/starts-with-slash", "ends-with-slash/", "dot..dot", "slash//slash", ".hidden", "trailing."],
+)
+def test_repo_create_default_branch_rejects_invalid_format(invalid_branch: str) -> None:
+    """RepoCreate rejects invalid git branch characters and traversal patterns."""
+    with pytest.raises(ValidationError):
+        RepoCreate(owner="owner", name="repo", default_branch=invalid_branch)
+
+
+def test_session_create_valid_branch() -> None:
+    """SessionCreate allows valid branch names including main."""
+    s = SessionCreate(repo_id=uuid.uuid4(), branch_name="feature/my-task_1")
+    assert s.branch_name == "feature/my-task_1"
+    s_main = SessionCreate(repo_id=uuid.uuid4(), branch_name="main")
+    assert s_main.branch_name == "main"
+
+
+@pytest.mark.parametrize(
+    "invalid_branch",
+    ["/starts-with-slash", "ends-with-slash/", "dot..dot", "slash//slash", "has spaces", "bad$char"],
+)
+def test_session_create_rejects_invalid_format(invalid_branch: str) -> None:
+    """SessionCreate rejects malformed branch names."""
+    with pytest.raises(ValidationError):
+        SessionCreate(repo_id=uuid.uuid4(), branch_name=invalid_branch)
+
+
+def test_commit_request_valid() -> None:
+    """CommitRequest / SessionCommitIn allows valid non-protected branch and alias."""
+    c = CommitRequest(title="fix: something", branch_name="haunter/fix-1")
+    assert c.title == "fix: something"
+    assert c.branch_name == "haunter/fix-1"
+
+
+@pytest.mark.parametrize("protected", ["main", "master", "dev", "develop"])
+def test_commit_request_rejects_protected_branches(protected: str) -> None:
+    """CommitRequest rejects protected branches."""
+    with pytest.raises(ValidationError, match="protected branch"):
+        CommitRequest(title="fix: something", branch_name=protected)
+

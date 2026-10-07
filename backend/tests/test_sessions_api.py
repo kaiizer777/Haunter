@@ -53,7 +53,7 @@ async def _seed_user_and_repo(
     repo = Repo(
         user_id=user.id,
         owner="test-org",
-        name="test-repo",
+        name=f"test-repo-{github_id}",
         default_branch="main",
         github_install_id=999,
     )

@@ -1328,6 +1328,14 @@ class SessionOrchestrator:
                     session=session,
                 )
 
+                if tool_name == "checkpoint_restore":
+                    # Checkpoint restore state synchronization:
+                    # Sync local staged_patches and conversation_history from session
+                    # so post-turn persistence does not overwrite with stale pre-restore snapshot variables.
+                    staged_patches.clear()
+                    staged_patches.update(dict(session.staged_patches or {}))
+                    conversation_history = list(session.conversation_history or [])
+
                 if tool_name == "ask_user_clarification":
                     paused_for_clarification = True
 
@@ -2836,22 +2844,36 @@ class SessionOrchestrator:
         """
         Load the AgentSession with its repo relationship.
 
+        Enforces concurrency locking via with_for_update(nowait=True).
         Returns None if the session does not exist or is not active.
+        Raises SessionBusyError if another transaction is currently holding the lock.
         Note: object-level auth (user_id check) is enforced at the endpoint;
         this layer only checks existence and status.
         """
         from sqlalchemy.orm import selectinload
+        from sqlalchemy.exc import DBAPIError, OperationalError
 
-        stmt = (
-            select(AgentSession)
-            .options(selectinload(AgentSession.repo))
-            .where(
-                AgentSession.id == self.session_id,
-                AgentSession.status == "active",
+        try:
+            stmt = (
+                select(AgentSession)
+                .options(selectinload(AgentSession.repo))
+                .where(
+                    AgentSession.id == self.session_id,
+                    AgentSession.status == "active",
+                )
+                .with_for_update(nowait=True)
             )
-        )
-        result = await self.db.execute(stmt)
-        return result.scalars().first()
+            result = await self.db.execute(stmt)
+            return result.scalars().first()
+        except (OperationalError, DBAPIError) as exc:
+            logger.warning(
+                "session_orchestrator: session=%s lock conflict: %s",
+                self.session_id,
+                exc,
+            )
+            raise SessionBusyError(
+                f"Session {self.session_id} is currently busy with another operation."
+            ) from exc
 
     async def _persist(
         self,

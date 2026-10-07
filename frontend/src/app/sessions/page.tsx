@@ -347,6 +347,7 @@ function SessionsContent() {
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const autoLoadAttemptedRef = useRef(false);
+  const cancelledRef = useRef(false);
 
   const loadSessions = useCallback(async () => {
     try {
@@ -376,7 +377,9 @@ function SessionsContent() {
 
     // Safety fallback: if auto-load doesn't redirect within 7s, fall back to sessions dashboard
     const safetyTimer = setTimeout(() => {
-      setAutoLoading(false);
+      if (!cancelledRef.current) {
+        setAutoLoading(false);
+      }
     }, 7000);
 
     async function init() {
@@ -395,6 +398,8 @@ function SessionsContent() {
           }),
         ]);
 
+        if (cancelledRef.current) return;
+
         setSessions(sessionsData.sessions);
         setTotal(sessionsData.total);
         setRepos(reposData);
@@ -405,21 +410,28 @@ function SessionsContent() {
           (s) => s.status === "active" || s.status === "awaiting_clarification"
         );
         if (activeSession) {
+          if (cancelledRef.current) return;
           clearTimeout(safetyTimer);
           setAutoLoadStatus(`Resuming session: ${activeSession.title || activeSession.id.slice(0, 8)}…`);
           router.replace(`/sessions/workspace?id=${activeSession.id}`);
           return;
         }
 
-        // 2. If no active session, auto-create a new session using the primary repo
+        // 2. If no active session, auto-create a new session using the primary repo on an isolated topic branch
         if (reposData.length > 0) {
+          if (cancelledRef.current) return;
           const defaultRepo = reposData[0];
           setAutoLoadStatus(`Creating new session on ${defaultRepo.owner}/${defaultRepo.name}…`);
+          const branchSuffix = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID().slice(0, 8)
+            : Math.random().toString(36).slice(2, 10);
+          const branchName = `haunter/session-${branchSuffix}`;
           const newSession = await api.createSession({
             repo_id: defaultRepo.id,
-            branch_name: defaultRepo.default_branch || "main",
+            branch_name: branchName,
             title: `Pairing on ${defaultRepo.name}`,
           });
+          if (cancelledRef.current) return;
           clearTimeout(safetyTimer);
           router.replace(`/sessions/workspace?id=${newSession.id}`);
           return;
@@ -430,6 +442,7 @@ function SessionsContent() {
         setAutoLoading(false);
       } catch (err) {
         clearTimeout(safetyTimer);
+        if (cancelledRef.current) return;
         const msg = err instanceof ApiError ? err.message : "Failed to auto-load session.";
         setError(msg);
         setAutoLoading(false);
@@ -467,9 +480,13 @@ function SessionsContent() {
     try {
       setLoading(true);
       setError(null);
+      const branchSuffix = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID().slice(0, 8)
+        : Math.random().toString(36).slice(2, 10);
+      const branchName = `haunter/session-${branchSuffix}`;
       const newSession = await api.createSession({
         repo_id: defaultRepo.id,
-        branch_name: defaultRepo.default_branch || "main",
+        branch_name: branchName,
         title: `Pairing on ${defaultRepo.name}`,
       });
       router.push(`/sessions/workspace?id=${newSession.id}`);
@@ -501,7 +518,12 @@ function SessionsContent() {
           </p>
 
           <button
-            onClick={() => setAutoLoading(false)}
+            onClick={() => {
+              cancelledRef.current = true;
+              setAutoLoading(false);
+              loadSessions();
+              api.getRepos().then(setRepos).catch(() => {});
+            }}
             className="text-xs font-mono text-zinc-500 hover:text-amber-400 transition-colors underline underline-offset-4"
           >
             Cancel auto-load & view all sessions

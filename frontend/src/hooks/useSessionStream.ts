@@ -888,9 +888,28 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
               // Finalise the assistant message with all accumulated content.
               // The backend emits the LLM response text via put_thought ({"delta": "..."})
               // and never emits a separate content event, so if assistantContent is empty
-              // we promote the last non-heartbeat thought as the visible response.
+              // we promote the last non-heartbeat thought as the visible response, ONLY IF
+              // it is not an intermediate tool execution thought on a multi-step turn.
               const HEARTBEAT = "Analyzing your request…";
-              const contentThought = thoughts.filter((t) => t !== HEARTBEAT).at(-1) ?? "";
+              const nonHeartbeatThoughts = thoughts.filter((t) => t !== HEARTBEAT);
+
+              let contentThought = "";
+              if (!assistantContent && nonHeartbeatThoughts.length > 0) {
+                const lastThought = nonHeartbeatThoughts.at(-1) ?? "";
+                const isToolReasoning =
+                  toolCalls.length > 0 &&
+                  toolCalls.some(
+                    (tc) =>
+                      lastThought.toLowerCase().startsWith(`calling ${tc.name.toLowerCase()}`) ||
+                      lastThought.toLowerCase().startsWith(`executing ${tc.name.toLowerCase()}`) ||
+                      lastThought.toLowerCase().startsWith(`running ${tc.name.toLowerCase()}`) ||
+                      lastThought.toLowerCase() === tc.name.toLowerCase()
+                  );
+                if (!isToolReasoning) {
+                  contentThought = lastThought;
+                }
+              }
+
               const finalContent =
                 typeof frame.data === "string"
                   ? frame.data
@@ -898,7 +917,7 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
               // Keep all thoughts in the accordion but strip the response from thoughts
               // so it doesn't display twice (once as content, once collapsed).
               const displayThoughts = thoughts.filter(
-                (t) => t !== HEARTBEAT && t !== contentThought
+                (t) => t !== HEARTBEAT && (!contentThought || t !== contentThought)
               );
               // Use the actual model reported by the backend (reflects fallbacks).
               // Falls back to requestedModel for older deploys that don't emit model_used.
@@ -975,8 +994,8 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
         // Flush any remaining frame (stream ended without trailing blank line).
         flushFrame();
       } catch (err: unknown) {
-        if ((err as { name?: string })?.name === "AbortError") {
-          // Intentional abort — no error to surface.
+        if ((err as { name?: string })?.name === "AbortError" || controller.signal.aborted) {
+          // Intentional abort — cleanly settle streaming without error message
           return;
         }
         const msg = err instanceof Error ? err.message : "Streaming error";
@@ -989,7 +1008,10 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
   );
 
   const stopStreaming = useCallback(() => {
-    abortRef.current?.abort();
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
     setIsStreaming(false);
   }, []);
 

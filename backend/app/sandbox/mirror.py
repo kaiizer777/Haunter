@@ -718,6 +718,8 @@ def apply_unified_diff(base_content: str, patch_text: str) -> str:
                 len(base_lines),
             )
 
+    if not base_lines:
+        return ""
     res = "\n".join(base_lines)
     if base_content.endswith("\n") and not res.endswith("\n"):
         res += "\n"

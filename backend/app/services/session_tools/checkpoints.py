@@ -154,6 +154,7 @@ def tool_scan_security_vulnerabilities(
     violations: list[dict[str, Any]] = []
 
     staged: dict[str, str] = dict(session.staged_patches or {})
+    scanned_count = 0
 
     for file_path in paths:
         content: str | None = None
@@ -177,6 +178,7 @@ def tool_scan_security_vulnerabilities(
         if content is None:
             continue
 
+        scanned_count += 1
         content_lines = content.splitlines()
 
         # Run secret patterns.
@@ -220,11 +222,11 @@ def tool_scan_security_vulnerabilities(
     if not violations:
         return (
             f"Security scan passed: 0 secrets or SQL injection flaws detected "
-            f"across {len(paths)} files."
+            f"across {scanned_count} files."
         )
 
     lines = [
-        f"Security scan found {len(violations)} violation(s) across {len(paths)} file(s):",
+        f"Security scan found {len(violations)} violation(s) across {scanned_count} file(s):",
         "",
     ]
     for v in violations:

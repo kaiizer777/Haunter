@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, AsyncGenerator
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,55 @@ _ALLOWED_EVENTS: frozenset[str] = frozenset(
     }
 )
 
+_REDACTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # AWS access key
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
+    # GitHub PAT / OAuth / fine-grained tokens
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{50,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    # OpenAI / Anthropic / general API keys (sk-...)
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "[REDACTED_API_KEY]"),
+    # Private keys
+    (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+        "[REDACTED_PRIVATE_KEY]",
+    ),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[^\n\r]*"), "[REDACTED_PRIVATE_KEY]"),
+    # Database connection strings with embedded passwords
+    (
+        re.compile(r"(postgres(?:ql)?(?:\+[a-z0-9]+)?://[^:]+:)([^@]+)(@)"),
+        r"\g<1>[REDACTED_PASSWORD]\g<3>",
+    ),
+    # Bearer tokens
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
+]
+
+
+def _redact_string(text: str) -> str:
+    """Apply secret redaction patterns to a string."""
+    result = text
+    for pattern, replacement in _REDACTION_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
+def _redact_secrets(obj: Any) -> Any:
+    """
+    Recursively redact sensitive secrets (AWS keys, GitHub tokens, API keys, passwords)
+    from dictionaries, lists, strings, and other data structures before SSE emission.
+    """
+    if isinstance(obj, str):
+        return _redact_string(obj)
+    elif isinstance(obj, dict):
+        return {k: _redact_secrets(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_redact_secrets(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_redact_secrets(item) for item in obj)
+    elif isinstance(obj, set):
+        return {_redact_secrets(item) for item in obj}
+    return obj
+
 
 def format_sse_event(event: str, data: dict[str, Any]) -> str:
     """
@@ -85,8 +135,9 @@ def format_sse_event(event: str, data: dict[str, Any]) -> str:
             f"format_sse_event: unknown event {event!r}. "
             f"Allowed: {sorted(_ALLOWED_EVENTS)}"
         )
+    sanitized_data = _redact_secrets(data)
     try:
-        data_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        data_str = json.dumps(sanitized_data, ensure_ascii=False, separators=(",", ":"))
     except (TypeError, ValueError) as exc:
         logger.error(
             "format_sse_event: failed to serialise data for event=%s: %s", event, exc

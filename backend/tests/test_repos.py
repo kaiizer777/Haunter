@@ -25,11 +25,30 @@ import asyncio
 import uuid
 import httpx
 import pytest
+import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ModelConfig, Repo, User
 from tests.conftest import truncate_all
+
+
+@pytest.fixture(autouse=True)
+def mock_github_repo_permission(respx_mock):
+    """Default mock for GitHub repo permission check so existing tests pass."""
+    route = respx_mock.get(
+        url__regex=r"^https://api\.github\.com/repos/.*$",
+        name="default_github_permission",
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "permissions": {"admin": True, "push": True, "pull": True},
+                "default_branch": "main",
+            },
+        )
+    )
+    yield route
 
 
 @pytest.mark.asyncio
@@ -63,6 +82,140 @@ async def test_post_repo_valid(db: AsyncSession, user_factory, make_auth_client)
     repo_row = res.scalar_one_or_none()
     assert repo_row is not None
     assert repo_row.user_id == user_id
+
+
+@pytest.mark.asyncio
+async def test_post_repo_forbidden_without_access_token(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """POST /repos without access token returns 403 Forbidden."""
+    await truncate_all(db)
+    user = await user_factory(github_id=740, username="no_token_user", access_token=None)
+    client = make_auth_client(user.id)
+
+    async with client:
+        resp = await client.post(
+            "/repos",
+            json={"owner": "org", "name": "repo1"},
+        )
+        assert resp.status_code == 403
+        assert "Push or admin permissions" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_post_repo_forbidden_when_lacking_push_admin(
+    db: AsyncSession, user_factory, make_auth_client, respx_mock
+):
+    """POST /repos when user lacks push/admin permissions on GitHub returns 403 Forbidden."""
+    await truncate_all(db)
+    user = await user_factory(github_id=741, username="read_only_user")
+    client = make_auth_client(user.id)
+
+    respx_mock.routes.pop("default_github_permission")
+    respx_mock.get("https://api.github.com/repos/org/read-only-repo").mock(
+        return_value=httpx.Response(
+            200,
+            json={"permissions": {"admin": False, "push": False, "pull": True}},
+        )
+    )
+
+    async with client:
+        resp = await client.post(
+            "/repos",
+            json={"owner": "org", "name": "read-only-repo"},
+        )
+        assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_post_repo_forbidden_when_github_returns_404(
+    db: AsyncSession, user_factory, make_auth_client, respx_mock
+):
+    """POST /repos when GitHub returns 404 for repo returns 403 Forbidden."""
+    await truncate_all(db)
+    user = await user_factory(github_id=742, username="non_existent_repo_user")
+    client = make_auth_client(user.id)
+
+    respx_mock.routes.pop("default_github_permission")
+    respx_mock.get("https://api.github.com/repos/org/ghost-repo").mock(
+        return_value=httpx.Response(404, json={"message": "Not Found"})
+    )
+
+    async with client:
+        resp = await client.post(
+            "/repos",
+            json={"owner": "org", "name": "ghost-repo"},
+        )
+        assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_post_repo_validates_and_sets_github_install_id(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """POST /repos validates and persists matched github_install_id."""
+    await truncate_all(db)
+    user = await user_factory(github_id=743, username="install_user")
+    client = make_auth_client(user.id)
+
+    async def mock_resolve(owner: str, repo: str):
+        return 998877
+
+    monkeypatch.setattr("app.repos.resolve_installation_id", mock_resolve)
+
+    async with client:
+        resp = await client.post(
+            "/repos",
+            json={"owner": "org", "name": "installed-repo", "github_install_id": 998877},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["github_install_id"] == 998877
+
+
+@pytest.mark.asyncio
+async def test_post_repo_rejects_spoofed_github_install_id(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """POST /repos with mismatched client github_install_id returns 400 Bad Request."""
+    await truncate_all(db)
+    user = await user_factory(github_id=744, username="spoof_user")
+    client = make_auth_client(user.id)
+
+    async def mock_resolve(owner: str, repo: str):
+        return 998877
+
+    monkeypatch.setattr("app.repos.resolve_installation_id", mock_resolve)
+
+    async with client:
+        resp = await client.post(
+            "/repos",
+            json={"owner": "org", "name": "installed-repo", "github_install_id": 112233},
+        )
+        assert resp.status_code == 400
+        assert "Supplied github_install_id does not match" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_post_repo_drops_unverified_client_install_id(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """POST /repos drops unverified client github_install_id when App is not installed."""
+    await truncate_all(db)
+    user = await user_factory(github_id=745, username="unverified_install_user")
+    client = make_auth_client(user.id)
+
+    async def mock_resolve_fail(owner: str, repo: str):
+        raise RuntimeError("App not installed")
+
+    monkeypatch.setattr("app.repos.resolve_installation_id", mock_resolve_fail)
+
+    async with client:
+        resp = await client.post(
+            "/repos",
+            json={"owner": "org", "name": "uninstalled-repo", "github_install_id": 112233},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["github_install_id"] is None
 
 
 @pytest.mark.asyncio

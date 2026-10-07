@@ -14,20 +14,136 @@ Security invariant (multi-tenant isolation):
 
 import logging
 import uuid
-from typing import Annotated
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user
+from app.auth import _decrypt_token, get_current_user
 from app.db import get_db
+from app.github.pr import resolve_installation_id
 from app.models import Repo, User
 from app.schemas import RepoAuditorInstallUpdate, RepoCreate, RepoOut
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["repos"])
+
+_GITHUB_API_BASE = "https://api.github.com"
+_DEFAULT_TIMEOUT_SECONDS = 15.0
+
+
+async def _verify_user_repo_permission(
+    current_user: User, owner: str, name: str
+) -> None:
+    """
+    Verify that the authenticated user has push or admin permissions on GitHub for owner/name.
+    Raises HTTPException(403) if access is unauthorized or token is missing/invalid.
+    """
+    if not current_user.access_token:
+        logger.warning(
+            "repos: user %s has no access token to verify repo %s/%s",
+            current_user.id,
+            owner,
+            name,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Push or admin permissions on GitHub repository required",
+        )
+
+    try:
+        token = _decrypt_token(current_user.access_token)
+    except Exception:
+        logger.error(
+            "repos: failed to decrypt access token for user %s", current_user.id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Push or admin permissions on GitHub repository required",
+        )
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Push or admin permissions on GitHub repository required",
+        )
+
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{name}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "Haunter-Autonomous-Agent/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT_SECONDS) as client:
+        try:
+            resp = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error verifying repo %s/%s for user %s: %s",
+                owner,
+                name,
+                current_user.id,
+                exc.__class__.__name__,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to connect to GitHub to verify repository permissions",
+            ) from exc
+
+    if resp.status_code in (401, 403, 404):
+        logger.warning(
+            "GitHub rejected permission check (%d) for repo %s/%s user %s",
+            resp.status_code,
+            owner,
+            name,
+            current_user.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Push or admin permissions on GitHub repository required",
+        )
+
+    if resp.is_error:
+        logger.error(
+            "GitHub returned %d during repo permission check for %s/%s",
+            resp.status_code,
+            owner,
+            name,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to verify repository permissions with GitHub",
+        )
+
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid response from GitHub",
+        ) from exc
+
+    perms = data.get("permissions") or {}
+    has_push = bool(perms.get("push"))
+    has_admin = bool(perms.get("admin"))
+    if not (has_push or has_admin):
+        logger.warning(
+            "User %s lacks push/admin permissions on %s/%s (permissions=%r)",
+            current_user.id,
+            owner,
+            name,
+            perms,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Push or admin permissions on GitHub repository required",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +161,12 @@ async def add_repo(
     Add a repo to the current user's workspace.
     Enforces (user_id, owner, name) uniqueness — same public repo can be tracked
     by two different tenants independently.
+    Verifies user push/admin permissions on GitHub and validates GitHub App installation.
     """
-    # Check for duplicate under this user before insert.
+    # 1. Verify user's push/admin access on GitHub
+    await _verify_user_repo_permission(current_user, body.owner, body.name)
+
+    # 2. Check for duplicate under this user before insert.
     existing = await db.execute(
         select(Repo).where(
             Repo.user_id == current_user.id,
@@ -57,7 +177,31 @@ async def add_repo(
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail="Repo already connected")
 
-    from sqlalchemy.exc import IntegrityError
+    # 3. Resolve / validate GitHub App installation ID
+    validated_install_id: Optional[int] = None
+    try:
+        validated_install_id = await resolve_installation_id(body.owner, body.name)
+    except Exception as exc:
+        logger.debug(
+            "GitHub App installation not resolved for %s/%s: %s",
+            body.owner,
+            body.name,
+            exc,
+        )
+        validated_install_id = None
+
+    if body.github_install_id is not None:
+        if (
+            validated_install_id is not None
+            and body.github_install_id != validated_install_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Supplied github_install_id does not match the verified GitHub App installation for this repository.",
+            )
+        final_install_id = validated_install_id
+    else:
+        final_install_id = validated_install_id
 
     repo = Repo(
         user_id=current_user.id,
@@ -66,7 +210,7 @@ async def add_repo(
         default_branch=body.default_branch,
         language_hint=body.language_hint,
         active_model_config_id=body.active_model_config_id,
-        github_install_id=body.github_install_id,
+        github_install_id=final_install_id,
     )
     db.add(repo)
     try:
@@ -77,7 +221,11 @@ async def add_repo(
         raise HTTPException(status_code=409, detail="Repo already connected")
 
     logger.info(
-        "Repo added: user=%s repo=%s/%s", current_user.id, body.owner, body.name
+        "Repo added: user=%s repo=%s/%s install_id=%s",
+        current_user.id,
+        body.owner,
+        body.name,
+        final_install_id,
     )
     return RepoOut.model_validate(repo)
 

@@ -119,8 +119,8 @@ def _validate_ident(value: str, label: str) -> None:
         )
 
 
-def _validate_branch(branch: str) -> None:
-    """Validate a branch name. Raises GitHubPRValidationError on mismatch or length excess."""
+def _validate_branch(branch: str, allow_protected: bool = True) -> None:
+    """Validate a branch name. Raises GitHubPRValidationError on mismatch, length excess, or protected branch."""
     if len(branch) > _BRANCH_MAX_LEN:
         raise GitHubPRValidationError(
             f"Branch name exceeds maximum length of {_BRANCH_MAX_LEN} characters."
@@ -129,6 +129,11 @@ def _validate_branch(branch: str) -> None:
         raise GitHubPRValidationError(
             f"Branch name {branch!r} contains invalid characters. "
             r"Only [a-zA-Z0-9/_\-.] are allowed."
+        )
+    clean = branch.removeprefix("refs/heads/")
+    if not allow_protected and clean.lower() in _PROTECTED_BRANCHES:
+        raise GitHubPRValidationError(
+            f"Cannot target protected branch {branch!r} directly."
         )
 
 
@@ -690,19 +695,19 @@ async def create_branch(
     """
     Create a new branch at `sha` in the repo.
 
-    Never uses force. Raises GitHubPRValidationError on invalid owner/repo/branch.
+    Never uses force. Rejects protected branches. Raises GitHubPRValidationError on invalid owner/repo/branch.
     Raises GitHubPRError if the branch already exists (409) or on HTTP error.
 
     Args:
         owner:  Repository owner (validated against _REPO_IDENT_RE).
         repo:   Repository name (validated against _REPO_IDENT_RE).
-        branch: New branch name (validated against _BRANCH_RE, max 255 chars).
+        branch: New branch name (validated against _BRANCH_RE, max 255 chars, non-protected).
         sha:    Full 40-char commit SHA to branch from.
         token:  GitHub installation access token.
     """
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
-    _validate_branch(branch)
+    _validate_branch(branch, allow_protected=False)
 
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs"
     payload = {"ref": f"refs/heads/{branch}", "sha": sha}
@@ -736,7 +741,7 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     """
     Split a unified diff into per-file patch segments.
 
-    Returns {filepath: file_patch_text} where filepath is the +++ b/ path.
+    Returns {filepath: file_patch_text} where filepath is the target path (or source path for deletions).
     Returns {} if parsing fails or no valid hunks found.
     Validates each path against _REPO_IDENT_RE traversal checks — invalid paths are skipped.
     """
@@ -754,22 +759,24 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     if not matches:
         return {}
     for idx, m in enumerate(matches):
-        # Use the +++ path as target (for renames/new files); strip trailing tabs/spaces
+        src = m.group(1).strip().split("\t")[0].strip()
         target = m.group(2).strip().split("\t")[0].strip()
-        if target == "/dev/null" or not target:
+        is_deletion = target == "/dev/null" or not target
+        file_path = src if is_deletion else target
+        if file_path == "/dev/null" or not file_path:
             continue
         # Validate path chars before accepting
         try:
             # Reuse _validate_ident logic for each path component
-            for part in target.split("/"):
+            for part in file_path.split("/"):
                 if part in (".", "..", ""):
                     raise ValueError(f"invalid path component {part!r}")
                 if part.startswith(".git") or part.startswith(".github"):
                     # Allow normal files but block .git/ and .github/workflows traversal checked later
                     pass
-            if ".." in target or target.startswith("/") or "//" in target:
+            if ".." in file_path or file_path.startswith("/") or "//" in file_path:
                 continue
-            if target.startswith(".git/") or target.startswith(".github/workflows/"):
+            if file_path.startswith(".git/") or file_path.startswith(".github/workflows/"):
                 continue
         except Exception:
             continue
@@ -780,7 +787,7 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
         if "@@" not in content:
             continue
         # Store the full per-file patch (header + body) for applier
-        files[target] = (m.group(0) + content).strip()
+        files[file_path] = (m.group(0) + content).strip()
     return files
 
 
@@ -913,7 +920,7 @@ async def commit_patch(
     """
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
-    _validate_branch(branch)
+    _validate_branch(branch, allow_protected=False)
 
     headers = _build_auth_headers(token)
     api = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
@@ -936,7 +943,7 @@ async def commit_patch(
         base_tree_sha = commit_resp.json()["tree"]["sha"]
 
         # 3. Try to parse and apply patch per-file
-        tree_entries: list[dict[str, str]] = []
+        tree_entries: list[dict[str, Any]] = []
         per_file_patches = _parse_patch_files(patch_text)
         use_fallback = False
 
@@ -958,6 +965,26 @@ async def commit_patch(
                         )
                         use_fallback = True
                         break
+
+                # Check for explicit file deletion
+                is_deletion = False
+                patch_lines = file_patch.splitlines()
+                if len(patch_lines) >= 2:
+                    second_line = patch_lines[1].strip()
+                    if second_line in ("+++ /dev/null", "+++ b//dev/null", "+++ dev/null"):
+                        is_deletion = True
+
+                if is_deletion:
+                    tree_entries.append(
+                        {
+                            "path": file_path,
+                            "mode": "100644",
+                            "type": "blob",
+                            "sha": None,
+                        }
+                    )
+                    continue
+
                 # Fetch current file content (may be new file → 404)
                 content_resp = await client.get(
                     f"{api}/contents/{file_path}",
@@ -1038,7 +1065,7 @@ async def commit_patch(
                     }
                 )
 
-            # If per-file parsing succeeded but yielded no entries (e.g., pure deletions), fallback
+            # If per-file parsing succeeded but yielded no entries, fallback
             if not use_fallback and not tree_entries:
                 use_fallback = True
         else:
@@ -1156,8 +1183,8 @@ async def open_pr(
     """
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
-    _validate_branch(head_branch)
-    _validate_branch(base_branch)
+    _validate_branch(head_branch, allow_protected=False)
+    _validate_branch(base_branch, allow_protected=True)
 
     safe_title = _escape_pr_text(title, max_len=72)
     safe_body = _escape_pr_text(body, max_len=3000)

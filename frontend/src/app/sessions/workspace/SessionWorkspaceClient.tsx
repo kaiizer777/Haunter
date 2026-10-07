@@ -817,12 +817,29 @@ function ToolExecutionAccordion({
               actionPrefix = "";
               label = `Restored to checkpoint '${cpId}'`;
             } else if (chip.name === "scan_security_vulnerabilities") {
-              const scanPaths = (chip.args?.paths as string[]) || [];
-              const scanResult = (chip.args?.scan_result as string) || "";
-              const isClean = scanResult.toLowerCase().includes("passed");
-              icon = isClean
-                ? <ShieldCheck className="h-3.5 w-3.5 text-emerald-400/80 shrink-0" />
-                : <ShieldAlert className="h-3.5 w-3.5 text-red-400/80 shrink-0" />;
+              const scanPaths = (chip.args?.paths as string[]) || (chip.args?.file_paths as string[]) || [];
+              const scanResult =
+                (chip.args?.scan_result as string) ||
+                (chip.args?.result as string) ||
+                (chip.args?.output as string) ||
+                (chip.args?.summary as string) ||
+                "";
+              const hasViolations =
+                scanResult.toLowerCase().includes("violation") ||
+                scanResult.toLowerCase().includes("vulnerabilit") ||
+                scanResult.toLowerCase().includes("failed") ||
+                scanResult.toLowerCase().includes("critical") ||
+                scanResult.toLowerCase().includes("high");
+              const isClean =
+                !hasViolations &&
+                (scanResult.toLowerCase().includes("passed") ||
+                  scanResult.toLowerCase().includes("clean") ||
+                  scanResult === "");
+              icon = isClean ? (
+                <ShieldCheck className="h-3.5 w-3.5 text-emerald-400/80 shrink-0" />
+              ) : (
+                <ShieldAlert className="h-3.5 w-3.5 text-red-400/80 shrink-0" />
+              );
               actionPrefix = "";
               label = isClean
                 ? `Security scan passed (${scanPaths.length} file${scanPaths.length !== 1 ? "s" : ""})`
@@ -1917,6 +1934,49 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   const initialScrolledRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Wire security violations detection from messages (tool calls & audit scans)
+  useEffect(() => {
+    for (const msg of messages) {
+      if (msg.toolCalls) {
+        for (const tc of msg.toolCalls) {
+          if (tc.name === "scan_security_vulnerabilities") {
+            const scanResult =
+              (tc.args?.scan_result as string) ||
+              (tc.args?.result as string) ||
+              (tc.args?.output as string) ||
+              (tc.args?.summary as string) ||
+              "";
+            const hasViolations =
+              scanResult.toLowerCase().includes("violation") ||
+              scanResult.toLowerCase().includes("vulnerabilit") ||
+              scanResult.toLowerCase().includes("failed") ||
+              scanResult.toLowerCase().includes("critical") ||
+              scanResult.toLowerCase().includes("high");
+            if (hasViolations) {
+              setSecurityViolations(
+                scanResult || "Security violations detected in repository scan."
+              );
+              return;
+            }
+          }
+        }
+      }
+      if (msg.auditScan?.report?.findings) {
+        const blockers = msg.auditScan.report.findings.filter(
+          (f) =>
+            f.severity?.toUpperCase() === "BLOCKER" ||
+            f.severity?.toUpperCase() === "CRITICAL"
+        );
+        if (blockers.length > 0) {
+          setSecurityViolations(
+            `${blockers.length} critical security blocker(s) detected.`
+          );
+          return;
+        }
+      }
+    }
+  }, [messages]);
+
   // -------------------------------------------------------------------------
   // Clarification selection handler
   // -------------------------------------------------------------------------
@@ -2080,15 +2140,20 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
 
   const handleStageAuditFix = useCallback(
     async (finding: AuditFinding, diff?: string) => {
-      const patch = diff || finding.remediation_diff || finding.suggested_fix;
-      if (patch && finding.file_path) {
+      const candidateDiff =
+        (isUnifiedDiff(diff) ? diff : null) ||
+        (isUnifiedDiff(finding.remediation_diff) ? finding.remediation_diff : null) ||
+        (isUnifiedDiff(finding.suggested_fix) ? finding.suggested_fix : null);
+
+      if (candidateDiff && finding.file_path) {
         setStagedPatches((prev) => ({
           ...prev,
-          [finding.file_path]: patch,
+          [finding.file_path]: candidateDiff,
         }));
         setActiveFile(finding.file_path);
       } else {
-        const prompt = `Apply surgical fix for finding ${finding.id || finding.title || "audit issue"} in ${finding.file_path}${finding.line_start ? `:${finding.line_start}` : ""}${finding.line_end ? `-${finding.line_end}` : ""}`;
+        const fixProse = finding.suggested_fix || finding.description || "";
+        const prompt = `Apply surgical fix for finding ${finding.id || finding.title || "audit issue"} in ${finding.file_path}${finding.line_start ? `:${finding.line_start}` : ""}${finding.line_end ? `-${finding.line_end}` : ""}${fixProse ? `: ${fixProse}` : ""}`;
         await handleSendChat(prompt);
       }
     },
@@ -2096,6 +2161,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   );
 
   const handleVerify = async () => {
+    if (isStreaming || sandboxLoading || ciActive) return;
     setActionError(null);
     setSandboxLoading(true);
     setSandboxResult(null);
@@ -2157,10 +2223,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
       }
     }
     for (const patch of Object.values(stagedPatches)) {
-      charCount += (patch?.length || 0) * 0.75;
+      charCount += (patch?.length || 0);
     }
-    // Base prompt & tool schemas ~ 1,200 tokens when conversation started
-    const estimated = Math.max(0, Math.round(charCount / 3.8)) + (messages.length > 0 ? 1200 : 0);
+    if (charCount === 0 && messages.length === 0) return 0;
+    const estimated = Math.round(charCount / 3.8);
     return estimated;
   }, [messages, stagedPatches]);
 
@@ -2368,7 +2434,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
           <button
             id="commit-pr-btn"
             onClick={() => setShowCommitModal(true)}
-            disabled={patchFiles.length === 0}
+            disabled={patchFiles.length === 0 || isStreaming || sandboxLoading || ciActive}
             className="flex items-center gap-1.5 rounded-xl border-t border-t-violet-400/60 border-x border-x-violet-600/60 border-b border-b-violet-950 bg-gradient-to-b from-violet-600 via-violet-650 to-violet-700 px-3.5 py-1.5 text-xs font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_8px_rgba(124,58,237,0.3)] hover:brightness-105 active:translate-y-[0.5px] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <GitPullRequest className="h-3.5 w-3.5" />
@@ -2723,7 +2789,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                           handleVerify();
                           setActionMenuOpen(false);
                         }}
-                        disabled={patchFiles.length === 0}
+                        disabled={patchFiles.length === 0 || isStreaming || sandboxLoading || ciActive}
                         className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800/80 hover:text-zinc-100 transition-colors disabled:opacity-40"
                       >
                         <FlaskConical className="h-3.5 w-3.5 text-emerald-400" />
@@ -3478,6 +3544,18 @@ function guessLanguage(filePath: string): string {
     html: "html",
   };
   return map[ext] ?? "plaintext";
+}
+
+function isUnifiedDiff(text?: string): boolean {
+  if (!text || typeof text !== "string") return false;
+  const trimmed = text.trim();
+  return (
+    trimmed.startsWith("diff --git") ||
+    trimmed.startsWith("--- ") ||
+    trimmed.startsWith("@@ ") ||
+    (trimmed.includes("\n--- ") && trimmed.includes("\n+++ ")) ||
+    (trimmed.includes("\n@@ ") && (trimmed.includes("\n+") || trimmed.includes("\n-")))
+  );
 }
 
 function parseDiffForMonaco(patch: string): { original: string; modified: string } {
