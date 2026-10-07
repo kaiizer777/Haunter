@@ -448,6 +448,34 @@ async def get_installation_token(repo: Any) -> str:
         )
     logger.info("github.pr: resolving installation token with source=%s", app_source)
 
+    if not install_id and getattr(repo, "owner", None) and getattr(repo, "name", None):
+        try:
+            discovery_jwt = _build_jwt(app_id, private_key, app_source)
+            discovery_url = f"{GITHUB_API_BASE}/repos/{repo.owner}/{repo.name}/installation"
+            discovery_headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {discovery_jwt}",
+                "User-Agent": "Haunter-Autonomous-Agent/1.0",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as disc_client:
+                disc_resp = await disc_client.get(discovery_url, headers=discovery_headers)
+                if disc_resp.status_code == 200:
+                    discovered_id = disc_resp.json().get("id")
+                    if discovered_id:
+                        install_id = discovered_id
+                        try:
+                            repo.github_install_id = discovered_id
+                        except Exception:
+                            pass
+        except Exception as disc_err:
+            logger.warning(
+                "github.pr: failed to auto-discover installation_id for %s/%s: %s",
+                getattr(repo, "owner", ""),
+                getattr(repo, "name", ""),
+                disc_err,
+            )
+
     if not install_id:
         raise GitHubPRError(
             f"repo {getattr(repo, 'id', '?')} has no github_install_id — "

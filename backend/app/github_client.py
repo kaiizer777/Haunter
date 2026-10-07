@@ -897,6 +897,78 @@ async def post_pr_comment(
     return response.json()
 
 
+async def create_issue_comment(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    body: str,
+    token: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Create a comment on an issue or pull request via GitHub Issues API.
+    POST /repos/{owner}/{repo}/issues/{issue_number}/comments
+    """
+    return await post_pr_comment(
+        owner=owner, repo=repo, pr_number=issue_number, body=body, token=token
+    )
+
+
+async def fetch_pull_request_reviews(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Fetch pull request reviews via GitHub Pulls API.
+    GET /repos/{owner}/{repo}/pulls/{pr_number}/reviews
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/pulls/{quote(str(pr_number), safe='')}/reviews"
+    )
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await _bounded_get(
+                client,
+                url,
+                headers=headers,
+                max_bytes=MAX_API_RESPONSE_BYTES,
+            )
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error fetching PR reviews for %s/%s PR #%s",
+                owner,
+                repo,
+                pr_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"PR reviews not found for {owner}/{repo} PR #{pr_number}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    try:
+        data = response.json()
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception as exc:
+        raise GitHubClientError("Invalid JSON returned for PR reviews") from exc
+
+
 async def fetch_pr_review_comments(
     owner: str,
     repo: str,
