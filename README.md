@@ -17,6 +17,7 @@
 </div>
 
 ---
+<!-- automated review trigger test -->
 
 Haunter is an enterprise-grade autonomous CI failure remediation engine, security auditor bot, and cloud agentic pairing studio. 
 

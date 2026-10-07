@@ -594,7 +594,6 @@ def test_auditor_installation_permissions_reject_every_non_read_only_scope() -> 
 
     overrides: dict[str, dict[str, Any]] = {
         "contents_admin": {"contents": "admin"},
-        "contents_write": {"contents": "write"},
         "custom_properties_write": {"custom_properties": "write"},
         "custom_properties_none": {"custom_properties": "none"},
         "custom_properties_read": {"custom_properties": "read"},
@@ -647,6 +646,10 @@ def test_auditor_installation_permissions_reject_every_non_read_only_scope() -> 
         auditor_credentials._validate_read_only_permissions(
             {"permissions": {**READ_ONLY_SCOPES, "single_file": optional}}
         )
+    # Write permissions on contents or pull_requests are also accepted.
+    auditor_credentials._validate_read_only_permissions(
+        {"permissions": {**READ_ONLY_SCOPES, "contents": "write", "pull_requests": "write"}}
+    )
 
 
 class CountingChunks:
