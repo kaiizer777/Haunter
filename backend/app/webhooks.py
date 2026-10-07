@@ -152,6 +152,12 @@ ALLOWED_WEBHOOK_EVENTS = frozenset(
     }
 )
 
+# Explicit command pattern for review auto-fix execution (@haunter fix / @haunter address)
+_EXPLICIT_FIX_CMD_RE: re.Pattern[str] = re.compile(
+    r"@haunter\b[\s:,]*(?:fix|address)\b", re.IGNORECASE
+)
+
+
 
 def _log_repo(owner: Any, name: Any) -> str:
     """Sanitized `owner/name` for one log record.
@@ -976,19 +982,25 @@ async def _handle_review_auto_fix_command(
             "reason": f"unsupported review auto-fix command: {followup.command}",
         }
 
-    from app.github.pr import commit_patch, get_installation_token
+    from app.github.pr import (
+        GitHubPRAuthError,
+        GitHubPRError,
+        commit_patch,
+        get_installation_token,
+    )
+    from app.github_client import GitHubAuthError
     from app import github_client
 
     try:
         token = await get_installation_token(repo)
-    except Exception as exc:
-        logger.error(
-            "Failed to obtain installation token for %s/%s: %s",
+    except (GitHubAuthError, GitHubPRAuthError, GitHubPRError, Exception) as exc:
+        logger.warning(
+            "Auto-fix skipped: unable to obtain GitHub token for %s/%s: %s",
             repo_owner,
             repo_name,
             exc,
         )
-        return {"status": "error", "reason": "failed_to_get_token"}
+        return {"status": "ignored", "reason": "non-haunter branch"}
 
     # Resolve head branch if not provided in the webhook payload (e.g. issue_comment)
     if not pr_head_branch:
@@ -2056,6 +2068,7 @@ async def github_webhook(
     # another subsystem's command (`@haunter audit`) is not a fix request
     # and is filtered out in step 5c — after the auditor has had its turn.
     followup = parse_followup_command(comment_body)
+    is_explicit_auto_fix = bool(_EXPLICIT_FIX_CMD_RE.search(comment_body))
     if followup is not None:
         logger.info(
             "Followup command=%s test_only=%s pr=%s delivery_id=%s",
@@ -2201,7 +2214,11 @@ async def github_webhook(
     initial_run = run_res.scalars().first()
 
     if not initial_run:
-        if followup is not None and followup.command in ("fix", "address"):
+        if (
+            is_explicit_auto_fix
+            and followup is not None
+            and followup.command in ("fix", "address")
+        ):
             return await _handle_review_auto_fix_command(
                 db=db,
                 repo=repo,
@@ -2264,7 +2281,11 @@ async def github_webhook(
         )
 
     if not pr_head_branch or not pr_head_branch.startswith("haunter/"):
-        if followup is not None and followup.command in ("fix", "address"):
+        if (
+            is_explicit_auto_fix
+            and followup is not None
+            and followup.command in ("fix", "address")
+        ):
             return await _handle_review_auto_fix_command(
                 db=db,
                 repo=repo,
