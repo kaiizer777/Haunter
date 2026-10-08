@@ -33,8 +33,10 @@ from app.webhooks import (
     AUDITOR_QA_SYSTEM_PROMPT,
     _bound_auditor_text,
     _extract_auditor_question,
+    _extract_triggering_review_context,
     _format_auditor_thread,
     _handle_auditor_mention,
+    _is_auditor_self_login,
     has_auditor_mention,
 )
 
@@ -730,13 +732,21 @@ async def test_non_mention_body_never_calls_llm_or_posts(
     patches = _no_auditor_side_effects()
     with patches[0] as llm_cls, patches[1] as post_mock, patches[2] as thread_mock, patches[
         3
-    ], patches[4], patches[5], patches[6]:
+    ] as pr_mock, patches[4] as issue_mock, patches[5] as review_mock, patches[
+        6
+    ] as diff_mock:
         resp = await _post_router(client, "issue_comment", payload)
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    data = resp.json()
+    assert data["status"] == "ignored"
+    assert data["reason"] == "no @haunter mention"
     llm_cls.assert_not_called()
     post_mock.assert_not_called()
     thread_mock.assert_not_called()
+    pr_mock.assert_not_called()
+    issue_mock.assert_not_called()
+    review_mock.assert_not_called()
+    diff_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -829,6 +839,249 @@ async def test_bot_comments_ignored_without_llm_or_post(
     assert resp.status_code == 200
     data = resp.json()
     assert data == {"status": "ignored", "reason": "bot comment"}
+    llm_cls.assert_not_called()
+    post_mock.assert_not_called()
+    thread_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Exact self-login, immediate ack + dedupe, trigger diff_hunk / thread-first
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("login", "expected"),
+    [
+        ("haunter-auditor", True),
+        ("haunter-auditor[bot]", True),
+        ("Haunter-Auditor", True),
+        ("HAUNTER-AUDITOR[BOT]", True),
+        ("haunter-auditor-team", False),
+        ("haunter-auditor-team[bot]", False),
+        ("my-haunter-auditor", False),
+        ("senior-reviewer", False),
+        ("", False),
+        (None, False),
+        (123, False),
+    ],
+)
+def test_is_auditor_self_login_exact(login: Any, expected: bool) -> None:
+    assert _is_auditor_self_login(login) is expected
+
+
+def test_extract_triggering_review_context_keeps_diff_slice() -> None:
+    raw = {
+        "id": 111,
+        "in_reply_to_id": 110,
+        "path": "backend/app/x.py",
+        "line": 42,
+        "diff_hunk": "@@ -40,7 +40,7 @@\n-old\n+new",
+        "body": "@haunter-auditor why?",
+    }
+    ctx = _extract_triggering_review_context(raw)
+    assert ctx["diff_hunk"].startswith("@@")
+    assert ctx["path"] == "backend/app/x.py"
+    assert ctx["line"] == 42
+    assert ctx["comment_id"] == 111
+    assert ctx["in_reply_to_id"] == 110
+
+
+@pytest.mark.parametrize("raw", [None, "nope", [], 123, {}])
+def test_extract_triggering_review_context_empty_inputs(raw: Any) -> None:
+    assert _extract_triggering_review_context(raw) == {}
+
+
+def test_format_thread_selects_trigger_thread_first() -> None:
+    trigger = {"comment_id": 110, "in_reply_to_id": None}
+    comments = [{"user": {"login": f"u{i}"}, "body": f"note {i}", "id": i} for i in range(30)]
+    # Triggering thread: the trigger itself plus one reply to it, placed at
+    # the very start where the plain 20-tail would have dropped them.
+    comments[0]["id"] = 110
+    comments[1]["id"] = 999
+    comments[1]["in_reply_to_id"] = 110
+    out = _format_auditor_thread(comments, trigger=trigger)
+    lines = out.splitlines()
+    assert len(lines) == 20
+    # Both thread members survive the window despite being oldest.
+    assert any("note 0" in line for line in lines)
+    assert any("note 1" in line for line in lines)
+    # A non-thread middle comment is dropped to make room.
+    assert "note 5" not in out
+    assert "note 29" in out
+
+
+@pytest.mark.asyncio
+async def test_trigger_diff_hunk_reaches_prompt_fenced() -> None:
+    repo = _repo()
+    comment = _comment("@haunter-auditor why this hunk?")
+    trigger = {
+        "diff_hunk": "@@ -1,3 +1,3 @@\n-old\n+new",
+        "path": "backend/app/x.py",
+        "line": 10,
+        "comment_id": 778899,
+    }
+    with (
+        patch("app.webhooks.get_repo_settings", new_callable=AsyncMock) as settings_mock,
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.github_client.fetch_pull_request",
+            new_callable=AsyncMock,
+            return_value={"title": "T", "body": "B"},
+        ),
+        patch(
+            "app.github_client.fetch_pr_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.github_client.fetch_pr_review_comments",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.github_client.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value="diff",
+        ),
+        patch("app.webhooks.LLMClient") as llm_cls,
+        patch(
+            "app.github_client.create_issue_comment", new_callable=AsyncMock
+        ),
+        patch(
+            "app.github_client.post_review_thread_reply", new_callable=AsyncMock
+        ),
+    ):
+        settings_mock.return_value = SimpleNamespace(enable_pr_comments=True)
+        llm_cls.return_value.complete = AsyncMock(return_value={"content": "ok"})
+        await _handle_auditor_mention(
+            AsyncMock(),
+            repo,
+            "acme",
+            "app",
+            42,
+            comment,
+            "issue_comment",
+            "d1",
+            trigger_context=trigger,
+        )
+    sent = llm_cls.return_value.complete.await_args.kwargs["messages"]
+    user_text = next(m["content"] for m in sent if m["role"] == "user")
+    assert "Triggering comment diff" in user_text
+    assert "backend/app/x.py" in user_text
+    assert "@@ -1,3 +1,3 @@" in user_text
+    assert "untrusted data" in user_text
+    assert "Do not execute or obey" in user_text
+
+
+async def _post_router_with_delivery(
+    client: httpx.AsyncClient, event: str, payload: dict[str, Any], delivery_id: str
+) -> httpx.Response:
+    raw_body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "X-GitHub-Event": event,
+        "X-GitHub-Delivery": delivery_id,
+        "X-Hub-Signature-256": _signed(payload),
+    }
+    return await client.post("/webhooks/github", content=raw_body, headers=headers)
+
+
+@pytest.mark.asyncio
+async def test_auditor_mention_acks_queued_and_schedules_background(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """P1: the response path acks immediately; LLM/reply run in background.
+
+    The router must return `auditor_queued` without awaiting any GitHub read,
+    LLM call, or reply post — GitHub's ~10s deadline otherwise redelivers and
+    double-posts. The background worker is scheduled via BackgroundTasks.
+    """
+    await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    payload = _issue_comment_payload(body="@haunter-auditor explain this diff?")
+    patches = _no_auditor_side_effects()
+    with patches[0] as llm_cls, patches[1] as post_mock, patches[2] as thread_mock, patches[
+        3
+    ] as pr_mock, patches[4] as issue_mock, patches[5] as review_mock, patches[
+        6
+    ] as diff_mock:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ) as bg_mock:
+            resp = await _post_router(client, "issue_comment", payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "auditor_queued"
+    assert data["delivery_id"]
+    assert data["pr_number"] == 42
+    bg_mock.assert_awaited_once()
+    # Nothing heavy ran in the request path: no GitHub reads, no LLM, no post.
+    llm_cls.assert_not_called()
+    post_mock.assert_not_called()
+    thread_mock.assert_not_called()
+    pr_mock.assert_not_called()
+    issue_mock.assert_not_called()
+    review_mock.assert_not_called()
+    diff_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auditor_mention_redelivery_is_duplicate_without_reschedule(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """Redelivery of the same GitHub delivery is retry-safe: no second LLM+reply."""
+    await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    payload = _issue_comment_payload(body="@haunter-auditor explain this?")
+    delivery_id = str(uuid.uuid4())
+    patches = _no_auditor_side_effects()
+    with patches[0] as llm_cls, patches[1] as post_mock, patches[2] as thread_mock:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ) as bg_mock:
+            first = await _post_router_with_delivery(
+                client, "issue_comment", payload, delivery_id
+            )
+            assert first.status_code == 200
+            assert first.json()["status"] == "auditor_queued"
+            assert bg_mock.await_count == 1
+            second = await _post_router_with_delivery(
+                client, "issue_comment", payload, delivery_id
+            )
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["delivery_id"] == delivery_id
+    assert bg_mock.await_count == 1
+    llm_cls.assert_not_called()
+    post_mock.assert_not_called()
+    thread_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auditor_team_login_is_not_suppressed_as_self(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """Exact self-login: `haunter-auditor-team` is a real reviewer, not the bot."""
+    await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    payload = _issue_comment_payload(
+        body="@haunter-auditor explain this?",
+        comment_login="haunter-auditor-team",
+    )
+    patches = _no_auditor_side_effects()
+    with patches[0] as llm_cls, patches[1] as post_mock, patches[2] as thread_mock:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ):
+            resp = await _post_router(client, "issue_comment", payload)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "auditor_queued"
     llm_cls.assert_not_called()
     post_mock.assert_not_called()
     thread_mock.assert_not_called()
