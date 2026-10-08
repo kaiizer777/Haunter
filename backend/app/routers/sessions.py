@@ -34,7 +34,11 @@ from sqlalchemy.orm import selectinload
 
 from app.auth import get_current_user
 from app.db import get_db
-from app.github.pr import get_installation_token
+from app.github.pr import (
+    GitHubPRValidationError,
+    _validate_branch,
+    get_installation_token,
+)
 from app.github_client import (
     GitHubClientError,
     GitHubResourceNotFoundError,
@@ -174,10 +178,43 @@ async def create_session(
             token=gh_token,
         )
     except GitHubResourceNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Branch '{branch_name}' not found in repository {repo.owner}/{repo.name}",
-        )
+        # If the requested branch does not exist on GitHub (e.g. topic branch to be created),
+        # initialize base SHA from repo.default_branch or fallback branches without raising 422.
+        fallback_candidates = [repo.default_branch or "main", "main", "master"]
+        resolved_base_sha: Optional[str] = None
+        for candidate in fallback_candidates:
+            if candidate == branch_name:
+                continue
+            try:
+                resolved_base_sha = await fetch_branch_sha(
+                    owner=repo.owner,
+                    repo=repo.name,
+                    branch=candidate,
+                    token=gh_token,
+                )
+                if resolved_base_sha:
+                    break
+            except GitHubResourceNotFoundError:
+                continue
+            except GitHubClientError as exc:
+                logger.error(
+                    "GitHub API error resolving fallback branch SHA for %s/%s branch %s: %s",
+                    repo.owner,
+                    repo.name,
+                    candidate,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Failed to resolve branch SHA from GitHub. Please try again.",
+                )
+        if resolved_base_sha:
+            base_sha = resolved_base_sha
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Branch '{branch_name}' not found in repository {repo.owner}/{repo.name}",
+            )
     except GitHubClientError as exc:
         logger.error(
             "GitHub API error resolving branch SHA for %s/%s branch %s: %s",
@@ -379,13 +416,15 @@ async def close_session(
             status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
         )
 
+    repo = session.repo
+
     if session.status != "closed":
         session.status = "closed"
         session.updated_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(session)
 
-    return _map_session_to_out(session, session.repo)
+    return _map_session_to_out(session, repo)
 
 
 # ---------------------------------------------------------------------------
@@ -622,18 +661,28 @@ async def commit_session(
     from app.services.patch_applier import apply_unified_diff
 
     # ------------------------------------------------------------------
-    # 1. Load session with repo join -- object-level auth.
+    # 1. Load session with repo join -- object-level auth + concurrency lock.
     # ------------------------------------------------------------------
-    stmt = (
-        select(AgentSession)
-        .options(selectinload(AgentSession.repo))
-        .where(
-            AgentSession.id == session_id,
-            AgentSession.user_id == current_user.id,
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    try:
+        stmt = (
+            select(AgentSession)
+            .options(selectinload(AgentSession.repo))
+            .where(
+                AgentSession.id == session_id,
+                AgentSession.user_id == current_user.id,
+            )
+            .with_for_update(nowait=True)
         )
-    )
-    result = await db.execute(stmt)
-    session: Optional[AgentSession] = result.scalars().first()
+        result = await db.execute(stmt)
+        session: Optional[AgentSession] = result.scalars().first()
+    except (OperationalError, DBAPIError) as exc:
+        logger.warning("sessions/commit: session %s lock conflict: %s", session_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another operation is currently locking this session. Please retry.",
+        ) from exc
 
     if not session:
         raise HTTPException(
@@ -641,7 +690,7 @@ async def commit_session(
         )
 
     # ------------------------------------------------------------------
-    # 2. State guards.
+    # 2. State guards & topic branch resolution.
     # ------------------------------------------------------------------
     if session.status != "active":
         raise HTTPException(
@@ -660,6 +709,20 @@ async def commit_session(
         )
 
     repo = session.repo
+    default_branch = repo.default_branch or "main"
+    target_branch = session.branch_name
+    if not target_branch or target_branch == default_branch:
+        target_branch = f"haunter/session-{str(session.id)[:8]}"
+
+    try:
+        _validate_branch(target_branch, allow_protected=False)
+    except GitHubPRValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    session.branch_name = target_branch
 
     # ------------------------------------------------------------------
     # 3. Resolve GitHub installation token.
@@ -777,22 +840,46 @@ async def commit_session(
         )
 
     # ------------------------------------------------------------------
-    # 7. Update branch ref.
+    # 7. Update or create branch ref.
     # ------------------------------------------------------------------
+    _validate_branch(target_branch, allow_protected=False)
     try:
         await _update_ref(
             owner=repo.owner,
             repo=repo.name,
-            branch=session.branch_name,
+            branch=target_branch,
             commit_sha=commit_sha,
             force=False,
             installation_token=gh_token,
         )
+    except GitHubResourceNotFoundError:
+        # Topic branch does not exist yet — create the branch ref.
+        from app.github.pr import create_branch
+
+        try:
+            await create_branch(
+                owner=repo.owner,
+                repo=repo.name,
+                branch=target_branch,
+                sha=commit_sha,
+                token=gh_token,
+            )
+        except Exception as exc:
+            logger.error(
+                "sessions/commit: create_branch failed for session %s branch %s: %s",
+                session_id,
+                target_branch,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to create branch ref via GitHub API: {exc}",
+            )
     except _GHErr as exc:
         logger.error(
             "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
             session_id,
-            session.branch_name,
+            target_branch,
             exc,
         )
         raise HTTPException(
@@ -803,13 +890,13 @@ async def commit_session(
     # ------------------------------------------------------------------
     # 8. Open pull request against repo default branch.
     # ------------------------------------------------------------------
-    pr_base = repo.default_branch or "main"
+    pr_base = default_branch
     try:
         pr_data: dict = await _create_pr(
             owner=repo.owner,
             repo=repo.name,
             title=body.title,
-            head=session.branch_name,
+            head=target_branch,
             base=pr_base,
             body=body.body,
             installation_token=gh_token,
@@ -932,12 +1019,11 @@ async def clarify_session(
     # Reset session status and clear waiting_input.
     session.status = "active"
     session.waiting_input = None
-    session.updated_at = datetime.now(timezone.utc)
-
+    repo = session.repo
     await db.commit()
     await db.refresh(session)
 
-    return _map_session_to_out(session, session.repo)
+    return _map_session_to_out(session, repo)
 
 
 # ---------------------------------------------------------------------------
@@ -996,8 +1082,7 @@ async def restore_checkpoint(
     session.conversation_history = list(
         (session.conversation_history or [])[:history_length]
     )
-    session.updated_at = datetime.now(timezone.utc)
-
+    repo = session.repo
     await db.commit()
     await db.refresh(session)
 
@@ -1007,4 +1092,4 @@ async def restore_checkpoint(
         checkpoint_id,
     )
 
-    return _map_session_to_out(session, session.repo)
+    return _map_session_to_out(session, repo)

@@ -250,6 +250,81 @@ def _loop_supports_subprocesses(loop: asyncio.AbstractEventLoop) -> bool:
     )
 
 
+_BLOCKED_ENV_EXACT: frozenset[str] = frozenset(
+    {
+        "DATABASE_URL",
+        "DATABASE_URL_UNPOOLED",
+        "TEST_DATABASE_URL",
+        "ALEMBIC_DATABASE_URL",
+        "SESSION_SECRET_KEY",
+        "GITHUB_CLIENT_SECRET",
+        "GITHUB_CLIENT_ID",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_APP_PRIVATE_KEY",
+        "JWT_SECRET",
+        "SECRET_KEY",
+        "OPENAI_API_KEY",
+        "GROQ_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "TINYFISH_API_KEY",
+    }
+)
+
+_BLOCKED_ENV_SUFFIXES: tuple[str, ...] = (
+    "_KEY",
+    "_SECRET",
+    "_TOKEN",
+    "_PASSWORD",
+    "_CREDENTIALS",
+    "_AUTH",
+    "_PAT",
+)
+
+_BLOCKED_ENV_SUBSTRINGS: tuple[str, ...] = (
+    "SECRET",
+    "PASSWORD",
+    "CREDENTIAL",
+    "DATABASE_URL",
+)
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    """Check if an environment variable key holds sensitive server secrets."""
+    upper = key.upper()
+    if upper in _BLOCKED_ENV_EXACT:
+        return True
+    if any(upper.endswith(suffix) for suffix in _BLOCKED_ENV_SUFFIXES):
+        return True
+    if any(sub in upper for sub in _BLOCKED_ENV_SUBSTRINGS):
+        return True
+    return False
+
+
+def _get_clean_subprocess_env(cwd: str | None = None) -> dict[str, str]:
+    """
+    Build a clean environment dictionary for sandbox subprocess execution.
+
+    Strips server secrets, database URLs, auth tokens, and credentials from
+    the parent process environment to prevent leaks into user scripts or commands.
+    Ensures local virtualenv bin/Scripts directory is prepended to PATH.
+    """
+    clean_env: dict[str, str] = {}
+    for k, v in os.environ.items():
+        if not _is_sensitive_env_key(k):
+            clean_env[k] = v
+
+    repo_python = _find_repo_python(cwd)
+    effective_python = repo_python if repo_python else sys.executable
+    bin_dir = os.path.dirname(effective_python)
+    scripts_dir = os.path.join(bin_dir, "Scripts")
+    path_dirs = [d for d in (bin_dir, scripts_dir) if os.path.isdir(d)]
+    if path_dirs:
+        clean_env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{clean_env.get('PATH', '')}"
+
+    return clean_env
+
+
 def _run_subprocess_sync(
     argv: list[str],
     timeout_sec: int,
@@ -268,15 +343,8 @@ def _run_subprocess_sync(
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
 
-    # Ensure virtualenv bin/Scripts directory is in PATH
-    env = os.environ.copy()
-    repo_python = _find_repo_python(cwd)
-    effective_python = repo_python if repo_python else sys.executable
-    bin_dir = os.path.dirname(effective_python)
-    scripts_dir = os.path.join(bin_dir, "Scripts")
-    path_dirs = [d for d in (bin_dir, scripts_dir) if os.path.isdir(d)]
-    if path_dirs:
-        env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{env.get('PATH', '')}"
+    # Clean subprocess environment: strip server secrets, ensure virtualenv PATH
+    env = _get_clean_subprocess_env(cwd)
 
     try:
         cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)
@@ -398,15 +466,8 @@ async def _run_subprocess(
     stdout_chunks: list[str] = []
     stderr_text = ""
 
-    # Ensure virtualenv bin/Scripts is in PATH
-    env = os.environ.copy()
-    repo_python = _find_repo_python(cwd)
-    effective_python = repo_python if repo_python else sys.executable
-    bin_dir = os.path.dirname(effective_python)
-    scripts_dir = os.path.join(bin_dir, "Scripts")
-    path_dirs = [d for d in (bin_dir, scripts_dir) if os.path.isdir(d)]
-    if path_dirs:
-        env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{env.get('PATH', '')}"
+    # Clean subprocess environment: strip server secrets, ensure virtualenv PATH
+    env = _get_clean_subprocess_env(cwd)
 
     try:
         cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)

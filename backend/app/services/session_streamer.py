@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, AsyncGenerator
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,77 @@ _ALLOWED_EVENTS: frozenset[str] = frozenset(
     }
 )
 
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # AWS access key
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
+    # GitHub PAT / OAuth / fine-grained tokens
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{50,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    # GitHub runner / recovery codes (ghr_)
+    (re.compile(r"\bghr_[A-Za-z0-9_]{10,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    # Neon / Supabase keys (npg_)
+    (re.compile(r"\bnpg_[A-Za-z0-9_]{16,}\b"), "[REDACTED_API_KEY]"),
+    # OpenAI / Anthropic / general API keys (sk-...)
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "[REDACTED_API_KEY]"),
+    # Private keys
+    (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+        "[REDACTED_PRIVATE_KEY]",
+    ),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[^\n\r]*"), "[REDACTED_PRIVATE_KEY]"),
+    # Database connection strings with embedded passwords (PostgreSQL, MySQL, MongoDB)
+    (
+        re.compile(r"(postgres(?:ql)?(?:\+[a-z0-9]+)?://[^:/\s]+:)([^@/\s]+)(@)"),
+        r"\g<1>[REDACTED_PASSWORD]\g<3>",
+    ),
+    (
+        re.compile(r"(mysql(?:\+[a-z0-9]+)?://[^:/\s]+:)([^@/\s]+)(@)"),
+        r"\g<1>[REDACTED_PASSWORD]\g<3>",
+    ),
+    (
+        re.compile(r"(mongodb(?:\+srv)?://[^:/\s]+:)([^@/\s]+)(@)"),
+        r"\g<1>[REDACTED_PASSWORD]\g<3>",
+    ),
+    # Authorization: Bearer headers
+    (
+        re.compile(r"(?i)\bAuthorization:\s*Bearer\s+[A-Za-z0-9\-._~+/]{16,}=*"),
+        "Authorization: Bearer [REDACTED]",
+    ),
+    # Bearer tokens (min length 16+ chars to prevent over-redacting prose)
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]{16,}=*"), "Bearer [REDACTED]"),
+    # Query parameter tokens (e.g. ?token=... or &token=...)
+    (re.compile(r"(?i)\btoken=[A-Za-z0-9\-._~+/]{16,}=*"), "token=[REDACTED]"),
+]
+
+# Backwards compatibility alias
+_REDACTION_PATTERNS = _SECRET_PATTERNS
+
+
+def _redact_string(text: str) -> str:
+    """Apply secret redaction patterns to a string."""
+    result = text
+    for pattern, replacement in _SECRET_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
+def _redact_secrets(obj: Any) -> Any:
+    """
+    Recursively redact sensitive secrets (AWS keys, GitHub tokens, API keys, passwords)
+    from dictionaries, lists, strings, and other data structures before SSE emission.
+    """
+    if isinstance(obj, str):
+        return _redact_string(obj)
+    elif isinstance(obj, dict):
+        return {k: _redact_secrets(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_redact_secrets(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_redact_secrets(item) for item in obj)
+    elif isinstance(obj, set):
+        return {_redact_secrets(item) for item in obj}
+    return obj
+
 
 def format_sse_event(event: str, data: dict[str, Any]) -> str:
     """
@@ -85,8 +157,9 @@ def format_sse_event(event: str, data: dict[str, Any]) -> str:
             f"format_sse_event: unknown event {event!r}. "
             f"Allowed: {sorted(_ALLOWED_EVENTS)}"
         )
+    sanitized_data = _redact_secrets(data)
     try:
-        data_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        data_str = json.dumps(sanitized_data, ensure_ascii=False, separators=(",", ":"))
     except (TypeError, ValueError) as exc:
         logger.error(
             "format_sse_event: failed to serialise data for event=%s: %s", event, exc

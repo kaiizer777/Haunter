@@ -5,6 +5,7 @@ All external input crossing a trust boundary is validated through these schemas.
 No free-text injection vectors — provider and model_name use Literal allowlists.
 """
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Literal, Optional
@@ -12,6 +13,95 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import UserRole
+
+# Branch name and repo ident validation regexes and protected branch names
+_BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9/_.-]+$")
+_REPO_IDENT_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+_PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "develop", "dev"})
+
+
+def validate_repo_ident(value: str, label: str = "identifier") -> str:
+    r"""Validate repository identifier (owner or name).
+
+    Checks ^[a-zA-Z0-9_.\-]+$ and rejects exact dot segments
+    (value in ('.', '..') or containing '/../'), without rejecting
+    valid names like 'foo..bar'.
+    """
+    if not value or not isinstance(value, str):
+        raise ValueError(f"Invalid repository {label}: cannot be empty.")
+    if not _REPO_IDENT_RE.match(value):
+        raise ValueError(
+            f"Invalid repository {label}: {value!r}. Only alphanumeric characters, '.', '_', and '-' are allowed."
+        )
+    if (
+        value in (".", "..")
+        or "/../" in value
+        or value.startswith("../")
+        or value.endswith("/..")
+    ):
+        raise ValueError(
+            f"Invalid repository {label}: {value!r}. Path traversal segments are not allowed."
+        )
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError(
+            f"Invalid repository {label}: {value!r}. Control characters are not allowed."
+        )
+    return value
+
+
+def _validate_git_branch(
+    branch: Optional[str], allow_protected: bool = True
+) -> Optional[str]:
+    """Validate Git branch format and enforce protected branch rules."""
+    if branch is None:
+        return None
+    b = branch.strip()
+    if not b:
+        return None
+    clean = b.removeprefix("refs/heads/")
+    if not clean:
+        raise ValueError("Branch name cannot be empty.")
+    if len(clean) > 255:
+        raise ValueError("Branch name cannot exceed 255 characters.")
+    if (
+        not _BRANCH_NAME_RE.match(clean)
+        or clean.startswith("/")
+        or clean.endswith("/")
+        or "//" in clean
+    ):
+        raise ValueError(
+            f"Invalid Git branch name format: {branch!r}. "
+            "Only alphanumeric characters, '/', '_', '-', and '.' are allowed."
+        )
+    components = clean.split("/")
+    for comp in components:
+        if not comp:
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Empty path components are not allowed."
+            )
+        if comp.startswith("."):
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot start with '.': {comp!r}."
+            )
+        if comp.endswith("."):
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot end with '.': {comp!r}."
+            )
+        if comp.endswith(".lock"):
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot end with '.lock': {comp!r}."
+            )
+        if ".." in comp:
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot contain '..': {comp!r}."
+            )
+
+    if not allow_protected and clean.lower() in _PROTECTED_BRANCHES:
+        raise ValueError(
+            f"Target branch cannot be a protected branch: {branch!r}. "
+            f"Protected branches: {sorted(_PROTECTED_BRANCHES)}"
+        )
+    return clean
 
 
 class UserRoleUpdate(BaseModel):
@@ -30,6 +120,16 @@ class RepoCreate(BaseModel):
     language_hint: Optional[str] = Field(None, max_length=255)
     active_model_config_id: Optional[uuid.UUID] = None
     github_install_id: Optional[int] = Field(default=None, gt=0)
+
+    @field_validator("owner", "name")
+    @classmethod
+    def validate_repo_ident_field(cls, v: str) -> str:
+        return validate_repo_ident(v)
+
+    @field_validator("default_branch", mode="before")
+    @classmethod
+    def validate_default_branch(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_git_branch(v, allow_protected=True)
 
     @field_validator("github_install_id")
     @classmethod
@@ -271,6 +371,13 @@ class WorkflowRunObj(BaseModel):
 
     model_config = {"extra": "ignore"}
 
+    @field_validator("head_branch", mode="before")
+    @classmethod
+    def normalize_head_branch(cls, v: Optional[str]) -> Optional[str]:
+        if isinstance(v, str):
+            return v.removeprefix("refs/heads/")
+        return v
+
 
 class WorkflowRunWebhookPayload(BaseModel):
     action: str
@@ -319,6 +426,13 @@ class PullRequestBranchRef(BaseModel):
     sha: Optional[str] = None
 
     model_config = {"extra": "ignore"}
+
+    @field_validator("ref", mode="before")
+    @classmethod
+    def normalize_ref(cls, v: str) -> str:
+        if isinstance(v, str):
+            return v.removeprefix("refs/heads/")
+        return v
 
 
 class PullRequestObj(BaseModel):
@@ -444,6 +558,15 @@ class SessionCreateIn(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    @field_validator("branch_name", mode="before")
+    @classmethod
+    def validate_session_branch_name(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_git_branch(v, allow_protected=True)
+
+
+# Alias for backward compatibility / external imports
+SessionCreate = SessionCreateIn
+
 
 class PlanTask(BaseModel):
     """A single step in the agent's live execution plan."""
@@ -558,13 +681,24 @@ class SessionCommitIn(BaseModel):
 
     title: PR title string.
     body: Optional PR description markdown.
+    branch_name: Optional target branch override (disallows protected branches).
     extra="forbid" prevents mass-assignment injection.
     """
 
     title: str = Field(..., min_length=1, max_length=255)
     body: str | None = Field(None, max_length=65535)
+    branch_name: Optional[str] = Field(None, max_length=255)
 
     model_config = {"extra": "forbid"}
+
+    @field_validator("branch_name", mode="before")
+    @classmethod
+    def validate_commit_branch_name(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_git_branch(v, allow_protected=False)
+
+
+# Alias for backward compatibility / external imports
+CommitRequest = SessionCommitIn
 
 
 class SessionCommitOut(BaseModel):

@@ -207,4 +207,142 @@ describe("useSessionStream — Audit SSE Events Handling", () => {
     expect(lastMsg.auditScan?.status).toBe("completed");
     expect(lastMsg.auditScan?.report?.health_score).toBe(95);
   });
+
+  it("handles stopStreaming by aborting the stream cleanly without inserting error messages", async () => {
+    let abortSignalObserved: AbortSignal | undefined;
+    globalThis.fetch = vi.fn().mockImplementation((_url, init) => {
+      abortSignalObserved = init?.signal;
+      const stream = new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        },
+      });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        body: stream,
+        text: async () => "",
+      } as unknown as Response);
+    });
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    let sendPromise: Promise<void> | undefined;
+    act(() => {
+      sendPromise = result.current.sendChatMessage("hello");
+    });
+
+    expect(result.current.isStreaming).toBe(true);
+
+    act(() => {
+      result.current.stopStreaming();
+    });
+
+    await act(async () => {
+      await sendPromise;
+    });
+
+    expect(abortSignalObserved?.aborted).toBe(true);
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.messages.some((m) => m.role === "system" && m.content.includes("Error"))).toBe(false);
+  });
+
+  it("does not promote intermediate tool reasoning thoughts as final assistant content", async () => {
+    const sseChunk = [
+      "event: tool_call\n",
+      'data: {"name": "read_file", "args": {"path": "src/main.py"}}\n\n',
+      "event: thought\n",
+      'data: {"delta": "Calling read_file"}\n\n',
+      "event: done\n",
+      "data: {}\n\n",
+    ].join("");
+
+    globalThis.fetch = vi.fn().mockResolvedValue(createMockStreamResponse([sseChunk]));
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    await act(async () => {
+      await result.current.sendChatMessage("read file");
+    });
+
+    const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg?.content).toBe("");
+    expect(assistantMsg?.thoughts).toEqual(["Calling read_file"]);
+    expect(assistantMsg?.toolCalls).toHaveLength(1);
+    expect(assistantMsg?.toolCalls?.[0].name).toBe("read_file");
+  });
+
+  it("promotes thoughts starting with 'Calling...' as assistant content when no tool calls are present", async () => {
+    const sseChunk = [
+      "event: thought\n",
+      'data: {"delta": "Calling this endpoint will return the session details."}\n\n',
+      "event: done\n",
+      "data: {}\n\n",
+    ].join("");
+
+    globalThis.fetch = vi.fn().mockResolvedValue(createMockStreamResponse([sseChunk]));
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    await act(async () => {
+      await result.current.sendChatMessage("how do I call this endpoint?");
+    });
+
+    const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg?.content).toBe("Calling this endpoint will return the session details.");
+  });
+
+  it("promotes genuine response prose starting with 'Calling...' even if unrelated tool calls exist", async () => {
+    const sseChunk = [
+      "event: tool_call\n",
+      'data: {"name": "read_file", "args": {"path": "src/main.py"}}\n\n',
+      "event: thought\n",
+      'data: {"delta": "Calling this function is the standard pattern across the repo."}\n\n',
+      "event: done\n",
+      "data: {}\n\n",
+    ].join("");
+
+    globalThis.fetch = vi.fn().mockResolvedValue(createMockStreamResponse([sseChunk]));
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    await act(async () => {
+      await result.current.sendChatMessage("analyze pattern");
+    });
+
+    const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg?.content).toBe("Calling this function is the standard pattern across the repo.");
+  });
+
+  it("promotes thought starting with the tool name when it is long prose (>150 chars) or multi-line", async () => {
+    const longProseThought =
+      "Calling read_file is the standard pattern across the whole repo to inspect configuration files and ensure all environments are synced properly with verified configurations.";
+    expect(longProseThought.length).toBeGreaterThan(150);
+
+    const sseChunk = [
+      "event: tool_call\n",
+      'data: {"name": "read_file", "args": {"path": "src/config.py"}}\n\n',
+      "event: thought\n",
+      `data: ${JSON.stringify({ delta: longProseThought })}\n\n`,
+      "event: done\n",
+      "data: {}\n\n",
+    ].join("");
+
+    globalThis.fetch = vi.fn().mockResolvedValue(createMockStreamResponse([sseChunk]));
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    await act(async () => {
+      await result.current.sendChatMessage("inspect config");
+    });
+
+    const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg?.content).toBe(longProseThought);
+  });
 });

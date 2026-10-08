@@ -1100,6 +1100,37 @@ class SessionBusyError(Exception):
     """Raised when a concurrent prompt is already in flight for this session."""
 
 
+def _is_lock_conflict(exc: Exception) -> bool:
+    """Check if exception represents a DB row lock contention (e.g. Postgres 55P03 / lock_not_available)."""
+    orig = getattr(exc, "orig", exc)
+    code = (
+        getattr(orig, "pgcode", None)
+        or getattr(orig, "sqlstate", None)
+        or getattr(exc, "pgcode", None)
+        or getattr(exc, "sqlstate", None)
+    )
+    if code and str(code).upper() == "55P03":
+        return True
+
+    orig_cls_name = type(orig).__name__
+    if "LockNotAvailable" in orig_cls_name:
+        return True
+
+    msg = f"{exc} {orig}".lower()
+    if any(
+        s in msg
+        for s in (
+            "55p03",
+            "lock_not_available",
+            "could not obtain lock",
+            "database is locked",
+        )
+    ):
+        return True
+
+    return False
+
+
 # ------------------------------------------------------------------
 # Main orchestrator
 # ------------------------------------------------------------------
@@ -1327,6 +1358,47 @@ class SessionOrchestrator:
                     queue=queue,
                     session=session,
                 )
+
+                if tool_name == "checkpoint_restore":
+                    # Checkpoint restore state synchronization:
+                    # Only synchronize staged_patches and conversation_history if the restore operation actually succeeded (not on error/failure).
+                    if not tool_result.startswith("Error"):
+                        staged_patches.clear()
+                        staged_patches.update(dict(session.staged_patches or {}))
+                        conversation_history = list(session.conversation_history or [])
+
+                        # Truncate current-turn intermediate tool entries in new_entries
+                        # (retaining only the user message and the checkpoint restore tool interaction)
+                        # so intermediate rolled-back tool executions are not left in conversation history.
+                        user_entry = new_entries[0] if new_entries else {"role": "user", "content": user_message}
+                        restore_tc = [
+                            c
+                            for c in assistant_entry.get("tool_calls", [])
+                            if c.get("id") == tc_id
+                            or c.get("function", {}).get("name") == "checkpoint_restore"
+                        ]
+                        restore_assistant_entry: dict[str, Any] = {
+                            "role": "assistant",
+                            "content": assistant_entry.get("content", ""),
+                            "tool_calls": restore_tc or assistant_entry.get("tool_calls", []),
+                        }
+                        new_entries.clear()
+                        new_entries.extend([user_entry, restore_assistant_entry])
+
+                        # Rebuild messages LLM context from the restored session.conversation_history
+                        # so subsequent iterations in the turn use the restored history.
+                        restored_system_msg: dict[str, Any] = {
+                            "role": "system",
+                            "content": _build_system_prompt(
+                                repo_owner=repo.owner,
+                                repo_name=repo.name,
+                                branch_name=session.branch_name,
+                                base_sha=session.base_sha,
+                                staged_patches=staged_patches,
+                            ),
+                        }
+                        restored_pruned_history = _prune_conversation_history(conversation_history)
+                        messages = [restored_system_msg] + restored_pruned_history + list(new_entries)
 
                 if tool_name == "ask_user_clarification":
                     paused_for_clarification = True
@@ -2836,22 +2908,38 @@ class SessionOrchestrator:
         """
         Load the AgentSession with its repo relationship.
 
+        Enforces concurrency locking via with_for_update(nowait=True).
         Returns None if the session does not exist or is not active.
+        Raises SessionBusyError if another transaction is currently holding the lock.
         Note: object-level auth (user_id check) is enforced at the endpoint;
         this layer only checks existence and status.
         """
         from sqlalchemy.orm import selectinload
+        from sqlalchemy.exc import DBAPIError, OperationalError
 
-        stmt = (
-            select(AgentSession)
-            .options(selectinload(AgentSession.repo))
-            .where(
-                AgentSession.id == self.session_id,
-                AgentSession.status == "active",
+        try:
+            stmt = (
+                select(AgentSession)
+                .options(selectinload(AgentSession.repo))
+                .where(
+                    AgentSession.id == self.session_id,
+                    AgentSession.status == "active",
+                )
+                .with_for_update(nowait=True)
             )
-        )
-        result = await self.db.execute(stmt)
-        return result.scalars().first()
+            result = await self.db.execute(stmt)
+            return result.scalars().first()
+        except (OperationalError, DBAPIError) as exc:
+            if not _is_lock_conflict(exc):
+                raise
+            logger.warning(
+                "session_orchestrator: session=%s lock conflict: %s",
+                self.session_id,
+                exc,
+            )
+            raise SessionBusyError(
+                f"Session {self.session_id} is currently busy with another operation."
+            ) from exc
 
     async def _persist(
         self,

@@ -28,15 +28,19 @@ from app.github.pr import (
     GitHubPRAuthError,
     GitHubPRError,
     GitHubPRValidationError,
+    GitHubResourceNotFoundError,
     _TOKEN_CACHE,
     _build_jwt,
     _clear_pem_cache_for_tests,
     _escape_pr_text,
+    _parse_patch_files,
     _resolve_app_credentials,
     _resolve_write_credentials,
+    commit_patch,
     create_branch,
     get_installation_token,
     open_pr,
+    update_branch_ref,
 )
 
 
@@ -531,3 +535,353 @@ def test_build_jwt_malformed_env_pem_defaults_source() -> None:
     """Malformed env PEM without explicit source still raises GitHubPRError."""
     with pytest.raises(GitHubPRError, match=r"source=github_app"):
         _build_jwt("app-id", "bogus-key", None)
+
+
+# ---------------------------------------------------------------------------
+# Protected Branches & Tree Deletion Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("branch", ["main", "master", "dev", "develop", "refs/heads/main"])
+async def test_create_branch_rejects_protected_branches(branch: str) -> None:
+    """create_branch must reject direct creation or write targeting protected branches."""
+    with pytest.raises(GitHubPRValidationError, match="protected branch"):
+        await create_branch(
+            owner="test-org",
+            repo="test-repo",
+            branch=branch,
+            sha="a" * 40,
+            token="fake_token",
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("branch", ["main", "master", "dev", "develop"])
+async def test_commit_patch_rejects_protected_branches(branch: str) -> None:
+    """commit_patch must reject commits targeting protected branches."""
+    with pytest.raises(GitHubPRValidationError, match="protected branch"):
+        await commit_patch(
+            owner="test-org",
+            repo="test-repo",
+            branch=branch,
+            patch_text="--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-a\n+b\n",
+            commit_msg="fix: something",
+            token="fake_token",
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("head_branch", ["main", "master", "dev", "develop"])
+async def test_open_pr_rejects_protected_head_branch(head_branch: str) -> None:
+    """open_pr must reject protected branches as head_branch."""
+    with pytest.raises(GitHubPRValidationError, match="protected branch"):
+        await open_pr(
+            owner="test-org",
+            repo="test-repo",
+            head_branch=head_branch,
+            base_branch="main",
+            title="fix: something",
+            body="Body text",
+            token="fake_token",
+        )
+
+
+def test_parse_patch_files_with_deletion() -> None:
+    """_parse_patch_files extracts deleted file path from +++ /dev/null."""
+    patch_text = (
+        "--- a/deleted_file.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,3 +0,0 @@\n"
+        "-line1\n"
+        "-line2\n"
+        "-line3\n"
+    )
+    parsed = _parse_patch_files(patch_text)
+    assert "deleted_file.py" in parsed
+    assert "+++ /dev/null" in parsed["deleted_file.py"]
+
+
+@pytest.mark.anyio
+async def test_commit_patch_with_deletion_produces_null_sha_tree_entry() -> None:
+    """commit_patch for deleted file creates tree entry with sha=None without creating blob."""
+    import base64
+
+    deletion_patch = (
+        "--- a/obsolete_module.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,2 +0,0 @@\n"
+        "-old_code_1\n"
+        "-old_code_2\n"
+    )
+    captured_tree_payload = []
+
+    def _mock_trees(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        captured_tree_payload.append(data)
+        return httpx.Response(201, json={"sha": "new_tree_sha_123"})
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
+        )
+        rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
+            return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        rx.get("/repos/test-org/test-repo/contents/obsolete_module.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"old_code_1\nold_code_2\n").decode("ascii")},
+            )
+        )
+        rx.post("/repos/test-org/test-repo/git/trees").mock(
+            side_effect=_mock_trees
+        )
+        rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "new_commit_sha_333"})
+        )
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "new_commit_sha_333"}})
+        )
+
+        commit_sha = await commit_patch(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-test",
+            patch_text=deletion_patch,
+            commit_msg="chore: delete obsolete module",
+            token="fake_token",
+        )
+
+    assert commit_sha == "new_commit_sha_333"
+    assert len(captured_tree_payload) == 1
+    tree_entries = captured_tree_payload[0]["tree"]
+    assert len(tree_entries) == 1
+    assert tree_entries[0] == {
+        "path": "obsolete_module.py",
+        "mode": "100644",
+        "type": "blob",
+        "sha": None,
+    }
+
+
+@pytest.mark.anyio
+async def test_commit_patch_with_deletion_mismatched_hunk_falls_back() -> None:
+    """commit_patch with mismatched deletion hunk falls back to haunter.patch."""
+    import base64
+
+    deletion_patch = (
+        "--- a/obsolete_module.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,2 +0,0 @@\n"
+        "-expected_code_1\n"
+        "-expected_code_2\n"
+    )
+    captured_tree_payload = []
+
+    def _mock_trees(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        captured_tree_payload.append(data)
+        return httpx.Response(201, json={"sha": "new_tree_sha_fallback"})
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
+        )
+        rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
+            return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        rx.get("/repos/test-org/test-repo/contents/obsolete_module.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"completely_different_code\n").decode("ascii")},
+            )
+        )
+        rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha_fallback"})
+        )
+        rx.post("/repos/test-org/test-repo/git/trees").mock(
+            side_effect=_mock_trees
+        )
+        rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "new_commit_fallback"})
+        )
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "new_commit_fallback"}})
+        )
+
+        commit_sha = await commit_patch(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-test",
+            patch_text=deletion_patch,
+            commit_msg="chore: delete obsolete module",
+            token="fake_token",
+        )
+
+    assert commit_sha == "new_commit_fallback"
+    assert len(captured_tree_payload) == 1
+    tree_entries = captured_tree_payload[0]["tree"]
+    assert len(tree_entries) == 1
+    assert tree_entries[0]["path"] == "haunter.patch"
+
+
+@pytest.mark.anyio
+async def test_update_branch_ref_404_raises_resource_not_found() -> None:
+    """update_branch_ref maps 404 to GitHubResourceNotFoundError."""
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").mock(
+            return_value=httpx.Response(404, json={"message": "Not Found"})
+        )
+        with pytest.raises(GitHubResourceNotFoundError, match="Branch ref not found"):
+            await update_branch_ref(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-1",
+                sha="a" * 40,
+                token="fake_token",
+            )
+
+
+@pytest.mark.anyio
+async def test_update_branch_ref_422_reference_not_exist_raises_resource_not_found() -> None:
+    """update_branch_ref maps 422 with 'Reference does not exist' to GitHubResourceNotFoundError."""
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").mock(
+            return_value=httpx.Response(
+                422, json={"message": "Reference does not exist", "documentation_url": "https://docs.github.com"}
+            )
+        )
+        with pytest.raises(GitHubResourceNotFoundError, match="Branch ref not found"):
+            await update_branch_ref(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-1",
+                sha="a" * 40,
+                token="fake_token",
+            )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("branch", ["main", "master", "dev", "develop", "refs/heads/main"])
+async def test_update_branch_ref_rejects_protected_branches(branch: str) -> None:
+    """update_branch_ref rejects direct updates to protected branches."""
+    with pytest.raises(GitHubPRValidationError, match="protected branch"):
+        await update_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch=branch,
+            sha="a" * 40,
+            token="fake_token",
+        )
+
+
+@pytest.mark.anyio
+async def test_update_branch_ref_disallows_force_true() -> None:
+    """update_branch_ref rejects force=True with GitHubPRValidationError."""
+    with pytest.raises(GitHubPRValidationError, match="Force-updating branch ref is not permitted"):
+        await update_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-1",
+            sha="a" * 40,
+            token="fake_token",
+            force=True,
+        )
+
+
+@pytest.mark.anyio
+async def test_update_branch_ref_always_sends_force_false() -> None:
+    """update_branch_ref always sends force: False over the wire."""
+    captured = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"object": {"sha": "a" * 40}})
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").mock(side_effect=_handler)
+        await update_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-1",
+            sha="a" * 40,
+            token="fake_token",
+        )
+
+    assert len(captured) == 1
+    assert captured[0] == {"sha": "a" * 40, "force": False}
+
+
+@pytest.mark.anyio
+async def test_commit_patch_with_deletion_404_does_not_trigger_fallback() -> None:
+    """commit_patch does NOT set use_fallback=True when a deleted file is 404 (already absent)."""
+    import base64
+
+    multi_file_patch = (
+        "--- a/already_gone.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,2 +0,0 @@\n"
+        "-line1\n"
+        "-line2\n"
+        "--- a/hello.py\n"
+        "+++ b/hello.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    captured_tree_payload = []
+
+    def _mock_trees(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.content)
+        captured_tree_payload.append(data)
+        return httpx.Response(201, json={"sha": "tree_sha_xyz"})
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
+        )
+        rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
+            return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        # Deletion target returns 404
+        rx.get("/repos/test-org/test-repo/contents/already_gone.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(404, json={"message": "Not Found"})
+        )
+        # Surviving file returns 200
+        rx.get("/repos/test-org/test-repo/contents/hello.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"old\n").decode("ascii")},
+            )
+        )
+        rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha_hello"})
+        )
+        rx.post("/repos/test-org/test-repo/git/trees").mock(
+            side_effect=_mock_trees
+        )
+        rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "new_commit_sha_clean"})
+        )
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "new_commit_sha_clean"}})
+        )
+
+        commit_sha = await commit_patch(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-test",
+            patch_text=multi_file_patch,
+            commit_msg="fix: test commit",
+            token="fake_token",
+        )
+
+    assert commit_sha == "new_commit_sha_clean"
+    # Ensure fallback haunter.patch was NOT used
+    assert len(captured_tree_payload) == 1
+    tree_entries = captured_tree_payload[0]["tree"]
+    assert len(tree_entries) == 1
+    assert tree_entries[0]["path"] == "hello.py"
+    assert tree_entries[0]["sha"] == "blob_sha_hello"

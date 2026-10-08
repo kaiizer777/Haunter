@@ -35,6 +35,7 @@ from app.github_client import (
     fetch_diff,
     fetch_workflow_run_logs,
     post_commit_comment,
+    update_branch_ref,
 )
 
 # Alias for Phase 3 spec terminology
@@ -699,3 +700,79 @@ async def test_post_commit_comment_errors():
     respx.post(url).respond(status_code=500, text="Server Error")
     with pytest.raises(GitHubClientError):
         await post_commit_comment(owner="owner", repo="repo", sha=sha, body="msg")
+
+
+# ---------------------------------------------------------------------------
+# update_branch_ref tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_branch_ref_success():
+    """update_branch_ref sends PATCH with force: False and updates ref cleanly."""
+    owner = "test-owner"
+    repo = "test-repo"
+    branch = "haunter/fix-branch"
+    sha = "c" * 40
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{branch}"
+
+    captured = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.read())
+        return httpx.Response(200, json={"ref": f"refs/heads/{branch}", "object": {"sha": sha}})
+
+    respx.patch(url).mock(side_effect=_handler)
+
+    await update_branch_ref(owner=owner, repo=repo, branch=f"refs/heads/{branch}", commit_sha=sha)
+
+    assert len(captured) == 1
+    import json
+    data = json.loads(captured[0].decode("utf-8"))
+    assert data == {"sha": sha, "force": False}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_branch_ref_404():
+    """update_branch_ref maps 404 to GitHubResourceNotFoundError."""
+    owner = "test-owner"
+    repo = "test-repo"
+    branch = "haunter/new-branch"
+    sha = "c" * 40
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{branch}"
+
+    respx.patch(url).respond(status_code=404, text="Not Found")
+
+    with pytest.raises(GitHubResourceNotFoundError, match="Branch ref not found"):
+        await update_branch_ref(owner=owner, repo=repo, branch=branch, commit_sha=sha)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_update_branch_ref_422_reference_does_not_exist():
+    """update_branch_ref maps 422 with 'Reference does not exist' to GitHubResourceNotFoundError."""
+    owner = "test-owner"
+    repo = "test-repo"
+    branch = "haunter/new-branch"
+    sha = "c" * 40
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{branch}"
+
+    respx.patch(url).respond(status_code=422, json={"message": "Reference does not exist"})
+
+    with pytest.raises(GitHubResourceNotFoundError, match="Branch ref not found"):
+        await update_branch_ref(owner=owner, repo=repo, branch=branch, commit_sha=sha)
+
+
+@pytest.mark.asyncio
+async def test_update_branch_ref_disallows_force_true():
+    """update_branch_ref rejects force=True with GitHubClientError."""
+    with pytest.raises(GitHubClientError, match="Force update is not permitted"):
+        await update_branch_ref(
+            owner="test-owner",
+            repo="test-repo",
+            branch="haunter/fix",
+            commit_sha="c" * 40,
+            force=True,
+        )

@@ -771,6 +771,7 @@ class SubagentRunner:
             timeout_sec: int = int(args.get("timeout_sec", 60))
         except (TypeError, ValueError):
             timeout_sec = 60
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         return await tool_run_terminal_command(
             command=command,
             timeout_sec=timeout_sec,
@@ -778,6 +779,9 @@ class SubagentRunner:
             cwd=cwd_str,
             repo_owner=self.repo_owner,
             repo_name=self.repo_name,
+            staged_patches=self.staged_patches,
+            base_sha=self.base_sha,
+            session_id=session_id_str,
         )
 
     async def _exec_run_linter(self, args: dict[str, Any]) -> str:
@@ -793,6 +797,7 @@ class SubagentRunner:
             timeout_sec: int = int(args.get("timeout_sec", 60))
         except (TypeError, ValueError):
             timeout_sec = 60
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         return await tool_run_linter(
             paths=paths,
             linter=linter,
@@ -801,6 +806,9 @@ class SubagentRunner:
             cwd=cwd_str,
             repo_owner=self.repo_owner,
             repo_name=self.repo_name,
+            staged_patches=self.staged_patches,
+            base_sha=self.base_sha,
+            session_id=session_id_str,
         )
 
     async def _exec_run_targeted_tests(self, args: dict[str, Any]) -> str:
@@ -815,6 +823,7 @@ class SubagentRunner:
             timeout_sec: int = int(args.get("timeout_sec", 120))
         except (TypeError, ValueError):
             timeout_sec = 120
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         return await tool_run_targeted_tests(
             test_targets=test_targets,
             timeout_sec=timeout_sec,
@@ -822,6 +831,9 @@ class SubagentRunner:
             cwd=cwd_str,
             repo_owner=self.repo_owner,
             repo_name=self.repo_name,
+            staged_patches=self.staged_patches,
+            base_sha=self.base_sha,
+            session_id=session_id_str,
         )
 
     async def _exec_search_web_docs(self, args: dict[str, Any]) -> str:

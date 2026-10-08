@@ -20,15 +20,21 @@ from pydantic import ValidationError
 from app.models import Repo
 from app.schemas import (
     AvailableRepoOut,
+    CommitRequest,
     HostingConfigOut,
     HostingConfigUpdate,
     ModelConfigUpdate,
+    PullRequestBranchRef,
     RepoCreate,
     RepoOut,
+    SessionCommitIn,
+    SessionCreate,
+    SessionCreateIn,
     WorkflowRunObj,
     WorkflowRunRepo,
     WorkflowRunRepoOwner,
     WorkflowRunWebhookPayload,
+    validate_repo_ident,
 )
 
 
@@ -97,6 +103,27 @@ def test_repo_create_extra_fields_ignored() -> None:
     )
     dumped = repo.model_dump()
     assert "unrecognized_extra_key" not in dumped
+
+
+@pytest.mark.parametrize(
+    ("bad_owner", "bad_name"),
+    [
+        ("../evil", "valid_name"),
+        ("valid_owner", "../evil"),
+        ("evil/org", "valid_name"),
+        ("valid_owner", "evil/repo"),
+        ("owner\x00", "valid_name"),
+        ("valid_owner", "name\n"),
+        ("..", "valid_name"),
+        ("valid_owner", ".."),
+        (".", "valid_name"),
+        ("valid_owner", "."),
+    ],
+)
+def test_repo_create_invalid_owner_and_name_rejected(bad_owner: str, bad_name: str) -> None:
+    """RepoCreate rejects path traversal, slashes, control chars, and invalid ident chars."""
+    with pytest.raises(ValidationError):
+        RepoCreate(owner=bad_owner, name=bad_name)
 
 
 # ---------------------------------------------------------------------------
@@ -365,3 +392,136 @@ def test_hosting_config_out(source: str) -> None:
     assert out.hosting_provider == "aws"
     assert out.sandbox_provider == "github_actions"
     assert out.source == source
+
+
+# ---------------------------------------------------------------------------
+# Branch Name Validation & Protected Branches
+# ---------------------------------------------------------------------------
+
+
+def test_repo_create_default_branch_allows_main() -> None:
+    """RepoCreate allows standard default branch names like 'main' and 'master'."""
+    r1 = RepoCreate(owner="owner", name="repo", default_branch="main")
+    assert r1.default_branch == "main"
+    r2 = RepoCreate(owner="owner", name="repo", default_branch="master")
+    assert r2.default_branch == "master"
+
+
+@pytest.mark.parametrize(
+    "invalid_branch",
+    ["/starts-with-slash", "ends-with-slash/", "dot..dot", "slash//slash", ".hidden", "trailing."],
+)
+def test_repo_create_default_branch_rejects_invalid_format(invalid_branch: str) -> None:
+    """RepoCreate rejects invalid git branch characters and traversal patterns."""
+    with pytest.raises(ValidationError):
+        RepoCreate(owner="owner", name="repo", default_branch=invalid_branch)
+
+
+def test_session_create_valid_branch() -> None:
+    """SessionCreate allows valid branch names including main."""
+    s = SessionCreate(repo_id=uuid.uuid4(), branch_name="feature/my-task_1")
+    assert s.branch_name == "feature/my-task_1"
+    s_main = SessionCreate(repo_id=uuid.uuid4(), branch_name="main")
+    assert s_main.branch_name == "main"
+
+
+@pytest.mark.parametrize(
+    "invalid_branch",
+    ["/starts-with-slash", "ends-with-slash/", "dot..dot", "slash//slash", "has spaces", "bad$char"],
+)
+def test_session_create_rejects_invalid_format(invalid_branch: str) -> None:
+    """SessionCreate rejects malformed branch names."""
+    with pytest.raises(ValidationError):
+        SessionCreate(repo_id=uuid.uuid4(), branch_name=invalid_branch)
+
+
+def test_commit_request_valid() -> None:
+    """CommitRequest / SessionCommitIn allows valid non-protected branch and alias."""
+    c = CommitRequest(title="fix: something", branch_name="haunter/fix-1")
+    assert c.title == "fix: something"
+    assert c.branch_name == "haunter/fix-1"
+
+
+@pytest.mark.parametrize("protected", ["main", "master", "dev", "develop"])
+def test_commit_request_rejects_protected_branches(protected: str) -> None:
+    """CommitRequest rejects protected branches."""
+    with pytest.raises(ValidationError, match="protected branch"):
+        CommitRequest(title="fix: something", branch_name=protected)
+
+
+@pytest.mark.parametrize(
+    "invalid_branch",
+    [
+        "feature/.hidden",
+        "fix/.env",
+        ".hidden/branch",
+        "feature.lock",
+        "feature/task.lock",
+        "fix/my.lock/branch",
+    ],
+)
+def test_validate_git_branch_rejects_hidden_components_and_lock_suffixes(invalid_branch: str) -> None:
+    """_validate_git_branch rejects branch paths with hidden components or .lock suffix components."""
+    with pytest.raises(ValidationError):
+        SessionCreate(repo_id=uuid.uuid4(), branch_name=invalid_branch)
+
+
+def test_validate_git_branch_cleanly_strips_refs_heads_prefix() -> None:
+    """_validate_git_branch cleanly strips refs/heads/ prefix."""
+    s = SessionCreate(repo_id=uuid.uuid4(), branch_name="refs/heads/feature/awesome")
+    assert s.branch_name == "feature/awesome"
+    r = RepoCreate(owner="owner", name="repo", default_branch="refs/heads/main")
+    assert r.default_branch == "main"
+
+
+def test_validate_repo_ident_direct() -> None:
+    """validate_repo_ident allows valid identifiers including foo..bar and rejects exact dot segments/traversals."""
+    assert validate_repo_ident("kaiizer777") == "kaiizer777"
+    assert validate_repo_ident("Haunter") == "Haunter"
+    assert validate_repo_ident("foo..bar") == "foo..bar"
+    assert validate_repo_ident("repo-1.0_beta") == "repo-1.0_beta"
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        validate_repo_ident("")
+
+    for bad in (".", "..", "../evil", "evil/..", "foo/bar", "foo\x00bar", "foo\nbar"):
+        with pytest.raises(ValueError):
+            validate_repo_ident(bad)
+
+
+def test_repo_create_allows_double_dots_in_names() -> None:
+    """RepoCreate allows valid identifiers containing '..' like 'foo..bar' without triggering traversal rejection."""
+    r = RepoCreate(owner="foo..bar", name="my..repo")
+    assert r.owner == "foo..bar"
+    assert r.name == "my..repo"
+
+
+def test_branch_normalization_before_max_length_check() -> None:
+    """refs/heads/ prefix is normalized BEFORE length <= 255 validation across all schemas."""
+    # 250 characters + 11 chars 'refs/heads/' = 261 total characters
+    valid_stripped_branch = "b" * 250
+    branch_with_prefix = f"refs/heads/{valid_stripped_branch}"
+
+    r = RepoCreate(owner="owner", name="repo", default_branch=branch_with_prefix)
+    assert r.default_branch == valid_stripped_branch
+
+    s = SessionCreate(repo_id=uuid.uuid4(), branch_name=branch_with_prefix)
+    assert s.branch_name == valid_stripped_branch
+
+    c = CommitRequest(title="fix: something", branch_name=branch_with_prefix)
+    assert c.branch_name == valid_stripped_branch
+
+    pr = PullRequestBranchRef(ref=branch_with_prefix)
+    assert pr.ref == valid_stripped_branch
+
+    wf = WorkflowRunObj(id=1, head_sha="a" * 40, head_branch=branch_with_prefix)
+    assert wf.head_branch == valid_stripped_branch
+
+    # Branch exceeding 255 characters even after prefix removal must fail
+    too_long_branch = "refs/heads/" + ("b" * 256)
+    with pytest.raises(ValidationError):
+        RepoCreate(owner="owner", name="repo", default_branch=too_long_branch)
+    with pytest.raises(ValidationError):
+        SessionCreate(repo_id=uuid.uuid4(), branch_name=too_long_branch)
+    with pytest.raises(ValidationError):
+        CommitRequest(title="fix", branch_name=too_long_branch)

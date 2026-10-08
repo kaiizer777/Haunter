@@ -64,6 +64,9 @@ def apply_unified_diff(original: str, patch_text: str) -> str:
     for hunk in hunks:
         result_lines, offset = _apply_hunk(result_lines, hunk, offset)
 
+    if not result_lines:
+        return ""
+
     output = "\n".join(result_lines)
     if original_has_crlf:
         output = output.replace("\n", "\r\n")

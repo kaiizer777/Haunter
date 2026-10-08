@@ -94,7 +94,7 @@ async def tool_checkpoint_restore(
     - Reverts session.staged_patches to the snapshot.
     - Truncates session.conversation_history to the snapshotted length.
     - Emits checkpoint_restored SSE event so Monaco editor buffers sync.
-    - Persists and commits changes to the DB.
+    - Flushes restored state to the active DB transaction (committed at turn end).
 
     Returns a human-readable result string for the LLM.
     """
@@ -117,8 +117,9 @@ async def tool_checkpoint_restore(
         staged_patches=dict(session.staged_patches),
     )
 
-    # Persist.
-    await db.commit()
+    # Stage changes in the active transaction without prematurely releasing row locks.
+    # The orchestrator commits the transaction at the end of the turn.
+    await db.flush()
 
     return (
         f"Successfully restored session to checkpoint '{checkpoint_id}' "
@@ -154,6 +155,7 @@ def tool_scan_security_vulnerabilities(
     violations: list[dict[str, Any]] = []
 
     staged: dict[str, str] = dict(session.staged_patches or {})
+    scanned_count = 0
 
     for file_path in paths:
         content: str | None = None
@@ -177,6 +179,7 @@ def tool_scan_security_vulnerabilities(
         if content is None:
             continue
 
+        scanned_count += 1
         content_lines = content.splitlines()
 
         # Run secret patterns.
@@ -220,11 +223,11 @@ def tool_scan_security_vulnerabilities(
     if not violations:
         return (
             f"Security scan passed: 0 secrets or SQL injection flaws detected "
-            f"across {len(paths)} files."
+            f"across {scanned_count} files."
         )
 
     lines = [
-        f"Security scan found {len(violations)} violation(s) across {len(paths)} file(s):",
+        f"Security scan found {len(violations)} violation(s) across {scanned_count} file(s):",
         "",
     ]
     for v in violations:

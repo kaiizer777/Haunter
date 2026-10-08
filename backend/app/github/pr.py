@@ -32,6 +32,8 @@ from typing import Any, Optional
 import httpx
 
 from app.config import settings
+from app.github_client import GitHubResourceNotFoundError
+from app.schemas import validate_repo_ident
 
 logger = logging.getLogger(__name__)
 
@@ -112,15 +114,17 @@ _CACHE_TTL_SECONDS = 50 * 60  # 50 min (GitHub expires at 60 min)
 
 def _validate_ident(value: str, label: str) -> None:
     """Validate an owner or repo name. Raises GitHubPRValidationError on mismatch."""
-    if not _REPO_IDENT_RE.match(value):
+    try:
+        validate_repo_ident(value, label)
+    except ValueError as exc:
         raise GitHubPRValidationError(
-            f"{label} {value!r} contains invalid characters. "
+            f"{label} {value!r} contains invalid characters or traversal segments. "
             "Only [a-zA-Z0-9_.-] are allowed."
-        )
+        ) from exc
 
 
-def _validate_branch(branch: str) -> None:
-    """Validate a branch name. Raises GitHubPRValidationError on mismatch or length excess."""
+def _validate_branch(branch: str, allow_protected: bool = True) -> None:
+    """Validate a branch name. Raises GitHubPRValidationError on mismatch, length excess, or protected branch."""
     if len(branch) > _BRANCH_MAX_LEN:
         raise GitHubPRValidationError(
             f"Branch name exceeds maximum length of {_BRANCH_MAX_LEN} characters."
@@ -129,6 +133,11 @@ def _validate_branch(branch: str) -> None:
         raise GitHubPRValidationError(
             f"Branch name {branch!r} contains invalid characters. "
             r"Only [a-zA-Z0-9/_\-.] are allowed."
+        )
+    clean = branch.removeprefix("refs/heads/")
+    if not allow_protected and clean.lower() in _PROTECTED_BRANCHES:
+        raise GitHubPRValidationError(
+            f"Cannot target protected branch {branch!r} directly."
         )
 
 
@@ -670,14 +679,110 @@ async def _get_repo_default_branch_sha(
     owner: str, repo: str, branch: str, token: str
 ) -> str:
     """Fetch the HEAD SHA of `branch` in the repo."""
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/ref/heads/{branch}"
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    _validate_branch(branch, allow_protected=True)
+    clean_branch = branch.removeprefix("refs/heads/")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/ref/heads/{clean_branch}"
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = await client.get(url, headers=_build_auth_headers(token))
+        try:
+            resp = await client.get(url, headers=_build_auth_headers(token))
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error fetching ref heads/{clean_branch}: {exc.__class__.__name__}"
+            ) from exc
+
+    if resp.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+        )
+    if resp.status_code == 422:
+        error_msg = resp.text
+        if "reference does not exist" in error_msg.lower() or "not found" in error_msg.lower():
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+            )
+        raise GitHubPRError(
+            f"Failed to fetch ref heads/{clean_branch} (422): {error_msg[:200]}"
+        )
+    if resp.status_code in (401, 403):
+        raise GitHubPRAuthError(f"Auth failed fetching branch ref ({resp.status_code}).")
     if resp.is_error:
         raise GitHubPRError(
-            f"Failed to fetch ref heads/{branch}: HTTP {resp.status_code}"
+            f"Failed to fetch ref heads/{clean_branch}: HTTP {resp.status_code}"
         )
     return resp.json()["object"]["sha"]
+
+
+async def update_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    sha: str,
+    token: str,
+    force: bool = False,
+) -> None:
+    """
+    Update a branch ref to point at a new commit SHA.
+
+    PATCH /repos/{owner}/{repo}/git/refs/heads/{branch}
+
+    Rejects protected branches directly (allow_protected=False).
+
+    Raises:
+        GitHubPRValidationError: On invalid owner, repo, or branch, or protected branch.
+        GitHubResourceNotFoundError: On 404 or 422 ("Reference does not exist").
+        GitHubPRAuthError: On 401/403.
+        GitHubPRError: On other HTTP / network errors.
+    """
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    _validate_branch(branch, allow_protected=False)
+
+    if force:
+        raise GitHubPRValidationError("Force-updating branch ref is not permitted")
+
+    clean_branch = branch.removeprefix("refs/heads/")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_auth_headers(token)
+    payload = {"sha": sha, "force": False}
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        try:
+            resp = await client.patch(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error updating branch ref {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+    if resp.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+        )
+    if resp.status_code == 422:
+        error_msg = resp.text
+        if "reference does not exist" in error_msg.lower() or "not found" in error_msg.lower():
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+            )
+        raise GitHubPRError(
+            f"Failed to update ref heads/{clean_branch} (422): {error_msg[:200]}"
+        )
+    if resp.status_code in (401, 403):
+        raise GitHubPRAuthError(f"Auth failed updating branch ref ({resp.status_code}).")
+    if resp.is_error:
+        raise GitHubPRError(
+            f"Failed to update ref heads/{clean_branch}: HTTP {resp.status_code}"
+        )
+
+    logger.info(
+        "github.pr: updated ref %s/%s:%s to sha=%s (force=%s)",
+        owner,
+        repo,
+        clean_branch,
+        sha[:8],
+        force,
+    )
 
 
 async def create_branch(
@@ -690,19 +795,19 @@ async def create_branch(
     """
     Create a new branch at `sha` in the repo.
 
-    Never uses force. Raises GitHubPRValidationError on invalid owner/repo/branch.
+    Never uses force. Rejects protected branches. Raises GitHubPRValidationError on invalid owner/repo/branch.
     Raises GitHubPRError if the branch already exists (409) or on HTTP error.
 
     Args:
         owner:  Repository owner (validated against _REPO_IDENT_RE).
         repo:   Repository name (validated against _REPO_IDENT_RE).
-        branch: New branch name (validated against _BRANCH_RE, max 255 chars).
+        branch: New branch name (validated against _BRANCH_RE, max 255 chars, non-protected).
         sha:    Full 40-char commit SHA to branch from.
         token:  GitHub installation access token.
     """
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
-    _validate_branch(branch)
+    _validate_branch(branch, allow_protected=False)
 
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs"
     payload = {"ref": f"refs/heads/{branch}", "sha": sha}
@@ -736,7 +841,7 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     """
     Split a unified diff into per-file patch segments.
 
-    Returns {filepath: file_patch_text} where filepath is the +++ b/ path.
+    Returns {filepath: file_patch_text} where filepath is the target path (or source path for deletions).
     Returns {} if parsing fails or no valid hunks found.
     Validates each path against _REPO_IDENT_RE traversal checks — invalid paths are skipped.
     """
@@ -754,22 +859,24 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     if not matches:
         return {}
     for idx, m in enumerate(matches):
-        # Use the +++ path as target (for renames/new files); strip trailing tabs/spaces
+        src = m.group(1).strip().split("\t")[0].strip()
         target = m.group(2).strip().split("\t")[0].strip()
-        if target == "/dev/null" or not target:
+        is_deletion = target == "/dev/null" or not target
+        file_path = src if is_deletion else target
+        if file_path == "/dev/null" or not file_path:
             continue
         # Validate path chars before accepting
         try:
             # Reuse _validate_ident logic for each path component
-            for part in target.split("/"):
+            for part in file_path.split("/"):
                 if part in (".", "..", ""):
                     raise ValueError(f"invalid path component {part!r}")
                 if part.startswith(".git") or part.startswith(".github"):
                     # Allow normal files but block .git/ and .github/workflows traversal checked later
                     pass
-            if ".." in target or target.startswith("/") or "//" in target:
+            if ".." in file_path or file_path.startswith("/") or "//" in file_path:
                 continue
-            if target.startswith(".git/") or target.startswith(".github/workflows/"):
+            if file_path.startswith(".git/") or file_path.startswith(".github/workflows/"):
                 continue
         except Exception:
             continue
@@ -780,7 +887,7 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
         if "@@" not in content:
             continue
         # Store the full per-file patch (header + body) for applier
-        files[target] = (m.group(0) + content).strip()
+        files[file_path] = (m.group(0) + content).strip()
     return files
 
 
@@ -913,14 +1020,32 @@ async def commit_patch(
     """
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
-    _validate_branch(branch)
+    _validate_branch(branch, allow_protected=False)
 
     headers = _build_auth_headers(token)
     api = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+    clean_branch = branch.removeprefix("refs/heads/")
 
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
         # 1. Fetch the current HEAD SHA for branch
-        ref_resp = await client.get(f"{api}/git/ref/heads/{branch}", headers=headers)
+        try:
+            ref_resp = await client.get(f"{api}/git/ref/heads/{clean_branch}", headers=headers)
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error fetching HEAD for branch {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+        if ref_resp.status_code == 404:
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+            )
+        if ref_resp.status_code == 422:
+            if "reference does not exist" in ref_resp.text.lower() or "not found" in ref_resp.text.lower():
+                raise GitHubResourceNotFoundError(
+                    f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+                )
+        if ref_resp.status_code in (401, 403):
+            raise GitHubPRAuthError(f"Auth failed fetching branch ref ({ref_resp.status_code}).")
         if ref_resp.is_error:
             raise GitHubPRError(
                 f"Cannot fetch HEAD for branch {branch!r}: HTTP {ref_resp.status_code}"
@@ -936,7 +1061,7 @@ async def commit_patch(
         base_tree_sha = commit_resp.json()["tree"]["sha"]
 
         # 3. Try to parse and apply patch per-file
-        tree_entries: list[dict[str, str]] = []
+        tree_entries: list[dict[str, Any]] = []
         per_file_patches = _parse_patch_files(patch_text)
         use_fallback = False
 
@@ -958,6 +1083,23 @@ async def commit_patch(
                         )
                         use_fallback = True
                         break
+
+                # Check for explicit file deletion
+                is_deletion = False
+                patch_lines = file_patch.splitlines()
+                if len(patch_lines) >= 2:
+                    second_line = patch_lines[1].strip()
+                    if (
+                        second_line in (
+                            "+++ /dev/null",
+                            "+++ b/dev/null",
+                            "+++ b//dev/null",
+                            "+++ dev/null",
+                        )
+                        or "/dev/null" in second_line
+                    ):
+                        is_deletion = True
+
                 # Fetch current file content (may be new file → 404)
                 content_resp = await client.get(
                     f"{api}/contents/{file_path}",
@@ -965,6 +1107,12 @@ async def commit_patch(
                     params={"ref": head_sha},
                 )
                 if content_resp.status_code == 404:
+                    if is_deletion:
+                        logger.info(
+                            "github.pr: deletion target %r not found (404) — already absent, skipping without fallback",
+                            file_path,
+                        )
+                        continue
                     original_text = ""
                 elif content_resp.is_error:
                     logger.warning(
@@ -1014,6 +1162,17 @@ async def commit_patch(
                     use_fallback = True
                     break
 
+                if is_deletion:
+                    tree_entries.append(
+                        {
+                            "path": file_path,
+                            "mode": "100644",
+                            "type": "blob",
+                            "sha": None,
+                        }
+                    )
+                    continue
+
                 # Create blob for new file content
                 blob_resp = await client.post(
                     f"{api}/git/blobs",
@@ -1038,7 +1197,7 @@ async def commit_patch(
                     }
                 )
 
-            # If per-file parsing succeeded but yielded no entries (e.g., pure deletions), fallback
+            # If per-file parsing succeeded but yielded no entries, fallback
             if not use_fallback and not tree_entries:
                 use_fallback = True
         else:
@@ -1101,14 +1260,31 @@ async def commit_patch(
         new_commit_sha = new_commit_resp.json()["sha"]
 
         # 6. Update the branch ref — force=False (default for PATCH)
-        update_resp = await client.patch(
-            f"{api}/git/refs/heads/{branch}",
-            headers=headers,
-            json={"sha": new_commit_sha, "force": False},
-        )
+        try:
+            update_resp = await client.patch(
+                f"{api}/git/refs/heads/{clean_branch}",
+                headers=headers,
+                json={"sha": new_commit_sha, "force": False},
+            )
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error updating branch ref {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+        if update_resp.status_code == 404:
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+            )
+        if update_resp.status_code == 422:
+            if "reference does not exist" in update_resp.text.lower() or "not found" in update_resp.text.lower():
+                raise GitHubResourceNotFoundError(
+                    f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+                )
+        if update_resp.status_code in (401, 403):
+            raise GitHubPRAuthError(f"Auth failed updating branch ref ({update_resp.status_code}).")
         if update_resp.is_error:
             raise GitHubPRError(
-                f"Failed to update ref heads/{branch}: HTTP {update_resp.status_code}"
+                f"Failed to update ref heads/{clean_branch}: HTTP {update_resp.status_code}"
             )
 
     logger.info(
@@ -1156,8 +1332,8 @@ async def open_pr(
     """
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
-    _validate_branch(head_branch)
-    _validate_branch(base_branch)
+    _validate_branch(head_branch, allow_protected=False)
+    _validate_branch(base_branch, allow_protected=True)
 
     safe_title = _escape_pr_text(title, max_len=72)
     safe_body = _escape_pr_text(body, max_len=3000)
