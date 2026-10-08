@@ -152,7 +152,7 @@ async def _load_pem_from_ssm(ssm_path: str) -> str:
 
     Raises ``RuntimeError`` (with the SSM API error wrapped) if the
     parameter is missing or inaccessible — the IAM policy on the
-    Lambda role (see aws.md §4) is the only realistic failure mode.
+    Lambda role (see redeploy.md) is the only realistic failure mode.
     """
     if ssm_path in _PEM_CACHE:
         return _PEM_CACHE[ssm_path]

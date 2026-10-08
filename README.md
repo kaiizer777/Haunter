@@ -222,7 +222,7 @@ Haunter/
 ├── HAUNTER.md                         # Exhaustive technical specification & architecture bible
 ├── WORK.md                            # Comprehensive engineering implementation log
 ├── future02.md                        # Auditor Mode & Per-Repo Governance specification
-├── aws.md                             # AWS Lambda deployment & packaging runbook
+├── redeploy.md                        # Redeployment runbook (Lambda + Workers), security checks
 └── github.md                          # GitHub Actions sandbox runner runbook
 ```
 
@@ -356,7 +356,7 @@ The backend is packaged using native Linux x86_64 wheels and deployed to AWS Lam
    terraform plan
    terraform apply
    ```
-   *For operational details, SSM parameter references, and troubleshooting, consult [aws.md](file:///C:/Users/bari2/Desktop/Haunter/aws.md).*
+   *For operational details, SSM parameter references, and troubleshooting, consult [redeploy.md](file:///C:/Users/bari2/Desktop/Haunter/redeploy.md).*
 
 ### Frontend: Cloudflare Workers Static Assets
 The Next.js 16 dashboard compiles to a static SPA export and is served via Cloudflare Workers Static Assets:
@@ -375,7 +375,7 @@ npx wrangler deploy
 - [HAUNTER.md](file:///C:/Users/bari2/Desktop/Haunter/HAUNTER.md): Comprehensive architectural specification, subagent contracts, and system invariants.
 - [WORK.md](file:///C:/Users/bari2/Desktop/Haunter/WORK.md): Complete chronological record of all implementation phases.
 - [future02.md](file:///C:/Users/bari2/Desktop/Haunter/future02.md): Specification for Auditor Mode, per-repo settings, and slash commands.
-- [aws.md](file:///C:/Users/bari2/Desktop/Haunter/aws.md): AWS Lambda deployment runbook, Terraform configuration, and gotchas.
+- [redeploy.md](file:///C:/Users/bari2/Desktop/Haunter/redeploy.md): Redeployment runbook — Lambda + Cloudflare Workers, Terraform gotchas, and the pre-deploy security checklist.
 - [github.md](file:///C:/Users/bari2/Desktop/Haunter/github.md): GitHub Actions sandbox runner implementation and mirror lifecycle.
 
 ---

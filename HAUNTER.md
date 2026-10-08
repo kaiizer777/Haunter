@@ -622,7 +622,7 @@ Asynchronous self-invocations (`boto3.client("lambda").invoke(InvocationType="Ev
 
 ### 8.1 Backend: AWS Lambda Function URL
 - **Hosting Adapter:** FastAPI wrapped with Mangum (`lifespan="off"`).
-- **Architecture:** `x86_64` (Verified in `infra/aws/lambda.tf:159`, `backend/rebuild_lambda_zip.py:53`, and `aws.md:57`).
+- **Architecture:** `x86_64` (Verified in `infra/aws/lambda.tf:159`, `backend/rebuild_lambda_zip.py:53`, and `redeploy.md`).
 - **Memory:** 512 MB.
 - **Execution Timeout:** 900 seconds (15 minutes).
 - **Endpoint Protocol:** AWS Lambda Function URL (`auth_type = "NONE"`).
@@ -737,7 +737,7 @@ During early system design, Haunter planned multi-cloud sandbox runners across A
 Originally targeted for Cloudflare Pages (`*.pages.dev`), the frontend hosting was migrated to **Cloudflare Workers Static Assets** (`frontend/wrangler.jsonc`) using worker `haunter`. This consolidates edge infrastructure onto Cloudflare's modern Workers platform with explicit asset directory routing (`./out`) and single-command Wrangler deployments.
 
 ### 12.3 Compute Architecture Alignment: x86_64
-Early architecture drafts proposed ARM64 Graviton2 for Lambda. Ground truth verification confirmed and locked the architecture to **`x86_64`** (`infra/aws/lambda.tf:159`, `aws.md:57`). Cross-compiling Python packages with native extensions (such as `asyncpg` and `cryptography`) from Windows development hosts for Lambda requires standardizing on `--platform manylinux2014_x86_64`, which aligns with the x86_64 Lambda runtime.
+Early architecture drafts proposed ARM64 Graviton2 for Lambda. Ground truth verification confirmed and locked the architecture to **`x86_64`** (`infra/aws/lambda.tf:159`, `redeploy.md`). Cross-compiling Python packages with native extensions (such as `asyncpg` and `cryptography`) from Windows development hosts for Lambda requires standardizing on `--platform manylinux2014_x86_64`, which aligns with the x86_64 Lambda runtime.
 
 ### 12.4 Session Security Fix: SameSite=None
 Original drafts specified `SameSite=Lax` for session cookies. In cross-origin topologies where the frontend is hosted on Cloudflare Workers and the API is hosted on AWS Lambda Function URL, modern browsers classify API requests as third-party cross-site contexts and refuse to send `SameSite=Lax` cookies. The architecture strictly mandates `samesite="none"` paired with `secure=True` and `httponly=True`.
