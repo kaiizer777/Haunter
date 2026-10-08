@@ -1,7 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
-import { api, AuthUser } from "./api";
+import { api, AuthUser, setStoredToken, removeStoredToken } from "./api";
 
 interface AuthContextType {
   user: AuthUser | null;
@@ -39,6 +39,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const token = params.get("token");
+        if (token) {
+          setStoredToken(token);
+          params.delete("token");
+          const remainingQuery = params.toString();
+          const newUrl =
+            window.location.pathname +
+            (remainingQuery ? `?${remainingQuery}` : "") +
+            window.location.hash;
+          window.history.replaceState({}, document.title, newUrl);
+        }
+      } catch {
+        // ignore in restricted environments
+      }
+    }
     fetchUser();
   }, [fetchUser]);
 
@@ -48,6 +66,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore
     } finally {
+      removeStoredToken();
       setUser(null);
       // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.href = "/login";

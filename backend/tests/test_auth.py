@@ -206,9 +206,10 @@ async def test_callback_valid_full_flow(
         follow_redirects=False,
     )
 
-    # 1. 302 Redirect to FRONTEND_URL
+    # 1. 302 Redirect to FRONTEND_URL with ?token= query parameter
     assert resp.status_code == 302
-    assert resp.headers["location"] == settings.frontend_url
+    assert resp.headers["location"].startswith(settings.frontend_url)
+    assert "token=" in resp.headers["location"]
 
     # 2. Session cookie set with 14d max age & security attributes
     cookies_header = resp.headers.get_list("set-cookie")
@@ -310,6 +311,70 @@ async def test_me_valid_user(
     assert data["id"] == str(user.id)
     assert data["github_username"] == "valid_user"
     assert data["avatar_url"] == "https://avatar.url"
+
+
+@pytest.mark.asyncio
+async def test_me_valid_bearer_token(
+    client: httpx.AsyncClient,
+    db: AsyncSession,
+    user_factory,
+    signed_session_factory,
+):
+    """GET /auth/me with Authorization: Bearer <token> returns authenticated profile."""
+    await truncate_all(db)
+    user = await user_factory(
+        github_id=602, username="bearer_user", avatar_url="https://avatar.url/bearer"
+    )
+    token = signed_session_factory(user.id)
+
+    resp = await client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["id"] == str(user.id)
+    assert data["github_username"] == "bearer_user"
+
+
+@pytest.mark.asyncio
+async def test_me_invalid_bearer_token(client: httpx.AsyncClient):
+    """GET /auth/me with invalid Bearer token returns 401."""
+    resp = await client.get(
+        "/auth/me",
+        headers={"Authorization": "Bearer invalid_tampered_token.sig"},
+    )
+    assert resp.status_code == 401
+    assert resp.json() == {"detail": "Invalid or expired session"}
+
+
+@pytest.mark.asyncio
+async def test_me_bearer_takes_precedence_over_cookie(
+    client: httpx.AsyncClient,
+    db: AsyncSession,
+    user_factory,
+    signed_session_factory,
+):
+    """Bearer token in Authorization header takes precedence over haunter_session cookie."""
+    await truncate_all(db)
+    user_bearer = await user_factory(
+        github_id=604, username="bearer_primary", avatar_url="https://avatar.url/b"
+    )
+    user_cookie = await user_factory(
+        github_id=605, username="cookie_secondary", avatar_url="https://avatar.url/c"
+    )
+    token_bearer = signed_session_factory(user_bearer.id)
+    token_cookie = signed_session_factory(user_cookie.id)
+
+    resp = await client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {token_bearer}"},
+        cookies={"haunter_session": token_cookie},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["id"] == str(user_bearer.id)
+    assert data["github_username"] == "bearer_primary"
 
 
 @pytest.mark.asyncio

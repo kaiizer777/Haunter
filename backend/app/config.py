@@ -21,6 +21,12 @@ def _to_asyncpg_url(url: str) -> str:
     return url
 
 
+#: Single source of truth for the Groq fallback model. Every Groq call site
+#: falls back to this when no model is configured explicitly or via env, so a
+#: retired model ID is replaced in exactly one place instead of N hardcodes.
+DEFAULT_GROQ_MODEL: str = "openai/gpt-oss-120b"
+
+
 class Settings(BaseSettings):
     database_url: str
     database_url_unpooled: str
@@ -95,7 +101,7 @@ class Settings(BaseSettings):
     groq_api_key: Optional[str] = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model_name: Optional[str] = Field(
-        default="openai/gpt-oss-120b",
+        default=DEFAULT_GROQ_MODEL,
         description="Default Groq model name from env",
     )
 

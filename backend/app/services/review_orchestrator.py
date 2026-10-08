@@ -158,9 +158,25 @@ _DROPPED_FINDINGS_TEMPLATE = (
 
 #: Characters held back from a rendered finding list so the disclosure block,
 #: which :func:`_bound_review_body` prepends, still fits under the length bound.
-#: Sized well above the templates above, which are ~250 chars each at their
-#: longest.
+#: A default only: suppression + truncation + dropped combined already exceed
+#: it (~620 chars), so callers whose disclosure is known up front must pass
+#: :func:`_fit_reserve_chars` explicitly instead of relying on this.
 _DISCLOSURE_RESERVE_CHARS = 400
+
+
+def _fit_reserve_chars(*, disclosure_len: int, footer_len: int) -> int:
+    """Room :func:`_render_findings_section` must hold back for text it never sees.
+
+    The fitted list later grows by the disclosure block (prepended with a blank
+    line by :func:`_bound_review_body`) and the footer (appended with a blank
+    line by the caller), so the reserve covers both lengths plus the two
+    separators. Without it the final clamp trims the findings tail after
+    ``dropped`` was counted, and the count understates what is missing.
+    ``disclosure_len`` may be an upper bound when the dropped line is only
+    known after the fit — over-holding drops at most a finding the disclosure
+    then truthfully reports.
+    """
+    return disclosure_len + footer_len + 4
 
 _PATH_UNKNOWN_REASON = (
     "the file was not part of the reviewed diff, so it was deleted, renamed "
@@ -306,12 +322,72 @@ def _build_grounded_comments(
     )
 
 
+def _count_findings_by_severity(
+    findings: Sequence[ReviewFinding],
+) -> tuple[int, int, int]:
+    """Returns (blockers, warnings, suggestions)."""
+    blockers = sum(1 for f in findings if f.severity.lower() in ("critical", "high"))
+    warnings = sum(1 for f in findings if f.severity.lower() == "medium")
+    suggestions = sum(1 for f in findings if f.severity.lower() == "low")
+    return blockers, warnings, suggestions
+
+
+def _render_findings_table(findings: Sequence[ReviewFinding]) -> str:
+    """Render a clean, scannable GFM table of findings."""
+    if not findings:
+        return ""
+    severity_icons = {
+        "critical": "🛑 Critical",
+        "high": "🚨 High",
+        "medium": "⚠️ Warning",
+        "low": "💡 Note",
+    }
+    rows = [
+        "| Severity | Category | File & Line | Summary |",
+        "| :--- | :--- | :--- | :--- |",
+    ]
+    for f in findings:
+        icon_sev = severity_icons.get(f.severity.lower(), f.severity.upper())
+        # Every cell is GFM table content: an unescaped `|` in a category,
+        # path, or summary splits the row. Escape all three, not just the
+        # summary — a filename can carry one as legitimately as prose can.
+        cat = f.category.replace("_", " ").title().replace("|", "\\|")
+        safe_path = f.file_path.replace("|", "\\|")
+        loc = (
+            f"`{safe_path}:{f.line_start}`"
+            if f.line_start == f.line_end
+            else f"`{safe_path}:{f.line_start}-{f.line_end}`"
+        )
+        summary_first_line = f.critique.splitlines()[0].strip()
+        if len(summary_first_line) > 85:
+            summary_first_line = summary_first_line[:82] + "..."
+        summary_clean = summary_first_line.replace("|", "\\|")
+        rows.append(f"| {icon_sev} | {cat} | {loc} | {summary_clean} |")
+    return "\n".join(rows)
+
+
+def _render_review_footer(review_id: uuid.UUID, target_sha: str) -> str:
+    commit_short = target_sha[:7] if target_sha else "head"
+    dashboard_base = (
+        settings.frontend_url.rstrip("/")
+        if settings.frontend_url
+        else "https://haunter.dev"
+    )
+    dashboard_link = f"{dashboard_base}/reviews/{review_id}"
+    return (
+        "---\n"
+        f"<sub>⚡ Powered by **Haunter** • Commit: `{commit_short}` • "
+        f"[View Run Trace in Dashboard]({dashboard_link})</sub>"
+    )
+
+
 def _render_findings_section(
     header: str,
     findings: Sequence[ReviewFinding],
     *,
     heading: str = "",
     budget: int = MAX_GITHUB_COMMENT_CHARS,
+    reserve: int = _DISCLOSURE_RESERVE_CHARS,
 ) -> tuple[str, int]:
     """``header`` plus as many rendered findings as fit in ``budget`` characters.
 
@@ -322,7 +398,9 @@ def _render_findings_section(
     many did not fit, and the count is returned so the caller can say so.
 
     ``heading`` is appended only when there is at least one finding to put under
-    it. Returns ``(body, dropped)``.
+    it. ``reserve`` is the room held back for the disclosure block and footer
+    the caller adds after the fit; pass :func:`_fit_reserve_chars` with the
+    actual lengths whenever they exceed the default. Returns ``(body, dropped)``.
     """
     prefix = f"{header}{heading}" if findings else header
     rendered: list[str] = []
@@ -330,15 +408,45 @@ def _render_findings_section(
     # The reserve is charged even when nothing is dropped: the disclosure block
     # is prepended to the fitted result afterwards, so the finding list has to
     # leave room for it either way.
-    remaining = max(0, budget - len(prefix) - _DISCLOSURE_RESERVE_CHARS)
+    remaining = max(0, budget - len(prefix) - reserve)
+
+    severity_icons = {
+        "critical": "🛑",
+        "high": "🚨",
+        "medium": "⚠️",
+        "low": "💡",
+    }
+
     for index, finding in enumerate(findings, 1):
-        block = (
-            f"\n{index}. **{finding.file_path}:{finding.line_start}-{finding.line_end}**"
-            f" ({finding.category.upper()} / {finding.severity.upper()}):\n"
-            f"   {finding.critique}\n"
+        icon = severity_icons.get(finding.severity.lower(), "🔍")
+        cat = finding.category.replace("_", " ").title()
+        sev = finding.severity.upper()
+        loc = (
+            f"{finding.file_path}:{finding.line_start}"
+            if finding.line_start == finding.line_end
+            else f"{finding.file_path}:{finding.line_start}-{finding.line_end}"
         )
-        if finding.suggested_patch:
-            block += f"\n   ```\n   {finding.suggested_patch.strip()}\n   ```\n"
+
+        block_parts = [
+            f"\n<details open>\n<summary>{icon} <b>[{sev} · {cat}]</b> <code>{loc}</code></summary>\n",
+            f"\n**Problem:**\n{finding.critique}\n",
+        ]
+        if finding.suggested_patch and finding.suggested_patch.strip():
+            # Route through the canonical renderer so a patch that triggered
+            # secret redaction is shown as a plain (non-applyable) block with
+            # its warning, never as a one-click ```suggestion. Only the
+            # remediation tail is embedded — this block already renders its
+            # own header and Problem section.
+            remediation_md = format_github_suggestion(finding)
+            marker = "**Remediation:**"
+            if marker in remediation_md:
+                remediation_tail = remediation_md.split(marker, 1)[1].strip()
+                block_parts.append(
+                    f"\n**Suggested Remediation:**\n{remediation_tail}\n"
+                )
+        block_parts.append("\n</details>\n")
+
+        block = "".join(block_parts)
         if len(block) > remaining:
             dropped = len(findings) - index + 1
             break
@@ -377,6 +485,10 @@ def _suppression_disclosure(
     outside every hunk" are different problems), and a diff that was clipped
     before it could be anchored — where nothing was dropped, but every inline
     comment in the review is known to cover only part of the change.
+
+    Callers pass the OR of ``DiffGrounding.clipped`` (parse bound) and
+    ``ReviewResult.diff_clipped`` (storage ceiling) as ``grounding_clipped``:
+    either one means the model read less than the full change.
 
     Returns ``""`` when there is nothing to disclose.
     """
@@ -866,12 +978,23 @@ async def _ensure_install_id(session: Any, repo: Any) -> None:
     )
 
 
+def _build_status_badge(risk_score: int, blockers: int = 0) -> str:
+    # The blocker count overrides a low score: a model-authored risk_score in
+    # the Approved band alongside critical/high findings is a false clean bill.
+    # Any blocker floors the badge at Changes Recommended, never Approved.
+    if risk_score >= 80:
+        return "🛑 `Changes Required`"
+    elif risk_score > 30 or blockers > 0:
+        return "⚠️ `Changes Recommended`"
+    return "✅ `Approved`"
+
+
 def _build_risk_badge(risk_score: int) -> str:
     if risk_score <= 30:
-        return "🟢 **Low Risk**"
+        return "🟢 `Low Risk`"
     elif risk_score <= 70:
-        return "🟡 **Moderate Risk**"
-    return "🔴 **Critical / High Risk**"
+        return "🟡 `Moderate Risk`"
+    return "🔴 `Critical / High Risk`"
 
 
 async def run_code_review_pipeline(review_id: uuid.UUID) -> None:
@@ -1200,20 +1323,56 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 )
 
             review_event = "REQUEST_CHANGES" if review.risk_score >= 80 else "COMMENT"
-            # Per-field bounds hold (every finding goes through
-            # `CodeReviewOutput.model_validate`), but the concatenation of N
-            # findings is a separate quantity with its own ceiling — bound the
-            # whole body, or one oversized body 422s the request and takes every
-            # inline comment down with it.
+
+            blockers, warnings, suggestions = _count_findings_by_severity(
+                result.output.findings
+            )
+            findings_breakdown = (
+                f"{blockers} Blockers • {warnings} Warnings • {suggestions} Suggestions"
+            )
+            status_badge = _build_status_badge(review.risk_score, blockers)
+
+            if review.risk_score >= 80 or blockers > 0:
+                alert_callout = (
+                    "> [!CAUTION]\n"
+                    f"> **Action Required**: {blockers} blocker finding(s) detected. Please resolve critical issues before merge.\n"
+                )
+            elif review.risk_score > 30:
+                alert_callout = (
+                    "> [!WARNING]\n"
+                    f"> **Action Recommended**: {warnings} warning(s) detected. Review the proposed remediations below.\n"
+                )
+            else:
+                alert_callout = (
+                    "> [!TIP]\n"
+                    "> **Clean Review**: No blocking issues detected. Changes look safe and well-structured.\n"
+                )
+
+            table_md = _render_findings_table(result.output.findings)
+            table_section = (
+                f"\n### 📋 Findings Summary\n\n{table_md}\n" if table_md else ""
+            )
+            footer_md = _render_review_footer(review.id, target_sha)
+
+            body_content = (
+                f"## ⚡ Haunter Code Review\n\n"
+                f"| Status | Risk Score | Findings Breakdown |\n"
+                f"| :--- | :--- | :--- |\n"
+                f"| {status_badge} | `{review.risk_score}/100` ({risk_badge}) | {findings_breakdown} |\n\n"
+                f"{alert_callout}\n"
+                f"### 📝 Executive Summary\n\n"
+                f"{review.summary}\n"
+                f"{table_section}\n"
+                f"{footer_md}"
+            )
+
             body = _bound_review_body(
-                f"### 🛡️ Haunter Autonomous Code Review\n\n"
-                f"**Risk Score**: {review.risk_score}/100 — {risk_badge}\n\n"
-                f"{review.summary}\n\n"
-                f"*Actionable findings: {len(comments)} flagged across 4 engineering dimensions.*",
+                body_content,
                 _suppression_disclosure(
                     report=suppression,
                     findings_total=len(result.output.findings),
-                    grounding_clipped=grounding.clipped,
+                    grounding_clipped=grounding.clipped
+                    or result.diff_clipped,
                     delivery=(
                         "They are recorded in the Haunter dashboard and are "
                         "not shown in this review."
@@ -1269,22 +1428,68 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 # for its inline comments, and it carries every finding
                 # inline in the body instead — so it needs the same total
                 # bound the first one had, or it 422s for the same reason.
-                fallback_body, dropped = _render_findings_section(
-                    body,
-                    result.output.findings,
-                    heading="\n\n### 🔍 Detailed Findings\n",
+                fallback_header = (
+                    f"## ⚡ Haunter Code Review (Summary)\n\n"
+                    f"| Status | Risk Score | Findings Breakdown |\n"
+                    f"| :--- | :--- | :--- |\n"
+                    f"| {status_badge} | `{review.risk_score}/100` ({risk_badge}) | {findings_breakdown} |\n\n"
+                    f"{alert_callout}\n"
+                    f"### 📝 Executive Summary\n\n"
+                    f"{review.summary}\n"
+                    f"{table_section}"
                 )
+                # The suppression half of the disclosure needs no fit count, so it
+                # is built before the fit and its length — plus the worst-case
+                # dropped line and the footer appended below — is held back
+                # from the finding list. The default 400-char reserve is
+                # smaller than suppression + truncation + dropped combined, so
+                # the final bound used to clip findings the `dropped` count
+                # said were shown.
+                suppression_note = _suppression_disclosure(
+                    report=suppression,
+                    findings_total=len(result.output.findings),
+                    grounding_clipped=grounding.clipped or result.diff_clipped,
+                    delivery=(
+                        "They are recorded in the Haunter dashboard and are "
+                        "not shown in this review."
+                    ),
+                )
+                max_dropped_line = len(
+                    _DROPPED_FINDINGS_TEMPLATE.format(
+                        dropped=len(result.output.findings),
+                        findings=len(result.output.findings),
+                    )
+                )
+                fallback_body, dropped = _render_findings_section(
+                    fallback_header,
+                    result.output.findings,
+                    heading="\n### 🔍 Detailed Findings & Remediations\n",
+                    reserve=_fit_reserve_chars(
+                        disclosure_len=len(suppression_note) + 2 + max_dropped_line,
+                        footer_len=len(footer_md),
+                    ),
+                )
+                fallback_body = f"{fallback_body}\n\n{footer_md}"
                 # The suppression block already rides at the top of `body`, so
                 # prepending the length-bound disclosure here keeps both
-                # statements above anything the bound can trim.
-                fallback_body = _bound_review_body(
-                    fallback_body,
+                # statements above anything the bound can trim. The retry
+                # carries every finding inline in place of the dropped inline
+                # comments, so it must repeat the suppression disclosure too —
+                # otherwise findings unanchorable to any hunk vanish silently.
+                dropped_note = (
                     _DROPPED_FINDINGS_TEMPLATE.format(
                         dropped=dropped,
                         findings=len(result.output.findings),
                     )
                     if dropped
-                    else "",
+                    else ""
+                )
+                fallback_disclosure = "\n\n".join(
+                    part for part in (suppression_note, dropped_note) if part
+                )
+                fallback_body = _bound_review_body(
+                    fallback_body,
+                    fallback_disclosure,
                 )
 
                 try:
@@ -1385,21 +1590,84 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
             # thing that can drop one. Same total bound as the PR review body:
             # N findings concatenated exceed GitHub's comment ceiling long
             # before any single field does.
-            body, dropped = _render_findings_section(
-                f"### 🛡️ Haunter Push-Level Code Review\n\n"
-                f"**Risk Score**: {review.risk_score}/100 — {risk_badge}\n\n"
-                f"{review.summary}",
-                result.output.findings,
-                heading="\n\n### 🔍 Actionable Findings\n",
+            blockers, warnings, suggestions = _count_findings_by_severity(
+                result.output.findings
             )
-            body = _bound_review_body(
-                body,
+            findings_breakdown = (
+                f"{blockers} Blockers • {warnings} Warnings • {suggestions} Suggestions"
+            )
+            status_badge = _build_status_badge(review.risk_score, blockers)
+
+            if review.risk_score >= 80 or blockers > 0:
+                alert_callout = (
+                    "> [!CAUTION]\n"
+                    f"> **Action Required**: {blockers} blocker finding(s) detected.\n"
+                )
+            elif review.risk_score > 30:
+                alert_callout = (
+                    "> [!WARNING]\n"
+                    f"> **Action Recommended**: {warnings} warning finding(s) detected.\n"
+                )
+            else:
+                alert_callout = (
+                    "> [!TIP]\n"
+                    "> **Clean Review**: No blocking issues detected.\n"
+                )
+
+            table_md = _render_findings_table(result.output.findings)
+            table_section = (
+                f"\n### 📋 Findings Summary\n\n{table_md}\n" if table_md else ""
+            )
+            footer_md = _render_review_footer(review.id, review.commit_sha)
+
+            push_header = (
+                f"## ⚡ Haunter Push Review\n\n"
+                f"| Status | Risk Score | Findings Breakdown |\n"
+                f"| :--- | :--- | :--- |\n"
+                f"| {status_badge} | `{review.risk_score}/100` ({risk_badge}) | {findings_breakdown} |\n\n"
+                f"{alert_callout}\n"
+                f"### 📝 Executive Summary\n\n"
+                f"{review.summary}\n"
+                f"{table_section}"
+            )
+
+            # The dropped line is only known after the fit, so the worst case
+            # (every finding dropped) is held back along with the footer
+            # appended below — otherwise the final bound clips findings the
+            # `dropped` count said were shown, as on the fallback path above.
+            # The truncation notice is known up front, so its length rides in
+            # the same reserve: without it a clipped diff both drops findings
+            # to the fit and loses the notice to the final clamp.
+            truncation_note = _TRUNCATION_NOTICE if result.diff_clipped else ""
+            max_dropped_line = len(
+                _DROPPED_FINDINGS_TEMPLATE.format(
+                    dropped=len(result.output.findings),
+                    findings=len(result.output.findings),
+                )
+            )
+            body, dropped = _render_findings_section(
+                push_header,
+                result.output.findings,
+                heading="\n### 🔍 Actionable Findings & Remediations\n",
+                reserve=_fit_reserve_chars(
+                    disclosure_len=len(truncation_note) + 2 + max_dropped_line,
+                    footer_len=len(footer_md),
+                ),
+            )
+            body = f"{body}\n\n{footer_md}"
+            dropped_note = (
                 _DROPPED_FINDINGS_TEMPLATE.format(
                     dropped=dropped,
                     findings=len(result.output.findings),
                 )
                 if dropped
-                else "",
+                else ""
+            )
+            body = _bound_review_body(
+                body,
+                "\n\n".join(
+                    part for part in (truncation_note, dropped_note) if part
+                ),
             )
 
             try:

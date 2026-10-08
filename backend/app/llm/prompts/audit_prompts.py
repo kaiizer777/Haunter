@@ -21,7 +21,46 @@ PERSPECTIVES: tuple[PerspectiveName, ...] = (
 SEVERITIES: tuple[AuditSeverity, ...] = ("BLOCKER", "WARNING", "NOTE")
 INFORMATIONAL_CONFIDENCE_THRESHOLD = 75
 
-MAX_DIFF_CHARS = 60_000
+MAX_DIFF_CHARS = 1_500_000
+#: Line ceiling for push-level code-reviewer intake ONLY (code-reviewer-only).
+#: Diffs past this many lines are clipped to the first MAX_DIFF_LINES lines;
+#: everything below it ships in full (up to MAX_DIFF_CHARS). Audit grounding
+#: (``auditor.build_diff_grounding``) applies NO line cap — it is limited by
+#: ``MAX_DIFF_CHARS`` alone — so do not rely on this constant outside
+#: ``code_reviewer``. Previous 60_000-char cap dropped real review surface.
+MAX_DIFF_LINES = 30_000
+#: Diff-ceiling coherence matrix — read before touching any ceiling here.
+#:
+#: * ``MAX_DIFF_CHARS`` (1.5M) + ``MAX_DIFF_LINES`` (30k) are the
+#:   *fetch/grounding* ceiling: how much diff text Haunter keeps locally for
+#:   storage, grounding and review surface. Both caps apply independently and
+#:   in sequence — a diff past EITHER bound is clipped. Per-consumer mapping:
+#:   ``auditor.AUDIT_MAX_DIFF_CHARS`` is an alias of ``MAX_DIFF_CHARS`` and
+#:   drives grounding, ``_truncate_diff`` and diff-prefix spans (char cap only,
+#:   no line cap); ``build_perspective_messages`` below redacts via
+#:   ``_safe_model_text`` then clamps the composed user message to
+#:   ``MAX_USER_PROMPT_CHARS``; ``code_reviewer.analyze_diff`` line-clips
+#:   (streaming, code-reviewer-only) then char-clips, and its
+#:   ``_build_review_messages`` applies the same redact + prompt bound.
+#:   The 1.5M chars (~375k tokens) deliberately exceed any single LLM
+#:   call: this constant is NEVER sent to a model verbatim — the prompt
+#:   bound, not this constant, is what the model sees.
+#: * ``MAX_USER_PROMPT_CHARS`` (90k) is the *model-input* bound: the only
+#:   number that must fit the provider timeout/token budget. Both review
+#:   paths (auditor perspectives, push-level code reviewer) clamp their
+#:   composed user message to it. Per-model budget note: 90k chars (~22k
+#:   tokens) plus system prompt (~3k tokens) plus ``REVIEW_MAX_TOKENS`` (4k)
+#:   stays well under every configured provider window — OpenAI (~128k),
+#:   Anthropic (~200k), Groq fallbacks and Zen (1M) — so no per-model
+#:   derivation is needed; the fixed prompt bound IS the cross-provider
+#:   budget. A fixed bound also keeps grounding/prompt behavior identical
+#:   across model switches instead of changing review coverage with config.
+#: * Separate 40k tool/report budgets, deliberately NOT unified with the
+#:   above — different surfaces, different callers, so unifying them would
+#:   couple unrelated limits: ``session_tools.git._MAX_DIFF_CHARS`` (agentic
+#:   git-tool output), ``webhooks._AUDITOR_DIFF_MAX_CHARS`` (webhook comment
+#:   context) and ``MAX_REMEDIATION_DIFF_CHARS`` below (rendered remediation
+#:   block). Leave all three untouched when changing the review ceilings.
 MAX_AST_CONTEXT_CHARS = 10_000
 MAX_REPO_CONTEXT_CHARS = 10_000
 MAX_SYSTEM_PROMPT_CHARS = 12_000
@@ -248,6 +287,16 @@ def _escape_markdown(value: str, *, escape_backticks: bool = True) -> str:
     # opens the report from.
     pattern = r"([\\`*_\[\]~!])" if escape_backticks else r"([\\*_\[\]~!])"
     return re.sub(pattern, r"\\\1", value)
+
+
+def _escape_table_cell(value: str) -> str:
+    """Escape literal pipes so a value cannot split a GFM table row.
+
+    Backticks do NOT protect ``|`` in GitHub tables — a valid repo path like
+    ``a|b.py`` still adds a column. ``\\|`` renders as ``|`` without shifting
+    columns, in or out of backticks.
+    """
+    return value.replace("|", "\\|")
 
 
 def _neutralize_markdown_urls(value: str) -> str:
@@ -577,6 +626,43 @@ def _bound_report(report: str) -> str:
     return report[:available].rstrip() + footer
 
 
+def _render_audit_findings_table(
+    findings: Sequence[Mapping[str, Any]],
+    overall_confidence: int,
+) -> str:
+    """Render a concise markdown table summarizing audit findings."""
+    if not findings:
+        return ""
+    rows = [
+        "| Severity | Perspective | File & Line | Summary | Confidence |",
+        "| :--- | :--- | :--- | :--- | :--- |",
+    ]
+    for f in findings:
+        sev = str(f.get("severity", "NOTE")).upper()
+        icon = _SEVERITY_ICON.get(sev, "ℹ️")
+        persp = _escape_table_cell(
+            _sanitize_inline(f.get("perspective", "General"), 40).title()
+        )
+
+        line_start = _bounded_integer(f.get("line_start"), 1, 10_000_000, 1)
+        line_end = _bounded_integer(
+            f.get("line_end"), line_start, 10_000_000, line_start
+        )
+        loc_path = _escape_table_cell(_safe_path(f.get("file_path")))
+        loc = f"`{loc_path}#L{line_start}`"
+        if line_end != line_start:
+            loc = f"`{loc_path}#L{line_start}-L{line_end}`"
+
+        title = _sanitize_heading_text(f.get("title", ""), 70)
+        if len(title) > 65:
+            title = title[:62] + "..."
+        title_clean = _escape_table_cell(title)
+
+        conf = _clamp_confidence(f.get("confidence"), overall_confidence)
+        rows.append(f"| {icon} [{sev}] | {persp} | {loc} | {title_clean} | `{conf}%` |")
+    return "\n".join(rows)
+
+
 def format_audit_report(
     *,
     executive_summary: str,
@@ -609,40 +695,89 @@ def format_audit_report(
         total_findings = len(findings)
     except TypeError:
         total_findings = len(bounded_findings)
+
+    status_sanitized = _escape_markdown(
+        _sanitize_inline(status, MAX_STATUS_CHARS, escape_markdown=False),
+        escape_backticks=False,
+    )
+    audit_target_sanitized = _escape_markdown(
+        _sanitize_inline(audit_target, MAX_TARGET_CHARS, escape_markdown=False),
+        escape_backticks=False,
+    )
+    engine_sanitized = _safe_inline_code(engine, MAX_ENGINE_CHARS, "unknown")
+    pub_policy_sanitized = _escape_markdown(
+        _sanitize_inline(publication_policy, 200, escape_markdown=False),
+        escape_backticks=False,
+    )
+
     prefix = [
         "## 🛡️ Haunter Autonomous Audit Report",
         "",
-        f"**Status:** {_escape_markdown(_sanitize_inline(status, MAX_STATUS_CHARS, escape_markdown=False), escape_backticks=False)}  ",
+        "| Status | Confidence Score | Audit Target | Engine |",
+        "| :--- | :--- | :--- | :--- |",
+        f"| {_escape_table_cell(status_sanitized)} | `{confidence_value}%` | {_escape_table_cell(audit_target_sanitized)} | `{engine_sanitized}` |",
+        "",
+        f"**Status:** {status_sanitized}  ",
         f"**Confidence Score:** `{confidence_value}%`  ",
-        f"**Publication Policy:** {_escape_markdown(_sanitize_inline(publication_policy, 200, escape_markdown=False), escape_backticks=False)}  ",
-        f"**Audit Target:** {_escape_markdown(_sanitize_inline(audit_target, MAX_TARGET_CHARS, escape_markdown=False), escape_backticks=False)}  ",
-        f"**Engine:** `{_safe_inline_code(engine, MAX_ENGINE_CHARS, 'unknown')}`",
+        f"**Publication Policy:** {pub_policy_sanitized}  ",
+        f"**Audit Target:** {audit_target_sanitized}  ",
+        f"**Engine:** `{engine_sanitized}`",
         f"**Structural Analysis:** {_escape_markdown(_sanitize_inline(analysis_metadata or 'No analysis metadata was supplied.', 2_000, escape_markdown=False), escape_backticks=False)}",
         "",
         "---",
         "",
         "### 🔍 Executive Summary",
-        _sanitize_inline(executive_summary),
+        f"> [!NOTE]\n> {_sanitize_inline(executive_summary)}",
         "",
+    ]
+
+    findings_table = _render_audit_findings_table(
+        bounded_findings[:MAX_REPORT_FINDINGS], confidence_value
+    )
+    if findings_table:
+        prefix.extend([
+            "---",
+            "",
+            "### 📋 Findings Overview",
+            "",
+            findings_table,
+            "",
+        ])
+
+    prefix.extend([
         "---",
         "",
         "### 🚨 Findings & Recommendations",
         "",
-    ]
+        "<details open>",
+        f"<summary>🔍 <b>Detailed Findings Breakdown</b> ({total_findings} items)</summary>",
+        "",
+    ])
+
     if effective_allowed:
         remediation_heading = "### 🛠️ Remediation Unified Diff"
-        remediation = _fenced_block(
-            "diff",
-            _sanitize_code(remediation_diff, MAX_REMEDIATION_DIFF_CHARS),
+        remediation = (
+            "<details open>\n"
+            "<summary>🛠️ <b>Proposed Remediation Unified Diff</b> (Click to inspect)</summary>\n\n"
+            + _fenced_block(
+                "diff",
+                _sanitize_code(remediation_diff, MAX_REMEDIATION_DIFF_CHARS),
+            )
+            + "\n</details>"
         )
     else:
         remediation_heading = "### ℹ️ Informational Audit Result"
         remediation = "Informational only — no automated remediation was generated."
+
     suffix = [
+        "</details>",
+        "",
         "---",
         "",
         remediation_heading,
         remediation,
+        "",
+        "---",
         "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*",
     ]
     finding_budget = (

@@ -13,7 +13,7 @@ from urllib.parse import urljoin
 
 import httpx
 
-from app.config import settings
+from app.config import DEFAULT_GROQ_MODEL, settings
 from app.llm.exceptions import LLMAuthenticationError, LLMError
 from app.llm.retry import execute_with_retry
 
@@ -33,7 +33,7 @@ class GroqProvider:
         raw_base_url = base_url or settings.groq_base_url
         self.base_url = raw_base_url.rstrip("/") + "/"
         self._api_key = api_key or settings.groq_api_key
-        self.default_model = model or settings.groq_model_name or "openai/gpt-oss-120b"
+        self.default_model = model or settings.groq_model_name or DEFAULT_GROQ_MODEL
         self.timeout = timeout
 
     async def complete(

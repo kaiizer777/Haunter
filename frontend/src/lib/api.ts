@@ -498,6 +498,33 @@ export function isGithubTokenError(detail: unknown): boolean {
   return false;
 }
 
+export function getStoredToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem("haunter_token");
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredToken(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem("haunter_token", token);
+  } catch {
+    // ignore
+  }
+}
+
+export function removeStoredToken(): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem("haunter_token");
+  } catch {
+    // ignore
+  }
+}
+
 type RequestOptions = RequestInit & { silent?: boolean };
 
 async function request<T>(
@@ -510,6 +537,13 @@ async function request<T>(
   const headers = new Headers(fetchOptions.headers || {});
   if (!headers.has("Content-Type") && fetchOptions.body && typeof fetchOptions.body === "string") {
     headers.set("Content-Type", "application/json");
+  }
+
+  if (!headers.has("Authorization")) {
+    const token = getStoredToken();
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
   }
 
   // 30s timeout covers Lambda cold starts; idempotent GETs get one retry on timeout.
@@ -668,7 +702,13 @@ export const api = {
 
   // Auth endpoints
   getMe: () => api.get<AuthUser>("/auth/me", { silent: true }),
-  logout: () => api.post<{ detail: string }>("/auth/logout"),
+  logout: async () => {
+    try {
+      return await api.post<{ detail: string }>("/auth/logout");
+    } finally {
+      removeStoredToken();
+    }
+  },
 
   // Repos endpoints
   getRepos: () => api.get<RepoOut[]>("/repos"),

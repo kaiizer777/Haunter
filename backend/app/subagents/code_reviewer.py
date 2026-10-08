@@ -18,10 +18,11 @@ Strict invariants:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import itertools
 import logging
 import re
 import time
-from typing import Literal, NoReturn, Optional
+from typing import Iterator, Literal, NoReturn, Optional
 import uuid
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -29,9 +30,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import LLMClient
 from app.llm.prompts.audit_prompts import (
+    MAX_DIFF_CHARS,
+    MAX_DIFF_LINES,
     MAX_GITHUB_COMMENT_CHARS,
     MAX_INLINE_FIELD_CHARS,
+    MAX_REPO_CONTEXT_CHARS,
     MAX_SUGGESTED_FIX_CHARS,
+    MAX_USER_PROMPT_CHARS,
+    _bounded_text,
+    _safe_model_text,
+    redact_sensitive_text_preserving_lines,
     sanitize_output_markdown,
 )
 
@@ -194,6 +202,12 @@ class ReviewResult:
     input_tokens: int
     output_tokens: int
     latency_ms: int
+    #: True when :func:`_bound_diff_for_storage` clipped the diff (line or char
+    #: cap). Consumed by the publish layer (``review_orchestrator``, owned
+    #: separately): combine with ``grounding.clipped`` when deciding
+    #: ``_TRUNCATION_NOTICE`` for PR reviews and include in push-review bodies,
+    #: so a line-clipped-but-char-small diff is never presented as full coverage.
+    diff_clipped: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -260,9 +274,20 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
     failure is deliberate: downgrade when in doubt.
     """
     critique = sanitize_output_markdown(finding.critique, MAX_INLINE_FIELD_CHARS)
-    header = (
-        f"**[{finding.category.upper()}] [{finding.severity.upper()}]**: {critique}"
-    )
+    severity_icon = {
+        "critical": "🛑",
+        "high": "🚨",
+        "medium": "⚠️",
+        "low": "💡",
+    }.get(finding.severity.lower(), "🔍")
+
+    header = f"{severity_icon} **[{finding.category.upper()}] [{finding.severity.upper()}]**"
+    sections = [
+        header,
+        "",
+        f"**Problem:**\n{critique}",
+    ]
+
     if finding.suggested_patch is not None and finding.suggested_patch.strip():
         patch_clean = sanitize_output_markdown(
             finding.suggested_patch, MAX_SUGGESTED_FIX_CHARS
@@ -287,15 +312,24 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
                 (len(run) for run in re.findall(r"`+", patch_clean)), default=0
             )
             fence = "`" * max(3, longest_run + 1)
-            return (
-                f"{header}\n\n"
-                "Not offered as an applyable suggestion: a value in the proposed "
+            sections.extend([
+                "",
+                "**Remediation:**",
+                "> [!WARNING]\n"
+                "> Not offered as an applyable suggestion: a value in the proposed "
                 "change matched Haunter's secret-redaction patterns and was "
                 "replaced with a placeholder below. Applying this block as-is "
-                f"would commit the placeholder.\n\n{fence}\n{patch_clean}\n{fence}"
-            )
-        return f"{header}\n\n```suggestion\n{patch_clean}\n```"
-    return header
+                "would commit the placeholder.\n",
+                f"{fence}\n{patch_clean}\n{fence}",
+            ])
+        else:
+            sections.extend([
+                "",
+                "**Remediation:**",
+                f"```suggestion\n{patch_clean}\n```",
+            ])
+
+    return "\n".join(sections)
 
 
 def bound_github_body(body: str) -> str:
@@ -347,19 +381,130 @@ STRICT DIRECTIVES:
 }"""
 
 
+#: Marker appended when the storage-level diff clip fires. Distinct from the
+#: ``[TRUNCATED]`` marker ``_safe_model_text`` appends at the prompt bound, so
+#: a reader can tell which ceiling cut the text.
+_DIFF_TRUNCATION_MARKER = "\n[...DIFF TRUNCATED...]\n"
+
+
+def _iter_diff_lines(diff_text: str) -> Iterator[str]:
+    """Yield ``\\n``-separated lines in a single pass without building a list.
+
+    ``str.splitlines()`` materializes every line at once, so slicing the first
+    30k lines of a multi-MB diff still holds the whole diff in memory twice
+    (the list plus the joined copy). Scanning for ``\\n`` keeps memory
+    proportional to the lines actually kept.
+    """
+    start = 0
+    find = diff_text.find
+    while True:
+        end = find("\n", start)
+        if end == -1:
+            yield diff_text[start:]
+            return
+        yield diff_text[start:end]
+        start = end + 1
+
+
+def _clip_diff_lines(diff_text: str, max_lines: int = MAX_DIFF_LINES) -> str:
+    """Keep the first ``max_lines`` lines of a diff (storage-level clip).
+
+    Streams via :func:`itertools.islice`, so only ``max_lines + 1`` lines are
+    ever held no matter how large the input is. Returns the input unchanged
+    when it already fits.
+    """
+    kept = list(itertools.islice(_iter_diff_lines(diff_text), max_lines + 1))
+    if len(kept) <= max_lines:
+        return diff_text
+    return "\n".join(kept[:max_lines]) + _DIFF_TRUNCATION_MARKER
+
+
+def _bound_diff_for_storage(diff_text: str) -> tuple[str, bool]:
+    """Apply BOTH storage caps (lines, then chars) to a raw diff.
+
+    Split out of :func:`analyze_diff` so the ceiling is directly testable.
+    This is the fetch/grounding budget only — the model-input bound lives in
+    :func:`_build_review_messages`.
+
+    Returns ``(stored, clipped)``: ``clipped`` is True when EITHER cap fired,
+    for the publish layer to combine with ``grounding.clipped`` when deciding
+    ``_TRUNCATION_NOTICE`` (see ``review_orchestrator`` — owned separately).
+    The char ceiling applies AFTER the line clip via sequential ``if``s, and
+    truncates back to the last newline minus the marker (like
+    ``auditor._diff_prefix``) so no partial hunk line crosses the boundary and
+    the result never exceeds ``MAX_DIFF_CHARS``.
+    """
+    line_clipped = _clip_diff_lines(diff_text)
+    was_line_clipped = line_clipped != diff_text
+    if len(line_clipped) <= MAX_DIFF_CHARS:
+        return line_clipped, was_line_clipped
+    budget = MAX_DIFF_CHARS - len(_DIFF_TRUNCATION_MARKER)
+    prefix = line_clipped[:budget]
+    boundary = prefix.rfind("\n")
+    prefix = prefix[: boundary + 1] if boundary >= 0 else ""
+    return prefix + _DIFF_TRUNCATION_MARKER, True
+
+
+#: Bound for the retry's validation-error feedback turn. ``str(ValidationError)``
+#: is unbounded in principle (it echoes the rejected payload), so the second
+#: user message gets its own small cap rather than riding on
+#: ``MAX_USER_PROMPT_CHARS``.
+_MAX_RETRY_FEEDBACK_CHARS = 2_000
+
+#: Reserve held back from the first user message when a retry turn will follow.
+#: Covers the assistant acknowledgement (~35 chars) plus the feedback template
+#: (~150 chars) plus the bounded error above, so the complete retry request
+#: (first user + assistant + feedback user) still fits ``MAX_USER_PROMPT_CHARS``.
+_RETRY_RESERVE_CHARS = 2_500
+
+
+def _safe_model_text_preserving_lines(
+    value: str, maximum: int, marker: str = "\n[TRUNCATED]"
+) -> str:
+    """Redact + bound like :func:`_safe_model_text` without moving lines.
+
+    ``_safe_model_text`` collapses a multi-line PEM block into one token, which
+    shifts every later diff line the model sees — and the model anchors finding
+    line numbers to those shifted lines while the publisher validates them
+    against the original diff. Preserving the newline count keeps line *n* of
+    the prompt on line *n* of the input.
+    """
+    return _bounded_text(
+        redact_sensitive_text_preserving_lines(value), maximum, marker
+    )
+
+
 def _build_review_messages(
     diff_text: str,
     repo_context: str = "",
     validation_error_context: Optional[str] = None,
 ) -> list[dict[str, str]]:
-    user_content = (
-        f"Repository Context:\n{repo_context}\n\nGit Diff to Review:\n{diff_text}"
+    # The storage-level ``bounded_diff`` above stays full-fidelity for
+    # grounding; only what the model sees is redacted and clamped — the same
+    # contract as the auditor's ``build_perspective_messages`` (redact, compose,
+    # then bound to ``MAX_USER_PROMPT_CHARS``), with two code-reviewer extras:
+    # ``repo_context`` is capped separately to ``MAX_REPO_CONTEXT_CHARS`` so it
+    # cannot consume the whole budget and crowd out ``diff_text`` (which keeps
+    # roughly ``MAX_USER_PROMPT_CHARS - MAX_REPO_CONTEXT_CHARS``), and redaction
+    # preserves newlines so finding line numbers still anchor.
+    bounded_repo = _safe_model_text_preserving_lines(
+        repo_context or "", MAX_REPO_CONTEXT_CHARS
+    )
+    user_budget = MAX_USER_PROMPT_CHARS
+    if validation_error_context:
+        user_budget = MAX_USER_PROMPT_CHARS - _RETRY_RESERVE_CHARS
+    user_content = _safe_model_text_preserving_lines(
+        f"Repository Context:\n{bounded_repo}\n\nGit Diff to Review:\n{diff_text}",
+        user_budget,
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
     if validation_error_context:
+        bounded_error = _safe_model_text(
+            str(validation_error_context), _MAX_RETRY_FEEDBACK_CHARS
+        )
         messages.append(
             {
                 "role": "assistant",
@@ -370,7 +515,7 @@ def _build_review_messages(
             {
                 "role": "user",
                 "content": (
-                    f"Your previous response failed JSON schema validation: {validation_error_context}\n"
+                    f"Your previous response failed JSON schema validation: {bounded_error}\n"
                     "Please correct the output. Return ONLY the strict JSON object."
                 ),
             }
@@ -556,10 +701,20 @@ async def analyze_diff(
             latency_ms=0,
         )
 
+    # Storage-level ceiling (see the ceiling matrix on MAX_DIFF_CHARS in
+    # ``app/llm/prompts/audit_prompts.py``): keep up to MAX_DIFF_LINES lines
+    # AND up to MAX_DIFF_CHARS chars so real review surface is never dropped,
+    # but a diff past EITHER bound is clipped. The two caps apply sequentially
+    # inside ``_bound_diff_for_storage`` on purpose — the old ``elif`` skipped
+    # the char cap whenever the line cap fired, shipping multi-MB payloads.
+    # Neither cap is what the model sees: ``_build_review_messages`` redacts
+    # secrets and clamps the composed prompt to MAX_USER_PROMPT_CHARS.
+    bounded_diff, storage_clipped = _bound_diff_for_storage(diff_text)
+
     llm = LLMClient(timeout=60.0)
     start_time = time.monotonic()
 
-    messages = _build_review_messages(diff_text, repo_context)
+    messages = _build_review_messages(bounded_diff, repo_context)
     response = await llm.complete(
         messages=messages,
         db=db,
@@ -588,6 +743,7 @@ async def analyze_diff(
             input_tokens=total_input,
             output_tokens=total_output,
             latency_ms=latency,
+            diff_clipped=storage_clipped,
         )
     except ValidationError as first_err:
         # A suspected budget cut is confirmed here, by the parse failing. Until
@@ -608,7 +764,7 @@ async def analyze_diff(
 
     # Retry once with error feedback
     retry_messages = _build_review_messages(
-        diff_text, repo_context, validation_error_context=err_msg
+        bounded_diff, repo_context, validation_error_context=err_msg
     )
     retry_response = await llm.complete(
         messages=retry_messages,
@@ -637,6 +793,7 @@ async def analyze_diff(
             input_tokens=total_input,
             output_tokens=total_output,
             latency_ms=latency,
+            diff_clipped=storage_clipped,
         )
     except ValidationError as second_err:
         if retry_truncation is not None:

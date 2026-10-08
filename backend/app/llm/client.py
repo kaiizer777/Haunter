@@ -21,7 +21,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.config import DEFAULT_GROQ_MODEL, settings
 from app.llm.anthropic import AnthropicAdapter
 from app.llm.config import default_base_url_for_provider, get_active_model_config
 from app.llm.discovery import BOOTSTRAP_FREE_MODELS, get_dynamic_free_models
@@ -113,7 +113,7 @@ class LLMClient:
 
         if target_provider == "groq":
             groq_model = (
-                explicit_model or settings.groq_model_name or "openai/gpt-oss-120b"
+                explicit_model or settings.groq_model_name or DEFAULT_GROQ_MODEL
             )
             provider = GroqProvider(
                 base_url=settings.groq_base_url,
@@ -340,19 +340,20 @@ class LLMClient:
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Fall back to Groq provider when OpenCode Zen is unavailable, exhausted, or blocked."""
+        fallback_model = settings.groq_model_name or DEFAULT_GROQ_MODEL
         logger.warning(
             "All OpenCode Zen models failed/blocked. Falling back to Groq provider with model=%s",
-            settings.groq_model_name,
+            fallback_model,
         )
         provider = GroqProvider(
             base_url=settings.groq_base_url,
             api_key=settings.groq_api_key,
-            model=settings.groq_model_name,
+            model=fallback_model,
             timeout=self.timeout,
         )
         return await provider.complete(
             messages=messages,
-            model=settings.groq_model_name,
+            model=fallback_model,
             tools=tools,
             **kwargs,
         )

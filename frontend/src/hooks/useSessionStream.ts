@@ -16,7 +16,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { API_BASE, CheckpointOut, PlanTask, WaitingInput } from "@/lib/api";
+import { API_BASE, CheckpointOut, PlanTask, WaitingInput, getStoredToken } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -252,10 +252,16 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
         if (options?.model) requestBody.model = options.model;
         if (options?.provider) requestBody.provider = options.provider;
 
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        const token = getStoredToken();
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`;
+        }
+
         const res = await fetch(url, {
           method: "POST",
           credentials: "include",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify(requestBody),
           signal: controller.signal,
         });
