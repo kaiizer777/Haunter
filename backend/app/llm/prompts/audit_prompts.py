@@ -22,9 +22,12 @@ SEVERITIES: tuple[AuditSeverity, ...] = ("BLOCKER", "WARNING", "NOTE")
 INFORMATIONAL_CONFIDENCE_THRESHOLD = 75
 
 MAX_DIFF_CHARS = 1_500_000
-#: Line ceiling for diff intake. Diffs past this many lines are clipped to the
-#: first MAX_DIFF_LINES lines; everything below it ships in full (up to
-#: MAX_DIFF_CHARS). Previous 60_000-char cap dropped real review surface.
+#: Line ceiling for push-level code-reviewer intake ONLY (code-reviewer-only).
+#: Diffs past this many lines are clipped to the first MAX_DIFF_LINES lines;
+#: everything below it ships in full (up to MAX_DIFF_CHARS). Audit grounding
+#: (``auditor.build_diff_grounding``) applies NO line cap — it is limited by
+#: ``MAX_DIFF_CHARS`` alone — so do not rely on this constant outside
+#: ``code_reviewer``. Previous 60_000-char cap dropped real review surface.
 MAX_DIFF_LINES = 30_000
 #: Diff-ceiling coherence matrix — read before touching any ceiling here.
 #:
@@ -33,18 +36,25 @@ MAX_DIFF_LINES = 30_000
 #:   storage, grounding and review surface. Both caps apply independently and
 #:   in sequence — a diff past EITHER bound is clipped. Per-consumer mapping:
 #:   ``auditor.AUDIT_MAX_DIFF_CHARS`` is an alias of ``MAX_DIFF_CHARS`` and
-#:   drives grounding, ``_truncate_diff`` and diff-prefix spans;
-#:   ``build_perspective_messages`` below redacts via ``_safe_model_text``
-#:   then clamps the composed user message to ``MAX_USER_PROMPT_CHARS``;
-#:   ``code_reviewer.analyze_diff`` line-clips (streaming) then char-clips,
-#:   and its ``_build_review_messages`` applies the same redact + prompt
-#:   bound. The 1.5M chars (~375k tokens) deliberately exceed any single LLM
+#:   drives grounding, ``_truncate_diff`` and diff-prefix spans (char cap only,
+#:   no line cap); ``build_perspective_messages`` below redacts via
+#:   ``_safe_model_text`` then clamps the composed user message to
+#:   ``MAX_USER_PROMPT_CHARS``; ``code_reviewer.analyze_diff`` line-clips
+#:   (streaming, code-reviewer-only) then char-clips, and its
+#:   ``_build_review_messages`` applies the same redact + prompt bound.
+#:   The 1.5M chars (~375k tokens) deliberately exceed any single LLM
 #:   call: this constant is NEVER sent to a model verbatim — the prompt
 #:   bound, not this constant, is what the model sees.
 #: * ``MAX_USER_PROMPT_CHARS`` (90k) is the *model-input* bound: the only
 #:   number that must fit the provider timeout/token budget. Both review
 #:   paths (auditor perspectives, push-level code reviewer) clamp their
-#:   composed user message to it.
+#:   composed user message to it. Per-model budget note: 90k chars (~22k
+#:   tokens) plus system prompt (~3k tokens) plus ``REVIEW_MAX_TOKENS`` (4k)
+#:   stays well under every configured provider window — OpenAI (~128k),
+#:   Anthropic (~200k), Groq fallbacks and Zen (1M) — so no per-model
+#:   derivation is needed; the fixed prompt bound IS the cross-provider
+#:   budget. A fixed bound also keeps grounding/prompt behavior identical
+#:   across model switches instead of changing review coverage with config.
 #: * Separate 40k tool/report budgets, deliberately NOT unified with the
 #:   above — different surfaces, different callers, so unifying them would
 #:   couple unrelated limits: ``session_tools.git._MAX_DIFF_CHARS`` (agentic
@@ -277,6 +287,16 @@ def _escape_markdown(value: str, *, escape_backticks: bool = True) -> str:
     # opens the report from.
     pattern = r"([\\`*_\[\]~!])" if escape_backticks else r"([\\*_\[\]~!])"
     return re.sub(pattern, r"\\\1", value)
+
+
+def _escape_table_cell(value: str) -> str:
+    """Escape literal pipes so a value cannot split a GFM table row.
+
+    Backticks do NOT protect ``|`` in GitHub tables — a valid repo path like
+    ``a|b.py`` still adds a column. ``\\|`` renders as ``|`` without shifting
+    columns, in or out of backticks.
+    """
+    return value.replace("|", "\\|")
 
 
 def _neutralize_markdown_urls(value: str) -> str:
@@ -620,20 +640,23 @@ def _render_audit_findings_table(
     for f in findings:
         sev = str(f.get("severity", "NOTE")).upper()
         icon = _SEVERITY_ICON.get(sev, "ℹ️")
-        persp = _sanitize_inline(f.get("perspective", "General"), 40).title()
+        persp = _escape_table_cell(
+            _sanitize_inline(f.get("perspective", "General"), 40).title()
+        )
 
         line_start = _bounded_integer(f.get("line_start"), 1, 10_000_000, 1)
         line_end = _bounded_integer(
             f.get("line_end"), line_start, 10_000_000, line_start
         )
-        loc = f"`{_safe_path(f.get('file_path'))}#L{line_start}`"
+        loc_path = _escape_table_cell(_safe_path(f.get("file_path")))
+        loc = f"`{loc_path}#L{line_start}`"
         if line_end != line_start:
-            loc = f"`{_safe_path(f.get('file_path'))}#L{line_start}-L{line_end}`"
+            loc = f"`{loc_path}#L{line_start}-L{line_end}`"
 
         title = _sanitize_heading_text(f.get("title", ""), 70)
         if len(title) > 65:
             title = title[:62] + "..."
-        title_clean = title.replace("|", "\\|")
+        title_clean = _escape_table_cell(title)
 
         conf = _clamp_confidence(f.get("confidence"), overall_confidence)
         rows.append(f"| {icon} [{sev}] | {persp} | {loc} | {title_clean} | `{conf}%` |")
@@ -692,7 +715,7 @@ def format_audit_report(
         "",
         "| Status | Confidence Score | Audit Target | Engine |",
         "| :--- | :--- | :--- | :--- |",
-        f"| {status_sanitized} | `{confidence_value}%` | {audit_target_sanitized} | `{engine_sanitized}` |",
+        f"| {_escape_table_cell(status_sanitized)} | `{confidence_value}%` | {_escape_table_cell(audit_target_sanitized)} | `{engine_sanitized}` |",
         "",
         f"**Status:** {status_sanitized}  ",
         f"**Confidence Score:** `{confidence_value}%`  ",

@@ -4173,8 +4173,11 @@ def test_clipped_statistics_are_labelled_as_prefix_statistics():
     # One file, one hunk whose body is far past the auditor's character bound, so
     # the character cut lands inside the new-side block: the partial hunk stays
     # usable, and the counts describe the inspected prefix only.
-    body = "".join(f"-old{index}\n" for index in range(5_000)) + "".join(
-        f"+new{index}\n" for index in range(5_000)
+    # Padding keeps the 5k+5k shape while pushing the diff past the 1.5M
+    # fetch/grounding ceiling (AUDIT_MAX_DIFF_CHARS): unpadded the same shape
+    # is ~87k and no longer clips since be82cc0 raised the ceiling.
+    body = "".join(f"-old{index} {'x' * 160}\n" for index in range(5_000)) + "".join(
+        f"+new{index} {'x' * 160}\n" for index in range(5_000)
     )
     diff = (
         "diff --git a/app.py b/app.py\n"
