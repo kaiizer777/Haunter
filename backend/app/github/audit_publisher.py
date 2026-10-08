@@ -166,7 +166,17 @@ def format_inline_comment_body(
                     bounded_fix = "\n".join(lines_fix[1:-1]).strip()
             lines.append("")
             lines.append("**Suggested Remediation:**")
-            if bounded_fix.startswith("--- ") or bounded_fix.startswith("@@ "):
+            # A full unified diff (`diff --git`, hunk headers, ---/+++ file
+            # lines) is never valid ```suggestion content — GitHub applies a
+            # suggestion block verbatim, so a diff pasted into one corrupts the
+            # file. Render diff-shaped fixes as ```diff instead. The `--- `
+            # match requires a trailing space plus path (diff header form), so
+            # a bare YAML `---` document marker is not misclassified as a diff.
+            stripped_fix = bounded_fix.lstrip()
+            is_unified_diff = stripped_fix.startswith(
+                ("diff --git", "@@ ", "--- ", "+++ ")
+            )
+            if is_unified_diff:
                 lines.append(f"```diff\n{bounded_fix}\n```")
             else:
                 lines.append(f"```suggestion\n{bounded_fix}\n```")

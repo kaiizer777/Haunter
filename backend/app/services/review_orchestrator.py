@@ -332,11 +332,15 @@ def _render_findings_table(findings: Sequence[ReviewFinding]) -> str:
     ]
     for f in findings:
         icon_sev = severity_icons.get(f.severity.lower(), f.severity.upper())
-        cat = f.category.replace("_", " ").title()
+        # Every cell is GFM table content: an unescaped `|` in a category,
+        # path, or summary splits the row. Escape all three, not just the
+        # summary — a filename can carry one as legitimately as prose can.
+        cat = f.category.replace("_", " ").title().replace("|", "\\|")
+        safe_path = f.file_path.replace("|", "\\|")
         loc = (
-            f"`{f.file_path}:{f.line_start}`"
+            f"`{safe_path}:{f.line_start}`"
             if f.line_start == f.line_end
-            else f"`{f.file_path}:{f.line_start}-{f.line_end}`"
+            else f"`{safe_path}:{f.line_start}-{f.line_end}`"
         )
         summary_first_line = f.critique.splitlines()[0].strip()
         if len(summary_first_line) > 85:
@@ -408,11 +412,19 @@ def _render_findings_section(
             f"\n<details open>\n<summary>{icon} <b>[{sev} · {cat}]</b> <code>{loc}</code></summary>\n",
             f"\n**Problem:**\n{finding.critique}\n",
         ]
-        if finding.suggested_patch:
-            clean_patch = finding.suggested_patch.strip()
-            block_parts.append(
-                f"\n**Suggested Remediation:**\n```suggestion\n{clean_patch}\n```\n"
-            )
+        if finding.suggested_patch and finding.suggested_patch.strip():
+            # Route through the canonical renderer so a patch that triggered
+            # secret redaction is shown as a plain (non-applyable) block with
+            # its warning, never as a one-click ```suggestion. Only the
+            # remediation tail is embedded — this block already renders its
+            # own header and Problem section.
+            remediation_md = format_github_suggestion(finding)
+            marker = "**Remediation:**"
+            if marker in remediation_md:
+                remediation_tail = remediation_md.split(marker, 1)[1].strip()
+                block_parts.append(
+                    f"\n**Suggested Remediation:**\n{remediation_tail}\n"
+                )
         block_parts.append("\n</details>\n")
 
         block = "".join(block_parts)
@@ -943,10 +955,13 @@ async def _ensure_install_id(session: Any, repo: Any) -> None:
     )
 
 
-def _build_status_badge(risk_score: int) -> str:
+def _build_status_badge(risk_score: int, blockers: int = 0) -> str:
+    # The blocker count overrides a low score: a model-authored risk_score in
+    # the Approved band alongside critical/high findings is a false clean bill.
+    # Any blocker floors the badge at Changes Recommended, never Approved.
     if risk_score >= 80:
         return "🛑 `Changes Required`"
-    elif risk_score > 30:
+    elif risk_score > 30 or blockers > 0:
         return "⚠️ `Changes Recommended`"
     return "✅ `Approved`"
 
@@ -1292,9 +1307,9 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
             findings_breakdown = (
                 f"{blockers} Blockers • {warnings} Warnings • {suggestions} Suggestions"
             )
-            status_badge = _build_status_badge(review.risk_score)
+            status_badge = _build_status_badge(review.risk_score, blockers)
 
-            if review.risk_score >= 80:
+            if review.risk_score >= 80 or blockers > 0:
                 alert_callout = (
                     "> [!CAUTION]\n"
                     f"> **Action Required**: {blockers} blocker finding(s) detected. Please resolve critical issues before merge.\n"
@@ -1407,15 +1422,33 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 fallback_body = f"{fallback_body}\n\n{footer_md}"
                 # The suppression block already rides at the top of `body`, so
                 # prepending the length-bound disclosure here keeps both
-                # statements above anything the bound can trim.
-                fallback_body = _bound_review_body(
-                    fallback_body,
+                # statements above anything the bound can trim. The retry
+                # carries every finding inline in place of the dropped inline
+                # comments, so it must repeat the suppression disclosure too —
+                # otherwise findings unanchorable to any hunk vanish silently.
+                suppression_note = _suppression_disclosure(
+                    report=suppression,
+                    findings_total=len(result.output.findings),
+                    grounding_clipped=grounding.clipped,
+                    delivery=(
+                        "They are recorded in the Haunter dashboard and are "
+                        "not shown in this review."
+                    ),
+                )
+                dropped_note = (
                     _DROPPED_FINDINGS_TEMPLATE.format(
                         dropped=dropped,
                         findings=len(result.output.findings),
                     )
                     if dropped
-                    else "",
+                    else ""
+                )
+                fallback_disclosure = "\n\n".join(
+                    part for part in (suppression_note, dropped_note) if part
+                )
+                fallback_body = _bound_review_body(
+                    fallback_body,
+                    fallback_disclosure,
                 )
 
                 try:
@@ -1522,9 +1555,9 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
             findings_breakdown = (
                 f"{blockers} Blockers • {warnings} Warnings • {suggestions} Suggestions"
             )
-            status_badge = _build_status_badge(review.risk_score)
+            status_badge = _build_status_badge(review.risk_score, blockers)
 
-            if review.risk_score >= 80:
+            if review.risk_score >= 80 or blockers > 0:
                 alert_callout = (
                     "> [!CAUTION]\n"
                     f"> **Action Required**: {blockers} blocker finding(s) detected.\n"
