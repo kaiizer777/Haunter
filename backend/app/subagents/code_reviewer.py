@@ -429,7 +429,7 @@ def _bound_diff_for_storage(diff_text: str) -> tuple[str, bool]:
     Returns ``(stored, clipped)``: ``clipped`` is True when EITHER cap fired,
     for the publish layer to combine with ``grounding.clipped`` when deciding
     ``_TRUNCATION_NOTICE`` (see ``review_orchestrator`` — owned separately).
-    The char ceiling applies AFTER the line clip via sequential ``if``\ s, and
+    The char ceiling applies AFTER the line clip via sequential ``if``s, and
     truncates back to the last newline minus the marker (like
     ``auditor._diff_prefix``) so no partial hunk line crosses the boundary and
     the result never exceeds ``MAX_DIFF_CHARS``.

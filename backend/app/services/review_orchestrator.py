@@ -158,9 +158,25 @@ _DROPPED_FINDINGS_TEMPLATE = (
 
 #: Characters held back from a rendered finding list so the disclosure block,
 #: which :func:`_bound_review_body` prepends, still fits under the length bound.
-#: Sized well above the templates above, which are ~250 chars each at their
-#: longest.
+#: A default only: suppression + truncation + dropped combined already exceed
+#: it (~620 chars), so callers whose disclosure is known up front must pass
+#: :func:`_fit_reserve_chars` explicitly instead of relying on this.
 _DISCLOSURE_RESERVE_CHARS = 400
+
+
+def _fit_reserve_chars(*, disclosure_len: int, footer_len: int) -> int:
+    """Room :func:`_render_findings_section` must hold back for text it never sees.
+
+    The fitted list later grows by the disclosure block (prepended with a blank
+    line by :func:`_bound_review_body`) and the footer (appended with a blank
+    line by the caller), so the reserve covers both lengths plus the two
+    separators. Without it the final clamp trims the findings tail after
+    ``dropped`` was counted, and the count understates what is missing.
+    ``disclosure_len`` may be an upper bound when the dropped line is only
+    known after the fit — over-holding drops at most a finding the disclosure
+    then truthfully reports.
+    """
+    return disclosure_len + footer_len + 4
 
 _PATH_UNKNOWN_REASON = (
     "the file was not part of the reviewed diff, so it was deleted, renamed "
@@ -371,6 +387,7 @@ def _render_findings_section(
     *,
     heading: str = "",
     budget: int = MAX_GITHUB_COMMENT_CHARS,
+    reserve: int = _DISCLOSURE_RESERVE_CHARS,
 ) -> tuple[str, int]:
     """``header`` plus as many rendered findings as fit in ``budget`` characters.
 
@@ -381,7 +398,9 @@ def _render_findings_section(
     many did not fit, and the count is returned so the caller can say so.
 
     ``heading`` is appended only when there is at least one finding to put under
-    it. Returns ``(body, dropped)``.
+    it. ``reserve`` is the room held back for the disclosure block and footer
+    the caller adds after the fit; pass :func:`_fit_reserve_chars` with the
+    actual lengths whenever they exceed the default. Returns ``(body, dropped)``.
     """
     prefix = f"{header}{heading}" if findings else header
     rendered: list[str] = []
@@ -389,7 +408,7 @@ def _render_findings_section(
     # The reserve is charged even when nothing is dropped: the disclosure block
     # is prepended to the fitted result afterwards, so the finding list has to
     # leave room for it either way.
-    remaining = max(0, budget - len(prefix) - _DISCLOSURE_RESERVE_CHARS)
+    remaining = max(0, budget - len(prefix) - reserve)
 
     severity_icons = {
         "critical": "🛑",
@@ -1414,18 +1433,13 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                     f"{review.summary}\n"
                     f"{table_section}"
                 )
-                fallback_body, dropped = _render_findings_section(
-                    fallback_header,
-                    result.output.findings,
-                    heading="\n### 🔍 Detailed Findings & Remediations\n",
-                )
-                fallback_body = f"{fallback_body}\n\n{footer_md}"
-                # The suppression block already rides at the top of `body`, so
-                # prepending the length-bound disclosure here keeps both
-                # statements above anything the bound can trim. The retry
-                # carries every finding inline in place of the dropped inline
-                # comments, so it must repeat the suppression disclosure too —
-                # otherwise findings unanchorable to any hunk vanish silently.
+                # The suppression half of the disclosure needs no fit count, so it
+                # is built before the fit and its length — plus the worst-case
+                # dropped line and the footer appended below — is held back
+                # from the finding list. The default 400-char reserve is
+                # smaller than suppression + truncation + dropped combined, so
+                # the final bound used to clip findings the `dropped` count
+                # said were shown.
                 suppression_note = _suppression_disclosure(
                     report=suppression,
                     findings_total=len(result.output.findings),
@@ -1435,6 +1449,28 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                         "not shown in this review."
                     ),
                 )
+                max_dropped_line = len(
+                    _DROPPED_FINDINGS_TEMPLATE.format(
+                        dropped=len(result.output.findings),
+                        findings=len(result.output.findings),
+                    )
+                )
+                fallback_body, dropped = _render_findings_section(
+                    fallback_header,
+                    result.output.findings,
+                    heading="\n### 🔍 Detailed Findings & Remediations\n",
+                    reserve=_fit_reserve_chars(
+                        disclosure_len=len(suppression_note) + 2 + max_dropped_line,
+                        footer_len=len(footer_md),
+                    ),
+                )
+                fallback_body = f"{fallback_body}\n\n{footer_md}"
+                # The suppression block already rides at the top of `body`, so
+                # prepending the length-bound disclosure here keeps both
+                # statements above anything the bound can trim. The retry
+                # carries every finding inline in place of the dropped inline
+                # comments, so it must repeat the suppression disclosure too —
+                # otherwise findings unanchorable to any hunk vanish silently.
                 dropped_note = (
                     _DROPPED_FINDINGS_TEMPLATE.format(
                         dropped=dropped,
@@ -1590,10 +1626,24 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 f"{table_section}"
             )
 
+            # The dropped line is only known after the fit, so the worst case
+            # (every finding dropped) is held back along with the footer
+            # appended below — otherwise the final bound clips findings the
+            # `dropped` count said were shown, as on the fallback path above.
+            max_dropped_line = len(
+                _DROPPED_FINDINGS_TEMPLATE.format(
+                    dropped=len(result.output.findings),
+                    findings=len(result.output.findings),
+                )
+            )
             body, dropped = _render_findings_section(
                 push_header,
                 result.output.findings,
                 heading="\n### 🔍 Actionable Findings & Remediations\n",
+                reserve=_fit_reserve_chars(
+                    disclosure_len=max_dropped_line + 2,
+                    footer_len=len(footer_md),
+                ),
             )
             body = f"{body}\n\n{footer_md}"
             body = _bound_review_body(
