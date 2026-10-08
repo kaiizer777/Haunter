@@ -1085,3 +1085,180 @@ async def test_auditor_team_login_is_not_suppressed_as_self(
     llm_cls.assert_not_called()
     post_mock.assert_not_called()
     thread_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_background_worker_failure_records_error_row(
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """Worker crash stays retryable: the exception path records an `error` row."""
+    from sqlalchemy import select
+
+    from app.models import WebhookDelivery
+    from app.webhooks import _run_auditor_mention_background
+
+    repo = await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    delivery_id = str(uuid.uuid4())
+    with patch(
+        "app.webhooks._handle_auditor_mention",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("worker boom"),
+    ):
+        await _run_auditor_mention_background(
+            repo_id=repo.id,
+            repo_owner=ROUTER_OWNER,
+            repo_name=ROUTER_REPO,
+            pr_number=42,
+            comment_id=900001,
+            comment_body="@haunter-auditor explain this?",
+            comment_login="senior-reviewer",
+            author_association="MEMBER",
+            in_reply_to_id=None,
+            event="issue_comment",
+            delivery_id=delivery_id,
+        )
+    rows = (
+        await fake_audit_db.execute(
+            select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+        )
+    ).scalars().all()
+    assert any(getattr(row, "status", "") == "error" for row in rows)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Hermetic FakeStore sorts ORDER BY ... DESC as ASC "
+    "(tests/fake_audit_db.py _order compares the SQLAlchemy 2.x desc_op "
+    "modifier against the string 'desc'); latest-wins needs real Postgres.",
+)
+@pytest.mark.asyncio
+async def test_auditor_redelivery_after_error_requeues(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """Redelivery after a failed attempt re-queues instead of answering duplicate."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from app.models import WebhookDelivery
+    from app.webhooks import _run_auditor_mention_background
+
+    repo = await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    payload = _issue_comment_payload(body="@haunter-auditor explain this?")
+    delivery_id = str(uuid.uuid4())
+    patches = _no_auditor_side_effects()
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ):
+            first = await _post_router_with_delivery(
+                client, "issue_comment", payload, delivery_id
+            )
+    assert first.status_code == 200
+    assert first.json()["status"] == "auditor_queued"
+
+    # Failed worker appends the retryable `error` row.
+    with patch(
+        "app.webhooks._handle_auditor_mention",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("worker boom"),
+    ):
+        await _run_auditor_mention_background(
+            repo_id=repo.id,
+            repo_owner=ROUTER_OWNER,
+            repo_name=ROUTER_REPO,
+            pr_number=42,
+            comment_id=900001,
+            comment_body="@haunter-auditor explain this?",
+            comment_login="senior-reviewer",
+            author_association="MEMBER",
+            in_reply_to_id=None,
+            event="issue_comment",
+            delivery_id=delivery_id,
+        )
+
+    # Pin wall-clock order: the fake store defaults both rows to ~now, which
+    # can tie; the regression is about latest-wins, so make it explicit.
+    rows = (
+        await fake_audit_db.execute(
+            select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+        )
+    ).scalars().all()
+    assert {getattr(r, "status", "") for r in rows} >= {"auditor_queued", "error"}
+    for r in rows:
+        if getattr(r, "status", "") == "auditor_queued":
+            r.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        elif getattr(r, "status", "") == "error":
+            r.created_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    patches2 = _no_auditor_side_effects()
+    with patches2[0], patches2[1], patches2[2], patches2[3], patches2[4], patches2[5], patches2[6]:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ) as bg_mock:
+            second = await _post_router_with_delivery(
+                client, "issue_comment", payload, delivery_id
+            )
+    assert second.status_code == 200
+    assert second.json()["status"] == "auditor_queued"
+    bg_mock.assert_awaited_once()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Hermetic FakeStore sorts ORDER BY ... DESC as ASC "
+    "(tests/fake_audit_db.py _order compares the SQLAlchemy 2.x desc_op "
+    "modifier against the string 'desc'); latest-wins needs real Postgres.",
+)
+@pytest.mark.asyncio
+async def test_stale_queued_row_does_not_shadow_fresh_error(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """Latest row wins: stale queued beside fresh error still retries."""
+    from datetime import datetime, timezone
+
+    from app.models import WebhookDelivery
+
+    repo = await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    delivery_id = str(uuid.uuid4())
+    fake_audit_db.add(
+        WebhookDelivery(
+            event="issue_comment",
+            delivery_id=delivery_id,
+            status="auditor_queued",
+            reason="auditor_qa pr=42 comment=900001",
+            repo=f"{ROUTER_OWNER}/{ROUTER_REPO}",
+            repo_id=repo.id,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    fake_audit_db.add(
+        WebhookDelivery(
+            event="issue_comment",
+            delivery_id=delivery_id,
+            status="error",
+            reason="auditor background failed pr=42 comment=900001",
+            repo=f"{ROUTER_OWNER}/{ROUTER_REPO}",
+            repo_id=repo.id,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+    )
+    await fake_audit_db.commit()
+
+    payload = _issue_comment_payload(body="@haunter-auditor explain this?")
+    patches = _no_auditor_side_effects()
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ) as bg_mock:
+            resp = await _post_router_with_delivery(
+                client, "issue_comment", payload, delivery_id
+            )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "auditor_queued"
+    bg_mock.assert_awaited_once()

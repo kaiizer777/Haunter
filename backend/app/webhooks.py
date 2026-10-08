@@ -641,6 +641,28 @@ async def _run_auditor_mention_background(
             sanitize_log_value(delivery_id, 64),
             type(exc).__name__,
         )
+        # Retry-safe: a worker crash must not leave `auditor_queued` as the
+        # latest state, or a redelivery answers `duplicate` for work that
+        # never ran. Record a best-effort `error` row so the delivery stays
+        # retryable (`error` is outside _AUDITOR_DEDUP_STATUSES). The recorder
+        # swallows DB failures, so this worker still never raises.
+        try:
+            from app.db import async_session_maker as _error_session_maker
+        except Exception:
+            return
+        try:
+            async with _error_session_maker() as error_db:
+                await _record_webhook_delivery(
+                    error_db,
+                    event=event,
+                    delivery_id=delivery_id,
+                    status_value="error",
+                    reason=f"auditor background failed pr={pr_number} comment={comment_id}",
+                    repo=f"{repo_owner}/{repo_name}",
+                    repo_id=repo_id if isinstance(repo_id, uuid.UUID) else None,
+                )
+        except Exception:
+            pass
 
 
 def _log_repo(owner: Any, name: Any) -> str:
@@ -2634,6 +2656,7 @@ async def github_webhook(
                         WebhookDelivery.delivery_id == str(x_github_delivery),
                         WebhookDelivery.event == str(x_github_event),
                     )
+                    .order_by(WebhookDelivery.created_at.desc())
                     .limit(1)
                 )
             ).scalars().first()
