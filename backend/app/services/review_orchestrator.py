@@ -486,6 +486,10 @@ def _suppression_disclosure(
     before it could be anchored — where nothing was dropped, but every inline
     comment in the review is known to cover only part of the change.
 
+    Callers pass the OR of ``DiffGrounding.clipped`` (parse bound) and
+    ``ReviewResult.diff_clipped`` (storage ceiling) as ``grounding_clipped``:
+    either one means the model read less than the full change.
+
     Returns ``""`` when there is nothing to disclose.
     """
     parts: list[str] = []
@@ -1367,7 +1371,8 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 _suppression_disclosure(
                     report=suppression,
                     findings_total=len(result.output.findings),
-                    grounding_clipped=grounding.clipped,
+                    grounding_clipped=grounding.clipped
+                    or result.diff_clipped,
                     delivery=(
                         "They are recorded in the Haunter dashboard and are "
                         "not shown in this review."
@@ -1443,7 +1448,7 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 suppression_note = _suppression_disclosure(
                     report=suppression,
                     findings_total=len(result.output.findings),
-                    grounding_clipped=grounding.clipped,
+                    grounding_clipped=grounding.clipped or result.diff_clipped,
                     delivery=(
                         "They are recorded in the Haunter dashboard and are "
                         "not shown in this review."
@@ -1630,6 +1635,10 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
             # (every finding dropped) is held back along with the footer
             # appended below — otherwise the final bound clips findings the
             # `dropped` count said were shown, as on the fallback path above.
+            # The truncation notice is known up front, so its length rides in
+            # the same reserve: without it a clipped diff both drops findings
+            # to the fit and loses the notice to the final clamp.
+            truncation_note = _TRUNCATION_NOTICE if result.diff_clipped else ""
             max_dropped_line = len(
                 _DROPPED_FINDINGS_TEMPLATE.format(
                     dropped=len(result.output.findings),
@@ -1641,19 +1650,24 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 result.output.findings,
                 heading="\n### 🔍 Actionable Findings & Remediations\n",
                 reserve=_fit_reserve_chars(
-                    disclosure_len=max_dropped_line + 2,
+                    disclosure_len=len(truncation_note) + 2 + max_dropped_line,
                     footer_len=len(footer_md),
                 ),
             )
             body = f"{body}\n\n{footer_md}"
-            body = _bound_review_body(
-                body,
+            dropped_note = (
                 _DROPPED_FINDINGS_TEMPLATE.format(
                     dropped=dropped,
                     findings=len(result.output.findings),
                 )
                 if dropped
-                else "",
+                else ""
+            )
+            body = _bound_review_body(
+                body,
+                "\n\n".join(
+                    part for part in (truncation_note, dropped_note) if part
+                ),
             )
 
             try:

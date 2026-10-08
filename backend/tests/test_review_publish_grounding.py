@@ -34,6 +34,7 @@ from app.github.audit_publisher import PublishResult
 from app.github_client import GitHubAuthError
 from app.llm.prompts.audit_prompts import (
     MAX_CATEGORY_CHARS,
+    MAX_DIFF_LINES,
     MAX_GITHUB_COMMENT_CHARS,
     MAX_INLINE_FIELD_CHARS,
     MAX_REPORT_CHARS,
@@ -1241,4 +1242,211 @@ async def test_review_markdown_visual_hierarchy_and_badges(
     # 4. Polished Footer
     assert "⚡ Powered by **Haunter**" in body
     assert "View Run Trace in Dashboard" in body
+
+
+# ---------------------------------------------------------------------------
+# diff-ceiling disclosure - ReviewResult.diff_clipped never reached the body
+# ---------------------------------------------------------------------------
+# `analyze_diff` clips the diff past MAX_DIFF_LINES (30k) or MAX_DIFF_CHARS
+# (1.5M) and reports it as `ReviewResult.diff_clipped` (code_reviewer.py:422,
+# stored on both success paths). The publish layer only consulted
+# `grounding.clipped` -- the parse bound -- so a line-clipped-but-char-small
+# diff published with no reader-facing notice of partial coverage, and the push
+# path disclosed only dropped findings. The `[...DIFF TRUNCATED...]` marker the
+# model saw is not a reader-facing disclosure.
+#
+# The fixture below is deliberately line-clipped-but-char-small: past
+# MAX_DIFF_LINES yet far under MAX_DIFF_CHARS, so `grounding.clipped` is False
+# (asserted, not assumed) and the notice can only come from `diff_clipped`.
+
+
+def _line_ceiling_diff() -> str:
+    """SAMPLE_DIFF padded past MAX_DIFF_LINES, still far under MAX_DIFF_CHARS."""
+    filler = "".join(f"# padding line {i}\n" for i in range(MAX_DIFF_LINES + 1))
+    return SAMPLE_DIFF + filler
+
+
+async def test_diff_clipped_pr_body_carries_truncation_notice(
+    pending_review: CodeReview,
+) -> None:
+    """A storage-clipped diff must disclose partial coverage in the PR body.
+
+    The fixture is char-small, so `grounding.clipped` is False: the notice
+    proves the body consumed `ReviewResult.diff_clipped`, not just grounding.
+    """
+    huge_diff = _line_ceiling_diff()
+    assert build_diff_grounding(huge_diff).clipped is False, (
+        "fixture must stay under the char ceiling -- otherwise this test "
+        "cannot tell diff_clipped apart from grounding.clipped"
+    )
+
+    mock_pr_review = AsyncMock(return_value={"id": 9001})
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=huge_diff,
+        ),
+        patch(
+            "app.subagents.code_reviewer.LLMClient",
+            _llm_patch_target(_llm_response(findings=[_finding_payload()])),
+        ),
+        patch(
+            "app.services.review_orchestrator.create_pull_request_review",
+            mock_pr_review,
+        ),
+        _install_token_patch(),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    publishes = _published(mock_pr_review)
+    assert len(publishes) == 1, (
+        f"expected a single published review, saw {len(publishes)} attempts"
+    )
+    body = publishes[0]["body"]
+    assert review_orch._TRUNCATION_NOTICE in body, (
+        "the analysed diff was clipped at the storage ceiling "
+        "(ReviewResult.diff_clipped=True) yet the published PR body carries no "
+        "coverage-partial notice"
+    )
+
+
+async def test_intact_diff_pr_body_carries_no_truncation_notice(
+    pending_review: CodeReview,
+) -> None:
+    """An unclipped diff must not carry the coverage-partial notice."""
+    mock_pr_review = AsyncMock(return_value={"id": 9002})
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=SAMPLE_DIFF,
+        ),
+        patch(
+            "app.subagents.code_reviewer.LLMClient",
+            _llm_patch_target(_llm_response(findings=[_finding_payload()])),
+        ),
+        patch(
+            "app.services.review_orchestrator.create_pull_request_review",
+            mock_pr_review,
+        ),
+        _install_token_patch(),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    body = mock_pr_review.call_args.kwargs["body"]
+    assert review_orch._TRUNCATION_NOTICE not in body, (
+        "nothing was clipped, so the coverage-partial notice must be absent"
+    )
+
+
+async def test_diff_clipped_fallback_body_carries_truncation_notice(
+    pending_review: CodeReview,
+) -> None:
+    """The 422 summary-only retry must repeat the coverage-partial notice."""
+    huge_diff = _line_ceiling_diff()
+    attempts: list[dict[str, Any]] = []
+
+    async def _reject_inline_then_accept(**kwargs: Any) -> dict[str, Any]:
+        attempts.append(kwargs)
+        if kwargs.get("comments"):
+            raise Exception("GitHub API returned error 422: Review body is too long")
+        return {"id": 9003}
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=huge_diff,
+        ),
+        patch(
+            "app.subagents.code_reviewer.LLMClient",
+            _llm_patch_target(_llm_response(findings=[_finding_payload()])),
+        ),
+        patch(
+            "app.services.review_orchestrator.create_pull_request_review",
+            new_callable=AsyncMock,
+            side_effect=_reject_inline_then_accept,
+        ),
+        _install_token_patch(),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    assert len(attempts) == 2, (
+        f"expected the inline attempt plus one summary-only retry, got {len(attempts)}"
+    )
+    assert review_orch._TRUNCATION_NOTICE in attempts[1]["body"], (
+        "the analysed diff was clipped at the storage ceiling yet the fallback "
+        "summary body carries no coverage-partial notice"
+    )
+
+
+async def test_diff_clipped_push_body_carries_truncation_notice(
+    pending_review: CodeReview,
+) -> None:
+    """A storage-clipped push diff must disclose partial coverage, not just drops."""
+    review = pending_review
+    review.pr_number = None
+    huge_diff = _line_ceiling_diff()
+
+    mock_commit_comment = AsyncMock(return_value={"id": 4242})
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_diff",
+            new_callable=AsyncMock,
+            return_value=huge_diff,
+        ),
+        patch(
+            "app.subagents.code_reviewer.LLMClient",
+            _llm_patch_target(_llm_response(findings=[_finding_payload()])),
+        ),
+        patch(
+            "app.services.review_orchestrator.create_commit_comment",
+            mock_commit_comment,
+        ),
+        _install_token_patch(),
+    ):
+        await run_code_review_pipeline(review.id)
+
+    mock_commit_comment.assert_awaited_once()
+    body = mock_commit_comment.call_args.kwargs["body"]
+    assert review_orch._TRUNCATION_NOTICE in body, (
+        "the analysed push diff was clipped at the storage ceiling "
+        "(ReviewResult.diff_clipped=True) yet the published commit comment "
+        "carries no coverage-partial notice"
+    )
+
+
+async def test_intact_diff_push_body_carries_no_truncation_notice(
+    pending_review: CodeReview,
+) -> None:
+    """An unclipped push diff must not carry the coverage-partial notice."""
+    review = pending_review
+    review.pr_number = None
+
+    mock_commit_comment = AsyncMock(return_value={"id": 4243})
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_diff",
+            new_callable=AsyncMock,
+            return_value=SAMPLE_DIFF,
+        ),
+        patch(
+            "app.subagents.code_reviewer.LLMClient",
+            _llm_patch_target(_llm_response(findings=[_finding_payload()])),
+        ),
+        patch(
+            "app.services.review_orchestrator.create_commit_comment",
+            mock_commit_comment,
+        ),
+        _install_token_patch(),
+    ):
+        await run_code_review_pipeline(review.id)
+
+    mock_commit_comment.assert_awaited_once()
+    body = mock_commit_comment.call_args.kwargs["body"]
+    assert review_orch._TRUNCATION_NOTICE not in body, (
+        "nothing was clipped, so the coverage-partial notice must be absent"
+    )
 
