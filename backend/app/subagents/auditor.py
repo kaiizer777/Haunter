@@ -46,9 +46,7 @@ from app.llm.prompts.audit_prompts import (
     PerspectiveName,
     build_perspective_messages,
     build_status_label,
-    derive_blast_radius,
     format_audit_report,
-    format_confidence_score,
     redact_sensitive_text,
     redact_sensitive_text_preserving_lines,
     sanitize_output_markdown,
@@ -1859,6 +1857,7 @@ async def run_audit(
         counts.get("BLOCKER", 0),
         counts.get("WARNING", 0),
         overall_confidence,
+        has_notes=counts.get("NOTE", 0) > 0,
     )
     executive_summary = _synthesize_executive_summary(
         executed_perspectives, len(findings)

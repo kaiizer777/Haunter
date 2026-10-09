@@ -934,7 +934,7 @@ def format_audit_report(
         derived_badge, _, _ = derive_blast_radius([])
         touched_match = re.search(r"Touched files:\s*\n((?:-\s*.+\n?)+)", analysis_metadata or "")
         if touched_match:
-            t_files = [l.strip()[2:].strip() for l in touched_match.group(1).splitlines() if l.strip().startswith("- ")]
+            t_files = [line.strip()[2:].strip() for line in touched_match.group(1).splitlines() if line.strip().startswith("- ")]
             derived_badge, _, _ = derive_blast_radius(t_files)
         blast_radius_label = derived_badge
 
@@ -981,15 +981,16 @@ def format_audit_report(
         "",
     ])
 
-    if remediation_diff and remediation_diff.strip():
-        if effective_allowed and "(no automated remediation" not in remediation_diff:
+    cleaned_diff = (remediation_diff or "").strip()
+    if cleaned_diff and "(no automated remediation" not in cleaned_diff:
+        if effective_allowed:
             remediation_heading = "### 🛠️ Remediation Unified Diff"
             remediation = (
                 "<details open>\n"
                 "<summary>🛠️ <b>Proposed Remediation Unified Diff</b> (Click to inspect)</summary>\n\n"
                 + _fenced_block(
                     "diff",
-                    _sanitize_code(remediation_diff, MAX_REMEDIATION_DIFF_CHARS),
+                    _sanitize_code(cleaned_diff, MAX_REMEDIATION_DIFF_CHARS),
                 )
                 + "\n</details>"
             )
