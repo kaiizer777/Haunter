@@ -540,6 +540,75 @@ def build_status_label(
     return "✅ Ready to Merge"
 
 
+def _is_test_path(path: str) -> bool:
+    """Determine whether a repository-relative path belongs strictly to a test suite.
+
+    Matches:
+    - Directories named 'tests', 'test', '__tests__', 'spec', 'specs', 'testing'
+    - Filenames starting with 'test_' or 'test-'
+    - Filenames ending with '_test.<ext>', '.test.<ext>', '_spec.<ext>', '.spec.<ext>'
+    - Filenames exactly named 'test.<ext>', 'tests.<ext>', 'conftest.py'
+
+    Does NOT match non-test files containing 'test' as a substring, such as
+    'backend/app/api/latest.py', 'contest.py', 'attestation.py', or 'testament.py'.
+    """
+    normalized = path.replace("\\", "/").strip().lower()
+    if not normalized:
+        return False
+
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+
+    filename = parts[-1]
+    dir_parts = parts[:-1]
+
+    test_dir_names = {"test", "tests", "__tests__", "spec", "specs", "testing"}
+    if any(part in test_dir_names for part in dir_parts):
+        return True
+
+    if filename in (
+        "test.py",
+        "tests.py",
+        "conftest.py",
+        "test.js",
+        "test.ts",
+        "test.jsx",
+        "test.tsx",
+    ):
+        return True
+
+    if filename.startswith("test_") or filename.startswith("test-"):
+        return True
+
+    test_suffixes = (
+        "_test.py",
+        "_test.ts",
+        "_test.js",
+        "_test.tsx",
+        "_test.jsx",
+        "_test.go",
+        "_test.rs",
+        ".test.py",
+        ".test.ts",
+        ".test.js",
+        ".test.tsx",
+        ".test.jsx",
+        "_spec.py",
+        "_spec.ts",
+        "_spec.js",
+        "_spec.tsx",
+        "_spec.jsx",
+        "_spec.rb",
+        ".spec.py",
+        ".spec.ts",
+        ".spec.js",
+        ".spec.tsx",
+        ".spec.jsx",
+    )
+    return any(filename.endswith(sfx) for sfx in test_suffixes)
+
+
 def derive_blast_radius(paths: Sequence[str]) -> tuple[str, str, str]:
     cleaned_paths = [p for p in paths if p and p != "unknown"]
     if not cleaned_paths:
@@ -561,7 +630,7 @@ def derive_blast_radius(paths: Sequence[str]) -> tuple[str, str, str]:
             "Low risk — purely presentational changes with zero runtime or logic impact.",
         )
     is_tests = all(
-        "test" in p.lower() or p.lower().startswith("tests/")
+        _is_test_path(p)
         for p in cleaned_paths
     )
     if is_tests:
@@ -661,6 +730,8 @@ def _render_structural_analysis(
     added = 0
     removed = 0
     touched_files: list[str] = []
+    stat_match: Optional[re.Match[str]] = None
+    touched_match: Optional[re.Match[str]] = None
 
     if stats:
         file_count = stats.get("file_count", 0)

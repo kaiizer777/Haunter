@@ -40,6 +40,8 @@ from app.github_client import (
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
     MAX_GITHUB_COMMENT_CHARS,
+    _render_structural_analysis,
+    derive_blast_radius,
     format_audit_report,
 )
 from app.models import Repo
@@ -996,4 +998,88 @@ def test_format_inline_comment_body_renders_suggestion_block():
     assert "**Suggested Remediation:**" in body
     assert "```suggestion\nreturn hmac.compare_digest(token, stored_token)\n```" in body
     assert "> [!WARNING]" in body
+
+
+# ==============================================================================
+# 9. Regression Tests: Blast Radius & Structural Analysis Defect Fixes
+# ==============================================================================
+
+
+def test_derive_blast_radius_regression_no_substring_false_positives():
+    """Verify production files containing 'test' substring are NOT classified as test suite."""
+    # Production API endpoint with 'test' in name ('latest.py')
+    badge, surface, risk = derive_blast_radius(["backend/app/api/latest.py"])
+    assert badge == "**Moderate** (API & Endpoints)"
+    assert surface == "API / Endpoints & Schemas"
+    assert "Moderate risk" in risk
+    assert "Test suite only" not in badge
+
+    # Other files with 'test' as a substring
+    badge, surface, _ = derive_blast_radius(["contest.py"])
+    assert "Test suite only" not in badge
+    assert surface == "Application Logic"
+
+    badge, surface, _ = derive_blast_radius(["attestation.py"])
+    assert "Test suite only" not in badge
+    assert surface == "Application Logic"
+
+    badge, surface, _ = derive_blast_radius(["backend/app/auth/attestation.py"])
+    assert badge == "**High** (Auth & Data Layer)"
+    assert surface == "Core / Auth & Database"
+
+    # Legitimate test paths MUST be classified as test suite
+    test_cases = [
+        ["tests/test_latest.py"],
+        ["backend/tests/test_api.py"],
+        ["tests/unit/test_auth.py"],
+        ["frontend/src/components/Button.test.tsx"],
+        ["frontend/src/components/Button.spec.ts"],
+        ["frontend/src/__tests__/Button.tsx"],
+        ["conftest.py"],
+        ["tests/helpers.py"],
+        ["backend/tests/test_models.py", "tests/conftest.py"],
+    ]
+    for paths in test_cases:
+        badge, surface, risk = derive_blast_radius(paths)
+        assert badge == "**Isolated** (Test suite only)", f"Failed for {paths}"
+        assert surface == "Isolated / Test Suite", f"Failed for {paths}"
+        assert "zero production runtime impact" in risk
+
+
+def test_render_structural_analysis_with_stats_no_unbound_local_error():
+    """Verify _render_structural_analysis works without UnboundLocalError when stats dict is provided."""
+    stats = {
+        "file_count": 2,
+        "added_lines": 12,
+        "removed_lines": 3,
+        "valid_paths": ["backend/app/main.py", "backend/app/api/latest.py"],
+    }
+    rendered = _render_structural_analysis(metadata="", blast_radius="", stats=stats)
+    assert "### 🔬 Structural & Blast Radius Analysis" in rendered
+    assert "- **Impact Surface:** API / Endpoints & Schemas" in rendered
+    assert "- **Files Modified:** `2 files` (+12 / -3 lines)" in rendered
+    assert "`backend/app/main.py`" in rendered
+    assert "`backend/app/api/latest.py`" in rendered
+    assert "- **Risk Assessment:** Moderate risk — modifies external request handling or public contract surfaces." in rendered
+
+
+def test_render_structural_analysis_with_raw_metadata_and_ast_noise():
+    """Verify _render_structural_analysis parses raw metadata and strips AST noise properly."""
+    raw_meta = (
+        "Files changed: 1; accepted hunks: 1; +5 added / -2 removed lines\n"
+        "Touched files:\n"
+        "- backend/app/api/latest.py\n"
+        "Custom analysis note on modified routes\n"
+        "No complete bounded Python source was available for parser-backed AST analysis.\n"
+        "Caller-supplied parser context: None\n"
+    )
+    rendered = _render_structural_analysis(metadata=raw_meta, blast_radius="", stats=None)
+    assert "### 🔬 Structural & Blast Radius Analysis" in rendered
+    assert "- **Impact Surface:** API / Endpoints & Schemas" in rendered
+    assert "- **Files Modified:** `1 file` (+5 / -2 lines)" in rendered
+    assert "`backend/app/api/latest.py`" in rendered
+    assert "No complete bounded Python source" not in rendered
+    assert "Caller-supplied parser context" not in rendered
+    assert "- **Metadata Note:** Custom analysis note on modified routes" in rendered
+
 
