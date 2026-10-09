@@ -1246,6 +1246,109 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
     ).all()
     assert stale == []
 
+@pytest.mark.asyncio
+async def test_issue_comment_manual_audit_dispatches_with_live_pr_endpoints(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
+    """When fetch_pull_request returns PR endpoints, @haunter audit in issue_comment dispatches."""
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "live-audit-org", "live-audit-repo"
+    )
+    await set_repo_auditor_settings(fake_audit_db, repo)
+    base_sha = "1" * 40
+    head_sha = "2" * 40
+    payload = make_issue_comment_payload(
+        owner="live-audit-org",
+        repo="live-audit-repo",
+        comment_body="@haunter audit this PR for vulnerabilities",
+        pr_number=80,
+        comment_id=9101005,
+    )
+    fake_pr_meta = {
+        "head": {"sha": head_sha, "ref": "feature-branch"},
+        "base": {"sha": base_sha, "ref": "main"},
+    }
+    with patch(
+        "app.github_client.fetch_pull_request",
+        new_callable=AsyncMock,
+        return_value=fake_pr_meta,
+    ) as mock_fetch, patch(
+        "app.github.auditor.get_auditor_installation_token",
+        new_callable=AsyncMock,
+        return_value="ghs_auditor_token",
+    ):
+        resp = await post_signed(client, "issue_comment", payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "audit_queued"
+    assert data["audit_type"] == "manual_audit"
+    mock_fetch.assert_awaited_once_with(
+        owner="live-audit-org",
+        repo="live-audit-repo",
+        pr_number=80,
+        token="ghs_auditor_token",
+        allow_global_token=False,
+    )
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(
+            AuditJob.repo_id == repo.id,
+            AuditJob.audit_type == "manual_audit",
+        )
+    )
+    assert job is not None
+    assert job.status == "queued"
+    assert job.pr_number == 80
+    assert job.base_sha == base_sha
+    assert job.head_sha == head_sha
+    assert job.ref == "feature-branch"
+
+
+@pytest.mark.asyncio
+async def test_issue_comment_manual_audit_falls_back_when_fetch_pull_request_fails_or_incomplete(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
+    """When fetch_pull_request fails or returns no SHAs, safe fallback skip reason is kept."""
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "live-fail-org", "live-fail-repo"
+    )
+    await set_repo_auditor_settings(fake_audit_db, repo)
+    payload = make_issue_comment_payload(
+        owner="live-fail-org",
+        repo="live-fail-repo",
+        comment_body="@haunter audit this PR",
+        pr_number=81,
+        comment_id=9101006,
+    )
+    with patch(
+        "app.github.auditor.get_auditor_installation_token",
+        new_callable=AsyncMock,
+        return_value="ghs_auditor_token",
+    ):
+        # 1. fetch_pull_request raises an exception
+        with patch(
+            "app.github_client.fetch_pull_request",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("GitHub API timeout"),
+        ) as mock_fetch:
+            resp = await post_signed(client, "issue_comment", payload)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ignored"
+        assert "pinned pull request endpoints" in resp.json()["reason"]
+        mock_fetch.assert_awaited_once()
+
+        # 2. fetch_pull_request returns empty / missing head and base SHAs
+        with patch(
+            "app.github_client.fetch_pull_request",
+            new_callable=AsyncMock,
+            return_value={"head": {}, "base": {}},
+        ) as mock_fetch:
+            resp2 = await post_signed(client, "issue_comment", payload)
+        assert resp2.status_code == 200
+        assert resp2.json()["status"] == "ignored"
+        assert "pinned pull request endpoints" in resp2.json()["reason"]
+        mock_fetch.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_review_comment_manual_audit_is_pinned_to_the_reviewed_commits(
