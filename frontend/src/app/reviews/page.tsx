@@ -19,6 +19,8 @@ import {
   AlertTriangle,
   GitCommit,
   GitPullRequest,
+  GitBranch,
+  FolderGit2,
   Search,
   RefreshCw,
   Copy,
@@ -243,7 +245,11 @@ function FindingItem({ finding }: { finding: ReviewFindingOut }) {
  */
 function ReviewCard({ review }: { review: CodeReviewOut }) {
   const [expanded, setExpanded] = useState(false);
+  const [copiedSha, setCopiedSha] = useState(false);
   const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
+  const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
+  const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
+  const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
 
   // Category counts
   const categoryCounts = useMemo(() => {
@@ -259,6 +265,20 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
 
   const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
 
+  const handleCopySha = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!review.commit_sha) return;
+    navigator.clipboard.writeText(review.commit_sha);
+    setCopiedSha(true);
+    setTimeout(() => setCopiedSha(false), 2000);
+  };
+
+  const prStatus = review.status?.toLowerCase() === "merged"
+    ? { label: "Merged", color: "bg-purple-950/60 text-purple-300 border-purple-500/40" }
+    : review.status?.toLowerCase() === "closed"
+    ? { label: "Closed", color: "bg-zinc-800 text-zinc-400 border-zinc-700" }
+    : { label: "Open", color: "bg-emerald-950/60 text-emerald-300 border-emerald-500/40" };
+
   return (
     <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)] transition-all hover:border-zinc-700/90">
       <div className="flex flex-col md:flex-row md:items-start justify-between gap-5">
@@ -270,41 +290,117 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
         {/* Center: Info & Findings overview */}
         <div className="flex-1 min-w-0 space-y-3">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-semibold text-zinc-100 text-sm">{repoName}</span>
-            <span className="text-zinc-600">•</span>
-            {review.pr_number ? (
+            {/* Repo link */}
+            {repoUrl ? (
               <a
-                href={`https://github.com/${repoName}/pull/${review.pr_number}`}
+                href={repoUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono font-medium text-amber-400 hover:text-amber-300 hover:bg-zinc-700/80 transition-colors"
+                className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold text-zinc-200 hover:text-white transition-colors"
               >
-                <GitPullRequest className="h-3 w-3" />
-                PR #{review.pr_number}
-                <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
+                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
+                <span>{repoName}</span>
               </a>
             ) : (
-              <span className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono text-zinc-300">
+              <span className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold text-zinc-200">
+                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
+                <span>{repoName}</span>
+              </span>
+            )}
+
+            <span className="text-zinc-600">•</span>
+
+            {/* PR Badge with status pill */}
+            {review.pr_number ? (
+              <div className="inline-flex items-center gap-1.5">
+                <a
+                  href={prUrl || `https://github.com/${repoName}/pull/${review.pr_number}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono font-medium text-amber-400 hover:text-amber-300 hover:bg-zinc-700/80 transition-colors border border-zinc-700/50"
+                >
+                  <GitPullRequest className="h-3 w-3" />
+                  <span>PR #{review.pr_number}</span>
+                  <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
+                </a>
+                <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-mono font-medium uppercase tracking-wider", prStatus.color)}>
+                  {prStatus.label}
+                </span>
+              </div>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono text-zinc-300 border border-zinc-700/50">
                 <GitCommit className="h-3 w-3 text-zinc-400" />
                 Push
               </span>
             )}
 
-            <a
-              href={`https://github.com/${repoName}/commit/${review.commit_sha}`}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-xs font-mono text-zinc-400 hover:text-zinc-200 transition-colors"
-            >
-              <GitCommit className="h-3 w-3" />
-              {commitShort}
-            </a>
+            {/* Author Badge */}
+            {review.pr_author && (
+              <div className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
+                {review.pr_author_avatar ? (
+                  <img
+                    src={review.pr_author_avatar}
+                    alt={review.pr_author}
+                    className="h-3.5 w-3.5 rounded-full object-cover"
+                  />
+                ) : (
+                  <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-zinc-800 text-[9px] font-bold text-zinc-300">
+                    {review.pr_author[0]?.toUpperCase()}
+                  </span>
+                )}
+                <span className="font-mono text-xs text-zinc-300">@{review.pr_author}</span>
+              </div>
+            )}
+
+            {/* Branch Flow Pill */}
+            {(review.head_branch || review.base_branch) && (
+              <div className="inline-flex items-center gap-1.5 rounded bg-zinc-900/90 border border-zinc-800 px-2 py-0.5 text-[11px] font-mono">
+                <GitBranch className="h-3 w-3 text-zinc-500" />
+                <span className="text-zinc-400">{review.base_branch || "main"}</span>
+                <span className="text-zinc-600">←</span>
+                <span className="text-amber-400 font-medium">{review.head_branch || "head"}</span>
+              </div>
+            )}
+
+            {/* Commit SHA with 1-click copy */}
+            <div className="inline-flex items-center rounded bg-zinc-900/80 border border-zinc-800 px-1.5 py-0.5 text-xs font-mono text-zinc-400">
+              <a
+                href={commitUrl || `https://github.com/${repoName}/commit/${review.commit_sha}`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors pr-1.5 border-r border-zinc-800"
+                title="View commit on GitHub"
+              >
+                <GitCommit className="h-3 w-3 text-zinc-500" />
+                <span>{commitShort}</span>
+              </a>
+              <button
+                type="button"
+                onClick={handleCopySha}
+                className="pl-1.5 hover:text-zinc-200 transition-colors focus:outline-none"
+                title="Copy commit SHA"
+                aria-label="Copy commit SHA"
+              >
+                {copiedSha ? (
+                  <Check className="h-3 w-3 text-emerald-400" />
+                ) : (
+                  <Copy className="h-3 w-3 text-zinc-500 hover:text-zinc-300" />
+                )}
+              </button>
+            </div>
 
             <span className="text-zinc-600">•</span>
             <span className="text-xs text-zinc-400 font-mono">
               {formatRelativeTime(review.created_at)}
             </span>
           </div>
+
+          {/* Hero PR Title */}
+          {review.pr_title && (
+            <h3 className="text-sm font-semibold text-zinc-100 leading-snug">
+              {review.pr_title}
+            </h3>
+          )}
 
           <p className="text-xs text-zinc-300 leading-relaxed font-sans">
             {review.summary}
