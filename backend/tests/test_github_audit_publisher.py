@@ -959,7 +959,7 @@ def test_audit_report_markdown_visual_hierarchy_and_tables():
     assert "PR Confidence" in report
     assert "Blockers" in report
     assert "Blast Radius" in report
-    assert "<b>6/10</b>" in report
+    assert "<b>3/10</b>" in report
     assert "<div>Must-Fix: <code>1</code></div>" in report
     assert "<div>Should-Fix: <code>0</code></div>" in report
     assert "⛔ Must Not Merge" in report
@@ -1227,6 +1227,74 @@ def test_build_status_label_legacy_kwargs():
     assert build_status_label(should_fix_count=1) == "⚠️ Merge Blocked (Changes Needed)"
     assert build_status_label(n_blockers=0, n_warnings=0, confidence=90, has_notes=True) == "👌 Looks Good to Merge"
     assert build_status_label(n_blockers=0, n_warnings=0, confidence=90, has_notes=False) == "✅ Great to Merge"
+
+
+def test_publisher_pr_confidence_and_status_tier_mapping():
+    """Verify publisher and prompt formatters harmonize 0-10 confidence with 4 merge tiers."""
+    from app.llm.prompts.audit_prompts import (
+        build_status_from_score,
+        build_status_label,
+        calculate_pr_confidence_score,
+        format_audit_report,
+    )
+
+    # 1. Scores 9-10 yield '✅ Great to Merge'
+    for score in (9, 10):
+        assert build_status_from_score(score) == "✅ Great to Merge"
+        assert build_status_label(score=score) == "✅ Great to Merge"
+        report = format_audit_report(pr_summary="Test", findings=[], pr_score=score)
+        assert f"<b>{score}/10</b>" in report
+        assert '<td align="left">✅ Great to Merge</td>' in report
+
+    # 2. Scores 7-8 yield '👌 Looks Good to Merge'
+    for score in (7, 8):
+        assert build_status_from_score(score) == "👌 Looks Good to Merge"
+        assert build_status_label(score=score) == "👌 Looks Good to Merge"
+        report = format_audit_report(pr_summary="Test", findings=[], pr_score=score)
+        assert f"<b>{score}/10</b>" in report
+        assert '<td align="left">👌 Looks Good to Merge</td>' in report
+
+    # 3. Scores 5-6 yield '⚠️ Merge Blocked (Changes Needed)'
+    for score in (5, 6):
+        assert build_status_from_score(score) == "⚠️ Merge Blocked (Changes Needed)"
+        assert build_status_label(score=score) == "⚠️ Merge Blocked (Changes Needed)"
+        report = format_audit_report(pr_summary="Test", findings=[], pr_score=score)
+        assert f"<b>{score}/10</b>" in report
+        assert '<td align="left">⚠️ Merge Blocked (Changes Needed)</td>' in report
+
+    # 4. Scores 0-4 yield '⛔ Must Not Merge'
+    for score in range(5):
+        assert build_status_from_score(score) == "⛔ Must Not Merge"
+        assert build_status_label(score=score) == "⛔ Must Not Merge"
+        report = format_audit_report(pr_summary="Test", findings=[], pr_score=score)
+        assert f"<b>{score}/10</b>" in report
+        assert '<td align="left">⛔ Must Not Merge</td>' in report
+
+    # 5. Blockers always produce score <= 4 and '⛔ Must Not Merge'
+    for blockers in (1, 2, 4):
+        score = calculate_pr_confidence_score(must_fix=blockers)
+        assert 0 <= score <= 4
+        assert build_status_from_score(score) == "⛔ Must Not Merge"
+        assert build_status_label(must_fix=blockers) == "⛔ Must Not Merge"
+
+    # 6. Warnings always produce score 5-6 and '⚠️ Merge Blocked (Changes Needed)'
+    for warnings in (1, 2, 3):
+        score = calculate_pr_confidence_score(must_fix=0, should_fix=warnings)
+        assert 5 <= score <= 6
+        assert build_status_from_score(score) == "⚠️ Merge Blocked (Changes Needed)"
+        assert build_status_label(must_fix=0, should_fix=warnings) == "⚠️ Merge Blocked (Changes Needed)"
+
+    # 7. Suggestions produce score 7-8 and '👌 Looks Good to Merge'
+    for notes in (1, 2, 3):
+        score = calculate_pr_confidence_score(must_fix=0, should_fix=0, n_notes=notes)
+        assert 7 <= score <= 8
+        assert build_status_from_score(score) == "👌 Looks Good to Merge"
+
+    # 8. Clean PR produces score 9-10 and '✅ Great to Merge'
+    clean_score = calculate_pr_confidence_score(must_fix=0, should_fix=0, n_notes=0)
+    assert 9 <= clean_score <= 10
+    assert build_status_from_score(clean_score) == "✅ Great to Merge"
+    assert build_status_label(must_fix=0, should_fix=0, has_notes=False) == "✅ Great to Merge"
 
 
 def test_format_finding_comment_body_structure():

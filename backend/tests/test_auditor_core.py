@@ -5784,20 +5784,23 @@ async def test_claim_refusal_logs_disabled_row_distinctly(
 
 
 def test_calculate_pr_confidence_score_scaling():
-    """Verify calculate_pr_confidence_score scales quality from 10/10 down based on defects."""
+    """Verify calculate_pr_confidence_score scales quality strictly across the 4 merge tiers."""
     from app.llm.prompts.audit_prompts import calculate_pr_confidence_score
 
-    # Clean PR -> 10/10
+    # Clean PR -> 10/10 (or 9/10 if tests missing)
     assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=0, n_notes=0) == 10
+    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=0, n_notes=0, has_tests=False) == 9
 
-    # Clean with 1 suggestion -> 9/10
-    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=0, n_notes=1) == 9
+    # Clean with 1 suggestion -> 8/10; multiple suggestions -> 7/10
+    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=0, n_notes=1) == 8
+    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=0, n_notes=2) == 7
 
-    # 1 Should-Fix warning -> 8/10
-    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, n_notes=0) == 8
+    # 1 Should-Fix warning -> 6/10; 2+ warnings -> 5/10
+    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, n_notes=0) == 6
+    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=2, n_notes=0) == 5
 
-    # 1 Must-Fix blocker -> max 6/10
-    assert calculate_pr_confidence_score(confidence=95, must_fix=1, should_fix=0, n_notes=0) == 6
+    # 1 Must-Fix blocker -> max <= 4 (3/10)
+    assert calculate_pr_confidence_score(confidence=95, must_fix=1, should_fix=0, n_notes=0) == 3
 
     # 2 Must-Fix blockers -> 2/10
     assert calculate_pr_confidence_score(confidence=100, must_fix=2, should_fix=0, n_notes=0) == 2
@@ -5806,11 +5809,71 @@ def test_calculate_pr_confidence_score_scaling():
     score_normal = calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, blast_radius="**Isolated**")
     score_broad = calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, blast_radius="**Broad (Cross-System)**")
     assert score_broad < score_normal
+    assert score_normal == 6
+    assert score_broad == 5
 
     # Missing tests deduction
     score_tests = calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, has_tests=True)
     score_no_tests = calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, has_tests=False)
     assert score_no_tests < score_tests
+    assert score_tests == 6
+    assert score_no_tests == 5
+
+
+def test_pr_confidence_score_and_merge_status_tier_mapping():
+    """Verify strict 1:1 mapping between scores (0-10) and merge decision tiers."""
+    from app.llm.prompts.audit_prompts import (
+        build_status_from_score,
+        build_status_label,
+        calculate_pr_confidence_score,
+    )
+
+    # Scores 9-10 yield '✅ Great to Merge'
+    for s in (9, 10):
+        assert build_status_from_score(s) == "✅ Great to Merge"
+        assert build_status_label(score=s) == "✅ Great to Merge"
+
+    # Scores 7-8 yield '👌 Looks Good to Merge'
+    for s in (7, 8):
+        assert build_status_from_score(s) == "👌 Looks Good to Merge"
+        assert build_status_label(score=s) == "👌 Looks Good to Merge"
+
+    # Scores 5-6 yield '⚠️ Merge Blocked (Changes Needed)'
+    for s in (5, 6):
+        assert build_status_from_score(s) == "⚠️ Merge Blocked (Changes Needed)"
+        assert build_status_label(score=s) == "⚠️ Merge Blocked (Changes Needed)"
+
+    # Scores 0-4 yield '⛔ Must Not Merge'
+    for s in range(5):
+        assert build_status_from_score(s) == "⛔ Must Not Merge"
+        assert build_status_label(score=s) == "⛔ Must Not Merge"
+
+    # Blockers always produce score <= 4 and '⛔ Must Not Merge'
+    for blockers in (1, 2, 3, 5):
+        score = calculate_pr_confidence_score(must_fix=blockers)
+        assert 0 <= score <= 4
+        assert build_status_from_score(score) == "⛔ Must Not Merge"
+        assert build_status_label(must_fix=blockers) == "⛔ Must Not Merge"
+
+    # Warnings always produce score 5-6 and '⚠️ Merge Blocked (Changes Needed)'
+    for warnings in (1, 2, 4):
+        score = calculate_pr_confidence_score(must_fix=0, should_fix=warnings)
+        assert 5 <= score <= 6
+        assert build_status_from_score(score) == "⚠️ Merge Blocked (Changes Needed)"
+        assert build_status_label(must_fix=0, should_fix=warnings) == "⚠️ Merge Blocked (Changes Needed)"
+
+    # Suggestions produce score 7-8 and '👌 Looks Good to Merge'
+    for notes in (1, 2, 3):
+        score = calculate_pr_confidence_score(must_fix=0, should_fix=0, n_notes=notes)
+        assert 7 <= score <= 8
+        assert build_status_from_score(score) == "👌 Looks Good to Merge"
+        assert build_status_label(must_fix=0, should_fix=0, has_notes=True) == "👌 Looks Good to Merge"
+
+    # Clean PR produces score 9-10 and '✅ Great to Merge'
+    score_clean = calculate_pr_confidence_score(must_fix=0, should_fix=0, n_notes=0)
+    assert 9 <= score_clean <= 10
+    assert build_status_from_score(score_clean) == "✅ Great to Merge"
+    assert build_status_label(must_fix=0, should_fix=0, has_notes=False) == "✅ Great to Merge"
 
 
 def test_auditor_format_finding_comment_helper():

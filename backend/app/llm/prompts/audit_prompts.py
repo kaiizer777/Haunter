@@ -522,6 +522,24 @@ def format_confidence_score(confidence: int) -> str:
 _format_confidence_score = format_confidence_score
 
 
+def build_status_from_score(score: int) -> str:
+    """Derive merge status label directly from the PR confidence score (0-10).
+
+    - 9 or 10 / 10: ✅ Great to Merge
+    - 7 or 8 / 10:  👌 Looks Good to Merge
+    - 5 or 6 / 10:  ⚠️ Merge Blocked (Changes Needed)
+    - 0 to 4 / 10:  ⛔ Must Not Merge
+    """
+    s = max(0, min(10, int(score)))
+    if s >= 9:
+        return "✅ Great to Merge"
+    if s >= 7:
+        return "👌 Looks Good to Merge"
+    if s >= 5:
+        return "⚠️ Merge Blocked (Changes Needed)"
+    return "⛔ Must Not Merge"
+
+
 def calculate_pr_confidence_score(
     *,
     confidence: int = 100,
@@ -534,39 +552,77 @@ def calculate_pr_confidence_score(
 ) -> int:
     """Calculate the PR Confidence / Quality / Readiness score (integer 0-10).
 
-    Represents the executive confidence/quality score of the PR itself (e.g. 10/10
-    for clean/perfect PRs, scaled down based on blockers/should-fix/blast-radius/missing-tests),
-    giving maintainers an immediate sense of the PR's readiness.
+    Strict 1:1 mapping with merge decision tiers:
+    - 9 or 10 / 10: ✅ Great to Merge (0 blockers, 0 warnings, 0 or minor suggestions, high code health)
+    - 7 or 8 / 10:  👌 Looks Good to Merge (0 blockers, 0 warnings, suggestions/notes present)
+    - 5 or 6 / 10:  ⚠️ Merge Blocked (Changes Needed) (warnings present, missing tests, or moderate risks)
+    - 0 to 4 / 10:  ⛔ Must Not Merge (1+ blockers present)
     """
-    clamped_conf = _clamp_confidence(confidence)
-    base = round(clamped_conf / 10.0)
+    effective_must_fix = kwargs.get("must_fix_count")
+    if effective_must_fix is None:
+        effective_must_fix = kwargs.get("n_blockers")
+    if effective_must_fix is None:
+        effective_must_fix = kwargs.get("blockers")
+    if effective_must_fix is None:
+        effective_must_fix = must_fix
+    blockers = max(0, int(effective_must_fix or 0))
 
-    deductions = 0
-    if must_fix > 0:
-        deductions += 4 * must_fix
-    if should_fix > 0:
-        deductions += 2 * should_fix
-    if n_notes > 0:
-        deductions += 1 if n_notes <= 2 else 2
+    effective_should_fix = kwargs.get("should_fix_count")
+    if effective_should_fix is None:
+        effective_should_fix = kwargs.get("n_warnings")
+    if effective_should_fix is None:
+        effective_should_fix = kwargs.get("warnings")
+    if effective_should_fix is None:
+        effective_should_fix = should_fix
+    warnings = max(0, int(effective_should_fix or 0))
 
-    if (must_fix > 0 or should_fix > 0) and any(
-        kw in blast_radius.lower() for kw in ("high", "broad", "cross-system")
-    ):
-        deductions += 1
+    effective_notes = kwargs.get("note_count")
+    if effective_notes is None:
+        effective_notes = kwargs.get("suggestions")
+    if effective_notes is None:
+        effective_notes = kwargs.get("notes")
+    if effective_notes is None:
+        effective_notes = n_notes
+    notes = max(0, int(effective_notes or 0))
 
-    if has_tests is False:
-        deductions += 1
+    conf = _clamp_confidence(confidence)
+    has_broad_blast = any(
+        kw in str(blast_radius).lower() for kw in ("high", "broad", "cross-system")
+    )
 
-    score = max(1, min(10, base - deductions))
-    if must_fix > 0:
-        score = min(score, 6)
-    elif should_fix > 0:
-        score = min(score, 8)
-    elif n_notes > 0:
-        score = min(score, 9)
+    # 1. Blockers > 0: score is strictly capped between 0 and 4 (default 2-3/10 depending on blocker count)
+    if blockers > 0:
+        base_blocker = max(0, 4 - blockers)
+        deduction = 0
+        if has_broad_blast:
+            deduction += 1
+        if has_tests is False:
+            deduction += 1
+        return max(0, min(4, base_blocker - deduction))
 
-    return score
+    # 2. Warnings > 0: score is strictly 5 or 6 (e.g. 1 warning -> 6, 2+ warnings -> 5)
+    if warnings > 0:
+        if warnings == 1:
+            if has_broad_blast or has_tests is False or notes > 0 or conf < INFORMATIONAL_CONFIDENCE_THRESHOLD:
+                return 5
+            return 6
+        return 5
 
+    # 3. Suggestions > 0 (or note counts): score is strictly 7 or 8 (e.g. 1 suggestion -> 8, multiple suggestions -> 7)
+    if notes > 0:
+        if notes == 1:
+            if has_broad_blast or has_tests is False or conf < INFORMATIONAL_CONFIDENCE_THRESHOLD:
+                return 7
+            return 8
+        return 7
+
+    # 4. Clean pass (0 findings): score is 9 or 10 (10 if tests present, 9 otherwise)
+    if conf < INFORMATIONAL_CONFIDENCE_THRESHOLD:
+        return 8 if conf >= 50 else 7
+
+    if has_tests is False or conf < 90:
+        return 9
+    return 10
 
 
 AUDIT_STATUS_LABELS: tuple[str, ...] = (
@@ -591,31 +647,49 @@ def build_status_label(
     confidence: int = 100,
     has_notes: bool = False,
     *,
+    score: Optional[int] = None,
+    pr_score: Optional[int] = None,
     n_blockers: Optional[int] = None,
     n_warnings: Optional[int] = None,
     must_fix_count: Optional[int] = None,
     should_fix_count: Optional[int] = None,
+    blast_radius: str = "",
+    has_tests: Optional[bool] = None,
+    **kwargs: Any,
 ) -> str:
+    """Derive merge status label directly from PR confidence score (0-10).
+
+    - 9 or 10 / 10: ✅ Great to Merge
+    - 7 or 8 / 10:  👌 Looks Good to Merge
+    - 5 or 6 / 10:  ⚠️ Merge Blocked (Changes Needed)
+    - 0 to 4 / 10:  ⛔ Must Not Merge
+    """
+    if score is not None:
+        return build_status_from_score(score)
+    if pr_score is not None:
+        return build_status_from_score(pr_score)
+
     effective_must_fix = (
         must_fix_count
         if must_fix_count is not None
-        else (must_fix if must_fix != 0 else (n_blockers if n_blockers is not None else must_fix))
+        else (n_blockers if n_blockers is not None else must_fix)
     )
     effective_should_fix = (
         should_fix_count
         if should_fix_count is not None
-        else (should_fix if should_fix != 0 else (n_warnings if n_warnings is not None else should_fix))
+        else (n_warnings if n_warnings is not None else should_fix)
     )
-    blockers = max(0, int(effective_must_fix))
-    warnings = max(0, int(effective_should_fix))
-    conf = _clamp_confidence(confidence)
-    if blockers > 0:
-        return "⛔ Must Not Merge"
-    if warnings > 0:
-        return "⚠️ Merge Blocked (Changes Needed)"
-    if has_notes or conf < INFORMATIONAL_CONFIDENCE_THRESHOLD:
-        return "👌 Looks Good to Merge"
-    return "✅ Great to Merge"
+
+    computed_score = calculate_pr_confidence_score(
+        confidence=confidence,
+        must_fix=effective_must_fix,
+        should_fix=effective_should_fix,
+        n_notes=1 if has_notes else 0,
+        blast_radius=blast_radius,
+        has_tests=has_tests,
+        **kwargs,
+    )
+    return build_status_from_score(computed_score)
 
 
 
@@ -1299,34 +1373,6 @@ def format_audit_report(
         if str(f.get("severity", "")).upper() == "NOTE"
     )
 
-    valid_enums = set(AUDIT_STATUS_LABELS)
-    has_notes = n_notes > 0 or total_findings > (n_must_fix + n_should_fix)
-    computed_status = build_status_label(
-        must_fix=n_must_fix,
-        should_fix=n_should_fix,
-        confidence=confidence_value,
-        has_notes=has_notes,
-    )
-    raw_status = status
-    if raw_status in OLD_TO_NEW_STATUS_MAP:
-        raw_status = OLD_TO_NEW_STATUS_MAP[raw_status]
-
-    if not raw_status or raw_status not in valid_enums:
-        status_label = computed_status
-    elif raw_status == "✅ Great to Merge" and (
-        n_must_fix > 0
-        or n_should_fix > 0
-        or has_notes
-        or confidence_value < INFORMATIONAL_CONFIDENCE_THRESHOLD
-    ):
-        status_label = computed_status
-    elif n_must_fix > 0 and raw_status != "⛔ Must Not Merge":
-        status_label = computed_status
-    elif n_should_fix > 0 and raw_status in ("✅ Great to Merge", "👌 Looks Good to Merge"):
-        status_label = computed_status
-    else:
-        status_label = raw_status
-
     summary_text = clean_pr_summary(pr_summary or executive_summary)
     summary_sanitized = _sanitize_inline(summary_text)
 
@@ -1348,8 +1394,16 @@ def format_audit_report(
         derived_badge, _, _ = derive_blast_radius(t_files, paths_omitted=has_omitted)
         blast_radius_label = derived_badge
 
+    valid_enums = set(AUDIT_STATUS_LABELS)
+    has_notes = n_notes > 0 or total_findings > (n_must_fix + n_should_fix)
+
+    raw_status = status
+    if raw_status in OLD_TO_NEW_STATUS_MAP:
+        raw_status = OLD_TO_NEW_STATUS_MAP[raw_status]
+
     if pr_score is not None:
         pr_score_val = max(0, min(10, int(pr_score)))
+        status_label = build_status_from_score(pr_score_val)
     else:
         pr_score_val = calculate_pr_confidence_score(
             confidence=confidence_value,
@@ -1358,6 +1412,29 @@ def format_audit_report(
             n_notes=n_notes,
             blast_radius=blast_radius_label,
         )
+        if raw_status in valid_enums:
+            if n_must_fix > 0 and raw_status != "⛔ Must Not Merge":
+                status_label = "⛔ Must Not Merge"
+            elif n_should_fix > 0 and raw_status in ("✅ Great to Merge", "👌 Looks Good to Merge"):
+                status_label = "⚠️ Merge Blocked (Changes Needed)"
+            elif has_notes and raw_status == "✅ Great to Merge":
+                status_label = "👌 Looks Good to Merge"
+            elif confidence_value < INFORMATIONAL_CONFIDENCE_THRESHOLD and raw_status == "✅ Great to Merge":
+                status_label = "👌 Looks Good to Merge"
+            else:
+                status_label = raw_status
+
+            # Ensure pr_score_val harmonizes with the reconciled status
+            if status_label == "⛔ Must Not Merge":
+                pr_score_val = min(pr_score_val, 4)
+            elif status_label == "⚠️ Merge Blocked (Changes Needed)":
+                pr_score_val = max(5, min(6, pr_score_val))
+            elif status_label == "👌 Looks Good to Merge":
+                pr_score_val = max(7, min(8, pr_score_val))
+            elif status_label == "✅ Great to Merge":
+                pr_score_val = max(9, pr_score_val)
+        else:
+            status_label = build_status_from_score(pr_score_val)
 
     structural_analysis_rendered = _render_structural_analysis(
         analysis_metadata,
