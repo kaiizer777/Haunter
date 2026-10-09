@@ -816,6 +816,24 @@ def _is_code_line(line: str) -> bool:
     )
 
 
+_STRUCTURED_META_NOTE_RE = re.compile(
+    r"^\s*-\s*\*\*([A-Za-z0-9 _\-]+):\*\*\s*(.+)$"
+)
+_CODE_KEYWORD_RE = re.compile(
+    r"^(?:import|from|export|const|let|var|def|class|function|return|public|private|protected|"
+    r"interface|type|enum|struct|package|use|include|using|namespace|if|elif|else|for|while|"
+    r"try|except|catch|finally|raise|throw|yield|await|self|this|switch|case|default|break|continue)$",
+    re.IGNORECASE,
+)
+_DISALLOWED_META_KEYS = {
+    "impact surface",
+    "files modified",
+    "touched components",
+    "risk assessment",
+    "coverage caveat",
+}
+
+
 def _render_structural_analysis(
     metadata: str = "",
     blast_radius: str = "",
@@ -830,7 +848,7 @@ def _render_structural_analysis(
         )
     )
     raw_meta = re.sub(
-        r"(?i)Unsupported AST languages and bounded structural fallbacks[\s\S]*?(?=(\n\s*\n[A-Z]|\n\s*-\s*\*\*|\Z))",
+        r"(?i)Unsupported AST languages and bounded structural fallbacks[\s\S]*?(?=(\n\s*-\s*\*\*|\Z))",
         "",
         raw_meta,
     )
@@ -867,11 +885,14 @@ def _render_structural_analysis(
             if simple_fc:
                 file_count = int(simple_fc.group(1))
 
-        touched_match = re.search(r"Touched files:\s*\n((?:-\s*.+\n?)+)", raw_meta)
+        touched_match = re.search(
+            r"Touched files:\s*\n((?:-[ \t]+(?!\*\*)[^\r\n]+\r?\n?)+)",
+            raw_meta,
+        )
         if touched_match:
             for line in touched_match.group(1).splitlines():
                 line = line.strip()
-                if line.startswith("- "):
+                if line.startswith("- ") and not line.startswith("- **"):
                     touched_files.append(line[2:].strip())
 
     has_omitted_paths = bool(
@@ -904,7 +925,6 @@ def _render_structural_analysis(
         f"- **Files Modified:** `{file_str}` (+{added} / -{removed} lines)",
         f"- **Touched Components:** {components_str}",
         f"- **Risk Assessment:** {risk_assessment}",
-        "<!-- Structural Analysis -->",
     ]
 
     if has_unsupported_ast:
@@ -922,19 +942,34 @@ def _render_structural_analysis(
     if touched_match:
         stripped_meta = stripped_meta.replace(touched_match.group(0), "")
 
-    extra_lines = [
-        _escape_markdown(_sanitize_inline(line, 500, escape_markdown=False), escape_backticks=False)
-        for line in stripped_meta.splitlines()
-        if line.strip()
-        and not line.strip().startswith("Touched files:")
-        and not line.strip().startswith("- ")
-        and not line.strip().startswith("```")
-        and not line.strip().startswith("'''")
-        and not _is_code_line(line)
-        and not any(pat.search(line) for pat in _RAW_AST_NOISE_PATTERNS)
-    ]
-    for ex in extra_lines[:3]:
-        lines.append(f"- **Metadata Note:** {ex}")
+    extra_notes: list[tuple[str, str]] = []
+    for line in stripped_meta.splitlines():
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        match = _STRUCTURED_META_NOTE_RE.match(line_clean)
+        if not match:
+            continue
+        key, val = match.group(1).strip(), match.group(2).strip()
+        if not val or not key:
+            continue
+        if key.lower() in _DISALLOWED_META_KEYS:
+            continue
+        if _CODE_KEYWORD_RE.match(key) or _is_code_line(key):
+            continue
+        if any(pat.search(key) for pat in _RAW_AST_NOISE_PATTERNS):
+            continue
+        if any(pat.search(val) for pat in _RAW_AST_NOISE_PATTERNS):
+            continue
+        clean_val = _escape_markdown(
+            _sanitize_inline(val, 500, escape_markdown=False),
+            escape_backticks=False,
+        )
+        if clean_val and clean_val != "Not provided.":
+            extra_notes.append((key, clean_val))
+
+    for key, val in extra_notes[:3]:
+        lines.append(f"- **{key}:** {val}")
 
     return "\n".join(lines)
 

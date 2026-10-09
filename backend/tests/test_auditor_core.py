@@ -382,7 +382,7 @@ def test_formatter_emits_all_section_1_4_sections():
 
     summary_pos = report.find("PR Summary")
     overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
-    structural_pos = report.find("Structural Analysis")
+    structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
     assert -1 < summary_pos < overview_pos < structural_pos
 
 
@@ -4896,7 +4896,8 @@ def _assert_no_renderable_url(report: str) -> None:
 @pytest.mark.parametrize("url", INJECTED_URLS)
 def test_metadata_cannot_render_links_images_or_raw_urls(url: str):
     metadata = (
-        f"Files changed: 1 ![tracker]({url}) and [click here]({url}) "
+        f"Files changed: 1\n"
+        f"- **Metadata Note:** ![tracker]({url}) and [click here]({url}) "
         f"plus a bare {url} and a forged heading\n## forged"
     )
     report = format_audit_report(
@@ -4943,7 +4944,7 @@ def test_model_produced_titles_and_descriptions_cannot_render_links_or_raw_urls(
             engine="test-engine",
             remediation_diff="(none)",
             publish_allowed=True,
-            analysis_metadata=f"Audited {url}",
+            analysis_metadata=f"- **Metadata Note:** Audited {url}",
         )
         _assert_no_renderable_url(report)
         # The finding itself is still reported, only inert.
@@ -4962,7 +4963,7 @@ def test_url_neutralization_does_not_mangle_ordinary_prose_or_code():
         engine="test-engine",
         remediation_diff="(none)",
         publish_allowed=True,
-        analysis_metadata="Fetched via api.github.com; host mongodb.example:27017",
+        analysis_metadata="- **Metadata Note:** Fetched via api.github.com; host mongodb.example:27017",
     )
     assert "hmac.compareDigest" in report
     # A host that is not a linkable scheme stays readable, and no zero-width
