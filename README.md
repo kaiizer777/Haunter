@@ -1,8 +1,12 @@
 <div align="center">
 
-# Haunter
+<br/>
 
-**Autonomous CI Failure Diagnosis, Self-Healing Repair & Security Auditing Engine**
+# 👻 Haunter
+
+### Autonomous CI Healing · PR Review & Fix · Cloud Coding Sessions
+
+<br/>
 
 [![Frontend](https://img.shields.io/badge/Frontend-Next.js%2016%20%7C%20React%2019-black?style=flat-square&logo=nextdotjs)](https://nextjs.org/)
 [![Backend](https://img.shields.io/badge/Backend-FastAPI%20%7C%20Python%203.11-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com/)
@@ -14,81 +18,95 @@
 [![Multi--Model](https://img.shields.io/badge/LLM-OpenCode%20Zen%20%7C%20OpenAI%20%7C%20Anthropic-7C3AED?style=flat-square)](https://opencode.ai/zen/v1)
 [![License](https://img.shields.io/badge/License-Business%20Source%201.1-yellow?style=flat-square)](LICENSE)
 
-*Haunter wakes on CI failure, isolates the root cause, verifies a patch in a sandboxed mirror, and opens an auditable PR — it never auto-merges.*
+<br/>
+
+> **Haunter** is your autonomous engineering co-pilot — it heals broken CI pipelines, reviews and fixes pull requests, and gives your team a live cloud coding environment, all without ever touching your default branch uninvited.
+
+<br/>
 
 </div>
 
 ---
 
-## How it works
+<br/>
+
+## ⚡ CI Healing
+
+When your GitHub Actions workflow fails, Haunter wakes up automatically.
+
+It reads the failure, traces it to the root cause, generates a verified patch, and opens a pull request — all before you've had a chance to look at the logs.
 
 ```
-workflow_run failure → Context Gatherer → Fix Generator → Sandbox Verifier → PR Writer
+Workflow fails  →  Root cause isolated  →  Fix generated  →  Sandboxed & verified  →  PR opened
 ```
 
-| Stage | What it does |
+- Distills raw CI logs and failing diffs into a precise root cause
+- Generates a candidate patch with a confidence score, retrying on feedback
+- Verifies every fix in an **ephemeral sandbox** — a mirror repo running real GitHub Actions CI — before proposing anything
+- Opens a clean, auditable **fix PR** on success, or posts a structured **diagnosis comment** when exhausted
+
+> **Human merge gate** — Haunter never auto-merges, never force-pushes, never touches your default branch.
+
+<br/>
+
+---
+
+<br/>
+
+## 🔍 PR Review & Fix
+
+Haunter doesn't just review code — it acts on it.
+
+Connect any repository and Haunter becomes an always-on auditor: reading every PR for security holes, regressions, architecture drift, and performance risks. When it finds something, it doesn't just comment — it opens a fix.
+
+| Mode | What Haunter does |
 |---|---|
-| **Context Gatherer** | Extracts failing logs, trace, and implicated diff |
-| **Fix Generator** | Produces a patch + confidence score; retries up to 3× on sandbox feedback |
-| **Sandbox Verifier** | Seeds a mirror repo via GitHub Git Data API and polls check-runs for pass/fail |
-| **PR Writer** | Opens a verified-fix PR, or posts a structured diagnosis comment on exhaust |
+| **Security Audit** | Finds vulnerabilities, unsafe patterns, and credential exposure |
+| **Regression Review** | Flags logic changes that could silently break existing behaviour |
+| **Architecture Audit** | Detects design drift and coupling violations |
+| **Performance Review** | Identifies inefficient queries, unindexed paths, and hot-path regressions |
+| **Auto-Fix** | Generates a verified patch PR for any finding it's confident about |
 
-> **Human merge gate** — Haunter never pushes to default branches or auto-merges.
+Governance presets (`autonomous`, `conservative`, `standard`, `audit_only`) let you tune how aggressively Haunter acts per repository.
 
----
-
-## Features
-
-- 🔍 **Auditor Mode** — read-only security, architecture, regression & perf reviews; never branches or PRs unprompted
-- 🖥 **Live Sessions** — in-browser pairing studio with WebContainer Node runtime, Monaco diff editor, checkpoints, and one-click CI verify
-- 🏛 **Per-repo governance** — presets (`autonomous`, `conservative`, `standard`, `audit_only`, `live_studio_only`, `custom`) with confidence thresholds and spend caps
-- 🤖 **Multi-model engine** — OpenCode Zen default (`nemotron-3.5-lightning-free`), switchable to OpenAI / Anthropic at runtime
-- 🧪 **Eval harness** — 20 golden fixtures for regression benchmarking; demo mode pinned to `fixture-001`
-- 📊 **Full audit trail** — tokens, latency, cost, confidence, and per-run traces in Neon Postgres, surfaced on the dashboard
+<br/>
 
 ---
 
-## Stack
+<br/>
 
-| Layer | Tech |
-|---|---|
-| Backend | FastAPI + Mangum → AWS Lambda |
-| Database | Neon Postgres · SQLAlchemy async · `asyncpg` · `NullPool` |
-| Frontend | Next.js 16 SPA → Cloudflare Workers |
-| Sandbox | GitHub Actions ephemeral mirror verifier |
-| Studio | WebContainer in-browser Node + Monaco diff editor |
-| LLM | OpenCode Zen (`nemotron-3.5-lightning-free`), OpenAI, Anthropic |
-| Auth | GitHub OAuth · HMAC-SHA256 webhooks · Fernet-encrypted session cookie |
+## 🖥 Cloud Coding Sessions
 
----
+A full development environment, in your browser, backed by real CI.
 
-## Quickstart
+Haunter's **Live Studio** gives you a WebContainer-powered Node runtime paired with a Monaco diff editor. Start a session on any PR or branch, make changes, and hit **Run CI** — your changes are verified against real GitHub Actions before you ever push a commit.
 
-**Prerequisites:** Python 3.11+, Node.js 20+, Neon Postgres, GitHub OAuth credentials, `OPENCODE_ZEN_API_KEY`
+- **In-browser runtime** — real Node.js, no Docker, no local setup
+- **Monaco diff editor** — surgical patch editing with full syntax awareness
+- **One-click CI verify** — patches run against your actual CI pipeline in the sandbox
+- **Session checkpoints** — save and resume any session state across teammates
+- **Multi-repo** — connect any GitHub repository; governance and spend caps apply per repo
 
-Configure `backend/.env` — see [HAUNTER.md](HAUNTER.md) and [redeploy.md](redeploy.md) for the full variable list.
-
-```bash
-# Backend  →  http://127.0.0.1:7555
-cd backend
-python -m venv .venv && .\.venv\Scripts\activate
-pip install -r requirements.txt
-alembic upgrade head
-python -m uvicorn main:app --reload --port 7555
-
-# Frontend  →  http://localhost:3011
-cd frontend
-npm install && npm run dev
-```
+<br/>
 
 ---
 
-## Docs
+<br/>
 
-[HAUNTER.md](HAUNTER.md) · [WORK.md](WORK.md) · [redeploy.md](redeploy.md) · [github.md](github.md) · [future02.md](future02.md)
+## 📊 Full Audit Trail
+
+Every action Haunter takes is logged, timestamped, and surfaced on the dashboard.
+
+Run history, per-run agent traces, confidence scores, and cost breakdowns — complete transparency, zero black boxes. An **eval harness** with 20 golden fixtures lets you benchmark and compare behaviour across model or config changes.
+
+<br/>
 
 ---
 
-## License
+<br/>
 
-Business Source License 1.1 — source-available, not OSI open source. See [LICENSE](LICENSE).
+<div align="center">
+
+**Source-available under [Business Source License 1.1](LICENSE).** &nbsp;|&nbsp; Not OSI open source.
+
+</div>
