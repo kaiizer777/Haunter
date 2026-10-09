@@ -808,6 +808,7 @@ def _is_code_line(line: str) -> bool:
             "try:", "except ", "catch ", "finally:", "raise ", "throw ",
             "yield ", "await ", "self.", "this.", "$", "@@", "diff --git",
             "--- ", "+++ ",
+            "//", "/*", "*/", "*", "#", "<!--", "--",
         ))
         or stripped.endswith((";", "{", "}", "*/", "/*", "};", ");", "],", "},", "()", "() =>"))
         or stripped in ("{", "}", "(", ")", "[", "]", "```", "'''", "<", ">", "<>", "/>")
@@ -821,9 +822,23 @@ def _render_structural_analysis(
     stats: Optional[dict[str, Any]] = None,
 ) -> str:
     raw_meta = str(metadata or "")
+    has_unsupported_ast = bool(
+        re.search(
+            r"Unsupported AST languages|AST parsing unsupported for",
+            raw_meta,
+            re.IGNORECASE,
+        )
+    )
+    raw_meta = re.sub(
+        r"(?i)Unsupported AST languages and bounded structural fallbacks[\s\S]*?(?=(\n\s*\n[A-Z]|\n\s*-\s*\*\*|\Z))",
+        "",
+        raw_meta,
+    )
+    raw_meta = re.sub(r"```[\s\S]*?```", "", raw_meta)
+    raw_meta = re.sub(r"'''[\s\S]*?'''", "", raw_meta)
+    raw_meta = re.sub(r"/\*[\s\S]*?\*/", "", raw_meta)
     for pat in _RAW_AST_NOISE_PATTERNS:
         raw_meta = pat.sub("", raw_meta)
-    raw_meta = re.sub(r"```[\s\S]*?```", "", raw_meta)
     raw_meta = raw_meta.strip()
 
     file_count = 0
@@ -892,6 +907,11 @@ def _render_structural_analysis(
         "<!-- Structural Analysis -->",
     ]
 
+    if has_unsupported_ast:
+        lines.append(
+            "- **Coverage Caveat:** Structural analysis for TypeScript/non-Python files used bounded line-diff fallback."
+        )
+
     # Extract non-noise extra metadata lines if present
     stripped_meta = raw_meta
     if stat_match:
@@ -909,6 +929,7 @@ def _render_structural_analysis(
         and not line.strip().startswith("Touched files:")
         and not line.strip().startswith("- ")
         and not line.strip().startswith("```")
+        and not line.strip().startswith("'''")
         and not _is_code_line(line)
         and not any(pat.search(line) for pat in _RAW_AST_NOISE_PATTERNS)
     ]

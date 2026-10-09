@@ -1115,7 +1115,7 @@ def test_audit_report_renders_coverage_caveats_when_present():
 
 
 def test_render_structural_analysis_strips_structural_fallback_noise():
-    """Verify structural fallback multi-line code excerpts and unsupported language blocks are stripped."""
+    """Verify structural fallback multi-line code excerpts, comments, and unsupported language blocks are stripped."""
     raw_meta = (
         "Files changed: 1; accepted hunks: 1; +10 added / -5 removed lines\n"
         "Touched files:\n"
@@ -1123,10 +1123,16 @@ def test_render_structural_analysis_strips_structural_fallback_noise():
         "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
         "AST parsing unsupported for TypeScript JSX file frontend/src/components/Header.tsx; using a bounded structural fallback that is not AST coverage. Changed-line anchor: 15; excerpt lines 1-30.\n"
         "import React from 'react';\n"
+        "// implementation detail\n"
+        "/* multi-line comment block\n"
+        " * inside structural fallback\n"
+        " */\n"
+        "# script comment inside snippet\n"
         "export const Header = () => <header>Banner</header>;\n"
         "```typescript\n"
         "const internalCode = true;\n"
-        "```\n"
+        "// another code comment\n"
+        "```\n\n"
         "Legitimate custom metadata note\n"
     )
     rendered = _render_structural_analysis(metadata=raw_meta)
@@ -1135,7 +1141,52 @@ def test_render_structural_analysis_strips_structural_fallback_noise():
     assert "AST parsing unsupported for" not in rendered
     assert "export const Header" not in rendered
     assert "const internalCode" not in rendered
+    assert "// implementation detail" not in rendered
+    assert "/* multi-line comment block" not in rendered
+    assert "inside structural fallback" not in rendered
+    assert "# script comment inside snippet" not in rendered
+    assert "// another code comment" not in rendered
+    assert (
+        "- **Coverage Caveat:** Structural analysis for TypeScript/non-Python files used bounded line-diff fallback."
+        in rendered
+    )
     assert "- **Metadata Note:** Legitimate custom metadata note" in rendered
+
+    # Verify ZERO lines from the fallback block leak into metadata notes
+    meta_notes = [
+        line for line in rendered.splitlines() if line.startswith("- **Metadata Note:**")
+    ]
+    assert len(meta_notes) == 1
+    assert meta_notes[0] == "- **Metadata Note:** Legitimate custom metadata note"
+
+
+def test_audit_report_renders_typescript_ast_coverage_caveat():
+    """Verify format_audit_report renders clean coverage caveat when unsupported AST languages are present."""
+    raw_meta = (
+        "Files changed: 1; accepted hunks: 1; +10 added / -5 removed lines\n"
+        "Touched files:\n"
+        "- frontend/src/components/Header.tsx\n"
+        "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+        "AST parsing unsupported for TypeScript JSX file frontend/src/components/Header.tsx; using a bounded structural fallback that is not AST coverage. Changed-line anchor: 15; excerpt lines 1-30.\n"
+        "import React from 'react';\n"
+        "// implementation detail\n"
+        "export const Header = () => <header>Banner</header>;\n"
+    )
+    report = format_audit_report(
+        pr_summary="Update Header component.",
+        findings=[],
+        confidence=90,
+        analysis_metadata=raw_meta,
+    )
+    assert (
+        "- **Coverage Caveat:** Structural analysis for TypeScript/non-Python files used bounded line-diff fallback."
+        in report
+    )
+    assert "Coverage Caveat" in report
+    assert "bounded line-diff fallback" in report
+    assert "Unsupported AST languages and bounded structural fallbacks" not in report
+    assert "// implementation detail" not in report
+    assert "export const Header" not in report
 
 
 def test_format_audit_report_reconciles_status_with_notes():
