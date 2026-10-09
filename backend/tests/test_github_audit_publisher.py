@@ -949,11 +949,14 @@ def test_audit_report_markdown_visual_hierarchy_and_tables():
     assert "> [!NOTE]" in report
     assert "**PR Summary:**" in report
 
-    # 2. Tier 2: Clean Overview Table (Status, Confidence 0-10, Blockers, Blast Radius)
-    assert "| Status | Confidence | Blockers | Blast Radius |" in report
-    assert "| :--- | :---: | :--- | :--- |" in report
-    assert "**10/10**" in report
-    assert "Must-Fix: `1` · Should-Fix: `0`" in report
+    # 2. Tier 2: Clean Overview Table (Status, Confidence 0-10, Blockers, Blast Radius - 100% full-width)
+    assert '<table width="100%">' in report
+    assert "Status" in report
+    assert "Confidence" in report
+    assert "Blockers" in report
+    assert "Blast Radius" in report
+    assert "<b>10/10</b>" in report
+    assert "Must-Fix: <code>1</code> · Should-Fix: <code>0</code>" in report
     assert "⛔ Do Not Merge" in report
 
     # 3. Tier 3: Structural & Blast Radius Analysis
@@ -964,13 +967,13 @@ def test_audit_report_markdown_visual_hierarchy_and_tables():
     assert "- **Risk Assessment:**" in report
 
     summary_pos = report.find("PR Summary")
-    overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
+    overview_pos = report.find('<table width="100%">')
     structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
     assert -1 < summary_pos < overview_pos < structural_pos
 
-    # 4. Scannable Findings Table & Deep Dives
-    assert "### 📋 Findings Overview" in report
-    assert "| Severity | Perspective | File & Line | Summary | Confidence |" in report
+    # 4. Redundant Findings Overview table removed completely; flows straight to Detailed Findings Breakdown
+    assert "### 📋 Findings Overview" not in report
+    assert "### 🚨 Findings & Recommendations" in report
     assert "[BLOCKER]" in report
     assert "`backend/app/auth.py#L84`" in report
 
@@ -1014,23 +1017,27 @@ def test_derive_blast_radius_regression_no_substring_false_positives():
     """Verify production files containing 'test' substring are NOT classified as test suite."""
     # Production API endpoint with 'test' in name ('latest.py')
     badge, surface, risk = derive_blast_radius(["backend/app/api/latest.py"])
-    assert badge == "**Moderate** (API & Endpoints)"
+    assert badge.startswith("**Moderate (API & Endpoints)**")
+    assert 15 <= len(badge.replace("**", "").split()) <= 30
     assert surface == "API / Endpoints & Schemas"
     assert "Moderate risk" in risk
-    assert "Test suite only" not in badge
+    assert "Test Suite" not in badge
 
     # Other files with 'test' as a substring
     badge, surface, _ = derive_blast_radius(["contest.py"])
-    assert "Test suite only" not in badge
+    assert "Test Suite" not in badge
     assert surface == "Application Logic"
+    assert 15 <= len(badge.replace("**", "").split()) <= 30
 
     badge, surface, _ = derive_blast_radius(["attestation.py"])
-    assert "Test suite only" not in badge
+    assert "Test Suite" not in badge
     assert surface == "Application Logic"
+    assert 15 <= len(badge.replace("**", "").split()) <= 30
 
     badge, surface, _ = derive_blast_radius(["backend/app/auth/attestation.py"])
-    assert badge == "**High** (Auth & Data Layer)"
+    assert badge.startswith("**High (Auth & Data Layer)**")
     assert surface == "Core / Auth & Database"
+    assert 15 <= len(badge.replace("**", "").split()) <= 30
 
     # Legitimate test paths MUST be classified as test suite
     test_cases = [
@@ -1046,7 +1053,8 @@ def test_derive_blast_radius_regression_no_substring_false_positives():
     ]
     for paths in test_cases:
         badge, surface, risk = derive_blast_radius(paths)
-        assert badge == "**Isolated** (Test suite only)", f"Failed for {paths}"
+        assert badge.startswith("**Isolated (Test Suite)**"), f"Failed for {paths}"
+        assert 15 <= len(badge.replace("**", "").split()) <= 30
         assert surface == "Isolated / Test Suite", f"Failed for {paths}"
         assert "zero production runtime impact" in risk
 
@@ -1109,7 +1117,7 @@ def test_audit_report_renders_coverage_caveats_when_present():
     assert "- **Metadata Note:** Diff or hunk truncation was detected" in report
 
     summary_pos = report.find("PR Summary")
-    overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
+    overview_pos = report.find('<table width="100%">')
     structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
     assert -1 < summary_pos < overview_pos < structural_pos
 
@@ -1281,6 +1289,76 @@ def test_render_structural_analysis_strict_metadata_allowlist_prevents_code_leak
     assert len(meta_bullet_lines) == 2
     assert meta_bullet_lines[0] == "- **Valid Note:** Bounded structural analysis completed."
     assert meta_bullet_lines[1] == "- **Metadata Note:** Additional verification required."
+
+
+def test_clean_pr_summary_strips_issue_and_verdict_boilerplate():
+    """Verify clean_pr_summary strips issue reports, verdicts, and failure boilerplate while preserving PR descriptions."""
+    from app.llm.prompts.audit_prompts import clean_pr_summary
+
+    # 1. Dirty summary with findings and perspective verdicts
+    dirty = (
+        "Security: No security issues identified. "
+        "Updates the login page branding and replaces static SVG logo with vector illustration component. "
+        "Potential correctness issue in viewBox dimensions. "
+        "0 perspective(s) failed and were excluded from actionable conclusions."
+    )
+    cleaned = clean_pr_summary(dirty)
+    assert cleaned == "Updates the login page branding and replaces static SVG logo with vector illustration component."
+    assert "No security issues" not in cleaned
+    assert "Potential correctness issue" not in cleaned
+    assert "perspective(s) failed" not in cleaned
+
+    # 2. Clean multi-sentence PR summary
+    multi = (
+        "Adds OAuth 2.0 authentication endpoints. "
+        "Refactors database connection pooling for Neon serverless postgres. "
+        "Adds unit tests for session lifecycle."
+    )
+    assert clean_pr_summary(multi) == multi
+
+    # 3. Summary with issue clause at end
+    clause = "JWT rotation implementation looks right except token comparison."
+    assert clean_pr_summary(clause) == "JWT rotation implementation looks right."
+
+    # 4. Fallback on empty or all-verdict summary
+    assert "updates and refactors application components" in clean_pr_summary("Clean.").lower()
+    assert "updates and refactors application components" in clean_pr_summary("").lower()
+
+
+def test_derive_blast_radius_all_categories_meet_word_count_and_bold_prefix():
+    """Verify all blast radius categories produce 15-30 words with bold category prefix."""
+    cases = [
+        # Empty / isolated
+        ([], False, "**Isolated (No Changes)**"),
+        # Omitted + Auth
+        (["backend/app/auth.py"], True, "**High (Auth & Data Layer)**"),
+        # Omitted + API
+        (["backend/app/routers/api.py"], True, "**Moderate (API & Endpoints)**"),
+        # Omitted fallback
+        (["frontend/src/index.ts"], True, "**Broad (Partial Coverage)**"),
+        # Docs
+        (["docs/guide.md", "README.md"], False, "**Isolated (Documentation)**"),
+        # Tests
+        (["tests/test_api.py", "backend/tests/test_auth.py"], False, "**Isolated (Test Suite)**"),
+        # Auth / DB
+        (["backend/app/models/user.py", "alembic/versions/001.py"], False, "**High (Auth & Data Layer)**"),
+        # API
+        (["backend/app/routers/webhook.py"], False, "**Moderate (API & Endpoints)**"),
+        # Frontend UI
+        (["frontend/src/components/Header.tsx", "frontend/src/logo.svg"], False, "**Moderate (Frontend UI)**"),
+        # Broad (>5 files)
+        ([f"backend/app/service_{i}.py" for i in range(6)], False, "**Broad (Cross-System)**"),
+        # Application Logic
+        (["backend/app/utils/crypto.py"], False, "**Moderate (Application Logic)**"),
+    ]
+
+    for paths, omitted, expected_prefix in cases:
+        badge, surface, risk = derive_blast_radius(paths, paths_omitted=omitted)
+        assert badge.startswith(expected_prefix), f"Expected prefix {expected_prefix} for paths={paths}, got {badge}"
+        assert badge.startswith("**"), f"Missing bold markdown prefix in {badge}"
+        words = len(badge.replace("**", "").split())
+        assert 15 <= words <= 30, f"Blast radius badge has {words} words (expected 15-30): {badge}"
+
 
 
 

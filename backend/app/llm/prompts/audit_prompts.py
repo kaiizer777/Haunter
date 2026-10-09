@@ -624,6 +624,81 @@ def _is_test_path(path: str) -> bool:
     return any(filename.endswith(sfx) for sfx in test_suffixes)
 
 
+_ISSUE_VERDICT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?i)\b(?:no|zero)\s+(?:security|correctness|performance|architectural?|actionable|critical|major|blocking)\s+(?:issues?|findings?|flaws?|bugs?|defects?|vulnerabilities|regressions?|risks?|concerns?|problems?)\b"
+    ),
+    re.compile(r"(?i)\bno\s+actionable\s+findings\b"),
+    re.compile(r"(?i)\bno\s+reliable\s+perspective\b"),
+    re.compile(
+        r"(?i)\b(?:potential|possible|identified|observed|found|detected|unhandled|critical|blocking)\s+(?:security|correctness|performance|architectural?)\s+(?:issues?|findings?|flaws?|bugs?|defects?|vulnerabilities|regressions?|risks?|concerns?|problems?|breakage|error)\b"
+    ),
+    re.compile(r"(?i)\b\d+\s+perspective\(s\)\s+failed\b"),
+    re.compile(r"(?i)\bperspectives?\s+(?:passed|failed|completed|executed)\b"),
+    re.compile(r"(?i)\bevaluated\s+across\s+all\s+perspectives\b"),
+    re.compile(r"(?i)\bclean\s+from\s+all\s+perspectives\b"),
+    re.compile(
+        r"(?i)\b(?:do\s+not\s+merge|requires?\s+changes|ready\s+to\s+merge|looks?\s+good)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:timing\s+attack|side-channel|sql\s+injection|xss|csrf|idor|n\+1\s+query)\b"
+    ),
+    re.compile(r"(?i)\b(?:must-fix|should-fix)\b"),
+    re.compile(
+        r"(?i)\baudit\s+found\s+security\s+and\s+performance\s+considerations\b"
+    ),
+    re.compile(r"(?i)^\s*clean\.?\s*$"),
+)
+
+_PREFIX_STRIP_RE = re.compile(
+    r"^(?:(?:security|correctness|performance|architecture|verdict|summary|pr summary|executive summary|note)\s*:\s*)+",
+    re.IGNORECASE,
+)
+
+
+def clean_pr_summary(
+    summary: Optional[str],
+    *,
+    default_fallback: str = "This pull request updates and refactors application components across the touched files.",
+) -> str:
+    """Clean PR Summary to strictly describe what is implemented/changed in 2-3 concise sentences.
+
+    Strips perspective verdicts, issue reports, bug descriptions, and clean/failed status boilerplate.
+    """
+    raw = str(summary or "").strip()
+    if not raw:
+        return default_fallback
+
+    raw_sentences = re.split(r"(?<=[.!?])\s+|\n+", raw)
+    cleaned_sentences: list[str] = []
+
+    for s in raw_sentences:
+        candidate = s.strip()
+        if not candidate:
+            continue
+        candidate = _PREFIX_STRIP_RE.sub("", candidate).strip()
+        if not candidate:
+            continue
+        if any(pat.search(candidate) for pat in _ISSUE_VERDICT_PATTERNS):
+            continue
+        candidate = re.sub(
+            r"(?i)(?:[,;]\s*|\s+)(?:except|but\s+has|with\s+potential|though|however)\s+[^.!?]+",
+            "",
+            candidate,
+        ).strip()
+        if not candidate.endswith((".", "!", "?")):
+            candidate += "."
+        if any(pat.search(candidate) for pat in _ISSUE_VERDICT_PATTERNS):
+            continue
+        if len(candidate) > 5 and candidate not in cleaned_sentences:
+            cleaned_sentences.append(candidate)
+
+    if not cleaned_sentences:
+        return default_fallback
+
+    return " ".join(cleaned_sentences[:3])
+
+
 def derive_blast_radius(
     paths: Sequence[str],
     *,
@@ -632,8 +707,8 @@ def derive_blast_radius(
     cleaned_paths = [p for p in paths if p and p != "unknown"]
     if not cleaned_paths and not paths_omitted:
         return (
-            "**Isolated** (No changes)",
-            "None / Clean",
+            "**Isolated (No Changes)** — Zero source code modifications detected; no runtime services, tests, or database schemas are affected.",
+            "Isolated / No Changes",
             "Zero risk — no source code modifications detected.",
         )
     if paths_omitted:
@@ -657,7 +732,7 @@ def derive_blast_radius(
         )
         if has_auth_or_db:
             return (
-                "**High** (Auth & Data Layer)",
+                "**High (Auth & Data Layer)** — Modifies sensitive authentication flows, session handling, or database migrations with truncated path coverage; full regression testing required.",
                 "Core / Auth & Database",
                 "Elevated risk — touches sensitive authentication, permissions, or database schemas.",
             )
@@ -677,12 +752,12 @@ def derive_blast_radius(
         )
         if has_api:
             return (
-                "**Moderate** (API & Endpoints)",
+                "**Moderate (API & Endpoints)** — Updates external API routing or request schemas with partial path coverage; downstream endpoints require verification while internal database models remain unaffected.",
                 "API / Endpoints & Schemas",
                 "Moderate risk — modifies external request handling or public contract surfaces.",
             )
         return (
-            "**Broad** (Partial Coverage)",
+            "**Broad (Partial Coverage)** — Wide-ranging modifications with additional paths omitted from analysis; cross-service regression testing recommended across all dependent application modules.",
             "Cross-System / Truncated Coverage",
             "Broad blast radius — additional paths omitted from analysis; full regression testing recommended.",
         )
@@ -695,7 +770,7 @@ def derive_blast_radius(
     )
     if is_docs:
         return (
-            "**Isolated** (Documentation only)",
+            "**Isolated (Documentation)** — Updates repository documentation and static guides; completely isolated with zero impact on runtime execution, API contracts, or build systems.",
             "Isolated / Documentation",
             "Low risk — purely presentational changes with zero runtime or logic impact.",
         )
@@ -705,7 +780,7 @@ def derive_blast_radius(
     )
     if is_tests:
         return (
-            "**Isolated** (Test suite only)",
+            "**Isolated (Test Suite)** — Confined entirely to automated test suites and test fixtures; production runtime code, endpoints, and database models remain untouched.",
             "Isolated / Test Suite",
             "Low risk — test additions or updates with zero production runtime impact.",
         )
@@ -729,7 +804,7 @@ def derive_blast_radius(
     )
     if has_auth_or_db:
         return (
-            "**High** (Auth & Data Layer)",
+            "**High (Auth & Data Layer)** — Modifies critical authentication mechanisms, user permissions, or database schemas; requires strict security review and database migration validation.",
             "Core / Auth & Database",
             "Elevated risk — touches sensitive authentication, permissions, or database schemas.",
         )
@@ -749,7 +824,7 @@ def derive_blast_radius(
     )
     if has_api:
         return (
-            "**Moderate** (API & Endpoints)",
+            "**Moderate (API & Endpoints)** — Alters HTTP endpoints, request routing, or API contracts; frontend consumers may be affected while backend database schemas remain isolated.",
             "API / Endpoints & Schemas",
             "Moderate risk — modifies external request handling or public contract surfaces.",
         )
@@ -762,18 +837,18 @@ def derive_blast_radius(
     )
     if is_frontend:
         return (
-            "**Moderate** (Frontend UI)",
+            "**Moderate (Frontend UI)** — Modifies client-side presentational UI components, styles, or assets; strictly isolated from backend endpoints, database schemas, and auth session middleware.",
             "Frontend / UI Components",
             "Low to moderate risk — client-side presentation and interaction logic.",
         )
     if len(cleaned_paths) > 5:
         return (
-            "**Broad** (Cross-system)",
+            "**Broad (Cross-System)** — Multi-module changes spanning multiple architectural layers; requires comprehensive end-to-end integration and regression test verification before merge.",
             "Cross-System / Multi-Module",
             "Higher blast radius — multi-module changes requiring comprehensive regression checks.",
         )
     return (
-        "**Moderate** (Application Logic)",
+        "**Moderate (Application Logic)** — Updates core application services and internal business logic; external API routes and database schemas remain largely unaffected.",
         "Application Logic",
         "Standard risk — modifications to core application code.",
     )
@@ -1176,7 +1251,7 @@ def format_audit_report(
     else:
         status_label = status
 
-    summary_text = pr_summary or executive_summary or "The audited diff was evaluated across all perspectives."
+    summary_text = clean_pr_summary(pr_summary or executive_summary)
     summary_sanitized = _sanitize_inline(summary_text)
 
     # Blast radius resolution
@@ -1203,34 +1278,35 @@ def format_audit_report(
         blast_radius=blast_radius_label,
     )
 
+    blast_radius_html = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", blast_radius_label)
+
     prefix = [
         "## 🛡️ Haunter Autonomous Audit Report",
         "",
         "> [!NOTE]",
         f"> **PR Summary:** {summary_sanitized}",
         "",
-        "| Status | Confidence | Blockers | Blast Radius |",
-        "| :--- | :---: | :--- | :--- |",
-        f"| {status_label} | **{conf_0_to_10}** | Must-Fix: `{n_must_fix}` · Should-Fix: `{n_should_fix}` | {blast_radius_label} |",
+        '<table width="100%">',
+        "<thead>",
+        "  <tr>",
+        '    <th width="20%" align="left">Status</th>',
+        '    <th width="15%" align="center">Confidence</th>',
+        '    <th width="25%" align="left">Blockers</th>',
+        '    <th width="40%" align="left">Blast Radius</th>',
+        "  </tr>",
+        "</thead>",
+        "<tbody>",
+        "  <tr>",
+        f'    <td align="left">{status_label}</td>',
+        f'    <td align="center"><b>{conf_0_to_10}</b></td>',
+        f'    <td align="left">Must-Fix: <code>{n_must_fix}</code> · Should-Fix: <code>{n_should_fix}</code></td>',
+        f'    <td align="left">{blast_radius_html}</td>',
+        "  </tr>",
+        "</tbody>",
+        "</table>",
         "",
         structural_analysis_rendered,
         "",
-    ]
-
-    findings_table = _render_audit_findings_table(
-        bounded_findings[:MAX_REPORT_FINDINGS], confidence_value
-    )
-    if findings_table:
-        prefix.extend([
-            "---",
-            "",
-            "### 📋 Findings Overview",
-            "",
-            findings_table,
-            "",
-        ])
-
-    prefix.extend([
         "---",
         "",
         "### 🚨 Findings & Recommendations",
@@ -1238,7 +1314,7 @@ def format_audit_report(
         "<details open>",
         f"<summary>🔍 <b>Detailed Findings Breakdown</b> ({total_findings} items)</summary>",
         "",
-    ])
+    ]
 
     cleaned_diff = (remediation_diff or "").strip()
     if cleaned_diff and "(no automated remediation" not in cleaned_diff:
