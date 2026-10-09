@@ -1724,12 +1724,16 @@ async def run_audit(
             publish_allowed=True,
         )
         report = format_audit_report(
+            pr_summary=empty.executive_summary,
             executive_summary=empty.executive_summary,
             findings=[],
             confidence=empty.confidence,
             status=empty.status,
+            blast_radius="**Isolated** (No changes)",
             audit_target=empty.target_label,
             engine=empty.engine,
+            must_fix_count=0,
+            should_fix_count=0,
             remediation_diff=empty.remediation_diff,
             analysis_metadata=empty.analysis_metadata,
             publish_allowed=empty.publish_allowed,
@@ -1853,6 +1857,7 @@ async def run_audit(
         counts.get("BLOCKER", 0),
         counts.get("WARNING", 0),
         overall_confidence,
+        has_notes=counts.get("NOTE", 0) > 0,
     )
     executive_summary = _synthesize_executive_summary(
         executed_perspectives, len(findings)
@@ -1886,12 +1891,15 @@ async def run_audit(
         publish_allowed=publish_allowed,
     )
     report = format_audit_report(
+        pr_summary=result.executive_summary,
         executive_summary=result.executive_summary,
         findings=[finding.to_report_dict() for finding in result.findings],
         confidence=result.confidence,
         status=result.status,
         audit_target=result.target_label,
         engine=result.engine,
+        must_fix_count=counts.get("BLOCKER", 0),
+        should_fix_count=counts.get("WARNING", 0),
         remediation_diff=result.remediation_diff,
         analysis_metadata=result.analysis_metadata,
         publish_allowed=result.publish_allowed,

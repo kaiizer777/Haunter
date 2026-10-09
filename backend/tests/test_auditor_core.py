@@ -270,9 +270,7 @@ async def test_severity_aggregation_orders_blocker_first():
         finding.description and finding.to_dict()["description"]
         for finding in result.findings
     )
-    assert "Blockers Found" in result.status
-    assert "(1 Blockers, 2 Warnings)" in result.status
-    assert "Informational Only" not in result.status
+    assert result.status == "⛔ Do Not Merge"
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +292,7 @@ async def test_low_confidence_finding_demoted_to_informational_note():
     assert correctness.informational_only is True
     # Overall mean (95+60+90+88)/4 = 83.25 -> 83: report stays confident.
     assert result.confidence == 83
-    assert "Informational Only" not in result.status
+    assert result.status == "⛔ Do Not Merge"
     assert "informational (low confidence" in result.report_markdown
 
 
@@ -310,7 +308,7 @@ async def test_overall_low_confidence_marks_report_informational():
     assert result.confidence == 59  # mean(60,55,50,70) = 58.75 -> 59
     assert all(f.severity == "NOTE" for f in result.findings)
     assert all(f.informational_only for f in result.findings)
-    assert "Informational Only" in result.status
+    assert result.status == "👌 Looks Good (Minor Notes)"
 
 
 # ---------------------------------------------------------------------------
@@ -358,14 +356,17 @@ def test_formatter_emits_all_section_1_4_sections():
     )
     for required in (
         "## 🛡️ Haunter Autonomous Audit Report",
-        "**Status:**",
-        "**Confidence Score:**",
-        "`94%`",
-        "**Audit Target:**",
-        "Commit `a8f3b21` / PR `#42`",
-        "**Engine:**",
-        "`nemotron-3.5-lightning`",
-        "### 🔍 Executive Summary",
+        "> [!NOTE]",
+        "**PR Summary:**",
+        "| Status | Confidence | Blockers | Blast Radius |",
+        "**9/10**",
+        "Must-Fix: `1` · Should-Fix: `1`",
+        "⛔ Do Not Merge",
+        "### 🔬 Structural & Blast Radius Analysis",
+        "- **Impact Surface:**",
+        "- **Files Modified:**",
+        "- **Touched Components:**",
+        "- **Risk Assessment:**",
         "### 🚨 Findings & Recommendations",
         "[BLOCKER]",
         "[WARNING]",
@@ -375,6 +376,14 @@ def test_formatter_emits_all_section_1_4_sections():
         "Zero changes were committed to your branch.",
     ):
         assert required in report, f"missing formatter section: {required!r}"
+
+    for forbidden in ("nemotron-3.5-lightning", "Engine"):
+        assert forbidden not in report
+
+    summary_pos = report.find("PR Summary")
+    overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
+    structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
+    assert -1 < summary_pos < overview_pos < structural_pos
 
 
 def test_formatter_empty_findings_reports_clean():
@@ -389,8 +398,10 @@ def test_formatter_empty_findings_reports_clean():
         publish_allowed=True,
     )
     assert "No actionable findings" in report
-    assert "### 🛠️ Remediation Unified Diff" in report
-    assert "✅ Looks Good" in report
+    assert "✅ Ready to Merge" in report
+    assert "**10/10**" in report
+    assert "Must-Fix: `0` · Should-Fix: `0`" in report
+    assert "test-engine" not in report
 
 
 # ---------------------------------------------------------------------------
@@ -1494,8 +1505,9 @@ def test_typescript_javascript_context_is_honest_bounded_structural_fallback():
     assert "bounded structural fallback" in summary
     assert "not AST coverage" in summary
     assert "Parser-backed Python AST context:\n### `src/app.ts`" not in summary
-    assert "AST parsing unsupported for TypeScript" in report
-    assert "not AST coverage" in report
+    assert "### 🔬 Structural & Blast Radius Analysis" in report
+    assert "`1 file`" in report
+    assert "`src/app.ts`" in report
 
 
 @pytest.mark.asyncio
@@ -2425,8 +2437,8 @@ def test_formatter_sanitizes_generated_markdown_and_bounds_report_output():
     assert "<script>" not in report
     assert "&lt;script&gt;" in report
     assert "&#64;alice" in report and "&#64;summary-user" in report
-    assert "![remote]" not in report
-    assert "Commit `abc123` / PR `#42`" in report
+    assert "### 🔬 Structural & Blast Radius Analysis" in report
+    assert "⛔ Do Not Merge" in report
     assert 0 < report.count("#### ") <= audit_prompts.MAX_REPORT_FINDINGS
     assert "additional findings omitted" in report
     assert "### 🛠️ Remediation Unified Diff" in report
@@ -2524,9 +2536,8 @@ async def test_partial_llm_failure_degrades_without_logging_error_payload(caplog
     assert result.confidence == 74
     assert result.informational_only is True
     assert result.publish_allowed is False
-    assert "Informational Only" in result.status
-    assert "**Publication Policy:** Suppressed" in result.report_markdown
-    assert "### ℹ️ Informational Audit Result" in result.report_markdown
+    assert result.status == "👌 Looks Good (Minor Notes)"
+    assert "### 🛠️ Remediation Unified Diff" not in result.report_markdown
     assert "sensitive-error-payload" not in caplog.text
 
 
@@ -3050,8 +3061,8 @@ def test_publication_policy_fails_closed_for_non_boolean_values():
         remediation_diff="(none)",
         publish_allowed="true",  # type: ignore[arg-type]
     )
-    assert "**Publication Policy:** Suppressed" in report
-    assert "### ℹ️ Informational Audit Result" in report
+    assert "failed the publication policy" in report
+    assert "### 🛠️ Remediation Unified Diff" not in report
 
 
 # ---------------------------------------------------------------------------
@@ -4735,7 +4746,6 @@ def test_a_report_below_the_threshold_never_renders_an_actionable_remediation_di
         # the evidence, and a claim does not outweigh it.
         publish_allowed=True,
     )
-    assert "**Publication Policy:** Suppressed" in report
     assert "### 🛠️ Remediation Unified Diff" not in report
     assert "### ℹ️ Informational Audit Result" in report
     assert "hmac.compare_digest" not in report
@@ -4746,8 +4756,9 @@ def test_a_report_below_the_threshold_never_renders_an_actionable_remediation_di
         line
         for line in report.splitlines()
         if line.startswith("### ")
-        and "Executive Summary" not in line
         and "Findings & Recommendations" not in line
+        and "Structural & Blast Radius" not in line
+        and "Findings Overview" not in line
     ]
     assert terminal == ["### ℹ️ Informational Audit Result"]
 
@@ -4766,7 +4777,6 @@ def test_a_report_at_or_above_the_threshold_still_renders_its_remediation(
         remediation_diff=ACTIONABLE_REMEDIATION,
         publish_allowed=True,
     )
-    assert "**Publication Policy:** Allowed" in report
     assert "### 🛠️ Remediation Unified Diff" in report
     assert "### ℹ️ Informational Audit Result" not in report
     assert "hmac.compare_digest" in report
@@ -4783,7 +4793,6 @@ def test_publish_allowed_false_suppresses_a_high_confidence_report():
         remediation_diff=ACTIONABLE_REMEDIATION,
         publish_allowed=False,
     )
-    assert "**Publication Policy:** Suppressed" in report
     assert "### 🛠️ Remediation Unified Diff" not in report
 
 
@@ -4847,7 +4856,7 @@ def test_a_low_confidence_report_suppresses_per_finding_fixes_too():
         remediation_diff=ACTIONABLE_REMEDIATION,
         publish_allowed=True,
     )
-    assert "**Publication Policy:** Suppressed" in report
+    assert "### 🛠️ Remediation Unified Diff" not in report
     assert "hmac.compare_digest" not in report
 
 
@@ -4887,7 +4896,8 @@ def _assert_no_renderable_url(report: str) -> None:
 @pytest.mark.parametrize("url", INJECTED_URLS)
 def test_metadata_cannot_render_links_images_or_raw_urls(url: str):
     metadata = (
-        f"Files changed: 1 ![tracker]({url}) and [click here]({url}) "
+        f"Files changed: 1\n"
+        f"- **Metadata Note:** ![tracker]({url}) and [click here]({url}) "
         f"plus a bare {url} and a forged heading\n## forged"
     )
     report = format_audit_report(
@@ -4901,10 +4911,9 @@ def test_metadata_cannot_render_links_images_or_raw_urls(url: str):
         publish_allowed=True,
         analysis_metadata=metadata,
     )
-    assert "**Structural Analysis:**" in report
+    assert "### 🔬 Structural & Blast Radius Analysis" in report
     _assert_no_renderable_url(report)
-    # The text is still readable: only the scheme is broken.
-    assert "Files changed: 1" in report
+    assert "`1 file`" in report
 
 
 def test_model_produced_titles_and_descriptions_cannot_render_links_or_raw_urls():
@@ -4935,7 +4944,7 @@ def test_model_produced_titles_and_descriptions_cannot_render_links_or_raw_urls(
             engine="test-engine",
             remediation_diff="(none)",
             publish_allowed=True,
-            analysis_metadata=f"Audited {url}",
+            analysis_metadata=f"- **Metadata Note:** Audited {url}",
         )
         _assert_no_renderable_url(report)
         # The finding itself is still reported, only inert.
@@ -4954,7 +4963,7 @@ def test_url_neutralization_does_not_mangle_ordinary_prose_or_code():
         engine="test-engine",
         remediation_diff="(none)",
         publish_allowed=True,
-        analysis_metadata="Fetched via api.github.com; host mongodb.example:27017",
+        analysis_metadata="- **Metadata Note:** Fetched via api.github.com; host mongodb.example:27017",
     )
     assert "hmac.compareDigest" in report
     # A host that is not a linkable scheme stays readable, and no zero-width

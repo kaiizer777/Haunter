@@ -40,6 +40,8 @@ from app.github_client import (
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
     MAX_GITHUB_COMMENT_CHARS,
+    _render_structural_analysis,
+    derive_blast_radius,
     format_audit_report,
 )
 from app.models import Repo
@@ -942,32 +944,50 @@ def test_audit_report_markdown_visual_hierarchy_and_tables():
 
     report = result.report_markdown
 
-    # 1. Executive Summary Header with status badges and table
+    # 1. 3-Tier Sequence: Tier 1 PR Summary Callout
     assert "## 🛡️ Haunter Autonomous Audit Report" in report
-    assert "| Status | Confidence Score | Audit Target | Engine |" in report
-    assert "| :--- | :--- | :--- | :--- |" in report
-    assert "`95%`" in report
-
-    # 2. Executive Summary Callout
-    assert "### 🔍 Executive Summary" in report
     assert "> [!NOTE]" in report
+    assert "**PR Summary:**" in report
 
-    # 3. Scannable Findings Table
+    # 2. Tier 2: Clean Overview Table (Status, Confidence 0-10, Blockers, Blast Radius)
+    assert "| Status | Confidence | Blockers | Blast Radius |" in report
+    assert "| :--- | :---: | :--- | :--- |" in report
+    assert "**10/10**" in report
+    assert "Must-Fix: `1` · Should-Fix: `0`" in report
+    assert "⛔ Do Not Merge" in report
+
+    # 3. Tier 3: Structural & Blast Radius Analysis
+    assert "### 🔬 Structural & Blast Radius Analysis" in report
+    assert "- **Impact Surface:**" in report
+    assert "- **Files Modified:**" in report
+    assert "- **Touched Components:**" in report
+    assert "- **Risk Assessment:**" in report
+
+    summary_pos = report.find("PR Summary")
+    overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
+    structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
+    assert -1 < summary_pos < overview_pos < structural_pos
+
+    # 4. Scannable Findings Table & Deep Dives
     assert "### 📋 Findings Overview" in report
     assert "| Severity | Perspective | File & Line | Summary | Confidence |" in report
     assert "[BLOCKER]" in report
     assert "`backend/app/auth.py#L84`" in report
 
-    # 4. Collapsible Deep-Dives
+    # 5. Collapsible Deep-Dives
     assert "<details open>" in report
     assert "<b>Detailed Findings Breakdown</b>" in report
     assert "</details>" in report
 
-    # 5. Collapsible Remediation Diff
+    # 6. Collapsible Remediation Diff
     assert "<b>Proposed Remediation Unified Diff</b>" in report
     assert "```diff" in report
 
-    # 6. Polished Footer
+    # 7. Strict Negative Assertion: Zero Model Exposure
+    for forbidden_model in ("space-bunny-free", "nemotron", "gpt-4o", "claude", "test-engine"):
+        assert forbidden_model not in report
+
+    # 8. Polished Footer
     assert "Generated autonomously by Haunter Guardian Mode" in report
 
 
@@ -983,4 +1003,284 @@ def test_format_inline_comment_body_renders_suggestion_block():
     assert "**Suggested Remediation:**" in body
     assert "```suggestion\nreturn hmac.compare_digest(token, stored_token)\n```" in body
     assert "> [!WARNING]" in body
+
+
+# ==============================================================================
+# 9. Regression Tests: Blast Radius & Structural Analysis Defect Fixes
+# ==============================================================================
+
+
+def test_derive_blast_radius_regression_no_substring_false_positives():
+    """Verify production files containing 'test' substring are NOT classified as test suite."""
+    # Production API endpoint with 'test' in name ('latest.py')
+    badge, surface, risk = derive_blast_radius(["backend/app/api/latest.py"])
+    assert badge == "**Moderate** (API & Endpoints)"
+    assert surface == "API / Endpoints & Schemas"
+    assert "Moderate risk" in risk
+    assert "Test suite only" not in badge
+
+    # Other files with 'test' as a substring
+    badge, surface, _ = derive_blast_radius(["contest.py"])
+    assert "Test suite only" not in badge
+    assert surface == "Application Logic"
+
+    badge, surface, _ = derive_blast_radius(["attestation.py"])
+    assert "Test suite only" not in badge
+    assert surface == "Application Logic"
+
+    badge, surface, _ = derive_blast_radius(["backend/app/auth/attestation.py"])
+    assert badge == "**High** (Auth & Data Layer)"
+    assert surface == "Core / Auth & Database"
+
+    # Legitimate test paths MUST be classified as test suite
+    test_cases = [
+        ["tests/test_latest.py"],
+        ["backend/tests/test_api.py"],
+        ["tests/unit/test_auth.py"],
+        ["frontend/src/components/Button.test.tsx"],
+        ["frontend/src/components/Button.spec.ts"],
+        ["frontend/src/__tests__/Button.tsx"],
+        ["conftest.py"],
+        ["tests/helpers.py"],
+        ["backend/tests/test_models.py", "tests/conftest.py"],
+    ]
+    for paths in test_cases:
+        badge, surface, risk = derive_blast_radius(paths)
+        assert badge == "**Isolated** (Test suite only)", f"Failed for {paths}"
+        assert surface == "Isolated / Test Suite", f"Failed for {paths}"
+        assert "zero production runtime impact" in risk
+
+
+def test_render_structural_analysis_with_stats_no_unbound_local_error():
+    """Verify _render_structural_analysis works without UnboundLocalError when stats dict is provided."""
+    stats = {
+        "file_count": 2,
+        "added_lines": 12,
+        "removed_lines": 3,
+        "valid_paths": ["backend/app/main.py", "backend/app/api/latest.py"],
+    }
+    rendered = _render_structural_analysis(metadata="", blast_radius="", stats=stats)
+    assert "### 🔬 Structural & Blast Radius Analysis" in rendered
+    assert "- **Impact Surface:** API / Endpoints & Schemas" in rendered
+    assert "- **Files Modified:** `2 files` (+12 / -3 lines)" in rendered
+    assert "`backend/app/main.py`" in rendered
+    assert "`backend/app/api/latest.py`" in rendered
+    assert "- **Risk Assessment:** Moderate risk — modifies external request handling or public contract surfaces." in rendered
+
+
+def test_render_structural_analysis_with_raw_metadata_and_ast_noise():
+    """Verify _render_structural_analysis parses raw metadata and strips AST noise properly."""
+    raw_meta = (
+        "Files changed: 1; accepted hunks: 1; +5 added / -2 removed lines\n"
+        "Touched files:\n"
+        "- backend/app/api/latest.py\n"
+        "- **Metadata Note:** Custom analysis note on modified routes\n"
+        "No complete bounded Python source was available for parser-backed AST analysis.\n"
+        "Caller-supplied parser context: None\n"
+    )
+    rendered = _render_structural_analysis(metadata=raw_meta, blast_radius="", stats=None)
+    assert "### 🔬 Structural & Blast Radius Analysis" in rendered
+    assert "- **Impact Surface:** API / Endpoints & Schemas" in rendered
+    assert "- **Files Modified:** `1 file` (+5 / -2 lines)" in rendered
+    assert "`backend/app/api/latest.py`" in rendered
+    assert "No complete bounded Python source" not in rendered
+    assert "Caller-supplied parser context" not in rendered
+    assert "- **Metadata Note:** Custom analysis note on modified routes" in rendered
+
+
+def test_audit_report_renders_coverage_caveats_when_present():
+    """Verify coverage caveats and partial coverage warnings are rendered in the final report markdown."""
+    raw_meta = (
+        "Files changed: 60; accepted hunks: 40; +120 added / -30 removed lines\n"
+        "Touched files:\n"
+        "- README.md\n"
+        "59 additional touched files omitted\n"
+        "- **Metadata Note:** Diff or hunk truncation was detected; affected line ranges are untrusted.\n"
+    )
+    report = format_audit_report(
+        pr_summary="Refactored documentation and omitted internal modules.",
+        findings=[],
+        confidence=90,
+        analysis_metadata=raw_meta,
+    )
+    assert "PR Summary" in report
+    assert "Broad" in report or "Partial Coverage" in report
+    assert "partial path coverage" in report or "additional paths omitted" in report
+    assert "- **Metadata Note:** Diff or hunk truncation was detected" in report
+
+    summary_pos = report.find("PR Summary")
+    overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
+    structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
+    assert -1 < summary_pos < overview_pos < structural_pos
+
+
+def test_render_structural_analysis_strips_structural_fallback_noise():
+    """Verify structural fallback multi-line code excerpts, comments, and unsupported language blocks are stripped."""
+    raw_meta = (
+        "Files changed: 1; accepted hunks: 1; +10 added / -5 removed lines\n"
+        "Touched files:\n"
+        "- frontend/src/components/Header.tsx\n"
+        "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+        "AST parsing unsupported for TypeScript JSX file frontend/src/components/Header.tsx; using a bounded structural fallback that is not AST coverage. Changed-line anchor: 15; excerpt lines 1-30.\n"
+        "import React from 'react';\n"
+        "// implementation detail\n"
+        "/* multi-line comment block\n"
+        " * inside structural fallback\n"
+        " */\n"
+        "# script comment inside snippet\n"
+        "export const Header = () => <header>Banner</header>;\n"
+        "Header.displayName = 'Header';\n"
+        "```typescript\n"
+        "const internalCode = true;\n"
+        "// another code comment\n"
+        "```\n\n"
+        "- **Metadata Note:** Legitimate custom metadata note\n"
+    )
+    rendered = _render_structural_analysis(metadata=raw_meta)
+    assert "Header.tsx" in rendered
+    assert "Unsupported AST languages and bounded structural fallbacks" not in rendered
+    assert "AST parsing unsupported for" not in rendered
+    assert "export const Header" not in rendered
+    assert "const internalCode" not in rendered
+    assert "Header.displayName" not in rendered
+    assert "// implementation detail" not in rendered
+    assert "/* multi-line comment block" not in rendered
+    assert "inside structural fallback" not in rendered
+    assert "# script comment inside snippet" not in rendered
+    assert "// another code comment" not in rendered
+    assert (
+        "- **Coverage Caveat:** Structural analysis for TypeScript/non-Python files used bounded line-diff fallback."
+        in rendered
+    )
+    assert "- **Metadata Note:** Legitimate custom metadata note" in rendered
+
+    # Verify ZERO lines from the fallback block leak into metadata notes
+    meta_notes = [
+        line for line in rendered.splitlines() if line.startswith("- **Metadata Note:**")
+    ]
+    assert len(meta_notes) == 1
+    assert meta_notes[0] == "- **Metadata Note:** Legitimate custom metadata note"
+
+
+def test_audit_report_renders_typescript_ast_coverage_caveat():
+    """Verify format_audit_report renders clean coverage caveat when unsupported AST languages are present."""
+    raw_meta = (
+        "Files changed: 1; accepted hunks: 1; +10 added / -5 removed lines\n"
+        "Touched files:\n"
+        "- frontend/src/components/Header.tsx\n"
+        "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+        "AST parsing unsupported for TypeScript JSX file frontend/src/components/Header.tsx; using a bounded structural fallback that is not AST coverage. Changed-line anchor: 15; excerpt lines 1-30.\n"
+        "import React from 'react';\n"
+        "// implementation detail\n"
+        "export const Header = () => <header>Banner</header>;\n"
+    )
+    report = format_audit_report(
+        pr_summary="Update Header component.",
+        findings=[],
+        confidence=90,
+        analysis_metadata=raw_meta,
+    )
+    assert (
+        "- **Coverage Caveat:** Structural analysis for TypeScript/non-Python files used bounded line-diff fallback."
+        in report
+    )
+    assert "Coverage Caveat" in report
+    assert "bounded line-diff fallback" in report
+    assert "Unsupported AST languages and bounded structural fallbacks" not in report
+    assert "// implementation detail" not in report
+    assert "export const Header" not in report
+
+
+def test_format_audit_report_reconciles_status_with_notes():
+    """Verify format_audit_report reconciles 'Ready to Merge' to 'Looks Good (Minor Notes)' when notes exist."""
+    note_finding = _make_finding(
+        id="AUD-NOTE-01",
+        severity="NOTE",
+        confidence=90,
+        title="Minor Hardening Advice",
+    )
+    report = format_audit_report(
+        pr_summary="Refactor with notes.",
+        findings=[note_finding.to_report_dict()],
+        confidence=90,
+        status="✅ Ready to Merge",
+    )
+    assert "👌 Looks Good (Minor Notes)" in report
+    assert "✅ Ready to Merge" not in report
+
+
+def test_build_status_label_legacy_kwargs():
+    """Verify build_status_label supports legacy and aliased keyword arguments."""
+    from app.llm.prompts.audit_prompts import build_status_label
+
+    assert build_status_label(n_blockers=1, n_warnings=0) == "⛔ Do Not Merge"
+    assert build_status_label(n_blockers=0, n_warnings=2) == "⚠️ Requires Changes"
+    assert build_status_label(must_fix_count=1) == "⛔ Do Not Merge"
+    assert build_status_label(should_fix_count=1) == "⚠️ Requires Changes"
+    assert build_status_label(n_blockers=0, n_warnings=0, confidence=90, has_notes=True) == "👌 Looks Good (Minor Notes)"
+
+
+def test_render_structural_analysis_strict_metadata_allowlist_prevents_code_leaks():
+    """Verify strict allowlist parsing prevents arbitrary JS/TS code, properties, or keywords from leaking into notes."""
+    raw_meta = (
+        "Files changed: 2; accepted hunks: 2; +25 added / -5 removed lines\n"
+        "Touched files:\n"
+        "- frontend/src/components/Header.tsx\n"
+        "- frontend/src/utils/helpers.ts\n"
+        "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+        "AST parsing unsupported for TypeScript JSX file frontend/src/components/Header.tsx\n"
+        "Header.displayName = 'Header';\n"
+        "React.useEffect(() => { doWork(); }, []);\n"
+        "const { data, error } = useQuery('key');\n"
+        "export default function Main() { return <div className='p-4'>Content</div>; }\n"
+        "type UserProps = { id: string; name: string };\n"
+        "interface State { count: number }\n"
+        "\n\n"
+        "Arbitrary unformatted text line\n"
+        "- **const:** invalid code keyword in key\n"
+        "- **export:** export const foo = 123\n"
+        "- **function:** () => console.log('leak')\n"
+        "- **Valid Note:** Bounded structural analysis completed.\n"
+        "- **Metadata Note:** Additional verification required.\n"
+    )
+    rendered = _render_structural_analysis(metadata=raw_meta)
+
+    # 1. Structural heading and core metrics present
+    assert "### 🔬 Structural & Blast Radius Analysis" in rendered
+    assert "<!-- Structural Analysis -->" not in rendered
+    assert "- **Impact Surface:**" in rendered
+    assert "- **Files Modified:** `2 files` (+25 / -5 lines)" in rendered
+    assert "- **Coverage Caveat:**" in rendered
+
+    # 2. None of the JS/TS code leaks into the rendered markdown
+    assert "Header.displayName" not in rendered
+    assert "React.useEffect" not in rendered
+    assert "const { data, error }" not in rendered
+    assert "export default function Main" not in rendered
+    assert "type UserProps" not in rendered
+    assert "interface State" not in rendered
+    assert "Arbitrary unformatted text line" not in rendered
+    assert "invalid code keyword in key" not in rendered
+    assert "export const foo" not in rendered
+    assert "() => console.log" not in rendered
+
+    # 3. Only the valid allowlisted metadata notes are rendered
+    assert "- **Valid Note:** Bounded structural analysis completed." in rendered
+    assert "- **Metadata Note:** Additional verification required." in rendered
+
+    meta_bullet_lines = [
+        line for line in rendered.splitlines()
+        if line.startswith("- **") and not line.startswith((
+            "- **Impact Surface:**",
+            "- **Files Modified:**",
+            "- **Touched Components:**",
+            "- **Risk Assessment:**",
+            "- **Coverage Caveat:**",
+        ))
+    ]
+    assert len(meta_bullet_lines) == 2
+    assert meta_bullet_lines[0] == "- **Valid Note:** Bounded structural analysis completed."
+    assert meta_bullet_lines[1] == "- **Metadata Note:** Additional verification required."
+
+
 
