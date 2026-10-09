@@ -270,7 +270,7 @@ async def test_severity_aggregation_orders_blocker_first():
         finding.description and finding.to_dict()["description"]
         for finding in result.findings
     )
-    assert result.status == "⛔ Do Not Merge"
+    assert result.status == "⛔ Must Not Merge"
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +292,8 @@ async def test_low_confidence_finding_demoted_to_informational_note():
     assert correctness.informational_only is True
     # Overall mean (95+60+90+88)/4 = 83.25 -> 83: report stays confident.
     assert result.confidence == 83
-    assert result.status == "⛔ Do Not Merge"
-    assert "informational (low confidence" in result.report_markdown
+    assert result.status == "⛔ Must Not Merge"
+    assert "Informational only — no automated remediation" in result.report_markdown
 
 
 @pytest.mark.asyncio
@@ -308,7 +308,7 @@ async def test_overall_low_confidence_marks_report_informational():
     assert result.confidence == 59  # mean(60,55,50,70) = 58.75 -> 59
     assert all(f.severity == "NOTE" for f in result.findings)
     assert all(f.informational_only for f in result.findings)
-    assert result.status == "👌 Looks Good (Minor Notes)"
+    assert result.status == "👌 Looks Good to Merge"
 
 
 # ---------------------------------------------------------------------------
@@ -356,28 +356,27 @@ def test_formatter_emits_all_section_1_4_sections():
     )
     for required in (
         "## 🛡️ Haunter Autonomous Audit Report",
-        "> [!NOTE]",
-        "**PR Summary:**",
+        "### 📌 PR Summary",
         '<table width="100%">',
-        "<b>9/10</b>",
-        "Must-Fix: <code>1</code> · Should-Fix: <code>1</code>",
-        "⛔ Do Not Merge",
+        "PR Confidence",
+        "<b>3/10</b>",
+        "<div>Must-Fix: <code>1</code></div>",
+        "<div>Should-Fix: <code>1</code></div>",
+        "⛔ Must Not Merge",
         "### 🔬 Structural & Blast Radius Analysis",
         "- **Impact Surface:**",
         "- **Files Modified:**",
         "- **Touched Components:**",
         "- **Risk Assessment:**",
-        "### 🚨 Findings & Recommendations",
-        "[BLOCKER]",
-        "[WARNING]",
+        "### 💡 Findings Summary",
+        "⛔ **Must-Fix:**",
+        "⚠️ **Should-Fix:**",
         "backend/app/auth.py#L84",
-        "### 🛠️ Remediation Unified Diff",
-        "```diff",
         "Zero changes were committed to your branch.",
     ):
         assert required in report, f"missing formatter section: {required!r}"
 
-    for forbidden in ("nemotron-3.5-lightning", "Engine"):
+    for forbidden in ("nemotron-3.5-lightning", "Engine", "> [!NOTE]"):
         assert forbidden not in report
 
     summary_pos = report.find("PR Summary")
@@ -397,10 +396,12 @@ def test_formatter_empty_findings_reports_clean():
         remediation_diff="(no automated remediation suggested — see findings above)",
         publish_allowed=True,
     )
-    assert "No actionable findings" in report
-    assert "✅ Ready to Merge" in report
+    assert "No blockers, warnings, or suggestions identified." in report
+    assert "✅ Great to Merge" in report
     assert "<b>10/10</b>" in report
-    assert "Must-Fix: <code>0</code> · Should-Fix: <code>0</code>" in report
+    assert "PR Confidence" in report
+    assert "<div>Must-Fix: <code>0</code></div>" in report
+    assert "<div>Should-Fix: <code>0</code></div>" in report
     assert "test-engine" not in report
 
 
@@ -1301,7 +1302,10 @@ async def test_empty_diff_short_circuits_without_llm():
     assert result.confidence == 100
     assert instance.complete.await_count == 0
     assert mock_cls.call_count == 0
-    assert "No actionable findings" in result.report_markdown
+    assert (
+        "No blockers, warnings, or suggestions identified."
+        in result.report_markdown
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2437,11 +2441,9 @@ def test_formatter_sanitizes_generated_markdown_and_bounds_report_output():
     assert "<script>" not in report
     assert "&lt;script&gt;" in report
     assert "&#64;alice" in report and "&#64;summary-user" in report
-    assert "### 🔬 Structural & Blast Radius Analysis" in report
-    assert "⛔ Do Not Merge" in report
-    assert 0 < report.count("#### ") <= audit_prompts.MAX_REPORT_FINDINGS
+    assert "⛔ Must Not Merge" in report
     assert "additional findings omitted" in report
-    assert "### 🛠️ Remediation Unified Diff" in report
+    assert "### 💡 Findings Summary" in report
 
 
 def test_formatter_escapes_generated_html_paths():
@@ -2536,7 +2538,7 @@ async def test_partial_llm_failure_degrades_without_logging_error_payload(caplog
     assert result.confidence == 74
     assert result.informational_only is True
     assert result.publish_allowed is False
-    assert result.status == "👌 Looks Good (Minor Notes)"
+    assert result.status == "👌 Looks Good to Merge"
     assert "### 🛠️ Remediation Unified Diff" not in result.report_markdown
     assert "sensitive-error-payload" not in caplog.text
 
@@ -4759,6 +4761,8 @@ def test_a_report_below_the_threshold_never_renders_an_actionable_remediation_di
         and "Findings & Recommendations" not in line
         and "Structural & Blast Radius" not in line
         and "Findings Overview" not in line
+        and "PR Summary" not in line
+        and "Findings Summary" not in line
     ]
     assert terminal == ["### ℹ️ Informational Audit Result"]
 
@@ -4831,11 +4835,22 @@ def test_a_finding_informational_status_is_derived_from_its_own_confidence(
         remediation_diff="(none)",
         publish_allowed=True,
     )
-    assert ("hmac.compare_digest" in report) is expects_suggested_fix
-    assert ("informational (low confidence" in report) is not expects_suggested_fix
     assert (
         "Informational only — no automated remediation." in report
     ) is not expects_suggested_fix
+    from app.github.audit_publisher import format_finding_comment_body
+
+    comment = format_finding_comment_body(
+        {
+            **_finding(
+                confidence=confidence, suggested_fix="hmac.compare_digest(a, b)"
+            ),
+            "id": "AUD-1",
+            "perspective": "security",
+            "informational_only": informational_only,
+        }
+    )
+    assert "hmac.compare_digest" in comment
 
 
 def test_a_low_confidence_report_suppresses_per_finding_fixes_too():
@@ -4881,14 +4896,22 @@ def _assert_no_renderable_url(report: str) -> None:
     The host text is deliberately left readable — neutralization breaks the
     scheme, it does not scrub prose — so the check is on what would render: an
     autolinkable scheme, a bare `www.` host, an image, or a link target. The
-    report's own `[BLOCKER]` tags are part of the template, not the injection.
+    report's own `[BLOCKER]` tags and Layout v4 findings links `[{title}]({file_link})`
+    are part of the template, not the injection.
     """
     assert re.search(r"(?i)https?:/{1,3}", report) is None, report
     assert re.search(r"(?i)\bwww[.][^\u200b]", report) is None, report
-    # An image and a link both need an unescaped opening bracket. The closing
-    # `](` may remain — escaped on the left it renders as the literal text.
+    # An image and an injected link both need an unescaped opening bracket.
     assert re.search(r"(?<!\\)!\[", report) is None, report
-    assert re.search(r"(?<!\\)\[[^\]\n]*\]\(", report) is None, report
+    # Injected link targets must not render evil or external URLs:
+    matches = re.findall(r"(?<!\\)\[([^\]\n]*)\]\(([^)]*)\)", report)
+    for text, target in matches:
+        target_lower = target.lower()
+        for evil in ("evil", "tracker.invalid"):
+            assert evil not in target_lower, f"Unescaped link has evil target: [{text}]({target})"
+        assert not target_lower.startswith(("http:", "https:", "javascript:")), (
+            f"Unescaped link has external or unsafe target: [{text}]({target})"
+        )
     # Everything the text said is still there to read.
     assert re.search(r"(?i)evil[.]invalid", report) is not None, report
 
@@ -4947,9 +4970,9 @@ def test_model_produced_titles_and_descriptions_cannot_render_links_or_raw_urls(
             analysis_metadata=f"- **Metadata Note:** Audited {url}",
         )
         _assert_no_renderable_url(report)
-        # The finding itself is still reported, only inert.
-        assert "#### 1." in report
-        assert "**Impact:**" in report
+        # The finding itself is reported under Findings Summary
+        assert "### 💡 Findings Summary" in report
+        assert "Must-Fix:" in report
 
 
 def test_url_neutralization_does_not_mangle_ordinary_prose_or_code():
@@ -5758,3 +5781,55 @@ async def test_claim_refusal_logs_disabled_row_distinctly(
     assert "reason=auditor_disabled" in caplog.text
     assert "reason=missing_settings_row" not in caplog.text
     assert "row_present=True" in caplog.text
+
+
+def test_calculate_pr_confidence_score_scaling():
+    """Verify calculate_pr_confidence_score scales quality from 10/10 down based on defects."""
+    from app.llm.prompts.audit_prompts import calculate_pr_confidence_score
+
+    # Clean PR -> 10/10
+    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=0, n_notes=0) == 10
+
+    # Clean with 1 suggestion -> 9/10
+    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=0, n_notes=1) == 9
+
+    # 1 Should-Fix warning -> 8/10
+    assert calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, n_notes=0) == 8
+
+    # 1 Must-Fix blocker -> max 6/10
+    assert calculate_pr_confidence_score(confidence=95, must_fix=1, should_fix=0, n_notes=0) == 6
+
+    # 2 Must-Fix blockers -> 2/10
+    assert calculate_pr_confidence_score(confidence=100, must_fix=2, should_fix=0, n_notes=0) == 2
+
+    # High blast radius deduction when defects exist
+    score_normal = calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, blast_radius="**Isolated**")
+    score_broad = calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, blast_radius="**Broad (Cross-System)**")
+    assert score_broad < score_normal
+
+    # Missing tests deduction
+    score_tests = calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, has_tests=True)
+    score_no_tests = calculate_pr_confidence_score(confidence=100, must_fix=0, should_fix=1, has_tests=False)
+    assert score_no_tests < score_tests
+
+
+def test_auditor_format_finding_comment_helper():
+    """Verify auditor.py format_finding_comment re-export produces clean diff comments."""
+    from app.subagents.auditor import format_finding_comment
+
+    finding = {
+        "id": "AUD-TEST-1",
+        "severity": "BLOCKER",
+        "title": "Unsafe Deserialization",
+        "file_path": "backend/app/main.py",
+        "line_start": 42,
+        "line_end": 42,
+        "description": "pickle.loads on untrusted payload",
+        "suggested_fix": "json.loads(payload)",
+    }
+    comment = format_finding_comment(finding)
+    assert "### ⛔ Must-Fix: Unsafe Deserialization" in comment
+    assert "**Location:** `backend/app/main.py#42`" in comment
+    assert "```diff" in comment
+    assert "+ json.loads" in comment
+

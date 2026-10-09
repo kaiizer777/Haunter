@@ -178,7 +178,7 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 _SEVERITY_ICON: dict[AuditSeverity, str] = {
     "BLOCKER": "⛔",
     "WARNING": "⚠️",
-    "NOTE": "ℹ️",
+    "NOTE": "💡",
 }
 
 
@@ -522,6 +522,69 @@ def format_confidence_score(confidence: int) -> str:
 _format_confidence_score = format_confidence_score
 
 
+def calculate_pr_confidence_score(
+    *,
+    confidence: int = 100,
+    must_fix: int = 0,
+    should_fix: int = 0,
+    n_notes: int = 0,
+    blast_radius: str = "",
+    has_tests: Optional[bool] = None,
+    **kwargs: Any,
+) -> int:
+    """Calculate the PR Confidence / Quality / Readiness score (integer 0-10).
+
+    Represents the executive confidence/quality score of the PR itself (e.g. 10/10
+    for clean/perfect PRs, scaled down based on blockers/should-fix/blast-radius/missing-tests),
+    giving maintainers an immediate sense of the PR's readiness.
+    """
+    clamped_conf = _clamp_confidence(confidence)
+    base = round(clamped_conf / 10.0)
+
+    deductions = 0
+    if must_fix > 0:
+        deductions += 4 * must_fix
+    if should_fix > 0:
+        deductions += 2 * should_fix
+    if n_notes > 0:
+        deductions += 1 if n_notes <= 2 else 2
+
+    if (must_fix > 0 or should_fix > 0) and any(
+        kw in blast_radius.lower() for kw in ("high", "broad", "cross-system")
+    ):
+        deductions += 1
+
+    if has_tests is False:
+        deductions += 1
+
+    score = max(1, min(10, base - deductions))
+    if must_fix > 0:
+        score = min(score, 6)
+    elif should_fix > 0:
+        score = min(score, 8)
+    elif n_notes > 0:
+        score = min(score, 9)
+
+    return score
+
+
+
+AUDIT_STATUS_LABELS: tuple[str, ...] = (
+    "✅ Great to Merge",
+    "👌 Looks Good to Merge",
+    "⚠️ Merge Blocked (Changes Needed)",
+    "⛔ Must Not Merge",
+)
+
+OLD_TO_NEW_STATUS_MAP: dict[str, str] = {
+    "✅ Ready to Merge": "✅ Great to Merge",
+    "👌 Looks Good (Minor Notes)": "👌 Looks Good to Merge",
+    "⚠️ Requires Changes": "⚠️ Merge Blocked (Changes Needed)",
+    "⚠️ Action Recommended": "⚠️ Merge Blocked (Changes Needed)",
+    "⛔ Do Not Merge": "⛔ Must Not Merge",
+}
+
+
 def build_status_label(
     must_fix: int = 0,
     should_fix: int = 0,
@@ -547,12 +610,13 @@ def build_status_label(
     warnings = max(0, int(effective_should_fix))
     conf = _clamp_confidence(confidence)
     if blockers > 0:
-        return "⛔ Do Not Merge"
+        return "⛔ Must Not Merge"
     if warnings > 0:
-        return "⚠️ Requires Changes"
+        return "⚠️ Merge Blocked (Changes Needed)"
     if has_notes or conf < INFORMATIONAL_CONFIDENCE_THRESHOLD:
-        return "👌 Looks Good (Minor Notes)"
-    return "✅ Ready to Merge"
+        return "👌 Looks Good to Merge"
+    return "✅ Great to Merge"
+
 
 
 def _is_test_path(path: str) -> bool:
@@ -666,6 +730,7 @@ def clean_pr_summary(
     Strips perspective verdicts, issue reports, bug descriptions, and clean/failed status boilerplate.
     """
     raw = str(summary or "").strip()
+    raw = re.sub(r"^[ \t]*>[ \t]*", "", raw, flags=re.MULTILINE)
     if not raw:
         return default_fallback
 
@@ -1058,6 +1123,8 @@ def _finding_heading(index: int, finding: Mapping[str, Any]) -> str:
     )
     title = _sanitize_heading_text(finding.get("title"), MAX_TITLE_CHARS)
     scope = f" [{perspective}]" if perspective else ""
+    if severity == "NOTE":
+        return f"#### {index}. 💡 [SUGGESTION]{scope} {title}"
     return f"#### {index}. {_SEVERITY_ICON[severity]} [{severity}]{scope} {title}"
 
 
@@ -1101,7 +1168,7 @@ def _append_finding(
     confidence_text = f"`{confidence}%`"
     if informational_only:
         confidence_text += (
-            " · ℹ️ informational (low confidence; human confirmation required)"
+            " · 💡 suggestion (low confidence; human confirmation required)"
         )
     lines.append(f"- **Confidence:** {confidence_text}")
     if informational_only:
@@ -1150,7 +1217,11 @@ def _render_audit_findings_table(
     ]
     for f in findings:
         sev = str(f.get("severity", "NOTE")).upper()
-        icon = _SEVERITY_ICON.get(sev, "ℹ️")
+        if sev == "NOTE":
+            sev_badge = "💡 [SUGGESTION]"
+        else:
+            icon = _SEVERITY_ICON.get(sev, "🔍")
+            sev_badge = f"{icon} [{sev}]"
         persp = _escape_table_cell(
             _sanitize_inline(f.get("perspective", "General"), 40).title()
         )
@@ -1170,7 +1241,7 @@ def _render_audit_findings_table(
         title_clean = _escape_table_cell(title)
 
         conf = _clamp_confidence(f.get("confidence"), overall_confidence)
-        rows.append(f"| {icon} [{sev}] | {persp} | {loc} | {title_clean} | `{conf}%` |")
+        rows.append(f"| {sev_badge} | {persp} | {loc} | {title_clean} | `{conf}%` |")
     return "\n".join(rows)
 
 
@@ -1189,12 +1260,14 @@ def format_audit_report(
     remediation_diff: str = "",
     publish_allowed: bool = True,
     analysis_metadata: str = "",
+    pr_score: Optional[int] = None,
 ) -> str:
     confidence_value = _clamp_confidence(confidence)
     policy_allowed = publish_allowed is True
     effective_allowed = (
         policy_allowed and confidence_value >= INFORMATIONAL_CONFIDENCE_THRESHOLD
     )
+    cleaned_diff = (remediation_diff or "").strip()
     bounded_findings = list(itertools.islice(findings, MAX_REPORT_FINDINGS + 1))
     try:
         total_findings = len(findings)
@@ -1226,12 +1299,7 @@ def format_audit_report(
         if str(f.get("severity", "")).upper() == "NOTE"
     )
 
-    valid_enums = {
-        "✅ Ready to Merge",
-        "👌 Looks Good (Minor Notes)",
-        "⚠️ Requires Changes",
-        "⛔ Do Not Merge",
-    }
+    valid_enums = set(AUDIT_STATUS_LABELS)
     has_notes = n_notes > 0 or total_findings > (n_must_fix + n_should_fix)
     computed_status = build_status_label(
         must_fix=n_must_fix,
@@ -1239,17 +1307,25 @@ def format_audit_report(
         confidence=confidence_value,
         has_notes=has_notes,
     )
-    if not status or status not in valid_enums:
+    raw_status = status
+    if raw_status in OLD_TO_NEW_STATUS_MAP:
+        raw_status = OLD_TO_NEW_STATUS_MAP[raw_status]
+
+    if not raw_status or raw_status not in valid_enums:
         status_label = computed_status
-    elif status == "✅ Ready to Merge" and (
+    elif raw_status == "✅ Great to Merge" and (
         n_must_fix > 0
         or n_should_fix > 0
         or has_notes
         or confidence_value < INFORMATIONAL_CONFIDENCE_THRESHOLD
     ):
         status_label = computed_status
+    elif n_must_fix > 0 and raw_status != "⛔ Must Not Merge":
+        status_label = computed_status
+    elif n_should_fix > 0 and raw_status in ("✅ Great to Merge", "👌 Looks Good to Merge"):
+        status_label = computed_status
     else:
-        status_label = status
+        status_label = raw_status
 
     summary_text = clean_pr_summary(pr_summary or executive_summary)
     summary_sanitized = _sanitize_inline(summary_text)
@@ -1272,7 +1348,17 @@ def format_audit_report(
         derived_badge, _, _ = derive_blast_radius(t_files, paths_omitted=has_omitted)
         blast_radius_label = derived_badge
 
-    conf_0_to_10 = format_confidence_score(confidence_value)
+    if pr_score is not None:
+        pr_score_val = max(0, min(10, int(pr_score)))
+    else:
+        pr_score_val = calculate_pr_confidence_score(
+            confidence=confidence_value,
+            must_fix=n_must_fix,
+            should_fix=n_should_fix,
+            n_notes=n_notes,
+            blast_radius=blast_radius_label,
+        )
+
     structural_analysis_rendered = _render_structural_analysis(
         analysis_metadata,
         blast_radius=blast_radius_label,
@@ -1283,14 +1369,15 @@ def format_audit_report(
     prefix = [
         "## 🛡️ Haunter Autonomous Audit Report",
         "",
-        "> [!NOTE]",
-        f"> **PR Summary:** {summary_sanitized}",
+        "### 📌 PR Summary",
+        "",
+        summary_sanitized,
         "",
         '<table width="100%">',
         "<thead>",
         "  <tr>",
         '    <th width="20%" align="left">Status</th>',
-        '    <th width="15%" align="center">Confidence</th>',
+        '    <th width="15%" align="center">PR Confidence</th>',
         '    <th width="25%" align="left">Blockers</th>',
         '    <th width="40%" align="left">Blast Radius</th>',
         "  </tr>",
@@ -1298,8 +1385,8 @@ def format_audit_report(
         "<tbody>",
         "  <tr>",
         f'    <td align="left">{status_label}</td>',
-        f'    <td align="center"><b>{conf_0_to_10}</b></td>',
-        f'    <td align="left">Must-Fix: <code>{n_must_fix}</code> · Should-Fix: <code>{n_should_fix}</code></td>',
+        f'    <td align="center"><b>{pr_score_val}/10</b></td>',
+        f'    <td align="left"><div>Must-Fix: <code>{n_must_fix}</code></div><div>Should-Fix: <code>{n_should_fix}</code></div></td>',
         f'    <td align="left">{blast_radius_html}</td>',
         "  </tr>",
         "</tbody>",
@@ -1309,77 +1396,75 @@ def format_audit_report(
         "",
         "---",
         "",
-        "### 🚨 Findings & Recommendations",
-        "",
-        "<details open>",
-        f"<summary>🔍 <b>Detailed Findings Breakdown</b> ({total_findings} items)</summary>",
-        "",
+        "### 💡 Findings Summary",
     ]
 
-    cleaned_diff = (remediation_diff or "").strip()
-    if cleaned_diff and "(no automated remediation" not in cleaned_diff:
-        if effective_allowed:
-            remediation_heading = "### 🛠️ Remediation Unified Diff"
-            remediation = (
-                "<details open>\n"
-                "<summary>🛠️ <b>Proposed Remediation Unified Diff</b> (Click to inspect)</summary>\n\n"
-                + _fenced_block(
-                    "diff",
-                    _sanitize_code(cleaned_diff, MAX_REMEDIATION_DIFF_CHARS),
-                )
-                + "\n</details>"
-            )
-        else:
-            remediation_heading = "### ℹ️ Informational Audit Result"
-            remediation = "Informational only — no automated remediation was generated."
-
-        suffix = [
-            "</details>",
-            "",
-            "---",
-            "",
-            remediation_heading,
-            remediation,
-            "",
-            "---",
-            "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*",
-        ]
-    else:
-        suffix = [
-            "</details>",
-            "",
-            "---",
-            "",
-            "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*",
-        ]
-
-    finding_budget = (
-        MAX_REPORT_CHARS - len("\n".join(prefix)) - len("\n".join(suffix)) - 100
-    )
-    rendered: list[str] = []
-    used = 0
     if total_findings == 0:
-        rendered.append(
-            "_No actionable findings. The audited diff looks clean from all perspectives._"
-            if effective_allowed
-            else "_No findings were published because the audit failed the publication policy._"
-        )
+        if not effective_allowed:
+            rendered = ["*No findings were published because the audit failed the publication policy.*"]
+        else:
+            rendered = ["*No blockers, warnings, or suggestions identified.*"]
+
+        if cleaned_diff and "(no automated remediation" not in cleaned_diff:
+            if effective_allowed:
+                rendered.extend([
+                    "",
+                    "---",
+                    "### 🛠️ Remediation Unified Diff",
+                    "<details open>\n"
+                    "<summary>🛠️ <b>Proposed Remediation Unified Diff</b> (Click to inspect)</summary>\n\n"
+                    + _fenced_block("diff", _sanitize_code(cleaned_diff, MAX_REMEDIATION_DIFF_CHARS))
+                    + "\n</details>",
+                ])
+            else:
+                rendered.extend([
+                    "",
+                    "---",
+                    "### ℹ️ Informational Audit Result",
+                    "Informational only — no automated remediation was generated.",
+                ])
     else:
-        for index, finding in enumerate(
-            bounded_findings[:MAX_REPORT_FINDINGS], start=1
-        ):
-            block = _render_finding(index, finding, confidence_value)
-            if used + len(block) > finding_budget:
-                break
-            rendered.append(block)
-            used += len(block) + 1
-        if not rendered:
-            rendered.append(
-                "_Findings omitted because the report safety budget was exhausted._"
+        rendered = ["*Detailed code diffs posted as separate review comments:*"]
+        for f in bounded_findings[:MAX_REPORT_FINDINGS]:
+            sev = str(f.get("severity", "NOTE")).upper()
+            if sev == "BLOCKER":
+                badge = "⛔ **Must-Fix:**"
+            elif sev == "WARNING":
+                badge = "⚠️ **Should-Fix:**"
+            else:
+                badge = "💡 **Suggestion:**"
+
+            title = _sanitize_heading_text(f.get("title", "Untitled finding"), 100)
+
+            file_path = _safe_path(f.get("file_path"))
+            line_start = _bounded_integer(f.get("line_start"), 1, 10_000_000, 1)
+            line_end = _bounded_integer(f.get("line_end"), line_start, 10_000_000, line_start)
+            loc = (
+                f"{file_path}#L{line_start}"
+                if line_start == line_end
+                else f"{file_path}#L{line_start}-L{line_end}"
             )
-    omitted_count = max(0, total_findings - len(rendered))
-    if omitted_count:
-        rendered.append(f"_{omitted_count} additional findings omitted._")
+            file_link = str(f.get("file_url") or f.get("url") or loc)
+
+            is_info = _finding_is_informational(f, confidence_value)
+            desc = str(f.get("description") or f.get("impact") or f.get("summary") or "")
+            if is_info:
+                short_summary = "Informational only — no automated remediation."
+            else:
+                short_summary = _sanitize_inline(desc, 140) if desc else "Review proposed remediation."
+
+            rendered.append(f"- {badge} [{title}]({file_link}) — {short_summary}")
+
+        omitted_count = max(0, total_findings - len(bounded_findings[:MAX_REPORT_FINDINGS]))
+        if omitted_count:
+            rendered.append(f"_{omitted_count} additional findings omitted._")
+
+    suffix = [
+        "",
+        "---",
+        "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*",
+    ]
+
     report = "\n".join([*prefix, *rendered, *suffix]).rstrip() + "\n"
     return _bound_report(redact_sensitive_text(report))
 

@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import LLMClient
 from app.llm.prompts.audit_prompts import (
+    AUDIT_STATUS_LABELS,
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
     MAX_AST_CONTEXT_CHARS,
     MAX_CATEGORY_CHARS,
@@ -46,6 +47,7 @@ from app.llm.prompts.audit_prompts import (
     PerspectiveName,
     build_perspective_messages,
     build_status_label,
+    calculate_pr_confidence_score,
     format_audit_report,
     redact_sensitive_text,
     redact_sensitive_text_preserving_lines,
@@ -74,6 +76,17 @@ MAX_LINE_NUMBER = 10_000_000
 MAX_GROUNDING_SPAN = 200
 MAX_EXECUTIVE_SUMMARY_CHARS = 1_200
 FALLBACK_ENGINE_LABEL = "haunter-auditor"
+AUDIT_STATUS_LABELS = AUDIT_STATUS_LABELS
+
+
+class AuditStatus(StrEnum):
+    GREAT_TO_MERGE = "✅ Great to Merge"
+    LOOKS_GOOD_TO_MERGE = "👌 Looks Good to Merge"
+    MERGE_BLOCKED = "⚠️ Merge Blocked (Changes Needed)"
+    MUST_NOT_MERGE = "⛔ Must Not Merge"
+
+
+VALID_AUDIT_STATUSES: frozenset[str] = frozenset(AuditStatus)
 
 AuditSeverity = Literal["BLOCKER", "WARNING", "NOTE"]
 _SEVERITY_RANK: dict[AuditSeverity, int] = {"BLOCKER": 0, "WARNING": 1, "NOTE": 2}
@@ -1737,6 +1750,7 @@ async def run_audit(
             remediation_diff=empty.remediation_diff,
             analysis_metadata=empty.analysis_metadata,
             publish_allowed=empty.publish_allowed,
+            pr_score=10,
         )
         return AuditResult(
             audit_id=empty.audit_id,
@@ -1890,6 +1904,12 @@ async def run_audit(
         latency_ms=int((time.monotonic() - started) * 1000),
         publish_allowed=publish_allowed,
     )
+    pr_score = calculate_pr_confidence_score(
+        confidence=result.confidence,
+        must_fix=counts.get("BLOCKER", 0),
+        should_fix=counts.get("WARNING", 0),
+        n_notes=counts.get("NOTE", 0),
+    )
     report = format_audit_report(
         pr_summary=result.executive_summary,
         executive_summary=result.executive_summary,
@@ -1903,6 +1923,7 @@ async def run_audit(
         remediation_diff=result.remediation_diff,
         analysis_metadata=result.analysis_metadata,
         publish_allowed=result.publish_allowed,
+        pr_score=pr_score,
     )
     result = AuditResult(
         audit_id=result.audit_id,
@@ -1935,3 +1956,11 @@ async def run_audit(
         result.latency_ms,
     )
     return result
+
+
+def format_finding_comment(finding: Any) -> str:
+    """Format an individual review comment for an audit finding with code diff."""
+    from app.github.audit_publisher import format_finding_comment as _fmt
+
+    return _fmt(finding)
+

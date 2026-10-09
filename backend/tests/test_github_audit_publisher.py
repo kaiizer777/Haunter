@@ -26,8 +26,10 @@ from app import github_client
 from app.github.audit_publisher import (
     PublishResult,
     build_inline_review_comments,
+    format_finding_comment_body,
     format_inline_comment_body,
     publish_audit_review,
+    publish_finding_comments,
     validate_finding_coordinates,
 )
 from app.github_client import (
@@ -41,6 +43,7 @@ from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
     MAX_GITHUB_COMMENT_CHARS,
     _render_structural_analysis,
+    build_status_label,
     derive_blast_radius,
     format_audit_report,
 )
@@ -944,20 +947,22 @@ def test_audit_report_markdown_visual_hierarchy_and_tables():
 
     report = result.report_markdown
 
-    # 1. 3-Tier Sequence: Tier 1 PR Summary Callout
+    # 1. 3-Tier Sequence: Tier 1 PR Summary (Clean, borderless, NO blockquote or alert box)
     assert "## 🛡️ Haunter Autonomous Audit Report" in report
-    assert "> [!NOTE]" in report
-    assert "**PR Summary:**" in report
+    assert "### 📌 PR Summary" in report
+    assert "> [!NOTE]" not in report
+    assert "> **PR Summary:**" not in report
 
-    # 2. Tier 2: Clean Overview Table (Status, Confidence 0-10, Blockers, Blast Radius - 100% full-width)
+    # 2. Tier 2: Clean Overview Table (Status, PR Confidence 0-10, Blockers, Blast Radius - 100% full-width)
     assert '<table width="100%">' in report
     assert "Status" in report
-    assert "Confidence" in report
+    assert "PR Confidence" in report
     assert "Blockers" in report
     assert "Blast Radius" in report
-    assert "<b>10/10</b>" in report
-    assert "Must-Fix: <code>1</code> · Should-Fix: <code>0</code>" in report
-    assert "⛔ Do Not Merge" in report
+    assert "<b>6/10</b>" in report
+    assert "<div>Must-Fix: <code>1</code></div>" in report
+    assert "<div>Should-Fix: <code>0</code></div>" in report
+    assert "⛔ Must Not Merge" in report
 
     # 3. Tier 3: Structural & Blast Radius Analysis
     assert "### 🔬 Structural & Blast Radius Analysis" in report
@@ -971,26 +976,21 @@ def test_audit_report_markdown_visual_hierarchy_and_tables():
     structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
     assert -1 < summary_pos < overview_pos < structural_pos
 
-    # 4. Redundant Findings Overview table removed completely; flows straight to Detailed Findings Breakdown
+    # 4. Findings Summary points to separate comments with code diffs
     assert "### 📋 Findings Overview" not in report
-    assert "### 🚨 Findings & Recommendations" in report
-    assert "[BLOCKER]" in report
-    assert "`backend/app/auth.py#L84`" in report
+    assert "### 💡 Findings Summary" in report
+    assert "*Detailed code diffs posted as separate review comments:*" in report
+    assert "⛔ **Must-Fix:**" in report
+    assert "backend/app/auth.py#L84" in report
 
-    # 5. Collapsible Deep-Dives
-    assert "<details open>" in report
-    assert "<b>Detailed Findings Breakdown</b>" in report
-    assert "</details>" in report
+    # 5. Main report does NOT dump giant diffs when findings are present
+    assert "```diff" not in report
 
-    # 6. Collapsible Remediation Diff
-    assert "<b>Proposed Remediation Unified Diff</b>" in report
-    assert "```diff" in report
-
-    # 7. Strict Negative Assertion: Zero Model Exposure
+    # 6. Strict Negative Assertion: Zero Model Exposure
     for forbidden_model in ("space-bunny-free", "nemotron", "gpt-4o", "claude", "test-engine"):
         assert forbidden_model not in report
 
-    # 8. Polished Footer
+    # 7. Polished Footer
     assert "Generated autonomously by Haunter Guardian Mode" in report
 
 
@@ -1200,7 +1200,7 @@ def test_audit_report_renders_typescript_ast_coverage_caveat():
 
 
 def test_format_audit_report_reconciles_status_with_notes():
-    """Verify format_audit_report reconciles 'Ready to Merge' to 'Looks Good (Minor Notes)' when notes exist."""
+    """Verify format_audit_report reconciles 'Ready to Merge' to 'Looks Good to Merge' when notes exist."""
     note_finding = _make_finding(
         id="AUD-NOTE-01",
         severity="NOTE",
@@ -1211,21 +1211,131 @@ def test_format_audit_report_reconciles_status_with_notes():
         pr_summary="Refactor with notes.",
         findings=[note_finding.to_report_dict()],
         confidence=90,
-        status="✅ Ready to Merge",
+        status="✅ Great to Merge",
     )
-    assert "👌 Looks Good (Minor Notes)" in report
-    assert "✅ Ready to Merge" not in report
+    assert "👌 Looks Good to Merge" in report
+    assert "✅ Great to Merge" not in report
 
 
 def test_build_status_label_legacy_kwargs():
     """Verify build_status_label supports legacy and aliased keyword arguments."""
     from app.llm.prompts.audit_prompts import build_status_label
 
-    assert build_status_label(n_blockers=1, n_warnings=0) == "⛔ Do Not Merge"
-    assert build_status_label(n_blockers=0, n_warnings=2) == "⚠️ Requires Changes"
-    assert build_status_label(must_fix_count=1) == "⛔ Do Not Merge"
-    assert build_status_label(should_fix_count=1) == "⚠️ Requires Changes"
-    assert build_status_label(n_blockers=0, n_warnings=0, confidence=90, has_notes=True) == "👌 Looks Good (Minor Notes)"
+    assert build_status_label(n_blockers=1, n_warnings=0) == "⛔ Must Not Merge"
+    assert build_status_label(n_blockers=0, n_warnings=2) == "⚠️ Merge Blocked (Changes Needed)"
+    assert build_status_label(must_fix_count=1) == "⛔ Must Not Merge"
+    assert build_status_label(should_fix_count=1) == "⚠️ Merge Blocked (Changes Needed)"
+    assert build_status_label(n_blockers=0, n_warnings=0, confidence=90, has_notes=True) == "👌 Looks Good to Merge"
+    assert build_status_label(n_blockers=0, n_warnings=0, confidence=90, has_notes=False) == "✅ Great to Merge"
+
+
+def test_format_finding_comment_body_structure():
+    """Verify format_finding_comment_body formats title, location, explanation, and diff correctly."""
+    finding_blocker = _make_finding(
+        id="AUD-B1",
+        severity="BLOCKER",
+        file_path="backend/app/auth.py",
+        line_start=84,
+        line_end=84,
+        title="SQL Injection Vector",
+        description="Untrusted user input interpolated in query.",
+        suggested_fix="db.execute(select(User).where(User.id == user_id))",
+    )
+    body = format_finding_comment_body(finding_blocker)
+    assert "### ⛔ Must-Fix: SQL Injection Vector" in body
+    assert "**Location:** `backend/app/auth.py#84`" in body
+    assert "**What's Happening:**" in body
+    assert "Untrusted user input interpolated in query." in body
+    assert "**Actionable Remediation Code Diff:**" in body
+    assert "```diff" in body
+    assert "--- a/backend/app/auth.py" in body
+    assert "+++ b/backend/app/auth.py" in body
+    assert "+ db.execute" in body
+    assert "AUD-B1" in body
+
+    finding_suggestion = _make_finding(
+        id="AUD-S1",
+        severity="NOTE",
+        file_path="frontend/src/Logo.tsx",
+        line_start=12,
+        line_end=15,
+        title="Reduce Redundant Allocations",
+        description="Array.from in render creates per-render garbage.",
+        suggested_fix="const staticList = Array.from({length: 10});",
+    )
+    body_s = format_finding_comment_body(finding_suggestion)
+    assert "### 💡 Suggestion: Reduce Redundant Allocations" in body_s
+    assert "**Location:** `frontend/src/Logo.tsx#12-15`" in body_s
+
+    from app.github.audit_publisher import format_finding_comment
+    assert format_finding_comment(finding_blocker) == body
+    assert format_finding_comment(finding_suggestion) == body_s
+
+
+@pytest.mark.asyncio
+async def test_publish_finding_comments_calls_github_post_pr_comment():
+    """Verify publish_finding_comments publishes separate comments for findings."""
+    result = _make_audit_result(
+        confidence=90,
+        publish_allowed=True,
+        findings=[
+            _make_finding(id="AUD-1", confidence=90, line_start=84, line_end=84),
+            _make_finding(id="AUD-LOW", confidence=50, line_start=85, line_end=85),
+        ],
+    )
+    mock_post = AsyncMock(return_value={"id": 4001, "html_url": "https://github.com/test#issuecomment-4001"})
+    with patch("app.github.audit_publisher.github_client.post_pr_comment", mock_post):
+        resps = await publish_finding_comments(
+            result=result,
+            owner="octocat",
+            repo="hello-world",
+            pr_number=42,
+            token="ghs_test123",
+            min_confidence=75,
+        )
+
+    assert len(resps) == 1
+    assert resps[0]["id"] == 4001
+    mock_post.assert_awaited_once()
+    kwargs = mock_post.call_args.kwargs
+    assert kwargs["owner"] == "octocat"
+    assert kwargs["repo"] == "hello-world"
+    assert kwargs["pr_number"] == 42
+    assert "###" in kwargs["body"]
+    assert "AUD-1" in kwargs["body"]
+
+
+@pytest.mark.asyncio
+async def test_publish_audit_review_with_post_finding_comments():
+    """Verify publish_audit_review with post_finding_comments=True publishes finding comments."""
+    result = _make_audit_result(
+        confidence=90,
+        publish_allowed=True,
+        findings=[_make_finding(id="AUD-1", confidence=90, line_start=84, line_end=84)],
+    )
+    mock_review = AsyncMock(return_value={"id": 1005, "state": "COMMENTED"})
+    mock_finding_pub = AsyncMock(return_value=[{"id": 5001}])
+
+    with (
+        patch("app.github.audit_publisher.github_client.create_pr_review", mock_review),
+        patch("app.github.audit_publisher.publish_finding_comments", mock_finding_pub),
+    ):
+        outcome = await publish_audit_review(
+            result=result,
+            owner="octocat",
+            repo="hello-world",
+            pr_number=42,
+            head_sha="a" * 40,
+            diff_text=SAMPLE_DIFF,
+            token="ghs_test123",
+            post_finding_comments=True,
+        )
+
+    assert outcome.published is True
+    assert len(outcome.finding_comments) == 1
+    assert outcome.finding_comments[0]["id"] == 5001
+    mock_finding_pub.assert_awaited_once()
+
 
 
 def test_render_structural_analysis_strict_metadata_allowlist_prevents_code_leaks():
