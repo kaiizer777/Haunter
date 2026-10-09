@@ -1,9 +1,5 @@
 <div align="center">
 
-<br/>
-
-<img src="https://img.shields.io/badge/-%F0%9F%91%BB%20Haunter-1a1a2e?style=for-the-badge&labelColor=1a1a2e" alt="Haunter" height="42"/>
-
 <h3>Your engineering team's autonomous AI agent.<br/>It reviews code, heals CI, and ships fixes — before you've opened Slack.</h3>
 
 <br/>
@@ -22,22 +18,6 @@
 </div>
 
 ---
-
-<br/>
-
-<details>
-<summary><strong>📋 &nbsp;Table of Contents</strong></summary>
-
-<br/>
-
-- [PR Review & Fix](#-pr-review--fix)
-- [Cloud Coding Sessions](#-cloud-coding-sessions)
-- [Full Audit Trail](#-full-audit-trail)
-- [License](#license)
-
-</details>
-
-<br/>
 
 ---
 
@@ -74,12 +54,7 @@ CI fails  →  Root cause traced  →  Fix generated  →  Sandboxed in real CI 
 
 <br/>
 
-<details>
-<summary><strong>Governance presets</strong></summary>
-
-<br/>
-
-Configure per repository how aggressively Haunter acts:
+**Governance presets** — configure per repository how aggressively Haunter acts:
 
 | Preset | Behaviour |
 |:---|:---|
@@ -88,8 +63,6 @@ Configure per repository how aggressively Haunter acts:
 | `standard` | Reviews + fixes for high-confidence findings only |
 | `audit_only` | Read-only audits; never opens branches or PRs |
 | `custom` | Full control over confidence thresholds and spend caps |
-
-</details>
 
 <br/>
 
