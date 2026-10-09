@@ -942,32 +942,45 @@ def test_audit_report_markdown_visual_hierarchy_and_tables():
 
     report = result.report_markdown
 
-    # 1. Executive Summary Header with status badges and table
+    # 1. 3-Tier Sequence: Tier 1 PR Summary Callout
     assert "## 🛡️ Haunter Autonomous Audit Report" in report
-    assert "| Status | Confidence Score | Audit Target | Engine |" in report
-    assert "| :--- | :--- | :--- | :--- |" in report
-    assert "`95%`" in report
-
-    # 2. Executive Summary Callout
-    assert "### 🔍 Executive Summary" in report
     assert "> [!NOTE]" in report
+    assert "**PR Summary:**" in report
 
-    # 3. Scannable Findings Table
+    # 2. Tier 2: Clean Overview Table (Status, Confidence 0-10, Blockers, Blast Radius)
+    assert "| Status | Confidence | Blockers | Blast Radius |" in report
+    assert "| :--- | :---: | :--- | :--- |" in report
+    assert "**10/10**" in report
+    assert "Must-Fix: `1` · Should-Fix: `0`" in report
+    assert "⛔ Do Not Merge" in report
+
+    # 3. Tier 3: Structural & Blast Radius Analysis
+    assert "### 🔬 Structural & Blast Radius Analysis" in report
+    assert "- **Impact Surface:**" in report
+    assert "- **Files Modified:**" in report
+    assert "- **Touched Components:**" in report
+    assert "- **Risk Assessment:**" in report
+
+    # 4. Scannable Findings Table & Deep Dives
     assert "### 📋 Findings Overview" in report
     assert "| Severity | Perspective | File & Line | Summary | Confidence |" in report
     assert "[BLOCKER]" in report
     assert "`backend/app/auth.py#L84`" in report
 
-    # 4. Collapsible Deep-Dives
+    # 5. Collapsible Deep-Dives
     assert "<details open>" in report
     assert "<b>Detailed Findings Breakdown</b>" in report
     assert "</details>" in report
 
-    # 5. Collapsible Remediation Diff
+    # 6. Collapsible Remediation Diff
     assert "<b>Proposed Remediation Unified Diff</b>" in report
     assert "```diff" in report
 
-    # 6. Polished Footer
+    # 7. Strict Negative Assertion: Zero Model Exposure
+    for forbidden_model in ("space-bunny-free", "nemotron", "gpt-4o", "claude", "test-engine"):
+        assert forbidden_model not in report
+
+    # 8. Polished Footer
     assert "Generated autonomously by Haunter Guardian Mode" in report
 
 

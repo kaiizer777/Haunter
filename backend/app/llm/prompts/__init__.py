@@ -8,7 +8,9 @@ from app.llm.prompts.audit_prompts import (
     PERSPECTIVES,
     build_perspective_messages,
     build_status_label,
+    derive_blast_radius,
     format_audit_report,
+    format_confidence_score,
 )
 
 __all__ = [
@@ -17,5 +19,8 @@ __all__ = [
     "PERSPECTIVES",
     "build_perspective_messages",
     "build_status_label",
+    "derive_blast_radius",
     "format_audit_report",
+    "format_confidence_score",
 ]
+

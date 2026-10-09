@@ -513,18 +513,222 @@ def build_perspective_messages(
     ]
 
 
-def build_status_label(n_blockers: int, n_warnings: int, confidence: int) -> str:
-    blockers = max(0, int(n_blockers))
-    warnings = max(0, int(n_warnings))
-    if blockers:
-        status = f"🚫 Blockers Found ({blockers} Blockers, {warnings} Warnings)"
-    elif warnings:
-        status = f"⚠️ Action Recommended ({warnings} Warnings, {blockers} Blockers)"
+def format_confidence_score(confidence: int) -> str:
+    clamped = _clamp_confidence(confidence)
+    score = max(0, min(10, round(clamped / 10.0)))
+    return f"{score}/10"
+
+
+_format_confidence_score = format_confidence_score
+
+
+def build_status_label(
+    must_fix: int = 0,
+    should_fix: int = 0,
+    confidence: int = 100,
+    has_notes: bool = False,
+) -> str:
+    blockers = max(0, int(must_fix))
+    warnings = max(0, int(should_fix))
+    conf = _clamp_confidence(confidence)
+    if blockers > 0:
+        return "⛔ Do Not Merge"
+    if warnings > 0:
+        return "⚠️ Requires Changes"
+    if has_notes or conf < INFORMATIONAL_CONFIDENCE_THRESHOLD:
+        return "👌 Looks Good (Minor Notes)"
+    return "✅ Ready to Merge"
+
+
+def derive_blast_radius(paths: Sequence[str]) -> tuple[str, str, str]:
+    cleaned_paths = [p for p in paths if p and p != "unknown"]
+    if not cleaned_paths:
+        return (
+            "**Isolated** (No changes)",
+            "None / Clean",
+            "Zero risk — no source code modifications detected.",
+        )
+    is_docs = all(
+        p.lower().endswith((".md", ".rst", ".txt", ".markdown"))
+        or p.lower().startswith("docs/")
+        or p.lower() in ("license", "readme", "notice")
+        for p in cleaned_paths
+    )
+    if is_docs:
+        return (
+            "**Isolated** (Documentation only)",
+            "Isolated / Documentation",
+            "Low risk — purely presentational changes with zero runtime or logic impact.",
+        )
+    is_tests = all(
+        "test" in p.lower() or p.lower().startswith("tests/")
+        for p in cleaned_paths
+    )
+    if is_tests:
+        return (
+            "**Isolated** (Test suite only)",
+            "Isolated / Test Suite",
+            "Low risk — test additions or updates with zero production runtime impact.",
+        )
+    has_auth_or_db = any(
+        any(
+            kw in p.lower()
+            for kw in (
+                "auth",
+                "db",
+                "database",
+                "model",
+                "alembic",
+                "migration",
+                "secret",
+                "permission",
+                "security",
+                "token",
+            )
+        )
+        for p in cleaned_paths
+    )
+    if has_auth_or_db:
+        return (
+            "**High** (Auth & Data Layer)",
+            "Core / Auth & Database",
+            "Elevated risk — touches sensitive authentication, permissions, or database schemas.",
+        )
+    has_api = any(
+        any(
+            kw in p.lower()
+            for kw in (
+                "router",
+                "webhook",
+                "api",
+                "endpoint",
+                "main.py",
+                "server",
+            )
+        )
+        for p in cleaned_paths
+    )
+    if has_api:
+        return (
+            "**Moderate** (API & Endpoints)",
+            "API / Endpoints & Schemas",
+            "Moderate risk — modifies external request handling or public contract surfaces.",
+        )
+    is_frontend = all(
+        p.lower().startswith("frontend/")
+        or p.lower().endswith(
+            (".tsx", ".jsx", ".css", ".scss", ".html", ".svg", ".json")
+        )
+        for p in cleaned_paths
+    )
+    if is_frontend:
+        return (
+            "**Moderate** (Frontend UI)",
+            "Frontend / UI Components",
+            "Low to moderate risk — client-side presentation and interaction logic.",
+        )
+    if len(cleaned_paths) > 5:
+        return (
+            "**Broad** (Cross-system)",
+            "Cross-System / Multi-Module",
+            "Higher blast radius — multi-module changes requiring comprehensive regression checks.",
+        )
+    return (
+        "**Moderate** (Application Logic)",
+        "Application Logic",
+        "Standard risk — modifications to core application code.",
+    )
+
+
+_RAW_AST_NOISE_PATTERNS = [
+    re.compile(r"No complete bounded Python source was available for parser-backed AST analysis\.?", re.IGNORECASE),
+    re.compile(r"Caller-supplied parser context:.*", re.DOTALL | re.IGNORECASE),
+    re.compile(r"Parser-backed Python AST context:.*", re.DOTALL | re.IGNORECASE),
+]
+
+
+def _render_structural_analysis(
+    metadata: str = "",
+    blast_radius: str = "",
+    stats: Optional[dict[str, Any]] = None,
+) -> str:
+    raw_meta = str(metadata or "")
+    for pat in _RAW_AST_NOISE_PATTERNS:
+        raw_meta = pat.sub("", raw_meta)
+    raw_meta = raw_meta.strip()
+
+    file_count = 0
+    added = 0
+    removed = 0
+    touched_files: list[str] = []
+
+    if stats:
+        file_count = stats.get("file_count", 0)
+        added = stats.get("added_lines", 0)
+        removed = stats.get("removed_lines", 0)
+        touched_files = list(stats.get("valid_paths", []))
     else:
-        status = "✅ Looks Good (0 Blockers, 0 Warnings)"
-    if _clamp_confidence(confidence) < INFORMATIONAL_CONFIDENCE_THRESHOLD:
-        status += " · ℹ️ Informational Only (low confidence)"
-    return status
+        stat_match = re.search(
+            r"Files changed:\s*(\d+);?\s*accepted hunks:\s*\d+;\s*\+(\d+)\s*added\s*/\s*-(\d+)\s*removed lines",
+            raw_meta,
+        )
+        if stat_match:
+            file_count = int(stat_match.group(1))
+            added = int(stat_match.group(2))
+            removed = int(stat_match.group(3))
+        else:
+            simple_fc = re.search(r"Files changed:\s*(\d+)", raw_meta)
+            if simple_fc:
+                file_count = int(simple_fc.group(1))
+
+        touched_match = re.search(r"Touched files:\s*\n((?:-\s*.+\n?)+)", raw_meta)
+        if touched_match:
+            for line in touched_match.group(1).splitlines():
+                line = line.strip()
+                if line.startswith("- "):
+                    touched_files.append(line[2:].strip())
+
+    derived_badge, impact_surface, risk_assessment = derive_blast_radius(touched_files)
+
+    file_str = f"{file_count} file" if file_count == 1 else f"{file_count} files"
+    if touched_files:
+        if len(touched_files) <= 5:
+            components_str = ", ".join(f"`{_safe_path(f)}`" for f in touched_files)
+        else:
+            components_str = ", ".join(f"`{_safe_path(f)}`" for f in touched_files[:5]) + f" and {len(touched_files) - 5} more"
+    else:
+        components_str = "None" if file_count == 0 else f"`{file_str}`"
+
+    lines = [
+        "### 🔬 Structural & Blast Radius Analysis",
+        f"- **Impact Surface:** {impact_surface}",
+        f"- **Files Modified:** `{file_str}` (+{added} / -{removed} lines)",
+        f"- **Touched Components:** {components_str}",
+        f"- **Risk Assessment:** {risk_assessment}",
+    ]
+
+    # Extract non-noise extra metadata lines if present
+    stripped_meta = raw_meta
+    if stat_match:
+        stripped_meta = stripped_meta.replace(stat_match.group(0), "")
+    else:
+        stripped_meta = re.sub(r"^Files changed:\s*\d+;?", "", stripped_meta, flags=re.MULTILINE)
+
+    if touched_match:
+        stripped_meta = stripped_meta.replace(touched_match.group(0), "")
+
+    extra_lines = [
+        _escape_markdown(_sanitize_inline(line, 500, escape_markdown=False), escape_backticks=False)
+        for line in stripped_meta.splitlines()
+        if line.strip()
+        and not line.strip().startswith("Touched files:")
+        and not line.strip().startswith("- ")
+        and not any(pat.search(line) for pat in _RAW_AST_NOISE_PATTERNS)
+    ]
+    for ex in extra_lines[:3]:
+        lines.append(f"- **Metadata Note:** {ex}")
+
+    return "\n".join(lines)
 
 
 def _finding_heading(index: int, finding: Mapping[str, Any]) -> str:
@@ -543,16 +747,6 @@ def _finding_is_informational(
     finding: Mapping[str, Any],
     overall_confidence: int,
 ) -> bool:
-    """Decide a finding's informational status instead of trusting a flag.
-
-    `informational_only` arrives on the mapping from a previous policy version
-    and from every caller that builds one by hand. Trusting it means the
-    decision that decides whether a remediation is shown to a human is made by
-    whoever assembled the dictionary, and a low-confidence finding can be
-    presented as an actionable fix by a single stale or optimistic flag. The
-    status is therefore recomputed here from the finding's own confidence and
-    the report's confidence, and the flag is ignored entirely.
-    """
     finding_confidence = _clamp_confidence(
         finding.get("confidence"), overall_confidence
     )
@@ -630,7 +824,6 @@ def _render_audit_findings_table(
     findings: Sequence[Mapping[str, Any]],
     overall_confidence: int,
 ) -> str:
-    """Render a concise markdown table summarizing audit findings."""
     if not findings:
         return ""
     rows = [
@@ -665,30 +858,24 @@ def _render_audit_findings_table(
 
 def format_audit_report(
     *,
-    executive_summary: str,
-    findings: Sequence[Mapping[str, Any]],
-    confidence: int,
-    status: str,
-    audit_target: str,
-    engine: str,
-    remediation_diff: str,
-    publish_allowed: bool,
+    pr_summary: Optional[str] = None,
+    executive_summary: Optional[str] = None,
+    findings: Sequence[Mapping[str, Any]] = (),
+    confidence: int = 100,
+    status: Optional[str] = None,
+    blast_radius: Optional[str] = None,
+    audit_target: Optional[str] = None,
+    engine: Optional[str] = None,
+    must_fix_count: Optional[int] = None,
+    should_fix_count: Optional[int] = None,
+    remediation_diff: str = "",
+    publish_allowed: bool = True,
     analysis_metadata: str = "",
 ) -> str:
     confidence_value = _clamp_confidence(confidence)
     policy_allowed = publish_allowed is True
-    # The one place publication is decided. `publish_allowed` is a caller's
-    # claim; the confidence score is the evidence. Taking the flag alone let a
-    # caller render a remediation unified diff under a report that its own
-    # header called informational, so the two are now combined here and every
-    # branch below reads the combined value.
     effective_allowed = (
         policy_allowed and confidence_value >= INFORMATIONAL_CONFIDENCE_THRESHOLD
-    )
-    publication_policy = (
-        "Allowed by the audit confidence policy."
-        if effective_allowed
-        else "Suppressed — informational or low-confidence audits are non-actionable."
     )
     bounded_findings = list(itertools.islice(findings, MAX_REPORT_FINDINGS + 1))
     try:
@@ -696,38 +883,78 @@ def format_audit_report(
     except TypeError:
         total_findings = len(bounded_findings)
 
-    status_sanitized = _escape_markdown(
-        _sanitize_inline(status, MAX_STATUS_CHARS, escape_markdown=False),
-        escape_backticks=False,
+    # Blocker and Warning counts
+    if must_fix_count is None:
+        n_must_fix = sum(
+            1
+            for f in findings
+            if str(f.get("severity", "")).upper() == "BLOCKER"
+        )
+    else:
+        n_must_fix = max(0, int(must_fix_count))
+
+    if should_fix_count is None:
+        n_should_fix = sum(
+            1
+            for f in findings
+            if str(f.get("severity", "")).upper() == "WARNING"
+        )
+    else:
+        n_should_fix = max(0, int(should_fix_count))
+
+    n_notes = sum(
+        1
+        for f in findings
+        if str(f.get("severity", "")).upper() == "NOTE"
     )
-    audit_target_sanitized = _escape_markdown(
-        _sanitize_inline(audit_target, MAX_TARGET_CHARS, escape_markdown=False),
-        escape_backticks=False,
-    )
-    engine_sanitized = _safe_inline_code(engine, MAX_ENGINE_CHARS, "unknown")
-    pub_policy_sanitized = _escape_markdown(
-        _sanitize_inline(publication_policy, 200, escape_markdown=False),
-        escape_backticks=False,
+
+    valid_enums = {
+        "✅ Ready to Merge",
+        "👌 Looks Good (Minor Notes)",
+        "⚠️ Requires Changes",
+        "⛔ Do Not Merge",
+    }
+    if status and status in valid_enums:
+        status_label = status
+    else:
+        status_label = build_status_label(
+            must_fix=n_must_fix,
+            should_fix=n_should_fix,
+            confidence=confidence_value,
+            has_notes=(n_notes > 0 or total_findings > (n_must_fix + n_should_fix)),
+        )
+
+    summary_text = pr_summary or executive_summary or "The audited diff was evaluated across all perspectives."
+    summary_sanitized = _sanitize_inline(summary_text)
+
+    # Blast radius resolution
+    if blast_radius:
+        blast_radius_label = blast_radius
+    else:
+        derived_badge, _, _ = derive_blast_radius([])
+        touched_match = re.search(r"Touched files:\s*\n((?:-\s*.+\n?)+)", analysis_metadata or "")
+        if touched_match:
+            t_files = [l.strip()[2:].strip() for l in touched_match.group(1).splitlines() if l.strip().startswith("- ")]
+            derived_badge, _, _ = derive_blast_radius(t_files)
+        blast_radius_label = derived_badge
+
+    conf_0_to_10 = format_confidence_score(confidence_value)
+    structural_analysis_rendered = _render_structural_analysis(
+        analysis_metadata,
+        blast_radius=blast_radius_label,
     )
 
     prefix = [
         "## 🛡️ Haunter Autonomous Audit Report",
         "",
-        "| Status | Confidence Score | Audit Target | Engine |",
-        "| :--- | :--- | :--- | :--- |",
-        f"| {_escape_table_cell(status_sanitized)} | `{confidence_value}%` | {_escape_table_cell(audit_target_sanitized)} | `{engine_sanitized}` |",
+        "> [!NOTE]",
+        f"> **PR Summary:** {summary_sanitized}",
         "",
-        f"**Status:** {status_sanitized}  ",
-        f"**Confidence Score:** `{confidence_value}%`  ",
-        f"**Publication Policy:** {pub_policy_sanitized}  ",
-        f"**Audit Target:** {audit_target_sanitized}  ",
-        f"**Engine:** `{engine_sanitized}`",
-        f"**Structural Analysis:** {_escape_markdown(_sanitize_inline(analysis_metadata or 'No analysis metadata was supplied.', 2_000, escape_markdown=False), escape_backticks=False)}",
+        "| Status | Confidence | Blockers | Blast Radius |",
+        "| :--- | :---: | :--- | :--- |",
+        f"| {status_label} | **{conf_0_to_10}** | Must-Fix: `{n_must_fix}` · Should-Fix: `{n_should_fix}` | {blast_radius_label} |",
         "",
-        "---",
-        "",
-        "### 🔍 Executive Summary",
-        f"> [!NOTE]\n> {_sanitize_inline(executive_summary)}",
+        structural_analysis_rendered,
         "",
     ]
 
@@ -754,32 +981,42 @@ def format_audit_report(
         "",
     ])
 
-    if effective_allowed:
-        remediation_heading = "### 🛠️ Remediation Unified Diff"
-        remediation = (
-            "<details open>\n"
-            "<summary>🛠️ <b>Proposed Remediation Unified Diff</b> (Click to inspect)</summary>\n\n"
-            + _fenced_block(
-                "diff",
-                _sanitize_code(remediation_diff, MAX_REMEDIATION_DIFF_CHARS),
+    if remediation_diff and remediation_diff.strip():
+        if effective_allowed and "(no automated remediation" not in remediation_diff:
+            remediation_heading = "### 🛠️ Remediation Unified Diff"
+            remediation = (
+                "<details open>\n"
+                "<summary>🛠️ <b>Proposed Remediation Unified Diff</b> (Click to inspect)</summary>\n\n"
+                + _fenced_block(
+                    "diff",
+                    _sanitize_code(remediation_diff, MAX_REMEDIATION_DIFF_CHARS),
+                )
+                + "\n</details>"
             )
-            + "\n</details>"
-        )
-    else:
-        remediation_heading = "### ℹ️ Informational Audit Result"
-        remediation = "Informational only — no automated remediation was generated."
+        else:
+            remediation_heading = "### ℹ️ Informational Audit Result"
+            remediation = "Informational only — no automated remediation was generated."
 
-    suffix = [
-        "</details>",
-        "",
-        "---",
-        "",
-        remediation_heading,
-        remediation,
-        "",
-        "---",
-        "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*",
-    ]
+        suffix = [
+            "</details>",
+            "",
+            "---",
+            "",
+            remediation_heading,
+            remediation,
+            "",
+            "---",
+            "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*",
+        ]
+    else:
+        suffix = [
+            "</details>",
+            "",
+            "---",
+            "",
+            "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*",
+        ]
+
     finding_budget = (
         MAX_REPORT_CHARS - len("\n".join(prefix)) - len("\n".join(suffix)) - 100
     )
@@ -787,7 +1024,7 @@ def format_audit_report(
     used = 0
     if total_findings == 0:
         rendered.append(
-            "_No actionable findings. The audited diff looks clean from all four perspectives._"
+            "_No actionable findings. The audited diff looks clean from all perspectives._"
             if effective_allowed
             else "_No findings were published because the audit failed the publication policy._"
         )
@@ -809,3 +1046,4 @@ def format_audit_report(
         rendered.append(f"_{omitted_count} additional findings omitted._")
     report = "\n".join([*prefix, *rendered, *suffix]).rstrip() + "\n"
     return _bound_report(redact_sensitive_text(report))
+
