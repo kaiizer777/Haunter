@@ -1,9 +1,5 @@
 <div align="center">
 
-<br/>
-
-<img src="https://img.shields.io/badge/-%F0%9F%91%BB%20Haunter-1a1a2e?style=for-the-badge&labelColor=1a1a2e" alt="Haunter" height="42"/>
-
 <h3>Your engineering team's autonomous AI agent.<br/>It reviews code, heals CI, and ships fixes — before you've opened Slack.</h3>
 
 <br/>
