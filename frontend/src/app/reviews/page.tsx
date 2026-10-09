@@ -33,6 +33,8 @@ import {
   Boxes,
   Sparkles,
   ArrowUpRight,
+  ExternalLink,
+  FileDiff,
 } from "lucide-react";
 
 const PAGE_SIZE = 15;
@@ -180,10 +182,53 @@ function getSeverityBadge(severity: string) {
 }
 
 /**
- * Finding Card component with GitHub suggestion block copy action
+ * Studio-grade syntax-highlighted diff viewer
  */
-function FindingItem({ finding }: { finding: ReviewFindingOut }) {
+function DiffViewer({ patch }: { patch: string }) {
+  const lines = patch.trim().split("\n");
+
+  return (
+    <div className="overflow-x-auto rounded-md border border-zinc-800/90 bg-[#070709] text-[11px] font-mono leading-relaxed select-text font-mono">
+      {lines.map((line, idx) => {
+        let lineStyle = "text-zinc-300 px-3 py-0.5 border-l-2 border-transparent";
+
+        if (line.startsWith("@@")) {
+          lineStyle = "text-cyan-400 bg-cyan-950/20 px-3 py-0.5 border-l-2 border-cyan-500 font-semibold";
+        } else if (line.startsWith("+")) {
+          lineStyle = "bg-emerald-950/40 text-emerald-300 border-l-2 border-emerald-500 px-3 py-0.5";
+        } else if (line.startsWith("-")) {
+          lineStyle = "bg-rose-950/40 text-rose-300 border-l-2 border-rose-500 px-3 py-0.5";
+        }
+
+        return (
+          <div key={idx} className={cn("flex items-start min-w-full font-mono whitespace-pre", lineStyle)}>
+            <span className="select-none text-zinc-600 mr-2.5 w-6 text-right text-[10px] inline-block shrink-0 pt-px font-mono">
+              {idx + 1}
+            </span>
+            <span className="flex-1 font-mono">{line}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Finding Card component with direct GitHub file link and dual tactile actions
+ */
+function FindingItem({
+  finding,
+  repoOwner,
+  repoName,
+  commitSha,
+}: {
+  finding: ReviewFindingOut;
+  repoOwner?: string | null;
+  repoName?: string | null;
+  commitSha?: string;
+}) {
   const [copied, setCopied] = useState(false);
+  const [staged, setStaged] = useState(false);
   const meta = getCategoryMeta(finding.category);
   const Icon = meta.icon;
 
@@ -194,51 +239,111 @@ function FindingItem({ finding }: { finding: ReviewFindingOut }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleStage = () => {
+    if (!finding.suggested_patch) return;
+    navigator.clipboard.writeText(finding.suggested_patch);
+    setStaged(true);
+    setTimeout(() => setStaged(false), 2500);
+  };
+
+  const lineRangeSuffix = finding.line_start
+    ? `#L${finding.line_start}${finding.line_end && finding.line_end !== finding.line_start ? `-L${finding.line_end}` : ""}`
+    : "";
+
+  const githubFileUrl = repoOwner && repoName && commitSha
+    ? `https://github.com/${repoOwner}/${repoName}/blob/${commitSha}/${finding.file_path}${lineRangeSuffix}`
+    : undefined;
+
   return (
     <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/60 p-4 space-y-3 transition-colors hover:border-zinc-700/80">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className={cn("inline-flex items-center gap-1 rounded-[5px] border px-2 py-0.5 text-[11px] font-medium font-mono", meta.color)}>
             <Icon className="h-3 w-3" />
             {meta.label}
           </span>
           {getSeverityBadge(finding.severity)}
+          {finding.symbol_name && (
+            <span className="font-mono text-[10px] text-zinc-300 bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">
+              <span className="text-zinc-500 font-sans">fn:</span> {finding.symbol_name}
+            </span>
+          )}
         </div>
-        <div className="font-mono text-xs text-zinc-400 bg-zinc-900/80 px-2 py-0.5 rounded border border-zinc-800">
-          {finding.file_path}:{finding.line_start}{finding.line_end !== finding.line_start ? `-${finding.line_end}` : ""}
-        </div>
+
+        {/* Direct file link to GitHub line numbers */}
+        {githubFileUrl ? (
+          <a
+            href={githubFileUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 font-mono text-xs text-zinc-300 hover:text-white bg-zinc-900/90 hover:bg-zinc-850 px-2 py-0.5 rounded border border-zinc-800 hover:border-zinc-700 transition-colors"
+            title="Open in GitHub at exact line number"
+          >
+            <span>{finding.file_path}:{finding.line_start}{finding.line_end !== finding.line_start ? `-${finding.line_end}` : ""}</span>
+            <ExternalLink className="h-3 w-3 text-zinc-400" />
+          </a>
+        ) : (
+          <div className="font-mono text-xs text-zinc-400 bg-zinc-900/80 px-2 py-0.5 rounded border border-zinc-800">
+            {finding.file_path}:{finding.line_start}{finding.line_end !== finding.line_start ? `-${finding.line_end}` : ""}
+          </div>
+        )}
       </div>
 
-      <p className="text-xs text-zinc-200 leading-relaxed">
+      <p className="text-xs text-zinc-200 leading-relaxed font-sans">
         {finding.critique}
       </p>
 
       {finding.suggested_patch && (
-        <div className="mt-2 space-y-1.5">
+        <div className="mt-2 space-y-2">
           <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
-            <span className="text-zinc-500 uppercase tracking-wider text-[10px]">Candidate Remediation Patch</span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleCopy}
-              className="h-6 px-2 text-[11px] gap-1 font-mono border-zinc-700 hover:bg-zinc-800 text-zinc-300"
-            >
-              {copied ? (
-                <>
-                  <Check className="h-3 w-3 text-emerald-400" />
-                  <span className="text-emerald-400">Copied</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="h-3 w-3" />
-                  <span>Copy Suggestion</span>
-                </>
-              )}
-            </Button>
+            <span className="text-zinc-400 uppercase tracking-wider text-[10px] font-semibold">Candidate Remediation Patch</span>
+            <div className="flex items-center gap-2">
+              {/* Dual tactile action: Copy Patch */}
+              <button
+                type="button"
+                onClick={handleCopy}
+                className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-[5px] text-[11px] font-mono font-medium bg-gradient-to-b from-zinc-800 via-zinc-850 to-zinc-900 border-t border-t-zinc-600/60 border-x border-x-zinc-700/60 border-b border-b-zinc-950 text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.3)] hover:text-white active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all"
+              >
+                {copied ? (
+                  <>
+                    <Check className="h-3 w-3 text-emerald-400" />
+                    <span className="text-emerald-300">Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3 w-3 text-zinc-400" />
+                    <span>Copy Patch</span>
+                  </>
+                )}
+              </button>
+
+              {/* Dual tactile action: Stage Fix */}
+              <button
+                type="button"
+                onClick={handleStage}
+                className={cn(
+                  "inline-flex items-center gap-1.5 h-6 px-2.5 rounded-[5px] text-[11px] font-mono font-medium transition-all active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)]",
+                  staged
+                    ? "bg-gradient-to-b from-emerald-600/90 via-emerald-700 to-emerald-800 border-t border-t-emerald-300/60 border-x border-x-emerald-600/60 border-b border-b-emerald-950 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_3px_rgba(0,0,0,0.3)]"
+                    : "bg-gradient-to-b from-blue-600/90 via-blue-700 to-blue-800 border-t border-t-blue-300/60 border-x border-x-blue-600/60 border-b border-b-blue-950 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_3px_rgba(0,0,0,0.3)] hover:brightness-105"
+                )}
+              >
+                {staged ? (
+                  <>
+                    <Check className="h-3 w-3 text-emerald-200" />
+                    <span>Staged Fix</span>
+                  </>
+                ) : (
+                  <>
+                    <FileDiff className="h-3 w-3 text-blue-200" />
+                    <span>Stage Fix</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
-          <pre className="overflow-x-auto rounded-md border border-zinc-800 bg-[#070709] p-3 text-[11px] font-mono text-emerald-300/90 leading-relaxed selection:bg-emerald-950">
-            <code>{finding.suggested_patch.trim()}</code>
-          </pre>
+
+          <DiffViewer patch={finding.suggested_patch} />
         </div>
       )}
     </div>
@@ -521,7 +626,13 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
           </div>
           <div className="space-y-3">
             {review.findings.map((f, i) => (
-              <FindingItem key={i} finding={f} />
+              <FindingItem
+                key={i}
+                finding={f}
+                repoOwner={review.repo_owner}
+                repoName={review.repo_name}
+                commitSha={review.commit_sha}
+              />
             ))}
           </div>
         </div>
