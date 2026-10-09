@@ -380,6 +380,11 @@ def test_formatter_emits_all_section_1_4_sections():
     for forbidden in ("nemotron-3.5-lightning", "Engine"):
         assert forbidden not in report
 
+    summary_pos = report.find("PR Summary")
+    overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
+    structural_pos = report.find("Structural Analysis")
+    assert -1 < summary_pos < overview_pos < structural_pos
+
 
 def test_formatter_empty_findings_reports_clean():
     report = format_audit_report(

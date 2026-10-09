@@ -963,6 +963,11 @@ def test_audit_report_markdown_visual_hierarchy_and_tables():
     assert "- **Touched Components:**" in report
     assert "- **Risk Assessment:**" in report
 
+    summary_pos = report.find("PR Summary")
+    overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
+    structural_pos = report.find("Structural Analysis")
+    assert -1 < summary_pos < overview_pos < structural_pos
+
     # 4. Scannable Findings Table & Deep Dives
     assert "### 📋 Findings Overview" in report
     assert "| Severity | Perspective | File & Line | Summary | Confidence |" in report
@@ -1081,5 +1086,84 @@ def test_render_structural_analysis_with_raw_metadata_and_ast_noise():
     assert "No complete bounded Python source" not in rendered
     assert "Caller-supplied parser context" not in rendered
     assert "- **Metadata Note:** Custom analysis note on modified routes" in rendered
+
+
+def test_audit_report_renders_coverage_caveats_when_present():
+    """Verify coverage caveats and partial coverage warnings are rendered in the final report markdown."""
+    raw_meta = (
+        "Files changed: 60; accepted hunks: 40; +120 added / -30 removed lines\n"
+        "Touched files:\n"
+        "- README.md\n"
+        "59 additional touched files omitted\n"
+        "Diff or hunk truncation was detected; affected line ranges are untrusted.\n"
+    )
+    report = format_audit_report(
+        pr_summary="Refactored documentation and omitted internal modules.",
+        findings=[],
+        confidence=90,
+        analysis_metadata=raw_meta,
+    )
+    assert "PR Summary" in report
+    assert "Broad" in report or "Partial Coverage" in report
+    assert "partial path coverage" in report or "additional paths omitted" in report
+    assert "- **Metadata Note:** Diff or hunk truncation was detected" in report
+
+    summary_pos = report.find("PR Summary")
+    overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
+    structural_pos = report.find("Structural Analysis")
+    assert -1 < summary_pos < overview_pos < structural_pos
+
+
+def test_render_structural_analysis_strips_structural_fallback_noise():
+    """Verify structural fallback multi-line code excerpts and unsupported language blocks are stripped."""
+    raw_meta = (
+        "Files changed: 1; accepted hunks: 1; +10 added / -5 removed lines\n"
+        "Touched files:\n"
+        "- frontend/src/components/Header.tsx\n"
+        "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+        "AST parsing unsupported for TypeScript JSX file frontend/src/components/Header.tsx; using a bounded structural fallback that is not AST coverage. Changed-line anchor: 15; excerpt lines 1-30.\n"
+        "import React from 'react';\n"
+        "export const Header = () => <header>Banner</header>;\n"
+        "```typescript\n"
+        "const internalCode = true;\n"
+        "```\n"
+        "Legitimate custom metadata note\n"
+    )
+    rendered = _render_structural_analysis(metadata=raw_meta)
+    assert "Header.tsx" in rendered
+    assert "Unsupported AST languages and bounded structural fallbacks" not in rendered
+    assert "AST parsing unsupported for" not in rendered
+    assert "export const Header" not in rendered
+    assert "const internalCode" not in rendered
+    assert "- **Metadata Note:** Legitimate custom metadata note" in rendered
+
+
+def test_format_audit_report_reconciles_status_with_notes():
+    """Verify format_audit_report reconciles 'Ready to Merge' to 'Looks Good (Minor Notes)' when notes exist."""
+    note_finding = _make_finding(
+        id="AUD-NOTE-01",
+        severity="NOTE",
+        confidence=90,
+        title="Minor Hardening Advice",
+    )
+    report = format_audit_report(
+        pr_summary="Refactor with notes.",
+        findings=[note_finding.to_report_dict()],
+        confidence=90,
+        status="✅ Ready to Merge",
+    )
+    assert "👌 Looks Good (Minor Notes)" in report
+    assert "✅ Ready to Merge" not in report
+
+
+def test_build_status_label_legacy_kwargs():
+    """Verify build_status_label supports legacy and aliased keyword arguments."""
+    from app.llm.prompts.audit_prompts import build_status_label
+
+    assert build_status_label(n_blockers=1, n_warnings=0) == "⛔ Do Not Merge"
+    assert build_status_label(n_blockers=0, n_warnings=2) == "⚠️ Requires Changes"
+    assert build_status_label(must_fix_count=1) == "⛔ Do Not Merge"
+    assert build_status_label(should_fix_count=1) == "⚠️ Requires Changes"
+    assert build_status_label(n_blockers=0, n_warnings=0, confidence=90, has_notes=True) == "👌 Looks Good (Minor Notes)"
 
 

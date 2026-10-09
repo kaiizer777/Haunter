@@ -527,9 +527,24 @@ def build_status_label(
     should_fix: int = 0,
     confidence: int = 100,
     has_notes: bool = False,
+    *,
+    n_blockers: Optional[int] = None,
+    n_warnings: Optional[int] = None,
+    must_fix_count: Optional[int] = None,
+    should_fix_count: Optional[int] = None,
 ) -> str:
-    blockers = max(0, int(must_fix))
-    warnings = max(0, int(should_fix))
+    effective_must_fix = (
+        must_fix_count
+        if must_fix_count is not None
+        else (must_fix if must_fix != 0 else (n_blockers if n_blockers is not None else must_fix))
+    )
+    effective_should_fix = (
+        should_fix_count
+        if should_fix_count is not None
+        else (should_fix if should_fix != 0 else (n_warnings if n_warnings is not None else should_fix))
+    )
+    blockers = max(0, int(effective_must_fix))
+    warnings = max(0, int(effective_should_fix))
     conf = _clamp_confidence(confidence)
     if blockers > 0:
         return "⛔ Do Not Merge"
@@ -609,14 +624,69 @@ def _is_test_path(path: str) -> bool:
     return any(filename.endswith(sfx) for sfx in test_suffixes)
 
 
-def derive_blast_radius(paths: Sequence[str]) -> tuple[str, str, str]:
+def derive_blast_radius(
+    paths: Sequence[str],
+    *,
+    paths_omitted: bool = False,
+) -> tuple[str, str, str]:
     cleaned_paths = [p for p in paths if p and p != "unknown"]
-    if not cleaned_paths:
+    if not cleaned_paths and not paths_omitted:
         return (
             "**Isolated** (No changes)",
             "None / Clean",
             "Zero risk — no source code modifications detected.",
         )
+    if paths_omitted:
+        has_auth_or_db = any(
+            any(
+                kw in p.lower()
+                for kw in (
+                    "auth",
+                    "db",
+                    "database",
+                    "model",
+                    "alembic",
+                    "migration",
+                    "secret",
+                    "permission",
+                    "security",
+                    "token",
+                )
+            )
+            for p in cleaned_paths
+        )
+        if has_auth_or_db:
+            return (
+                "**High** (Auth & Data Layer)",
+                "Core / Auth & Database",
+                "Elevated risk — touches sensitive authentication, permissions, or database schemas.",
+            )
+        has_api = any(
+            any(
+                kw in p.lower()
+                for kw in (
+                    "router",
+                    "webhook",
+                    "api",
+                    "endpoint",
+                    "main.py",
+                    "server",
+                )
+            )
+            for p in cleaned_paths
+        )
+        if has_api:
+            return (
+                "**Moderate** (API & Endpoints)",
+                "API / Endpoints & Schemas",
+                "Moderate risk — modifies external request handling or public contract surfaces.",
+            )
+        return (
+            "**Broad** (Partial Coverage)",
+            "Cross-System / Truncated Coverage",
+            "Broad blast radius — additional paths omitted from analysis; full regression testing recommended.",
+        )
+
     is_docs = all(
         p.lower().endswith((".md", ".rst", ".txt", ".markdown"))
         or p.lower().startswith("docs/")
@@ -710,10 +780,39 @@ def derive_blast_radius(paths: Sequence[str]) -> tuple[str, str, str]:
 
 
 _RAW_AST_NOISE_PATTERNS = [
-    re.compile(r"No complete bounded Python source was available for parser-backed AST analysis\.?", re.IGNORECASE),
-    re.compile(r"Caller-supplied parser context:.*", re.DOTALL | re.IGNORECASE),
-    re.compile(r"Parser-backed Python AST context:.*", re.DOTALL | re.IGNORECASE),
+    re.compile(r"^No complete bounded Python source was available for parser-backed AST analysis\.?", re.IGNORECASE),
+    re.compile(r"^Caller-supplied parser context:?.*", re.IGNORECASE),
+    re.compile(r"^Parser-backed Python AST context:?.*", re.IGNORECASE),
+    re.compile(r"^Unsupported AST languages and bounded structural fallbacks.*", re.IGNORECASE),
+    re.compile(r"^AST parsing unsupported for.*", re.IGNORECASE),
+    re.compile(r"^Changed-line anchor:.*", re.IGNORECASE),
+    re.compile(r"^New symbol declarations observed.*", re.IGNORECASE),
+    re.compile(r"^UNCONFIRMED deterministic leads.*", re.IGNORECASE),
+    re.compile(r"^File:\s*.+,\s*Line:\s*\d+", re.IGNORECASE),
+    re.compile(r"^Scope:\s*.*", re.IGNORECASE),
+    re.compile(r"^Source:\s*.*", re.IGNORECASE),
 ]
+
+
+def _is_code_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return (
+        stripped.startswith((
+            "import ", "from ", "export ", "const ", "let ", "var ",
+            "def ", "async def ", "class ", "function ", "return ",
+            "public ", "private ", "protected ", "interface ", "type ",
+            "enum ", "struct ", "package ", "use ", "include ", "#include",
+            "using ", "namespace ", "if ", "elif ", "else:", "for ", "while ",
+            "try:", "except ", "catch ", "finally:", "raise ", "throw ",
+            "yield ", "await ", "self.", "this.", "$", "@@", "diff --git",
+            "--- ", "+++ ",
+        ))
+        or stripped.endswith((";", "{", "}", "*/", "/*", "};", ");", "],", "},", "()", "() =>"))
+        or stripped in ("{", "}", "(", ")", "[", "]", "```", "'''", "<", ">", "<>", "/>")
+        or (stripped.startswith("<") and stripped.endswith(">") and not stripped.startswith("<!--"))
+    )
 
 
 def _render_structural_analysis(
@@ -724,6 +823,7 @@ def _render_structural_analysis(
     raw_meta = str(metadata or "")
     for pat in _RAW_AST_NOISE_PATTERNS:
         raw_meta = pat.sub("", raw_meta)
+    raw_meta = re.sub(r"```[\s\S]*?```", "", raw_meta)
     raw_meta = raw_meta.strip()
 
     file_count = 0
@@ -759,7 +859,18 @@ def _render_structural_analysis(
                 if line.startswith("- "):
                     touched_files.append(line[2:].strip())
 
-    derived_badge, impact_surface, risk_assessment = derive_blast_radius(touched_files)
+    has_omitted_paths = bool(
+        re.search(
+            r"\d+\s+additional touched files omitted|paths? omitted|\(\+\d+\s+paths omitted\)",
+            str(metadata or ""),
+            re.IGNORECASE,
+        )
+        or (file_count > len(touched_files) > 0)
+    )
+
+    derived_badge, impact_surface, risk_assessment = derive_blast_radius(
+        touched_files, paths_omitted=has_omitted_paths
+    )
 
     file_str = f"{file_count} file" if file_count == 1 else f"{file_count} files"
     if touched_files:
@@ -767,6 +878,8 @@ def _render_structural_analysis(
             components_str = ", ".join(f"`{_safe_path(f)}`" for f in touched_files)
         else:
             components_str = ", ".join(f"`{_safe_path(f)}`" for f in touched_files[:5]) + f" and {len(touched_files) - 5} more"
+        if has_omitted_paths and len(touched_files) <= 5:
+            components_str += " (partial path coverage)"
     else:
         components_str = "None" if file_count == 0 else f"`{file_str}`"
 
@@ -776,6 +889,7 @@ def _render_structural_analysis(
         f"- **Files Modified:** `{file_str}` (+{added} / -{removed} lines)",
         f"- **Touched Components:** {components_str}",
         f"- **Risk Assessment:** {risk_assessment}",
+        "<!-- Structural Analysis -->",
     ]
 
     # Extract non-noise extra metadata lines if present
@@ -794,6 +908,8 @@ def _render_structural_analysis(
         if line.strip()
         and not line.strip().startswith("Touched files:")
         and not line.strip().startswith("- ")
+        and not line.strip().startswith("```")
+        and not _is_code_line(line)
         and not any(pat.search(line) for pat in _RAW_AST_NOISE_PATTERNS)
     ]
     for ex in extra_lines[:3]:
@@ -985,15 +1101,24 @@ def format_audit_report(
         "⚠️ Requires Changes",
         "⛔ Do Not Merge",
     }
-    if status and status in valid_enums:
-        status_label = status
+    has_notes = n_notes > 0 or total_findings > (n_must_fix + n_should_fix)
+    computed_status = build_status_label(
+        must_fix=n_must_fix,
+        should_fix=n_should_fix,
+        confidence=confidence_value,
+        has_notes=has_notes,
+    )
+    if not status or status not in valid_enums:
+        status_label = computed_status
+    elif status == "✅ Ready to Merge" and (
+        n_must_fix > 0
+        or n_should_fix > 0
+        or has_notes
+        or confidence_value < INFORMATIONAL_CONFIDENCE_THRESHOLD
+    ):
+        status_label = computed_status
     else:
-        status_label = build_status_label(
-            must_fix=n_must_fix,
-            should_fix=n_should_fix,
-            confidence=confidence_value,
-            has_notes=(n_notes > 0 or total_findings > (n_must_fix + n_should_fix)),
-        )
+        status_label = status
 
     summary_text = pr_summary or executive_summary or "The audited diff was evaluated across all perspectives."
     summary_sanitized = _sanitize_inline(summary_text)
@@ -1002,11 +1127,18 @@ def format_audit_report(
     if blast_radius:
         blast_radius_label = blast_radius
     else:
-        derived_badge, _, _ = derive_blast_radius([])
+        has_omitted = bool(
+            re.search(
+                r"\d+\s+additional touched files omitted|paths? omitted|\(\+\d+\s+paths omitted\)",
+                analysis_metadata or "",
+                re.IGNORECASE,
+            )
+        )
         touched_match = re.search(r"Touched files:\s*\n((?:-\s*.+\n?)+)", analysis_metadata or "")
+        t_files = []
         if touched_match:
             t_files = [line.strip()[2:].strip() for line in touched_match.group(1).splitlines() if line.strip().startswith("- ")]
-            derived_badge, _, _ = derive_blast_radius(t_files)
+        derived_badge, _, _ = derive_blast_radius(t_files, paths_omitted=has_omitted)
         blast_radius_label = derived_badge
 
     conf_0_to_10 = format_confidence_score(confidence_value)
