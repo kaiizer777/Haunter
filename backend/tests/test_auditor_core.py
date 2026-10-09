@@ -358,9 +358,9 @@ def test_formatter_emits_all_section_1_4_sections():
         "## 🛡️ Haunter Autonomous Audit Report",
         "> [!NOTE]",
         "**PR Summary:**",
-        "| Status | Confidence | Blockers | Blast Radius |",
-        "**9/10**",
-        "Must-Fix: `1` · Should-Fix: `1`",
+        '<table width="100%">',
+        "<b>9/10</b>",
+        "Must-Fix: <code>1</code> · Should-Fix: <code>1</code>",
         "⛔ Do Not Merge",
         "### 🔬 Structural & Blast Radius Analysis",
         "- **Impact Surface:**",
@@ -381,7 +381,7 @@ def test_formatter_emits_all_section_1_4_sections():
         assert forbidden not in report
 
     summary_pos = report.find("PR Summary")
-    overview_pos = report.find("| Status | Confidence | Blockers | Blast Radius |")
+    overview_pos = report.find('<table width="100%">')
     structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
     assert -1 < summary_pos < overview_pos < structural_pos
 
@@ -399,8 +399,8 @@ def test_formatter_empty_findings_reports_clean():
     )
     assert "No actionable findings" in report
     assert "✅ Ready to Merge" in report
-    assert "**10/10**" in report
-    assert "Must-Fix: `0` · Should-Fix: `0`" in report
+    assert "<b>10/10</b>" in report
+    assert "Must-Fix: <code>0</code> · Should-Fix: <code>0</code>" in report
     assert "test-engine" not in report
 
 
