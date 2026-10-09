@@ -38,35 +38,41 @@ import {
 const PAGE_SIZE = 15;
 
 /**
- * Radial tactile gauge for Risk Score (0-100).
+ * Calibrated tactile physical gauge for Risk Score (0-100).
+ * Replaces unearned neon glow with a clean circular bezel,
+ * neutral dark contact shadow, and high-contrast score.
  */
-function RiskGauge({ score, size = 64 }: { score: number; size?: number }) {
+function RiskGauge({ score, size = 68 }: { score: number; size?: number }) {
   const strokeWidth = 5;
-  const radius = (size - strokeWidth) / 2;
+  const radius = (size - strokeWidth - 8) / 2;
   const circumference = 2 * Math.PI * radius;
   const clampedScore = Math.max(0, Math.min(100, score));
   const offset = circumference - (clampedScore / 100) * circumference;
 
   let strokeColor = "#10b981"; // emerald
-  let glowColor = "rgba(16, 185, 129, 0.3)";
   let textClass = "text-emerald-400";
   let label = "SAFE";
+  let badgeColor = "bg-emerald-950/60 text-emerald-300 border-emerald-500/30";
 
   if (clampedScore > 70) {
     strokeColor = "#f43f5e"; // rose
-    glowColor = "rgba(244, 63, 94, 0.4)";
     textClass = "text-rose-400";
     label = "CRITICAL";
+    badgeColor = "bg-rose-950/60 text-rose-300 border-rose-500/30";
   } else if (clampedScore > 30) {
     strokeColor = "#f59e0b"; // amber
-    glowColor = "rgba(245, 158, 11, 0.3)";
     textClass = "text-amber-400";
     label = "MODERATE";
+    badgeColor = "bg-amber-950/60 text-amber-300 border-amber-500/30";
   }
 
   return (
     <div className="flex flex-col items-center justify-center">
-      <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
+      {/* Tactile circular bezel housing */}
+      <div
+        className="relative flex items-center justify-center rounded-full border border-zinc-800/90 bg-gradient-to-b from-[#18181b] via-[#111114] to-[#09090b] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_8px_rgba(0,0,0,0.5)]"
+        style={{ width: size, height: size }}
+      >
         <svg className="rotate-[-90deg]" width={size} height={size}>
           <circle
             cx={size / 2}
@@ -88,7 +94,6 @@ function RiskGauge({ score, size = 64 }: { score: number; size?: number }) {
             strokeLinecap="round"
             style={{
               transition: "stroke-dashoffset 0.6s cubic-bezier(0.16, 1, 0.3, 1)",
-              filter: `drop-shadow(0 0 6px ${glowColor})`,
             }}
           />
         </svg>
@@ -98,7 +103,7 @@ function RiskGauge({ score, size = 64 }: { score: number; size?: number }) {
           </span>
         </div>
       </div>
-      <span className={cn("mt-1.5 text-[10px] font-mono font-semibold tracking-wider uppercase", textClass)}>
+      <span className={cn("mt-1.5 rounded-[4px] border px-1.5 py-0.5 text-[9px] font-mono font-bold tracking-wider uppercase", badgeColor)}>
         {label}
       </span>
     </div>
@@ -149,7 +154,7 @@ function getSeverityBadge(severity: string) {
   switch (sev) {
     case "critical":
       return (
-        <span className="rounded-[4px] border border-red-500/40 bg-red-950/60 px-1.5 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-red-400 shadow-[0_0_8px_rgba(239,68,68,0.3)]">
+        <span className="rounded-[4px] border border-rose-500/40 bg-rose-950/60 px-1.5 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.3)]">
           CRITICAL
         </span>
       );
@@ -279,6 +284,31 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
     ? { label: "Closed", color: "bg-zinc-800 text-zinc-400 border-zinc-700" }
     : { label: "Open", color: "bg-emerald-950/60 text-emerald-300 border-emerald-500/40" };
 
+  // Blast Radius Telemetry calculation
+  const filesCount = review.diff_stats?.files_changed ?? new Set(review.findings.map((f) => f.file_path)).size;
+  const additions = review.diff_stats?.additions ?? review.findings.reduce((acc, f) => {
+    if (!f.suggested_patch) return acc;
+    const added = (f.suggested_patch.match(/^\+[^+]/gm) || []).length;
+    return acc + (added || 1);
+  }, 0);
+  const deletions = review.diff_stats?.deletions ?? review.findings.reduce((acc, f) => {
+    if (!f.suggested_patch) return acc;
+    const removed = (f.suggested_patch.match(/^-[^-]/gm) || []).length;
+    return acc + (removed || 0);
+  }, 0);
+
+  const totalModifications = additions + deletions;
+  let mutationScope = "Targeted";
+  let mutationScopeColor = "border-emerald-500/30 bg-emerald-950/40 text-emerald-300";
+
+  if (filesCount > 8 || totalModifications > 250 || review.risk_score > 70) {
+    mutationScope = "Extensive";
+    mutationScopeColor = "border-rose-500/30 bg-rose-950/40 text-rose-300";
+  } else if (filesCount > 3 || totalModifications > 60 || review.risk_score > 35) {
+    mutationScope = "Moderate";
+    mutationScopeColor = "border-amber-500/30 bg-amber-950/40 text-amber-300";
+  }
+
   return (
     <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)] transition-all hover:border-zinc-700/90">
       <div className="flex flex-col md:flex-row md:items-start justify-between gap-5">
@@ -308,7 +338,7 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
               </span>
             )}
 
-            <span className="text-zinc-600">•</span>
+            <span className="text-zinc-500">•</span>
 
             {/* PR Badge with status pill */}
             {review.pr_number ? (
@@ -357,7 +387,7 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
               <div className="inline-flex items-center gap-1.5 rounded bg-zinc-900/90 border border-zinc-800 px-2 py-0.5 text-[11px] font-mono">
                 <GitBranch className="h-3 w-3 text-zinc-500" />
                 <span className="text-zinc-400">{review.base_branch || "main"}</span>
-                <span className="text-zinc-600">←</span>
+                <span className="text-zinc-500">←</span>
                 <span className="text-amber-400 font-medium">{review.head_branch || "head"}</span>
               </div>
             )}
@@ -389,7 +419,7 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
               </button>
             </div>
 
-            <span className="text-zinc-600">•</span>
+            <span className="text-zinc-500">•</span>
             <span className="text-xs text-zinc-400 font-mono">
               {formatRelativeTime(review.created_at)}
             </span>
@@ -405,6 +435,26 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
           <p className="text-xs text-zinc-300 leading-relaxed font-sans">
             {review.summary}
           </p>
+
+          {/* Blast Radius Telemetry Strip */}
+          <div className="flex flex-wrap items-center gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-950/70 px-3 py-1.5 text-xs font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+            <div className="flex items-center gap-1.5 text-zinc-300">
+              <span className="text-[10px] text-zinc-400 font-semibold uppercase tracking-wider">Blast Radius:</span>
+              <span className="text-zinc-100 font-semibold">{filesCount} {filesCount === 1 ? "file" : "files"}</span>
+            </div>
+            <span className="text-zinc-700">|</span>
+            <div className="flex items-center gap-2">
+              <span className="text-emerald-400 font-semibold">+{additions}</span>
+              <span className="text-rose-400 font-semibold">-{deletions}</span>
+            </div>
+            <span className="text-zinc-700">|</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Mutation Scope:</span>
+              <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider border", mutationScopeColor)}>
+                {mutationScope}
+              </span>
+            </div>
+          </div>
 
           {/* Finding Category Badges */}
           <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -443,9 +493,9 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
 
         {/* Right: Actions & Telemetry */}
         <div className="flex flex-row md:flex-col items-end justify-between gap-3 min-w-[120px]">
-          <div className="text-right text-[11px] font-mono text-zinc-500 space-y-0.5">
+          <div className="text-right text-[11px] font-mono text-zinc-400 space-y-0.5">
             <div>{review.input_tokens + review.output_tokens} tok</div>
-            <div className="text-zinc-600 text-[10px]">{review.status}</div>
+            <div className="text-zinc-400 text-[10px] uppercase font-semibold">{review.status}</div>
           </div>
 
           {review.findings.length > 0 && (
@@ -486,6 +536,7 @@ export default function ReviewsPage() {
   const [selectedRepoId, setSelectedRepoId] = useState<string>("all");
   const [selectedSeverity, setSelectedSeverity] = useState<string>("all");
   const [highRiskOnly, setHighRiskOnly] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<"all" | "high_risk" | "avg_risk" | "patches">("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -543,22 +594,28 @@ export default function ReviewsPage() {
     fetchReviews();
   };
 
-  // Client-side text search filtering
+  // Client-side text search & ribbon tab filtering
   const filteredReviews = useMemo(() => {
-    if (!searchQuery.trim()) return reviews;
+    let list = reviews;
+    if (activeTab === "patches") {
+      list = list.filter((r) => r.findings.some((f) => !!f.suggested_patch));
+    }
+    if (!searchQuery.trim()) return list;
     const q = searchQuery.toLowerCase();
-    return reviews.filter((r) => {
+    return list.filter((r) => {
       const matchSummary = r.summary?.toLowerCase().includes(q);
       const matchCommit = r.commit_sha?.toLowerCase().includes(q);
       const matchRepo = (r.repo_owner && r.repo_name) ? `${r.repo_owner}/${r.repo_name}`.toLowerCase().includes(q) : false;
+      const matchPr = r.pr_title?.toLowerCase().includes(q) || (r.pr_author && r.pr_author.toLowerCase().includes(q));
       const matchFindings = r.findings.some(
         (f) =>
           f.file_path.toLowerCase().includes(q) ||
-          f.critique.toLowerCase().includes(q)
+          f.critique.toLowerCase().includes(q) ||
+          (f.symbol_name && f.symbol_name.toLowerCase().includes(q))
       );
-      return matchSummary || matchCommit || matchRepo || matchFindings;
+      return matchSummary || matchCommit || matchRepo || matchPr || matchFindings;
     });
-  }, [reviews, searchQuery]);
+  }, [reviews, searchQuery, activeTab]);
 
   // Metric rollups
   const stats = useMemo(() => {
@@ -597,42 +654,101 @@ export default function ReviewsPage() {
       }
     >
       <div className="space-y-6 pb-12">
-        {/* Metric Cards Row */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="rounded-xl border border-zinc-800 bg-[#111114] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-            <div className="flex items-center justify-between text-zinc-400 text-xs font-mono">
-              <span>REVIEWS SCANNED</span>
-              <ShieldCheck className="h-4 w-4 text-emerald-400" />
-            </div>
-            <div className="mt-2 text-2xl font-bold font-mono text-zinc-100">{totalCount}</div>
-            <div className="mt-1 text-[11px] text-zinc-500">Autonomous CI push & PR scans</div>
-          </div>
+        {/* Interactive Telemetry Ribbon doubling as Filter Tabs */}
+        <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#141418] via-[#101013] to-[#0a0a0d] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_16px_rgba(0,0,0,0.35)]">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-1.5">
+            {/* Tab 1: All Reviews */}
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("all");
+                setHighRiskOnly(false);
+                setPage(0);
+              }}
+              className={cn(
+                "flex flex-col justify-between rounded-lg p-3.5 text-left transition-all",
+                activeTab === "all" && !highRiskOnly
+                  ? "bg-zinc-800/90 border border-zinc-700/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_2px_6px_rgba(0,0,0,0.4)]"
+                  : "bg-transparent border border-transparent hover:bg-zinc-900/60 hover:border-zinc-800/60"
+              )}
+            >
+              <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
+                <span className="uppercase tracking-wider text-[11px] font-semibold text-zinc-300">Reviews Scanned</span>
+                <ShieldCheck className="h-4 w-4 text-emerald-400" />
+              </div>
+              <div className="mt-2 text-2xl font-bold font-mono text-zinc-100">{totalCount}</div>
+              <div className="mt-1 text-[11px] text-zinc-400 font-sans">Autonomous CI push & PR scans</div>
+            </button>
 
-          <div className="rounded-xl border border-zinc-800 bg-[#111114] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-            <div className="flex items-center justify-between text-zinc-400 text-xs font-mono">
-              <span>HIGH RISK FLAGGED</span>
-              <ShieldAlert className="h-4 w-4 text-rose-400" />
-            </div>
-            <div className="mt-2 text-2xl font-bold font-mono text-rose-400">{stats.highRisk}</div>
-            <div className="mt-1 text-[11px] text-zinc-500">Score &gt;= 71 (Changes Requested)</div>
-          </div>
+            {/* Tab 2: High Risk Flagged */}
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("high_risk");
+                setHighRiskOnly(true);
+                setPage(0);
+              }}
+              className={cn(
+                "flex flex-col justify-between rounded-lg p-3.5 text-left transition-all",
+                highRiskOnly || activeTab === "high_risk"
+                  ? "bg-rose-950/30 border border-rose-500/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_6px_rgba(0,0,0,0.4)]"
+                  : "bg-transparent border border-transparent hover:bg-zinc-900/60 hover:border-zinc-800/60"
+              )}
+            >
+              <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
+                <span className="uppercase tracking-wider text-[11px] font-semibold text-rose-300">High Risk Flagged</span>
+                <ShieldAlert className="h-4 w-4 text-rose-400" />
+              </div>
+              <div className="mt-2 text-2xl font-bold font-mono text-rose-400">{stats.highRisk}</div>
+              <div className="mt-1 text-[11px] text-zinc-400 font-sans">Score &gt;= 71 (Changes Requested)</div>
+            </button>
 
-          <div className="rounded-xl border border-zinc-800 bg-[#111114] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-            <div className="flex items-center justify-between text-zinc-400 text-xs font-mono">
-              <span>AVG RISK SCORE</span>
-              <Sparkles className="h-4 w-4 text-amber-400" />
-            </div>
-            <div className="mt-2 text-2xl font-bold font-mono text-zinc-100">{stats.avgScore} <span className="text-xs text-zinc-500 font-normal">/ 100</span></div>
-            <div className="mt-1 text-[11px] text-zinc-500">Across current batch</div>
-          </div>
+            {/* Tab 3: Avg Risk Score */}
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("avg_risk");
+                setHighRiskOnly(false);
+                setPage(0);
+              }}
+              className={cn(
+                "flex flex-col justify-between rounded-lg p-3.5 text-left transition-all",
+                activeTab === "avg_risk"
+                  ? "bg-zinc-800/90 border border-zinc-700/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_2px_6px_rgba(0,0,0,0.4)]"
+                  : "bg-transparent border border-transparent hover:bg-zinc-900/60 hover:border-zinc-800/60"
+              )}
+            >
+              <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
+                <span className="uppercase tracking-wider text-[11px] font-semibold text-amber-300">Avg Risk Score</span>
+                <Sparkles className="h-4 w-4 text-amber-400" />
+              </div>
+              <div className="mt-2 text-2xl font-bold font-mono text-zinc-100">
+                {stats.avgScore} <span className="text-xs text-zinc-400 font-normal">/ 100</span>
+              </div>
+              <div className="mt-1 text-[11px] text-zinc-400 font-sans">Across current batch</div>
+            </button>
 
-          <div className="rounded-xl border border-zinc-800 bg-[#111114] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-            <div className="flex items-center justify-between text-zinc-400 text-xs font-mono">
-              <span>ACTIONABLE PATCHES</span>
-              <Zap className="h-4 w-4 text-cyan-400" />
-            </div>
-            <div className="mt-2 text-2xl font-bold font-mono text-cyan-400">{stats.totalPatches}</div>
-            <div className="mt-1 text-[11px] text-zinc-500">1-click GitHub suggestions ready</div>
+            {/* Tab 4: Actionable Patches */}
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("patches");
+                setPage(0);
+              }}
+              className={cn(
+                "flex flex-col justify-between rounded-lg p-3.5 text-left transition-all",
+                activeTab === "patches"
+                  ? "bg-cyan-950/30 border border-cyan-500/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_6px_rgba(0,0,0,0.4)]"
+                  : "bg-transparent border border-transparent hover:bg-zinc-900/60 hover:border-zinc-800/60"
+              )}
+            >
+              <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
+                <span className="uppercase tracking-wider text-[11px] font-semibold text-cyan-300">Actionable Patches</span>
+                <Zap className="h-4 w-4 text-cyan-400" />
+              </div>
+              <div className="mt-2 text-2xl font-bold font-mono text-cyan-400">{stats.totalPatches}</div>
+              <div className="mt-1 text-[11px] text-zinc-400 font-sans">1-click GitHub suggestions ready</div>
+            </button>
           </div>
         </div>
 
@@ -675,13 +791,15 @@ export default function ReviewsPage() {
             {/* High Risk score filter toggle (> 50) */}
             <button
               onClick={() => {
-                setHighRiskOnly(!highRiskOnly);
+                const nextVal = !highRiskOnly;
+                setHighRiskOnly(nextVal);
+                setActiveTab(nextVal ? "high_risk" : "all");
                 setPage(0);
               }}
               className={cn(
                 "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-mono transition-all",
                 highRiskOnly
-                  ? "border-rose-500/50 bg-rose-950/40 text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.2)]"
+                  ? "border-rose-500/50 bg-rose-950/40 text-rose-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_4px_rgba(0,0,0,0.3)]"
                   : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
               )}
             >
@@ -720,15 +838,15 @@ export default function ReviewsPage() {
         ) : filteredReviews.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800 bg-[#0c0c0e] py-16 text-center space-y-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 border border-zinc-800 text-zinc-500">
-              <ShieldCheck className="h-6 w-6 text-zinc-600" />
+              <ShieldCheck className="h-6 w-6 text-zinc-500" />
             </div>
             <div className="space-y-1">
               <h3 className="text-sm font-semibold text-zinc-200">No Code Reviews Found</h3>
-              <p className="text-xs text-zinc-500 max-w-sm">
+              <p className="text-xs text-zinc-400 max-w-sm">
                 Push commits or open a pull request on your connected repositories to trigger Haunter&apos;s Sentinel.
               </p>
             </div>
-            {(selectedRepoId !== "all" || highRiskOnly || selectedSeverity !== "all" || searchQuery) && (
+            {(selectedRepoId !== "all" || highRiskOnly || activeTab !== "all" || selectedSeverity !== "all" || searchQuery) && (
               <Button
                 variant="outline"
                 size="sm"
@@ -736,6 +854,7 @@ export default function ReviewsPage() {
                   setSelectedRepoId("all");
                   setSelectedSeverity("all");
                   setHighRiskOnly(false);
+                  setActiveTab("all");
                   setSearchQuery("");
                   setPage(0);
                 }}
