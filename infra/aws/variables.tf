@@ -27,7 +27,7 @@ variable "log_retention_days" {
 # ---------------------------------------------------------------------------
 
 variable "lambda_zip_path" {
-  description = "Path to the Lambda deployment zip file. Build with: cd backend && zip -r ../lambda.zip . -x '*.pyc' -x '__pycache__/*' -x '.venv/*' -x 'tests/*'"
+  description = "Path to the Lambda deployment zip file. Build ONLY with: cd backend && python rebuild_lambda_zip.py — never a bare 'zip -r', which omits Linux-compatible wheels and bundles backend/.env (live secrets). See redeploy.md."
   type        = string
   default     = "../../lambda.zip"
 }

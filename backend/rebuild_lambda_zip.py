@@ -57,7 +57,18 @@ EXCLUDE_DIR_NAMES = {
     "share",
 }
 EXCLUDE_FILE_SUFFIXES = {".pyc", ".pyo"}
-EXCLUDE_FILE_NAMES = {"rebuild_lambda_zip.py"}
+EXCLUDE_FILE_NAMES = {
+    "rebuild_lambda_zip.py",
+    # Never bundle dotfiles. backend/.env carries live secrets (GitHub App PEM,
+    # DATABASE_URL, token-encryption key, LLM provider keys) and Lambda injects
+    # all of these via Terraform instead — pydantic-settings ranks real env vars
+    # above env_file, so shipping it is redundant AND a credential leak.
+    ".env",
+    ".env.example",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+}
 
 
 def read_runtime_requirements() -> list[str]:
