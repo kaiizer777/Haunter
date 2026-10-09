@@ -113,6 +113,11 @@ export interface RunSummaryOut {
   // undefined until the issue is created; then the link to the issue.
   fallback_issue_url?: string | null;
   fallback_issue_number?: number | null;
+  pr_title?: string | null;
+  pr_author?: string | null;
+  pr_author_avatar?: string | null;
+  head_branch?: string | null;
+  base_branch?: string | null;
 }
 
 export interface TraceOut {
