@@ -113,6 +113,11 @@ export interface RunSummaryOut {
   // undefined until the issue is created; then the link to the issue.
   fallback_issue_url?: string | null;
   fallback_issue_number?: number | null;
+  pr_title?: string | null;
+  pr_author?: string | null;
+  pr_author_avatar?: string | null;
+  head_branch?: string | null;
+  base_branch?: string | null;
 }
 
 export interface TraceOut {
@@ -147,6 +152,8 @@ export interface ReviewFindingOut {
   severity: "low" | "medium" | "high" | "critical" | string;
   critique: string;
   suggested_patch?: string | null;
+  symbol_name?: string | null;
+  ast_type?: string | null;
 }
 
 export interface CodeReviewOut {
@@ -156,6 +163,14 @@ export interface CodeReviewOut {
   repo_name?: string | null;
   commit_sha: string;
   pr_number?: number | null;
+  pr_title?: string | null;
+  pr_author?: string | null;
+  pr_author_avatar?: string | null;
+  head_branch?: string | null;
+  base_branch?: string | null;
+  pr_url?: string | null;
+  failure_reason?: string | null;
+  diff_stats?: { additions: number; deletions: number; files_changed: number } | null;
   risk_score: number;
   summary: string;
   findings: ReviewFindingOut[];

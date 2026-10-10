@@ -12,13 +12,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import RetryRunButton from "@/components/runs/retry-run-button";
 import RunLineage from "@/components/runs/run-lineage";
-import { api, TraceOut } from "@/lib/api";
+import { api, TraceOut, RepoOut } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/utils";
 import {
   ArrowLeft,
   ExternalLink,
   GitPullRequest,
   GitBranch,
+  FolderGit2,
   AlertCircle,
   Clock,
   AlertTriangle,
@@ -39,6 +40,38 @@ export default function RunDetailClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState(false);
+  const [repos, setRepos] = useState<RepoOut[]>([]);
+
+  useEffect(() => {
+    if (typeof api.getRepos === "function") {
+      api.getRepos()
+        .then((data) => setRepos(data || []))
+        .catch((err) => console.error("Failed to load repos:", err));
+    }
+  }, []);
+
+  const currentRepo = trace?.run?.repo_id
+    ? repos.find((r) => r.id === trace.run.repo_id) || null
+    : null;
+
+  const repoIdentity = (() => {
+    if (currentRepo) {
+      return {
+        fullName: `${currentRepo.owner}/${currentRepo.name}`,
+        url: `https://github.com/${currentRepo.owner}/${currentRepo.name}`,
+      };
+    }
+    if (trace?.run?.pr_url) {
+      const match = trace.run.pr_url.match(/github\.com\/([^/]+)\/([^/]+)/);
+      if (match) {
+        return {
+          fullName: `${match[1]}/${match[2]}`,
+          url: `https://github.com/${match[1]}/${match[2]}`,
+        };
+      }
+    }
+    return null;
+  })();
 
   const fetchTrace = useCallback(async () => {
     if (!runId) {
@@ -160,6 +193,64 @@ export default function RunDetailClient() {
                 aria-hidden="true"
                 className="pointer-events-none absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent"
               />
+
+              {/* Repository Identity & PR Context Banner */}
+              {repoIdentity && (
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-zinc-800/80">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <a
+                      href={repoIdentity.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 text-sm sm:text-base font-bold font-mono text-zinc-100 hover:text-white transition-colors"
+                      title="View repository on GitHub"
+                    >
+                      <FolderGit2 className="h-4 w-4 text-zinc-400" />
+                      <span>{repoIdentity.fullName}</span>
+                      <ExternalLink className="h-3 w-3 text-zinc-500" />
+                    </a>
+
+                    {trace.run.pr_number && (
+                      <span className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono font-medium text-amber-400 border border-zinc-700/60">
+                        <GitPullRequest className="h-3 w-3" />
+                        PR #{trace.run.pr_number}
+                      </span>
+                    )}
+
+                    {trace.run.pr_author && (
+                      <div className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-xs font-mono text-zinc-300">
+                        {trace.run.pr_author_avatar ? (
+                          <img
+                            src={trace.run.pr_author_avatar}
+                            alt={trace.run.pr_author}
+                            className="h-3.5 w-3.5 rounded-full object-cover"
+                          />
+                        ) : (
+                          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-zinc-800 text-[9px] font-bold text-zinc-300">
+                            {trace.run.pr_author[0]?.toUpperCase()}
+                          </span>
+                        )}
+                        <span>@{trace.run.pr_author}</span>
+                      </div>
+                    )}
+
+                    {(trace.run.pr_branch || trace.run.head_branch) && (
+                      <span className="inline-flex items-center gap-1.5 rounded bg-zinc-900/90 border border-zinc-800 px-2 py-0.5 text-[11px] font-mono text-zinc-300">
+                        <GitBranch className="h-3 w-3 text-zinc-500" />
+                        <span className="text-zinc-400">{trace.run.base_branch || currentRepo?.default_branch || "main"}</span>
+                        <span className="text-zinc-500">←</span>
+                        <span className="text-amber-400 font-medium">{trace.run.pr_branch || trace.run.head_branch}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  {trace.run.pr_title && (
+                    <div className="text-xs font-medium text-zinc-200 max-w-md truncate" title={trace.run.pr_title}>
+                      {trace.run.pr_title}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Status & Actions Header */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-4">
