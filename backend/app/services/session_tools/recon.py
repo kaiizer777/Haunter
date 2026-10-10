@@ -11,10 +11,12 @@ Provides fast, token-efficient repository exploration:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
 from app.github_client import (
+    GitHubClientError,
     fetch_file_content,
     fetch_git_tree,
 )
@@ -109,6 +111,93 @@ def _glob_to_regex(pat: str) -> re.Pattern[str]:
 # ---------------------------------------------------------------------------
 
 
+async def tool_read_file(
+    path: str,
+    owner: str = "",
+    repo: str = "",
+    base_sha: str = "",
+    token: str | None = None,
+    staged_patches: dict[str, str] | None = None,
+    session_id: str | None = None,
+) -> str:
+    """
+    Read file contents with support for local checkout synchronization,
+    staged patches overlay, symlink containment, and deletion detection.
+    """
+    path = _validate_file_path(path)
+
+    # If file is staged for deletion, report deleted
+    if staged_patches and path in staged_patches:
+        diff = staged_patches[path]
+        if "+++ /dev/null" in diff:
+            return f"File not found: {path!r} (deleted in staged changes)"
+
+    content: str | None = None
+
+    # 1. Check local checkout if available
+    if repo and repo.strip():
+        try:
+            from app.services.session_tools.sandbox import resolve_repo_dir
+
+            repo_root, _ = resolve_repo_dir(
+                repo_name=repo, repo_owner=owner, session_id=session_id
+            )
+            if repo_root:
+                real_root = os.path.realpath(repo_root)
+                local_path = os.path.normpath(os.path.join(real_root, path))
+                real_target = os.path.realpath(local_path)
+                # Symlink / traversal check
+                if os.path.commonpath([real_root, real_target]) == real_root:
+                    if os.path.isfile(real_target):
+                        with open(real_target, "r", encoding="utf-8", errors="replace") as f:
+                            content = f.read()
+        except Exception as e:
+            logger.debug("Failed reading file from local checkout: %s", e)
+
+    # 2. If not on local disk, fetch from GitHub
+    if content is None:
+        try:
+            content = await fetch_file_content(
+                owner=owner,
+                repo=repo,
+                path=path,
+                sha=base_sha,
+                token=token,
+            )
+        except GitHubClientError as exc:
+            logger.warning(
+                "recon: read_file GitHub error for path=%s: %s",
+                path,
+                exc,
+            )
+            if not (staged_patches and path in staged_patches):
+                return f"Error reading file: {exc}"
+
+        # If fetched from GitHub and staged_patches has an entry, overlay via apply_unified_diff
+        if staged_patches and path in staged_patches:
+            from app.sandbox.mirror import apply_unified_diff
+
+            diff = staged_patches[path]
+            if content is None and "--- /dev/null" not in diff:
+                return f"Error reading file: base content for {path!r} is unavailable."
+            content = apply_unified_diff(content or "", diff)
+
+    if content is None:
+        return f"File not found: {path!r}"
+
+    # Truncate very large files to avoid bloating the context window.
+    max_chars = 50_000
+    if len(content) > max_chars:
+        content = (
+            content[:max_chars]
+            + f"\n\n[...truncated at {max_chars} chars]"
+        )
+    return content
+
+
+read_file = tool_read_file
+
+
 async def tool_read_file_slice(
     path: str,
     start_line: int,
@@ -117,6 +206,8 @@ async def tool_read_file_slice(
     repo: str = "",
     base_sha: str = "",
     token: str | None = None,
+    staged_patches: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Read a specific line range from a repository file (1-based, inclusive).
@@ -134,11 +225,26 @@ async def tool_read_file_slice(
             f"Invalid line range: start_line ({start_line}) cannot exceed end_line ({end_line})."
         )
 
-    content = await fetch_file_content(
-        owner=owner, repo=repo, path=path, sha=base_sha, token=token
-    )
-    if content is None:
-        return f"File not found: {path!r}"
+    # If staged_patches or local disk might exist, obtain content with overlays
+    if staged_patches or repo:
+        content_res = await tool_read_file(
+            path=path,
+            owner=owner,
+            repo=repo,
+            base_sha=base_sha,
+            token=token,
+            staged_patches=staged_patches,
+            session_id=session_id,
+        )
+        if content_res.startswith("File not found:") or content_res.startswith("Error"):
+            return content_res
+        content: str | None = content_res
+    else:
+        content = await fetch_file_content(
+            owner=owner, repo=repo, path=path, sha=base_sha, token=token
+        )
+        if content is None:
+            return f"File not found: {path!r}"
 
     lines = content.splitlines()
     total_lines = len(lines)
