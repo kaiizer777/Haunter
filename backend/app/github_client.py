@@ -2334,6 +2334,13 @@ async def update_branch_ref(
         raise GitHubClientError("Force update is not permitted")
 
     clean_branch = branch.removeprefix("refs/heads/")
+    from app.schemas import is_protected_branch
+
+    if is_protected_branch(clean_branch):
+        raise GitHubClientError(
+            f"Cannot target protected branch {branch!r} directly"
+        )
+
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
     headers = _build_headers(
         token=installation_token, accept="application/vnd.github+json"
@@ -2369,6 +2376,53 @@ async def update_branch_ref(
             raise GitHubResourceNotFoundError(
                 f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
             )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
+
+
+async def delete_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    installation_token: Optional[str] = None,
+) -> None:
+    """
+    Delete a branch ref.
+
+    DELETE /repos/{owner}/{repo}/git/refs/heads/{branch}
+    """
+    clean_branch = branch.removeprefix("refs/heads/")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.delete(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error deleting branch ref for %s/%s branch %s",
+                owner,
+                repo,
+                branch,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code in (204, 404):
+        return
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")

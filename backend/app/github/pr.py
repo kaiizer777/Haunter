@@ -33,7 +33,7 @@ import httpx
 
 from app.config import settings
 from app.github_client import GitHubResourceNotFoundError
-from app.schemas import validate_repo_ident
+from app.schemas import _PROTECTED_BRANCHES, is_protected_branch, validate_repo_ident
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,8 @@ _BRANCH_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9/_\-\.]+$")
 _BRANCH_MAX_LEN = 255
 
 # Protected base branches — Haunter must never push directly to these.
-_PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "develop", "dev"})
+# Single source of truth imported from app.schemas.
+_PROTECTED_BRANCHES: frozenset[str] = _PROTECTED_BRANCHES
 
 # ---------------------------------------------------------------------------
 # Secret redaction (import from context_gatherer to keep a single source of truth)
@@ -135,7 +136,7 @@ def _validate_branch(branch: str, allow_protected: bool = True) -> None:
             r"Only [a-zA-Z0-9/_\-.] are allowed."
         )
     clean = branch.removeprefix("refs/heads/")
-    if not allow_protected and clean.lower() in _PROTECTED_BRANCHES:
+    if not allow_protected and is_protected_branch(clean):
         raise GitHubPRValidationError(
             f"Cannot target protected branch {branch!r} directly."
         )
@@ -835,6 +836,50 @@ async def create_branch(
     logger.info(
         "github.pr: created branch %s/%s:%s at sha=%s", owner, repo, branch, sha[:8]
     )
+
+
+async def delete_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    token: str,
+) -> None:
+    """
+    Delete a branch ref from the repo.
+
+    Never deletes protected branches (allow_protected=False). Safely handles 204 (deleted) and 404 (already gone).
+    """
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    _validate_branch(branch, allow_protected=False)
+
+    clean_branch = branch.removeprefix("refs/heads/")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_auth_headers(token)
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        try:
+            resp = await client.delete(url, headers=headers)
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error deleting branch ref {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+    if resp.status_code in (204, 404):
+        logger.info(
+            "github.pr: deleted branch ref %s/%s:%s (status %d)",
+            owner,
+            repo,
+            clean_branch,
+            resp.status_code,
+        )
+        return
+    if resp.status_code in (401, 403):
+        raise GitHubPRAuthError(f"Auth failed deleting branch ref ({resp.status_code}).")
+    if resp.is_error:
+        raise GitHubPRError(
+            f"Failed to delete branch ref heads/{clean_branch}: HTTP {resp.status_code}"
+        )
 
 
 def _parse_patch_files(patch_text: str) -> dict[str, str]:

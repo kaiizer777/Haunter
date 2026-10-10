@@ -1531,6 +1531,7 @@ function CommitModal({
 }: CommitModalProps) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1552,6 +1553,10 @@ function CommitModal({
     e.preventDefault();
     if (!title.trim()) {
       setError("PR title is required.");
+      return;
+    }
+    if (!confirmed) {
+      setError("Please confirm the target branch before publishing.");
       return;
     }
     setLoading(true);
@@ -1658,6 +1663,40 @@ function CommitModal({
             />
           </div>
 
+          {/* Target Branch and Confirmation Guard */}
+          <div className="rounded-xl border border-zinc-750/70 bg-[#16161f] p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-zinc-400 font-medium flex items-center gap-1.5">
+                <GitBranch className="h-3.5 w-3.5 text-violet-400" />
+                Target Branch:
+              </span>
+              <span className="font-mono font-semibold text-violet-300 bg-violet-950/60 border border-violet-800/50 px-2.5 py-0.5 rounded-md text-[11px]">
+                {branchName || "haunter/session"}
+              </span>
+            </div>
+            <p className="text-[11px] text-zinc-400 leading-normal">
+              Commits will be pushed to <code className="text-zinc-200 font-mono">{branchName || "this branch"}</code> and a pull request will be opened against the repository default branch.
+            </p>
+            <div className="pt-2 border-t border-zinc-800/80 flex items-start gap-2.5">
+              <input
+                id="commit-confirm-checkbox"
+                type="checkbox"
+                checked={confirmed}
+                onChange={(e) => {
+                  setConfirmed(e.target.checked);
+                  if (error && error.includes("confirm")) setError(null);
+                }}
+                className="mt-0.5 h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-violet-600 focus:ring-violet-500/30 cursor-pointer"
+              />
+              <label
+                htmlFor="commit-confirm-checkbox"
+                className="text-xs text-zinc-300 cursor-pointer select-none font-medium leading-tight"
+              >
+                I confirm pushing commits to <span className="font-mono text-zinc-100">{branchName || "this branch"}</span> and opening a pull request
+              </label>
+            </div>
+          </div>
+
           {/* Error display */}
           {error && (
             <div className="flex items-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs font-mono text-red-300 animate-in fade-in duration-150">
@@ -1685,7 +1724,7 @@ function CommitModal({
               <button
                 id="commit-submit-btn"
                 type="submit"
-                disabled={loading}
+                disabled={loading || !confirmed || !title.trim()}
                 className="flex items-center justify-center gap-2 rounded-xl border-t border-t-violet-400/60 border-x border-x-violet-600/60 border-b border-b-violet-950 bg-gradient-to-b from-violet-600 via-violet-650 to-violet-700 px-4 py-2 text-xs font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_8px_rgba(124,58,237,0.35)] hover:brightness-105 active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.35)] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitPullRequest className="h-3.5 w-3.5" />}

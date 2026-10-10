@@ -145,6 +145,45 @@ async def test_create_session_success(
     assert db_session.status == "active"
 
 
+@pytest.mark.asyncio
+async def test_create_session_null_branch_mints_topic_branch(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """POST /sessions with branch_name=None yields a session whose branch_name is not main/master."""
+    user, repo = await _seed_user_and_repo(db, github_id=10099)
+    fake_sha = "f" * 40
+
+    with (
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="mock-gh-token",
+        ),
+        patch(
+            "app.routers.sessions.fetch_branch_sha",
+            new_callable=AsyncMock,
+            return_value=fake_sha,
+        ),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                "/sessions",
+                json={
+                    "repo_id": str(repo.id),
+                    "branch_name": None,
+                    "title": "Topic Session",
+                },
+            )
+
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["status"] == "active"
+    assert data["base_sha"] == fake_sha
+    assert data["branch_name"] not in ("main", "master", "dev", "develop")
+    assert data["branch_name"].startswith("haunter/session-")
+
+
 # ---------------------------------------------------------------------------
 # Test 2: concurrency_limit
 # ---------------------------------------------------------------------------

@@ -116,7 +116,7 @@ function NewSessionModal({ repos, onClose, onCreated }: NewSessionModalProps) {
       const selectedRepo = repos.find((r) => r.id === repoId);
       const payload: SessionCreateIn = {
         repo_id: repoId,
-        branch_name: branch.trim() || selectedRepo?.default_branch || null,
+        branch_name: branch.trim() || null,
         title: title.trim() || null,
       };
       const session = await api.createSession(payload);

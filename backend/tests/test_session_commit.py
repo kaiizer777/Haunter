@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import _sign_user_id
+from app.github_client import GitHubClientError, GitHubResourceNotFoundError
 from app.models import AgentSession, Repo, User
 
 
@@ -159,7 +160,7 @@ async def test_commit_success(
             return_value=fake_commit_sha,
         ),
         patch(
-            "app.github_client.update_branch_ref",
+            "app.github.pr.update_branch_ref",
             new_callable=AsyncMock,
             return_value=None,
         ),
@@ -329,3 +330,240 @@ async def test_commit_closed_session_rejected(
             resp.status_code == 400
         ), f"Expected 400 for status={terminal_status!r}, got {resp.status_code}: {resp.text}"
         assert "active" in resp.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Test 5: protected branch rejected with zero HTTP ref calls
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protected_branch", ["main", "master", "dev", "develop"])
+async def test_commit_protected_branch_rejected_with_zero_ref_calls(
+    db: AsyncSession,
+    make_auth_client,
+    protected_branch: str,
+) -> None:
+    """
+    POST /sessions/{id}/commit returns 400 and makes zero ref calls when targeting a protected branch.
+    Parametrized over {main, master, dev, develop}.
+    """
+    user, repo = await _seed_user_and_repo(
+        db, github_id=99050 + abs(hash(protected_branch)) % 1000
+    )
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch=protected_branch,
+    )
+
+    mock_update_ref = AsyncMock()
+    mock_create_branch = AsyncMock()
+    mock_create_blob = AsyncMock()
+    mock_create_commit = AsyncMock()
+
+    with (
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch("app.github.pr.update_branch_ref", mock_update_ref),
+        patch("app.github_client.update_branch_ref", mock_update_ref),
+        patch("app.github.pr.create_branch", mock_create_branch),
+        patch("app.github_client.create_blob", mock_create_blob),
+        patch("app.github_client.create_git_commit", mock_create_commit),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "Commit to protected branch"},
+            )
+
+    assert (
+        resp.status_code == 400
+    ), f"Expected 400 for {protected_branch}, got {resp.status_code}: {resp.text}"
+    detail = resp.json()["detail"].lower()
+    assert (
+        "protected" in detail
+        or "cannot target" in detail
+        or "cannot commit directly" in detail
+    )
+    mock_update_ref.assert_not_called()
+    mock_create_branch.assert_not_called()
+    mock_create_blob.assert_not_called()
+    mock_create_commit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 6: PR creation failure deletes newly created topic branch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_pr_failure_cleans_up_newly_created_branch(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """
+    When create_pull_request fails, the newly created branch ref is deleted via delete_branch_ref
+    so no commit is left on a non-PR branch.
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=99088)
+    topic_branch = f"haunter/session-{uuid.uuid4().hex[:8]}"
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch=topic_branch,
+    )
+
+    fake_blob_sha = "blob" + "b" * 36
+    fake_tree_sha = "tree" + "c" * 36
+    fake_commit_sha = "cmmt" + "d" * 36
+
+    mock_delete_ref = AsyncMock()
+    mock_create_branch = AsyncMock()
+
+    with (
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.github_client.create_blob",
+            new_callable=AsyncMock,
+            return_value=fake_blob_sha,
+        ),
+        patch(
+            "app.github_client.create_git_tree",
+            new_callable=AsyncMock,
+            return_value=fake_tree_sha,
+        ),
+        patch(
+            "app.github_client.create_git_commit",
+            new_callable=AsyncMock,
+            return_value=fake_commit_sha,
+        ),
+        patch(
+            "app.github_client.fetch_file_content",
+            new_callable=AsyncMock,
+            return_value=_ORIGINAL_FILE,
+        ),
+        patch(
+            "app.github.pr.update_branch_ref",
+            new_callable=AsyncMock,
+            side_effect=GitHubResourceNotFoundError("Branch does not exist"),
+        ),
+        patch("app.github.pr.create_branch", mock_create_branch),
+        patch("app.github.pr.delete_branch_ref", mock_delete_ref),
+        patch(
+            "app.github_client.create_pull_request",
+            new_callable=AsyncMock,
+            side_effect=GitHubClientError("Simulated PR creation failure"),
+        ),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "Test PR rollback"},
+            )
+
+    assert resp.status_code == 502, resp.text
+    mock_create_branch.assert_called_once()
+    mock_delete_ref.assert_called_once_with(
+        owner=repo.owner,
+        repo=repo.name,
+        branch=topic_branch,
+        token="tok",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 7: PR creation failure reverts existing topic branch to base_sha
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_pr_failure_reverts_existing_branch(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """
+    When create_pull_request fails on an existing branch, the branch ref is rolled back to base_sha
+    so no commit is left on a non-PR branch.
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=99089)
+    topic_branch = "feat/existing-topic"
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch=topic_branch,
+        sha="base" + "0" * 36,
+    )
+
+    fake_blob_sha = "blob" + "b" * 36
+    fake_tree_sha = "tree" + "c" * 36
+    fake_commit_sha = "cmmt" + "d" * 36
+
+    mock_update_ref = AsyncMock()
+
+    with (
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.github_client.create_blob",
+            new_callable=AsyncMock,
+            return_value=fake_blob_sha,
+        ),
+        patch(
+            "app.github_client.create_git_tree",
+            new_callable=AsyncMock,
+            return_value=fake_tree_sha,
+        ),
+        patch(
+            "app.github_client.create_git_commit",
+            new_callable=AsyncMock,
+            return_value=fake_commit_sha,
+        ),
+        patch(
+            "app.github_client.fetch_file_content",
+            new_callable=AsyncMock,
+            return_value=_ORIGINAL_FILE,
+        ),
+        patch("app.github.pr.update_branch_ref", mock_update_ref),
+        patch(
+            "app.github_client.create_pull_request",
+            new_callable=AsyncMock,
+            side_effect=GitHubClientError("Simulated PR creation failure"),
+        ),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "Test PR rollback existing branch"},
+            )
+
+    assert resp.status_code == 502, resp.text
+    # mock_update_ref was called first to advance to commit_sha, then called again to rollback to base_sha
+    assert mock_update_ref.call_count == 2
+    mock_update_ref.assert_called_with(
+        owner=repo.owner,
+        repo=repo.name,
+        branch=topic_branch,
+        sha=session.base_sha,
+        token="tok",
+        force=False,
+    )
