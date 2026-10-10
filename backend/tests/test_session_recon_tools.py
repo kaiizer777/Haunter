@@ -669,4 +669,94 @@ async def test_tool_git_diff_untracked_symlink_ignored(tmp_path) -> None:
     assert "No uncommitted working-tree differences found." in res
 
 
+# ---------------------------------------------------------------------------
+# tool_read_file & read_file_slice Deep Edge Case Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_read_file_invalid_path_returns_error_string() -> None:
+    """tool_read_file safely returns error strings on invalid paths instead of raising ValueError."""
+    from app.services.session_tools.recon import tool_read_file
+
+    res_traversal = await tool_read_file(path="../../etc/passwd")
+    assert res_traversal.startswith("Error: ")
+    assert "Directory traversal rejected" in res_traversal
+
+    res_absolute = await tool_read_file(path="/etc/shadow")
+    assert res_absolute.startswith("Error: ")
+    assert "Absolute path rejected" in res_absolute
+
+    res_chars = await tool_read_file(path="file; rm -rf /")
+    assert res_chars.startswith("Error: ")
+    assert "disallowed characters" in res_chars
+
+
+@pytest.mark.asyncio
+async def test_tool_read_file_truncation_flag() -> None:
+    """tool_read_file respects truncate=False for full content slicing."""
+    from app.services.session_tools.recon import tool_read_file
+
+    large_content = "x" * 60_000
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content",
+        new_callable=AsyncMock,
+        return_value=large_content,
+    ):
+        truncated = await tool_read_file("large.txt", truncate=True)
+        assert len(truncated) < 60_000
+        assert "[...truncated at 50000 chars]" in truncated
+
+        untruncated = await tool_read_file("large.txt", truncate=False)
+        assert len(untruncated) == 60_000
+        assert "[...truncated" not in untruncated
+
+
+@pytest.mark.asyncio
+async def test_read_file_slice_on_large_file_with_staged_overlay(tmp_path) -> None:
+    """read_file_slice on a large file (>50k chars) reads beyond 50k without truncation artifacts."""
+    from app.services.session_tools.recon import tool_read_file_slice
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    large_file = repo_dir / "large.py"
+    # Create a 2000-line file
+    lines = [f"def func_{i}(): pass" for i in range(2000)]
+    large_file.write_text("\n".join(lines), encoding="utf-8")
+
+    staged = {
+        "large.py": "--- a/large.py\n+++ b/large.py\n@@ -1900,1 +1900,1 @@\n-def func_1899(): pass\n+def func_1899_modified(): pass\n"
+    }
+
+    with patch("app.services.session_tools.sandbox.resolve_repo_dir", return_value=(str(repo_dir), None)):
+        res = await tool_read_file_slice(
+            path="large.py",
+            start_line=1895,
+            end_line=1905,
+            repo="test-repo",
+            staged_patches=staged,
+        )
+        assert "1900: def func_1899_modified(): pass" in res
+
+
+@pytest.mark.asyncio
+async def test_read_file_slice_file_starting_with_error_word() -> None:
+    """read_file_slice handles a file whose content starts with 'Error' correctly without mistaking it for a failure."""
+    from app.services.session_tools.recon import tool_read_file_slice
+
+    error_code = "ErrorMessage = 'Something went wrong'\nErrorCode = 500\n"
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content",
+        new_callable=AsyncMock,
+        return_value=error_code,
+    ):
+        res = await tool_read_file_slice(
+            path="errors.py",
+            start_line=1,
+            end_line=2,
+        )
+        assert res == "1: ErrorMessage = 'Something went wrong'\n2: ErrorCode = 500"
+
+
+
 

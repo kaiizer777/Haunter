@@ -1814,16 +1814,19 @@ class SessionOrchestrator:
                 effective_sid = None
         from app.services.session_tools.recon import tool_read_file
 
-        return await tool_read_file(
-            path=path,
-            owner=repo_owner,
-            repo=repo_name,
-            base_sha=base_sha,
-            token=self.gh_token,
-            staged_patches=staged_patches,
-            session_id=effective_sid,
-            fetcher=fetch_file_content,
-        )
+        try:
+            return await tool_read_file(
+                path=path,
+                owner=repo_owner,
+                repo=repo_name,
+                base_sha=base_sha,
+                token=self.gh_token,
+                staged_patches=staged_patches,
+                session_id=effective_sid,
+                fetcher=fetch_file_content,
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
 
     async def _tool_stage_patch(
         self,

@@ -613,15 +613,18 @@ class SubagentRunner:
             if (self.session and getattr(self.session, "id", None))
             else None
         )
-        return await tool_read_file(
-            path=path,
-            owner=self.repo_owner,
-            repo=self.repo_name,
-            base_sha=self.base_sha,
-            token=self.gh_token,
-            staged_patches=self.staged_patches,
-            session_id=session_id_str,
-        )
+        try:
+            return await tool_read_file(
+                path=path,
+                owner=self.repo_owner,
+                repo=self.repo_name,
+                base_sha=self.base_sha,
+                token=self.gh_token,
+                staged_patches=self.staged_patches,
+                session_id=session_id_str,
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
 
     async def _exec_grep_search(self, args: dict[str, Any]) -> str:
         query: str = str(args.get("query", ""))

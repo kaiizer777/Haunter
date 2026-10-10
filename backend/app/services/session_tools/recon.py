@@ -120,12 +120,16 @@ async def tool_read_file(
     staged_patches: dict[str, str] | None = None,
     session_id: str | None = None,
     fetcher: Any = None,
+    truncate: bool = True,
 ) -> str:
     """
     Read file contents with support for local checkout synchronization,
     staged patches overlay, symlink containment, and deletion detection.
     """
-    path = _validate_file_path(path)
+    try:
+        path = _validate_file_path(path)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     # If file is staged for deletion, report deleted
     if staged_patches and path in staged_patches:
@@ -134,6 +138,7 @@ async def tool_read_file(
             return f"File not found: {path!r} (deleted in staged changes)"
 
     content: str | None = None
+    read_from_disk = False
 
     # 1. Check local checkout if available
     if repo and repo.strip():
@@ -152,6 +157,7 @@ async def tool_read_file(
                     if os.path.isfile(real_target):
                         with open(real_target, "r", encoding="utf-8", errors="replace") as f:
                             content = f.read()
+                        read_from_disk = True
         except Exception as e:
             logger.debug("Failed reading file from local checkout: %s", e)
 
@@ -175,25 +181,31 @@ async def tool_read_file(
             if not (staged_patches and path in staged_patches):
                 return f"Error reading file: {exc}"
 
-        # If fetched from GitHub and staged_patches has an entry, overlay via apply_unified_diff
-        if staged_patches and path in staged_patches:
-            from app.sandbox.mirror import apply_unified_diff
+    # 3. If staged_patches has an entry for path, overlay via apply_unified_diff
+    if staged_patches and path in staged_patches:
+        from app.sandbox.mirror import apply_unified_diff
 
-            diff = staged_patches[path]
-            if content is None and "--- /dev/null" not in diff:
-                return f"Error reading file: base content for {path!r} is unavailable."
+        diff = staged_patches[path]
+        if content is None and "--- /dev/null" not in diff:
+            return f"Error reading file: base content for {path!r} is unavailable."
+        if read_from_disk and content:
+            from app.services.session_tools.editor import _is_diff_applied
+            if not _is_diff_applied(content, diff):
+                content = apply_unified_diff(content, diff)
+        else:
             content = apply_unified_diff(content or "", diff)
 
     if content is None:
         return f"File not found: {path!r}"
 
-    # Truncate very large files to avoid bloating the context window.
-    max_chars = 50_000
-    if len(content) > max_chars:
-        content = (
-            content[:max_chars]
-            + f"\n\n[...truncated at {max_chars} chars]"
-        )
+    # Truncate very large files to avoid bloating the context window (unless truncate=False).
+    if truncate:
+        max_chars = 50_000
+        if len(content) > max_chars:
+            content = (
+                content[:max_chars]
+                + f"\n\n[...truncated at {max_chars} chars]"
+            )
     return content
 
 
@@ -227,7 +239,7 @@ async def tool_read_file_slice(
             f"Invalid line range: start_line ({start_line}) cannot exceed end_line ({end_line})."
         )
 
-    # If staged_patches or local disk might exist, obtain content with overlays
+    # If staged_patches or local disk might exist, obtain content with overlays and NO truncation
     if staged_patches or repo:
         content_res = await tool_read_file(
             path=path,
@@ -237,8 +249,13 @@ async def tool_read_file_slice(
             token=token,
             staged_patches=staged_patches,
             session_id=session_id,
+            truncate=False,
         )
-        if content_res.startswith("File not found:") or content_res.startswith("Error"):
+        if (
+            content_res.startswith("File not found: ")
+            or content_res.startswith("Error: ")
+            or content_res.startswith("Error reading file: ")
+        ):
             return content_res
         content: str | None = content_res
     else:
