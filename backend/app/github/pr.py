@@ -795,19 +795,46 @@ async def restore_branch_ref(
     branch: str,
     sha: str,
     token: str,
-) -> None:
+    expected_sha: Optional[str] = None,
+) -> bool:
     """
     Rollback / restore a non-protected branch ref to a prior commit SHA.
 
     Used strictly in rollback scenarios (e.g. when PR creation fails after advancing
     an existing topic branch). Explicitly rejects protected branches (allow_protected=False)
     and sends force=True to allow rewinding the ref to the pre-commit SHA.
+
+    If `expected_sha` is provided, verifies that the branch still points to `expected_sha`
+    before restoring; if another writer has advanced the branch, rollback is safely skipped.
     """
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
     _validate_branch(branch, allow_protected=False)
 
     clean_branch = branch.removeprefix("refs/heads/")
+
+    if expected_sha is not None:
+        try:
+            current_sha = await get_branch_ref(owner, repo, clean_branch, token)
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github.pr: skipping restore_branch_ref for %s/%s:%s because ref SHA %s != expected %s (advanced by concurrent writer)",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            logger.warning(
+                "github.pr: skipping restore_branch_ref for %s/%s:%s because branch ref was not found",
+                owner,
+                repo,
+                clean_branch,
+            )
+            return False
+
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
     headers = _build_auth_headers(token)
     payload = {"sha": sha, "force": True}
@@ -847,6 +874,7 @@ async def restore_branch_ref(
         clean_branch,
         sha[:8],
     )
+    return True
 
 
 async def create_branch(
@@ -906,17 +934,36 @@ async def delete_branch_ref(
     repo: str,
     branch: str,
     token: str,
-) -> None:
+    expected_sha: Optional[str] = None,
+) -> bool:
     """
     Delete a branch ref from the repo.
 
     Never deletes protected branches (allow_protected=False). Safely handles 204 (deleted) and 404 (already gone).
+    If `expected_sha` is provided, verifies that the branch still points to `expected_sha` before deleting.
     """
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
     _validate_branch(branch, allow_protected=False)
 
     clean_branch = branch.removeprefix("refs/heads/")
+
+    if expected_sha is not None:
+        try:
+            current_sha = await get_branch_ref(owner, repo, clean_branch, token)
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github.pr: skipping delete_branch_ref for %s/%s:%s because ref SHA %s != expected %s (advanced by concurrent writer)",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            return True
+
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
     headers = _build_auth_headers(token)
 
@@ -936,13 +983,14 @@ async def delete_branch_ref(
             clean_branch,
             resp.status_code,
         )
-        return
+        return True
     if resp.status_code in (401, 403):
         raise GitHubPRAuthError(f"Auth failed deleting branch ref ({resp.status_code}).")
     if resp.is_error:
         raise GitHubPRError(
             f"Failed to delete branch ref heads/{clean_branch}: HTTP {resp.status_code}"
         )
+    return True
 
 
 def _parse_patch_files(patch_text: str) -> dict[str, str]:

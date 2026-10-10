@@ -38,6 +38,8 @@ from app.github.pr import (
     _resolve_write_credentials,
     commit_patch,
     create_branch,
+    delete_branch_ref,
+    get_branch_ref,
     get_installation_token,
     open_pr,
     restore_branch_ref,
@@ -835,6 +837,95 @@ async def test_restore_branch_ref_sends_force_true() -> None:
 
     assert len(captured) == 1
     assert captured[0] == {"sha": "b" * 40, "force": True}
+
+
+@pytest.mark.anyio
+async def test_restore_branch_ref_expected_sha_matches() -> None:
+    """restore_branch_ref restores the branch when current ref matches expected_sha."""
+    captured = []
+
+    def _patch_handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"object": {"sha": "b" * 40}})
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-1").respond(
+            200, json={"object": {"sha": "expected_commit_sha"}}
+        )
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").mock(side_effect=_patch_handler)
+        res = await restore_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-1",
+            sha="b" * 40,
+            token="fake_token",
+            expected_sha="expected_commit_sha",
+        )
+
+    assert res is True
+    assert len(captured) == 1
+    assert captured[0] == {"sha": "b" * 40, "force": True}
+
+
+@pytest.mark.anyio
+async def test_restore_branch_ref_expected_sha_mismatch_skips() -> None:
+    """restore_branch_ref skips rollback when current ref was advanced past expected_sha by concurrent writer."""
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-1").respond(
+            200, json={"object": {"sha": "advanced_by_concurrent_writer_sha"}}
+        )
+        patch_route = rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").respond(200)
+        res = await restore_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-1",
+            sha="b" * 40,
+            token="fake_token",
+            expected_sha="expected_commit_sha",
+        )
+
+    assert res is False
+    assert not patch_route.called
+
+
+@pytest.mark.anyio
+async def test_delete_branch_ref_expected_sha_matches() -> None:
+    """delete_branch_ref deletes the branch when current ref matches expected_sha."""
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-1").respond(
+            200, json={"object": {"sha": "expected_commit_sha"}}
+        )
+        delete_route = rx.delete("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").respond(204)
+        res = await delete_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-1",
+            token="fake_token",
+            expected_sha="expected_commit_sha",
+        )
+
+    assert res is True
+    assert delete_route.called
+
+
+@pytest.mark.anyio
+async def test_delete_branch_ref_expected_sha_mismatch_skips() -> None:
+    """delete_branch_ref skips deletion when current ref was advanced past expected_sha by concurrent writer."""
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-1").respond(
+            200, json={"object": {"sha": "advanced_by_concurrent_writer_sha"}}
+        )
+        delete_route = rx.delete("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").respond(204)
+        res = await delete_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-1",
+            token="fake_token",
+            expected_sha="expected_commit_sha",
+        )
+
+    assert res is False
+    assert not delete_route.called
 
 
 @pytest.mark.anyio

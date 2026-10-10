@@ -2394,10 +2394,12 @@ async def restore_branch_ref(
     branch: str,
     commit_sha: str,
     installation_token: Optional[str] = None,
-) -> None:
+    expected_sha: Optional[str] = None,
+) -> bool:
     """
     Rollback / restore a non-protected branch ref to a prior commit SHA.
     Explicitly rejects protected branches and sends force=True to allow rewinding.
+    If expected_sha is provided, verifies that the branch ref still matches before updating.
     """
     clean_branch = branch.removeprefix("refs/heads/")
     from app.schemas import is_protected_branch
@@ -2406,6 +2408,33 @@ async def restore_branch_ref(
         raise GitHubClientError(
             f"Cannot target protected branch {branch!r} directly"
         )
+
+    if expected_sha is not None:
+        try:
+            current_sha = await fetch_branch_sha(
+                owner=owner,
+                repo=repo,
+                branch=clean_branch,
+                installation_token=installation_token,
+            )
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github_client: restore_branch_ref skipped for %s/%s:%s; SHA %s != expected %s",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            logger.warning(
+                "github_client: restore_branch_ref skipped for %s/%s:%s; branch not found",
+                owner,
+                repo,
+                clean_branch,
+            )
+            return False
 
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
     headers = _build_headers(
@@ -2455,6 +2484,7 @@ async def restore_branch_ref(
         raise GitHubClientError(
             f"GitHub API returned error {response.status_code}: {response.text[:200]}"
         )
+    return True
 
 
 async def delete_branch_ref(
@@ -2462,13 +2492,37 @@ async def delete_branch_ref(
     repo: str,
     branch: str,
     installation_token: Optional[str] = None,
-) -> None:
+    expected_sha: Optional[str] = None,
+) -> bool:
     """
     Delete a branch ref.
 
     DELETE /repos/{owner}/{repo}/git/refs/heads/{branch}
+    If expected_sha is provided, verifies that the branch ref still matches before deleting.
     """
     clean_branch = branch.removeprefix("refs/heads/")
+
+    if expected_sha is not None:
+        try:
+            current_sha = await fetch_branch_sha(
+                owner=owner,
+                repo=repo,
+                branch=clean_branch,
+                installation_token=installation_token,
+            )
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github_client: delete_branch_ref skipped for %s/%s:%s; SHA %s != expected %s",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            return True
+
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
     headers = _build_headers(
         token=installation_token, accept="application/vnd.github+json"
@@ -2491,7 +2545,7 @@ async def delete_branch_ref(
             ) from exc
 
     if response.status_code in (204, 404):
-        return
+        return True
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
@@ -2502,6 +2556,7 @@ async def delete_branch_ref(
         raise GitHubClientError(
             f"GitHub API returned error {response.status_code}: {response.text[:200]}"
         )
+    return True
 
 
 async def create_pull_request(

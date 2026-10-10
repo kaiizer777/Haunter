@@ -464,7 +464,7 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
         patch(
             "app.github.pr.get_branch_ref",
             new_callable=AsyncMock,
-            side_effect=GitHubResourceNotFoundError("Branch does not exist"),
+            side_effect=[GitHubResourceNotFoundError("Branch does not exist"), fake_commit_sha],
         ),
         patch("app.github.pr.create_branch", mock_create_branch),
         patch("app.github.pr.delete_branch_ref", mock_delete_ref),
@@ -487,6 +487,7 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
         repo=repo.name,
         branch=topic_branch,
         token="tok",
+        expected_sha=fake_commit_sha,
     )
 
 
@@ -553,7 +554,7 @@ async def test_commit_pr_failure_reverts_existing_branch(
         patch(
             "app.github.pr.get_branch_ref",
             new_callable=AsyncMock,
-            return_value=original_target_sha,
+            side_effect=[original_target_sha, fake_commit_sha],
         ),
         patch("app.github.pr.update_branch_ref", mock_update_ref),
         patch("app.github.pr.restore_branch_ref", mock_restore_ref),
@@ -579,11 +580,100 @@ async def test_commit_pr_failure_reverts_existing_branch(
         token="tok",
         force=False,
     )
-    # mock_restore_ref restored the ref to original_target_sha
+    # mock_restore_ref restored the ref to original_target_sha with expected_sha guard
     mock_restore_ref.assert_called_once_with(
         owner=repo.owner,
         repo=repo.name,
         branch=topic_branch,
         sha=original_target_sha,
         token="tok",
+        expected_sha=fake_commit_sha,
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 8: PR creation failure skips rollback if concurrent writer advanced ref
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_pr_failure_skips_rollback_if_concurrent_writer_advanced_branch(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """
+    When create_pull_request fails and another writer has advanced the branch ref past commit_sha,
+    rollback is skipped to avoid overwriting concurrent work.
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=99090)
+    topic_branch = "feat/concurrent-topic"
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch=topic_branch,
+        sha="base" + "0" * 36,
+    )
+
+    fake_blob_sha = "blob" + "b" * 36
+    fake_tree_sha = "tree" + "c" * 36
+    fake_commit_sha = "cmmt" + "d" * 36
+    original_target_sha = "orig" + "1" * 36
+    concurrent_sha = "conc" + "9" * 36
+
+    mock_update_ref = AsyncMock()
+    mock_restore_ref = AsyncMock()
+    mock_delete_ref = AsyncMock()
+
+    with (
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.github_client.create_blob",
+            new_callable=AsyncMock,
+            return_value=fake_blob_sha,
+        ),
+        patch(
+            "app.github_client.create_git_tree",
+            new_callable=AsyncMock,
+            return_value=fake_tree_sha,
+        ),
+        patch(
+            "app.github_client.create_git_commit",
+            new_callable=AsyncMock,
+            return_value=fake_commit_sha,
+        ),
+        patch(
+            "app.github_client.fetch_file_content",
+            new_callable=AsyncMock,
+            return_value=_ORIGINAL_FILE,
+        ),
+        patch(
+            "app.github.pr.get_branch_ref",
+            new_callable=AsyncMock,
+            side_effect=[original_target_sha, concurrent_sha],
+        ),
+        patch("app.github.pr.update_branch_ref", mock_update_ref),
+        patch("app.github.pr.restore_branch_ref", mock_restore_ref),
+        patch("app.github.pr.delete_branch_ref", mock_delete_ref),
+        patch(
+            "app.github_client.create_pull_request",
+            new_callable=AsyncMock,
+            side_effect=GitHubClientError("Simulated PR creation failure"),
+        ),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "Test PR rollback concurrent conflict"},
+            )
+
+    assert resp.status_code == 502, resp.text
+    # mock_restore_ref and mock_delete_ref must NOT be called when ref was advanced by another writer
+    mock_restore_ref.assert_not_called()
+    mock_delete_ref.assert_not_called()

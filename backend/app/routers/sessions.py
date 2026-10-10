@@ -955,13 +955,38 @@ async def commit_session(
             exc,
         )
         # Rollback: ensure no commit is left on a non-PR branch without a PR.
-        if branch_was_created:
+        # Guard against overwriting concurrent writer commits: only rollback if the
+        # branch ref still points to this session's commit_sha.
+        try:
+            current_ref_sha = await _pr_get_ref(
+                owner=repo.owner,
+                repo=repo.name,
+                branch=target_branch,
+                token=gh_token,
+            )
+        except Exception as ref_exc:
+            logger.warning(
+                "sessions/commit: failed to inspect current ref for %s during rollback: %s",
+                target_branch,
+                ref_exc,
+            )
+            current_ref_sha = None
+
+        if current_ref_sha is not None and current_ref_sha != commit_sha:
+            logger.warning(
+                "sessions/commit: skipping branch rollback for %s; ref advanced to %s (expected %s)",
+                target_branch,
+                current_ref_sha,
+                commit_sha,
+            )
+        elif branch_was_created:
             try:
                 await _pr_delete_ref(
                     owner=repo.owner,
                     repo=repo.name,
                     branch=target_branch,
                     token=gh_token,
+                    expected_sha=commit_sha,
                 )
             except Exception as del_exc:
                 logger.warning(
@@ -977,6 +1002,7 @@ async def commit_session(
                     branch=target_branch,
                     sha=original_target_sha,
                     token=gh_token,
+                    expected_sha=commit_sha,
                 )
             except Exception as reset_exc:
                 logger.warning(
