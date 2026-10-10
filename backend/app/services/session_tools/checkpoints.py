@@ -230,6 +230,11 @@ def tool_scan_security_vulnerabilities(
     )
 
     if not violations:
+        if scanned_count == 0:
+            return (
+                f"Security scan incomplete: 0 files scanned, 0 secrets or SQL injection flaws detected"
+                f"{skip_note}."
+            )
         return (
             f"Security scan passed: 0 secrets or SQL injection flaws detected "
             f"across {scanned_count} files{skip_note}."

@@ -260,7 +260,7 @@ async def tool_git_diff(
                     if ref_target.startswith("-"):
                         return f"Error: invalid ref '{ref_target}'."
                     cmd = ["git", "-C", repo_root, "diff", "--end-of-options", ref_target]
-                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=True)
                     diff_parts: list[str] = []
                     if p.stdout and p.stdout.strip():
                         diff_parts.append(p.stdout.strip())
@@ -279,7 +279,7 @@ async def tool_git_diff(
                         "-z",
                         "--untracked-files=all",
                     ]
-                    sp = subprocess.run(status_cmd, capture_output=True, text=True, timeout=5)
+                    sp = subprocess.run(status_cmd, capture_output=True, text=True, timeout=5, check=True)
                     if sp.stdout:
                         for entry in sp.stdout.split("\0"):
                             entry = entry.strip()
@@ -347,6 +347,14 @@ async def tool_git_diff(
                         if len(diff_text) > _MAX_DIFF_CHARS:
                             return diff_text[:_MAX_DIFF_CHARS] + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
                         return diff_text
+                    if staged_patches:
+                        staged_diff = "\n\n".join(
+                            f"# Staged patch: {p}\n{d.strip()}"
+                            for p, d in staged_patches.items()
+                            if d and d.strip()
+                        )
+                        if staged_diff:
+                            return staged_diff
                     return "No uncommitted working-tree differences found."
                 else:
                     local_err = err_msg or f"Error: Local checkout for repository '{repo}' was not found on this machine."

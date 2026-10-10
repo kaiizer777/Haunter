@@ -1251,7 +1251,7 @@ async def test_tool_verify_ci_sandbox_rejects_unknown_provider(monkeypatch: pyte
         repo_name="repo",
     )
     assert "Error: Unknown SANDBOX_PROVIDER='invalid_cloud_provider'" in res
-    assert "Must be 'github_actions'" in res
+    assert "Must be 'github_actions' or 'local'" in res
 
 
 

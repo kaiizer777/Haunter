@@ -1783,7 +1783,7 @@ async def tool_verify_ci_sandbox(
     provider = provider.lower().strip()
 
     if provider not in ("github_actions", "local"):
-        return f"Error: Unknown SANDBOX_PROVIDER={provider!r}. Must be 'github_actions'."
+        return f"Error: Unknown SANDBOX_PROVIDER={provider!r}. Must be 'github_actions' or 'local'."
 
     # ---- Local fast path: run staged files through the local test runner.
     if provider == "local":

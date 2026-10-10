@@ -963,7 +963,8 @@ def _build_system_prompt(
 
     from app.lambda_runtime import is_lambda_runtime
 
-    if is_lambda_runtime():
+    _is_lambda = is_lambda_runtime()
+    if _is_lambda:
         verification_instruction = (
             "For cloud-native verification, call `verify_in_ci_sandbox` to dispatch staged patches to the isolated "
             "GitHub Actions mirror — it streams CI logs live and returns pass/fail with tracebacks for self-healing. "
@@ -994,6 +995,19 @@ def _build_system_prompt(
             "Always validate patches with sandbox_verifier or run_targeted_tests after any feature_architect or bug_hunter run.\n"
         )
 
+    if _is_lambda:
+        local_tools_block = (
+            " 15. `run_terminal_command(command, timeout_sec, cwd)` — UNAVAILABLE in AWS Lambda serverless runtime; do not call, use `verify_in_ci_sandbox` instead.\n"
+            " 16. `run_linter(paths, linter, cwd)` — UNAVAILABLE in AWS Lambda serverless runtime; do not call, use `verify_in_ci_sandbox` instead.\n"
+            " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — UNAVAILABLE in AWS Lambda serverless runtime; do not call, use `verify_in_ci_sandbox` instead.\n"
+        )
+    else:
+        local_tools_block = (
+            " 15. `run_terminal_command(command, timeout_sec, cwd)` — run a shell command and return stdout/stderr/exit code. Supports chained commands (&&, ;) and directory navigation (cd). Output streams live to the terminal drawer.\n"
+            " 16. `run_linter(paths, linter, cwd)` — run ruff/eslint on the specified files and get diagnostics.\n"
+            " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — run pytest or vitest on specific test files and capture tracebacks.\n"
+        )
+
     return (
         f"You are an expert pair-programming agent working on the repository "
         f"`{repo_owner}/{repo_name}` (branch: `{branch_name}`, base SHA: `{base_sha[:8]}`).\n\n"
@@ -1013,9 +1027,7 @@ def _build_system_prompt(
         " 12. `get_file_outline(path)` — return signatures, classes, and docstrings of a file without implementation bodies (saves context tokens).\n"
         " 13. `find_symbol(name, kind)` — locate definitions of functions, classes, interfaces, or types across the codebase.\n"
         " 14. `find_references(symbol, path)` — find all call sites and usages of a symbol (word-boundary matched, capped at 50).\n"
-        " 15. `run_terminal_command(command, timeout_sec, cwd)` — run a shell command and return stdout/stderr/exit code. Supports chained commands (&&, ;) and directory navigation (cd). Output streams live to the terminal drawer.\n"
-        " 16. `run_linter(paths, linter, cwd)` — run ruff/eslint on the specified files and get diagnostics.\n"
-        " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — run pytest or vitest on specific test files and capture tracebacks.\n"
+        f"{local_tools_block}"
         " 18. `verify_in_ci_sandbox(workflow_file, timeout_sec)` — dispatch staged patches to the isolated GitHub Actions CI sandbox mirror, stream CI logs live, and return pass/fail with tracebacks for self-healing.\n"
         " 19. `search_web_docs(query, domain, max_results)` — search live web/docs via TinyFish for up-to-date library APIs, breaking changes, and migration guides.\n"
         " 20. `fetch_web_content(url, format)` — fetch and render a public documentation page or GitHub issue as clean Markdown via TinyFish.\n"

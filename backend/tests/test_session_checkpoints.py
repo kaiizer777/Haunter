@@ -356,8 +356,9 @@ def test_security_scan_unstaged_paths_reported_and_counted_as_zero() -> None:
         base_sha="a" * 40,
     )
 
-    assert "passed" in result.lower()
-    assert "across 0 files" in result
+    assert "incomplete" in result.lower()
+    assert "0 files scanned" in result
+    assert "passed" not in result.lower()
     assert "skipped 2 path(s) with no staged changes: file_a.py, file_b.py" in result
 
 
