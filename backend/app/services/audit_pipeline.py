@@ -871,7 +871,7 @@ async def execute_audit_job(
             repo=name,
             head_sha=target.head_sha,
             pr_number=resolved_pr,
-            diff_text=diff_text,
+            diff_text=filtered_diff,
             token=token,
         )
     except Exception as pub_exc:

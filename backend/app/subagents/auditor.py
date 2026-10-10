@@ -949,17 +949,13 @@ def build_diff_grounding(
                 mark_truncated(is_budget_truncated=True)
             continue
 
+        if not line:
+            continue
+
         if hunk is not None:
-            if line.startswith("diff --git "):
-                mark_truncated(is_budget_truncated=True)
-                current_path = None
-                old_dev_null = False
-                new_dev_null = False
-                old_path = None
-                new_path = None
-                continue
             if (
-                line.startswith("--- ")
+                line.startswith("diff --git ")
+                or line.startswith("--- ")
                 or line.startswith("+++ ")
                 or line.startswith("Binary files ")
                 or line.startswith("GIT binary patch")
