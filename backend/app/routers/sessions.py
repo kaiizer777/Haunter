@@ -655,6 +655,7 @@ async def commit_session(
         create_git_commit as _create_commit,
         create_git_tree as _create_tree,
         create_pull_request as _create_pr,
+        fetch_commit_tree_sha as _fetch_commit_tree,
         fetch_file_content as _fetch_file,
         update_branch_ref as _update_ref,
     )
@@ -745,7 +746,23 @@ async def commit_session(
             sha=session.base_sha,
             token=gh_token,
         )
-        original = base_content if base_content is not None else ""
+        if base_content is None:
+            # If the patch is not a creation patch (does not start from /dev/null),
+            # missing base content indicates a missing file at the base revision.
+            if "--- /dev/null" not in patch_text:
+                logger.error(
+                    "sessions/commit: base content missing for '%s' at sha %s in session %s",
+                    file_path,
+                    session.base_sha,
+                    session_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Base file '{file_path}' not found at revision {session.base_sha}.",
+                )
+            original = ""
+        else:
+            original = base_content
 
         try:
             patched_content = apply_unified_diff(original, patch_text)
@@ -759,6 +776,17 @@ async def commit_session(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Patch for '{file_path}' could not be applied cleanly: {exc}",
+            )
+
+        if not patched_content:
+            logger.error(
+                "sessions/commit: patched content is empty for '%s' in session %s",
+                file_path,
+                session_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Patched content for '{file_path}' is empty. 0-byte files cannot be committed.",
             )
 
         try:
@@ -791,14 +819,30 @@ async def commit_session(
         )
 
     # ------------------------------------------------------------------
-    # 5. Create Git tree (rooted at base_sha as base_tree).
+    # 5. Create Git tree (rooted at tree SHA resolved from base_sha).
     # ------------------------------------------------------------------
+    try:
+        base_tree_sha = await _fetch_commit_tree(
+            owner=repo.owner,
+            repo=repo.name,
+            commit_sha=session.base_sha,
+            installation_token=gh_token,
+        )
+    except _GHErr as exc:
+        logger.warning(
+            "sessions/commit: could not resolve tree SHA for commit %s in session %s: %s",
+            session.base_sha,
+            session_id,
+            exc,
+        )
+        base_tree_sha = session.base_sha
+
     try:
         tree_sha = await _create_tree(
             owner=repo.owner,
             repo=repo.name,
             tree=tree_entries,
-            base_tree=session.base_sha,
+            base_tree=base_tree_sha,
             installation_token=gh_token,
         )
     except _GHErr as exc:

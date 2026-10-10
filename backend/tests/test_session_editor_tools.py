@@ -529,7 +529,8 @@ async def test_editor_tools_sync_to_local_disk(tmp_path, monkeypatch: pytest.Mon
         staged_patches=staged,
         queue=queue,
     )
-    assert "Successfully staged deletion" in res_del
+    assert "Removed newly-created file" in res_del
+    assert "src/helper.py" not in staged
     assert not helper_file.exists()
 
 
@@ -1170,6 +1171,146 @@ async def test_str_replace_terminal_created_file_generates_creation_diff(
     assert "--- /dev/null" in diff2
     assert "a = 99" in diff2
     assert "b = 200" in diff2
+
+
+# ---------------------------------------------------------------------------
+# Issue #63 Regression Tests: create -> delete leaves staged_patches empty
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_issue_63_single_tool_create_then_delete_unstages_patch() -> None:
+    """Issue #63: create_file followed by delete_file removes staged patch and leaves git_diff clean."""
+    from app.services.session_tools.git import git_diff
+
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+    path = "src/ephemeral.py"
+
+    # Step 1: create_file stages a creation diff.
+    res_create = await tool_create_file(
+        path=path,
+        content="def ephemeral():\n    return True\n",
+        staged_patches=staged,
+        queue=queue,
+    )
+    assert "Successfully staged new file" in res_create
+    assert path in staged
+    assert "--- /dev/null" in staged[path]
+
+    diff_staged = await git_diff(
+        base="abc123",
+        head="staged",
+        owner="owner",
+        repo="repo",
+        staged_patches=staged,
+    )
+    assert path in diff_staged
+
+    # Step 2: delete_file on newly-created file unstages the file without phantom deletion.
+    res_del = await tool_delete_file(
+        path=path,
+        repo_owner="owner",
+        repo_name="repo",
+        base_sha="abc123",
+        staged_patches=staged,
+        queue=queue,
+    )
+    assert res_del == f"Removed newly-created file '{path}'."
+    assert path not in staged
+    assert len(staged) == 0
+
+    # Step 3: git_diff verifies no staged patch remains.
+    diff_after = await git_diff(
+        base="abc123",
+        head="staged",
+        owner="owner",
+        repo="repo",
+        staged_patches=staged,
+    )
+    assert path not in diff_after
+    assert diff_after == "No staged patches currently in session."
+
+
+@pytest.mark.asyncio
+async def test_issue_63_apply_multi_patch_create_then_delete_same_batch() -> None:
+    """Issue #63: apply_multi_patch with create_file and delete_file in same batch leaves staged_patches empty."""
+    from app.services.session_tools.git import git_diff
+
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+    path = "src/batch_temp.py"
+
+    patches = [
+        {"type": "create_file", "path": path, "content": "x = 1\n"},
+        {"type": "delete_file", "path": path},
+    ]
+
+    res = await tool_apply_multi_patch(
+        patches=patches,
+        repo_owner="owner",
+        repo_name="repo",
+        base_sha="abc123",
+        staged_patches=staged,
+        queue=queue,
+    )
+    assert "Successfully applied 2 file edits atomically." in res
+    assert path not in staged
+    assert len(staged) == 0
+
+    diff_after = await git_diff(
+        base="abc123",
+        head="staged",
+        owner="owner",
+        repo="repo",
+        staged_patches=staged,
+    )
+    assert path not in diff_after
+    assert diff_after == "No staged patches currently in session."
+
+
+@pytest.mark.asyncio
+async def test_issue_63_apply_multi_patch_delete_previously_staged_creation() -> None:
+    """Issue #63: apply_multi_patch delete on file created in earlier turn unstages it cleanly."""
+    from app.services.session_tools.git import git_diff
+
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+    path = "src/prior_temp.py"
+
+    # Turn 1: create file
+    await tool_create_file(
+        path=path,
+        content="prior = 42\n",
+        staged_patches=staged,
+        queue=queue,
+    )
+    assert path in staged
+
+    # Turn 2: delete file via batch
+    patches = [{"type": "delete_file", "path": path}]
+    res = await tool_apply_multi_patch(
+        patches=patches,
+        repo_owner="owner",
+        repo_name="repo",
+        base_sha="abc123",
+        staged_patches=staged,
+        queue=queue,
+    )
+    assert "Successfully applied 1 file edit atomically." in res
+    assert path not in staged
+    assert len(staged) == 0
+
+    diff_after = await git_diff(
+        base="abc123",
+        head="staged",
+        owner="owner",
+        repo="repo",
+        staged_patches=staged,
+    )
+    assert path not in diff_after
+    assert diff_after == "No staged patches currently in session."
+
 
 
 

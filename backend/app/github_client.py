@@ -2210,6 +2210,68 @@ async def create_blob(
     return sha
 
 
+async def fetch_commit_tree_sha(
+    owner: str,
+    repo: str,
+    commit_sha: str,
+    installation_token: Optional[str] = None,
+) -> str:
+    """
+    Resolve a commit SHA to its root tree SHA via GitHub Git Data API.
+
+    GET /repos/{owner}/{repo}/git/commits/{commit_sha}
+    Returns the tree SHA.
+
+    Raises:
+        GitHubAuthError, GitHubRateLimitError, GitHubResourceNotFoundError, GitHubClientError.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/commits/{quote(commit_sha, safe='')}"
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error fetching git commit for %s/%s @ %s",
+                owner,
+                repo,
+                commit_sha,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Commit not found for {owner}/{repo} @ {commit_sha}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
+
+    data = response.json()
+    tree = data.get("tree", {})
+    if isinstance(tree, dict) and "sha" in tree:
+        return str(tree["sha"])
+    if isinstance(tree, str):
+        return tree
+    raise GitHubClientError(
+        f"Tree SHA not found in commit object for {owner}/{repo} @ {commit_sha}"
+    )
+
+
 async def create_git_tree(
     owner: str,
     repo: str,

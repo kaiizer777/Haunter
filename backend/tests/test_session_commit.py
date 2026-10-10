@@ -149,6 +149,11 @@ async def test_commit_success(
             return_value=fake_blob_sha,
         ),
         patch(
+            "app.github_client.fetch_commit_tree_sha",
+            new_callable=AsyncMock,
+            return_value="resolved_tree_" + "a" * 26,
+        ),
+        patch(
             "app.github_client.create_git_tree",
             new_callable=AsyncMock,
             return_value=fake_tree_sha,
