@@ -113,11 +113,16 @@ def classify_failure(
 
     # -------------------------------------------------------------------------
     # 3. wrong_fix — attempts exist but none ever reached sandbox verification
-    #    (verification_status is None/"skipped" means patch was rejected or verification disabled before sandbox)
+    #    (verification_status is None means patch was rejected before submission).
+    #    When verification is skipped by repo settings, return None to avoid
+    #    misclassifying policy/config bypass as an invalid patch.
     # -------------------------------------------------------------------------
+    if all(a.verification_status == "skipped" for a in attempts):
+        return None
+
     sandbox_reached = [
         a for a in attempts
-        if a.verification_status not in (None, "skipped", "pending")
+        if a.verification_status is not None and a.verification_status != "skipped"
     ]
     if not sandbox_reached:
         return "wrong_fix"
