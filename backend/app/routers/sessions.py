@@ -21,12 +21,14 @@ Security invariants:
 
 from __future__ import annotations
 
+import asyncio as _asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, AsyncGenerator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,12 +59,33 @@ from app.schemas import (
     SessionListOut,
     SessionOut,
 )
-from app.services.session_orchestrator import SessionOrchestrator
+from app.services.session_orchestrator import (
+    SessionOrchestrator,
+    _is_lock_conflict as _is_row_lock_conflict,
+)
 from app.services.session_streamer import SseQueue
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
+
+# Retain strong references to running background tasks to prevent garbage collection.
+_BACKGROUND_TASKS: set[_asyncio.Task[Any]] = set()
+
+# Live SSE turns by session id: (queue, background task). Lets a client that
+# disconnected mid-stream reattach to the in-flight turn via Last-Event-ID
+# instead of starting a duplicate turn.
+_ACTIVE_TURNS: dict[str, tuple[SseQueue, _asyncio.Task[Any]]] = {}
+
+# Seconds a completed turn's replay buffer stays available for reconnects
+# that missed the terminal event.
+_COMPLETED_TURN_TTL_S = 300.0
+
+# Monotonic timestamps (time.monotonic()) marking when a registered turn
+# completed. A completed entry is kept (not popped) so a reconnect that
+# missed `done` replays the terminal outcome instead of getting 410 and
+# resubmitting an already-executed turn as a duplicate.
+_TURN_COMPLETED_AT: dict[str, float] = {}
 
 # Statuses allowed on the AgentSession model.
 _VALID_STATUSES = {"active", "completed", "closed", "awaiting_clarification"}
@@ -286,6 +309,90 @@ async def list_sessions(
     return SessionListOut(sessions=out, total=total)
 
 
+async def _is_turn_active_elsewhere(db: AsyncSession, session_id: uuid.UUID) -> bool:
+    """
+    Probe whether another backend worker currently holds this session's row lock.
+
+    A live turn holds the session row lock from _load_session until its final
+    _persist commit. _ACTIVE_TURNS only sees turns in this process, so on Lambda
+    (Function URL fans out across execution environments) a reconnect can miss
+    a turn that is alive elsewhere. A NOWAIT lock conflict here means exactly
+    that: some other worker owns the turn. Any other outcome reports False.
+    """
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    try:
+        probe_stmt = (
+            select(AgentSession.id)
+            .where(AgentSession.id == session_id)
+            .with_for_update(nowait=True)
+        )
+        await db.execute(probe_stmt)
+        return False
+    except (OperationalError, DBAPIError) as exc:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return _is_row_lock_conflict(exc)
+
+
+def _register_turn(
+    session_id: uuid.UUID, queue: SseQueue, task: _asyncio.Task[Any]
+) -> bool:
+    """
+    Register a new turn unless a live one already owns this session.
+
+    Returns True when the new turn was registered. Returns False (leaving the
+    live entry untouched) when an overlapping POST won the race past the
+    pre-creation live-turn check in chat_session: the new turn runs
+    unregistered, so neither this registration nor its cleanup can orphan the
+    live turn and break resumption with a spurious 410.
+    """
+    live_entry = _live_turn(session_id)
+    if live_entry is None:
+        _ACTIVE_TURNS[str(session_id)] = (queue, task)
+        _TURN_COMPLETED_AT.pop(str(session_id), None)
+        return True
+    logger.warning(
+        "chat_session: overlapping POST for session %s while a turn is live; "
+        "preserving the live registry entry",
+        session_id,
+    )
+    return False
+
+
+def _live_turn(
+    session_id: uuid.UUID,
+) -> tuple[SseQueue, _asyncio.Task[Any]] | None:
+    """Return the live (unfinished) turn entry for session_id, if any."""
+    entry = _ACTIVE_TURNS.get(str(session_id))
+    if entry is not None and not entry[1].done():
+        return entry
+    return None
+
+
+def _forget_turn(session_id: str) -> None:
+    """Drop any registry entry and completion stamp for session_id."""
+    _ACTIVE_TURNS.pop(session_id, None)
+    _TURN_COMPLETED_AT.pop(session_id, None)
+
+
+def _completed_turn_expired(session_id: str) -> bool:
+    """True when no retained completed turn exists or it is past its TTL."""
+    completed_at = _TURN_COMPLETED_AT.get(session_id)
+    if completed_at is None:
+        return True
+    return (time.monotonic() - completed_at) > _COMPLETED_TURN_TTL_S
+
+
+def _sweep_expired_turns() -> None:
+    """Drop retained completed turns past their replay TTL (bounded memory)."""
+    for key, completed_at in list(_TURN_COMPLETED_AT.items()):
+        if (time.monotonic() - completed_at) > _COMPLETED_TURN_TTL_S:
+            _forget_turn(key)
+
+
 @router.get("/sessions/{session_id}", response_model=SessionOut)
 async def get_session(
     session_id: uuid.UUID,
@@ -438,6 +545,8 @@ async def chat_session(
     body: SessionChatIn,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    last_event_id_header: Annotated[Optional[str], Header(alias="Last-Event-ID")] = None,
+    last_event_id_query: Annotated[Optional[int], Query(alias="last_event_id")] = None,
 ) -> StreamingResponse:
     """
     Submit a user message to the live pairing agent and stream the response via SSE.
@@ -461,6 +570,9 @@ async def chat_session(
         Connection: keep-alive
         X-Accel-Buffering: no
     """
+    # Drop retained completed turns past their replay TTL (bounded memory).
+    _sweep_expired_turns()
+
     # Object-level authorization: session must be active and owned by caller.
     stmt = select(AgentSession).where(
         AgentSession.id == session_id,
@@ -477,6 +589,105 @@ async def chat_session(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Session is not active (status={session.status!r}). Cannot submit prompt.",
+        )
+
+    # Parse resumption event ID if provided
+    parsed_last_event_id: Optional[int] = None
+    if last_event_id_header and last_event_id_header.isdigit():
+        parsed_last_event_id = int(last_event_id_header)
+    elif last_event_id_query is not None:
+        parsed_last_event_id = last_event_id_query
+
+    # A resumption request reattaches to the live turn for this session
+    # instead of starting a duplicate orchestrator. The replay buffer on the
+    # existing queue supplies every event after the resumption ID.
+    if parsed_last_event_id is not None:
+        existing = _ACTIVE_TURNS.get(str(session_id))
+        if existing is not None:
+            existing_queue, existing_task = existing
+            if not existing_task.done():
+                # The original turn already owns this prompt; this request's
+                # message/model/provider are intentionally ignored.
+                if existing_queue.resume_gap(parsed_last_event_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_410_GONE,
+                        detail=(
+                            "RESUME_GAP: Last-Event-ID predates the retained replay "
+                            "window; some events were evicted before this reconnect. "
+                            "Reload the session state and send your message again "
+                            "as a new request."
+                        ),
+                    )
+                return StreamingResponse(
+                    existing_queue.stream(last_event_id=parsed_last_event_id),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            if not _completed_turn_expired(str(session_id)):
+                # Completed but retained: replay the terminal outcome so the
+                # client does not resubmit an already-executed turn. Served
+                # from the retained buffer only — attaching a live stream to
+                # a dead turn could park on _q.get() forever.
+                if existing_queue.resume_gap(parsed_last_event_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_410_GONE,
+                        detail=(
+                            "RESUME_GAP: Last-Event-ID predates the retained replay "
+                            "window; some events were evicted before this reconnect. "
+                            "Reload the session state and send your message again "
+                            "as a new request."
+                        ),
+                    )
+                replay = existing_queue.replay_after(parsed_last_event_id)
+
+                async def _replay_only() -> AsyncGenerator[str, None]:
+                    for chunk in replay:
+                        yield chunk
+
+                return StreamingResponse(
+                    _replay_only(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            _forget_turn(str(session_id))
+        # No live turn in this execution environment. The registry is
+        # process-local, so on Lambda the turn may still be running on another
+        # environment — probe the shared row lock before giving up.
+        if await _is_turn_active_elsewhere(db, session_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "TURN_ACTIVE_ELSEWHERE: a turn for this session is still running "
+                    "on another worker. Retry this resumption shortly; keep the "
+                    "same Last-Event-ID."
+                ),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="No resumable turn for this session. Please send your message again as a new request.",
+        )
+
+    # Overlapping non-resumption POST while a turn owns this session: reject
+    # before starting a second orchestrator. The live entry stays untouched,
+    # and the caller gets an explicit busy signal instead of a turn it could
+    # never resume (the row lock would yield SESSION_BUSY anyway). Resumption
+    # POSTs (with Last-Event-ID) took the reattach path above and never reach
+    # here. _register_turn remains as the race guard for simultaneous POSTs.
+    if _live_turn(session_id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "SESSION_BUSY: another prompt is already in progress for this "
+                "session. Please wait for it to finish and send your message again."
+            ),
         )
 
     # Resolve GitHub installation token for file reads — best-effort.
@@ -503,11 +714,9 @@ async def chat_session(
         gh_token=gh_token,
     )
 
-    import asyncio as _asyncio
-
     # Launch the orchestrator in a background task so the StreamingResponse
     # generator can start yielding immediately while the LLM runs.
-    _asyncio.ensure_future(
+    task = _asyncio.create_task(
         orchestrator.run(
             user_message=body.message,
             queue=queue,
@@ -515,9 +724,36 @@ async def chat_session(
             provider=body.provider,
         )
     )
+    _BACKGROUND_TASKS.add(task)
+    _register_turn(session_id, queue, task)
+
+    def _on_orchestrator_done(t: _asyncio.Task) -> None:
+        _BACKGROUND_TASKS.discard(t)
+        entry = _ACTIVE_TURNS.get(str(session_id))
+        if entry is not None and entry[1] is t:
+            if t.cancelled():
+                # No terminal event was emitted; retaining the queue could
+                # hang a reattaching consumer on _q.get() forever.
+                _forget_turn(str(session_id))
+            else:
+                # Retain the completed turn for a bounded replay period so a
+                # client that missed the terminal event replays the outcome
+                # instead of getting 410 and resubmitting a duplicate turn.
+                _TURN_COMPLETED_AT[str(session_id)] = time.monotonic()
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                logger.error(
+                    "session_orchestrator background task failed for session %s: %s",
+                    session_id,
+                    exc,
+                    exc_info=exc,
+                )
+
+    task.add_done_callback(_on_orchestrator_done)
 
     return StreamingResponse(
-        queue.stream(),
+        queue.stream(last_event_id=parsed_last_event_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

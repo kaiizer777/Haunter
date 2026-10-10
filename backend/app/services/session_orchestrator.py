@@ -1136,6 +1136,36 @@ def _is_lock_conflict(exc: Exception) -> bool:
 # ------------------------------------------------------------------
 
 
+def _with_interrupted_turn(
+    history: list[dict[str, Any]], user_message: str
+) -> list[dict[str, Any]]:
+    """Return history with the user message + interruption notice appended.
+
+    Idempotent across retries of the same message: the user entry is matched
+    on role+content (not content alone), and the filler notice is only added
+    when the last entry is not already such a notice.
+    """
+    updated = list(history)
+    if not (
+        updated
+        and updated[-1].get("role") == "user"
+        and updated[-1].get("content") == user_message
+    ):
+        updated.append({"role": "user", "content": user_message})
+    if not (
+        updated
+        and updated[-1].get("role") == "assistant"
+        and str(updated[-1].get("content") or "").startswith("Turn interrupted")
+    ):
+        updated.append(
+            {
+                "role": "assistant",
+                "content": "Turn interrupted by internal error. Your prior state has been preserved.",
+            }
+        )
+    return updated
+
+
 class SessionOrchestrator:
     """
     Drives the LLM tool-calling loop for a single pairing session turn.
@@ -1193,6 +1223,30 @@ class SessionOrchestrator:
                 self.session_id,
                 exc,
             )
+            # Ensure interrupted turn is recorded in session history so it is never silently lost
+            try:
+                try:
+                    await self.db.rollback()
+                except Exception:
+                    pass
+                try:
+                    session = await self._load_session()
+                except Exception:
+                    session = None
+                if session is None:
+                    # The request-scoped session may be closed; load via a
+                    # fresh session so the interruption record still persists.
+                    session = await self._load_session_fallback()
+                if session:
+                    history = _with_interrupted_turn(
+                        list(session.conversation_history or []), user_message
+                    )
+                    await self._persist(session, history, dict(session.staged_patches or {}))
+            except Exception as persist_exc:
+                logger.warning(
+                    "session_orchestrator: failed to persist error fallback state: %s",
+                    persist_exc,
+                )
             await queue.put_error(
                 "An internal error occurred while processing your request.",
                 "INTERNAL_ERROR",
@@ -1307,6 +1361,26 @@ class SessionOrchestrator:
                     iteration,
                     exc,
                 )
+                # The generic run() recovery never sees this branch (it
+                # returns normally), so persist the interrupted turn here.
+                # Persist the local in-progress staged_patches: tools mutate
+                # that copy during the turn while session.staged_patches still
+                # holds the stale pre-turn snapshot — persisting the snapshot
+                # would silently drop patches staged before the LLM failure.
+                try:
+                    interrupted_history = _with_interrupted_turn(
+                        list(session.conversation_history or []), user_message
+                    )
+                    await self._persist(
+                        session,
+                        interrupted_history,
+                        dict(staged_patches),
+                    )
+                except Exception as persist_exc:
+                    logger.warning(
+                        "session_orchestrator: failed to persist LLM-error fallback state: %s",
+                        persist_exc,
+                    )
                 await queue.put_error(
                     "LLM request failed. Please try again.", "LLM_ERROR"
                 )
@@ -2941,6 +3015,24 @@ class SessionOrchestrator:
                 f"Session {self.session_id} is currently busy with another operation."
             ) from exc
 
+    async def _load_session_fallback(self) -> AgentSession | None:
+        """Load the session row via a fresh DB session (no row lock).
+
+        Used on error paths when the request-scoped self.db may be closed or
+        otherwise unusable. Returns a detached row; only column attributes
+        (history, patches, status) are safe to read from it.
+        """
+        from app.db import async_session_maker
+
+        async with async_session_maker() as fresh_db:
+            stmt = select(AgentSession).where(AgentSession.id == self.session_id)
+            res = await fresh_db.execute(stmt)
+            row = res.scalars().first()
+            if row is None:
+                return None
+            fresh_db.expunge(row)
+            return row
+
     async def _persist(
         self,
         session: AgentSession,
@@ -2948,8 +3040,48 @@ class SessionOrchestrator:
         updated_patches: dict[str, str],
     ) -> None:
         """Atomically persist conversation_history and staged_patches."""
+        # Snapshot every ORM attribute the fallback path needs BEFORE the
+        # commit attempt. rollback() expires all persistent state, so reading
+        # session.id / status / ... after rollback can trigger refresh I/O on
+        # a broken session and fail the recovery outright.
+        fallback_session_id = session.id
+        fallback_status = session.status
+        fallback_checkpoints = session.checkpoints
+        fallback_plan = session.plan
+        fallback_waiting_input = session.waiting_input
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
-        await self.db.commit()
-        await self.db.refresh(session)
+        try:
+            if not getattr(self.db, "is_active", True):
+                raise RuntimeError("self.db is closed or inactive")
+            await self.db.commit()
+            await self.db.refresh(session)
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: committing with self.db failed (%s), rolling back and attempting fallback persist",
+                exc,
+            )
+            # Release any row lock / failed transaction on the original
+            # session first: otherwise the fallback UPDATE on the same row
+            # can block on that lock and hang instead of saving.
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            from app.db import async_session_maker
+            async with async_session_maker() as fallback_db:
+                stmt = select(AgentSession).where(
+                    AgentSession.id == fallback_session_id
+                )
+                res = await fallback_db.execute(stmt)
+                db_session = res.scalars().first()
+                if db_session:
+                    db_session.conversation_history = updated_history
+                    db_session.staged_patches = updated_patches
+                    db_session.updated_at = datetime.now(timezone.utc)
+                    db_session.status = fallback_status
+                    db_session.checkpoints = fallback_checkpoints
+                    db_session.plan = fallback_plan
+                    db_session.waiting_input = fallback_waiting_input
+                    await fallback_db.commit()

@@ -351,3 +351,186 @@ async def test_close_session(
 
     assert create_resp.status_code == 201, create_resp.text
     assert create_resp.json()["base_sha"] == fake_sha
+
+
+# ---------------------------------------------------------------------------
+# Chat resumption helpers (hermetic — no DB).
+# ---------------------------------------------------------------------------
+
+
+def _lock_conflict_error() -> Exception:
+    """Build an OperationalError shaped like a Postgres NOWAIT lock conflict."""
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError(
+        "SELECT agent_sessions.id FROM agent_sessions WHERE ... FOR UPDATE NOWAIT",
+        {},
+        Exception('could not obtain lock on relation "agent_sessions"'),
+    )
+
+
+@pytest.mark.asyncio
+async def test_is_turn_active_elsewhere_detects_row_lock() -> None:
+    """A NOWAIT lock conflict means a live turn runs on another worker."""
+    from app.routers.sessions import _is_turn_active_elsewhere
+
+    class _LockedDb:
+        rolled_back = False
+
+        async def execute(self, _stmt):
+            raise _lock_conflict_error()
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    db = _LockedDb()
+    assert await _is_turn_active_elsewhere(db, uuid.uuid4()) is True  # type: ignore[arg-type]
+    assert db.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_is_turn_active_elsewhere_free_row_and_other_errors() -> None:
+    """A free row (or a non-lock DB error) reports no remote turn."""
+    from app.routers.sessions import _is_turn_active_elsewhere
+
+    class _FreeDb:
+        async def execute(self, _stmt):
+            return object()
+
+        async def rollback(self) -> None:
+            raise AssertionError("rollback must not run on the success path")
+
+    assert await _is_turn_active_elsewhere(_FreeDb(), uuid.uuid4()) is False  # type: ignore[arg-type]
+
+    class _OtherDbError:
+        rolled_back = False
+
+        async def execute(self, _stmt):
+            from sqlalchemy.exc import OperationalError
+
+            raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    other_db = _OtherDbError()
+    assert await _is_turn_active_elsewhere(other_db, uuid.uuid4()) is False  # type: ignore[arg-type]
+    assert other_db.rolled_back is True
+
+
+def test_register_turn_preserves_live_entry() -> None:
+    """An overlapping POST never replaces (or orphans) the live turn entry."""
+    from unittest.mock import MagicMock
+
+    from app.routers.sessions import _ACTIVE_TURNS, _register_turn
+    from app.services.session_streamer import SseQueue
+
+    session_id = uuid.uuid4()
+    key = str(session_id)
+    _ACTIVE_TURNS.pop(key, None)
+    try:
+        live_queue, live_task = SseQueue(), MagicMock()
+        live_task.done.return_value = False
+        assert _register_turn(session_id, live_queue, live_task) is True
+        assert _ACTIVE_TURNS[key][1] is live_task
+
+        # Overlapping turn runs unregistered; the live entry survives.
+        other_queue, other_task = SseQueue(), MagicMock()
+        other_task.done.return_value = False
+        assert _register_turn(session_id, other_queue, other_task) is False
+        assert _ACTIVE_TURNS[key] == (live_queue, live_task)
+
+        # Once the live turn finishes, a new turn registers normally.
+        live_task.done.return_value = True
+        assert _register_turn(session_id, other_queue, other_task) is True
+        assert _ACTIVE_TURNS[key] == (other_queue, other_task)
+    finally:
+        _ACTIVE_TURNS.pop(key, None)
+
+
+def test_live_turn_reports_unfinished_entry_only() -> None:
+    """_live_turn returns the entry while its task runs, else None."""
+    from unittest.mock import MagicMock
+
+    from app.routers.sessions import _ACTIVE_TURNS, _live_turn
+    from app.services.session_streamer import SseQueue
+
+    session_id = uuid.uuid4()
+    key = str(session_id)
+    _ACTIVE_TURNS.pop(key, None)
+    try:
+        assert _live_turn(session_id) is None
+
+        queue, task = SseQueue(), MagicMock()
+        task.done.return_value = False
+        _ACTIVE_TURNS[key] = (queue, task)
+        assert _live_turn(session_id) == (queue, task)
+
+        task.done.return_value = True
+        assert _live_turn(session_id) is None
+    finally:
+        _ACTIVE_TURNS.pop(key, None)
+
+
+def test_completed_turn_retention_lifecycle() -> None:
+    """Completed turns are retained for replay until TTL, then swept."""
+    import time
+    from unittest.mock import MagicMock
+
+    from app.routers.sessions import (
+        _ACTIVE_TURNS,
+        _COMPLETED_TURN_TTL_S,
+        _completed_turn_expired,
+        _forget_turn,
+        _register_turn,
+        _sweep_expired_turns,
+        _TURN_COMPLETED_AT,
+    )
+    from app.services.session_streamer import SseQueue
+
+    session_id = uuid.uuid4()
+    key = str(session_id)
+    _ACTIVE_TURNS.pop(key, None)
+    _TURN_COMPLETED_AT.pop(key, None)
+    try:
+        queue, task = SseQueue(), MagicMock()
+        task.done.return_value = True
+        _ACTIVE_TURNS[key] = (queue, task)
+
+        # No stamp yet: treated as expired (safe default, matches old pop-on-done).
+        assert _completed_turn_expired(key) is True
+
+        # Fresh completion: retained, and a finished task is not "live",
+        # so new prompts are NOT rejected with 409.
+        _TURN_COMPLETED_AT[key] = time.monotonic()
+        assert _completed_turn_expired(key) is False
+
+        from app.routers.sessions import _live_turn
+
+        assert _live_turn(session_id) is None
+
+        # A new turn replaces the retained entry and clears its stamp.
+        new_queue, new_task = SseQueue(), MagicMock()
+        new_task.done.return_value = False
+        assert _register_turn(session_id, new_queue, new_task) is True
+        assert _ACTIVE_TURNS[key] == (new_queue, new_task)
+        assert key not in _TURN_COMPLETED_AT
+
+        # Stale completions are swept; fresh ones survive the sweep.
+        _ACTIVE_TURNS[key] = (queue, task)
+        _TURN_COMPLETED_AT[key] = time.monotonic() - _COMPLETED_TURN_TTL_S - 1.0
+        _sweep_expired_turns()
+        assert key not in _ACTIVE_TURNS
+        assert key not in _TURN_COMPLETED_AT
+
+        _ACTIVE_TURNS[key] = (queue, task)
+        _TURN_COMPLETED_AT[key] = time.monotonic()
+        _sweep_expired_turns()
+        assert _ACTIVE_TURNS[key] == (queue, task)
+
+        _forget_turn(key)
+        assert key not in _ACTIVE_TURNS
+        assert key not in _TURN_COMPLETED_AT
+    finally:
+        _ACTIVE_TURNS.pop(key, None)
+        _TURN_COMPLETED_AT.pop(key, None)
