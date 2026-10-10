@@ -1184,7 +1184,15 @@ def resolve_repo_dir(
             break
 
     if not resolved_repo_root:
+        from app.lambda_runtime import is_lambda_runtime
+
         repo_desc = f"{clean_owner}/{clean_repo}" if clean_owner else clean_repo
+        if is_lambda_runtime():
+            return None, (
+                f"Error: Local checkout for repository {repo_desc!r} is not available in the AWS Lambda runtime. "
+                "Local terminal commands, linters, and test runners cannot execute locally on Lambda. "
+                "To verify staged patches in an isolated cloud environment, use 'verify_in_ci_sandbox'."
+            )
         return None, (
             f"Error: Local checkout for repository {repo_desc!r} was not found on this machine. "
             "Local terminal commands and test runners require a local clone of the repository. "
@@ -1473,6 +1481,25 @@ async def tool_run_linter(
     if not paths:
         return "Error: No paths provided to run_linter."
 
+    # Sanitize each path — no traversal allowed.
+    cleaned: list[str] = []
+    for p in paths:
+        stripped = p.strip()
+        if ".." in stripped or stripped.startswith("/"):
+            return (
+                f"Error: Path rejected — traversal or absolute path not allowed: {p!r}"
+            )
+        cleaned.append(stripped)
+
+    linter_name, argv_prefix = _select_linter(cleaned, linter)
+    argv = argv_prefix + cleaned
+
+    command_str = shlex.join(argv)
+    try:
+        _sanitize_command(command_str)
+    except ValueError as exc:
+        return f"Error: {exc}"
+
     effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
         repo_name=repo_name,
@@ -1501,25 +1528,6 @@ async def tool_run_linter(
             base_sha=_kwargs.get("base_sha"),
             session_id=effective_session_id,
         )
-
-    # Sanitize each path — no traversal allowed.
-    cleaned: list[str] = []
-    for p in paths:
-        stripped = p.strip()
-        if ".." in stripped or stripped.startswith("/"):
-            return (
-                f"Error: Path rejected — traversal or absolute path not allowed: {p!r}"
-            )
-        cleaned.append(stripped)
-
-    linter_name, argv_prefix = _select_linter(cleaned, linter)
-    argv = argv_prefix + cleaned
-
-    command_str = shlex.join(argv)
-    try:
-        _sanitize_command(command_str)
-    except ValueError as exc:
-        return f"Error: {exc}"
 
     timeout_sec = max(_MIN_TIMEOUT, min(_MAX_TIMEOUT, timeout_sec))
 
@@ -1599,6 +1607,23 @@ async def tool_run_targeted_tests(
     if not test_targets:
         return "Error: No test targets provided."
 
+    # Sanitize target paths.
+    cleaned: list[str] = []
+    for t in test_targets:
+        stripped = t.strip()
+        if ".." in stripped or stripped.startswith("/"):
+            return f"Error: Target rejected — traversal or absolute path not allowed: {t!r}"
+        cleaned.append(stripped)
+
+    framework, argv_prefix = _select_test_framework(cleaned)
+    argv = argv_prefix + cleaned
+
+    command_str = shlex.join(argv)
+    try:
+        _sanitize_command(command_str)
+    except ValueError as exc:
+        return f"Error: {exc}"
+
     effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
         repo_name=repo_name,
@@ -1627,23 +1652,6 @@ async def tool_run_targeted_tests(
             base_sha=_kwargs.get("base_sha"),
             session_id=effective_session_id,
         )
-
-    # Sanitize target paths.
-    cleaned: list[str] = []
-    for t in test_targets:
-        stripped = t.strip()
-        if ".." in stripped or stripped.startswith("/"):
-            return f"Error: Target rejected — traversal or absolute path not allowed: {t!r}"
-        cleaned.append(stripped)
-
-    framework, argv_prefix = _select_test_framework(cleaned)
-    argv = argv_prefix + cleaned
-
-    command_str = shlex.join(argv)
-    try:
-        _sanitize_command(command_str)
-    except ValueError as exc:
-        return f"Error: {exc}"
 
     timeout_sec = max(_MIN_TIMEOUT, min(_MAX_TIMEOUT, timeout_sec))
 
@@ -1773,6 +1781,9 @@ async def tool_verify_ci_sandbox(
         getattr(settings, "sandbox_provider", "github_actions") or "github_actions"
     )
     provider = provider.lower().strip()
+
+    if provider not in ("github_actions", "local"):
+        return f"Error: Unknown SANDBOX_PROVIDER={provider!r}. Must be 'github_actions' or 'local'."
 
     # ---- Local fast path: run staged files through the local test runner.
     if provider == "local":

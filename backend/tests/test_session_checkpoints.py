@@ -340,6 +340,46 @@ def test_security_scan_clean_code_passes() -> None:
 
     assert "passed" in result.lower()
     assert "0 secrets" in result
+    assert "across 1 files" in result
+
+
+def test_security_scan_unstaged_paths_reported_and_counted_as_zero() -> None:
+    """tool_scan_security_vulnerabilities over unstaged paths reports 0 scanned and names skipped paths."""
+    session = MagicMock(spec=AgentSession)
+    session.staged_patches = {}
+
+    result = tool_scan_security_vulnerabilities(
+        paths=["file_a.py", "file_b.py"],
+        session=session,
+        repo_owner="org",
+        repo_name="repo",
+        base_sha="a" * 40,
+    )
+
+    assert "incomplete" in result.lower()
+    assert "0 files scanned" in result
+    assert "passed" not in result.lower()
+    assert "skipped 2 path(s) with no staged changes: file_a.py, file_b.py" in result
+
+
+def test_security_scan_partial_staged_reports_accurate_counts() -> None:
+    """tool_scan_security_vulnerabilities counts only staged paths and notes skipped paths."""
+    session = MagicMock(spec=AgentSession)
+    session.staged_patches = {
+        "staged_file.py": "+def ok(): pass\n",
+    }
+
+    result = tool_scan_security_vulnerabilities(
+        paths=["staged_file.py", "unstaged_file.py"],
+        session=session,
+        repo_owner="org",
+        repo_name="repo",
+        base_sha="a" * 40,
+    )
+
+    assert "passed" in result.lower()
+    assert "across 1 files" in result
+    assert "skipped 1 path(s) with no staged changes: unstaged_file.py" in result
 
 
 # ---------------------------------------------------------------------------

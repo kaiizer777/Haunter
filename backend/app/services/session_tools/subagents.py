@@ -55,6 +55,7 @@ from app.services.session_tools.sandbox import (
     tool_run_linter,
     tool_run_targeted_tests,
     tool_run_terminal_command,
+    tool_verify_ci_sandbox,
 )
 from app.services.session_tools.symbols import (
     tool_find_references,
@@ -160,6 +161,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
                 "str_replace",
                 "run_targeted_tests",
                 "run_linter",
+                "verify_in_ci_sandbox",
                 "scan_security_vulnerabilities",
             }
         ),
@@ -168,7 +170,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
             "You are BugHunter, a root-cause diagnosis and surgical-fix specialist. "
             "Use git_log, git_blame, git_show, and git_diff for provenance, "
             "navigator tools for context, then fix with str_replace. "
-            "Verify with run_targeted_tests and run_linter, and scan for "
+            "Verify with verify_in_ci_sandbox. Use run_targeted_tests and run_linter only when a local checkout is available, and scan for "
             "secrets before finishing."
         ),
     ),
@@ -179,6 +181,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
                 "run_targeted_tests",
                 "run_linter",
                 "run_terminal_command",
+                "verify_in_ci_sandbox",
                 "glob_files",
                 "read_file_slice",
             }
@@ -186,7 +189,8 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         max_iterations=8,
         system_prompt_suffix=(
             "You are SandboxVerifier, a test-execution and validation specialist. "
-            "Run run_targeted_tests, run_linter, and run_terminal_command to "
+            "Run verify_in_ci_sandbox for cloud CI verification, or run_targeted_tests, "
+            "run_linter, and run_terminal_command when local checkout is available to "
             "validate correctness. Use glob_files and read_file_slice only to "
             "locate targets. You are read-only — never write or modify code."
         ),
@@ -575,6 +579,8 @@ class SubagentRunner:
             return await self._exec_run_linter(args)
         elif tool_name == "run_targeted_tests":
             return await self._exec_run_targeted_tests(args)
+        elif tool_name == "verify_in_ci_sandbox":
+            return await self._exec_verify_ci_sandbox(args)
         elif tool_name == "search_web_docs":
             return await self._exec_search_web_docs(args)
         elif tool_name == "fetch_web_content":
@@ -834,6 +840,29 @@ class SubagentRunner:
             staged_patches=self.staged_patches,
             base_sha=self.base_sha,
             session_id=session_id_str,
+        )
+
+    async def _exec_verify_ci_sandbox(self, args: dict[str, Any]) -> str:
+        """Subagent tool runner for cloud CI verification via the hybrid sandbox engine."""
+        raw_workflow = args.get("workflow_file")
+        workflow_file = str(raw_workflow).strip() if raw_workflow else None
+        if workflow_file == "":
+            workflow_file = None
+        try:
+            timeout_sec: int = int(args.get("timeout_sec", 180))
+        except (TypeError, ValueError):
+            timeout_sec = 180
+        repo = getattr(self.session, "repo", None)
+        return await tool_verify_ci_sandbox(
+            workflow_file=workflow_file,
+            timeout_sec=timeout_sec,
+            queue=self.queue,
+            session=self.session,
+            repo=repo,
+            staged_patches=self.staged_patches,
+            gh_token=self.gh_token,
+            repo_owner=self.repo_owner,
+            repo_name=self.repo_name,
         )
 
     async def _exec_search_web_docs(self, args: dict[str, Any]) -> str:

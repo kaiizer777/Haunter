@@ -960,6 +960,54 @@ def _build_system_prompt(
         if staged_patches
         else "  (none)"
     )
+
+    from app.lambda_runtime import is_lambda_runtime
+
+    _is_lambda = is_lambda_runtime()
+    if _is_lambda:
+        verification_instruction = (
+            "For cloud-native verification, call `verify_in_ci_sandbox` to dispatch staged patches to the isolated "
+            "GitHub Actions mirror — it streams CI logs live and returns pass/fail with tracebacks for self-healing. "
+            "Re-run it after each fix until CI passes.\n"
+            "Self-healing loop: on FAILED, inspect the returned CI logs/traceback, apply a targeted fix "
+            "with `str_replace`, then re-run `verify_in_ci_sandbox`; repeat up to 3 attempts before declaring completion.\n"
+            "Note: In the AWS Lambda serverless runtime, local terminal commands, linters, and test runners are unavailable; "
+            "use `verify_in_ci_sandbox` as the primary verification engine.\n"
+        )
+        subagent_instruction = (
+            "Always validate patches with sandbox_verifier (via verify_in_ci_sandbox) after any feature_architect or bug_hunter run.\n"
+        )
+    else:
+        verification_instruction = (
+            "After proposing changes with `str_replace` or `create_file`, always run `run_targeted_tests` "
+            "on the affected test files to verify your fix before declaring completion (or use `verify_in_ci_sandbox` for cloud CI verification). "
+            "If tests fail, read the traceback, correct the code with `str_replace`, and re-run until they pass.\n"
+            "For cloud-native verification, call `verify_in_ci_sandbox` to dispatch staged patches to the isolated "
+            "GitHub Actions mirror — it streams CI logs live and returns pass/fail with tracebacks for self-healing. "
+            "Re-run it after each fix until CI passes.\n"
+            "Self-healing loop: on FAILED, inspect the returned CI logs/traceback, apply a targeted fix "
+            "with `str_replace`, then re-run `verify_in_ci_sandbox`; repeat up to 3 attempts before declaring completion.\n"
+            "When running tests in multi-directory repositories (e.g. backend/ or frontend/), use `run_targeted_tests` "
+            "with specific existing test paths (or explore available tests first with `glob_files('**/*test*')`), "
+            "or use `run_terminal_command` with `cd <dir> && ...` or `cwd`.\n"
+        )
+        subagent_instruction = (
+            "Always validate patches with sandbox_verifier or run_targeted_tests after any feature_architect or bug_hunter run.\n"
+        )
+
+    if _is_lambda:
+        local_tools_block = (
+            " 15. `run_terminal_command(command, timeout_sec, cwd)` — UNAVAILABLE in AWS Lambda serverless runtime; do not call, use `verify_in_ci_sandbox` instead.\n"
+            " 16. `run_linter(paths, linter, cwd)` — UNAVAILABLE in AWS Lambda serverless runtime; do not call, use `verify_in_ci_sandbox` instead.\n"
+            " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — UNAVAILABLE in AWS Lambda serverless runtime; do not call, use `verify_in_ci_sandbox` instead.\n"
+        )
+    else:
+        local_tools_block = (
+            " 15. `run_terminal_command(command, timeout_sec, cwd)` — run a shell command and return stdout/stderr/exit code. Supports chained commands (&&, ;) and directory navigation (cd). Output streams live to the terminal drawer.\n"
+            " 16. `run_linter(paths, linter, cwd)` — run ruff/eslint on the specified files and get diagnostics.\n"
+            " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — run pytest or vitest on specific test files and capture tracebacks.\n"
+        )
+
     return (
         f"You are an expert pair-programming agent working on the repository "
         f"`{repo_owner}/{repo_name}` (branch: `{branch_name}`, base SHA: `{base_sha[:8]}`).\n\n"
@@ -979,9 +1027,7 @@ def _build_system_prompt(
         " 12. `get_file_outline(path)` — return signatures, classes, and docstrings of a file without implementation bodies (saves context tokens).\n"
         " 13. `find_symbol(name, kind)` — locate definitions of functions, classes, interfaces, or types across the codebase.\n"
         " 14. `find_references(symbol, path)` — find all call sites and usages of a symbol (word-boundary matched, capped at 50).\n"
-        " 15. `run_terminal_command(command, timeout_sec, cwd)` — run a shell command and return stdout/stderr/exit code. Supports chained commands (&&, ;) and directory navigation (cd). Output streams live to the terminal drawer.\n"
-        " 16. `run_linter(paths, linter, cwd)` — run ruff/eslint on the specified files and get diagnostics.\n"
-        " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — run pytest or vitest on specific test files and capture tracebacks.\n"
+        f"{local_tools_block}"
         " 18. `verify_in_ci_sandbox(workflow_file, timeout_sec)` — dispatch staged patches to the isolated GitHub Actions CI sandbox mirror, stream CI logs live, and return pass/fail with tracebacks for self-healing.\n"
         " 19. `search_web_docs(query, domain, max_results)` — search live web/docs via TinyFish for up-to-date library APIs, breaking changes, and migration guides.\n"
         " 20. `fetch_web_content(url, format)` — fetch and render a public documentation page or GitHub issue as clean Markdown via TinyFish.\n"
@@ -1005,17 +1051,7 @@ def _build_system_prompt(
         "For code modifications, prefer `str_replace` over `stage_patch`. "
         "Always provide enough surrounding lines in `old_str` so it matches uniquely — "
         "the tool will reject the edit if `old_str` is ambiguous or missing.\n"
-        "After proposing changes with `str_replace` or `create_file`, always run `run_targeted_tests` "
-        "on the affected test files to verify your fix before declaring completion. "
-        "If tests fail, read the traceback, correct the code with `str_replace`, and re-run until they pass.\n"
-        "For cloud-native verification, call `verify_in_ci_sandbox` to dispatch staged patches to the isolated "
-        "GitHub Actions mirror — it streams CI logs live and returns pass/fail with tracebacks for self-healing. "
-        "Re-run it after each fix until CI passes.\n"
-        "Self-healing loop: on FAILED, inspect the returned CI logs/traceback, apply a targeted fix "
-        "with `str_replace`, then re-run `verify_in_ci_sandbox`; repeat up to 3 attempts before declaring completion.\n"
-        "When running tests in multi-directory repositories (e.g. backend/ or frontend/), use `run_targeted_tests` "
-        "with specific existing test paths (or explore available tests first with `glob_files('**/*test*')`), "
-        "or use `run_terminal_command` with `cd <dir> && ...` or `cwd`.\n"
+        f"{verification_instruction}"
         "To prevent context-window bloat, prefer `get_file_outline` over reading entire files, "
         "and use `grep_search`, `glob_files`, `read_file_slice` for targeted exploration.\n"
         "Use `find_references` before renaming or refactoring a function to inspect all callers.\n"
@@ -1025,7 +1061,7 @@ def _build_system_prompt(
         "Do not declare the task complete if violations are found — fix them first.\n\n"
         "You are the Lead Architect of this session. For complex tasks, delegate via invoke_subagent rather than doing everything yourself. "
         "Standard implementation chain: invoke repo_navigator first on large codebases → then feature_architect → then sandbox_verifier. "
-        "Always validate patches with sandbox_verifier or run_targeted_tests after any feature_architect or bug_hunter run.\n"
+        f"{subagent_instruction}"
         f"Currently staged files:\n{staged_summary}"
     )
 

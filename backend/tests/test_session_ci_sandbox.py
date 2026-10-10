@@ -92,9 +92,11 @@ def test_tool_definition_present() -> None:
     assert "600" in props["timeout_sec"]["description"]
 
 
-def test_system_prompt_advertises_tool() -> None:
+def test_system_prompt_advertises_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services.session_orchestrator import _build_system_prompt
 
+    monkeypatch.setattr("app.config.settings.aws_lambda_function_name", None)
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
     prompt = _build_system_prompt(
         repo_owner="o",
         repo_name="r",
@@ -103,6 +105,24 @@ def test_system_prompt_advertises_tool() -> None:
         staged_patches={},
     )
     assert "verify_in_ci_sandbox(workflow_file, timeout_sec)" in prompt
+    assert "run_targeted_tests" in prompt
+
+
+def test_system_prompt_on_lambda_does_not_mandate_local_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.session_orchestrator import _build_system_prompt
+
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "haunter-prod-backend")
+    prompt = _build_system_prompt(
+        repo_owner="o",
+        repo_name="r",
+        branch_name="b",
+        base_sha="a" * 40,
+        staged_patches={},
+    )
+    assert "verify_in_ci_sandbox" in prompt
+    assert "AWS Lambda serverless runtime, local terminal commands, linters, and test runners are unavailable" in prompt
+    assert "After proposing changes with `str_replace` or `create_file`, always run `run_targeted_tests`" not in prompt
+    assert "UNAVAILABLE in AWS Lambda serverless runtime" in prompt
 
 
 def test_tool_exported_from_sandbox_module() -> None:

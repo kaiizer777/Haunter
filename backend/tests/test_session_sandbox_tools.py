@@ -1177,4 +1177,81 @@ def test_sync_staged_patches_to_repo_preserves_formatter_edits(tmp_path: Path) -
     assert apply_unified_diff(base, staged["fmt.py"]) == formatted_content
 
 
+@pytest.mark.asyncio
+async def test_tool_git_diff_no_local_checkout_returns_explicit_error() -> None:
+    """When working tree is requested without local checkout and no staged patches, returns explicit error instead of clean tree."""
+    from app.services.session_tools.git import tool_git_diff
+
+    result = await tool_git_diff(
+        base="HEAD",
+        head="working",
+        owner="nonexistent_org",
+        repo="nonexistent_repo_xyz",
+        staged_patches={},
+    )
+    assert "Error: Local checkout for repository" in result
+    assert "nonexistent_org/nonexistent_repo_xyz" in result
+    assert "No uncommitted working-tree differences found" not in result
+    assert "head='staged'" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_run_linter_rejects_traversal_before_checkout_gate() -> None:
+    """run_linter validates path traversal before checking local repo checkout."""
+    from app.services.session_tools.sandbox import tool_run_linter
+
+    result = await tool_run_linter(
+        paths=["../../etc/passwd"],
+        repo_owner="nonexistent_org",
+        repo_name="nonexistent_repo",
+    )
+    assert "Error: Path rejected — traversal or absolute path not allowed" in result
+    assert "Local checkout for repository" not in result
+
+
+@pytest.mark.asyncio
+async def test_tool_run_targeted_tests_rejects_traversal_before_checkout_gate() -> None:
+    """run_targeted_tests validates path traversal before checking local repo checkout."""
+    from app.services.session_tools.sandbox import tool_run_targeted_tests
+
+    result = await tool_run_targeted_tests(
+        test_targets=["../../etc/shadow"],
+        repo_owner="nonexistent_org",
+        repo_name="nonexistent_repo",
+    )
+    assert "Error: Target rejected — traversal or absolute path not allowed" in result
+    assert "Local checkout for repository" not in result
+
+
+def test_resolve_repo_dir_lambda_runtime_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """resolve_repo_dir mentions AWS Lambda runtime when running on Lambda."""
+    from app.services.session_tools.sandbox import resolve_repo_dir
+
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "haunter-backend-prod")
+    repo_root, err = resolve_repo_dir(
+        repo_name="nonexistent_repo_abc",
+        repo_owner="fake_owner",
+    )
+    assert repo_root is None
+    assert err is not None
+    assert "AWS Lambda runtime" in err
+    assert "verify_in_ci_sandbox" in err
+
+
+@pytest.mark.asyncio
+async def test_tool_verify_ci_sandbox_rejects_unknown_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """tool_verify_ci_sandbox returns explicit error when SANDBOX_PROVIDER is unsupported."""
+    from app.config import settings
+    from app.services.session_tools.sandbox import tool_verify_ci_sandbox
+
+    monkeypatch.setattr(settings, "sandbox_provider", "invalid_cloud_provider")
+    res = await tool_verify_ci_sandbox(
+        staged_patches={"test.py": "diff"},
+        repo_owner="org",
+        repo_name="repo",
+    )
+    assert "Error: Unknown SANDBOX_PROVIDER='invalid_cloud_provider'" in res
+    assert "Must be 'github_actions' or 'local'" in res
+
+
 
