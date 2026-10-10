@@ -50,12 +50,11 @@ export default function RunDetailClient() {
     }
   }, []);
 
-  const currentRepo = useMemo(() => {
-    if (!trace?.run?.repo_id || !repos.length) return null;
-    return repos.find((r) => r.id === trace.run.repo_id) || null;
-  }, [trace?.run?.repo_id, repos]);
+  const currentRepo = trace?.run?.repo_id
+    ? repos.find((r) => r.id === trace.run.repo_id) || null
+    : null;
 
-  const repoIdentity = useMemo(() => {
+  const repoIdentity = (() => {
     if (currentRepo) {
       return {
         fullName: `${currentRepo.owner}/${currentRepo.name}`,
@@ -72,7 +71,7 @@ export default function RunDetailClient() {
       }
     }
     return null;
-  }, [currentRepo, trace?.run?.pr_url]);
+  })();
 
   const fetchTrace = useCallback(async () => {
     if (!runId) {
