@@ -165,6 +165,10 @@ async def tool_checkpoint_restore(
 
     restored_cp_id = cp["checkpoint_id"]
 
+    # Invalidate any checkpoints created after the restored checkpoint.
+    cp_idx = checkpoints.index(cp)
+    session.checkpoints = list(checkpoints[: cp_idx + 1])
+
     # Restore state on session ORM model.
     session.staged_patches = dict(cp["staged_patches"])
     history_length: int = cp["history_length"]

@@ -16,9 +16,10 @@ Tests:
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -26,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentSession, Repo, User
-from app.services.session_orchestrator import _build_system_prompt
+from app.services.session_orchestrator import SessionOrchestrator, _build_system_prompt
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.checkpoints import (
     create_checkpoint,
@@ -51,17 +52,19 @@ async def _seed_user_and_repo(db: AsyncSession, *, github_id: int) -> tuple[User
         github_username=f"user-{github_id}",
         role="user",
     )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
     repo = Repo(
-        user=user,
+        user_id=user.id,
         owner="test-org",
         name=f"test-repo-{github_id}",
         default_branch="main",
         github_install_id=999,
     )
-    db.add(user)
     db.add(repo)
     await db.commit()
-    await db.refresh(user)
     await db.refresh(repo)
     return user, repo
 
@@ -75,11 +78,8 @@ def _make_session(
     checkpoints: list[dict[str, Any]] | None = None,
 ) -> AgentSession:
     s = AgentSession(
-        id=uuid.uuid4(),
         user_id=user.id,
         repo_id=repo.id,
-        user=user,
-        repo=repo,
         title="Test Session",
         status="active",
         branch_name="main",
@@ -102,10 +102,7 @@ async def _seed_session(
     s = _make_session(user, repo, **kwargs)
     db.add(s)
     await db.commit()
-    try:
-        await db.refresh(s)
-    except Exception:
-        pass
+    await db.refresh(s)
     return s
 
 
@@ -625,6 +622,60 @@ def test_build_system_prompt_surfaces_available_checkpoints() -> None:
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_restore_invalidates_subsequent_checkpoints() -> None:
+    """Restoring an earlier checkpoint invalidates/prunes all checkpoints created after it."""
+    session = MagicMock(spec=AgentSession)
+    session.staged_patches = {"current.py": "+current"}
+    session.conversation_history = [{"role": "user", "content": "1"}] * 6
+    session.checkpoints = [
+        {
+            "checkpoint_id": "cp_1",
+            "turn": 1,
+            "timestamp": "2026-10-01T10:00:00Z",
+            "description": "Turn 1",
+            "staged_patches": {"f1.py": "+1"},
+            "history_length": 2,
+        },
+        {
+            "checkpoint_id": "cp_2",
+            "turn": 2,
+            "timestamp": "2026-10-01T10:05:00Z",
+            "description": "Turn 2",
+            "staged_patches": {"f2.py": "+2"},
+            "history_length": 4,
+        },
+        {
+            "checkpoint_id": "cp_3",
+            "turn": 3,
+            "timestamp": "2026-10-01T10:10:00Z",
+            "description": "Turn 3",
+            "staged_patches": {"f3.py": "+3"},
+            "history_length": 6,
+        },
+    ]
+
+    queue = MagicMock(spec=SseQueue)
+    queue.put_checkpoint_restored = AsyncMock()
+    db = AsyncMock(spec=AsyncSession)
+
+    res = await tool_checkpoint_restore(
+        checkpoint_id="cp_1",
+        session=session,
+        queue=queue,
+        db=db,
+    )
+
+    assert "Successfully restored session to checkpoint 'cp_1'" in res
+    assert len(session.checkpoints) == 1
+    assert session.checkpoints[0]["checkpoint_id"] == "cp_1"
+
+
+# ---------------------------------------------------------------------------
+# Test 16: Regression for Issue #64 — End-of-turn persistence via SessionOrchestrator
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_restore_end_of_turn_persistence_regression(
     db: AsyncSession,
 ) -> None:
@@ -632,11 +683,14 @@ async def test_checkpoint_restore_end_of_turn_persistence_regression(
     Regression test for Issue #64:
     Verifies that when a turn modifies staged_patches then restores to a prior checkpoint,
     the post-turn persistence preserves the restored snapshot in the DB without clobbering.
+    Drives the full orchestration loop through SessionOrchestrator.run_turn with stubbed LLM.
     """
     user, repo = await _seed_user_and_repo(db, github_id=90005)
 
     cp_orig_id = "cp_orig_snapshot"
-    original_staged = {"src/stable.py": "--- a/src/stable.py\n+++ b/src/stable.py\n@@ -1 +1 @@\n+stable\n"}
+    original_staged = {
+        "src/stable.py": "--- a/src/stable.py\n+++ b/src/stable.py\n@@ -1 +1 @@\n+stable\n"
+    }
 
     session = await _seed_session(
         db,
@@ -658,45 +712,90 @@ async def test_checkpoint_restore_end_of_turn_persistence_regression(
             }
         ],
     )
+    session_id = session.id
 
-    # Simulate Turn 2 execution:
-    # 1. Turn begins by capturing local staged_patches and conversation_history
-    local_staged = dict(session.staged_patches or {})
-    local_history = list(session.conversation_history or [])
+    call_count = 0
 
-    # 2. Intermediate tool stages a broken patch
-    local_staged["src/broken.py"] = "+broken code"
-    local_staged["src/stable.py"] = "+corrupted"
+    tool_call_stage_broken = {
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_stage_bad",
+                "type": "function",
+                "function": {
+                    "name": "stage_patch",
+                    "arguments": json.dumps(
+                        {
+                            "path": "src/broken.py",
+                            "diff": "--- /dev/null\n+++ b/src/broken.py\n@@ -0,0 +1 @@\n+broken\n",
+                            "action": "create",
+                        }
+                    ),
+                },
+            }
+        ],
+        "usage": {"input_tokens": 50, "output_tokens": 30},
+        "latency_ms": 200,
+        "model": "nemotron-3.5-lightning-free",
+    }
 
-    # 3. Model discovers problem and executes checkpoint_restore
-    queue = MagicMock(spec=SseQueue)
-    queue.put_checkpoint_restored = AsyncMock()
+    tool_call_restore = {
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_restore_cp",
+                "type": "function",
+                "function": {
+                    "name": "checkpoint_restore",
+                    "arguments": json.dumps({"checkpoint_id": cp_orig_id}),
+                },
+            }
+        ],
+        "usage": {"input_tokens": 50, "output_tokens": 30},
+        "latency_ms": 200,
+        "model": "nemotron-3.5-lightning-free",
+    }
 
-    restore_msg = await tool_checkpoint_restore(
-        checkpoint_id=cp_orig_id,
-        session=session,
-        queue=queue,
+    done_response = {
+        "content": "Restored stable state.",
+        "tool_calls": None,
+        "usage": {"input_tokens": 50, "output_tokens": 20},
+        "latency_ms": 100,
+        "model": "nemotron-3.5-lightning-free",
+    }
+
+    async def _mock_complete(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return tool_call_stage_broken
+        elif call_count == 2:
+            return tool_call_restore
+        return done_response
+
+    queue = SseQueue()
+    orchestrator = SessionOrchestrator(
+        session_id=session_id,
         db=db,
-        staged_patches=local_staged,
-        conversation_history=local_history,
+        gh_token=None,
     )
-    assert "Successfully restored" in restore_msg
-    assert local_staged == original_staged
 
-    # 4. Turn ends and orchestrator persists state to the DB:
-    new_entries = [
-        {"role": "user", "content": "rollback please"},
-        {"role": "assistant", "content": "Rolled back to cp_orig_snapshot."},
-    ]
-    updated_history = local_history + new_entries
-    session.conversation_history = updated_history
-    session.staged_patches = local_staged
+    with patch.object(orchestrator._llm, "complete", side_effect=_mock_complete):
+        await orchestrator.run(
+            user_message="break something then restore",
+            queue=queue,
+        )
 
-    await db.commit()
-    await db.refresh(session)
+    # Expunge identity map and reload freshly from DB to verify persistence.
+    db.expunge_all()
+    stmt = select(AgentSession).where(AgentSession.id == session_id)
+    res = await db.execute(stmt)
+    persisted_session = res.scalars().first()
 
-    # 5. Assert DB state matches the checkpoint content, NOT the corrupted state.
-    assert session.staged_patches == original_staged
-    assert "src/broken.py" not in session.staged_patches
-    assert len(session.conversation_history) == 4
+    assert persisted_session is not None
+    # Verify persisted staged_patches matches the checkpoint's content, NOT the broken patch.
+    assert persisted_session.staged_patches == original_staged
+    assert "src/broken.py" not in (persisted_session.staged_patches or {})
+    # Verify conversation history preserves turn 1 plus the restore turn interaction
+    assert len(persisted_session.conversation_history or []) >= 4
 
