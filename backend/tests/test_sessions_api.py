@@ -446,3 +446,27 @@ def test_register_turn_preserves_live_entry() -> None:
         assert _ACTIVE_TURNS[key] == (other_queue, other_task)
     finally:
         _ACTIVE_TURNS.pop(key, None)
+
+
+def test_live_turn_reports_unfinished_entry_only() -> None:
+    """_live_turn returns the entry while its task runs, else None."""
+    from unittest.mock import MagicMock
+
+    from app.routers.sessions import _ACTIVE_TURNS, _live_turn
+    from app.services.session_streamer import SseQueue
+
+    session_id = uuid.uuid4()
+    key = str(session_id)
+    _ACTIVE_TURNS.pop(key, None)
+    try:
+        assert _live_turn(session_id) is None
+
+        queue, task = SseQueue(), MagicMock()
+        task.done.return_value = False
+        _ACTIVE_TURNS[key] = (queue, task)
+        assert _live_turn(session_id) == (queue, task)
+
+        task.done.return_value = True
+        assert _live_turn(session_id) is None
+    finally:
+        _ACTIVE_TURNS.pop(key, None)

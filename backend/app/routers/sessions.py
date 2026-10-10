@@ -333,12 +333,13 @@ def _register_turn(
     Register a new turn unless a live one already owns this session.
 
     Returns True when the new turn was registered. Returns False (leaving the
-    live entry untouched) when an overlapping POST arrives mid-turn: the new
-    turn runs unregistered, so neither this registration nor its cleanup can
-    orphan the live turn and break resumption with a spurious 410.
+    live entry untouched) when an overlapping POST won the race past the
+    pre-creation live-turn check in chat_session: the new turn runs
+    unregistered, so neither this registration nor its cleanup can orphan the
+    live turn and break resumption with a spurious 410.
     """
-    live_entry = _ACTIVE_TURNS.get(str(session_id))
-    if live_entry is None or live_entry[1].done():
+    live_entry = _live_turn(session_id)
+    if live_entry is None:
         _ACTIVE_TURNS[str(session_id)] = (queue, task)
         return True
     logger.warning(
@@ -347,6 +348,16 @@ def _register_turn(
         session_id,
     )
     return False
+
+
+def _live_turn(
+    session_id: uuid.UUID,
+) -> tuple[SseQueue, _asyncio.Task[Any]] | None:
+    """Return the live (unfinished) turn entry for session_id, if any."""
+    entry = _ACTIVE_TURNS.get(str(session_id))
+    if entry is not None and not entry[1].done():
+        return entry
+    return None
 
 
 @router.get("/sessions/{session_id}", response_model=SessionOut)
@@ -595,6 +606,21 @@ async def chat_session(
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
             detail="No resumable turn for this session. Please send your message again as a new request.",
+        )
+
+    # Overlapping non-resumption POST while a turn owns this session: reject
+    # before starting a second orchestrator. The live entry stays untouched,
+    # and the caller gets an explicit busy signal instead of a turn it could
+    # never resume (the row lock would yield SESSION_BUSY anyway). Resumption
+    # POSTs (with Last-Event-ID) took the reattach path above and never reach
+    # here. _register_turn remains as the race guard for simultaneous POSTs.
+    if _live_turn(session_id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "SESSION_BUSY: another prompt is already in progress for this "
+                "session. Please wait for it to finish and send your message again."
+            ),
         )
 
     # Resolve GitHub installation token for file reads — best-effort.
