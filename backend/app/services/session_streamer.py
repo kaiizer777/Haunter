@@ -530,6 +530,18 @@ class SseQueue:
             last_event_id is not None and last_event_id < self._evicted_up_to
         )
 
+    def replay_after(self, last_event_id: int) -> list[str]:
+        """
+        Return retained chunks with id > last_event_id, without a live tail.
+
+        Used to serve the terminal outcome of an already-completed turn:
+        attaching a live stream() to a dead turn could park on _q.get()
+        forever once the retained queue is drained.
+        """
+        return [
+            chunk for eid, chunk in list(self._replay_buffer) if eid > last_event_id
+        ]
+
     async def stream(
         self, last_event_id: int | None = None
     ) -> AsyncGenerator[str, None]:

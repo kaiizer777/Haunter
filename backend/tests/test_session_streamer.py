@@ -347,3 +347,21 @@ async def test_sse_queue_resume_gap_rejected() -> None:
     assert any("Event 8" in e for e in replayed)
     assert any("event: done" in e for e in replayed)
 
+
+@pytest.mark.asyncio
+async def test_sse_queue_replay_after_returns_survivors_without_live_tail() -> None:
+    """replay_after() serves retained events (incl. done) with no queue attach."""
+    queue = SseQueue(maxsize=512, replay_buffer_size=50)
+
+    await queue.put_thought("Event 1")
+    await queue.put_thought("Event 2")
+    await queue.put_done("session-replay", staged_files_count=0)
+
+    replayed = queue.replay_after(1)
+    assert len(replayed) == 2
+    assert "Event 2" in replayed[0]
+    assert "event: done" in replayed[1]
+
+    # Nothing newer than the terminal event: empty replay, no hang.
+    assert queue.replay_after(3) == []
+
