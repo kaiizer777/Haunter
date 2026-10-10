@@ -2018,6 +2018,7 @@ async def run_audit(
             publish_allowed=empty.publish_allowed,
         )
 
+    raw_clipped = len(raw_diff) > MAX_SPLIT_DIFF_CHARS
     filtered_diff, omitted_noise = filter_audit_diff_noise(raw_diff)
     budgeted_diff, budget_truncated, affected_paths = partition_and_budget_diff(
         filtered_diff,
@@ -2025,7 +2026,7 @@ async def run_audit(
         max_per_file_chars=25_000,
     )
     clean_diff = _redact_preserving_line_anchors(budgeted_diff)
-    was_truncated = budget_truncated
+    was_truncated = raw_clipped or budget_truncated
 
     ast_summary = await build_ast_diff_summary_async(clean_diff)
     supplied_ast = _redact_audit_secrets(str(ast_context or ""))
@@ -2035,7 +2036,10 @@ async def run_audit(
 
     notices: list[str] = []
     if was_truncated:
-        trunc_msg = f"Input diff was partitioned/truncated to {AUDIT_MAX_DIFF_CHARS} characters."
+        if raw_clipped:
+            trunc_msg = f"Input diff exceeded {MAX_SPLIT_DIFF_CHARS} characters and was bounded."
+        else:
+            trunc_msg = f"Input diff was partitioned/truncated to {AUDIT_MAX_DIFF_CHARS} characters."
         if affected_paths:
             trunc_files = ", ".join(affected_paths[:5])
             if len(affected_paths) > 5:
