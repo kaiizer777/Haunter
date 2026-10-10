@@ -11,10 +11,12 @@ Provides fast, token-efficient repository exploration:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
 from app.github_client import (
+    GitHubClientError,
     fetch_file_content,
     fetch_git_tree,
 )
@@ -25,8 +27,45 @@ logger = logging.getLogger(__name__)
 # Path traversal validation
 # ---------------------------------------------------------------------------
 
-_SAFE_PATH_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_./ \-]+$")
+_SAFE_PATH_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_./ \-\[\]@+#]+$")
 _MAX_PATH_LEN = 500
+
+
+def _is_staged_deletion(diff: str) -> bool:
+    """True if a staged unified diff deletes the file (+++ header targets /dev/null).
+
+    Parses only the ``+++ `` header line — never the patch body — so a modified
+    file whose added lines embed example diff text is not misclassified.
+    """
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            return line[4:].split("\t")[0].strip() == "/dev/null"
+    return False
+
+
+def _is_staged_creation(diff: str) -> bool:
+    """True if a staged unified diff creates the file (--- header is /dev/null).
+
+    Parses only the ``--- `` header line — never the patch body.
+    """
+    for line in diff.splitlines():
+        if line.startswith("--- "):
+            return line[4:].split("\t")[0].strip() == "/dev/null"
+    return False
+
+
+def _count_diff_lines(diff: str) -> tuple[int, int]:
+    """Count (insertions, deletions) in a staged unified diff, excluding headers."""
+    ins = 0
+    dels = 0
+    for line in diff.splitlines():
+        if line.startswith("+++ ") or line.startswith("--- ") or line in ("+++", "---"):
+            continue
+        if line.startswith("+"):
+            ins += 1
+        elif line.startswith("-"):
+            dels += 1
+    return ins, dels
 
 
 def _validate_file_path(path: str) -> str:
@@ -36,7 +75,7 @@ def _validate_file_path(path: str) -> str:
     Rejects:
       - Paths containing ".." (directory traversal).
       - Paths starting with "/" (absolute path injection).
-      - Paths with characters outside [a-zA-Z0-9_./ -].
+      - Paths with characters outside alphanumerics plus _ . / space - [ ] @ + #.
       - Paths exceeding 500 characters.
 
     Returns the path unchanged if valid.
@@ -53,6 +92,14 @@ def _validate_file_path(path: str) -> str:
     if not _SAFE_PATH_RE.fullmatch(path):
         raise ValueError(f"Path contains disallowed characters: {path!r}")
     return path
+
+
+def _normalize_rel_path(path: str) -> str:
+    """Normalize a validated relative path: backslashes to slashes, strip one leading ./ and /."""
+    norm = path.replace("\\", "/").strip()
+    if norm.startswith("./"):
+        norm = norm[2:]
+    return norm.removeprefix("/")
 
 
 validate_file_path = _validate_file_path
@@ -105,6 +152,98 @@ def _glob_to_regex(pat: str) -> re.Pattern[str]:
 
 
 # ---------------------------------------------------------------------------
+# Shared Content Resolver (Recon & AST Intelligence)
+# ---------------------------------------------------------------------------
+
+
+async def resolve_read_content(
+    path: str,
+    *,
+    repo_owner: str = "",
+    repo_name: str = "",
+    base_sha: str = "",
+    staged_patches: dict[str, str] | None = None,
+    gh_token: str | None = None,
+    session_id: str | None = None,
+) -> str | None:
+    """
+    Resolve file content by prioritizing:
+    1. Staged deletions -> returns None.
+    2. Local workspace checkout on disk (if exists and file present on disk).
+    3. Remote repository at base_sha from GitHub API, with staged_patches unified diff
+       overlay applied via apply_unified_diff.
+
+    Returns the full string content, or None if the file does not exist or was deleted.
+    """
+    try:
+        path = _validate_file_path(path)
+    except ValueError:
+        return None
+
+    # 1. Staged deletion check (header-line parse only — patch bodies may embed
+    #    example diff text containing "/dev/null" literals).
+    if staged_patches and path in staged_patches:
+        if _is_staged_deletion(staged_patches[path]):
+            return None
+
+    content: str | None = None
+
+    # 2. Check local workspace checkout on disk — but NOT when the file has a
+    #    staged patch: the staged patch is authoritative (the disk sync in
+    #    _tool_stage_patch swallows sync failures, and the checkout may be a
+    #    shared/unsynced copy), so a disk hit here would silently omit staged
+    #    changes. Staged files always resolve via base + overlay below.
+    has_staged_patch = bool(staged_patches and path in staged_patches)
+    if repo_name and repo_name.strip() and not has_staged_patch:
+        try:
+            from app.services.session_tools.sandbox import resolve_repo_dir
+
+            repo_root, _ = resolve_repo_dir(
+                repo_name=repo_name, repo_owner=repo_owner, session_id=session_id
+            )
+            if repo_root and os.path.isdir(repo_root):
+                real_root = os.path.realpath(repo_root)
+                local_path = os.path.normpath(os.path.join(real_root, path))
+                real_target = os.path.realpath(local_path)
+                if (
+                    os.path.commonpath([real_root, real_target]) == real_root
+                    and os.path.isfile(real_target)
+                    and not os.path.islink(local_path)
+                ):
+                    with open(
+                        real_target, "r", encoding="utf-8", errors="replace"
+                    ) as f:
+                        content = f.read()
+        except Exception as exc:
+            logger.debug("recon: failed reading file from local checkout: %s", exc)
+
+    # 3. If not on local disk, fetch from GitHub and apply staged diff overlay
+    if content is None:
+        try:
+            content = await fetch_file_content(
+                owner=repo_owner,
+                repo=repo_name,
+                path=path,
+                sha=base_sha,
+                token=gh_token,
+            )
+        except GitHubClientError as exc:
+            logger.warning("recon: fetch_file_content error for %s: %s", path, exc)
+            if not (staged_patches and path in staged_patches):
+                return None
+
+        if staged_patches and path in staged_patches:
+            from app.sandbox.mirror import apply_unified_diff
+
+            diff = staged_patches[path]
+            if content is None and not _is_staged_creation(diff):
+                return None
+            content = apply_unified_diff(content or "", diff)
+
+    return content
+
+
+# ---------------------------------------------------------------------------
 # Recon Tool Handlers
 # ---------------------------------------------------------------------------
 
@@ -116,10 +255,13 @@ async def tool_read_file_slice(
     owner: str = "",
     repo: str = "",
     base_sha: str = "",
+    staged_patches: dict[str, str] | None = None,
     token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Read a specific line range from a repository file (1-based, inclusive).
+    Overlays in-memory staged patches and local disk modifications onto the base commit.
 
     Returns a line-numbered content string (e.g. '42: def my_func():').
     Raises ValueError on invalid line ranges or path traversal attempts.
@@ -134,10 +276,22 @@ async def tool_read_file_slice(
             f"Invalid line range: start_line ({start_line}) cannot exceed end_line ({end_line})."
         )
 
-    content = await fetch_file_content(
-        owner=owner, repo=repo, path=path, sha=base_sha, token=token
+    content = await resolve_read_content(
+        path=path,
+        repo_owner=owner,
+        repo_name=repo,
+        base_sha=base_sha,
+        staged_patches=staged_patches,
+        gh_token=token,
+        session_id=session_id,
     )
     if content is None:
+        if staged_patches and path in staged_patches:
+            diff = staged_patches[path]
+            if _is_staged_deletion(diff):
+                return f"File not found: {path!r} (deleted in staged changes)"
+            if not _is_staged_creation(diff):
+                return f"Error reading file: base content for {path!r} is unavailable."
         return f"File not found: {path!r}"
 
     lines = content.splitlines()
@@ -162,10 +316,12 @@ async def tool_glob_files(
     owner: str = "",
     repo: str = "",
     base_sha: str = "",
+    staged_patches: dict[str, str] | None = None,
     token: str | None = None,
 ) -> list[str]:
     """
     Find repository file paths matching a wildcard glob pattern.
+    Reflects staged created files and excludes staged deleted files.
 
     Returns a sorted list of relative file paths.
     Raises ValueError on path traversal attempts.
@@ -184,13 +340,23 @@ async def tool_glob_files(
     )
     items: list[dict[str, Any]] = tree_data.get("tree", [])
 
-    matches: list[str] = []
+    candidate_paths: set[str] = set()
     for item in items:
         if item.get("type") != "blob":
             continue
         p = item.get("path", "")
-        if not p:
-            continue
+        if p:
+            candidate_paths.add(p)
+
+    if staged_patches:
+        for staged_path, diff in staged_patches.items():
+            if _is_staged_deletion(diff):
+                candidate_paths.discard(staged_path)
+            else:
+                candidate_paths.add(staged_path)
+
+    matches: list[str] = []
+    for p in candidate_paths:
         if exclude_hidden and any(part.startswith(".") for part in p.split("/")):
             continue
         if pattern_re.match(p):
@@ -211,10 +377,13 @@ async def tool_grep_search(
     owner: str = "",
     repo: str = "",
     base_sha: str = "",
+    staged_patches: dict[str, str] | None = None,
     token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Search matching lines with regex or case-insensitive substring across repository files.
+    Overlays staged in-memory modifications and creations, and excludes staged deletions.
 
     Returns formatted matches: 'file_path:line_number: content' capped at max_results.
     Raises ValueError on path traversal attempts or invalid queries.
@@ -223,7 +392,7 @@ async def tool_grep_search(
         raise ValueError("Search query cannot be empty.")
     if path_prefix:
         path_prefix = _validate_file_path(path_prefix)
-        norm_prefix = path_prefix.lstrip("./").lstrip("/")
+        norm_prefix = _normalize_rel_path(path_prefix)
     else:
         norm_prefix = ""
 
@@ -273,13 +442,24 @@ async def tool_grep_search(
         ".wasm",
     )
 
-    candidate_files: list[str] = []
+    candidate_files_set: set[str] = set()
     for item in items:
         if item.get("type") != "blob":
             continue
         p = item.get("path", "")
         if not p:
             continue
+        candidate_files_set.add(p)
+
+    if staged_patches:
+        for staged_path, diff in staged_patches.items():
+            if _is_staged_deletion(diff):
+                candidate_files_set.discard(staged_path)
+            else:
+                candidate_files_set.add(staged_path)
+
+    candidate_files: list[str] = []
+    for p in sorted(candidate_files_set):
         if norm_prefix and not p.startswith(norm_prefix):
             continue
         if any(p.startswith(ign) or f"/{ign}" in f"/{p}" for ign in _IGNORE_PREFIXES):
@@ -298,8 +478,14 @@ async def tool_grep_search(
 
     matches: list[str] = []
     for file_path in candidate_files:
-        content = await fetch_file_content(
-            owner=owner, repo=repo, path=file_path, sha=base_sha, token=token
+        content = await resolve_read_content(
+            path=file_path,
+            repo_owner=owner,
+            repo_name=repo,
+            base_sha=base_sha,
+            staged_patches=staged_patches,
+            gh_token=token,
+            session_id=session_id,
         )
         if not content:
             continue
@@ -332,10 +518,12 @@ async def tool_list_directory(
     owner: str = "",
     repo: str = "",
     base_sha: str = "",
+    staged_patches: dict[str, str] | None = None,
     token: str | None = None,
 ) -> list[str]:
     """
     Traverse repository directory hierarchy up to specified depth.
+    Reflects staged created files and directory hierarchy changes.
 
     Returns a list of relative directory (with trailing slash) and file paths.
     Raises ValueError on path traversal attempts.
@@ -344,7 +532,9 @@ async def tool_list_directory(
         norm_path = ""
     else:
         path = _validate_file_path(path)
-        norm_path = path.strip("./").strip("/")
+        norm_path = _normalize_rel_path(path).strip("/")
+        if norm_path == ".":
+            norm_path = ""
 
     depth = max(1, min(depth, 10))
 
@@ -368,6 +558,23 @@ async def tool_list_directory(
             parts = p.split("/")
             for k in range(1, len(parts)):
                 all_dirs.add("/".join(parts[:k]))
+
+    if staged_patches:
+        for staged_path, diff in staged_patches.items():
+            if _is_staged_deletion(diff):
+                all_files.discard(staged_path)
+            else:
+                all_files.add(staged_path)
+                parts = staged_path.split("/")
+                for k in range(1, len(parts)):
+                    all_dirs.add("/".join(parts[:k]))
+        # Prune directories left empty after staged deletions: git never tracks
+        # empty dirs, so any dir with no remaining file beneath it is stale.
+        all_dirs = {
+            d
+            for d in all_dirs
+            if any(f == d or f.startswith(d + "/") for f in all_files)
+        }
 
     result_entries: list[str] = []
     seen: set[str] = set()

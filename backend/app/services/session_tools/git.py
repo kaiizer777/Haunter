@@ -25,12 +25,32 @@ from app.github_client import (
     fetch_commits,
     fetch_diff,
 )
-from app.services.session_tools.recon import _validate_file_path
+from app.services.session_tools.recon import _normalize_rel_path, _validate_file_path
 
 logger = logging.getLogger(__name__)
 
 _MAX_LOG_ENTRIES = 30
 _MAX_DIFF_CHARS = 40_000
+
+
+def _strip_git_prefix(p: str) -> str:
+    """Remove one leading ``a/`` or ``b/`` diff prefix via exact prefix removal.
+
+    ``str.lstrip("a/")`` strips a character set (mangling e.g. ``brick.py`` to
+    ``rick.py``); this removes at most one exact prefix.
+    """
+    if p.startswith(("a/", "b/")):
+        return p[2:]
+    return p
+
+
+def _is_diff_header_line(line: str) -> bool:
+    """True only for unified-diff file header lines (``--- ``/``+++ ``).
+
+    Hunk content lines may legitimately begin with ``--``/``++`` (e.g. a
+    deleted CSS ``--var`` line renders as ``---var``); those must be counted.
+    """
+    return line.startswith(("--- ", "+++ ")) or line in ("---", "+++")
 
 
 async def tool_git_log(
@@ -209,21 +229,191 @@ async def tool_git_show(
 git_show = tool_git_show
 
 
+def _filter_diff_by_path(diff_text: str, path: str) -> str | None:
+    """Extract only the unified diff hunk(s) targeting the specified file path."""
+    if not diff_text or not diff_text.strip():
+        return None
+    norm_target = _normalize_rel_path(path)
+
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    for line in diff_text.splitlines(keepends=True):
+        if line.startswith("diff --git ") and current_lines:
+            chunks.append("".join(current_lines))
+            current_lines = [line]
+        elif (
+            (line.startswith("--- a/") or line.startswith("--- /dev/null"))
+            and current_lines
+            and not any(ln.startswith("diff --git ") for ln in current_lines)
+            and any(ln.startswith("@@ ") for ln in current_lines)
+        ):
+            chunks.append("".join(current_lines))
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    if current_lines:
+        chunks.append("".join(current_lines))
+
+    for chunk in chunks:
+        for line in chunk.splitlines():
+            if line.startswith("diff --git "):
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    p1 = _strip_git_prefix(parts[2])
+                    p2 = _strip_git_prefix(parts[3])
+                    if p1 == norm_target or p2 == norm_target:
+                        return chunk.strip()
+            elif line.startswith("--- ") or line.startswith("+++ "):
+                target_p = _strip_git_prefix(
+                    line[4:]
+                    .split("\t")[0]
+                    .strip()
+                    .strip('"')
+                    .strip("'")
+                )
+                if target_p == norm_target:
+                    return chunk.strip()
+    return None
+
+
+def _format_diff_stat(diff_text: str) -> str:
+    """Generate git-style diffstat summary lines from a unified diff string."""
+    if not diff_text or not diff_text.strip():
+        return " 0 files changed"
+
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    for line in diff_text.splitlines(keepends=True):
+        if line.startswith("diff --git ") and current_lines:
+            chunks.append("".join(current_lines))
+            current_lines = [line]
+        elif (
+            (line.startswith("--- a/") or line.startswith("--- /dev/null"))
+            and current_lines
+            and not any(ln.startswith("diff --git ") for ln in current_lines)
+            and any(ln.startswith("@@ ") for ln in current_lines)
+        ):
+            chunks.append("".join(current_lines))
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    if current_lines:
+        chunks.append("".join(current_lines))
+
+    stat_lines: list[str] = []
+    total_files = 0
+    total_ins = 0
+    total_del = 0
+
+    for chunk in chunks:
+        file_path = ""
+        for line in chunk.splitlines():
+            if line.startswith("diff --git "):
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    file_path = _strip_git_prefix(parts[3])
+                    break
+            elif line.startswith("+++ ") and line[4:].strip() != "/dev/null":
+                file_path = _strip_git_prefix(
+                    line[4:]
+                    .split("\t")[0]
+                    .strip()
+                    .strip('"')
+                    .strip("'")
+                )
+                break
+            elif line.startswith("--- ") and line[4:].strip() != "/dev/null":
+                file_path = _strip_git_prefix(
+                    line[4:]
+                    .split("\t")[0]
+                    .strip()
+                    .strip('"')
+                    .strip("'")
+                )
+
+        if not file_path:
+            file_path = "file"
+
+        ins = 0
+        dels = 0
+        for line in chunk.splitlines():
+            if _is_diff_header_line(line):
+                continue
+            if line.startswith("+"):
+                ins += 1
+            elif line.startswith("-"):
+                dels += 1
+
+        total_files += 1
+        total_ins += ins
+        total_del += dels
+        change_count = ins + dels
+        plus_bar = "+" * min(ins, 20)
+        minus_bar = "-" * min(dels, max(0, 20 - len(plus_bar)))
+        stat_lines.append(f" {file_path} | {change_count} {plus_bar}{minus_bar}")
+
+    summary = (
+        f" {total_files} file{'s' if total_files != 1 else ''} changed, "
+        f"{total_ins} insertion{'s' if total_ins != 1 else ''}(+), "
+        f"{total_del} deletion{'s' if total_del != 1 else ''}(-)"
+    )
+    stat_lines.append(summary)
+    return "\n".join(stat_lines)
+
+
+def _format_diff_stat_from_patches(patches: dict[str, str]) -> str:
+    """Generate diffstat summary directly from a staged_patches mapping."""
+    if not patches:
+        return " 0 files changed"
+    stat_lines: list[str] = []
+    total_files = 0
+    total_ins = 0
+    total_del = 0
+    for p, d in sorted(patches.items()):
+        ins = 0
+        dels = 0
+        for ln in d.splitlines():
+            if _is_diff_header_line(ln):
+                continue
+            if ln.startswith("+"):
+                ins += 1
+            elif ln.startswith("-"):
+                dels += 1
+        total_files += 1
+        total_ins += ins
+        total_del += dels
+        change_count = ins + dels
+        plus_bar = "+" * min(ins, 20)
+        minus_bar = "-" * min(dels, max(0, 20 - len(plus_bar)))
+        stat_lines.append(f" {p} | {change_count} {plus_bar}{minus_bar}")
+    summary = (
+        f" {total_files} file{'s' if total_files != 1 else ''} changed, "
+        f"{total_ins} insertion{'s' if total_ins != 1 else ''}(+), "
+        f"{total_del} deletion{'s' if total_del != 1 else ''}(-)"
+    )
+    stat_lines.append(summary)
+    return "\n".join(stat_lines)
+
+
 async def tool_git_diff(
     base: str,
     head: str,
+    path: str | None = None,
+    stat_only: bool = False,
     owner: str = "",
     repo: str = "",
     token: str | None = None,
     staged_patches: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
-    Show a unified diff between two refs (branches, tags, or SHAs), or between a ref
-    and the local working tree (use head='working' or head='staged').
+    Show a unified diff or diffstat between two refs (branches, tags, or SHAs), or between a ref
+    and the local working tree (head='working') or session staged patches (head='staged').
 
     base and head can be any ref: branch names, commit SHAs, or tags.
     Set head='working' to inspect uncommitted changes in the local working tree,
     or head='staged' to inspect currently staged patches in the session.
+    Optionally restrict to a specific 'path' and/or request 'stat_only=True' for diffstat.
     Diff is truncated at 40 000 chars.
     """
     if not base or not head:
@@ -233,41 +423,85 @@ async def tool_git_diff(
         bad_ref = base.strip() if base.strip().startswith("-") else head.strip()
         return f"Error: invalid ref '{bad_ref}'."
 
+    if path:
+        try:
+            path = _validate_file_path(path)
+        except ValueError as exc:
+            return f"Error: {exc}"
+
     head_lower = head.strip().lower()
     base_lower = base.strip().lower()
 
     # Working tree or staged query
-    if head_lower in ("working", "worktree", "working_tree", "staged", "uncommitted") or base_lower in ("working", "worktree", "staged"):
+    if head_lower in (
+        "working",
+        "worktree",
+        "working_tree",
+        "staged",
+        "uncommitted",
+    ) or base_lower in ("working", "worktree", "staged"):
         # 1. If explicit staged requested
-        if head_lower in ("staged", "staged_patches") or base_lower in ("staged", "staged_patches"):
-            if staged_patches:
-                diff_text = "\n\n".join(
-                    f"# Staged patch: {p}\n{d.strip()}"
-                    for p, d in staged_patches.items()
-                    if d and d.strip()
-                )
-                return diff_text if diff_text else "No staged patches currently in session."
-            return "No staged patches currently in session."
+        if head_lower in ("staged", "staged_patches") or base_lower in (
+            "staged",
+            "staged_patches",
+        ):
+            if not staged_patches:
+                return "No staged patches currently in session."
+
+            if path:
+                norm_p = _normalize_rel_path(path)
+                if norm_p in staged_patches:
+                    target_patches = {norm_p: staged_patches[norm_p]}
+                else:
+                    return f"No staged patch found for {path!r}."
+            else:
+                target_patches = staged_patches
+
+            if stat_only:
+                return _format_diff_stat_from_patches(target_patches)
+
+            diff_text = "\n\n".join(
+                f"# Staged patch: {p}\n{d.strip()}"
+                for p, d in target_patches.items()
+                if d and d.strip()
+            )
+            return (
+                diff_text
+                if diff_text
+                else "No staged patches currently in session."
+            )
 
         # 2. Check local repo checkout if available
         if repo:
             try:
                 from app.services.session_tools.sandbox import resolve_repo_dir
-                repo_root, _ = resolve_repo_dir(repo_name=repo, repo_owner=owner)
+
+                repo_root, _ = resolve_repo_dir(
+                    repo_name=repo, repo_owner=owner, session_id=session_id
+                )
                 if repo_root and os.path.isdir(repo_root):
-                    ref_target = "HEAD" if base_lower in ("working", "worktree", "staged") else base
+                    ref_target = (
+                        "HEAD"
+                        if base_lower in ("working", "worktree", "staged")
+                        else base
+                    )
                     if ref_target.startswith("-"):
                         return f"Error: invalid ref '{ref_target}'."
-                    cmd = ["git", "-C", repo_root, "diff", "--end-of-options", ref_target]
-                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    cmd = ["git", "-C", repo_root, "diff"]
+                    # Always request the full diff: stat_only output is rendered via
+                    # _format_diff_stat below so untracked files are included in the
+                    # totals (Git's own --stat summary would exclude them).
+                    cmd.extend(["--end-of-options", ref_target])
+                    if path:
+                        cmd.extend(["--", path])
+                    p = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=10
+                    )
                     diff_parts: list[str] = []
                     if p.stdout and p.stdout.strip():
                         diff_parts.append(p.stdout.strip())
 
                     # Also include untracked newly created files in working-tree diff.
-                    # Use NUL-delimited porcelain output so filenames with spaces are
-                    # not quoted (e.g. ?? "my file.py") and untracked directories
-                    # are expanded to individual files via --untracked-files=all.
                     real_root = os.path.realpath(repo_root)
                     status_cmd = [
                         "git",
@@ -278,7 +512,9 @@ async def tool_git_diff(
                         "-z",
                         "--untracked-files=all",
                     ]
-                    sp = subprocess.run(status_cmd, capture_output=True, text=True, timeout=5)
+                    sp = subprocess.run(
+                        status_cmd, capture_output=True, text=True, timeout=5
+                    )
                     if sp.stdout:
                         for entry in sp.stdout.split("\0"):
                             entry = entry.strip()
@@ -289,8 +525,6 @@ async def tool_git_diff(
                             untracked_path = entry[3:].strip()
                             if not untracked_path:
                                 continue
-                            # Defensive: strip surrounding quotes if a non -z
-                            # consumer or older git still quotes spaces.
                             if (
                                 len(untracked_path) >= 2
                                 and untracked_path.startswith('"')
@@ -314,6 +548,11 @@ async def tool_git_diff(
                             else:
                                 candidate_paths.append(untracked_path)
                             for cand_rel in candidate_paths:
+                                if path:
+                                    norm_cand = _normalize_rel_path(cand_rel)
+                                    norm_filter = _normalize_rel_path(path)
+                                    if norm_cand != norm_filter and not norm_cand.startswith(norm_filter + "/"):
+                                        continue
                                 target_file = os.path.normpath(
                                     os.path.join(real_root, cand_rel)
                                 )
@@ -324,42 +563,57 @@ async def tool_git_diff(
                                 if (
                                     os.path.commonpath([real_root, real_parent])
                                     == real_root
-                                    and os.path.commonpath([real_root, real_untracked])
+                                    and os.path.commonpath(
+                                        [real_root, real_untracked]
+                                    )
                                     == real_root
                                     and os.path.isfile(real_untracked)
                                     and not os.path.islink(target_file)
                                 ):
                                     try:
-                                        with open(real_untracked, "r", encoding="utf-8", errors="replace") as uf:
+                                        with open(
+                                            real_untracked,
+                                            "r",
+                                            encoding="utf-8",
+                                            errors="replace",
+                                        ) as uf:
                                             u_content = uf.read()
-                                        num_lines = len(u_content.splitlines()) or 1
+                                        num_lines = (
+                                            len(u_content.splitlines()) or 1
+                                        )
                                         display_path = cand_rel.replace("\\", "/")
                                         diff_parts.append(
                                             f"--- /dev/null\n+++ b/{display_path}\n@@ -0,0 +1,{num_lines} @@\n"
-                                            + "".join(f"+{line}\n" for line in u_content.splitlines())
+                                            + "".join(
+                                                f"+{line}\n"
+                                                for line in u_content.splitlines()
+                                            )
                                         )
                                     except Exception:
                                         pass
 
                     if diff_parts:
                         diff_text = "\n\n".join(diff_parts)
+                        if stat_only:
+                            return _format_diff_stat(diff_text)
                         if len(diff_text) > _MAX_DIFF_CHARS:
-                            return diff_text[:_MAX_DIFF_CHARS] + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
+                            return (
+                                diff_text[:_MAX_DIFF_CHARS]
+                                + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
+                            )
                         return diff_text
+                    return (
+                        f"No uncommitted working-tree differences found for {path!r}."
+                        if path
+                        else "No uncommitted working-tree differences found."
+                    )
             except Exception as exc:
                 logger.debug("git_diff: local git diff failed: %s", exc)
 
-        # 3. Fallback to staged_patches if available
-        if staged_patches:
-            diff_text = "\n\n".join(
-                f"# Staged patch: {p}\n{d.strip()}"
-                for p, d in staged_patches.items()
-                if d and d.strip()
-            )
-            if diff_text:
-                return diff_text
-
-        return "No uncommitted working-tree differences found."
+        return (
+            "No local repository checkout available in this environment. "
+            "Use head='staged' to inspect in-memory staged patches."
+        )
 
     if base.strip() == head.strip():
         if staged_patches:
@@ -380,6 +634,17 @@ async def tool_git_diff(
         )
     except GitHubClientError as exc:
         return f"Error fetching diff between '{base}' and '{head}': {exc}"
+
+    if path:
+        filtered = _filter_diff_by_path(diff_text, path)
+        if filtered is None:
+            return (
+                f"No differences found for {path!r} between '{base}' and '{head}'."
+            )
+        diff_text = filtered
+
+    if stat_only:
+        return _format_diff_stat(diff_text)
 
     if not diff_text.strip():
         if staged_patches:
