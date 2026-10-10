@@ -66,7 +66,7 @@ def classify_failure(
         failure_reason directly.
     """
     # Only classify terminal failure states.
-    if run.status not in ("fallback", "error"):
+    if run.status not in ("fallback", "fallback_commented", "error"):
         return None
 
     # Phase 15: defer to the orchestrator-written failure_reason when present.

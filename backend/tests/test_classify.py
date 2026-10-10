@@ -261,7 +261,7 @@ def test_classify_wrong_fix_attempts_with_verification_status_none() -> None:
 
 def test_classify_wrong_fix_attempts_with_verification_status_skipped() -> None:
     """Attempts exist but all have verification_status='skipped' (bypassed before sandbox) returns wrong_fix."""
-    run = _run(status="fallback")
+    run = _run(status="fallback_commented")
     steps = [_step("context_gatherer"), _step("fix_generator")]
     attempts = [
         _attempt(number=1, verification_status="skipped"),

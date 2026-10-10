@@ -223,7 +223,11 @@ async def _transition(
 # ---------------------------------------------------------------------------
 
 
-def _sanitize_fallback(diagnosis_summary: Optional[str], attempts: list) -> str:
+def _sanitize_fallback(
+    diagnosis_summary: Optional[str],
+    attempts: list,
+    skip_to_fallback_reason: Optional[str] = None,
+) -> str:
     """
     Build a sanitised fallback comment body to post on the commit.
 
@@ -244,10 +248,17 @@ def _sanitize_fallback(diagnosis_summary: Optional[str], attempts: list) -> str:
     escaped = html_module.escape(redacted, quote=False)
     # Step 3: cap body content (prefix does not count towards cap)
     prefix = "**Haunter AI Diagnosis:**\n\n"
-    suffix = (
-        "\n\n*Note: Automated fixes were attempted but none passed the CI sandbox. "
-        "Please review the diagnosis above to manually resolve the issue.*"
-    )
+    if skip_to_fallback_reason == "sandbox_verification_disabled":
+        suffix = (
+            "\n\n*Note: Sandbox verification is disabled by repository settings. "
+            "Automated fixes were generated but could not be verified in sandbox CI. "
+            "Please review the diagnosis above to manually resolve the issue.*"
+        )
+    else:
+        suffix = (
+            "\n\n*Note: Automated fixes were attempted but none passed the CI sandbox. "
+            "Please review the diagnosis above to manually resolve the issue.*"
+        )
     max_body = 10_000_000 - len(prefix) - len(suffix)
     body_content = escaped[:max_body]
     return f"{prefix}{body_content}{suffix}"
@@ -1424,7 +1435,9 @@ async def _orchestrator_pipeline_body(
                 )
                 all_attempts = attempts_result.scalars().all()
                 fallback_body = _sanitize_fallback(
-                    run.diagnosis_summary, list(all_attempts)
+                    run.diagnosis_summary,
+                    list(all_attempts),
+                    skip_to_fallback_reason=skip_to_fallback_reason,
                 )
 
                 from app.github.pr import get_installation_token
