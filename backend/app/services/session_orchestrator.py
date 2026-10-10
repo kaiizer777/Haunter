@@ -44,6 +44,7 @@ from app.models import AgentSession
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.recon import (
     _validate_file_path,
+    resolve_read_content,
     tool_glob_files,
     tool_grep_search,
     tool_list_directory,
@@ -106,6 +107,7 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "read_file",
             "description": (
                 "Read the content of a source file from the repository at the session branch. "
+                "Reflects live staged patches and local workspace edits. "
                 "Use this to inspect code before proposing a patch."
             ),
             "parameters": {
@@ -117,6 +119,21 @@ _TOOLS: list[dict[str, Any]] = [
                     }
                 },
                 "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_staged_files",
+            "description": (
+                "List all file paths currently staged with in-memory uncommitted modifications, "
+                "creations, or deletions in the session."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
                 "additionalProperties": False,
             },
         },
@@ -174,7 +191,8 @@ _TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "grep_search",
             "description": (
-                "Search for a regex or substring query across repository source files at the session commit. "
+                "Search for a regex or substring query across repository source files. "
+                "Reflects live staged changes, newly staged files, and excludes staged deleted files. "
                 "Returns formatted matches: 'file_path:line_number: content' capped at max_results. "
                 "Use this to locate function definitions, variable usages, or error strings."
             ),
@@ -209,6 +227,7 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "glob_files",
             "description": (
                 "Find file paths in the repository matching a wildcard pattern (e.g. '**/*auth*.py', 'src/components/**/*.tsx'). "
+                "Reflects staged new files and excludes staged deleted files. "
                 "Use this to discover file locations before reading or editing."
             ),
             "parameters": {
@@ -234,6 +253,7 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "read_file_slice",
             "description": (
                 "Read a specific line range from a file (1-based, inclusive). "
+                "Reflects live staged patches and local workspace edits. "
                 "Returns line-numbered lines (e.g. '42: def foo():'). "
                 "Use this instead of read_file for large files to avoid blowing the context window."
             ),
@@ -264,6 +284,7 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "list_directory",
             "description": (
                 "List contents of a directory in the repository up to a given depth. "
+                "Reflects staged new files and directory hierarchy changes. "
                 "Returns directories and files relative to the specified path."
             ),
             "parameters": {
@@ -394,6 +415,7 @@ _TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Return a compact structural outline of a source file — classes, methods, "
                 "function signatures, and docstrings — without loading implementation bodies. "
+                "Reflects live staged patches and local workspace edits. "
                 "Use this to understand a file's structure before reading or editing it. "
                 "Supported extensions: .py, .ts, .tsx, .js, .jsx."
             ),
@@ -416,7 +438,8 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "find_symbol",
             "description": (
                 "Locate definitions of functions, classes, interfaces, or types across "
-                "repository source files. Returns path:line: signature for each match. "
+                "repository source files. Reflects live staged modifications and newly created files. "
+                "Returns path:line: signature for each match. "
                 "Use this to find where a symbol is defined before reading or editing it."
             ),
             "parameters": {
@@ -444,6 +467,7 @@ _TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Find all call sites and usages of a symbol across repository source files "
                 "using word-boundary matching (so 'user' matches 'user.id' but NOT 'username'). "
+                "Reflects live staged modifications and newly created files. "
                 "Use this before renaming or refactoring a symbol to inspect all callers. "
                 "Results capped at 50 to avoid context bloat."
             ),
@@ -862,7 +886,7 @@ _TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "git_diff",
             "description": (
-                "Show a unified diff between two refs (branch names, commit SHAs, or tags), "
+                "Show a unified diff or diffstat between two refs (branch names, commit SHAs, or tags), "
                 "or between a ref and the local working tree (use head='working' or head='staged'). "
                 "Use this to inspect uncommitted edits, staged patches, or compare the session branch against main."
             ),
@@ -875,7 +899,15 @@ _TOOLS: list[dict[str, Any]] = [
                     },
                     "head": {
                         "type": "string",
-                        "description": "Head ref (branch, SHA, or tag) — the 'after' side of the diff.",
+                        "description": "Head ref (branch, SHA, or tag) — the 'after' side of the diff (or 'working' / 'staged').",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Optional file path to restrict the diff output to a single file.",
+                    },
+                    "stat_only": {
+                        "type": "boolean",
+                        "description": "Whether to return git-style diffstat summary lines instead of full patch (default false).",
                     },
                 },
                 "required": ["base", "head"],
@@ -993,8 +1025,9 @@ def _build_system_prompt(
         " 26. `git_log(path, limit)` — list commit history on the session branch (optionally scoped to a file). Returns sha, date, author, message.\n"
         " 27. `git_blame(path)` — annotate each line range of a file with the commit that last modified it (author, date, sha, message).\n"
         " 28. `git_show(commit_sha)` — show full metadata and unified diff for a single commit.\n"
-        " 29. `git_diff(base, head)` — unified diff between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
-        " 30. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
+        " 29. `git_diff(base, head, path?, stat_only?)` — unified diff or diffstat between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
+        " 30. `list_staged_files()` — list all file paths currently staged with in-memory uncommitted modifications, creations, or deletions in the session.\n"
+        " 31. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
         "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n\n"
         "For multi-step requests, start by calling update_plan to outline your steps. "
         "Update task statuses as you progress. If you encounter ambiguous architectural trade-offs, "
@@ -1282,6 +1315,18 @@ class SessionOrchestrator:
         # 3. Tool-calling loop — max 10 iterations to prevent runaway loops.
         MAX_ITERATIONS = 10
         for iteration in range(MAX_ITERATIONS):
+            # Dynamically regenerate system prompt so in-turn staged/discarded patches are immediately visible to LLM
+            messages[0] = {
+                "role": "system",
+                "content": _build_system_prompt(
+                    repo_owner=repo.owner,
+                    repo_name=repo.name,
+                    branch_name=session.branch_name,
+                    base_sha=session.base_sha,
+                    staged_patches=staged_patches,
+                ),
+            }
+
             # Emit a heartbeat thought so the stream doesn't idle on large prompts.
             if iteration == 0:
                 await queue.put_thought("Analyzing your request…")
@@ -1549,6 +1594,8 @@ class SessionOrchestrator:
                 staged_patches=staged_patches,
                 session_id=session_id,
             )
+        elif tool_name == "list_staged_files":
+            return self._tool_list_staged_files(staged_patches=staged_patches)
         elif tool_name == "stage_patch":
             return await self._tool_stage_patch(
                 args=args,
@@ -1573,6 +1620,8 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "glob_files":
             return await self._tool_glob_files(
@@ -1580,6 +1629,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
             )
         elif tool_name == "read_file_slice":
             return await self._tool_read_file_slice(
@@ -1587,6 +1637,8 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "list_directory":
             return await self._tool_list_directory(
@@ -1594,6 +1646,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
             )
         elif tool_name == "str_replace":
             return await self._tool_str_replace(
@@ -1641,6 +1694,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 base_sha=base_sha,
                 staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "find_symbol":
             return await self._tool_find_symbol(
@@ -1649,6 +1703,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 base_sha=base_sha,
                 staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "find_references":
             return await self._tool_find_references(
@@ -1657,6 +1712,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 base_sha=base_sha,
                 staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "run_terminal_command":
             return await self._tool_run_terminal_command(
@@ -1757,6 +1813,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "invoke_subagent":
             if session is None:
@@ -1790,6 +1847,22 @@ class SessionOrchestrator:
             )
             return f"Unknown tool: {tool_name!r}"
 
+    def _tool_list_staged_files(self, staged_patches: dict[str, str]) -> str:
+        """List all file paths currently staged in the session with modification status."""
+        if not staged_patches:
+            return "No staged files currently in session."
+        lines = [f"Staged files ({len(staged_patches)}):"]
+        for p in sorted(staged_patches.keys()):
+            d = staged_patches[p]
+            if "+++ /dev/null" in d:
+                status = "deleted"
+            elif "--- /dev/null" in d:
+                status = "created"
+            else:
+                status = "modified"
+            lines.append(f"  - {p} ({status})")
+        return "\n".join(lines)
+
     async def _tool_read_file(
         self,
         args: dict[str, Any],
@@ -1809,67 +1882,30 @@ class SessionOrchestrator:
         except ValueError as exc:
             return f"Error: {exc}"
 
-        # If file is staged for deletion, report deleted
-        if staged_patches and path in staged_patches:
-            diff = staged_patches[path]
-            if "+++ /dev/null" in diff:
-                return f"File not found: {path!r} (deleted in staged changes)"
-
-        content: str | None = None
-
-        # 1. Check local checkout if available
-        if repo_name and repo_name.strip():
+        effective_sid = session_id
+        if effective_sid is None:
             try:
-                from app.services.session_tools.sandbox import resolve_repo_dir
-                effective_sid = session_id
-                if effective_sid is None:
-                    try:
-                        effective_sid = str(self.session_id) if self.session_id else None
-                    except Exception:
-                        effective_sid = None
-                repo_root, _ = resolve_repo_dir(
-                    repo_name=repo_name, repo_owner=repo_owner, session_id=effective_sid
-                )
-                if repo_root:
-                    real_root = os.path.realpath(repo_root)
-                    local_path = os.path.normpath(os.path.join(real_root, path))
-                    real_target = os.path.realpath(local_path)
-                    # Symlink / traversal check
-                    if os.path.commonpath([real_root, real_target]) == real_root:
-                        if os.path.isfile(real_target):
-                            with open(real_target, "r", encoding="utf-8", errors="replace") as f:
-                                content = f.read()
-            except Exception as e:
-                logger.debug("Failed reading file from local checkout: %s", e)
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
 
-        # 2. If not on local disk, fetch from GitHub
+        content = await resolve_read_content(
+            path=path,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            base_sha=base_sha,
+            staged_patches=staged_patches,
+            gh_token=self.gh_token,
+            session_id=effective_sid,
+        )
+
         if content is None:
-            try:
-                content = await fetch_file_content(
-                    owner=repo_owner,
-                    repo=repo_name,
-                    path=path,
-                    sha=base_sha,
-                    token=self.gh_token,
-                )
-            except GitHubClientError as exc:
-                logger.warning(
-                    "session_orchestrator: read_file GitHub error for path=%s: %s",
-                    path,
-                    exc,
-                )
-                if not (staged_patches and path in staged_patches):
-                    return f"Error reading file: {exc}"
-
-            # If fetched from GitHub and staged_patches has an entry, overlay via apply_unified_diff
             if staged_patches and path in staged_patches:
-                from app.sandbox.mirror import apply_unified_diff
                 diff = staged_patches[path]
-                if content is None and "--- /dev/null" not in diff:
+                if "+++ /dev/null" in diff:
+                    return f"File not found: {path!r} (deleted in staged changes)"
+                if "--- /dev/null" not in diff:
                     return f"Error reading file: base content for {path!r} is unavailable."
-                content = apply_unified_diff(content or "", diff)
-
-        if content is None:
             return f"File not found: {path!r}"
 
         # Truncate very large files to avoid bloating the context window.
@@ -2182,6 +2218,8 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         query: str = str(args.get("query", ""))
         path_prefix: str = str(args.get("path_prefix", ""))
@@ -2190,6 +2228,13 @@ class SessionOrchestrator:
             max_results: int = int(args.get("max_results", 25))
         except (TypeError, ValueError):
             max_results = 25
+
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
 
         try:
             return await tool_grep_search(
@@ -2200,7 +2245,9 @@ class SessionOrchestrator:
                 owner=repo_owner,
                 repo=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
                 token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2211,6 +2258,7 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
     ) -> str:
         pattern: str = str(args.get("pattern", ""))
         exclude_hidden: bool = bool(args.get("exclude_hidden", True))
@@ -2221,6 +2269,7 @@ class SessionOrchestrator:
                 owner=repo_owner,
                 repo=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
                 token=self.gh_token,
             )
             return (
@@ -2237,6 +2286,8 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         path: str = str(args.get("path", ""))
         try:
@@ -2244,6 +2295,13 @@ class SessionOrchestrator:
             end_line: int = int(args.get("end_line", 1))
         except (TypeError, ValueError):
             return "Error: start_line and end_line must be valid integers."
+
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
 
         try:
             return await tool_read_file_slice(
@@ -2253,7 +2311,9 @@ class SessionOrchestrator:
                 owner=repo_owner,
                 repo=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
                 token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2264,6 +2324,7 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
     ) -> str:
         path: str = str(args.get("path", "."))
         try:
@@ -2278,6 +2339,7 @@ class SessionOrchestrator:
                 owner=repo_owner,
                 repo=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
                 token=self.gh_token,
             )
             return (
@@ -2413,8 +2475,15 @@ class SessionOrchestrator:
         repo_name: str,
         base_sha: str,
         staged_patches: dict[str, str],
+        session_id: str | None = None,
     ) -> str:
         path: str = str(args.get("path", ""))
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         try:
             return await tool_get_file_outline(
                 path=path,
@@ -2423,6 +2492,7 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 gh_token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2434,9 +2504,16 @@ class SessionOrchestrator:
         repo_name: str,
         base_sha: str,
         staged_patches: dict[str, str],
+        session_id: str | None = None,
     ) -> str:
         name: str = str(args.get("name", ""))
         kind: str | None = args.get("kind") or None
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         try:
             return await tool_find_symbol(
                 name=name,
@@ -2446,6 +2523,7 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 gh_token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2457,9 +2535,16 @@ class SessionOrchestrator:
         repo_name: str,
         base_sha: str,
         staged_patches: dict[str, str],
+        session_id: str | None = None,
     ) -> str:
         symbol: str = str(args.get("symbol", ""))
         path: str | None = args.get("path") or None
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         try:
             return await tool_find_references(
                 symbol=symbol,
@@ -2469,6 +2554,7 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 gh_token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2810,19 +2896,31 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         staged_patches: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Inspect unified diff between git refs or local working tree / staged patches."""
         base: str = str(args.get("base", ""))
         head: str = str(args.get("head", ""))
+        path: str | None = args.get("path") or None
+        stat_only: bool = bool(args.get("stat_only", False))
         if not base or not head:
             return "Error: 'base' and 'head' are both required for git_diff."
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         return await tool_git_diff(
             base=base,
             head=head,
+            path=path,
+            stat_only=stat_only,
             owner=repo_owner,
             repo=repo_name,
             token=self.gh_token,
             staged_patches=staged_patches,
+            session_id=effective_sid,
         )
 
     async def _tool_invoke_subagent(

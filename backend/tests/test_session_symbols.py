@@ -382,3 +382,104 @@ def test_python_outline_no_top_level() -> None:
     source = "x = 1\ny = 2\n"
     outline = _python_outline(source)
     assert "(no top-level symbols found)" in outline
+
+
+# ---------------------------------------------------------------------------
+# 7. Staged Overlay Integration Tests for Symbol Tools
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_file_outline_with_staged_overlay() -> None:
+    """tool_get_file_outline extracts outline from live staged files."""
+    from unittest.mock import AsyncMock, patch
+
+    create_diff = (
+        "--- /dev/null\n"
+        "+++ b/src/new_service.py\n"
+        "@@ -0,0 +1,6 @@\n"
+        "+class NewOrderService:\n"
+        "+    '''Handles new orders.'''\n"
+        "+    def process(self, order_id: str):\n"
+        "+        pass\n"
+    )
+    staged = {"src/new_service.py": create_diff}
+
+    with patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock, return_value=None):
+        outline = await tool_get_file_outline(
+            path="src/new_service.py",
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert "# Outline: src/new_service.py" in outline
+        assert "class NewOrderService:" in outline
+        assert "def process(self, order_id: str):" in outline
+
+
+@pytest.mark.asyncio
+async def test_find_symbol_with_staged_overlay() -> None:
+    """tool_find_symbol discovers definitions in staged creations/modifications and ignores deletions."""
+    from unittest.mock import AsyncMock, patch
+
+    mock_tree = {
+        "tree": [
+            {"path": "src/existing.py", "type": "blob"},
+            {"path": "src/deleted.py", "type": "blob"},
+        ]
+    }
+    staged = {
+        "src/existing.py": "--- a/src/existing.py\n+++ b/src/existing.py\n@@ -1,2 +1,3 @@\n+class StagedOrderManager:\n+    pass\n",
+        "src/created.py": "--- /dev/null\n+++ b/src/created.py\n@@ -0,0 +1,2 @@\n+class StagedOrderManager:\n+    pass\n",
+        "src/deleted.py": "--- a/src/deleted.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-class StagedOrderManager:\n-    pass\n",
+    }
+
+    with patch("app.services.session_tools.symbols.fetch_git_tree", new_callable=AsyncMock, return_value=mock_tree), \
+         patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock, return_value=""):
+
+        results = await tool_find_symbol(
+            name="StagedOrderManager",
+            kind="class",
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert "Found 2 definition(s) for 'StagedOrderManager'" in results
+        assert "src/existing.py:1: class StagedOrderManager" in results
+        assert "src/created.py:1: class StagedOrderManager" in results
+        assert "src/deleted.py" not in results
+
+
+@pytest.mark.asyncio
+async def test_find_references_with_staged_overlay() -> None:
+    """tool_find_references discovers usages in staged creations/modifications and ignores deletions."""
+    from unittest.mock import AsyncMock, patch
+
+    mock_tree = {
+        "tree": [
+            {"path": "src/caller.py", "type": "blob"},
+            {"path": "src/deleted.py", "type": "blob"},
+        ]
+    }
+    staged = {
+        "src/caller.py": "--- a/src/caller.py\n+++ b/src/caller.py\n@@ -1,2 +1,3 @@\n+res = special_calc_fn(10)\n",
+        "src/new_caller.py": "--- /dev/null\n+++ b/src/new_caller.py\n@@ -0,0 +1,2 @@\n+res2 = special_calc_fn(20)\n",
+        "src/deleted.py": "--- a/src/deleted.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-res_old = special_calc_fn(30)\n",
+    }
+
+    with patch("app.services.session_tools.symbols.fetch_git_tree", new_callable=AsyncMock, return_value=mock_tree), \
+         patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock, return_value=""):
+
+        results = await tool_find_references(
+            symbol="special_calc_fn",
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert "Found 2 reference(s) for 'special_calc_fn'" in results
+        assert "src/caller.py:1: res = special_calc_fn(10)" in results
+        assert "src/new_caller.py:1: res2 = special_calc_fn(20)" in results
+        assert "src/deleted.py" not in results

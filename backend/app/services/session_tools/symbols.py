@@ -22,7 +22,10 @@ from app.github_client import (
     fetch_file_content,
     fetch_git_tree,
 )
-from app.services.session_tools.recon import _validate_file_path
+from app.services.session_tools.recon import (
+    _validate_file_path,
+    resolve_read_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -247,38 +250,6 @@ def _ts_outline(source: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Shared file content resolver
-# ---------------------------------------------------------------------------
-
-
-async def _resolve_file_content(
-    path: str,
-    repo_owner: str,
-    repo_name: str,
-    base_sha: str,
-    staged_patches: dict[str, str],
-    gh_token: str | None,
-) -> str | None:
-    """
-    Return full file content from GitHub.
-
-    staged_patches are unified diffs, not full source — we always fetch from
-    GitHub for AST/outline parsing purposes.
-    """
-    try:
-        return await fetch_file_content(
-            owner=repo_owner,
-            repo=repo_name,
-            path=path,
-            sha=base_sha,
-            token=gh_token,
-        )
-    except GitHubClientError as exc:
-        logger.warning("symbols: fetch_file_content error for %s: %s", path, exc)
-        return None
-
-
-# ---------------------------------------------------------------------------
 # tool_get_file_outline
 # ---------------------------------------------------------------------------
 
@@ -288,11 +259,13 @@ async def tool_get_file_outline(
     repo_owner: str,
     repo_name: str,
     base_sha: str,
-    staged_patches: dict[str, str],
+    staged_patches: dict[str, str] | None = None,
     gh_token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Return a compact structural outline of a source file.
+    Reflects live staged modifications and local disk changes.
 
     Python: AST-based extraction of classes, methods, functions, docstrings.
     TS/JS: Regex-based extraction of interfaces, types, classes, exported functions.
@@ -310,13 +283,14 @@ async def tool_get_file_outline(
             f"Supported: {', '.join(_SOURCE_EXTENSIONS)}"
         )
 
-    content = await _resolve_file_content(
+    content = await resolve_read_content(
         path=path,
         repo_owner=repo_owner,
         repo_name=repo_name,
         base_sha=base_sha,
         staged_patches=staged_patches,
         gh_token=gh_token,
+        session_id=session_id,
     )
     if content is None:
         return f"File not found: {path!r}"
@@ -481,9 +455,11 @@ async def tool_find_symbol(
     base_sha: str = "",
     staged_patches: dict[str, str] | None = None,
     gh_token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Locate definitions of functions, classes, interfaces, or types across the repo.
+    Reflects live staged modifications, newly created files, and excludes deleted files.
 
     Scans .py, .ts, .tsx, .js, .jsx source files.
     Filters by kind if specified: "function", "class", "interface", "type".
@@ -514,7 +490,7 @@ async def tool_find_symbol(
         return f"Error fetching repository tree: {exc}"
 
     items: list[dict[str, Any]] = tree_data.get("tree", [])
-    candidate_files: list[str] = [
+    candidate_files_set: set[str] = set(
         item["path"]
         for item in items
         if item.get("type") == "blob"
@@ -524,16 +500,30 @@ async def tool_find_symbol(
             for ign in _IGNORE_PREFIXES
         )
         and any(item["path"].endswith(ext) for ext in _SOURCE_EXTENSIONS)
-    ]
+    )
 
+    if staged_patches:
+        for staged_path, diff in staged_patches.items():
+            if "+++ /dev/null" in diff:
+                candidate_files_set.discard(staged_path)
+            elif any(staged_path.endswith(ext) for ext in _SOURCE_EXTENSIONS):
+                if not any(
+                    staged_path.startswith(ign) or f"/{ign}" in f"/{staged_path}"
+                    for ign in _IGNORE_PREFIXES
+                ):
+                    candidate_files_set.add(staged_path)
+
+    candidate_files = sorted(candidate_files_set)
     matches: list[str] = []
     for file_path in candidate_files:
-        content = await fetch_file_content(
-            owner=repo_owner,
-            repo=repo_name,
+        content = await resolve_read_content(
             path=file_path,
-            sha=base_sha,
-            token=gh_token,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            base_sha=base_sha,
+            staged_patches=staged_patches,
+            gh_token=gh_token,
+            session_id=session_id,
         )
         if not content:
             continue
@@ -570,9 +560,11 @@ async def tool_find_references(
     base_sha: str = "",
     staged_patches: dict[str, str] | None = None,
     gh_token: str | None = None,
+    session_id: str | None = None,
 ) -> str:
     """
     Find all call sites and usages of a symbol across the repository.
+    Reflects live staged modifications, newly created files, and excludes deleted files.
 
     Uses word-boundary regex r"\\b<symbol>\\b" so "user" matches "user.id"
     but NOT "username". Results capped at 50 to prevent context bloat.
@@ -609,7 +601,7 @@ async def tool_find_references(
         return f"Error fetching repository tree: {exc}"
 
     items: list[dict[str, Any]] = tree_data.get("tree", [])
-    candidate_files: list[str] = []
+    candidate_files_set: set[str] = set()
     for item in items:
         if item.get("type") != "blob":
             continue
@@ -622,18 +614,34 @@ async def tool_find_references(
             continue
         if not any(p.endswith(ext) for ext in _SOURCE_EXTENSIONS):
             continue
-        candidate_files.append(p)
+        candidate_files_set.add(p)
 
+    if staged_patches:
+        for staged_path, diff in staged_patches.items():
+            if "+++ /dev/null" in diff:
+                candidate_files_set.discard(staged_path)
+            elif any(staged_path.endswith(ext) for ext in _SOURCE_EXTENSIONS):
+                if path_filter and not staged_path.startswith(path_filter):
+                    continue
+                if not any(
+                    staged_path.startswith(ign) or f"/{ign}" in f"/{staged_path}"
+                    for ign in _IGNORE_PREFIXES
+                ):
+                    candidate_files_set.add(staged_path)
+
+    candidate_files = sorted(candidate_files_set)
     matches: list[str] = []
     for file_path in candidate_files:
         if len(matches) >= _MAX_REFERENCES:
             break
-        content = await fetch_file_content(
-            owner=repo_owner,
-            repo=repo_name,
+        content = await resolve_read_content(
             path=file_path,
-            sha=base_sha,
-            token=gh_token,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            base_sha=base_sha,
+            staged_patches=staged_patches,
+            gh_token=gh_token,
+            session_id=session_id,
         )
         if not content:
             continue

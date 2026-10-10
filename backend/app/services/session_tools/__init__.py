@@ -8,6 +8,7 @@ from app.services.session_tools.recon import (
     grep_search,
     list_directory,
     read_file_slice,
+    resolve_read_content,
     tool_glob_files,
     tool_grep_search,
     tool_list_directory,
@@ -73,6 +74,7 @@ __all__ = [
     "glob_files",
     "tool_read_file_slice",
     "read_file_slice",
+    "resolve_read_content",
     "tool_list_directory",
     "list_directory",
     # editor

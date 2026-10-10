@@ -598,7 +598,7 @@ async def test_read_file_overlay_github_error_modify_vs_create() -> None:
 
     # 1. Staged create diff -> reconstructed from /dev/null patch
     create_diff = "--- /dev/null\n+++ b/brand_new.py\n@@ -0,0 +1,1 @@\n+print('created')\n"
-    with patch("app.services.session_orchestrator.fetch_file_content", side_effect=GitHubClientError("Not found")):
+    with patch("app.services.session_tools.recon.fetch_file_content", side_effect=GitHubClientError("Not found")):
         res_create = await orch._tool_read_file(
             args={"path": "brand_new.py"},
             repo_owner="org",
@@ -610,7 +610,7 @@ async def test_read_file_overlay_github_error_modify_vs_create() -> None:
 
     # 2. Staged modify diff -> rejects because base is unavailable
     mod_diff = "--- a/existing.py\n+++ b/existing.py\n@@ -1 +1 @@\n-old\n+new\n"
-    with patch("app.services.session_orchestrator.fetch_file_content", side_effect=GitHubClientError("Not found")):
+    with patch("app.services.session_tools.recon.fetch_file_content", side_effect=GitHubClientError("Not found")):
         res_mod = await orch._tool_read_file(
             args={"path": "existing.py"},
             repo_owner="org",
