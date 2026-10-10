@@ -18,8 +18,8 @@ Covers:
    - Webhook returns HTTP 200 with skipped reason and skips Run creation
    - Orchestrator terminates pipeline early with recorded failure_reason
 4. Sandbox verification toggle (enable_sandbox_verification):
-   - enable_sandbox_verification=False bypasses sandbox CI verification
-   - Attempt verification status treated as pass without running sandbox runner
+   - enable_sandbox_verification=False skips sandbox CI verification
+   - Attempt verification status recorded as skipped and terminates via fallback without fabricating pass
 5. PR comments toggle (enable_pr_comments):
    - enable_pr_comments=False suppresses PR and commit comment posting
    - Review orchestrator skips comment publishing when disabled
@@ -612,9 +612,9 @@ async def test_orchestrator_auto_fix_disabled_terminates_pipeline(
 async def test_orchestrator_sandbox_verification_disabled_bypasses_sandbox(
     fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    """When enable_sandbox_verification=False, orchestrator bypasses sandbox verification,
-    records bypass in decisions and attempt strategy notes, sets verification_status=pass,
-    and proceeds to PR creation."""
+    """When enable_sandbox_verification=False, orchestrator records verification_status=skipped,
+    bypasses running the sandbox runner, records bypass in decisions and attempt strategy notes,
+    and terminates via fallback instead of fabricating a passing PR."""
     # Unit assertion
     assert (
         is_sandbox_verification_allowed(enable_sandbox_verification=True).allowed
@@ -672,9 +672,10 @@ async def test_orchestrator_sandbox_verification_disabled_bypasses_sandbox(
         patch(
             "app.github.pr.get_installation_token", new_callable=AsyncMock
         ) as mock_token,
-        patch("app.github.pr.create_branch", new_callable=AsyncMock),
-        patch("app.github.pr.commit_patch", new_callable=AsyncMock),
+        patch("app.github.pr.create_branch", new_callable=AsyncMock) as mock_create_branch,
+        patch("app.github.pr.commit_patch", new_callable=AsyncMock) as mock_commit_patch,
         patch("app.github.pr.open_pr", new_callable=AsyncMock) as mock_open_pr,
+        patch("app.github_client.post_commit_comment", new_callable=AsyncMock),
     ):
         mock_gather.return_value = "diagnosis: generic failure"
         mock_generate_fix.return_value = generated_attempt
@@ -699,18 +700,105 @@ async def test_orchestrator_sandbox_verification_disabled_bypasses_sandbox(
     # Sandbox verify was NOT called
     mock_sandbox_verify.assert_not_called()
 
-    # Decisions recorded bypass and pass
-    assert "sandbox_verification_skipped" in state["decisions"]
-    assert "verification_passed" in state["decisions"]
+    # PR creation was NOT called
+    mock_gen_pr.assert_not_called()
+    mock_create_branch.assert_not_called()
+    mock_commit_patch.assert_not_called()
+    mock_open_pr.assert_not_called()
 
-    # Attempt updated to pass with bypass notes
-    assert generated_attempt.verification_status == "pass"
+    # Decisions recorded bypass and did NOT fabricate pass
+    assert "sandbox_verification_skipped" in state["decisions"]
+    assert "verification_passed" not in state["decisions"]
+
+    # Attempt updated to skipped with bypass notes and 0 duration
+    assert generated_attempt.verification_status == "skipped"
+    assert generated_attempt.build_duration_ms == 0
+    assert "sandbox verification disabled by repository settings" in (
+        generated_attempt.failure_reason or ""
+    )
     assert "[sandbox verification bypassed by repo settings]" in (
         generated_attempt.strategy_notes or ""
     )
 
-    # Progressed to pr_opened
-    assert run.status == RunStatus.pr_opened.value
+    # Progressed to fallback_commented, NEVER pending_pr or pr_opened
+    assert run.status == RunStatus.fallback_commented.value
+    assert state["step"] == RunStatus.fallback_commented.value
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_sandbox_verification_disabled_cannot_reach_pending_pr(
+    fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
+    """Regression test (Issue #62): Assert the pipeline cannot reach pending_pr or open a PR
+    when sandbox verification is disabled, even when multiple attempts are configured."""
+    user, repo = await seed_test_repo(
+        fake_audit_db, fake_audit_user_factory, "orch-reg-org", "orch-reg-repo"
+    )
+    settings_row = RepoSettings(
+        repo_id=repo.id,
+        enable_auto_fix=True,
+        enable_sandbox_verification=False,
+    )
+    fake_audit_db.add(settings_row)
+
+    run = Run(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        github_run_id=8809,
+        github_delivery_id=str(uuid.uuid4()),
+        head_sha="7" * 40,
+        head_branch="main",
+        status="pending",
+        conclusion="failure",
+    )
+    fake_audit_db.add(run)
+    await fake_audit_db.commit()
+
+    attempt_1 = Attempt(
+        id=uuid.uuid4(),
+        run_id=run.id,
+        attempt_number=1,
+        patch_text="diff --git a/app.py b/app.py\n+test",
+        confidence_score=95,
+    )
+
+    state = {"step": "pending", "decisions": []}
+
+    with (
+        patch.object(settings, "max_attempts", 3),
+        patch("app.orchestrator.gather_context", new_callable=AsyncMock) as mock_gather,
+        patch(
+            "app.subagents.fix_generator.generate_fix", new_callable=AsyncMock
+        ) as mock_gen_fix,
+        patch("app.sandbox.verify", new_callable=AsyncMock) as mock_verify,
+        patch("app.subagents.pr_writer.generate_pr_text", new_callable=AsyncMock) as mock_gen_pr,
+        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_token,
+        patch("app.github_client.post_commit_comment", new_callable=AsyncMock),
+    ):
+        mock_gather.return_value = "diagnosis: bug"
+        mock_gen_fix.return_value = attempt_1
+        fake_audit_db.add(attempt_1)
+        await fake_audit_db.commit()
+        mock_token.return_value = "ghs_tok"
+
+        await _orchestrator_pipeline_body(
+            db=fake_audit_db,
+            run_id=run.id,
+            run=run,
+            repo=repo,
+            state=state,
+        )
+
+    # Only 1 fix attempt generated before bailing to fallback (no redundant retries)
+    assert mock_gen_fix.call_count == 1
+    mock_verify.assert_not_called()
+    mock_gen_pr.assert_not_called()
+
+    # Never reached pending_pr
+    assert "verification_passed" not in state["decisions"]
+    assert state["step"] != RunStatus.pending_pr.value
+    assert run.status == RunStatus.fallback_commented.value
+    assert attempt_1.verification_status == "skipped"
 
 
 @pytest.mark.asyncio

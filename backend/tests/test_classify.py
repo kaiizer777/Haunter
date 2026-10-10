@@ -259,6 +259,16 @@ def test_classify_wrong_fix_attempts_with_verification_status_none() -> None:
     assert classify_failure(run, steps, attempts) == "wrong_fix"
 
 
+def test_classify_wrong_fix_attempts_with_verification_status_skipped() -> None:
+    """Attempts exist but all have verification_status='skipped' (bypassed before sandbox) returns None (not misclassified as invalid patch)."""
+    run = _run(status="fallback_commented")
+    steps = [_step("context_gatherer"), _step("fix_generator")]
+    attempts = [
+        _attempt(number=1, verification_status="skipped"),
+    ]
+    assert classify_failure(run, steps, attempts) is None
+
+
 # ---------------------------------------------------------------------------
 # 6. tests_still_failing branches
 # ---------------------------------------------------------------------------
