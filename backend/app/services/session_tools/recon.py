@@ -119,6 +119,7 @@ async def tool_read_file(
     token: str | None = None,
     staged_patches: dict[str, str] | None = None,
     session_id: str | None = None,
+    fetcher: Any = None,
 ) -> str:
     """
     Read file contents with support for local checkout synchronization,
@@ -156,8 +157,9 @@ async def tool_read_file(
 
     # 2. If not on local disk, fetch from GitHub
     if content is None:
+        _fetch = fetcher or fetch_file_content
         try:
-            content = await fetch_file_content(
+            content = await _fetch(
                 owner=owner,
                 repo=repo,
                 path=path,

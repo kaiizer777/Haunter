@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.github_client import (
     GitHubClientError,
+    fetch_file_content,
 )
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
@@ -1821,6 +1822,7 @@ class SessionOrchestrator:
             token=self.gh_token,
             staged_patches=staged_patches,
             session_id=effective_sid,
+            fetcher=fetch_file_content,
         )
 
     async def _tool_stage_patch(
