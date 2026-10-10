@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from app.github_client import GitHubClientError, fetch_file_content
+from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
 from app.models import AgentSession
@@ -45,7 +45,6 @@ from app.services.session_tools.git import (
     tool_git_show,
 )
 from app.services.session_tools.recon import (
-    _validate_file_path,
     tool_glob_files,
     tool_grep_search,
     tool_list_directory,

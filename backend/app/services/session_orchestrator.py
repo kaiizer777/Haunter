@@ -36,7 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.github_client import (
     GitHubClientError,
-    fetch_file_content,
 )
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
