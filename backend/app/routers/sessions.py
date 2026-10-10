@@ -21,12 +21,13 @@ Security invariants:
 
 from __future__ import annotations
 
+import asyncio as _asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,6 +64,9 @@ from app.services.session_streamer import SseQueue
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
+
+# Retain strong references to running background tasks to prevent garbage collection.
+_BACKGROUND_TASKS: set[_asyncio.Task[Any]] = set()
 
 # Statuses allowed on the AgentSession model.
 _VALID_STATUSES = {"active", "completed", "closed", "awaiting_clarification"}
@@ -438,6 +442,8 @@ async def chat_session(
     body: SessionChatIn,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    last_event_id_header: Annotated[Optional[str], Header(alias="Last-Event-ID")] = None,
+    last_event_id_query: Annotated[Optional[int], Query(alias="last_event_id")] = None,
 ) -> StreamingResponse:
     """
     Submit a user message to the live pairing agent and stream the response via SSE.
@@ -479,6 +485,13 @@ async def chat_session(
             detail=f"Session is not active (status={session.status!r}). Cannot submit prompt.",
         )
 
+    # Parse resumption event ID if provided
+    parsed_last_event_id: Optional[int] = None
+    if last_event_id_header and last_event_id_header.isdigit():
+        parsed_last_event_id = int(last_event_id_header)
+    elif last_event_id_query is not None:
+        parsed_last_event_id = last_event_id_query
+
     # Resolve GitHub installation token for file reads — best-effort.
     try:
         from sqlalchemy.orm import selectinload as _sel
@@ -503,11 +516,9 @@ async def chat_session(
         gh_token=gh_token,
     )
 
-    import asyncio as _asyncio
-
     # Launch the orchestrator in a background task so the StreamingResponse
     # generator can start yielding immediately while the LLM runs.
-    _asyncio.ensure_future(
+    task = _asyncio.create_task(
         orchestrator.run(
             user_message=body.message,
             queue=queue,
@@ -515,9 +526,24 @@ async def chat_session(
             provider=body.provider,
         )
     )
+    _BACKGROUND_TASKS.add(task)
+
+    def _on_orchestrator_done(t: _asyncio.Task) -> None:
+        _BACKGROUND_TASKS.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                logger.error(
+                    "session_orchestrator background task failed for session %s: %s",
+                    session_id,
+                    exc,
+                    exc_info=exc,
+                )
+
+    task.add_done_callback(_on_orchestrator_done)
 
     return StreamingResponse(
-        queue.stream(),
+        queue.stream(last_event_id=parsed_last_event_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

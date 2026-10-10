@@ -774,3 +774,66 @@ async def test_tool_stage_patch_creation_authority_over_existing_disk_content(
     assert staged["newmod.py"] == creation_diff
     assert (repo_dir / "newmod.py").read_text(encoding="utf-8") == "fresh = 1\nready = True\n"
 
+
+@pytest.mark.asyncio
+async def test_session_orchestrator_disconnect_persists_turn() -> None:
+    """
+    Regression test for Issue #65:
+    Disconnect after N events; assert producer does not deadlock and turn is persisted.
+    """
+    import asyncio
+    from app.services.session_orchestrator import SessionOrchestrator
+
+    mock_db = AsyncMock()
+    orch = SessionOrchestrator(
+        session_id=uuid.uuid4(),
+        db=mock_db,
+        gh_token=None,
+    )
+
+    mock_session = MagicMock()
+    mock_session.id = orch.session_id
+    mock_session.repo = MagicMock(owner="test-owner", name="test-repo")
+    mock_session.branch_name = "main"
+    mock_session.base_sha = "abc123"
+    mock_session.conversation_history = []
+    mock_session.staged_patches = {}
+    mock_session.checkpoints = []
+
+    orch._load_session = AsyncMock(return_value=mock_session)
+    orch._persist = AsyncMock()
+    orch._llm = AsyncMock()
+    async def slow_llm_complete(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return {
+            "content": "Refactoring completed successfully.",
+            "tool_calls": None,
+            "model": "nemotron-3.5-lightning-free",
+        }
+
+    orch._llm.complete = AsyncMock(side_effect=slow_llm_complete)
+
+    queue = SseQueue(maxsize=2)
+    gen = queue.stream()
+
+    task = asyncio.create_task(
+        orch.run(
+            user_message="Please refactor auth",
+            queue=queue,
+        )
+    )
+
+    # Consumer reads 1 event (e.g. heartbeat) then disconnects
+    first_chunk = await anext(gen)
+    assert "thought" in first_chunk
+    await gen.aclose()
+    assert queue.is_disconnected is True
+
+    # Producer must finish execution and persist without deadlocking
+    await asyncio.wait_for(task, timeout=2.0)
+
+    orch._persist.assert_awaited_once()
+    assert mock_session.conversation_history[0]["content"] == "Please refactor auth"
+    assert mock_session.conversation_history[1]["content"] == "Refactoring completed successfully."
+
+

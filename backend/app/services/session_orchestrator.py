@@ -1193,6 +1193,26 @@ class SessionOrchestrator:
                 self.session_id,
                 exc,
             )
+            # Ensure interrupted turn is recorded in session history so it is never silently lost
+            try:
+                session = await self._load_session()
+                if session:
+                    history = list(session.conversation_history or [])
+                    # Only append if not already in history
+                    if not history or history[-1].get("content") != user_message:
+                        history.append({"role": "user", "content": user_message})
+                    history.append(
+                        {
+                            "role": "assistant",
+                            "content": "Turn interrupted by internal error. Your prior state has been preserved.",
+                        }
+                    )
+                    await self._persist(session, history, dict(session.staged_patches or {}))
+            except Exception as persist_exc:
+                logger.warning(
+                    "session_orchestrator: failed to persist error fallback state: %s",
+                    persist_exc,
+                )
             await queue.put_error(
                 "An internal error occurred while processing your request.",
                 "INTERNAL_ERROR",
@@ -2951,5 +2971,29 @@ class SessionOrchestrator:
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
-        await self.db.commit()
-        await self.db.refresh(session)
+        try:
+            if not getattr(self.db, "is_active", True):
+                raise RuntimeError("self.db is closed or inactive")
+            await self.db.commit()
+            await self.db.refresh(session)
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: committing with self.db failed (%s), attempting fallback session persist",
+                exc,
+            )
+            from app.db import async_session_maker
+            async with async_session_maker() as fallback_db:
+                stmt = select(AgentSession).where(AgentSession.id == session.id)
+                res = await fallback_db.execute(stmt)
+                db_session = res.scalars().first()
+                if db_session:
+                    db_session.conversation_history = updated_history
+                    db_session.staged_patches = updated_patches
+                    db_session.updated_at = datetime.now(timezone.utc)
+                    if hasattr(session, "checkpoints") and session.checkpoints:
+                        db_session.checkpoints = session.checkpoints
+                    if hasattr(session, "plan") and session.plan:
+                        db_session.plan = session.plan
+                    if hasattr(session, "waiting_input") and session.waiting_input:
+                        db_session.waiting_input = session.waiting_input
+                    await fallback_db.commit()

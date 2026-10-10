@@ -345,4 +345,77 @@ describe("useSessionStream — Audit SSE Events Handling", () => {
     expect(assistantMsg).toBeDefined();
     expect(assistantMsg?.content).toBe(longProseThought);
   });
+
+  it("retries on unexpected stream drop and passes Last-Event-ID to resume", async () => {
+    // First chunk drops before done event with id: 10
+    const chunk1 = [
+      "event: thought\n",
+      "id: 10\n",
+      "retry: 50\n",
+      'data: {"delta": "Partial thought..."}\n\n',
+    ].join("");
+
+    // Second chunk after retry delivers completion
+    const chunk2 = [
+      "event: thought\n",
+      "id: 11\n",
+      'data: {"delta": " and completed thought."}\n\n',
+      "event: done\n",
+      'data: {"session_id": "session_123"}\n\n',
+    ].join("");
+
+    const fetchCalls: { url: string; headers: Record<string, string> }[] = [];
+    let callCount = 0;
+
+    globalThis.fetch = vi.fn().mockImplementation((url, init) => {
+      callCount++;
+      fetchCalls.push({ url: String(url), headers: (init?.headers as Record<string, string>) || {} });
+      if (callCount === 1) {
+        return Promise.resolve(createMockStreamResponse([chunk1]));
+      }
+      return Promise.resolve(createMockStreamResponse([chunk2]));
+    });
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    await act(async () => {
+      await result.current.sendChatMessage("hello");
+    });
+
+    expect(callCount).toBe(2);
+    // Second call must include Last-Event-ID
+    expect(fetchCalls[1].headers["Last-Event-ID"]).toBe("10");
+
+    const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg?.thoughts).toEqual(["Partial thought...", " and completed thought."]);
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.isReconnecting).toBe(false);
+  });
+
+  it("surfaces connection interrupted message when retries are exhausted without terminal done event", async () => {
+    const chunkIncomplete = [
+      "event: thought\n",
+      "id: 1\n",
+      "retry: 20\n",
+      'data: {"delta": "Thinking..."}\n\n',
+    ].join("");
+
+    globalThis.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve(createMockStreamResponse([chunkIncomplete]))
+    );
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    await act(async () => {
+      await result.current.sendChatMessage("hello");
+    });
+
+    // When retries are exhausted without receiving 'done', a system warning is displayed
+    const systemMsg = result.current.messages.find(
+      (m) => m.role === "system" && m.content.includes("interrupted")
+    );
+    expect(systemMsg).toBeDefined();
+    expect(result.current.isStreaming).toBe(false);
+  });
 });

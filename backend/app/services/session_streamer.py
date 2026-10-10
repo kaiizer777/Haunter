@@ -133,7 +133,12 @@ def _redact_secrets(obj: Any) -> Any:
     return obj
 
 
-def format_sse_event(event: str, data: dict[str, Any]) -> str:
+def format_sse_event(
+    event: str,
+    data: dict[str, Any],
+    event_id: int | str | None = None,
+    retry: int | None = None,
+) -> str:
     """
     Serialise a single SSE event to its wire representation.
 
@@ -166,7 +171,13 @@ def format_sse_event(event: str, data: dict[str, Any]) -> str:
         )
         raise
 
-    return f"event: {event}\ndata: {data_str}\n\n"
+    lines: list[str] = [f"event: {event}"]
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    if retry is not None:
+        lines.append(f"retry: {retry}")
+    lines.append(f"data: {data_str}")
+    return "\n".join(lines) + "\n\n"
 
 
 class SseQueue:
@@ -185,21 +196,91 @@ class SseQueue:
         return StreamingResponse(queue.stream(), media_type="text/event-stream", ...)
     """
 
-    def __init__(self, maxsize: int = 512) -> None:
+    def __init__(
+        self,
+        maxsize: int = 512,
+        replay_buffer_size: int = 256,
+        retry_ms: int = 3000,
+    ) -> None:
+        self._maxsize = maxsize
         self._q: asyncio.Queue[Any] = asyncio.Queue(maxsize=maxsize)
+        self._event_counter = 0
+        self._replay_buffer: list[tuple[int, str]] = []
+        self._replay_buffer_size = replay_buffer_size
+        self._retry_ms = retry_ms
+        self._consumer_active = False
+        self._consumer_disconnected = False
+        self._is_closed = False
 
     # ------------------------------------------------------------------
     # Low-level put
     # ------------------------------------------------------------------
 
-    async def put_event(self, event: str, data: dict[str, Any]) -> None:
-        """Enqueue a formatted SSE string. Raises ValueError on unknown event."""
-        chunk = format_sse_event(event, data)
-        await self._q.put(chunk)
+    async def put_event(
+        self,
+        event: str,
+        data: dict[str, Any],
+        event_id: int | None = None,
+        retry: int | None = None,
+    ) -> None:
+        """
+        Enqueue a formatted SSE string without blocking indefinitely.
+
+        Uses drop-oldest overflow strategy when the queue fills up to prevent
+        deadlocking background orchestrator turns on client disconnects.
+        """
+        if event_id is None:
+            self._event_counter += 1
+            event_id = self._event_counter
+
+        effective_retry = retry if retry is not None else self._retry_ms
+        chunk = format_sse_event(event, data, event_id=event_id, retry=effective_retry)
+
+        # Store in bounded replay buffer for potential client reconnection/resumption
+        self._replay_buffer.append((event_id, chunk))
+        if len(self._replay_buffer) > self._replay_buffer_size:
+            self._replay_buffer.pop(0)
+
+        # Non-blocking enqueue with drop-oldest policy to prevent producer deadlock
+        try:
+            self._q.put_nowait((event_id, chunk))
+        except asyncio.QueueFull:
+            try:
+                self._q.get_nowait()
+            except (asyncio.QueueEmpty, ValueError):
+                pass
+            try:
+                self._q.put_nowait((event_id, chunk))
+            except asyncio.QueueFull:
+                logger.warning("SseQueue: dropped event %s due to full queue", event)
 
     async def close(self) -> None:
         """Signal the consumer that the stream is finished."""
-        await self._q.put(_STREAM_DONE)
+        self._is_closed = True
+        try:
+            self._q.put_nowait((float("inf"), _STREAM_DONE))
+        except asyncio.QueueFull:
+            try:
+                self._q.get_nowait()
+            except (asyncio.QueueEmpty, ValueError):
+                pass
+            try:
+                self._q.put_nowait((float("inf"), _STREAM_DONE))
+            except asyncio.QueueFull:
+                pass
+
+    def drain(self) -> None:
+        """Drain queued items to prevent dangling references."""
+        while not self._q.empty():
+            try:
+                self._q.get_nowait()
+            except (asyncio.QueueEmpty, ValueError):
+                break
+
+    @property
+    def is_disconnected(self) -> bool:
+        """Return whether the HTTP consumer has disconnected."""
+        return self._consumer_disconnected
 
     # ------------------------------------------------------------------
     # Typed helpers (avoid magic strings at call sites)
@@ -392,14 +473,40 @@ class SseQueue:
     # Async generator for StreamingResponse
     # ------------------------------------------------------------------
 
-    async def stream(self) -> AsyncGenerator[str, None]:
+    async def stream(
+        self, last_event_id: int | None = None
+    ) -> AsyncGenerator[str, None]:
         """
         Async generator consumed by FastAPI's StreamingResponse.
 
-        Yields SSE chunks until the sentinel is received.
+        Yields SSE chunks until the sentinel is received or client disconnects.
+        If last_event_id is specified, replays buffered events with id > last_event_id first.
         """
-        while True:
-            item = await self._q.get()
-            if item is _STREAM_DONE:
-                break
-            yield item
+        self._consumer_active = True
+        self._consumer_disconnected = False
+        max_yielded_id = last_event_id if last_event_id is not None else 0
+        try:
+            # Replay any missed events if client is reconnecting/resuming
+            if last_event_id is not None:
+                for eid, chunk in list(self._replay_buffer):
+                    if eid > last_event_id:
+                        yield chunk
+                        if eid > max_yielded_id:
+                            max_yielded_id = eid
+
+            while True:
+                item = await self._q.get()
+                eid, payload = item if isinstance(item, tuple) else (0, item)
+                if payload is _STREAM_DONE or item is _STREAM_DONE:
+                    break
+                if eid > max_yielded_id or max_yielded_id == 0:
+                    yield payload if isinstance(payload, str) else item
+                    if eid > max_yielded_id:
+                        max_yielded_id = eid
+        except (GeneratorExit, asyncio.CancelledError):
+            logger.info("SseQueue: consumer disconnected mid-stream")
+            raise
+        finally:
+            self._consumer_active = False
+            self._consumer_disconnected = True
+            self.drain()

@@ -183,3 +183,86 @@ async def test_sse_queue_streaming_flow() -> None:
     assert events[1].startswith("event: tool_call\n")
     assert events[2].startswith("event: file_diff\n")
     assert events[3].startswith("event: done\n")
+
+
+@pytest.mark.asyncio
+async def test_sse_queue_never_deadlocks_on_overflow() -> None:
+    """Producer does not deadlock when pushing more events than queue maxsize without a consumer."""
+    small_queue = SseQueue(maxsize=5)
+
+    # Push 20 events into a maxsize=5 queue without reading
+    for i in range(20):
+        await small_queue.put_thought(f"Thought step {i}")
+
+    await small_queue.put_done("session-overflow", staged_files_count=0)
+
+    # Verify stream still yields the latest events + done marker without hanging
+    events: list[str] = []
+    async for chunk in small_queue.stream():
+        events.append(chunk)
+
+    assert len(events) <= 6
+    assert any("done" in e for e in events)
+
+
+@pytest.mark.asyncio
+async def test_sse_queue_client_disconnect_draining() -> None:
+    """When a client disconnects mid-stream, stream() exits cleanly and marks queue disconnected."""
+    queue = SseQueue(maxsize=10)
+
+    for i in range(5):
+        await queue.put_thought(f"Step {i}")
+
+    # Consumer reads 2 events and then disconnects (closes generator)
+    gen = queue.stream()
+    read_events: list[str] = []
+    read_events.append(await anext(gen))
+    read_events.append(await anext(gen))
+    assert len(read_events) == 2
+
+    # Simulate ASGI client disconnect
+    await gen.aclose()
+
+    assert queue.is_disconnected is True
+
+    # Producer continues emitting after consumer disconnect — must not block
+    for i in range(10):
+        await queue.put_thought(f"Post-disconnect step {i}")
+
+    await queue.put_done("session-disconnect", staged_files_count=0)
+    assert queue.is_disconnected is True
+
+
+@pytest.mark.asyncio
+async def test_sse_queue_resumption_with_last_event_id() -> None:
+    """stream(last_event_id=N) replays buffered events with id > N."""
+    queue = SseQueue(maxsize=50, replay_buffer_size=50)
+
+    await queue.put_thought("Event 1")
+    await queue.put_thought("Event 2")
+    await queue.put_thought("Event 3")
+    await queue.close()
+
+    # Replay from event 1 (should yield events 2 and 3)
+    replayed: list[str] = []
+    async for chunk in queue.stream(last_event_id=1):
+        replayed.append(chunk)
+
+    assert len(replayed) == 2
+    assert "Event 2" in replayed[0]
+    assert "Event 3" in replayed[1]
+
+
+def test_format_sse_event_with_id_and_retry() -> None:
+    """format_sse_event correctly formats optional event_id and retry fields per SSE spec."""
+    formatted = format_sse_event(
+        event="thought",
+        data={"delta": "Processing..."},
+        event_id=42,
+        retry=5000,
+    )
+    assert "event: thought\n" in formatted
+    assert "id: 42\n" in formatted
+    assert "retry: 5000\n" in formatted
+    assert 'data: {"delta":"Processing..."}\n\n' in formatted
+

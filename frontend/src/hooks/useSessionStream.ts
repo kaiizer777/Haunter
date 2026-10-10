@@ -201,6 +201,7 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
   const [ciStartedAt, setCiStartedAt] = useState<number | null>(null);
   const [ciFinishedAt, setCiFinishedAt] = useState<number | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
   const [plan, setPlan] = useState<PlanTask[]>([]);
   const [pendingClarification, setPendingClarification] = useState<WaitingInput | null>(null);
@@ -246,59 +247,90 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
       const requestedModel = options?.model ?? "";
       const requestedProvider = options?.provider ?? "";
 
+      let lastEventId: string | null = null;
+      let retryDelayMs = 3000;
+      let isTurnCompleted = false;
+      const MAX_RETRIES = 3;
+      let attempt = 0;
+
       try {
-        const url = `${API_BASE}/sessions/${sessionId}/chat`;
-        const requestBody: Record<string, unknown> = { message: prompt };
-        if (options?.model) requestBody.model = options.model;
-        if (options?.provider) requestBody.provider = options.provider;
+        while (attempt <= MAX_RETRIES && !isTurnCompleted) {
+          if (controller.signal.aborted) break;
 
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        const token = getStoredToken();
-        if (token) {
-          headers["Authorization"] = `Bearer ${token}`;
-        }
-
-        const res = await fetch(url, {
-          method: "POST",
-          credentials: "include",
-          headers,
-          body: JSON.stringify(requestBody),
-          signal: controller.signal,
-        });
-
-        if (!res.ok || !res.body) {
-          const errText = await res.text().catch(() => "unknown error");
-          throw new Error(`Chat endpoint error ${res.status}: ${errText}`);
-        }
-
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-
-        // SSE parse state.
-        let buffer = "";
-        let currentEvent = "";
-        let currentData = "";
-
-        const flushFrame = () => {
-          if (!currentData) {
-            currentEvent = "";
-            currentData = "";
-            return;
+          if (attempt > 0) {
+            setIsReconnecting(true);
+            const delay = Math.min(retryDelayMs * Math.pow(1.5, attempt - 1), 10000);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            if (controller.signal.aborted) break;
           }
-          let parsed: unknown;
+
           try {
-            parsed = JSON.parse(currentData);
-          } catch {
-            parsed = currentData;
-          }
-          const frame: SseFrame = {
-            event: (currentEvent || "message") as SseEventType,
-            data: parsed,
-          };
-          handleFrame(frame);
-          currentEvent = "";
-          currentData = "";
-        };
+            const url = `${API_BASE}/sessions/${sessionId}/chat`;
+            const requestBody: Record<string, unknown> = { message: prompt };
+            if (options?.model) requestBody.model = options.model;
+            if (options?.provider) requestBody.provider = options.provider;
+
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            const token = getStoredToken();
+            if (token) {
+              headers["Authorization"] = `Bearer ${token}`;
+            }
+            if (lastEventId) {
+              headers["Last-Event-ID"] = lastEventId;
+            }
+
+            const res = await fetch(url, {
+              method: "POST",
+              credentials: "include",
+              headers,
+              body: JSON.stringify(requestBody),
+              signal: controller.signal,
+            });
+
+            if (!res.ok || !res.body) {
+              const errText = await res.text().catch(() => "unknown error");
+              throw new Error(`Chat endpoint error ${res.status}: ${errText}`);
+            }
+
+            setIsReconnecting(false);
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+
+            // SSE parse state.
+            let buffer = "";
+            let currentEvent = "";
+            let currentData = "";
+            let currentId = "";
+
+            const flushFrame = () => {
+              if (currentId) {
+                lastEventId = currentId;
+              }
+              if (!currentData) {
+                currentEvent = "";
+                currentData = "";
+                currentId = "";
+                return;
+              }
+              let parsed: unknown;
+              try {
+                parsed = JSON.parse(currentData);
+              } catch {
+                parsed = currentData;
+              }
+              const frame: SseFrame = {
+                event: (currentEvent || "message") as SseEventType,
+                data: parsed,
+              };
+              if (frame.event === "done" || frame.event === "error") {
+                isTurnCompleted = true;
+              }
+              handleFrame(frame);
+              currentEvent = "";
+              currentData = "";
+              currentId = "";
+            };
 
         // Incremental SSE frame handler.
         const handleFrame = (frame: SseFrame) => {
@@ -998,26 +1030,66 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
               flushFrame();
             } else if (line.startsWith("event:")) {
               currentEvent = line.slice("event:".length).trim();
+            } else if (line.startsWith("id:")) {
+              currentId = line.slice("id:".length).trim();
+            } else if (line.startsWith("retry:")) {
+              const parsedRetry = parseInt(line.slice("retry:".length).trim(), 10);
+              if (!isNaN(parsedRetry) && parsedRetry > 0) {
+                retryDelayMs = parsedRetry;
+              }
             } else if (line.startsWith("data:")) {
               const chunk = line.slice("data:".length).trimStart();
               currentData = currentData ? currentData + "\n" + chunk : chunk;
             }
-            // id: and retry: fields are intentionally ignored.
           }
         }
 
         // Flush any remaining frame (stream ended without trailing blank line).
         flushFrame();
-      } catch (err: unknown) {
-        if ((err as { name?: string })?.name === "AbortError" || controller.signal.aborted) {
-          // Intentional abort — cleanly settle streaming without error message
+
+        if (isTurnCompleted) {
+          break;
+        }
+
+        // Stream closed without terminal event (done/error).
+        attempt++;
+        if (attempt > MAX_RETRIES) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "system",
+              content: "Connection interrupted. Stream ended before completion.",
+            },
+          ]);
+          break;
+        }
+      } catch (streamErr: unknown) {
+        if (
+          (streamErr as { name?: string })?.name === "AbortError" ||
+          controller.signal.aborted
+        ) {
           return;
         }
-        const msg = err instanceof Error ? err.message : "Streaming error";
-        setMessages((prev) => [...prev, { role: "system", content: `Error: ${msg}` }]);
-      } finally {
-        setIsStreaming(false);
+        attempt++;
+        if (attempt > MAX_RETRIES) {
+          const msg =
+            streamErr instanceof Error ? streamErr.message : "Streaming error";
+          setMessages((prev) => [...prev, { role: "system", content: `Error: ${msg}` }]);
+          break;
+        }
       }
+    }
+  } catch (err: unknown) {
+    if ((err as { name?: string })?.name === "AbortError" || controller.signal.aborted) {
+      // Intentional abort — cleanly settle streaming without error message
+      return;
+    }
+    const msg = err instanceof Error ? err.message : "Streaming error";
+    setMessages((prev) => [...prev, { role: "system", content: `Error: ${msg}` }]);
+  } finally {
+    setIsStreaming(false);
+    setIsReconnecting(false);
+  }
     },
     [sessionId, isStreaming]
   );
@@ -1028,6 +1100,7 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
       abortRef.current = null;
     }
     setIsStreaming(false);
+    setIsReconnecting(false);
   }, []);
 
   return {
@@ -1041,6 +1114,7 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
     ciStartedAt,
     ciFinishedAt,
     isStreaming,
+    isReconnecting,
     terminalLogs,
     plan,
     pendingClarification,
