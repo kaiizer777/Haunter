@@ -26,9 +26,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentSession, Repo, User
+from app.services.session_orchestrator import _build_system_prompt
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.checkpoints import (
     create_checkpoint,
+    tool_checkpoint_list,
     tool_checkpoint_restore,
     tool_scan_security_vulnerabilities,
 )
@@ -73,6 +75,7 @@ def _make_session(
     checkpoints: list[dict[str, Any]] | None = None,
 ) -> AgentSession:
     s = AgentSession(
+        id=uuid.uuid4(),
         user_id=user.id,
         repo_id=repo.id,
         user=user,
@@ -436,3 +439,264 @@ async def test_restore_endpoint_idor(
         resp = await ac.post(f"/sessions/{session.id}/checkpoints/{cp_id}/restore")
 
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Test 11: checkpoint_list — empty and populated
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_list_empty() -> None:
+    """tool_checkpoint_list returns clear notification when session has no checkpoints."""
+    session = MagicMock(spec=AgentSession)
+    session.checkpoints = []
+
+    res = tool_checkpoint_list(session)
+    assert "No checkpoints available" in res
+
+
+def test_checkpoint_list_with_checkpoints() -> None:
+    """tool_checkpoint_list surfaces all checkpoint IDs, turns, and staged files to agent."""
+    session = MagicMock(spec=AgentSession)
+    session.checkpoints = [
+        {
+            "checkpoint_id": "cp_1111aaaa",
+            "turn": 1,
+            "timestamp": "2026-10-01T12:00:00Z",
+            "description": "Initial setup",
+            "staged_patches": {"app/main.py": "+line"},
+            "history_length": 2,
+        },
+        {
+            "checkpoint_id": "cp_2222bbbb",
+            "turn": 2,
+            "timestamp": "2026-10-01T12:05:00Z",
+            "description": "Added feature",
+            "staged_patches": {"app/main.py": "+line", "app/util.py": "+util"},
+            "history_length": 4,
+        },
+    ]
+
+    res = tool_checkpoint_list(session)
+    assert "Available checkpoints (2):" in res
+    assert "cp_1111aaaa" in res
+    assert "Turn 1" in res
+    assert "Initial setup" in res
+    assert "app/main.py" in res
+    assert "cp_2222bbbb" in res
+    assert "Turn 2" in res
+    assert "Added feature" in res
+    assert "app/util.py" in res
+
+
+# ---------------------------------------------------------------------------
+# Test 12: checkpoint_restore with 'latest'
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_latest() -> None:
+    """tool_checkpoint_restore('latest') rewinds to the most recent checkpoint."""
+    session = MagicMock(spec=AgentSession)
+    session.staged_patches = {"current.py": "+current"}
+    session.conversation_history = [{"role": "user", "content": "1"}] * 6
+    session.checkpoints = [
+        {
+            "checkpoint_id": "cp_first",
+            "turn": 1,
+            "timestamp": "2026-10-01T10:00:00Z",
+            "description": "Turn 1",
+            "staged_patches": {"f1.py": "+1"},
+            "history_length": 2,
+        },
+        {
+            "checkpoint_id": "cp_second",
+            "turn": 2,
+            "timestamp": "2026-10-01T10:05:00Z",
+            "description": "Turn 2",
+            "staged_patches": {"f2.py": "+2"},
+            "history_length": 4,
+        },
+    ]
+
+    queue = MagicMock(spec=SseQueue)
+    queue.put_checkpoint_restored = AsyncMock()
+    db = AsyncMock(spec=AsyncSession)
+
+    res = await tool_checkpoint_restore(
+        checkpoint_id="latest",
+        session=session,
+        queue=queue,
+        db=db,
+    )
+
+    assert "Successfully restored session to checkpoint 'cp_second'" in res
+    assert session.staged_patches == {"f2.py": "+2"}
+    assert len(session.conversation_history) == 4
+    queue.put_checkpoint_restored.assert_awaited_once_with(
+        checkpoint_id="cp_second",
+        staged_patches={"f2.py": "+2"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 13: checkpoint_restore mutates caller's turn-local dict & list in-place
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_mutates_turn_local_structures() -> None:
+    """tool_checkpoint_restore directly updates turn-local staged_patches and conversation_history."""
+    session = MagicMock(spec=AgentSession)
+    cp_id = "cp_local_sync"
+    session.checkpoints = [
+        {
+            "checkpoint_id": cp_id,
+            "turn": 1,
+            "timestamp": "2026-10-01T10:00:00Z",
+            "description": "Baseline",
+            "staged_patches": {"base.py": "+base patch"},
+            "history_length": 2,
+        }
+    ]
+    session.staged_patches = {"corrupted.py": "+bad"}
+    session.conversation_history = [{"role": "user", "content": "msg"}] * 5
+
+    turn_staged_patches = {"corrupted.py": "+bad"}
+    turn_conversation_history = [{"role": "user", "content": "msg"}] * 5
+
+    queue = MagicMock(spec=SseQueue)
+    queue.put_checkpoint_restored = AsyncMock()
+    db = AsyncMock(spec=AsyncSession)
+
+    res = await tool_checkpoint_restore(
+        checkpoint_id=cp_id,
+        session=session,
+        queue=queue,
+        db=db,
+        staged_patches=turn_staged_patches,
+        conversation_history=turn_conversation_history,
+    )
+
+    assert "Successfully restored" in res
+    # Turn-local dict must be mutated in-place to prevent post-turn clobber.
+    assert turn_staged_patches == {"base.py": "+base patch"}
+    assert len(turn_conversation_history) == 2
+    assert session.staged_patches == {"base.py": "+base patch"}
+    assert len(session.conversation_history) == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 14: _build_system_prompt surfaces checkpoints to model context
+# ---------------------------------------------------------------------------
+
+
+def test_build_system_prompt_surfaces_available_checkpoints() -> None:
+    """_build_system_prompt lists available checkpoints for model discovery."""
+    checkpoints = [
+        {
+            "checkpoint_id": "cp_disc123",
+            "turn": 2,
+            "description": "Pre-refactor state",
+            "staged_patches": {"app/core.py": "+diff"},
+        }
+    ]
+    prompt = _build_system_prompt(
+        repo_owner="test-owner",
+        repo_name="test-repo",
+        branch_name="feat/time-machine",
+        base_sha="abcdef1234567890",
+        staged_patches={},
+        checkpoints=checkpoints,
+    )
+
+    assert "Available checkpoints:" in prompt
+    assert "cp_disc123" in prompt
+    assert "Turn 2" in prompt
+    assert "Pre-refactor state" in prompt
+    assert "1 file(s) staged" in prompt
+    assert "checkpoint_list()" in prompt
+    assert "checkpoint_restore(checkpoint_id)" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Test 15: Regression for Issue #64 — End-of-turn persistence preserves restored state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_end_of_turn_persistence_regression(
+    db: AsyncSession,
+) -> None:
+    """
+    Regression test for Issue #64:
+    Verifies that when a turn modifies staged_patches then restores to a prior checkpoint,
+    the post-turn persistence preserves the restored snapshot in the DB without clobbering.
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=90005)
+
+    cp_orig_id = "cp_orig_snapshot"
+    original_staged = {"src/stable.py": "--- a/src/stable.py\n+++ b/src/stable.py\n@@ -1 +1 @@\n+stable\n"}
+
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        staged_patches=original_staged,
+        conversation_history=[
+            {"role": "user", "content": "turn 1 request"},
+            {"role": "assistant", "content": "turn 1 response"},
+        ],
+        checkpoints=[
+            {
+                "checkpoint_id": cp_orig_id,
+                "turn": 1,
+                "timestamp": "2026-10-01T10:00:00Z",
+                "description": "Turn 1 stable",
+                "staged_patches": original_staged,
+                "history_length": 2,
+            }
+        ],
+    )
+
+    # Simulate Turn 2 execution:
+    # 1. Turn begins by capturing local staged_patches and conversation_history
+    local_staged = dict(session.staged_patches or {})
+    local_history = list(session.conversation_history or [])
+
+    # 2. Intermediate tool stages a broken patch
+    local_staged["src/broken.py"] = "+broken code"
+    local_staged["src/stable.py"] = "+corrupted"
+
+    # 3. Model discovers problem and executes checkpoint_restore
+    queue = MagicMock(spec=SseQueue)
+    queue.put_checkpoint_restored = AsyncMock()
+
+    restore_msg = await tool_checkpoint_restore(
+        checkpoint_id=cp_orig_id,
+        session=session,
+        queue=queue,
+        db=db,
+        staged_patches=local_staged,
+        conversation_history=local_history,
+    )
+    assert "Successfully restored" in restore_msg
+    assert local_staged == original_staged
+
+    # 4. Turn ends and orchestrator persists state to the DB:
+    new_entries = [
+        {"role": "user", "content": "rollback please"},
+        {"role": "assistant", "content": "Rolled back to cp_orig_snapshot."},
+    ]
+    updated_history = local_history + new_entries
+    session.conversation_history = updated_history
+    session.staged_patches = local_staged
+
+    await db.commit()
+    await db.refresh(session)
+
+    # 5. Assert DB state matches the checkpoint content, NOT the corrupted state.
+    assert session.staged_patches == original_staged
+    assert "src/broken.py" not in session.staged_patches
+    assert len(session.conversation_history) == 4
+
