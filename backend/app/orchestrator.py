@@ -1039,8 +1039,8 @@ async def _orchestrator_pipeline_body(
                         sandbox_decision.reason,
                     )
                     verify_result = {
-                        "status": "pass",
-                        "failure_reason": None,
+                        "status": "skipped",
+                        "failure_reason": sandbox_decision.reason,
                         "build_duration_ms": 0,
                     }
                     attempt.strategy_notes = (
@@ -1056,7 +1056,7 @@ async def _orchestrator_pipeline_body(
                     )
 
                 # Persist verification result
-                v_status: str = verify_result["status"]  # "pass" | "fail"
+                v_status: str = verify_result["status"]  # "pass" | "fail" | "skipped"
                 failure_reason: Optional[str] = verify_result["failure_reason"]
                 build_duration_ms: int = verify_result["build_duration_ms"]
 
@@ -1302,6 +1302,12 @@ async def _orchestrator_pipeline_body(
                         except InvalidTransitionError:
                             pass
                     return
+
+                if v_status == "skipped":
+                    # Sandbox verification disabled by repo settings. Do not retry fix generation
+                    # or fabricate a passing result. Bail directly to fallback path.
+                    skip_to_fallback_reason = "sandbox_verification_disabled"
+                    break
 
                 # ---- Patch failed ----
                 state["decisions"].append(

@@ -113,9 +113,12 @@ def classify_failure(
 
     # -------------------------------------------------------------------------
     # 3. wrong_fix — attempts exist but none ever reached sandbox verification
-    #    (verification_status is None means patch was rejected before submission)
+    #    (verification_status is None/"skipped" means patch was rejected or verification disabled before sandbox)
     # -------------------------------------------------------------------------
-    sandbox_reached = [a for a in attempts if a.verification_status is not None]
+    sandbox_reached = [
+        a for a in attempts
+        if a.verification_status not in (None, "skipped", "pending")
+    ]
     if not sandbox_reached:
         return "wrong_fix"
 

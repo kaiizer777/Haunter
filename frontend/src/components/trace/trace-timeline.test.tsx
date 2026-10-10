@@ -176,4 +176,28 @@ describe("trace-timeline.tsx", () => {
     // Warning variant has amber dot
     expect(container.querySelector(".bg-amber-400")).toBeInTheDocument();
   });
+
+  it("renders warning badge and failure reason for skipped sandbox verification", () => {
+    const skippedAttemptTrace: TraceOut = {
+      ...mockTrace,
+      steps: [],
+      attempts: [
+        {
+          attempt_number: 1,
+          confidence_score: 90,
+          verification_status: "skipped",
+          failure_reason: "sandbox verification disabled by repository settings (enable_sandbox_verification=False)",
+          build_duration_ms: 0,
+          created_at: new Date().toISOString(),
+        },
+      ],
+    };
+
+    const { container } = render(<TraceTimeline trace={skippedAttemptTrace} />);
+    expect(screen.getByText("Sandbox skipped")).toBeInTheDocument();
+    expect(container.querySelector(".bg-amber-400")).toBeInTheDocument();
+    expect(
+      screen.getByText("sandbox verification disabled by repository settings (enable_sandbox_verification=False)")
+    ).toBeInTheDocument();
+  });
 });
