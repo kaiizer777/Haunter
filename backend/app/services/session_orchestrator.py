@@ -77,6 +77,7 @@ from app.services.session_tools.planning import (
 )
 from app.services.session_tools.checkpoints import (
     create_checkpoint,
+    tool_checkpoint_list,
     tool_checkpoint_restore,
     tool_scan_security_vulnerabilities,
 )
@@ -746,10 +747,29 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "checkpoint_list",
+            "description": (
+                "List all available checkpoints for the current session. "
+                "Returns each checkpoint's ID, turn number, timestamp, description, "
+                "and number of staged files. Use this before calling checkpoint_restore "
+                "to inspect available rollback points."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "checkpoint_restore",
             "description": (
                 "Restore the session state to a prior checkpoint by its checkpoint_id. "
                 "Reverts staged patches and conversation history to the snapshotted state. "
+                "Use 'latest' to restore the most recent checkpoint, or use "
+                "checkpoint_list to find a specific checkpoint ID. "
                 "Use this when a change direction was wrong and needs to be rolled back."
             ),
             "parameters": {
@@ -757,7 +777,10 @@ _TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "checkpoint_id": {
                         "type": "string",
-                        "description": "The checkpoint ID to restore to (e.g. 'cp_a1b2c3d4').",
+                        "description": (
+                            "The checkpoint ID to restore to (e.g. 'cp_a1b2c3d4'), "
+                            "or 'latest' for the most recent checkpoint."
+                        ),
                     },
                 },
                 "required": ["checkpoint_id"],
@@ -953,11 +976,22 @@ def _build_system_prompt(
     branch_name: str,
     base_sha: str,
     staged_patches: dict[str, str],
+    checkpoints: list[dict[str, Any]] | None = None,
 ) -> str:
     """Construct the system message injected at the start of every LLM call."""
     staged_summary = (
         "\n".join(f"  - {path}" for path in staged_patches)
         if staged_patches
+        else "  (none)"
+    )
+    checkpoints_summary = (
+        "\n".join(
+            f"  - {cp.get('checkpoint_id')} (Turn {cp.get('turn')}): "
+            f"{cp.get('description', 'No description')} "
+            f"({len(cp.get('staged_patches', {}))} file(s) staged)"
+            for cp in (checkpoints or [])
+        )
+        if checkpoints
         else "  (none)"
     )
     return (
@@ -988,13 +1022,14 @@ def _build_system_prompt(
         " 21. `fetch_package_metadata(ecosystem, package_name)` — check official latest version, license, and dependencies from PyPI or npm.\n"
         " 22. `update_plan(tasks)` — update and render a live multi-step task checklist (statuses: pending, in_progress, completed, failed).\n"
         " 23. `ask_user_clarification(question, options)` — pause execution and ask the user to pick between trade-offs or design decisions.\n"
-        " 24. `checkpoint_restore(checkpoint_id)` — restore session state to a prior checkpoint, reverting staged patches and conversation history.\n"
-        " 25. `scan_security_vulnerabilities(paths)` — scan staged files for secrets and injection flaws before committing.\n"
-        " 26. `git_log(path, limit)` — list commit history on the session branch (optionally scoped to a file). Returns sha, date, author, message.\n"
-        " 27. `git_blame(path)` — annotate each line range of a file with the commit that last modified it (author, date, sha, message).\n"
-        " 28. `git_show(commit_sha)` — show full metadata and unified diff for a single commit.\n"
-        " 29. `git_diff(base, head)` — unified diff between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
-        " 30. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
+        " 24. `checkpoint_list()` — list all checkpoints with IDs, turns, timestamps, descriptions, and staged files.\n"
+        " 25. `checkpoint_restore(checkpoint_id)` — restore session state to a prior checkpoint by ID (or 'latest'), reverting staged patches and conversation history.\n"
+        " 26. `scan_security_vulnerabilities(paths)` — scan staged files for secrets and injection flaws before committing.\n"
+        " 27. `git_log(path, limit)` — list commit history on the session branch (optionally scoped to a file). Returns sha, date, author, message.\n"
+        " 28. `git_blame(path)` — annotate each line range of a file with the commit that last modified it (author, date, sha, message).\n"
+        " 29. `git_show(commit_sha)` — show full metadata and unified diff for a single commit.\n"
+        " 30. `git_diff(base, head)` — unified diff between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
+        " 31. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
         "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n\n"
         "For multi-step requests, start by calling update_plan to outline your steps. "
         "Update task statuses as you progress. If you encounter ambiguous architectural trade-offs, "
@@ -1026,6 +1061,7 @@ def _build_system_prompt(
         "You are the Lead Architect of this session. For complex tasks, delegate via invoke_subagent rather than doing everything yourself. "
         "Standard implementation chain: invoke repo_navigator first on large codebases → then feature_architect → then sandbox_verifier. "
         "Always validate patches with sandbox_verifier or run_targeted_tests after any feature_architect or bug_hunter run.\n"
+        f"Available checkpoints:\n{checkpoints_summary}\n\n"
         f"Currently staged files:\n{staged_summary}"
     )
 
@@ -1268,6 +1304,7 @@ class SessionOrchestrator:
                 branch_name=session.branch_name,
                 base_sha=session.base_sha,
                 staged_patches=staged_patches,
+                checkpoints=list(session.checkpoints or []),
             ),
         }
         user_msg: dict[str, Any] = {"role": "user", "content": user_message}
@@ -1357,6 +1394,7 @@ class SessionOrchestrator:
                     staged_patches=staged_patches,
                     queue=queue,
                     session=session,
+                    conversation_history=conversation_history,
                 )
 
                 if tool_name == "checkpoint_restore":
@@ -1395,6 +1433,7 @@ class SessionOrchestrator:
                                 branch_name=session.branch_name,
                                 base_sha=session.base_sha,
                                 staged_patches=staged_patches,
+                                checkpoints=list(session.checkpoints or []),
                             ),
                         }
                         restored_pruned_history = _prune_conversation_history(conversation_history)
@@ -1530,6 +1569,7 @@ class SessionOrchestrator:
         staged_patches: dict[str, str],
         queue: SseQueue,
         session: AgentSession | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
     ) -> str:
         """
         Execute a single tool call and return a string result for the LLM.
@@ -1715,11 +1755,19 @@ class SessionOrchestrator:
             return await self._tool_ask_user_clarification(
                 args=args, session=session, queue=queue
             )
+        elif tool_name == "checkpoint_list":
+            if session is None:
+                return "Error: Session context is required for checkpoint_list."
+            return self._tool_checkpoint_list(session=session)
         elif tool_name == "checkpoint_restore":
             if session is None:
                 return "Error: Session context is required for checkpoint_restore."
             return await self._tool_checkpoint_restore(
-                args=args, session=session, queue=queue
+                args=args,
+                session=session,
+                queue=queue,
+                staged_patches=staged_patches,
+                conversation_history=conversation_history,
             )
         elif tool_name == "scan_security_vulnerabilities":
             if session is None:
@@ -2533,11 +2581,16 @@ class SessionOrchestrator:
             db=self.db,
         )
 
+    def _tool_checkpoint_list(self, session: AgentSession) -> str:
+        return tool_checkpoint_list(session=session)
+
     async def _tool_checkpoint_restore(
         self,
         args: dict[str, Any],
         session: AgentSession,
         queue: SseQueue,
+        staged_patches: dict[str, str] | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
     ) -> str:
         checkpoint_id: str = str(args.get("checkpoint_id", "")).strip()
         if not checkpoint_id:
@@ -2547,6 +2600,8 @@ class SessionOrchestrator:
             session=session,
             queue=queue,
             db=self.db,
+            staged_patches=staged_patches,
+            conversation_history=conversation_history,
         )
 
     def _tool_scan_security_vulnerabilities(

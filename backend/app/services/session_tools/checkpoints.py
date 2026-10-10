@@ -82,38 +82,112 @@ def create_checkpoint(
     return checkpoint
 
 
+def tool_checkpoint_list(session: AgentSession) -> str:
+    """
+    List all available checkpoints for the session.
+
+    Returns a human-readable summary of available rollback checkpoints.
+    """
+    checkpoints: list[dict[str, Any]] = list(session.checkpoints or [])
+    if not checkpoints:
+        return "No checkpoints available for this session."
+
+    lines: list[str] = [
+        f"Available checkpoints ({len(checkpoints)}):",
+    ]
+    for cp in checkpoints:
+        cp_id = cp.get("checkpoint_id", "unknown")
+        turn = cp.get("turn", "?")
+        ts = cp.get("timestamp", "")
+        desc = cp.get("description", "No description")
+        staged = cp.get("staged_patches", {}) or {}
+        staged_files = list(staged.keys())
+        if staged_files:
+            files_str = f"{len(staged_files)} file(s) staged: {', '.join(staged_files)}"
+        else:
+            files_str = "0 files staged"
+        ts_str = f", {ts}" if ts else ""
+        lines.append(f"  - {cp_id} (Turn {turn}{ts_str}): {desc} [{files_str}]")
+
+    lines.append("")
+    lines.append(
+        "Use checkpoint_restore(checkpoint_id='<id>') or "
+        "checkpoint_restore(checkpoint_id='latest') to restore."
+    )
+    return "\n".join(lines)
+
+
 async def tool_checkpoint_restore(
     checkpoint_id: str,
     session: AgentSession,
     queue: SseQueue,
     db: AsyncSession,
+    staged_patches: dict[str, str] | None = None,
+    conversation_history: list[dict[str, Any]] | None = None,
 ) -> str:
     """
-    Restore session state to a prior checkpoint by checkpoint_id.
+    Restore session state to a prior checkpoint by checkpoint_id or 'latest'.
 
     - Reverts session.staged_patches to the snapshot.
+    - Mutates turn-local staged_patches dict in-place if provided.
     - Truncates session.conversation_history to the snapshotted length.
+    - Truncates turn-local conversation_history list in-place if provided.
     - Emits checkpoint_restored SSE event so Monaco editor buffers sync.
     - Flushes restored state to the active DB transaction (committed at turn end).
 
     Returns a human-readable result string for the LLM.
     """
     checkpoints: list[dict[str, Any]] = list(session.checkpoints or [])
-    cp = next((c for c in checkpoints if c.get("checkpoint_id") == checkpoint_id), None)
+    if not checkpoints:
+        return f"Error: Checkpoint '{checkpoint_id}' not found."
+
+    target = checkpoint_id.strip()
+    cp: dict[str, Any] | None = None
+
+    if target.lower() in ("latest", "last", "-1"):
+        cp = checkpoints[-1]
+    else:
+        # Match exact checkpoint_id first
+        cp = next((c for c in checkpoints if c.get("checkpoint_id") == target), None)
+        # Fallback: match by turn number or negative offset if numeric
+        if cp is None:
+            try:
+                turn_num = int(target)
+                if turn_num < 0 and abs(turn_num) <= len(checkpoints):
+                    cp = checkpoints[turn_num]
+                else:
+                    cp = next((c for c in checkpoints if c.get("turn") == turn_num), None)
+            except (ValueError, IndexError):
+                pass
 
     if cp is None:
         return f"Error: Checkpoint '{checkpoint_id}' not found."
 
-    # Restore state.
+    restored_cp_id = cp["checkpoint_id"]
+
+    # Invalidate any checkpoints created after the restored checkpoint.
+    cp_idx = checkpoints.index(cp)
+    session.checkpoints = list(checkpoints[: cp_idx + 1])
+
+    # Restore state on session ORM model.
     session.staged_patches = dict(cp["staged_patches"])
     history_length: int = cp["history_length"]
     session.conversation_history = list(
         (session.conversation_history or [])[:history_length]
     )
 
+    # Mutate caller's turn-local structures in-place to prevent post-turn clobbering.
+    if staged_patches is not None:
+        staged_patches.clear()
+        staged_patches.update(dict(session.staged_patches))
+
+    if conversation_history is not None:
+        conversation_history.clear()
+        conversation_history.extend(list(session.conversation_history))
+
     # Emit SSE event to sync frontend buffers.
     await queue.put_checkpoint_restored(
-        checkpoint_id=checkpoint_id,
+        checkpoint_id=restored_cp_id,
         staged_patches=dict(session.staged_patches),
     )
 
@@ -122,7 +196,7 @@ async def tool_checkpoint_restore(
     await db.flush()
 
     return (
-        f"Successfully restored session to checkpoint '{checkpoint_id}' "
+        f"Successfully restored session to checkpoint '{restored_cp_id}' "
         f"({len(session.staged_patches)} files staged)."
     )
 

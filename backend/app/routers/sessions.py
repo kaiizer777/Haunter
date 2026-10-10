@@ -1148,6 +1148,8 @@ async def restore_checkpoint(
         )
 
     # Restore state directly (no SSE queue needed for the REST endpoint path).
+    cp_idx = checkpoints.index(cp)
+    session.checkpoints = list(checkpoints[: cp_idx + 1])
     session.staged_patches = dict(cp["staged_patches"])
     history_length: int = cp["history_length"]
     session.conversation_history = list(
