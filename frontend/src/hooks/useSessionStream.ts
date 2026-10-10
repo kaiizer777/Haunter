@@ -648,6 +648,7 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
               setMessages((prev) => {
                 const copy = [...prev];
                 for (let i = copy.length - 1; i >= 0; i--) {
+                  if (copy[i].role === "user") break;
                   if (copy[i].role === "assistant" && copy[i].subagents) {
                     const subs = copy[i].subagents!;
                     const runningIdx = subs
@@ -1120,6 +1121,20 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
         const msg = err instanceof Error ? err.message : "Streaming error";
         setMessages((prev) => [...prev, { role: "system", content: `Error: ${msg}` }]);
       } finally {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant" && last.subagents?.some((s) => s.status === "running")) {
+            const copy = [...prev];
+            copy[copy.length - 1] = {
+              ...last,
+              subagents: last.subagents.map((s) =>
+                s.status === "running" ? { ...s, status: "done" as const } : s
+              ),
+            };
+            return copy;
+          }
+          return prev;
+        });
         setIsStreaming(false);
       }
     },
