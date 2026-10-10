@@ -416,4 +416,111 @@ describe("SessionWorkspaceClient (app/sessions/workspace/SessionWorkspaceClient.
       expect(screen.getByText("Updated task checklist (2/5)")).toBeInTheDocument();
     });
   });
+
+  it("resolves multi-question turns individually as subsequent answers arrive", async () => {
+    mockUseSessionStreamState = {
+      ...mockUseSessionStreamState,
+      messages: [
+        {
+          role: "assistant",
+          content: "Two decisions required.",
+          toolCalls: [
+            {
+              name: "ask_user_clarification",
+              args: {
+                question: "Choose database",
+                options: ["Postgres", "SQLite"],
+              },
+            },
+            {
+              name: "ask_user_clarification",
+              args: {
+                question: "Run migrations automatically?",
+                options: ["Yes", "No"],
+              },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: "Proceed with: Postgres",
+        },
+      ],
+    };
+
+    render(<SessionWorkspaceClient sessionId="sess_abc123" />);
+
+    await waitFor(() => {
+      // Question 1 should be resolved with Postgres selected
+      expect(screen.getByText("Choose database")).toBeInTheDocument();
+      expect(screen.getByText("Postgres")).toBeInTheDocument();
+      // Question 2 should remain pending with options Yes/No
+      expect(screen.getByText("Run migrations automatically?")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^yes$/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^no$/i })).toBeInTheDocument();
+    });
+  });
+
+  it("rejects typed clarification answers exceeding 2000 characters with an error message", async () => {
+    mockUseSessionStreamState = {
+      ...mockUseSessionStreamState,
+      pendingClarification: {
+        question: "Database selection",
+        options: ["Postgres", "SQLite"],
+      },
+    };
+
+    render(<SessionWorkspaceClient sessionId="sess_abc123" />);
+
+    let textarea!: HTMLElement;
+    await waitFor(() => {
+      textarea = screen.getByPlaceholderText(/agent is waiting for clarification/i);
+      expect(textarea).toBeInTheDocument();
+    });
+
+    const longText = "a".repeat(2001);
+    fireEvent.change(textarea, { target: { value: longText } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+
+    await waitFor(() => {
+      expect(screen.getByText("Clarification response cannot exceed 2000 characters.")).toBeInTheDocument();
+      expect(api.clarifySession).not.toHaveBeenCalled();
+    });
+  });
+
+  it("restores pendingClarification and displays error when clarifySession fails", async () => {
+    vi.mocked(api.clarifySession).mockRejectedValue(new Error("Database connection error"));
+    mockUseSessionStreamState = {
+      ...mockUseSessionStreamState,
+      messages: [
+        {
+          role: "assistant",
+          content: "Need clarification",
+          toolCalls: [
+            {
+              name: "ask_user_clarification",
+              args: {
+                question: "Pick database provider",
+                options: ["Neon Postgres", "Hermetic SQLite"],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    render(<SessionWorkspaceClient sessionId="sess_abc123" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /neon postgres/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /neon postgres/i }));
+
+    await waitFor(() => {
+      expect(api.clarifySession).toHaveBeenCalledWith("sess_abc123", { response: "Neon Postgres" });
+      expect(mockUseSessionStreamState.setPendingClarification).toHaveBeenCalledWith(null);
+      expect(screen.getByText("Failed to submit clarification.")).toBeInTheDocument();
+    });
+  });
 });

@@ -550,6 +550,10 @@ function ThoughtAccordion({
 // Tool Execution Group Accordion ("Exploring 1 file, 1 folder v")
 // ---------------------------------------------------------------------------
 
+/**
+ * Collapsible accordion grouping completed tool execution chips for a chat turn.
+ * Displays summary title (e.g. "Exploring 1 file, 1 folder") and individual chips.
+ */
 function ToolExecutionAccordion({
   toolCalls,
   thoughts,
@@ -981,6 +985,27 @@ function SubagentCard({
 // Chat Bubble (Matches SS2 user pill + clean assistant presentation)
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract clean answer text from an answering user message in the conversation.
+ * Handles both structured prefix headers and raw text replies.
+ */
+function extractClarificationAnswer(userMsg?: ChatMessage | null): string | null {
+  if (!userMsg?.content) return null;
+  const content = userMsg.content.trim();
+  if (content.startsWith("[User Clarification Response]: ")) {
+    return content.replace("[User Clarification Response]: ", "").trim();
+  }
+  if (content.startsWith("Proceed with: ")) {
+    return content.replace("Proceed with: ", "").trim();
+  }
+  return content;
+}
+
+/**
+ * Renders an individual chat bubble for system, user, or assistant turns.
+ * Assistant turns render thoughts, tool executions, markdown content, and
+ * active/resolved ClarificationPromptCards for `ask_user_clarification` calls.
+ */
 function ChatBubble({
   message,
   messageIndex,
@@ -1045,31 +1070,11 @@ function ChatBubble({
   const hasExecutionToolCalls = executionToolCalls.length > 0;
   const hasThoughts = message.thoughts && message.thoughts.length > 0;
 
-  // Determine answered state for clarification calls in this turn:
-  let answeredChoice: string | null = null;
-  let isPendingClarification = false;
-
-  if (clarificationCalls.length > 0) {
-    if (messages && typeof messageIndex === "number") {
-      const subsequent = messages.slice(messageIndex + 1);
-      const answeringUserMsg = subsequent.find((m) => m.role === "user");
-      if (answeringUserMsg) {
-        const content = answeringUserMsg.content || "";
-        if (content.startsWith("[User Clarification Response]: ")) {
-          answeredChoice = content.replace("[User Clarification Response]: ", "").trim();
-        } else if (content.startsWith("Proceed with: ")) {
-          answeredChoice = content.replace("Proceed with: ", "").trim();
-        } else {
-          answeredChoice = content.trim();
-        }
-        isPendingClarification = false;
-      } else {
-        isPendingClarification = true;
-      }
-    } else {
-      isPendingClarification = Boolean(isSessionBlocked);
-    }
-  }
+  // Track subsequent user messages to resolve clarification calls per question index
+  const subsequentUserMsgs =
+    messages && typeof messageIndex === "number"
+      ? messages.slice(messageIndex + 1).filter((m) => m.role === "user")
+      : [];
 
   return (
     <div className="my-5 space-y-2">
@@ -1110,6 +1115,16 @@ function ChatBubble({
           ? rawOptions.filter((o) => typeof o === "string" && o.trim().length > 0)
           : [];
 
+        // Match each question to its corresponding answering user turn
+        const answeringUserMsg = subsequentUserMsgs[idx];
+        const isAnswered = Boolean(answeringUserMsg);
+        const answeredChoice = isAnswered ? extractClarificationAnswer(answeringUserMsg) : null;
+        const isQuestionPending = isAnswered
+          ? false
+          : messages && typeof messageIndex === "number"
+          ? true
+          : Boolean(isSessionBlocked);
+
         return (
           <ClarificationPromptCard
             key={idx}
@@ -1117,7 +1132,7 @@ function ChatBubble({
             options={options}
             index={idx + 1}
             total={clarificationCalls.length}
-            isPending={isPendingClarification}
+            isPending={isQuestionPending}
             selectedAnswer={answeredChoice}
             onSelectOption={onClarificationSelect}
             disabled={isLatestStreaming}
@@ -2072,30 +2087,47 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   // Clarification selection handler
   // -------------------------------------------------------------------------
 
+  /**
+   * Handle user selection of a clarification option or custom submission.
+   * Unblocks the agent session, records the answer, and triggers the next agent turn.
+   * Restores pending clarification and rolls back optimistic state on error.
+   */
   const handleClarificationSelect = useCallback(
     async (choice: string) => {
+      const prevPending = pendingClarification;
+      setPendingClarification(null);
+
+      // Optimistically append user's response in chat so UI gives immediate feedback
+      const optimisticMsg = {
+        role: "user" as const,
+        content: `[User Clarification Response]: ${choice}`,
+      };
+      setMessages((prev) => [...prev, optimisticMsg]);
+
       try {
-        setPendingClarification(null);
-        // Optimistically append user's response in chat
-        setMessages((prev) => [
-          ...prev,
-          { role: "user", content: `[User Clarification Response]: ${choice}` },
-        ]);
         await api.clarifySession(sessionId, { response: choice });
         if (session) {
           setSession({ ...session, status: "active", waiting_input: null });
         }
+        // Remove optimistic clarification message right before sendChatMessage to avoid
+        // duplicate responses in the transcript (sendChatMessage appends its own turn).
+        setMessages((prev) => prev.filter((m) => m !== optimisticMsg));
+
         // Trigger the next agent chat turn automatically
         await sendChatMessage(`Proceed with: ${choice}`, {
           model: selectedModelId,
           provider: selectedProvider === "auto" ? undefined : selectedProvider,
         });
       } catch (err) {
+        // Roll back optimistic state on error and rethrow so caller can reset button states
+        setPendingClarification(prevPending);
+        setMessages((prev) => prev.filter((m) => m !== optimisticMsg));
         const msg = err instanceof ApiError ? err.message : "Failed to submit clarification.";
         setActionError(msg);
+        throw err;
       }
     },
-    [sessionId, session, selectedModelId, selectedProvider, sendChatMessage, setMessages, setPendingClarification, setActionError]
+    [sessionId, session, selectedModelId, selectedProvider, sendChatMessage, setMessages, pendingClarification, setPendingClarification, setActionError]
   );
 
   // -------------------------------------------------------------------------
@@ -2254,6 +2286,11 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   // Actions
   // -------------------------------------------------------------------------
 
+  /**
+   * Handle user submission of chat input textarea.
+   * If session is awaiting clarification, validates string length (max 2000 chars)
+   * and delegates to handleClarificationSelect; otherwise sends chat message.
+   */
   const handleSendChat = useCallback(
     async (textToSend?: string) => {
       const msg = (textToSend ?? chatInput).trim();
@@ -2266,6 +2303,10 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
       // If the session is currently blocked waiting on clarification, submitting text
       // answers the clarification request to properly unblock the orchestrator lifecycle.
       if (pendingClarification || session?.status === "awaiting_clarification") {
+        if (msg.length > 2000) {
+          setActionError("Clarification response cannot exceed 2000 characters.");
+          return;
+        }
         await handleClarificationSelect(msg);
         return;
       }
@@ -2275,7 +2316,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
         provider: selectedProvider || undefined,
       });
     },
-    [chatInput, isStreaming, sendChatMessage, selectedModelId, selectedProvider, pendingClarification, session?.status, handleClarificationSelect]
+    [chatInput, isStreaming, sendChatMessage, selectedModelId, selectedProvider, pendingClarification, session?.status, handleClarificationSelect, setActionError]
   );
 
   const handleStageAuditFix = useCallback(

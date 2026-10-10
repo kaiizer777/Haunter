@@ -21,6 +21,13 @@ export interface ClarificationPromptCardProps {
   className?: string;
 }
 
+/**
+ * ClarificationPromptCard renders an active blocking prompt or resolved feedback card
+ * for an agent's `ask_user_clarification` tool call turn.
+ *
+ * In pending state, it presents prominent amber visual accents, option choice pills,
+ * and a custom response form. In resolved state, it presents subtle emerald confirmation.
+ */
 export function ClarificationPromptCard({
   question,
   options,
@@ -37,28 +44,39 @@ export function ClarificationPromptCard({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submittingChoice, setSubmittingChoice] = useState<string | null>(null);
 
+  /**
+   * Submit an option selection to the clarification handler.
+   */
   const handleChoiceClick = async (choice: string) => {
     if (disabled || isSubmitting || !onSelectOption) return;
     try {
       setIsSubmitting(true);
       setSubmittingChoice(choice);
       await onSelectOption(choice);
+    } catch {
+      // Handled by parent caller; finally ensures isSubmitting resets
     } finally {
       setIsSubmitting(false);
       setSubmittingChoice(null);
     }
   };
 
+  /**
+   * Submit custom text instructions up to 2000 characters.
+   */
   const handleCustomSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = customInput.trim();
     if (!trimmed || disabled || isSubmitting || !onSelectOption) return;
+    if (trimmed.length > 2000) return;
     try {
       setIsSubmitting(true);
       setSubmittingChoice(trimmed);
       await onSelectOption(trimmed);
       setCustomInput("");
       setShowCustomInput(false);
+    } catch {
+      // Handled by parent caller; finally ensures isSubmitting resets
     } finally {
       setIsSubmitting(false);
       setSubmittingChoice(null);
@@ -189,6 +207,7 @@ export function ClarificationPromptCard({
                   value={customInput}
                   onChange={(e) => setCustomInput(e.target.value)}
                   placeholder="Type your instructions or answer…"
+                  maxLength={2000}
                   disabled={disabled || isSubmitting}
                   className="flex-1 rounded-xl border border-amber-500/30 bg-black/40 px-3 py-1.5 text-xs font-mono text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
                   autoFocus

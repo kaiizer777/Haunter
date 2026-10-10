@@ -97,4 +97,38 @@ describe("ClarificationPromptCard (components/workspace/ClarificationPromptCard.
     // In resolved state, active option buttons should not be present
     expect(screen.queryByRole("button", { name: /sqlite \(hermetic\)/i })).not.toBeInTheDocument();
   });
+
+  it("enforces maxLength of 2000 characters on custom input", () => {
+    render(
+      <ClarificationPromptCard
+        question="How should we proceed?"
+        options={["Proceed", "Abort"]}
+        isPending={true}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /\+ type custom clarification response/i }));
+    const input = screen.getByPlaceholderText(/type your instructions or answer/i);
+    expect(input).toHaveAttribute("maxLength", "2000");
+  });
+
+  it("re-enables option buttons if onSelectOption throws an error", async () => {
+    const handleSelect = vi.fn().mockRejectedValue(new Error("Network failure"));
+    render(
+      <ClarificationPromptCard
+        question="Select option"
+        options={["Option 1", "Option 2"]}
+        isPending={true}
+        onSelectOption={handleSelect}
+      />
+    );
+
+    const btn = screen.getByRole("button", { name: /option 1/i });
+    fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(handleSelect).toHaveBeenCalledWith("Option 1");
+      expect(btn).not.toBeDisabled();
+    });
+  });
 });
