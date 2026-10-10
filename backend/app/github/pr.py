@@ -676,7 +676,7 @@ def _build_auth_headers(token: str) -> dict[str, str]:
     }
 
 
-async def _get_repo_default_branch_sha(
+async def get_branch_ref(
     owner: str, repo: str, branch: str, token: str
 ) -> str:
     """Fetch the HEAD SHA of `branch` in the repo."""
@@ -713,6 +713,9 @@ async def _get_repo_default_branch_sha(
             f"Failed to fetch ref heads/{clean_branch}: HTTP {resp.status_code}"
         )
     return resp.json()["object"]["sha"]
+
+
+_get_repo_default_branch_sha = get_branch_ref
 
 
 async def update_branch_ref(
@@ -783,6 +786,66 @@ async def update_branch_ref(
         clean_branch,
         sha[:8],
         force,
+    )
+
+
+async def restore_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    sha: str,
+    token: str,
+) -> None:
+    """
+    Rollback / restore a non-protected branch ref to a prior commit SHA.
+
+    Used strictly in rollback scenarios (e.g. when PR creation fails after advancing
+    an existing topic branch). Explicitly rejects protected branches (allow_protected=False)
+    and sends force=True to allow rewinding the ref to the pre-commit SHA.
+    """
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    _validate_branch(branch, allow_protected=False)
+
+    clean_branch = branch.removeprefix("refs/heads/")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_auth_headers(token)
+    payload = {"sha": sha, "force": True}
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        try:
+            resp = await client.patch(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error restoring branch ref {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+    if resp.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+        )
+    if resp.status_code == 422:
+        error_msg = resp.text
+        if "reference does not exist" in error_msg.lower() or "not found" in error_msg.lower():
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+            )
+        raise GitHubPRError(
+            f"Failed to restore ref heads/{clean_branch} (422): {error_msg[:200]}"
+        )
+    if resp.status_code in (401, 403):
+        raise GitHubPRAuthError(f"Auth failed restoring branch ref ({resp.status_code}).")
+    if resp.is_error:
+        raise GitHubPRError(
+            f"Failed to restore ref heads/{clean_branch}: HTTP {resp.status_code}"
+        )
+
+    logger.info(
+        "github.pr: restored ref %s/%s:%s to sha=%s",
+        owner,
+        repo,
+        clean_branch,
+        sha[:8],
     )
 
 

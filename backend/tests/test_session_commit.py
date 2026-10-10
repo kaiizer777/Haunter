@@ -160,6 +160,11 @@ async def test_commit_success(
             return_value=fake_commit_sha,
         ),
         patch(
+            "app.github.pr.get_branch_ref",
+            new_callable=AsyncMock,
+            return_value="existing_sha",
+        ),
+        patch(
             "app.github.pr.update_branch_ref",
             new_callable=AsyncMock,
             return_value=None,
@@ -457,7 +462,7 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
             return_value=_ORIGINAL_FILE,
         ),
         patch(
-            "app.github.pr.update_branch_ref",
+            "app.github.pr.get_branch_ref",
             new_callable=AsyncMock,
             side_effect=GitHubResourceNotFoundError("Branch does not exist"),
         ),
@@ -486,7 +491,7 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
 
 
 # ---------------------------------------------------------------------------
-# Test 7: PR creation failure reverts existing topic branch to base_sha
+# Test 7: PR creation failure reverts existing topic branch to original_target_sha
 # ---------------------------------------------------------------------------
 
 
@@ -496,8 +501,8 @@ async def test_commit_pr_failure_reverts_existing_branch(
     make_auth_client,
 ) -> None:
     """
-    When create_pull_request fails on an existing branch, the branch ref is rolled back to base_sha
-    so no commit is left on a non-PR branch.
+    When create_pull_request fails on an existing branch, the branch ref is rolled back to original_target_sha
+    via restore_branch_ref so no commit is left on a non-PR branch, preserving prior commits.
     """
     user, repo = await _seed_user_and_repo(db, github_id=99089)
     topic_branch = "feat/existing-topic"
@@ -514,8 +519,10 @@ async def test_commit_pr_failure_reverts_existing_branch(
     fake_blob_sha = "blob" + "b" * 36
     fake_tree_sha = "tree" + "c" * 36
     fake_commit_sha = "cmmt" + "d" * 36
+    original_target_sha = "orig" + "1" * 36
 
     mock_update_ref = AsyncMock()
+    mock_restore_ref = AsyncMock()
 
     with (
         patch(
@@ -543,7 +550,13 @@ async def test_commit_pr_failure_reverts_existing_branch(
             new_callable=AsyncMock,
             return_value=_ORIGINAL_FILE,
         ),
+        patch(
+            "app.github.pr.get_branch_ref",
+            new_callable=AsyncMock,
+            return_value=original_target_sha,
+        ),
         patch("app.github.pr.update_branch_ref", mock_update_ref),
+        patch("app.github.pr.restore_branch_ref", mock_restore_ref),
         patch(
             "app.github_client.create_pull_request",
             new_callable=AsyncMock,
@@ -557,13 +570,20 @@ async def test_commit_pr_failure_reverts_existing_branch(
             )
 
     assert resp.status_code == 502, resp.text
-    # mock_update_ref was called first to advance to commit_sha, then called again to rollback to base_sha
-    assert mock_update_ref.call_count == 2
-    mock_update_ref.assert_called_with(
+    # mock_update_ref advanced the ref once to fake_commit_sha
+    mock_update_ref.assert_called_once_with(
         owner=repo.owner,
         repo=repo.name,
         branch=topic_branch,
-        sha=session.base_sha,
+        sha=fake_commit_sha,
         token="tok",
         force=False,
+    )
+    # mock_restore_ref restored the ref to original_target_sha
+    mock_restore_ref.assert_called_once_with(
+        owner=repo.owner,
+        repo=repo.name,
+        branch=topic_branch,
+        sha=original_target_sha,
+        token="tok",
     )

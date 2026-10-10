@@ -40,6 +40,7 @@ from app.github.pr import (
     create_branch,
     get_installation_token,
     open_pr,
+    restore_branch_ref,
     update_branch_ref,
 )
 
@@ -811,6 +812,43 @@ async def test_update_branch_ref_always_sends_force_false() -> None:
 
     assert len(captured) == 1
     assert captured[0] == {"sha": "a" * 40, "force": False}
+
+
+@pytest.mark.anyio
+async def test_restore_branch_ref_sends_force_true() -> None:
+    """restore_branch_ref sends force: True to rewind non-protected branch ref."""
+    captured = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"object": {"sha": "b" * 40}})
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-1").mock(side_effect=_handler)
+        await restore_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch="haunter/fix-1",
+            sha="b" * 40,
+            token="fake_token",
+        )
+
+    assert len(captured) == 1
+    assert captured[0] == {"sha": "b" * 40, "force": True}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("branch", ["main", "master", "develop", "dev"])
+async def test_restore_branch_ref_rejects_protected_branches(branch: str) -> None:
+    """restore_branch_ref rejects protected branches with GitHubPRValidationError."""
+    with pytest.raises(GitHubPRValidationError, match="protected branch"):
+        await restore_branch_ref(
+            owner="test-org",
+            repo="test-repo",
+            branch=branch,
+            sha="b" * 40,
+            token="fake_token",
+        )
 
 
 @pytest.mark.anyio

@@ -860,21 +860,37 @@ async def commit_session(
     from app.github.pr import (
         create_branch as _pr_create_branch,
         delete_branch_ref as _pr_delete_ref,
+        get_branch_ref as _pr_get_ref,
+        restore_branch_ref as _pr_restore_ref,
         update_branch_ref as _pr_update_ref,
     )
 
     _validate_branch(target_branch, allow_protected=False)
     branch_was_created = False
+    original_target_sha: Optional[str] = None
+
     try:
-        await _pr_update_ref(
+        original_target_sha = await _pr_get_ref(
             owner=repo.owner,
             repo=repo.name,
             branch=target_branch,
-            sha=commit_sha,
             token=gh_token,
-            force=False,
         )
     except GitHubResourceNotFoundError:
+        original_target_sha = None
+    except Exception as exc:
+        logger.error(
+            "sessions/commit: get_branch_ref failed for session %s branch %s: %s",
+            session_id,
+            target_branch,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to inspect branch ref via GitHub API: {exc}",
+        )
+
+    if original_target_sha is None:
         # Topic branch does not exist yet — create the branch ref.
         try:
             await _pr_create_branch(
@@ -896,17 +912,27 @@ async def commit_session(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Failed to create branch ref via GitHub API: {exc}",
             )
-    except Exception as exc:
-        logger.error(
-            "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
-            session_id,
-            target_branch,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to update branch ref via GitHub API: {exc}",
-        )
+    else:
+        try:
+            await _pr_update_ref(
+                owner=repo.owner,
+                repo=repo.name,
+                branch=target_branch,
+                sha=commit_sha,
+                token=gh_token,
+                force=False,
+            )
+        except Exception as exc:
+            logger.error(
+                "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
+                session_id,
+                target_branch,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to update branch ref via GitHub API: {exc}",
+            )
 
     # ------------------------------------------------------------------
     # 8. Open pull request against repo default branch.
@@ -943,19 +969,18 @@ async def commit_session(
                     target_branch,
                     del_exc,
                 )
-        else:
+        elif original_target_sha is not None:
             try:
-                await _pr_update_ref(
+                await _pr_restore_ref(
                     owner=repo.owner,
                     repo=repo.name,
                     branch=target_branch,
-                    sha=session.base_sha,
+                    sha=original_target_sha,
                     token=gh_token,
-                    force=False,
                 )
             except Exception as reset_exc:
                 logger.warning(
-                    "sessions/commit: rollback update_branch_ref failed for %s: %s",
+                    "sessions/commit: rollback restore_branch_ref failed for %s: %s",
                     target_branch,
                     reset_exc,
                 )
