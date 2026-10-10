@@ -724,7 +724,7 @@ def split_diff_by_files(diff_text: str) -> list[tuple[str, str]]:
     else:
         current_chunk = []
         for line in lines:
-            if line.startswith("--- ") and current_chunk and any(l.startswith("+++ ") for l in current_chunk):
+            if line.startswith("--- ") and current_chunk and any(chunk_line.startswith("+++ ") for chunk_line in current_chunk):
                 chunks.append(current_chunk)
                 current_chunk = [line]
             else:
