@@ -58,7 +58,6 @@ import {
   Globe,
   Package,
   ListTodo,
-  HelpCircle,
   Clock,
   Undo2,
   ShieldAlert,
@@ -74,6 +73,7 @@ import {
   AuditFinding,
 } from "@/hooks/useSessionStream";
 import { AuditReportCard } from "@/components/workspace/AuditReportCard";
+import { ClarificationPromptCard } from "@/components/workspace/ClarificationPromptCard";
 import { AppLayout } from "@/components/layout/app-layout";
 import { WebPreviewPanel } from "@/components/workspace/WebPreviewPanel";
 import { useWebContainer } from "@/hooks/useWebContainer";
@@ -550,18 +550,24 @@ function ThoughtAccordion({
 // Tool Execution Group Accordion ("Exploring 1 file, 1 folder v")
 // ---------------------------------------------------------------------------
 
+/**
+ * Collapsible accordion grouping completed tool execution chips for a chat turn.
+ * Displays summary title (e.g. "Exploring 1 file, 1 folder") and individual chips.
+ */
 function ToolExecutionAccordion({
   toolCalls,
   thoughts,
   thoughtDuration,
   isStreamingTurn,
   onViewDiff,
+  onClarificationSelect,
 }: {
   toolCalls: ToolCallChip[];
   thoughts?: string[];
   thoughtDuration?: number;
   isStreamingTurn?: boolean;
   onViewDiff?: (filePath: string) => void;
+  onClarificationSelect?: (choice: string) => Promise<void> | void;
 }) {
   const [open, setOpen] = useState(true);
 
@@ -601,9 +607,9 @@ function ToolExecutionAccordion({
       c.name === "fetch_web_content" ||
       c.name === "fetch_package_metadata"
   ).length;
-  const planCount = toolCalls.filter(
-    (c) => c.name === "update_plan" || c.name === "ask_user_clarification"
-  ).length;
+  const planCount = toolCalls.filter((c) => c.name === "update_plan").length;
+  const clarificationCalls = toolCalls.filter((c) => c.name === "ask_user_clarification");
+  const clarificationCount = clarificationCalls.length;
 
   let summaryTitle = `Executed ${toolCalls.length} tool${toolCalls.length !== 1 ? "s" : ""}`;
   if (editCount > 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0) {
@@ -614,8 +620,10 @@ function ToolExecutionAccordion({
     summaryTitle = `Running sandbox (${sandboxCount} command${sandboxCount > 1 ? "s" : ""})`;
   } else if (webCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0 && sandboxCount === 0) {
     summaryTitle = `Searching web (${webCount} request${webCount > 1 ? "s" : ""})`;
-  } else if (planCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0 && sandboxCount === 0 && webCount === 0) {
+  } else if (planCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0 && sandboxCount === 0 && webCount === 0 && clarificationCount === 0) {
     summaryTitle = "Planning execution";
+  } else if (clarificationCount > 0 && editCount === 0 && fileCount === 0 && folderCount === 0 && searchCount === 0 && symbolCount === 0 && sandboxCount === 0 && webCount === 0 && planCount === 0) {
+    summaryTitle = clarificationCount === 1 ? "Waiting for user clarification" : `Waiting for clarification (${clarificationCount} questions)`;
   } else if (fileCount > 0 && folderCount > 0) {
     summaryTitle = `Exploring ${fileCount} file${fileCount > 1 ? "s" : ""}, ${folderCount} folder${folderCount > 1 ? "s" : ""}`;
   } else if (searchCount > 0 && fileCount === 0 && folderCount === 0) {
@@ -635,6 +643,12 @@ function ToolExecutionAccordion({
         className="flex items-center gap-1.5 text-xs font-sans text-zinc-300 hover:text-zinc-100 transition-colors py-1 cursor-pointer"
       >
         <span className="font-medium text-zinc-300">{summaryTitle}</span>
+        {clarificationCount > 0 && (
+          <span className="ml-1.5 inline-flex items-center gap-1 rounded-full bg-amber-500/20 border border-amber-500/35 px-2 py-0.5 text-[10px] font-mono text-amber-300 font-semibold">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+            Awaiting Input
+          </span>
+        )}
         <ChevronDown
           className={`h-3.5 w-3.5 text-zinc-400 transition-transform duration-200 ${
             open ? "" : "-rotate-90"
@@ -807,10 +821,30 @@ function ToolExecutionAccordion({
               actionPrefix = "";
               label = `Updated task checklist (${comp}/${tot})`;
             } else if (chip.name === "ask_user_clarification") {
-              const question = (chip.args?.question as string) || "";
-              icon = <HelpCircle className="h-3.5 w-3.5 text-amber-400/80 shrink-0" />;
-              actionPrefix = "";
-              label = `Asked for clarification: '${question}'`;
+              const question =
+                (chip.args?.question as string) ||
+                (typeof chip.args === "string" ? chip.args : "") ||
+                "Clarification requested";
+              const rawOptions = (chip.args?.options as string[]) || [];
+              const options = Array.isArray(rawOptions)
+                ? rawOptions.filter((o) => typeof o === "string" && o.trim().length > 0)
+                : [];
+              return (
+                <ClarificationPromptCard
+                  key={idx}
+                  question={question}
+                  options={options}
+                  index={
+                    clarificationCount > 1
+                      ? clarificationCalls.findIndex((c) => c === chip) + 1
+                      : undefined
+                  }
+                  total={clarificationCount > 1 ? clarificationCount : undefined}
+                  isPending={true}
+                  onSelectOption={onClarificationSelect}
+                  disabled={isStreamingTurn}
+                />
+              );
             } else if (chip.name === "checkpoint_restore") {
               const cpId = (chip.args?.checkpoint_id as string) || "";
               icon = <Undo2 className="h-3.5 w-3.5 text-violet-400/80 shrink-0" />;
@@ -951,16 +985,45 @@ function SubagentCard({
 // Chat Bubble (Matches SS2 user pill + clean assistant presentation)
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract clean answer text from an answering user message in the conversation.
+ * Handles both structured prefix headers and raw text replies.
+ */
+function extractClarificationAnswer(userMsg?: ChatMessage | null): string | null {
+  if (!userMsg?.content) return null;
+  const content = userMsg.content.trim();
+  if (content.startsWith("[User Clarification Response]: ")) {
+    return content.replace("[User Clarification Response]: ", "").trim();
+  }
+  if (content.startsWith("Proceed with: ")) {
+    return content.replace("Proceed with: ", "").trim();
+  }
+  return content;
+}
+
+/**
+ * Renders an individual chat bubble for system, user, or assistant turns.
+ * Assistant turns render thoughts, tool executions, markdown content, and
+ * active/resolved ClarificationPromptCards for `ask_user_clarification` calls.
+ */
 function ChatBubble({
   message,
+  messageIndex,
+  messages,
   isLatestStreaming,
   onViewDiff,
   onStageAuditFix,
+  onClarificationSelect,
+  isSessionBlocked,
 }: {
   message: ChatMessage;
+  messageIndex?: number;
+  messages?: ChatMessage[];
   isLatestStreaming?: boolean;
   onViewDiff?: (filePath: string) => void;
   onStageAuditFix?: (finding: AuditFinding, diff?: string) => Promise<void> | void;
+  onClarificationSelect?: (choice: string) => Promise<void> | void;
+  isSessionBlocked?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const [reaction, setReaction] = useState<"up" | "down" | null>(null);
@@ -1000,19 +1063,30 @@ function ChatBubble({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const hasToolCalls = message.toolCalls && message.toolCalls.length > 0;
+  const toolCalls = message.toolCalls || [];
+  const clarificationCalls = toolCalls.filter((c) => c.name === "ask_user_clarification");
+  const executionToolCalls = toolCalls.filter((c) => c.name !== "ask_user_clarification");
+
+  const hasExecutionToolCalls = executionToolCalls.length > 0;
   const hasThoughts = message.thoughts && message.thoughts.length > 0;
+
+  // Track subsequent user messages to resolve clarification calls per question index
+  const subsequentUserMsgs =
+    messages && typeof messageIndex === "number"
+      ? messages.slice(messageIndex + 1).filter((m) => m.role === "user")
+      : [];
 
   return (
     <div className="my-5 space-y-2">
       {/* If tools were executed, render tool accordion (with nested thoughts if any) */}
-      {hasToolCalls ? (
+      {hasExecutionToolCalls ? (
         <ToolExecutionAccordion
-          toolCalls={message.toolCalls!}
+          toolCalls={executionToolCalls}
           thoughts={message.thoughts}
           thoughtDuration={message.thoughtDurationSeconds}
           isStreamingTurn={isLatestStreaming}
           onViewDiff={onViewDiff}
+          onClarificationSelect={onClarificationSelect}
         />
       ) : hasThoughts ? (
         /* Otherwise render thought accordion by itself */
@@ -1029,6 +1103,42 @@ function ChatBubble({
           <MarkdownContent content={message.content} />
         </div>
       )}
+
+      {/* Clarification prompt cards rendered prominently right in transcript */}
+      {clarificationCalls.map((chip, idx) => {
+        const question =
+          (chip.args?.question as string) ||
+          (typeof chip.args === "string" ? chip.args : "") ||
+          "Clarification requested";
+        const rawOptions = (chip.args?.options as string[]) || [];
+        const options = Array.isArray(rawOptions)
+          ? rawOptions.filter((o) => typeof o === "string" && o.trim().length > 0)
+          : [];
+
+        // Match each question to its corresponding answering user turn
+        const answeringUserMsg = subsequentUserMsgs[idx];
+        const isAnswered = Boolean(answeringUserMsg);
+        const answeredChoice = isAnswered ? extractClarificationAnswer(answeringUserMsg) : null;
+        const isQuestionPending = isAnswered
+          ? false
+          : messages && typeof messageIndex === "number"
+          ? true
+          : Boolean(isSessionBlocked);
+
+        return (
+          <ClarificationPromptCard
+            key={idx}
+            question={question}
+            options={options}
+            index={idx + 1}
+            total={clarificationCalls.length}
+            isPending={isQuestionPending}
+            selectedAnswer={answeredChoice}
+            onSelectOption={onClarificationSelect}
+            disabled={isLatestStreaming}
+          />
+        );
+      })}
 
       {/* Action buttons bar underneath response (Copy, ThumbsUp, ThumbsDown) + model badge */}
       {message.content && (
@@ -1977,28 +2087,48 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   // Clarification selection handler
   // -------------------------------------------------------------------------
 
-  const handleClarificationSelect = async (choice: string) => {
-    try {
+  /**
+   * Handle user selection of a clarification option or custom submission.
+   * Unblocks the agent session, records the answer, and triggers the next agent turn.
+   * Restores pending clarification and rolls back optimistic state on error.
+   */
+  const handleClarificationSelect = useCallback(
+    async (choice: string) => {
+      const prevPending = pendingClarification;
       setPendingClarification(null);
-      // Optimistically append user's response in chat
-      setMessages((prev) => [
-        ...prev,
-        { role: "user", content: `[User Clarification Response]: ${choice}` },
-      ]);
-      await api.clarifySession(sessionId, { response: choice });
-      if (session) {
-        setSession({ ...session, status: "active", waiting_input: null });
+
+      // Optimistically append user's response in chat so UI gives immediate feedback
+      const optimisticMsg = {
+        role: "user" as const,
+        content: `[User Clarification Response]: ${choice}`,
+      };
+      setMessages((prev) => [...prev, optimisticMsg]);
+
+      try {
+        await api.clarifySession(sessionId, { response: choice });
+        if (session) {
+          setSession({ ...session, status: "active", waiting_input: null });
+        }
+        // Remove optimistic clarification message right before sendChatMessage to avoid
+        // duplicate responses in the transcript (sendChatMessage appends its own turn).
+        setMessages((prev) => prev.filter((m) => m !== optimisticMsg));
+
+        // Trigger the next agent chat turn automatically
+        await sendChatMessage(`Proceed with: ${choice}`, {
+          model: selectedModelId,
+          provider: selectedProvider === "auto" ? undefined : selectedProvider,
+        });
+      } catch (err) {
+        // Roll back optimistic state on error and rethrow so caller can reset button states
+        setPendingClarification(prevPending);
+        setMessages((prev) => prev.filter((m) => m !== optimisticMsg));
+        const msg = err instanceof ApiError ? err.message : "Failed to submit clarification.";
+        setActionError(msg);
+        throw err;
       }
-      // Trigger the next agent chat turn automatically
-      await sendChatMessage(`Proceed with: ${choice}`, {
-        model: selectedModelId,
-        provider: selectedProvider === "auto" ? undefined : selectedProvider,
-      });
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : "Failed to submit clarification.";
-      setActionError(msg);
-    }
-  };
+    },
+    [sessionId, session, selectedModelId, selectedProvider, sendChatMessage, setMessages, pendingClarification, setPendingClarification, setActionError]
+  );
 
   // -------------------------------------------------------------------------
   // Load session on mount
@@ -2028,14 +2158,52 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
         if (s.status === "awaiting_clarification" && s.waiting_input) {
           setPendingClarification(s.waiting_input);
         }
-        // Hydrate chat history from DB — skip tool messages (internal LLM plumbing).
+        // Hydrate chat history from DB — preserve tool calls so transcript states persist.
         if (s.conversation_history && s.conversation_history.length > 0) {
-          const hydrated: import("@/hooks/useSessionStream").ChatMessage[] = s.conversation_history
+          type RawHistoryMessage = {
+            role?: string;
+            content?: unknown;
+            tool_calls?: Array<{
+              name?: string;
+              args?: Record<string, unknown>;
+              function?: {
+                name?: string;
+                arguments?: string | Record<string, unknown>;
+              };
+            }>;
+            thoughts?: string[];
+          };
+          const rawHistory = s.conversation_history as unknown as RawHistoryMessage[];
+          const hydrated: import("@/hooks/useSessionStream").ChatMessage[] = rawHistory
             .filter((m) => m.role === "user" || m.role === "assistant")
-            .map((m) => ({
-              role: m.role as "user" | "assistant",
-              content: typeof m.content === "string" ? m.content : "",
-            }));
+            .map((m) => {
+              const rawToolCalls = m.tool_calls;
+              let toolCalls: ToolCallChip[] | undefined;
+              if (Array.isArray(rawToolCalls)) {
+                toolCalls = rawToolCalls.map((tc) => {
+                  if (tc.name) return { name: tc.name, args: tc.args };
+                  if (tc.function) {
+                    let parsedArgs: Record<string, unknown> | undefined;
+                    try {
+                      parsedArgs =
+                        typeof tc.function.arguments === "string"
+                          ? (JSON.parse(tc.function.arguments) as Record<string, unknown>)
+                          : tc.function.arguments;
+                    } catch {
+                      parsedArgs = undefined;
+                    }
+                    return { name: tc.function.name ?? "unknown", args: parsedArgs };
+                  }
+                  return { name: "unknown", args: undefined };
+                });
+              }
+              return {
+                role: m.role as "user" | "assistant",
+                content: typeof m.content === "string" ? m.content : "",
+                toolCalls,
+                thoughts: Array.isArray(m.thoughts) ? m.thoughts : undefined,
+              };
+            });
           if (hydrated.length > 0) setMessages(hydrated);
         }
         // Seed checkpoints from DB.
@@ -2118,6 +2286,11 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   // Actions
   // -------------------------------------------------------------------------
 
+  /**
+   * Handle user submission of chat input textarea.
+   * If session is awaiting clarification, validates string length (max 2000 chars)
+   * and delegates to handleClarificationSelect; otherwise sends chat message.
+   */
   const handleSendChat = useCallback(
     async (textToSend?: string) => {
       const msg = (textToSend ?? chatInput).trim();
@@ -2126,12 +2299,24 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
+
+      // If the session is currently blocked waiting on clarification, submitting text
+      // answers the clarification request to properly unblock the orchestrator lifecycle.
+      if (pendingClarification || session?.status === "awaiting_clarification") {
+        if (msg.length > 2000) {
+          setActionError("Clarification response cannot exceed 2000 characters.");
+          return;
+        }
+        await handleClarificationSelect(msg);
+        return;
+      }
+
       await sendChatMessage(msg, {
         model: selectedModelId || undefined,
         provider: selectedProvider || undefined,
       });
     },
-    [chatInput, isStreaming, sendChatMessage, selectedModelId, selectedProvider]
+    [chatInput, isStreaming, sendChatMessage, selectedModelId, selectedProvider, pendingClarification, session?.status, handleClarificationSelect, setActionError]
   );
 
   const handleStageAuditFix = useCallback(
@@ -2620,9 +2805,13 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                     <ChatBubble
                       key={i}
                       message={msg}
+                      messageIndex={i}
+                      messages={messages}
                       isLatestStreaming={isStreaming && i === messages.length - 1}
                       onViewDiff={handleViewDiffForFile}
                       onStageAuditFix={handleStageAuditFix}
+                      onClarificationSelect={handleClarificationSelect}
+                      isSessionBlocked={session?.status === "awaiting_clarification" || Boolean(pendingClarification)}
                     />
                   ))}
 
@@ -2674,43 +2863,25 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                     />
                   )}
 
-                  {/* Clarification Request Card with Choice Pills */}
-                  {pendingClarification && (
-                    <div className="my-4 rounded-2xl border border-amber-500/40 bg-gradient-to-br from-amber-500/15 via-[#16161c] to-zinc-900/90 p-4 shadow-xl backdrop-blur-xl animate-in fade-in slide-in-from-bottom-2 duration-300">
-                      <div className="flex items-start gap-3">
-                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                          <HelpCircle className="h-4 w-4" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-[10px] font-mono uppercase tracking-wider text-amber-400 font-semibold">
-                              Clarification Requested
-                            </span>
-                            <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                          </div>
-                          <p className="text-sm font-medium text-zinc-100 leading-snug">
-                            {pendingClarification.question}
-                          </p>
-                          <p className="text-xs text-zinc-400 mt-1">
-                            Choose an option below to guide the agent and resume execution:
-                          </p>
-                          <div className="mt-3.5 flex flex-wrap gap-2">
-                            {pendingClarification.options.map((option, idx) => (
-                              <button
-                                key={idx}
-                                onClick={() => handleClarificationSelect(option)}
-                                disabled={isStreaming}
-                                className="flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-amber-500/15 px-3.5 py-2 text-xs font-mono text-amber-200 hover:bg-amber-500/30 hover:border-amber-400 hover:text-white active:scale-95 transition-all shadow-sm cursor-pointer disabled:opacity-50"
-                              >
-                                <Check className="h-3.5 w-3.5 text-amber-400" />
-                                <span>{option}</span>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                  {/* Fallback Clarification Request Card if not already rendered inline in transcript */}
+                  {pendingClarification &&
+                    !messages.some((m, idx) => {
+                      const isLatestAssistant =
+                        m.role === "assistant" &&
+                        !messages.slice(idx + 1).some((sub) => sub.role === "user");
+                      return (
+                        isLatestAssistant &&
+                        m.toolCalls?.some((c) => c.name === "ask_user_clarification")
+                      );
+                    }) && (
+                      <ClarificationPromptCard
+                        question={pendingClarification.question}
+                        options={pendingClarification.options}
+                        isPending={true}
+                        onSelectOption={handleClarificationSelect}
+                        disabled={isStreaming}
+                      />
+                    )}
 
                   <div ref={chatBottomRef} className="h-4" />
                 </div>
@@ -3065,6 +3236,8 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                           ? "Session is closed."
                           : isStreaming
                           ? "Agent is responding…"
+                          : pendingClarification || session?.status === "awaiting_clarification"
+                          ? "Agent is waiting for clarification above (select an option or type reply)…"
                           : "Ask anything, @ to mention, / for actions"
                       }
                       rows={1}
