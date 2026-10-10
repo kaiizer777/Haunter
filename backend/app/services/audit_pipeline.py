@@ -807,6 +807,9 @@ async def execute_audit_job(
         # `fetch_audit_diff` raises a typed error for every non-success status,
         # so "no changes" here means GitHub was asked and reported none.
         return AuditExecutionOutcome(status="skipped_no_diff")
+    filtered_diff, _ = auditor.filter_audit_diff_noise(diff_text)
+    if not filtered_diff.strip():
+        return AuditExecutionOutcome(status="skipped_no_diff")
     if resolved_pr is not None:
         await _fetch_pr_target(
             repo=repo,
@@ -819,7 +822,7 @@ async def execute_audit_job(
     source_contexts = await auditor.fetch_audit_source_contexts(
         owner=owner,
         repo=name,
-        diff_text=diff_text,
+        diff_text=filtered_diff,
         sha=target.head_sha,
         token=token,
     )
@@ -832,7 +835,7 @@ async def execute_audit_job(
             token=token,
         )
     ast_context = await auditor.build_ast_diff_summary_async(
-        diff_text,
+        filtered_diff,
         source_contexts,
     )
     repository_context = "\n".join(
@@ -868,7 +871,7 @@ async def execute_audit_job(
             repo=name,
             head_sha=target.head_sha,
             pr_number=resolved_pr,
-            diff_text=diff_text,
+            diff_text=filtered_diff,
             token=token,
         )
     except Exception as pub_exc:
