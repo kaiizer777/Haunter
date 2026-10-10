@@ -424,4 +424,161 @@ describe("useSessionStream — Audit SSE Events Handling", () => {
     expect(systemMsg).toBeDefined();
     expect(result.current.isStreaming).toBe(false);
   });
+
+  it("does not advance the replay cursor for an incomplete trailing frame", async () => {
+    const complete = [
+      "event: thought\n",
+      "id: 7\n",
+      "retry: 20\n",
+      'data: {"delta": "Complete thought."}\n\n',
+    ].join("");
+    // Stream ends with a truncated frame: id received, payload cut off, no
+    // trailing blank line.
+    const truncated = complete + 'event: thought\nid: 8\ndata: {"delta": "truncated"\n';
+
+    const chunk2 = [
+      "event: thought\n",
+      "id: 8\n",
+      "retry: 20\n",
+      'data: {"delta": "Full eight."}\n\n',
+      "event: done\n",
+      'data: {"session_id": "session_123"}\n\n',
+    ].join("");
+
+    const fetchCalls: { headers: Record<string, string> }[] = [];
+    let callCount = 0;
+
+    globalThis.fetch = vi.fn().mockImplementation((url, init) => {
+      void url;
+      callCount++;
+      fetchCalls.push({ headers: (init?.headers as Record<string, string>) || {} });
+      if (callCount === 1) {
+        return Promise.resolve(createMockStreamResponse([truncated]));
+      }
+      return Promise.resolve(createMockStreamResponse([chunk2]));
+    });
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    await act(async () => {
+      await result.current.sendChatMessage("hello");
+    });
+
+    expect(callCount).toBe(2);
+    // The cursor stayed at the last COMPLETE frame, so the retry replays
+    // event 8 in full instead of skipping it.
+    expect(fetchCalls[1].headers["Last-Event-ID"]).toBe("7");
+
+    const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    // The truncated payload was dropped, not surfaced as a garbled thought;
+    // the replayed event 8 arrives in full and (per the done handler) is
+    // promoted to the visible response content.
+    expect(assistantMsg?.thoughts).toEqual(["Complete thought."]);
+    expect(assistantMsg?.content).toBe("Full eight.");
+    expect(result.current.isStreaming).toBe(false);
+  });
+
+  it("retries resumption when the turn is alive on another worker (409)", async () => {
+    const doneChunk = [
+      "event: thought\n",
+      "id: 9\n",
+      "retry: 20\n",
+      'data: {"delta": "Live thought."}\n\n',
+      "event: done\n",
+      'data: {"session_id": "session_123"}\n\n',
+    ].join("");
+
+    let callCount = 0;
+    globalThis.fetch = vi.fn().mockImplementation((url, init) => {
+      void url;
+      void init;
+      callCount++;
+      if (callCount === 1) {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          body: null,
+          text: async () => '{"detail":"TURN_ACTIVE_ELSEWHERE: a turn is still running"}',
+        } as unknown as Response);
+      }
+      return Promise.resolve(createMockStreamResponse([doneChunk]));
+    });
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    await act(async () => {
+      await result.current.sendChatMessage("hello");
+    });
+
+    // The 409 is retryable (turn alive elsewhere), not terminal.
+    expect(callCount).toBe(2);
+    const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg?.content).toBe("Live thought.");
+    const systemErr = result.current.messages.find(
+      (m) => m.role === "system" && m.content.startsWith("Error:")
+    );
+    expect(systemErr).toBeUndefined();
+    expect(result.current.isStreaming).toBe(false);
+  }, 15000);
+
+  it("an aborted retry does not clear a newer stream that took over", async () => {
+    const incomplete = [
+      "event: thought\n",
+      "id: 1\n",
+      "retry: 20\n",
+      'data: {"delta": "First."}\n\n',
+    ].join("");
+    const doneChunk = [
+      "event: done\n",
+      'data: {"session_id": "session_123"}\n\n',
+    ].join("");
+
+    let releaseSecond: ((v: Response) => void) | null = null;
+    const secondGate = new Promise<Response>((resolve) => {
+      releaseSecond = resolve;
+    });
+    globalThis.fetch = vi.fn().mockImplementation((url, init) => {
+      void url;
+      const body = JSON.parse((init?.body as string) ?? "{}") as { message?: string };
+      if (body.message === "second") {
+        return secondGate;
+      }
+      return Promise.resolve(createMockStreamResponse([incomplete]));
+    });
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    let first: Promise<void> = Promise.resolve();
+    act(() => {
+      first = result.current.sendChatMessage("first");
+    });
+    // Let the first attempt finish streaming and enter backoff.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 80));
+    });
+    // Abort the retrying stream, then start a newer one.
+    act(() => {
+      result.current.stopStreaming();
+    });
+    let second: Promise<void> = Promise.resolve();
+    act(() => {
+      second = result.current.sendChatMessage("second");
+    });
+    // The aborted first stream settles while the second is still pending:
+    // shared streaming state must still belong to the newer stream.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 150));
+    });
+    expect(result.current.isStreaming).toBe(true);
+
+    await act(async () => {
+      if (releaseSecond !== null) {
+        releaseSecond(createMockStreamResponse([doneChunk]));
+      }
+      await second;
+      await first;
+    });
+    expect(result.current.isStreaming).toBe(false);
+  }, 15000);
 });

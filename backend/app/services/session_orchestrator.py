@@ -1363,6 +1363,10 @@ class SessionOrchestrator:
                 )
                 # The generic run() recovery never sees this branch (it
                 # returns normally), so persist the interrupted turn here.
+                # Persist the local in-progress staged_patches: tools mutate
+                # that copy during the turn while session.staged_patches still
+                # holds the stale pre-turn snapshot — persisting the snapshot
+                # would silently drop patches staged before the LLM failure.
                 try:
                     interrupted_history = _with_interrupted_turn(
                         list(session.conversation_history or []), user_message
@@ -1370,7 +1374,7 @@ class SessionOrchestrator:
                     await self._persist(
                         session,
                         interrupted_history,
-                        dict(session.staged_patches or {}),
+                        dict(staged_patches),
                     )
                 except Exception as persist_exc:
                     logger.warning(
@@ -3036,6 +3040,15 @@ class SessionOrchestrator:
         updated_patches: dict[str, str],
     ) -> None:
         """Atomically persist conversation_history and staged_patches."""
+        # Snapshot every ORM attribute the fallback path needs BEFORE the
+        # commit attempt. rollback() expires all persistent state, so reading
+        # session.id / status / ... after rollback can trigger refresh I/O on
+        # a broken session and fail the recovery outright.
+        fallback_session_id = session.id
+        fallback_status = session.status
+        fallback_checkpoints = session.checkpoints
+        fallback_plan = session.plan
+        fallback_waiting_input = session.waiting_input
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
@@ -3058,18 +3071,17 @@ class SessionOrchestrator:
                 pass
             from app.db import async_session_maker
             async with async_session_maker() as fallback_db:
-                stmt = select(AgentSession).where(AgentSession.id == session.id)
+                stmt = select(AgentSession).where(
+                    AgentSession.id == fallback_session_id
+                )
                 res = await fallback_db.execute(stmt)
                 db_session = res.scalars().first()
                 if db_session:
                     db_session.conversation_history = updated_history
                     db_session.staged_patches = updated_patches
                     db_session.updated_at = datetime.now(timezone.utc)
-                    db_session.status = session.status
-                    if hasattr(session, "checkpoints"):
-                        db_session.checkpoints = session.checkpoints
-                    if hasattr(session, "plan"):
-                        db_session.plan = session.plan
-                    if hasattr(session, "waiting_input"):
-                        db_session.waiting_input = session.waiting_input
+                    db_session.status = fallback_status
+                    db_session.checkpoints = fallback_checkpoints
+                    db_session.plan = fallback_plan
+                    db_session.waiting_input = fallback_waiting_input
                     await fallback_db.commit()

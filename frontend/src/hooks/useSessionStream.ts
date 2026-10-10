@@ -290,7 +290,13 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
             if (!res.ok || !res.body) {
               const errText = await res.text().catch(() => "unknown error");
               const err = new Error(`Chat endpoint error ${res.status}: ${errText}`);
-              if (!res.ok && res.status >= 400 && res.status < 500) {
+              // Retryable: the turn is alive on another worker (Lambda
+              // multi-env); a retry may land on the owning worker and reattach.
+              // Every other 4xx is terminal (401/404/409/410, including "no
+              // resumable turn"): surface immediately instead of retrying.
+              const turnAliveElsewhere =
+                res.status === 409 && errText.includes("TURN_ACTIVE_ELSEWHERE");
+              if (!turnAliveElsewhere && res.status >= 400 && res.status < 500) {
                 // Non-transient (401/404/409/410, including "no resumable
                 // turn"): surface immediately instead of retrying.
                 attempt = MAX_RETRIES;
@@ -309,24 +315,31 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
             let currentData = "";
             let currentId = "";
 
-            const flushFrame = () => {
-              if (currentId) {
-                lastEventId = currentId;
-              }
-              if (!currentData) {
-                currentEvent = "";
-                currentData = "";
-                currentId = "";
+            const flushFrame = (isFinalFlush = false) => {
+              const frameId = currentId;
+              const frameEvent = currentEvent;
+              const frameData = currentData;
+              currentEvent = "";
+              currentData = "";
+              currentId = "";
+              if (!frameData) {
+                // Incomplete frame (id without payload): never advance the
+                // replay cursor, or a resume would skip an event never received.
                 return;
               }
               let parsed: unknown;
               try {
-                parsed = JSON.parse(currentData);
+                parsed = JSON.parse(frameData);
               } catch {
-                parsed = currentData;
+                if (isFinalFlush) {
+                  // Truncated trailing frame after a disconnect: drop it and
+                  // keep the cursor so the retry replays this event in full.
+                  return;
+                }
+                parsed = frameData;
               }
               const frame: SseFrame = {
-                event: (currentEvent || "message") as SseEventType,
+                event: (frameEvent || "message") as SseEventType,
                 data: parsed,
               };
               if (frame.event === "done") {
@@ -336,18 +349,17 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
                 if (code === "SESSION_BUSY" && attempt < MAX_RETRIES) {
                   // Retryable: the rejected turn never executed, so re-POST
                   // (and reattach if the in-flight turn is registered) instead
-                  // of ending the turn. Skip surfacing this transient frame.
-                  currentEvent = "";
-                  currentData = "";
-                  currentId = "";
+                  // of ending the turn. Skip surfacing this transient frame
+                  // and do not consume its cursor: its event id belongs to the
+                  // rejected turn's queue, not the live turn being resumed.
                   return;
                 }
                 isTurnCompleted = true;
               }
+              if (frameId) {
+                lastEventId = frameId;
+              }
               handleFrame(frame);
-              currentEvent = "";
-              currentData = "";
-              currentId = "";
             };
 
         // Incremental SSE frame handler.
@@ -1063,7 +1075,8 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
         }
 
         // Flush any remaining frame (stream ended without trailing blank line).
-        flushFrame();
+        // Strict: a truncated trailing frame must not advance the cursor.
+        flushFrame(true);
 
         if (isTurnCompleted) {
           break;
@@ -1105,8 +1118,15 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
     const msg = err instanceof Error ? err.message : "Streaming error";
     setMessages((prev) => [...prev, { role: "system", content: `Error: ${msg}` }]);
   } finally {
-    setIsStreaming(false);
-    setIsReconnecting(false);
+    // Only the owning (latest) stream settles shared streaming state: an
+    // aborted retry still in backoff must not clear a newer stream that took
+    // over after stopStreaming. (stopStreaming already settles state itself,
+    // so skipping here loses nothing.)
+    if (abortRef.current === controller) {
+      abortRef.current = null;
+      setIsStreaming(false);
+      setIsReconnecting(false);
+    }
   }
     },
     [sessionId, isStreaming]

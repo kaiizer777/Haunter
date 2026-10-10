@@ -837,3 +837,179 @@ async def test_session_orchestrator_disconnect_persists_turn() -> None:
     assert mock_session.conversation_history[1]["content"] == "Refactoring completed successfully."
 
 
+@pytest.mark.asyncio
+async def test_execute_llm_error_persists_in_progress_staged_patches() -> None:
+    """LLMError mid-turn persists the local in-progress staged_patches.
+
+    Regression: the LLM-error branch persisted a copy of session.staged_patches
+    (the stale pre-turn snapshot), silently dropping patches staged by tools
+    earlier in the same turn.
+    """
+    from app.llm.exceptions import LLMError
+    from app.services.session_orchestrator import SessionOrchestrator
+
+    mock_db = AsyncMock()
+    orch = SessionOrchestrator(
+        session_id=uuid.uuid4(),
+        db=mock_db,
+        gh_token=None,
+    )
+
+    mock_session = MagicMock()
+    mock_session.id = orch.session_id
+    mock_session.repo = MagicMock(owner="test-owner", name="test-repo")
+    mock_session.branch_name = "main"
+    mock_session.base_sha = "abc123"
+    mock_session.conversation_history = []
+    mock_session.staged_patches = {}
+    mock_session.checkpoints = []
+
+    orch._load_session = AsyncMock(return_value=mock_session)
+    persisted: dict[str, Any] = {}
+
+    async def fake_persist(session, history, patches):
+        persisted["history"] = history
+        persisted["patches"] = patches
+
+    orch._persist = AsyncMock(side_effect=fake_persist)
+
+    stage_tool_call = {
+        "id": "call_stage_1",
+        "function": {
+            "name": "stage_patch",
+            "arguments": json.dumps({"path": "staged.py", "diff": "fake-diff"}),
+        },
+    }
+    orch._llm = AsyncMock()
+    orch._llm.complete = AsyncMock(
+        side_effect=[
+            {"content": "", "tool_calls": [stage_tool_call], "model": "test-llm"},
+            LLMError("provider boom"),
+        ]
+    )
+
+    async def fake_dispatch_tool(**kwargs):
+        kwargs["staged_patches"]["staged.py"] = "fake-diff"
+        return "Patch staged"
+
+    with patch.object(
+        SessionOrchestrator, "_dispatch_tool", side_effect=fake_dispatch_tool
+    ):
+        queue = SseQueue()
+        await orch._execute(user_message="stage this", queue=queue)
+
+    # The locally staged patch survives the LLM failure...
+    assert persisted["patches"] == {"staged.py": "fake-diff"}
+    # ...while the untouched DB snapshot would have persisted nothing.
+    assert mock_session.staged_patches == {}
+    assert persisted["history"][0]["content"] == "stage this"
+
+
+@pytest.mark.asyncio
+async def test_persist_fallback_uses_pre_rollback_snapshot() -> None:
+    """_persist fallback never reads ORM state after rollback().
+
+    Regression: rollback() expires all persistent objects, so building the
+    fallback UPDATE from session.id / status / ... after rollback can trigger
+    refresh I/O on a broken session and fail the recovery outright.
+    """
+    from app.services.session_orchestrator import SessionOrchestrator
+
+    class _ExpiringSession:
+        """Mimics post-rollback expiry: reads after expire() raise."""
+
+        def __init__(self, values: dict[str, Any]) -> None:
+            object.__setattr__(self, "_store", dict(values))
+            object.__setattr__(self, "_expired", False)
+
+        def __getattr__(self, name: str) -> Any:
+            if object.__getattribute__(self, "_expired"):
+                raise AssertionError(
+                    f"attribute {name!r} read after rollback (expired ORM state)"
+                )
+            try:
+                return object.__getattribute__(self, "_store")[name]
+            except KeyError:
+                raise AttributeError(name) from None
+
+        def expire(self) -> None:
+            object.__setattr__(self, "_expired", True)
+
+    session_id = uuid.uuid4()
+    session = _ExpiringSession(
+        {
+            "id": session_id,
+            "status": "awaiting_clarification",
+            "checkpoints": [{"checkpoint_id": "cp1"}],
+            "plan": [{"id": "0", "status": "pending"}],
+            "waiting_input": {"question": "q?"},
+        }
+    )
+
+    class _FailingDb:
+        is_active = True
+
+        async def commit(self) -> None:
+            raise RuntimeError("commit boom")
+
+        async def refresh(self, _session) -> None:
+            raise AssertionError("refresh must not run after failed commit")
+
+        async def rollback(self) -> None:
+            session.expire()
+
+    written: dict[str, Any] = {}
+
+    class _FakeRow:
+        pass
+
+    fake_row = _FakeRow()
+
+    class _FakeScalars:
+        def first(self):
+            return fake_row
+
+    class _FakeResult:
+        def scalars(self):
+            return _FakeScalars()
+
+    class _FakeFallbackDb:
+        async def execute(self, _stmt):
+            return _FakeResult()
+
+        async def commit(self) -> None:
+            written["committed"] = True
+            written["history"] = fake_row.conversation_history
+            written["patches"] = fake_row.staged_patches
+            written["status"] = fake_row.status
+            written["checkpoints"] = fake_row.checkpoints
+            written["plan"] = fake_row.plan
+            written["waiting_input"] = fake_row.waiting_input
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> bool:
+            return False
+
+    fake_fallback = _FakeFallbackDb()
+    orch = SessionOrchestrator(
+        session_id=session_id,
+        db=_FailingDb(),  # type: ignore[arg-type]
+        gh_token=None,
+    )
+    history = [{"role": "user", "content": "hi"}]
+    patches = {"a.py": "diff-a"}
+
+    with patch("app.db.async_session_maker", return_value=fake_fallback):
+        await orch._persist(session, history, patches)  # type: ignore[arg-type]
+
+    assert written["committed"] is True
+    assert written["history"] == history
+    assert written["patches"] == patches
+    assert written["status"] == "awaiting_clarification"
+    assert written["checkpoints"] == [{"checkpoint_id": "cp1"}]
+    assert written["plan"] == [{"id": "0", "status": "pending"}]
+    assert written["waiting_input"] == {"question": "q?"}
+
+

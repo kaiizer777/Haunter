@@ -58,7 +58,10 @@ from app.schemas import (
     SessionListOut,
     SessionOut,
 )
-from app.services.session_orchestrator import SessionOrchestrator
+from app.services.session_orchestrator import (
+    SessionOrchestrator,
+    _is_lock_conflict as _is_row_lock_conflict,
+)
 from app.services.session_streamer import SseQueue
 
 logger = logging.getLogger(__name__)
@@ -295,6 +298,57 @@ async def list_sessions(
     return SessionListOut(sessions=out, total=total)
 
 
+async def _is_turn_active_elsewhere(db: AsyncSession, session_id: uuid.UUID) -> bool:
+    """
+    Probe whether another backend worker currently holds this session's row lock.
+
+    A live turn holds the session row lock from _load_session until its final
+    _persist commit. _ACTIVE_TURNS only sees turns in this process, so on Lambda
+    (Function URL fans out across execution environments) a reconnect can miss
+    a turn that is alive elsewhere. A NOWAIT lock conflict here means exactly
+    that: some other worker owns the turn. Any other outcome reports False.
+    """
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    try:
+        probe_stmt = (
+            select(AgentSession.id)
+            .where(AgentSession.id == session_id)
+            .with_for_update(nowait=True)
+        )
+        await db.execute(probe_stmt)
+        return False
+    except (OperationalError, DBAPIError) as exc:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return _is_row_lock_conflict(exc)
+
+
+def _register_turn(
+    session_id: uuid.UUID, queue: SseQueue, task: _asyncio.Task[Any]
+) -> bool:
+    """
+    Register a new turn unless a live one already owns this session.
+
+    Returns True when the new turn was registered. Returns False (leaving the
+    live entry untouched) when an overlapping POST arrives mid-turn: the new
+    turn runs unregistered, so neither this registration nor its cleanup can
+    orphan the live turn and break resumption with a spurious 410.
+    """
+    live_entry = _ACTIVE_TURNS.get(str(session_id))
+    if live_entry is None or live_entry[1].done():
+        _ACTIVE_TURNS[str(session_id)] = (queue, task)
+        return True
+    logger.warning(
+        "chat_session: overlapping POST for session %s while a turn is live; "
+        "preserving the live registry entry",
+        session_id,
+    )
+    return False
+
+
 @router.get("/sessions/{session_id}", response_model=SessionOut)
 async def get_session(
     session_id: uuid.UUID,
@@ -507,6 +561,16 @@ async def chat_session(
             if not existing_task.done():
                 # The original turn already owns this prompt; this request's
                 # message/model/provider are intentionally ignored.
+                if existing_queue.resume_gap(parsed_last_event_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_410_GONE,
+                        detail=(
+                            "RESUME_GAP: Last-Event-ID predates the retained replay "
+                            "window; some events were evicted before this reconnect. "
+                            "Reload the session state and send your message again "
+                            "as a new request."
+                        ),
+                    )
                 return StreamingResponse(
                     existing_queue.stream(last_event_id=parsed_last_event_id),
                     media_type="text/event-stream",
@@ -516,6 +580,18 @@ async def chat_session(
                         "X-Accel-Buffering": "no",
                     },
                 )
+        # No live turn in this execution environment. The registry is
+        # process-local, so on Lambda the turn may still be running on another
+        # environment — probe the shared row lock before giving up.
+        if await _is_turn_active_elsewhere(db, session_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "TURN_ACTIVE_ELSEWHERE: a turn for this session is still running "
+                    "on another worker. Retry this resumption shortly; keep the "
+                    "same Last-Event-ID."
+                ),
+            )
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
             detail="No resumable turn for this session. Please send your message again as a new request.",
@@ -556,7 +632,7 @@ async def chat_session(
         )
     )
     _BACKGROUND_TASKS.add(task)
-    _ACTIVE_TURNS[str(session_id)] = (queue, task)
+    _register_turn(session_id, queue, task)
 
     def _on_orchestrator_done(t: _asyncio.Task) -> None:
         _BACKGROUND_TASKS.discard(t)
