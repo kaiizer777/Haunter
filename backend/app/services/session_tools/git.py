@@ -250,10 +250,11 @@ async def tool_git_diff(
             return "No staged patches currently in session."
 
         # 2. Check local repo checkout if available
+        local_err: str | None = None
         if repo:
             try:
                 from app.services.session_tools.sandbox import resolve_repo_dir
-                repo_root, _ = resolve_repo_dir(repo_name=repo, repo_owner=owner)
+                repo_root, err_msg = resolve_repo_dir(repo_name=repo, repo_owner=owner)
                 if repo_root and os.path.isdir(repo_root):
                     ref_target = "HEAD" if base_lower in ("working", "worktree", "staged") else base
                     if ref_target.startswith("-"):
@@ -346,8 +347,14 @@ async def tool_git_diff(
                         if len(diff_text) > _MAX_DIFF_CHARS:
                             return diff_text[:_MAX_DIFF_CHARS] + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
                         return diff_text
+                    return "No uncommitted working-tree differences found."
+                else:
+                    local_err = err_msg or f"Error: Local checkout for repository '{repo}' was not found on this machine."
             except Exception as exc:
                 logger.debug("git_diff: local git diff failed: %s", exc)
+                local_err = f"Error: Failed to inspect local repository checkout: {exc}."
+        else:
+            local_err = "Error: Repository name is required to inspect local working-tree differences."
 
         # 3. Fallback to staged_patches if available
         if staged_patches:
@@ -359,7 +366,7 @@ async def tool_git_diff(
             if diff_text:
                 return diff_text
 
-        return "No uncommitted working-tree differences found."
+        return f"{local_err} Use head='staged' to inspect in-memory staged patches."
 
     if base.strip() == head.strip():
         if staged_patches:

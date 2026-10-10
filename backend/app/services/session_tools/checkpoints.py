@@ -156,6 +156,7 @@ def tool_scan_security_vulnerabilities(
 
     staged: dict[str, str] = dict(session.staged_patches or {})
     scanned_count = 0
+    skipped_paths: list[str] = []
 
     for file_path in paths:
         content: str | None = None
@@ -174,9 +175,11 @@ def tool_scan_security_vulnerabilities(
             content = "\n".join(lines)
         else:
             # No staged patch — nothing to scan for this path.
+            skipped_paths.append(file_path)
             continue
 
         if content is None:
+            skipped_paths.append(file_path)
             continue
 
         scanned_count += 1
@@ -220,14 +223,20 @@ def tool_scan_security_vulnerabilities(
                         }
                     )
 
+    skip_note = (
+        f" (skipped {len(skipped_paths)} path(s) with no staged changes: {', '.join(skipped_paths)})"
+        if skipped_paths
+        else ""
+    )
+
     if not violations:
         return (
             f"Security scan passed: 0 secrets or SQL injection flaws detected "
-            f"across {scanned_count} files."
+            f"across {scanned_count} files{skip_note}."
         )
 
     lines = [
-        f"Security scan found {len(violations)} violation(s) across {scanned_count} file(s):",
+        f"Security scan found {len(violations)} violation(s) across {scanned_count} file(s){skip_note}:",
         "",
     ]
     for v in violations:

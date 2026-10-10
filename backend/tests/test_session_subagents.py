@@ -341,3 +341,18 @@ async def test_subagent_telemetry_logged() -> None:
     assert out_tokens == 5
     assert isinstance(latency_ms, int) and latency_ms >= 0
     assert iterations == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. Production-compatible verification tool in subagent configs
+# ---------------------------------------------------------------------------
+
+
+def test_sandbox_verifier_and_bug_hunter_include_ci_verification() -> None:
+    """sandbox_verifier and bug_hunter allowed tools must include verify_in_ci_sandbox for cloud production runtime."""
+    verifier_tools = ROLE_CONFIGS["sandbox_verifier"].allowed_tools
+    assert "verify_in_ci_sandbox" in verifier_tools
+    assert "run_targeted_tests" in verifier_tools
+
+    hunter_tools = ROLE_CONFIGS["bug_hunter"].allowed_tools
+    assert "verify_in_ci_sandbox" in hunter_tools

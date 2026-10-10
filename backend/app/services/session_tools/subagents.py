@@ -160,6 +160,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
                 "str_replace",
                 "run_targeted_tests",
                 "run_linter",
+                "verify_in_ci_sandbox",
                 "scan_security_vulnerabilities",
             }
         ),
@@ -168,7 +169,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
             "You are BugHunter, a root-cause diagnosis and surgical-fix specialist. "
             "Use git_log, git_blame, git_show, and git_diff for provenance, "
             "navigator tools for context, then fix with str_replace. "
-            "Verify with run_targeted_tests and run_linter, and scan for "
+            "Verify with verify_in_ci_sandbox or run_targeted_tests and run_linter, and scan for "
             "secrets before finishing."
         ),
     ),
@@ -179,6 +180,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
                 "run_targeted_tests",
                 "run_linter",
                 "run_terminal_command",
+                "verify_in_ci_sandbox",
                 "glob_files",
                 "read_file_slice",
             }
@@ -186,7 +188,8 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
         max_iterations=8,
         system_prompt_suffix=(
             "You are SandboxVerifier, a test-execution and validation specialist. "
-            "Run run_targeted_tests, run_linter, and run_terminal_command to "
+            "Run verify_in_ci_sandbox for cloud CI verification, or run_targeted_tests, "
+            "run_linter, and run_terminal_command when local checkout is available to "
             "validate correctness. Use glob_files and read_file_slice only to "
             "locate targets. You are read-only — never write or modify code."
         ),
