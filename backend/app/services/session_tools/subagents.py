@@ -184,14 +184,15 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
                 "run_terminal_command",
                 "glob_files",
                 "read_file_slice",
+                "read_file",
             }
         ),
         max_iterations=8,
         system_prompt_suffix=(
             "You are SandboxVerifier, a test-execution and validation specialist. "
             "Run run_targeted_tests, run_linter, and run_terminal_command to "
-            "validate correctness. Use glob_files and read_file_slice only to "
-            "locate targets. You are read-only — never write or modify code."
+            "validate correctness. Use glob_files, read_file, and read_file_slice only to "
+            "locate targets and inspect test outputs. You are read-only — never write or modify code."
         ),
     ),
     "code_guardian": RoleConfig(
@@ -690,7 +691,11 @@ class SubagentRunner:
             end_line: int = int(args.get("end_line", 1))
         except (TypeError, ValueError):
             return "Error: start_line and end_line must be valid integers."
-        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
+        session_id_str = (
+            str(self.session.id)
+            if (self.session and getattr(self.session, "id", None))
+            else None
+        )
         try:
             return await tool_read_file_slice(
                 path=path,
@@ -699,8 +704,8 @@ class SubagentRunner:
                 owner=self.repo_owner,
                 repo=self.repo_name,
                 base_sha=self.base_sha,
-                staged_patches=self.staged_patches,
                 token=self.gh_token,
+                staged_patches=self.staged_patches,
                 session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:

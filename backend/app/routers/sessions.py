@@ -21,12 +21,14 @@ Security invariants:
 
 from __future__ import annotations
 
+import asyncio as _asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, AsyncGenerator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,12 +59,33 @@ from app.schemas import (
     SessionListOut,
     SessionOut,
 )
-from app.services.session_orchestrator import SessionOrchestrator
+from app.services.session_orchestrator import (
+    SessionOrchestrator,
+    _is_lock_conflict as _is_row_lock_conflict,
+)
 from app.services.session_streamer import SseQueue
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
+
+# Retain strong references to running background tasks to prevent garbage collection.
+_BACKGROUND_TASKS: set[_asyncio.Task[Any]] = set()
+
+# Live SSE turns by session id: (queue, background task). Lets a client that
+# disconnected mid-stream reattach to the in-flight turn via Last-Event-ID
+# instead of starting a duplicate turn.
+_ACTIVE_TURNS: dict[str, tuple[SseQueue, _asyncio.Task[Any]]] = {}
+
+# Seconds a completed turn's replay buffer stays available for reconnects
+# that missed the terminal event.
+_COMPLETED_TURN_TTL_S = 300.0
+
+# Monotonic timestamps (time.monotonic()) marking when a registered turn
+# completed. A completed entry is kept (not popped) so a reconnect that
+# missed `done` replays the terminal outcome instead of getting 410 and
+# resubmitting an already-executed turn as a duplicate.
+_TURN_COMPLETED_AT: dict[str, float] = {}
 
 # Statuses allowed on the AgentSession model.
 _VALID_STATUSES = {"active", "completed", "closed", "awaiting_clarification"}
@@ -160,8 +183,16 @@ async def create_session(
             ),
         )
 
-    # Resolve target branch.
-    branch_name: str = body.branch_name or repo.default_branch or "main"
+    # Resolve target branch:
+    # When branch_name is omitted (null), never default to repo.default_branch as a writable target.
+    # Mint a dedicated topic branch (e.g. haunter/session-{id[:8]}) and resolve base_sha from repo default_branch.
+    session_id: uuid.UUID = uuid.uuid4()
+    if body.branch_name:
+        branch_name: str = body.branch_name
+        ref_to_fetch: str = branch_name
+    else:
+        branch_name = f"haunter/session-{str(session_id)[:8]}"
+        ref_to_fetch = repo.default_branch or "main"
 
     # Resolve base SHA via GitHub App installation token.
     # Falls back to settings.github_token for local dev (get_installation_token does this internally).
@@ -174,7 +205,7 @@ async def create_session(
         base_sha: str = await fetch_branch_sha(
             owner=repo.owner,
             repo=repo.name,
-            branch=branch_name,
+            branch=ref_to_fetch,
             token=gh_token,
         )
     except GitHubResourceNotFoundError:
@@ -229,6 +260,7 @@ async def create_session(
         )
 
     session = AgentSession(
+        id=session_id,
         user_id=current_user.id,
         repo_id=repo.id,
         title=body.title or "Pairing Session",
@@ -284,6 +316,90 @@ async def list_sessions(
 
     out = [_map_session_to_out(s, s.repo) for s in sessions]
     return SessionListOut(sessions=out, total=total)
+
+
+async def _is_turn_active_elsewhere(db: AsyncSession, session_id: uuid.UUID) -> bool:
+    """
+    Probe whether another backend worker currently holds this session's row lock.
+
+    A live turn holds the session row lock from _load_session until its final
+    _persist commit. _ACTIVE_TURNS only sees turns in this process, so on Lambda
+    (Function URL fans out across execution environments) a reconnect can miss
+    a turn that is alive elsewhere. A NOWAIT lock conflict here means exactly
+    that: some other worker owns the turn. Any other outcome reports False.
+    """
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    try:
+        probe_stmt = (
+            select(AgentSession.id)
+            .where(AgentSession.id == session_id)
+            .with_for_update(nowait=True)
+        )
+        await db.execute(probe_stmt)
+        return False
+    except (OperationalError, DBAPIError) as exc:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return _is_row_lock_conflict(exc)
+
+
+def _register_turn(
+    session_id: uuid.UUID, queue: SseQueue, task: _asyncio.Task[Any]
+) -> bool:
+    """
+    Register a new turn unless a live one already owns this session.
+
+    Returns True when the new turn was registered. Returns False (leaving the
+    live entry untouched) when an overlapping POST won the race past the
+    pre-creation live-turn check in chat_session: the new turn runs
+    unregistered, so neither this registration nor its cleanup can orphan the
+    live turn and break resumption with a spurious 410.
+    """
+    live_entry = _live_turn(session_id)
+    if live_entry is None:
+        _ACTIVE_TURNS[str(session_id)] = (queue, task)
+        _TURN_COMPLETED_AT.pop(str(session_id), None)
+        return True
+    logger.warning(
+        "chat_session: overlapping POST for session %s while a turn is live; "
+        "preserving the live registry entry",
+        session_id,
+    )
+    return False
+
+
+def _live_turn(
+    session_id: uuid.UUID,
+) -> tuple[SseQueue, _asyncio.Task[Any]] | None:
+    """Return the live (unfinished) turn entry for session_id, if any."""
+    entry = _ACTIVE_TURNS.get(str(session_id))
+    if entry is not None and not entry[1].done():
+        return entry
+    return None
+
+
+def _forget_turn(session_id: str) -> None:
+    """Drop any registry entry and completion stamp for session_id."""
+    _ACTIVE_TURNS.pop(session_id, None)
+    _TURN_COMPLETED_AT.pop(session_id, None)
+
+
+def _completed_turn_expired(session_id: str) -> bool:
+    """True when no retained completed turn exists or it is past its TTL."""
+    completed_at = _TURN_COMPLETED_AT.get(session_id)
+    if completed_at is None:
+        return True
+    return (time.monotonic() - completed_at) > _COMPLETED_TURN_TTL_S
+
+
+def _sweep_expired_turns() -> None:
+    """Drop retained completed turns past their replay TTL (bounded memory)."""
+    for key, completed_at in list(_TURN_COMPLETED_AT.items()):
+        if (time.monotonic() - completed_at) > _COMPLETED_TURN_TTL_S:
+            _forget_turn(key)
 
 
 @router.get("/sessions/{session_id}", response_model=SessionOut)
@@ -438,6 +554,8 @@ async def chat_session(
     body: SessionChatIn,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    last_event_id_header: Annotated[Optional[str], Header(alias="Last-Event-ID")] = None,
+    last_event_id_query: Annotated[Optional[int], Query(alias="last_event_id")] = None,
 ) -> StreamingResponse:
     """
     Submit a user message to the live pairing agent and stream the response via SSE.
@@ -461,6 +579,9 @@ async def chat_session(
         Connection: keep-alive
         X-Accel-Buffering: no
     """
+    # Drop retained completed turns past their replay TTL (bounded memory).
+    _sweep_expired_turns()
+
     # Object-level authorization: session must be active and owned by caller.
     stmt = select(AgentSession).where(
         AgentSession.id == session_id,
@@ -477,6 +598,105 @@ async def chat_session(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Session is not active (status={session.status!r}). Cannot submit prompt.",
+        )
+
+    # Parse resumption event ID if provided
+    parsed_last_event_id: Optional[int] = None
+    if last_event_id_header and last_event_id_header.isdigit():
+        parsed_last_event_id = int(last_event_id_header)
+    elif last_event_id_query is not None:
+        parsed_last_event_id = last_event_id_query
+
+    # A resumption request reattaches to the live turn for this session
+    # instead of starting a duplicate orchestrator. The replay buffer on the
+    # existing queue supplies every event after the resumption ID.
+    if parsed_last_event_id is not None:
+        existing = _ACTIVE_TURNS.get(str(session_id))
+        if existing is not None:
+            existing_queue, existing_task = existing
+            if not existing_task.done():
+                # The original turn already owns this prompt; this request's
+                # message/model/provider are intentionally ignored.
+                if existing_queue.resume_gap(parsed_last_event_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_410_GONE,
+                        detail=(
+                            "RESUME_GAP: Last-Event-ID predates the retained replay "
+                            "window; some events were evicted before this reconnect. "
+                            "Reload the session state and send your message again "
+                            "as a new request."
+                        ),
+                    )
+                return StreamingResponse(
+                    existing_queue.stream(last_event_id=parsed_last_event_id),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            if not _completed_turn_expired(str(session_id)):
+                # Completed but retained: replay the terminal outcome so the
+                # client does not resubmit an already-executed turn. Served
+                # from the retained buffer only — attaching a live stream to
+                # a dead turn could park on _q.get() forever.
+                if existing_queue.resume_gap(parsed_last_event_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_410_GONE,
+                        detail=(
+                            "RESUME_GAP: Last-Event-ID predates the retained replay "
+                            "window; some events were evicted before this reconnect. "
+                            "Reload the session state and send your message again "
+                            "as a new request."
+                        ),
+                    )
+                replay = existing_queue.replay_after(parsed_last_event_id)
+
+                async def _replay_only() -> AsyncGenerator[str, None]:
+                    for chunk in replay:
+                        yield chunk
+
+                return StreamingResponse(
+                    _replay_only(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            _forget_turn(str(session_id))
+        # No live turn in this execution environment. The registry is
+        # process-local, so on Lambda the turn may still be running on another
+        # environment — probe the shared row lock before giving up.
+        if await _is_turn_active_elsewhere(db, session_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "TURN_ACTIVE_ELSEWHERE: a turn for this session is still running "
+                    "on another worker. Retry this resumption shortly; keep the "
+                    "same Last-Event-ID."
+                ),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="No resumable turn for this session. Please send your message again as a new request.",
+        )
+
+    # Overlapping non-resumption POST while a turn owns this session: reject
+    # before starting a second orchestrator. The live entry stays untouched,
+    # and the caller gets an explicit busy signal instead of a turn it could
+    # never resume (the row lock would yield SESSION_BUSY anyway). Resumption
+    # POSTs (with Last-Event-ID) took the reattach path above and never reach
+    # here. _register_turn remains as the race guard for simultaneous POSTs.
+    if _live_turn(session_id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "SESSION_BUSY: another prompt is already in progress for this "
+                "session. Please wait for it to finish and send your message again."
+            ),
         )
 
     # Resolve GitHub installation token for file reads — best-effort.
@@ -503,11 +723,9 @@ async def chat_session(
         gh_token=gh_token,
     )
 
-    import asyncio as _asyncio
-
     # Launch the orchestrator in a background task so the StreamingResponse
     # generator can start yielding immediately while the LLM runs.
-    _asyncio.ensure_future(
+    task = _asyncio.create_task(
         orchestrator.run(
             user_message=body.message,
             queue=queue,
@@ -515,9 +733,36 @@ async def chat_session(
             provider=body.provider,
         )
     )
+    _BACKGROUND_TASKS.add(task)
+    _register_turn(session_id, queue, task)
+
+    def _on_orchestrator_done(t: _asyncio.Task) -> None:
+        _BACKGROUND_TASKS.discard(t)
+        entry = _ACTIVE_TURNS.get(str(session_id))
+        if entry is not None and entry[1] is t:
+            if t.cancelled():
+                # No terminal event was emitted; retaining the queue could
+                # hang a reattaching consumer on _q.get() forever.
+                _forget_turn(str(session_id))
+            else:
+                # Retain the completed turn for a bounded replay period so a
+                # client that missed the terminal event replays the outcome
+                # instead of getting 410 and resubmitting a duplicate turn.
+                _TURN_COMPLETED_AT[str(session_id)] = time.monotonic()
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                logger.error(
+                    "session_orchestrator background task failed for session %s: %s",
+                    session_id,
+                    exc,
+                    exc_info=exc,
+                )
+
+    task.add_done_callback(_on_orchestrator_done)
 
     return StreamingResponse(
-        queue.stream(),
+        queue.stream(last_event_id=parsed_last_event_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -655,8 +900,8 @@ async def commit_session(
         create_git_commit as _create_commit,
         create_git_tree as _create_tree,
         create_pull_request as _create_pr,
+        fetch_commit_tree_sha as _fetch_commit_tree,
         fetch_file_content as _fetch_file,
-        update_branch_ref as _update_ref,
     )
     from app.services.patch_applier import apply_unified_diff
 
@@ -710,16 +955,23 @@ async def commit_session(
 
     repo = session.repo
     default_branch = repo.default_branch or "main"
-    target_branch = session.branch_name
-    if not target_branch or target_branch == default_branch:
+    target_branch = body.branch_name or session.branch_name
+    if not target_branch:
         target_branch = f"haunter/session-{str(session.id)[:8]}"
 
+    # Protected-branch guard: reject protected branches or default branch before ANY external call
     try:
         _validate_branch(target_branch, allow_protected=False)
     except GitHubPRValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
+        )
+
+    if target_branch.lower() == default_branch.lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot commit directly to default branch '{target_branch}'. A topic branch must be used.",
         )
 
     session.branch_name = target_branch
@@ -745,7 +997,23 @@ async def commit_session(
             sha=session.base_sha,
             token=gh_token,
         )
-        original = base_content if base_content is not None else ""
+        if base_content is None:
+            # If the patch is not a creation patch (does not start from /dev/null),
+            # missing base content indicates a missing file at the base revision.
+            if "--- /dev/null" not in patch_text:
+                logger.error(
+                    "sessions/commit: base content missing for '%s' at sha %s in session %s",
+                    file_path,
+                    session.base_sha,
+                    session_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Base file '{file_path}' not found at revision {session.base_sha}.",
+                )
+            original = ""
+        else:
+            original = base_content
 
         try:
             patched_content = apply_unified_diff(original, patch_text)
@@ -759,6 +1027,41 @@ async def commit_session(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Patch for '{file_path}' could not be applied cleanly: {exc}",
+            )
+
+        is_deletion_patch = any(
+            line.strip() == "+++ /dev/null" for line in patch_text.splitlines()
+        )
+        if is_deletion_patch:
+            if patched_content:
+                logger.error(
+                    "sessions/commit: deletion patch for '%s' in session %s resulted in non-empty content",
+                    file_path,
+                    session_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Deletion patch for '{file_path}' resulted in non-empty content.",
+                )
+            tree_entries.append(
+                {
+                    "path": file_path,
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": None,
+                }
+            )
+            continue
+
+        if not patched_content:
+            logger.error(
+                "sessions/commit: patched content is empty for '%s' in session %s",
+                file_path,
+                session_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Patched content for '{file_path}' is empty. 0-byte files cannot be committed.",
             )
 
         try:
@@ -791,14 +1094,33 @@ async def commit_session(
         )
 
     # ------------------------------------------------------------------
-    # 5. Create Git tree (rooted at base_sha as base_tree).
+    # 5. Create Git tree (rooted at tree SHA resolved from base_sha).
     # ------------------------------------------------------------------
+    try:
+        base_tree_sha = await _fetch_commit_tree(
+            owner=repo.owner,
+            repo=repo.name,
+            commit_sha=session.base_sha,
+            installation_token=gh_token,
+        )
+    except _GHErr as exc:
+        logger.error(
+            "sessions/commit: could not resolve tree SHA for commit %s in session %s: %s",
+            session.base_sha,
+            session_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to resolve Git tree SHA for commit '{session.base_sha}' via GitHub API: {exc}",
+        )
+
     try:
         tree_sha = await _create_tree(
             owner=repo.owner,
             repo=repo.name,
             tree=tree_entries,
-            base_tree=session.base_sha,
+            base_tree=base_tree_sha,
             installation_token=gh_token,
         )
     except _GHErr as exc:
@@ -842,28 +1164,50 @@ async def commit_session(
     # ------------------------------------------------------------------
     # 7. Update or create branch ref.
     # ------------------------------------------------------------------
+    from app.github.pr import (
+        create_branch as _pr_create_branch,
+        delete_branch_ref as _pr_delete_ref,
+        get_branch_ref as _pr_get_ref,
+        restore_branch_ref as _pr_restore_ref,
+        update_branch_ref as _pr_update_ref,
+    )
+
     _validate_branch(target_branch, allow_protected=False)
+    branch_was_created = False
+    original_target_sha: Optional[str] = None
+
     try:
-        await _update_ref(
+        original_target_sha = await _pr_get_ref(
             owner=repo.owner,
             repo=repo.name,
             branch=target_branch,
-            commit_sha=commit_sha,
-            force=False,
-            installation_token=gh_token,
+            token=gh_token,
         )
     except GitHubResourceNotFoundError:
-        # Topic branch does not exist yet — create the branch ref.
-        from app.github.pr import create_branch
+        original_target_sha = None
+    except Exception as exc:
+        logger.error(
+            "sessions/commit: get_branch_ref failed for session %s branch %s: %s",
+            session_id,
+            target_branch,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to inspect branch ref via GitHub API: {exc}",
+        )
 
+    if original_target_sha is None:
+        # Topic branch does not exist yet — create the branch ref.
         try:
-            await create_branch(
+            await _pr_create_branch(
                 owner=repo.owner,
                 repo=repo.name,
                 branch=target_branch,
                 sha=commit_sha,
                 token=gh_token,
             )
+            branch_was_created = True
         except Exception as exc:
             logger.error(
                 "sessions/commit: create_branch failed for session %s branch %s: %s",
@@ -875,17 +1219,27 @@ async def commit_session(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Failed to create branch ref via GitHub API: {exc}",
             )
-    except _GHErr as exc:
-        logger.error(
-            "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
-            session_id,
-            target_branch,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to update branch ref via GitHub API: {exc}",
-        )
+    else:
+        try:
+            await _pr_update_ref(
+                owner=repo.owner,
+                repo=repo.name,
+                branch=target_branch,
+                sha=commit_sha,
+                token=gh_token,
+                force=False,
+            )
+        except Exception as exc:
+            logger.error(
+                "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
+                session_id,
+                target_branch,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to update branch ref via GitHub API: {exc}",
+            )
 
     # ------------------------------------------------------------------
     # 8. Open pull request against repo default branch.
@@ -901,12 +1255,68 @@ async def commit_session(
             body=body.body,
             installation_token=gh_token,
         )
-    except _GHErr as exc:
+    except Exception as exc:
         logger.error(
             "sessions/commit: create_pull_request failed for session %s: %s",
             session_id,
             exc,
         )
+        # Rollback: ensure no commit is left on a non-PR branch without a PR.
+        # Guard against overwriting concurrent writer commits: only rollback if the
+        # branch ref still points to this session's commit_sha.
+        try:
+            current_ref_sha = await _pr_get_ref(
+                owner=repo.owner,
+                repo=repo.name,
+                branch=target_branch,
+                token=gh_token,
+            )
+        except Exception as ref_exc:
+            logger.warning(
+                "sessions/commit: failed to inspect current ref for %s during rollback: %s",
+                target_branch,
+                ref_exc,
+            )
+            current_ref_sha = None
+
+        if current_ref_sha is not None and current_ref_sha != commit_sha:
+            logger.warning(
+                "sessions/commit: skipping branch rollback for %s; ref advanced to %s (expected %s)",
+                target_branch,
+                current_ref_sha,
+                commit_sha,
+            )
+        elif branch_was_created:
+            try:
+                await _pr_delete_ref(
+                    owner=repo.owner,
+                    repo=repo.name,
+                    branch=target_branch,
+                    token=gh_token,
+                    expected_sha=commit_sha,
+                )
+            except Exception as del_exc:
+                logger.warning(
+                    "sessions/commit: cleanup delete_branch_ref failed for %s: %s",
+                    target_branch,
+                    del_exc,
+                )
+        elif original_target_sha is not None:
+            try:
+                await _pr_restore_ref(
+                    owner=repo.owner,
+                    repo=repo.name,
+                    branch=target_branch,
+                    sha=original_target_sha,
+                    token=gh_token,
+                    expected_sha=commit_sha,
+                )
+            except Exception as reset_exc:
+                logger.warning(
+                    "sessions/commit: rollback restore_branch_ref failed for %s: %s",
+                    target_branch,
+                    reset_exc,
+                )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to open pull request via GitHub API: {exc}",
@@ -1077,6 +1487,8 @@ async def restore_checkpoint(
         )
 
     # Restore state directly (no SSE queue needed for the REST endpoint path).
+    cp_idx = checkpoints.index(cp)
+    session.checkpoints = list(checkpoints[: cp_idx + 1])
     session.staged_patches = dict(cp["staged_patches"])
     history_length: int = cp["history_length"]
     session.conversation_history = list(
