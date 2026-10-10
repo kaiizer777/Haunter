@@ -68,8 +68,7 @@ import {
   useSessionStream,
   ChatMessage,
   ToolCallChip,
-  SubagentStartEvent,
-  SubagentDoneEvent,
+  SubagentCardState,
   AuditFinding,
 } from "@/hooks/useSessionStream";
 import { AuditReportCard } from "@/components/workspace/AuditReportCard";
@@ -927,15 +926,6 @@ const ROLE_EMOJI: Record<string, string> = {
   code_guardian: "🛡️",
 };
 
-type SubagentCardState = {
-  role: string;
-  task: string;
-  startedAt: number;
-  status: "running" | "done";
-  summary?: string;
-  patchesModified?: string[];
-};
-
 function SubagentCard({
   role,
   task,
@@ -1096,6 +1086,24 @@ function ChatBubble({
           isStreaming={isLatestStreaming && !message.content}
         />
       ) : null}
+
+      {/* Subagent progress cards (chronological, tied to this assistant turn) */}
+      {message.subagents && message.subagents.length > 0 && (
+        <div className="space-y-2 my-2" aria-live="polite">
+          {message.subagents.map((s, i) => (
+            <SubagentCard
+              key={`${s.role}-${s.startedAt}-${i}`}
+              role={s.role}
+              task={s.task}
+              startedAt={s.startedAt}
+              status={s.status}
+              summary={s.summary}
+              patchesModified={s.patchesModified}
+              onViewDiff={onViewDiff}
+            />
+          ))}
+        </div>
+      )}
 
       {/* Main text content */}
       {message.content && (
@@ -1883,25 +1891,6 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     ];
   }, [availableModels]);
 
-  // Subagent progress cards (Phase 1.3) — fed by subagent_start/done SSE events.
-  const [subagents, setSubagents] = useState<SubagentCardState[]>([]);
-
-  const handleSubagentStart = useCallback((e: SubagentStartEvent) => {
-    setSubagents((prev) => [...prev, { ...e, status: "running" as const }]);
-  }, []);
-
-  const handleSubagentDone = useCallback((e: SubagentDoneEvent) => {
-    setSubagents((prev) => {
-      const runningIdx = prev.map((s, i) => ({ s, i })).reverse().find(({ s }) => s.role === e.role && s.status === "running")?.i;
-      if (runningIdx === undefined) {
-        return [...prev, { role: e.role, task: "", startedAt: Date.now(), status: "done" as const, summary: e.summary, patchesModified: e.patchesModified }];
-      }
-      const copy = [...prev];
-      copy[runningIdx] = { ...copy[runningIdx], status: "done" as const, summary: e.summary, patchesModified: e.patchesModified };
-      return copy;
-    });
-  }, []);
-
   // Chat & Stream (Phase 4.2: live CI sandbox events flow through the same SSE stream)
   const {
     messages,
@@ -1925,10 +1914,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
     setPlan,
     setPendingClarification,
     setCheckpoints,
-  } = useSessionStream(sessionId, {
-    onSubagentStart: handleSubagentStart,
-    onSubagentDone: handleSubagentDone,
-  });
+  } = useSessionStream(sessionId);
 
   // Live CI derivation — SSE (agent-driven verify_in_ci_sandbox) takes
   // precedence; the manual top-bar REST verify is the fallback source.
@@ -2826,23 +2812,6 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                       />
                     )}
 
-                  {/* Subagent progress cards (live start → done) */}
-                  {subagents.length > 0 && (
-                    <div className="space-y-2" aria-live="polite">
-                      {subagents.map((s, i) => (
-                        <SubagentCard
-                          key={`${s.role}-${s.startedAt}-${i}`}
-                          role={s.role}
-                          task={s.task}
-                          startedAt={s.startedAt}
-                          status={s.status}
-                          summary={s.summary}
-                          patchesModified={s.patchesModified}
-                          onViewDiff={handleViewDiffForFile}
-                        />
-                      ))}
-                    </div>
-                  )}
 
                   {/* Agent CI verification badge — sandbox_result verdict inline */}
                   {(liveCiPhase === "passed" || liveCiPhase === "failed") &&
@@ -3313,7 +3282,9 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
                         {isStreaming ? (
                           <button
                             type="button"
-                            onClick={stopStreaming}
+                            onClick={() => {
+                              stopStreaming();
+                            }}
                             className="flex h-8 w-8 items-center justify-center rounded-lg border-t border-t-red-400/60 border-x border-x-red-500/40 border-b border-b-red-800 bg-gradient-to-b from-red-500/30 to-red-600/20 text-red-300 hover:bg-red-500/40 transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_6px_rgba(239,68,68,0.2)] active:translate-y-[0.5px]"
                             title="Stop generating"
                           >

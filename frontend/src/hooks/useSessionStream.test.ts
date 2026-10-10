@@ -345,4 +345,128 @@ describe("useSessionStream — Audit SSE Events Handling", () => {
     expect(assistantMsg).toBeDefined();
     expect(assistantMsg?.content).toBe(longProseThought);
   });
+
+  it("handles subagent_start and subagent_done events and anchors them to the assistant message", async () => {
+    const onSubagentStart = vi.fn();
+    const onSubagentDone = vi.fn();
+
+    const sseChunk = [
+      "event: subagent_start\n",
+      'data: {"role": "sandbox_verifier", "task": "verify fix in sandbox"}\n\n',
+      "event: subagent_done\n",
+      'data: {"role": "sandbox_verifier", "summary": "Verdict: All 4 tests passed", "patches_modified": ["src/auth.ts"]}\n\n',
+      "event: thought\n",
+      'data: {"delta": "Sandbox verification completed successfully."}\n\n',
+      "event: done\n",
+      "data: {}\n\n",
+    ].join("");
+
+    globalThis.fetch = vi.fn().mockResolvedValue(createMockStreamResponse([sseChunk]));
+
+    const { result } = renderHook(() =>
+      useSessionStream("session_123", { onSubagentStart, onSubagentDone })
+    );
+
+    await act(async () => {
+      await result.current.sendChatMessage("run sandbox verification");
+    });
+
+    expect(onSubagentStart).toHaveBeenCalledTimes(1);
+    expect(onSubagentStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: "sandbox_verifier",
+        task: "verify fix in sandbox",
+      })
+    );
+
+    expect(onSubagentDone).toHaveBeenCalledTimes(1);
+    expect(onSubagentDone).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: "sandbox_verifier",
+        summary: "Verdict: All 4 tests passed",
+        patchesModified: ["src/auth.ts"],
+      })
+    );
+
+    const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg?.subagents).toHaveLength(1);
+    expect(assistantMsg?.subagents?.[0]).toEqual(
+      expect.objectContaining({
+        role: "sandbox_verifier",
+        status: "done",
+        summary: "Verdict: All 4 tests passed",
+        patchesModified: ["src/auth.ts"],
+      })
+    );
+  });
+
+  it("regression #58: card emitted in turn N is anchored to turn N and not rendered as part of turn N+1", async () => {
+    const sseChunkTurn1 = [
+      "event: subagent_start\n",
+      'data: {"role": "sandbox_verifier", "task": "run sandbox verification"}\n\n',
+      "event: subagent_done\n",
+      'data: {"role": "sandbox_verifier", "summary": "Verdict: Cannot confirm — the file does not exist at base SHA a0bb921a", "patches_modified": []}\n\n',
+      "event: thought\n",
+      'data: {"delta": "Could not confirm test failure in sandbox."}\n\n',
+      "event: done\n",
+      "data: {}\n\n",
+    ].join("");
+
+    const sseChunkTurn2 = [
+      "event: thought\n",
+      'data: {"delta": "Exploring repository architecture now."}\n\n',
+      "event: done\n",
+      "data: {}\n\n",
+    ].join("");
+
+    let callCount = 0;
+    globalThis.fetch = vi.fn().mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) {
+        return Promise.resolve(createMockStreamResponse([sseChunkTurn1]));
+      }
+      return Promise.resolve(createMockStreamResponse([sseChunkTurn2]));
+    });
+
+    const { result } = renderHook(() => useSessionStream("session_123"));
+
+    // Turn 1
+    await act(async () => {
+      await result.current.sendChatMessage("fix the issue");
+    });
+
+    expect(result.current.messages).toHaveLength(2);
+    expect(result.current.messages[0]).toEqual({ role: "user", content: "fix the issue" });
+    expect(result.current.messages[1].role).toBe("assistant");
+    expect(result.current.messages[1].subagents).toHaveLength(1);
+    expect(result.current.messages[1].subagents?.[0].summary).toBe(
+      "Verdict: Cannot confirm — the file does not exist at base SHA a0bb921a"
+    );
+
+    // Turn 2
+    await act(async () => {
+      await result.current.sendChatMessage("explore more");
+    });
+
+    expect(result.current.messages).toHaveLength(4);
+    // Turn 1 remains intact
+    expect(result.current.messages[0]).toEqual({ role: "user", content: "fix the issue" });
+    expect(result.current.messages[1].role).toBe("assistant");
+    expect(result.current.messages[1].subagents?.[0].summary).toBe(
+      "Verdict: Cannot confirm — the file does not exist at base SHA a0bb921a"
+    );
+
+    // Turn 2: user prompt followed by assistant response without Turn 1's subagents
+    expect(result.current.messages[2]).toEqual({ role: "user", content: "explore more" });
+    expect(result.current.messages[3].role).toBe("assistant");
+    expect(result.current.messages[3].content).toBe("Exploring repository architecture now.");
+    expect(result.current.messages[3].subagents).toBeUndefined();
+
+    // Stale subagent card from turn 1 is NOT the final element of the transcript
+    const lastMessage = result.current.messages[result.current.messages.length - 1];
+    expect(lastMessage.role).toBe("assistant");
+    expect(lastMessage.content).toBe("Exploring repository architecture now.");
+    expect(lastMessage.subagents).toBeUndefined();
+  });
 });
