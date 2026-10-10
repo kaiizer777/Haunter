@@ -25,12 +25,32 @@ from app.github_client import (
     fetch_commits,
     fetch_diff,
 )
-from app.services.session_tools.recon import _validate_file_path
+from app.services.session_tools.recon import _normalize_rel_path, _validate_file_path
 
 logger = logging.getLogger(__name__)
 
 _MAX_LOG_ENTRIES = 30
 _MAX_DIFF_CHARS = 40_000
+
+
+def _strip_git_prefix(p: str) -> str:
+    """Remove one leading ``a/`` or ``b/`` diff prefix via exact prefix removal.
+
+    ``str.lstrip("a/")`` strips a character set (mangling e.g. ``brick.py`` to
+    ``rick.py``); this removes at most one exact prefix.
+    """
+    if p.startswith(("a/", "b/")):
+        return p[2:]
+    return p
+
+
+def _is_diff_header_line(line: str) -> bool:
+    """True only for unified-diff file header lines (``--- ``/``+++ ``).
+
+    Hunk content lines may legitimately begin with ``--``/``++`` (e.g. a
+    deleted CSS ``--var`` line renders as ``---var``); those must be counted.
+    """
+    return line.startswith(("--- ", "+++ ")) or line in ("---", "+++")
 
 
 async def tool_git_log(
@@ -213,7 +233,7 @@ def _filter_diff_by_path(diff_text: str, path: str) -> str | None:
     """Extract only the unified diff hunk(s) targeting the specified file path."""
     if not diff_text or not diff_text.strip():
         return None
-    norm_target = path.replace("\\", "/").strip().lstrip("./")
+    norm_target = _normalize_rel_path(path)
 
     chunks: list[str] = []
     current_lines: list[str] = []
@@ -224,8 +244,8 @@ def _filter_diff_by_path(diff_text: str, path: str) -> str | None:
         elif (
             (line.startswith("--- a/") or line.startswith("--- /dev/null"))
             and current_lines
-            and not any(l.startswith("diff --git ") for l in current_lines)
-            and any(l.startswith("@@ ") for l in current_lines)
+            and not any(ln.startswith("diff --git ") for ln in current_lines)
+            and any(ln.startswith("@@ ") for ln in current_lines)
         ):
             chunks.append("".join(current_lines))
             current_lines = [line]
@@ -239,19 +259,17 @@ def _filter_diff_by_path(diff_text: str, path: str) -> str | None:
             if line.startswith("diff --git "):
                 parts = line.strip().split()
                 if len(parts) >= 4:
-                    p1 = parts[2].lstrip("a/").lstrip("b/")
-                    p2 = parts[3].lstrip("a/").lstrip("b/")
+                    p1 = _strip_git_prefix(parts[2])
+                    p2 = _strip_git_prefix(parts[3])
                     if p1 == norm_target or p2 == norm_target:
                         return chunk.strip()
             elif line.startswith("--- ") or line.startswith("+++ "):
-                target_p = (
+                target_p = _strip_git_prefix(
                     line[4:]
                     .split("\t")[0]
                     .strip()
                     .strip('"')
                     .strip("'")
-                    .lstrip("a/")
-                    .lstrip("b/")
                 )
                 if target_p == norm_target:
                     return chunk.strip()
@@ -272,8 +290,8 @@ def _format_diff_stat(diff_text: str) -> str:
         elif (
             (line.startswith("--- a/") or line.startswith("--- /dev/null"))
             and current_lines
-            and not any(l.startswith("diff --git ") for l in current_lines)
-            and any(l.startswith("@@ ") for l in current_lines)
+            and not any(ln.startswith("diff --git ") for ln in current_lines)
+            and any(ln.startswith("@@ ") for ln in current_lines)
         ):
             chunks.append("".join(current_lines))
             current_lines = [line]
@@ -293,28 +311,24 @@ def _format_diff_stat(diff_text: str) -> str:
             if line.startswith("diff --git "):
                 parts = line.strip().split()
                 if len(parts) >= 4:
-                    file_path = parts[3].lstrip("b/").lstrip("a/")
+                    file_path = _strip_git_prefix(parts[3])
                     break
             elif line.startswith("+++ ") and line[4:].strip() != "/dev/null":
-                file_path = (
+                file_path = _strip_git_prefix(
                     line[4:]
                     .split("\t")[0]
                     .strip()
                     .strip('"')
                     .strip("'")
-                    .lstrip("b/")
-                    .lstrip("a/")
                 )
                 break
             elif line.startswith("--- ") and line[4:].strip() != "/dev/null":
-                file_path = (
+                file_path = _strip_git_prefix(
                     line[4:]
                     .split("\t")[0]
                     .strip()
                     .strip('"')
                     .strip("'")
-                    .lstrip("a/")
-                    .lstrip("b/")
                 )
 
         if not file_path:
@@ -323,7 +337,7 @@ def _format_diff_stat(diff_text: str) -> str:
         ins = 0
         dels = 0
         for line in chunk.splitlines():
-            if line.startswith("+++") or line.startswith("---"):
+            if _is_diff_header_line(line):
                 continue
             if line.startswith("+"):
                 ins += 1
@@ -359,7 +373,7 @@ def _format_diff_stat_from_patches(patches: dict[str, str]) -> str:
         ins = 0
         dels = 0
         for ln in d.splitlines():
-            if ln.startswith("+++") or ln.startswith("---"):
+            if _is_diff_header_line(ln):
                 continue
             if ln.startswith("+"):
                 ins += 1
@@ -435,7 +449,7 @@ async def tool_git_diff(
                 return "No staged patches currently in session."
 
             if path:
-                norm_p = path.replace("\\", "/").strip().lstrip("./")
+                norm_p = _normalize_rel_path(path)
                 if norm_p in staged_patches:
                     target_patches = {norm_p: staged_patches[norm_p]}
                 else:
@@ -474,8 +488,9 @@ async def tool_git_diff(
                     if ref_target.startswith("-"):
                         return f"Error: invalid ref '{ref_target}'."
                     cmd = ["git", "-C", repo_root, "diff"]
-                    if stat_only:
-                        cmd.append("--stat")
+                    # Always request the full diff: stat_only output is rendered via
+                    # _format_diff_stat below so untracked files are included in the
+                    # totals (Git's own --stat summary would exclude them).
                     cmd.extend(["--end-of-options", ref_target])
                     if path:
                         cmd.extend(["--", path])
@@ -534,8 +549,8 @@ async def tool_git_diff(
                                 candidate_paths.append(untracked_path)
                             for cand_rel in candidate_paths:
                                 if path:
-                                    norm_cand = cand_rel.replace("\\", "/").strip().lstrip("./")
-                                    norm_filter = path.replace("\\", "/").strip().lstrip("./")
+                                    norm_cand = _normalize_rel_path(cand_rel)
+                                    norm_filter = _normalize_rel_path(path)
                                     if norm_cand != norm_filter and not norm_cand.startswith(norm_filter + "/"):
                                         continue
                                 target_file = os.path.normpath(
@@ -567,24 +582,20 @@ async def tool_git_diff(
                                             len(u_content.splitlines()) or 1
                                         )
                                         display_path = cand_rel.replace("\\", "/")
-                                        if stat_only:
-                                            diff_parts.append(
-                                                f" {display_path} | {num_lines} "
-                                                + "+" * min(num_lines, 20)
+                                        diff_parts.append(
+                                            f"--- /dev/null\n+++ b/{display_path}\n@@ -0,0 +1,{num_lines} @@\n"
+                                            + "".join(
+                                                f"+{line}\n"
+                                                for line in u_content.splitlines()
                                             )
-                                        else:
-                                            diff_parts.append(
-                                                f"--- /dev/null\n+++ b/{display_path}\n@@ -0,0 +1,{num_lines} @@\n"
-                                                + "".join(
-                                                    f"+{line}\n"
-                                                    for line in u_content.splitlines()
-                                                )
-                                            )
+                                        )
                                     except Exception:
                                         pass
 
                     if diff_parts:
                         diff_text = "\n\n".join(diff_parts)
+                        if stat_only:
+                            return _format_diff_stat(diff_text)
                         if len(diff_text) > _MAX_DIFF_CHARS:
                             return (
                                 diff_text[:_MAX_DIFF_CHARS]

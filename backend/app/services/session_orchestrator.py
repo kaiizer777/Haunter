@@ -34,15 +34,15 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.github_client import (
-    GitHubClientError,
-    fetch_file_content,
-)
+from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
 from app.models import AgentSession
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.recon import (
+    _count_diff_lines,
+    _is_staged_creation,
+    _is_staged_deletion,
     _validate_file_path,
     resolve_read_content,
     tool_glob_files,
@@ -1854,13 +1854,14 @@ class SessionOrchestrator:
         lines = [f"Staged files ({len(staged_patches)}):"]
         for p in sorted(staged_patches.keys()):
             d = staged_patches[p]
-            if "+++ /dev/null" in d:
+            if _is_staged_deletion(d):
                 status = "deleted"
-            elif "--- /dev/null" in d:
+            elif _is_staged_creation(d):
                 status = "created"
             else:
                 status = "modified"
-            lines.append(f"  - {p} ({status})")
+            ins, dels = _count_diff_lines(d)
+            lines.append(f"  - {p} ({status}, +{ins}/-{dels})")
         return "\n".join(lines)
 
     async def _tool_read_file(
@@ -1902,9 +1903,9 @@ class SessionOrchestrator:
         if content is None:
             if staged_patches and path in staged_patches:
                 diff = staged_patches[path]
-                if "+++ /dev/null" in diff:
+                if _is_staged_deletion(diff):
                     return f"File not found: {path!r} (deleted in staged changes)"
-                if "--- /dev/null" not in diff:
+                if not _is_staged_creation(diff):
                     return f"Error reading file: base content for {path!r} is unavailable."
             return f"File not found: {path!r}"
 
@@ -2101,7 +2102,7 @@ class SessionOrchestrator:
             else:
                 # File missing on disk (e.g. staged deletion synced): the
                 # inverted diff applied to empty reconstructs the base.
-                if "+++ /dev/null" in staged_diff:
+                if _is_staged_deletion(staged_diff):
                     restored = apply_unified_diff("", inverted)
                     if restored:
                         os.makedirs(os.path.dirname(target_file), exist_ok=True)
@@ -2144,7 +2145,7 @@ class SessionOrchestrator:
 
         if path in staged_patches:
             staged_diff = staged_patches[path]
-            is_creation = "--- /dev/null" in staged_diff or not staged_diff.strip()
+            is_creation = _is_staged_creation(staged_diff) or not staged_diff.strip()
             if repo_name:
                 try:
                     import subprocess

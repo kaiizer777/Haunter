@@ -844,6 +844,7 @@ async def test_recon_tools_reflect_staged_overlay() -> None:
         )
         assert "created.py" in dir_entries
         assert "existing.py" in dir_entries
+        assert "deleted.py" not in dir_entries
 
 
 @pytest.mark.asyncio
@@ -931,9 +932,9 @@ async def test_list_staged_files_tool_and_prompt_formatting() -> None:
 
     result = orchestrator._tool_list_staged_files(staged_patches=staged)
     assert "Staged files (3):" in result
-    assert "  - src/del.py (deleted)" in result
-    assert "  - src/mod.py (modified)" in result
-    assert "  - src/new.py (created)" in result
+    assert "  - src/del.py (deleted, +0/-1)" in result
+    assert "  - src/mod.py (modified, +1/-1)" in result
+    assert "  - src/new.py (created, +1/-0)" in result
 
     prompt = _build_system_prompt(
         repo_owner="test-owner",

@@ -27,8 +27,45 @@ logger = logging.getLogger(__name__)
 # Path traversal validation
 # ---------------------------------------------------------------------------
 
-_SAFE_PATH_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_./ \-]+$")
+_SAFE_PATH_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_./ \-\[\]@+#]+$")
 _MAX_PATH_LEN = 500
+
+
+def _is_staged_deletion(diff: str) -> bool:
+    """True if a staged unified diff deletes the file (+++ header targets /dev/null).
+
+    Parses only the ``+++ `` header line — never the patch body — so a modified
+    file whose added lines embed example diff text is not misclassified.
+    """
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            return line[4:].split("\t")[0].strip() == "/dev/null"
+    return False
+
+
+def _is_staged_creation(diff: str) -> bool:
+    """True if a staged unified diff creates the file (--- header is /dev/null).
+
+    Parses only the ``--- `` header line — never the patch body.
+    """
+    for line in diff.splitlines():
+        if line.startswith("--- "):
+            return line[4:].split("\t")[0].strip() == "/dev/null"
+    return False
+
+
+def _count_diff_lines(diff: str) -> tuple[int, int]:
+    """Count (insertions, deletions) in a staged unified diff, excluding headers."""
+    ins = 0
+    dels = 0
+    for line in diff.splitlines():
+        if line.startswith("+++ ") or line.startswith("--- ") or line in ("+++", "---"):
+            continue
+        if line.startswith("+"):
+            ins += 1
+        elif line.startswith("-"):
+            dels += 1
+    return ins, dels
 
 
 def _validate_file_path(path: str) -> str:
@@ -38,7 +75,7 @@ def _validate_file_path(path: str) -> str:
     Rejects:
       - Paths containing ".." (directory traversal).
       - Paths starting with "/" (absolute path injection).
-      - Paths with characters outside [a-zA-Z0-9_./ -].
+      - Paths with characters outside alphanumerics plus _ . / space - [ ] @ + #.
       - Paths exceeding 500 characters.
 
     Returns the path unchanged if valid.
@@ -55,6 +92,14 @@ def _validate_file_path(path: str) -> str:
     if not _SAFE_PATH_RE.fullmatch(path):
         raise ValueError(f"Path contains disallowed characters: {path!r}")
     return path
+
+
+def _normalize_rel_path(path: str) -> str:
+    """Normalize a validated relative path: backslashes to slashes, strip one leading ./ and /."""
+    norm = path.replace("\\", "/").strip()
+    if norm.startswith("./"):
+        norm = norm[2:]
+    return norm.removeprefix("/")
 
 
 validate_file_path = _validate_file_path
@@ -135,16 +180,21 @@ async def resolve_read_content(
     except ValueError:
         return None
 
-    # 1. Staged deletion check
+    # 1. Staged deletion check (header-line parse only — patch bodies may embed
+    #    example diff text containing "/dev/null" literals).
     if staged_patches and path in staged_patches:
-        diff = staged_patches[path]
-        if "+++ /dev/null" in diff:
+        if _is_staged_deletion(staged_patches[path]):
             return None
 
     content: str | None = None
 
-    # 2. Check local workspace checkout on disk
-    if repo_name and repo_name.strip():
+    # 2. Check local workspace checkout on disk — but NOT when the file has a
+    #    staged patch: the staged patch is authoritative (the disk sync in
+    #    _tool_stage_patch swallows sync failures, and the checkout may be a
+    #    shared/unsynced copy), so a disk hit here would silently omit staged
+    #    changes. Staged files always resolve via base + overlay below.
+    has_staged_patch = bool(staged_patches and path in staged_patches)
+    if repo_name and repo_name.strip() and not has_staged_patch:
         try:
             from app.services.session_tools.sandbox import resolve_repo_dir
 
@@ -186,7 +236,7 @@ async def resolve_read_content(
             from app.sandbox.mirror import apply_unified_diff
 
             diff = staged_patches[path]
-            if content is None and "--- /dev/null" not in diff:
+            if content is None and not _is_staged_creation(diff):
                 return None
             content = apply_unified_diff(content or "", diff)
 
@@ -236,6 +286,12 @@ async def tool_read_file_slice(
         session_id=session_id,
     )
     if content is None:
+        if staged_patches and path in staged_patches:
+            diff = staged_patches[path]
+            if _is_staged_deletion(diff):
+                return f"File not found: {path!r} (deleted in staged changes)"
+            if not _is_staged_creation(diff):
+                return f"Error reading file: base content for {path!r} is unavailable."
         return f"File not found: {path!r}"
 
     lines = content.splitlines()
@@ -294,7 +350,7 @@ async def tool_glob_files(
 
     if staged_patches:
         for staged_path, diff in staged_patches.items():
-            if "+++ /dev/null" in diff:
+            if _is_staged_deletion(diff):
                 candidate_paths.discard(staged_path)
             else:
                 candidate_paths.add(staged_path)
@@ -336,7 +392,7 @@ async def tool_grep_search(
         raise ValueError("Search query cannot be empty.")
     if path_prefix:
         path_prefix = _validate_file_path(path_prefix)
-        norm_prefix = path_prefix.lstrip("./").lstrip("/")
+        norm_prefix = _normalize_rel_path(path_prefix)
     else:
         norm_prefix = ""
 
@@ -397,7 +453,7 @@ async def tool_grep_search(
 
     if staged_patches:
         for staged_path, diff in staged_patches.items():
-            if "+++ /dev/null" in diff:
+            if _is_staged_deletion(diff):
                 candidate_files_set.discard(staged_path)
             else:
                 candidate_files_set.add(staged_path)
@@ -476,7 +532,9 @@ async def tool_list_directory(
         norm_path = ""
     else:
         path = _validate_file_path(path)
-        norm_path = path.strip("./").strip("/")
+        norm_path = _normalize_rel_path(path).strip("/")
+        if norm_path == ".":
+            norm_path = ""
 
     depth = max(1, min(depth, 10))
 
@@ -503,13 +561,20 @@ async def tool_list_directory(
 
     if staged_patches:
         for staged_path, diff in staged_patches.items():
-            if "+++ /dev/null" in diff:
+            if _is_staged_deletion(diff):
                 all_files.discard(staged_path)
             else:
                 all_files.add(staged_path)
                 parts = staged_path.split("/")
                 for k in range(1, len(parts)):
                     all_dirs.add("/".join(parts[:k]))
+        # Prune directories left empty after staged deletions: git never tracks
+        # empty dirs, so any dir with no remaining file beneath it is stale.
+        all_dirs = {
+            d
+            for d in all_dirs
+            if any(f == d or f.startswith(d + "/") for f in all_files)
+        }
 
     result_entries: list[str] = []
     seen: set[str] = set()

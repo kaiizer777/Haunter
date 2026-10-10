@@ -19,10 +19,10 @@ from typing import Any
 
 from app.github_client import (
     GitHubClientError,
-    fetch_file_content,
     fetch_git_tree,
 )
 from app.services.session_tools.recon import (
+    _is_staged_deletion,
     _validate_file_path,
     resolve_read_content,
 )
@@ -490,7 +490,7 @@ async def tool_find_symbol(
         return f"Error fetching repository tree: {exc}"
 
     items: list[dict[str, Any]] = tree_data.get("tree", [])
-    candidate_files_set: set[str] = set(
+    candidate_files_set: set[str] = {
         item["path"]
         for item in items
         if item.get("type") == "blob"
@@ -500,11 +500,11 @@ async def tool_find_symbol(
             for ign in _IGNORE_PREFIXES
         )
         and any(item["path"].endswith(ext) for ext in _SOURCE_EXTENSIONS)
-    )
+    }
 
     if staged_patches:
         for staged_path, diff in staged_patches.items():
-            if "+++ /dev/null" in diff:
+            if _is_staged_deletion(diff):
                 candidate_files_set.discard(staged_path)
             elif any(staged_path.endswith(ext) for ext in _SOURCE_EXTENSIONS):
                 if not any(
@@ -618,7 +618,7 @@ async def tool_find_references(
 
     if staged_patches:
         for staged_path, diff in staged_patches.items():
-            if "+++ /dev/null" in diff:
+            if _is_staged_deletion(diff):
                 candidate_files_set.discard(staged_path)
             elif any(staged_path.endswith(ext) for ext in _SOURCE_EXTENSIONS):
                 if path_filter and not staged_path.startswith(path_filter):

@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from app.github_client import GitHubClientError, fetch_file_content
+from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
 from app.models import AgentSession
@@ -45,6 +45,8 @@ from app.services.session_tools.git import (
     tool_git_show,
 )
 from app.services.session_tools.recon import (
+    _is_staged_creation,
+    _is_staged_deletion,
     _validate_file_path,
     resolve_read_content,
     tool_glob_files,
@@ -623,8 +625,12 @@ class SubagentRunner:
             session_id=session_id_str,
         )
         if content is None:
-            if self.staged_patches and path in self.staged_patches and "+++ /dev/null" in self.staged_patches[path]:
-                return f"File not found: {path!r} (deleted in staged changes)"
+            if self.staged_patches and path in self.staged_patches:
+                staged_diff = self.staged_patches[path]
+                if _is_staged_deletion(staged_diff):
+                    return f"File not found: {path!r} (deleted in staged changes)"
+                if not _is_staged_creation(staged_diff):
+                    return f"Error reading file: base content for {path!r} is unavailable."
             return f"File not found: {path!r}"
         max_chars = 50_000
         if len(content) > max_chars:

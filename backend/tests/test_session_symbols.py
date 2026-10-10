@@ -429,14 +429,18 @@ async def test_find_symbol_with_staged_overlay() -> None:
             {"path": "src/deleted.py", "type": "blob"},
         ]
     }
+    base_source = "class BaseHelper:\n    pass\n"
     staged = {
-        "src/existing.py": "--- a/src/existing.py\n+++ b/src/existing.py\n@@ -1,2 +1,3 @@\n+class StagedOrderManager:\n+    pass\n",
+        "src/existing.py": "--- a/src/existing.py\n+++ b/src/existing.py\n@@ -1,2 +1,4 @@\n class BaseHelper:\n     pass\n+class StagedOrderManager:\n+    pass\n",
         "src/created.py": "--- /dev/null\n+++ b/src/created.py\n@@ -0,0 +1,2 @@\n+class StagedOrderManager:\n+    pass\n",
         "src/deleted.py": "--- a/src/deleted.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-class StagedOrderManager:\n-    pass\n",
     }
 
+    async def _fake_fetch(**kwargs):
+        return base_source if kwargs.get("path") == "src/existing.py" else None
+
     with patch("app.services.session_tools.symbols.fetch_git_tree", new_callable=AsyncMock, return_value=mock_tree), \
-         patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock, return_value=""):
+         patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock, side_effect=_fake_fetch):
 
         results = await tool_find_symbol(
             name="StagedOrderManager",
@@ -447,9 +451,20 @@ async def test_find_symbol_with_staged_overlay() -> None:
             staged_patches=staged,
         )
         assert "Found 2 definition(s) for 'StagedOrderManager'" in results
-        assert "src/existing.py:1: class StagedOrderManager" in results
+        assert "src/existing.py:3: class StagedOrderManager" in results
         assert "src/created.py:1: class StagedOrderManager" in results
         assert "src/deleted.py" not in results
+
+        base_results = await tool_find_symbol(
+            name="BaseHelper",
+            kind="class",
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert "Found 1 definition(s) for 'BaseHelper'" in base_results
+        assert "src/existing.py:1: class BaseHelper" in base_results
 
 
 @pytest.mark.asyncio
