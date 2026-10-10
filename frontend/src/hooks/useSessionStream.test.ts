@@ -388,7 +388,10 @@ describe("useSessionStream — Audit SSE Events Handling", () => {
 
     const assistantMsg = result.current.messages.find((m) => m.role === "assistant");
     expect(assistantMsg).toBeDefined();
-    expect(assistantMsg?.thoughts).toEqual(["Partial thought...", " and completed thought."]);
+    // The done handler promotes the last thought into the visible response
+    // content and strips it from the thoughts accordion to avoid duplication.
+    expect(assistantMsg?.thoughts).toEqual(["Partial thought..."]);
+    expect(assistantMsg?.content).toBe(" and completed thought.");
     expect(result.current.isStreaming).toBe(false);
     expect(result.current.isReconnecting).toBe(false);
   });
@@ -401,9 +404,10 @@ describe("useSessionStream — Audit SSE Events Handling", () => {
       'data: {"delta": "Thinking..."}\n\n',
     ].join("");
 
-    globalThis.fetch = vi.fn().mockImplementation(() =>
+    const mockFetch = vi.fn().mockImplementation(() =>
       Promise.resolve(createMockStreamResponse([chunkIncomplete]))
     );
+    globalThis.fetch = mockFetch;
 
     const { result } = renderHook(() => useSessionStream("session_123"));
 
@@ -411,6 +415,8 @@ describe("useSessionStream — Audit SSE Events Handling", () => {
       await result.current.sendChatMessage("hello");
     });
 
+    // Initial request plus all three retries must have been attempted.
+    expect(mockFetch).toHaveBeenCalledTimes(4);
     // When retries are exhausted without receiving 'done', a system warning is displayed
     const systemMsg = result.current.messages.find(
       (m) => m.role === "system" && m.content.includes("interrupted")

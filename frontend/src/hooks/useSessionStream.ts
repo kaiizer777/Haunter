@@ -289,7 +289,13 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
 
             if (!res.ok || !res.body) {
               const errText = await res.text().catch(() => "unknown error");
-              throw new Error(`Chat endpoint error ${res.status}: ${errText}`);
+              const err = new Error(`Chat endpoint error ${res.status}: ${errText}`);
+              if (!res.ok && res.status >= 400 && res.status < 500) {
+                // Non-transient (401/404/409/410, including "no resumable
+                // turn"): surface immediately instead of retrying.
+                attempt = MAX_RETRIES;
+              }
+              throw err;
             }
 
             setIsReconnecting(false);
@@ -323,7 +329,19 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
                 event: (currentEvent || "message") as SseEventType,
                 data: parsed,
               };
-              if (frame.event === "done" || frame.event === "error") {
+              if (frame.event === "done") {
+                isTurnCompleted = true;
+              } else if (frame.event === "error") {
+                const code = (parsed as Record<string, unknown> | null)?.code;
+                if (code === "SESSION_BUSY" && attempt < MAX_RETRIES) {
+                  // Retryable: the rejected turn never executed, so re-POST
+                  // (and reattach if the in-flight turn is registered) instead
+                  // of ending the turn. Skip surfacing this transient frame.
+                  currentEvent = "";
+                  currentData = "";
+                  currentId = "";
+                  return;
+                }
                 isTurnCompleted = true;
               }
               handleFrame(frame);

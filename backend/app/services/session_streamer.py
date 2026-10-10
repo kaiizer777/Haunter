@@ -180,6 +180,17 @@ def format_sse_event(
     return "\n".join(lines) + "\n\n"
 
 
+def _extract_event_id(chunk: str) -> int | None:
+    """Extract the integer event ID from a formatted SSE chunk, if present."""
+    for line in chunk.splitlines():
+        if line.startswith("id: "):
+            try:
+                return int(line[4:].strip())
+            except ValueError:
+                return None
+    return None
+
+
 class SseQueue:
     """
     Asyncio-Queue-backed SSE producer/consumer bridge.
@@ -210,7 +221,6 @@ class SseQueue:
         self._retry_ms = retry_ms
         self._consumer_active = False
         self._consumer_disconnected = False
-        self._is_closed = False
 
     # ------------------------------------------------------------------
     # Low-level put
@@ -241,31 +251,47 @@ class SseQueue:
         if len(self._replay_buffer) > self._replay_buffer_size:
             self._replay_buffer.pop(0)
 
+        # The asyncio.Queue carries plain SSE strings (plus the _STREAM_DONE
+        # sentinel). Event IDs live in the replay buffer and are re-derived
+        # from the wire format on consume, so every queue reader observes str.
+        if self._consumer_disconnected and not self._consumer_active:
+            # Nobody is reading; the replay buffer already holds the chunk
+            # for a later resumption.
+            return
+        if self._consumer_active:
+            # A connected (possibly slow) consumer gets bounded backpressure
+            # instead of silently losing events to the overflow policy.
+            try:
+                await asyncio.wait_for(self._q.put(chunk), timeout=5.0)
+                return
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "SseQueue: consumer stalled; falling back to drop-oldest"
+                )
         # Non-blocking enqueue with drop-oldest policy to prevent producer deadlock
         try:
-            self._q.put_nowait((event_id, chunk))
+            self._q.put_nowait(chunk)
         except asyncio.QueueFull:
             try:
                 self._q.get_nowait()
             except (asyncio.QueueEmpty, ValueError):
                 pass
             try:
-                self._q.put_nowait((event_id, chunk))
+                self._q.put_nowait(chunk)
             except asyncio.QueueFull:
                 logger.warning("SseQueue: dropped event %s due to full queue", event)
 
     async def close(self) -> None:
         """Signal the consumer that the stream is finished."""
-        self._is_closed = True
         try:
-            self._q.put_nowait((float("inf"), _STREAM_DONE))
+            self._q.put_nowait(_STREAM_DONE)
         except asyncio.QueueFull:
             try:
                 self._q.get_nowait()
             except (asyncio.QueueEmpty, ValueError):
                 pass
             try:
-                self._q.put_nowait((float("inf"), _STREAM_DONE))
+                self._q.put_nowait(_STREAM_DONE)
             except asyncio.QueueFull:
                 pass
 
@@ -496,12 +522,12 @@ class SseQueue:
 
             while True:
                 item = await self._q.get()
-                eid, payload = item if isinstance(item, tuple) else (0, item)
-                if payload is _STREAM_DONE or item is _STREAM_DONE:
+                if item is _STREAM_DONE:
                     break
-                if eid > max_yielded_id or max_yielded_id == 0:
-                    yield payload if isinstance(payload, str) else item
-                    if eid > max_yielded_id:
+                eid = _extract_event_id(item) if isinstance(item, str) else None
+                if eid is None or eid > max_yielded_id or max_yielded_id == 0:
+                    yield item
+                    if eid is not None and eid > max_yielded_id:
                         max_yielded_id = eid
         except (GeneratorExit, asyncio.CancelledError):
             logger.info("SseQueue: consumer disconnected mid-stream")

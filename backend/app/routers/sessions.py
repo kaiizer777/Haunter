@@ -68,6 +68,11 @@ router = APIRouter(tags=["sessions"])
 # Retain strong references to running background tasks to prevent garbage collection.
 _BACKGROUND_TASKS: set[_asyncio.Task[Any]] = set()
 
+# Live SSE turns by session id: (queue, background task). Lets a client that
+# disconnected mid-stream reattach to the in-flight turn via Last-Event-ID
+# instead of starting a duplicate turn.
+_ACTIVE_TURNS: dict[str, tuple[SseQueue, _asyncio.Task[Any]]] = {}
+
 # Statuses allowed on the AgentSession model.
 _VALID_STATUSES = {"active", "completed", "closed", "awaiting_clarification"}
 
@@ -492,6 +497,30 @@ async def chat_session(
     elif last_event_id_query is not None:
         parsed_last_event_id = last_event_id_query
 
+    # A resumption request reattaches to the live turn for this session
+    # instead of starting a duplicate orchestrator. The replay buffer on the
+    # existing queue supplies every event after the resumption ID.
+    if parsed_last_event_id is not None:
+        existing = _ACTIVE_TURNS.get(str(session_id))
+        if existing is not None:
+            existing_queue, existing_task = existing
+            if not existing_task.done():
+                # The original turn already owns this prompt; this request's
+                # message/model/provider are intentionally ignored.
+                return StreamingResponse(
+                    existing_queue.stream(last_event_id=parsed_last_event_id),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="No resumable turn for this session. Please send your message again as a new request.",
+        )
+
     # Resolve GitHub installation token for file reads — best-effort.
     try:
         from sqlalchemy.orm import selectinload as _sel
@@ -527,9 +556,13 @@ async def chat_session(
         )
     )
     _BACKGROUND_TASKS.add(task)
+    _ACTIVE_TURNS[str(session_id)] = (queue, task)
 
     def _on_orchestrator_done(t: _asyncio.Task) -> None:
         _BACKGROUND_TASKS.discard(t)
+        entry = _ACTIVE_TURNS.get(str(session_id))
+        if entry is not None and entry[1] is t:
+            _ACTIVE_TURNS.pop(str(session_id), None)
         if not t.cancelled():
             exc = t.exception()
             if exc:

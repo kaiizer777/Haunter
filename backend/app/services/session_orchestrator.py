@@ -1136,6 +1136,36 @@ def _is_lock_conflict(exc: Exception) -> bool:
 # ------------------------------------------------------------------
 
 
+def _with_interrupted_turn(
+    history: list[dict[str, Any]], user_message: str
+) -> list[dict[str, Any]]:
+    """Return history with the user message + interruption notice appended.
+
+    Idempotent across retries of the same message: the user entry is matched
+    on role+content (not content alone), and the filler notice is only added
+    when the last entry is not already such a notice.
+    """
+    updated = list(history)
+    if not (
+        updated
+        and updated[-1].get("role") == "user"
+        and updated[-1].get("content") == user_message
+    ):
+        updated.append({"role": "user", "content": user_message})
+    if not (
+        updated
+        and updated[-1].get("role") == "assistant"
+        and str(updated[-1].get("content") or "").startswith("Turn interrupted")
+    ):
+        updated.append(
+            {
+                "role": "assistant",
+                "content": "Turn interrupted by internal error. Your prior state has been preserved.",
+            }
+        )
+    return updated
+
+
 class SessionOrchestrator:
     """
     Drives the LLM tool-calling loop for a single pairing session turn.
@@ -1195,17 +1225,21 @@ class SessionOrchestrator:
             )
             # Ensure interrupted turn is recorded in session history so it is never silently lost
             try:
-                session = await self._load_session()
+                try:
+                    await self.db.rollback()
+                except Exception:
+                    pass
+                try:
+                    session = await self._load_session()
+                except Exception:
+                    session = None
+                if session is None:
+                    # The request-scoped session may be closed; load via a
+                    # fresh session so the interruption record still persists.
+                    session = await self._load_session_fallback()
                 if session:
-                    history = list(session.conversation_history or [])
-                    # Only append if not already in history
-                    if not history or history[-1].get("content") != user_message:
-                        history.append({"role": "user", "content": user_message})
-                    history.append(
-                        {
-                            "role": "assistant",
-                            "content": "Turn interrupted by internal error. Your prior state has been preserved.",
-                        }
+                    history = _with_interrupted_turn(
+                        list(session.conversation_history or []), user_message
                     )
                     await self._persist(session, history, dict(session.staged_patches or {}))
             except Exception as persist_exc:
@@ -1327,6 +1361,22 @@ class SessionOrchestrator:
                     iteration,
                     exc,
                 )
+                # The generic run() recovery never sees this branch (it
+                # returns normally), so persist the interrupted turn here.
+                try:
+                    interrupted_history = _with_interrupted_turn(
+                        list(session.conversation_history or []), user_message
+                    )
+                    await self._persist(
+                        session,
+                        interrupted_history,
+                        dict(session.staged_patches or {}),
+                    )
+                except Exception as persist_exc:
+                    logger.warning(
+                        "session_orchestrator: failed to persist LLM-error fallback state: %s",
+                        persist_exc,
+                    )
                 await queue.put_error(
                     "LLM request failed. Please try again.", "LLM_ERROR"
                 )
@@ -2961,6 +3011,24 @@ class SessionOrchestrator:
                 f"Session {self.session_id} is currently busy with another operation."
             ) from exc
 
+    async def _load_session_fallback(self) -> AgentSession | None:
+        """Load the session row via a fresh DB session (no row lock).
+
+        Used on error paths when the request-scoped self.db may be closed or
+        otherwise unusable. Returns a detached row; only column attributes
+        (history, patches, status) are safe to read from it.
+        """
+        from app.db import async_session_maker
+
+        async with async_session_maker() as fresh_db:
+            stmt = select(AgentSession).where(AgentSession.id == self.session_id)
+            res = await fresh_db.execute(stmt)
+            row = res.scalars().first()
+            if row is None:
+                return None
+            fresh_db.expunge(row)
+            return row
+
     async def _persist(
         self,
         session: AgentSession,
@@ -2978,9 +3046,16 @@ class SessionOrchestrator:
             await self.db.refresh(session)
         except Exception as exc:
             logger.warning(
-                "session_orchestrator: committing with self.db failed (%s), attempting fallback session persist",
+                "session_orchestrator: committing with self.db failed (%s), rolling back and attempting fallback persist",
                 exc,
             )
+            # Release any row lock / failed transaction on the original
+            # session first: otherwise the fallback UPDATE on the same row
+            # can block on that lock and hang instead of saving.
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
             from app.db import async_session_maker
             async with async_session_maker() as fallback_db:
                 stmt = select(AgentSession).where(AgentSession.id == session.id)
@@ -2990,10 +3065,11 @@ class SessionOrchestrator:
                     db_session.conversation_history = updated_history
                     db_session.staged_patches = updated_patches
                     db_session.updated_at = datetime.now(timezone.utc)
-                    if hasattr(session, "checkpoints") and session.checkpoints:
+                    db_session.status = session.status
+                    if hasattr(session, "checkpoints"):
                         db_session.checkpoints = session.checkpoints
-                    if hasattr(session, "plan") and session.plan:
+                    if hasattr(session, "plan"):
                         db_session.plan = session.plan
-                    if hasattr(session, "waiting_input") and session.waiting_input:
+                    if hasattr(session, "waiting_input"):
                         db_session.waiting_input = session.waiting_input
                     await fallback_db.commit()

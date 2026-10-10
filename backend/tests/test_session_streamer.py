@@ -201,8 +201,14 @@ async def test_sse_queue_never_deadlocks_on_overflow() -> None:
     async for chunk in small_queue.stream():
         events.append(chunk)
 
-    assert len(events) <= 6
-    assert any("done" in e for e in events)
+    # Drop-oldest must retain the newest payloads in order, terminated by done:
+    # 20 thoughts fill the 5-slot queue with [15..19]; put_done evicts 15 and
+    # close evicts 16, leaving [thought 17, thought 18, thought 19, done].
+    assert len(events) == 4
+    assert "Thought step 17" in events[0]
+    assert "Thought step 18" in events[1]
+    assert "Thought step 19" in events[2]
+    assert "event: done" in events[3]
 
 
 @pytest.mark.asyncio
