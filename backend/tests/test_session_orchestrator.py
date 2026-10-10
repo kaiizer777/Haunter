@@ -598,7 +598,7 @@ async def test_read_file_overlay_github_error_modify_vs_create() -> None:
 
     # 1. Staged create diff -> reconstructed from /dev/null patch
     create_diff = "--- /dev/null\n+++ b/brand_new.py\n@@ -0,0 +1,1 @@\n+print('created')\n"
-    with patch("app.services.session_orchestrator.fetch_file_content", side_effect=GitHubClientError("Not found")):
+    with patch("app.services.session_tools.recon.fetch_file_content", side_effect=GitHubClientError("Not found")):
         res_create = await orch._tool_read_file(
             args={"path": "brand_new.py"},
             repo_owner="org",
@@ -610,7 +610,7 @@ async def test_read_file_overlay_github_error_modify_vs_create() -> None:
 
     # 2. Staged modify diff -> rejects because base is unavailable
     mod_diff = "--- a/existing.py\n+++ b/existing.py\n@@ -1 +1 @@\n-old\n+new\n"
-    with patch("app.services.session_orchestrator.fetch_file_content", side_effect=GitHubClientError("Not found")):
+    with patch("app.services.session_tools.recon.fetch_file_content", side_effect=GitHubClientError("Not found")):
         res_mod = await orch._tool_read_file(
             args={"path": "existing.py"},
             repo_owner="org",
@@ -1011,5 +1011,53 @@ async def test_persist_fallback_uses_pre_rollback_snapshot() -> None:
     assert written["checkpoints"] == [{"checkpoint_id": "cp1"}]
     assert written["plan"] == [{"id": "0", "status": "pending"}]
     assert written["waiting_input"] == {"question": "q?"}
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_system_prompt_rebuild_keeps_checkpoints() -> None:
+    """Per-iteration system prompt rebuilds keep checkpoint IDs for checkpoint_restore."""
+    from app.services.session_orchestrator import SessionOrchestrator
+
+    mock_db = AsyncMock()
+    orch = SessionOrchestrator(
+        session_id=uuid.uuid4(),
+        db=mock_db,
+        gh_token=None,
+    )
+
+    mock_session = MagicMock()
+    mock_session.id = orch.session_id
+    mock_session.repo = MagicMock(owner="test-owner", name="test-repo")
+    mock_session.branch_name = "fix-branch"
+    mock_session.base_sha = "abc123def456"
+    mock_session.conversation_history = []
+    mock_session.staged_patches = {}
+    mock_session.checkpoints = [
+        {
+            "checkpoint_id": "cp_keep_me",
+            "turn": 1,
+            "description": "before risky edit",
+            "staged_patches": {},
+        }
+    ]
+
+    orch._load_session = AsyncMock(return_value=mock_session)
+    orch._persist = AsyncMock()
+    orch._llm = AsyncMock()
+    orch._llm.complete = AsyncMock(
+        return_value={
+            "content": "Done.",
+            "tool_calls": None,
+            "model": "nemotron-3.5-lightning-free",
+        }
+    )
+
+    queue = SseQueue()
+    await orch.run(user_message="hello", queue=queue)
+
+    orch._llm.complete.assert_awaited_once()
+    sent_messages = orch._llm.complete.call_args.kwargs["messages"]
+    assert sent_messages[0]["role"] == "system"
+    assert "cp_keep_me" in sent_messages[0]["content"]
 
 

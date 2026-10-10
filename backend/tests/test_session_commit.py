@@ -452,6 +452,11 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
             return_value=fake_blob_sha,
         ),
         patch(
+            "app.github_client.fetch_commit_tree_sha",
+            new_callable=AsyncMock,
+            return_value="resolved_tree_" + "a" * 26,
+        ),
+        patch(
             "app.github_client.create_git_tree",
             new_callable=AsyncMock,
             return_value=fake_tree_sha,
@@ -540,6 +545,11 @@ async def test_commit_pr_failure_reverts_existing_branch(
             "app.github_client.create_blob",
             new_callable=AsyncMock,
             return_value=fake_blob_sha,
+        ),
+        patch(
+            "app.github_client.fetch_commit_tree_sha",
+            new_callable=AsyncMock,
+            return_value="resolved_tree_" + "a" * 26,
         ),
         patch(
             "app.github_client.create_git_tree",
@@ -642,6 +652,11 @@ async def test_commit_pr_failure_skips_rollback_if_concurrent_writer_advanced_br
             "app.github_client.create_blob",
             new_callable=AsyncMock,
             return_value=fake_blob_sha,
+        ),
+        patch(
+            "app.github_client.fetch_commit_tree_sha",
+            new_callable=AsyncMock,
+            return_value="resolved_tree_" + "a" * 26,
         ),
         patch(
             "app.github_client.create_git_tree",

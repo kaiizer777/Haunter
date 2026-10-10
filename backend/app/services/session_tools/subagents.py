@@ -45,10 +45,13 @@ from app.services.session_tools.git import (
     tool_git_show,
 )
 from app.services.session_tools.recon import (
+    _is_staged_creation,
+    _is_staged_deletion,
+    _validate_file_path,
+    resolve_read_content,
     tool_glob_files,
     tool_grep_search,
     tool_list_directory,
-    tool_read_file,
     tool_read_file_slice,
 )
 from app.services.session_tools.sandbox import (
@@ -608,23 +611,32 @@ class SubagentRunner:
 
     async def _exec_read_file(self, args: dict[str, Any]) -> str:
         path: str = str(args.get("path", ""))
-        session_id_str = (
-            str(self.session.id)
-            if (self.session and getattr(self.session, "id", None))
-            else None
-        )
         try:
-            return await tool_read_file(
-                path=path,
-                owner=self.repo_owner,
-                repo=self.repo_name,
-                base_sha=self.base_sha,
-                token=self.gh_token,
-                staged_patches=self.staged_patches,
-                session_id=session_id_str,
-            )
+            path = _validate_file_path(path)
         except ValueError as exc:
             return f"Error: {exc}"
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
+        content = await resolve_read_content(
+            path=path,
+            repo_owner=self.repo_owner,
+            repo_name=self.repo_name,
+            base_sha=self.base_sha,
+            staged_patches=self.staged_patches,
+            gh_token=self.gh_token,
+            session_id=session_id_str,
+        )
+        if content is None:
+            if self.staged_patches and path in self.staged_patches:
+                staged_diff = self.staged_patches[path]
+                if _is_staged_deletion(staged_diff):
+                    return f"File not found: {path!r} (deleted in staged changes)"
+                if not _is_staged_creation(staged_diff):
+                    return f"Error reading file: base content for {path!r} is unavailable."
+            return f"File not found: {path!r}"
+        max_chars = 50_000
+        if len(content) > max_chars:
+            content = content[:max_chars] + f"\n\n[...truncated at {max_chars} chars]"
+        return content
 
     async def _exec_grep_search(self, args: dict[str, Any]) -> str:
         query: str = str(args.get("query", ""))
@@ -634,6 +646,7 @@ class SubagentRunner:
             max_results: int = int(args.get("max_results", 25))
         except (TypeError, ValueError):
             max_results = 25
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         try:
             return await tool_grep_search(
                 query=query,
@@ -643,7 +656,9 @@ class SubagentRunner:
                 owner=self.repo_owner,
                 repo=self.repo_name,
                 base_sha=self.base_sha,
+                staged_patches=self.staged_patches,
                 token=self.gh_token,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -658,6 +673,7 @@ class SubagentRunner:
                 owner=self.repo_owner,
                 repo=self.repo_name,
                 base_sha=self.base_sha,
+                staged_patches=self.staged_patches,
                 token=self.gh_token,
             )
             return (
@@ -708,6 +724,7 @@ class SubagentRunner:
                 owner=self.repo_owner,
                 repo=self.repo_name,
                 base_sha=self.base_sha,
+                staged_patches=self.staged_patches,
                 token=self.gh_token,
             )
             return (
@@ -720,6 +737,7 @@ class SubagentRunner:
 
     async def _exec_get_file_outline(self, args: dict[str, Any]) -> str:
         path: str = str(args.get("path", ""))
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         try:
             return await tool_get_file_outline(
                 path=path,
@@ -728,6 +746,7 @@ class SubagentRunner:
                 base_sha=self.base_sha,
                 staged_patches=self.staged_patches,
                 gh_token=self.gh_token,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -735,6 +754,7 @@ class SubagentRunner:
     async def _exec_find_symbol(self, args: dict[str, Any]) -> str:
         name: str = str(args.get("name", ""))
         kind: str | None = args.get("kind") or None
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         try:
             return await tool_find_symbol(
                 name=name,
@@ -744,6 +764,7 @@ class SubagentRunner:
                 base_sha=self.base_sha,
                 staged_patches=self.staged_patches,
                 gh_token=self.gh_token,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -751,6 +772,7 @@ class SubagentRunner:
     async def _exec_find_references(self, args: dict[str, Any]) -> str:
         symbol: str = str(args.get("symbol", ""))
         path: str | None = args.get("path") or None
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         try:
             return await tool_find_references(
                 symbol=symbol,
@@ -760,6 +782,7 @@ class SubagentRunner:
                 base_sha=self.base_sha,
                 staged_patches=self.staged_patches,
                 gh_token=self.gh_token,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -905,15 +928,21 @@ class SubagentRunner:
     async def _exec_git_diff(self, args: dict[str, Any]) -> str:
         base: str = str(args.get("base", ""))
         head: str = str(args.get("head", ""))
+        path: str | None = args.get("path") or None
+        stat_only: bool = bool(args.get("stat_only", False))
         if not base or not head:
             return "Error: 'base' and 'head' are both required for git_diff."
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         return await tool_git_diff(
             base=base,
             head=head,
+            path=path,
+            stat_only=stat_only,
             owner=self.repo_owner,
             repo=self.repo_name,
             token=self.gh_token,
             staged_patches=self.staged_patches,
+            session_id=session_id_str,
         )
 
     def _exec_scan_security(self, args: dict[str, Any]) -> str:
