@@ -202,6 +202,74 @@ async def test_commit_creation_patch_allows_none_base() -> None:
 
 
 @pytest.mark.asyncio
+async def test_commit_deletion_patch_creates_tree_entry_with_null_sha() -> None:
+    """A deletion patch (+++ /dev/null) adds a tree entry with sha=None and does not fail empty-content guard."""
+    user, session = _make_mock_user_and_session(
+        staged_patches={
+            "app/deleted.py": "--- a/app/deleted.py\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-old\n"
+        }
+    )
+    mock_db = _make_mock_db(session)
+    body = SessionCommitIn(title="Delete file")
+
+    mock_create_tree = AsyncMock(return_value="tree_after_delete")
+
+    with (
+        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="old\n"),
+        patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, return_value="base_tree_sha"),
+        patch("app.github_client.create_git_tree", mock_create_tree),
+        patch("app.github_client.create_git_commit", new_callable=AsyncMock, return_value="commit_delete"),
+        patch("app.github_client.update_branch_ref", new_callable=AsyncMock, return_value=None),
+        patch("app.github_client.create_pull_request", new_callable=AsyncMock, return_value={"html_url": "https://github.com/pr/3", "number": 3}),
+    ):
+        result = await commit_session(
+            session_id=session.id,
+            body=body,
+            current_user=user,
+            db=mock_db,
+        )
+
+    assert result.commit_sha == "commit_delete"
+    mock_create_tree.assert_called_once_with(
+        owner="test-owner",
+        repo="test-repo",
+        tree=[{"path": "app/deleted.py", "mode": "100644", "type": "blob", "sha": None}],
+        base_tree="base_tree_sha",
+        installation_token="tok",
+    )
+
+
+@pytest.mark.asyncio
+async def test_commit_tree_resolution_failure_raises_502() -> None:
+    """If fetch_commit_tree_sha raises GitHubClientError, commit_session returns HTTP 502 instead of falling back to commit SHA."""
+    user, session = _make_mock_user_and_session(
+        staged_patches={
+            "app/valid.py": "--- a/app/valid.py\n+++ b/app/valid.py\n@@ -1 +1 @@\n-old\n+new\n"
+        }
+    )
+    mock_db = _make_mock_db(session)
+    body = SessionCommitIn(title="Tree resolution failure")
+
+    with (
+        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="old\n"),
+        patch("app.github_client.create_blob", new_callable=AsyncMock, return_value="blob_1"),
+        patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, side_effect=GitHubClientError("GitHub API 500")),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await commit_session(
+                session_id=session.id,
+                body=body,
+                current_user=user,
+                db=mock_db,
+            )
+
+    assert exc_info.value.status_code == 502
+    assert "Failed to resolve Git tree SHA for commit" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
 @respx.mock
 async def test_fetch_commit_tree_sha_github_client_success() -> None:
     """fetch_commit_tree_sha calls GET /repos/{owner}/{repo}/git/commits/{sha} and returns tree sha."""

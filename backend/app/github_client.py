@@ -2262,11 +2262,15 @@ async def fetch_commit_tree_sha(
         )
 
     data = response.json()
-    tree = data.get("tree", {})
-    if isinstance(tree, dict) and "sha" in tree:
-        return str(tree["sha"])
-    if isinstance(tree, str):
-        return tree
+    if not isinstance(data, dict):
+        raise GitHubClientError(
+            f"Invalid commit response payload for {owner}/{repo} @ {commit_sha}"
+        )
+    tree = data.get("tree")
+    if isinstance(tree, dict) and tree.get("sha") and isinstance(tree["sha"], str) and tree["sha"].strip():
+        return tree["sha"].strip()
+    if isinstance(tree, str) and tree.strip():
+        return tree.strip()
     raise GitHubClientError(
         f"Tree SHA not found in commit object for {owner}/{repo} @ {commit_sha}"
     )

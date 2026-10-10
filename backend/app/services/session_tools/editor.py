@@ -658,16 +658,29 @@ async def tool_delete_file(
     if content is None:
         return f"Error: File not found: '{path}'."
 
-    # If this file was newly created in the session (staged from /dev/null or absent at base),
+    clean_base = await _get_clean_base(
+        path=path,
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        base_sha=base_sha,
+        gh_token=gh_token,
+        session_id=session_id,
+    )
+
+    # If this file was newly created in the session and is absent at base_sha,
     # deleting it must unstage the creation rather than staging a phantom deletion diff.
+    # If the file exists at base_sha, deleting it must stage a real deletion from base to /dev/null.
     is_newly_created = (
-        (path in staged_patches and "--- /dev/null" in staged_patches[path])
-        or _is_absent_at_base(
-            path=path,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            session_id=session_id,
+        clean_base is None
+        and (
+            (path in staged_patches and "--- /dev/null" in staged_patches[path])
+            or _is_absent_at_base(
+                path=path,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                session_id=session_id,
+            )
         )
     )
 
@@ -684,9 +697,10 @@ async def tool_delete_file(
             )
         return f"Removed newly-created file '{path}'."
 
+    diff_base = clean_base if clean_base is not None else content
     diff = "".join(
         difflib.unified_diff(
-            content.splitlines(keepends=True),
+            diff_base.splitlines(keepends=True),
             [],
             fromfile=f"a/{path}",
             tofile="/dev/null",
@@ -950,11 +964,11 @@ async def tool_apply_multi_patch(
             )
             final_action = "create" if is_created_files.get(path) else action
         elif action == "delete":
-            if is_created_files.get(path):
+            clean_base = clean_bases.get(path)
+            if clean_base is None and is_created_files.get(path):
                 diff = ""
                 final_action = "delete"
             else:
-                clean_base = clean_bases.get(path)
                 if clean_base is None:
                     _initial = initial_contents.get(path)
                     clean_base = _initial if _initial is not None else ""
@@ -983,7 +997,7 @@ async def tool_apply_multi_patch(
         final_committed.append((path, diff, final_action))
 
     for path, diff, action in final_committed:
-        if action == "delete" and is_created_files.get(path):
+        if action == "delete" and is_created_files.get(path) and clean_bases.get(path) is None:
             staged_patches.pop(path, None)
         else:
             staged_patches[path] = diff

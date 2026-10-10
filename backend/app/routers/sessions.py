@@ -778,6 +778,20 @@ async def commit_session(
                 detail=f"Patch for '{file_path}' could not be applied cleanly: {exc}",
             )
 
+        is_deletion_patch = any(
+            line.strip() == "+++ /dev/null" for line in patch_text.splitlines()
+        )
+        if is_deletion_patch:
+            tree_entries.append(
+                {
+                    "path": file_path,
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": None,
+                }
+            )
+            continue
+
         if not patched_content:
             logger.error(
                 "sessions/commit: patched content is empty for '%s' in session %s",
@@ -829,13 +843,16 @@ async def commit_session(
             installation_token=gh_token,
         )
     except _GHErr as exc:
-        logger.warning(
+        logger.error(
             "sessions/commit: could not resolve tree SHA for commit %s in session %s: %s",
             session.base_sha,
             session_id,
             exc,
         )
-        base_tree_sha = session.base_sha
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to resolve Git tree SHA for commit '{session.base_sha}' via GitHub API: {exc}",
+        )
 
     try:
         tree_sha = await _create_tree(
