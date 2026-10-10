@@ -133,7 +133,12 @@ def _redact_secrets(obj: Any) -> Any:
     return obj
 
 
-def format_sse_event(event: str, data: dict[str, Any]) -> str:
+def format_sse_event(
+    event: str,
+    data: dict[str, Any],
+    event_id: int | str | None = None,
+    retry: int | None = None,
+) -> str:
     """
     Serialise a single SSE event to its wire representation.
 
@@ -166,7 +171,28 @@ def format_sse_event(event: str, data: dict[str, Any]) -> str:
         )
         raise
 
-    return f"event: {event}\ndata: {data_str}\n\n"
+    lines: list[str] = [f"event: {event}"]
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    if retry is not None:
+        lines.append(f"retry: {retry}")
+    lines.append(f"data: {data_str}")
+    return "\n".join(lines) + "\n\n"
+
+
+def _extract_event_id(chunk: str) -> int | None:
+    """Extract the integer event ID from a formatted SSE chunk, if present."""
+    for line in chunk.splitlines():
+        if line.startswith("id: "):
+            try:
+                return int(line[4:].strip())
+            except ValueError:
+                return None
+    return None
+
+
+class ResumeGapError(Exception):
+    """Raised when a resumption id predates the retained replay window."""
 
 
 class SseQueue:
@@ -185,21 +211,120 @@ class SseQueue:
         return StreamingResponse(queue.stream(), media_type="text/event-stream", ...)
     """
 
-    def __init__(self, maxsize: int = 512) -> None:
+    def __init__(
+        self,
+        maxsize: int = 512,
+        replay_buffer_size: int = 256,
+        retry_ms: int = 3000,
+    ) -> None:
+        self._maxsize = maxsize
         self._q: asyncio.Queue[Any] = asyncio.Queue(maxsize=maxsize)
+        self._event_counter = 0
+        self._replay_buffer: list[tuple[int, str]] = []
+        self._replay_buffer_size = replay_buffer_size
+        self._retry_ms = retry_ms
+        self._consumer_active = False
+        self._consumer_disconnected = False
+        # Ownership generation for overlapping stream() generators. Incremented
+        # on every stream() entry; only the latest generation may clear the
+        # consumer flags or drain the queue (see stream() finally block).
+        self._stream_generation = 0
+        # Handoff event of the latest generator. A reconnect sets the previous
+        # generator's event so a reader parked on _q.get() wakes and exits
+        # instead of lingering as a second reader on this queue.
+        self._active_handover: asyncio.Event | None = None
+        # Highest event id evicted from the bounded replay buffer (0 = none
+        # evicted yet). Used to reject resumptions that would silently skip
+        # evicted output (see resume_gap()).
+        self._evicted_up_to = 0
 
     # ------------------------------------------------------------------
     # Low-level put
     # ------------------------------------------------------------------
 
-    async def put_event(self, event: str, data: dict[str, Any]) -> None:
-        """Enqueue a formatted SSE string. Raises ValueError on unknown event."""
-        chunk = format_sse_event(event, data)
-        await self._q.put(chunk)
+    async def put_event(
+        self,
+        event: str,
+        data: dict[str, Any],
+        event_id: int | None = None,
+        retry: int | None = None,
+    ) -> None:
+        """
+        Enqueue a formatted SSE string without blocking indefinitely.
+
+        Uses drop-oldest overflow strategy when the queue fills up to prevent
+        deadlocking background orchestrator turns on client disconnects.
+        """
+        if event_id is None:
+            self._event_counter += 1
+            event_id = self._event_counter
+
+        effective_retry = retry if retry is not None else self._retry_ms
+        chunk = format_sse_event(event, data, event_id=event_id, retry=effective_retry)
+
+        # Store in bounded replay buffer for potential client reconnection/resumption
+        self._replay_buffer.append((event_id, chunk))
+        if len(self._replay_buffer) > self._replay_buffer_size:
+            evicted_id, _ = self._replay_buffer.pop(0)
+            if evicted_id > self._evicted_up_to:
+                self._evicted_up_to = evicted_id
+
+        # The asyncio.Queue carries plain SSE strings (plus the _STREAM_DONE
+        # sentinel). Event IDs live in the replay buffer and are re-derived
+        # from the wire format on consume, so every queue reader observes str.
+        if self._consumer_disconnected and not self._consumer_active:
+            # Nobody is reading; the replay buffer already holds the chunk
+            # for a later resumption.
+            return
+        if self._consumer_active:
+            # A connected (possibly slow) consumer gets bounded backpressure
+            # instead of silently losing events to the overflow policy.
+            try:
+                await asyncio.wait_for(self._q.put(chunk), timeout=5.0)
+                return
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "SseQueue: consumer stalled; falling back to drop-oldest"
+                )
+        # Non-blocking enqueue with drop-oldest policy to prevent producer deadlock
+        try:
+            self._q.put_nowait(chunk)
+        except asyncio.QueueFull:
+            try:
+                self._q.get_nowait()
+            except (asyncio.QueueEmpty, ValueError):
+                pass
+            try:
+                self._q.put_nowait(chunk)
+            except asyncio.QueueFull:
+                logger.warning("SseQueue: dropped event %s due to full queue", event)
 
     async def close(self) -> None:
         """Signal the consumer that the stream is finished."""
-        await self._q.put(_STREAM_DONE)
+        try:
+            self._q.put_nowait(_STREAM_DONE)
+        except asyncio.QueueFull:
+            try:
+                self._q.get_nowait()
+            except (asyncio.QueueEmpty, ValueError):
+                pass
+            try:
+                self._q.put_nowait(_STREAM_DONE)
+            except asyncio.QueueFull:
+                pass
+
+    def drain(self) -> None:
+        """Drain queued items to prevent dangling references."""
+        while not self._q.empty():
+            try:
+                self._q.get_nowait()
+            except (asyncio.QueueEmpty, ValueError):
+                break
+
+    @property
+    def is_disconnected(self) -> bool:
+        """Return whether the HTTP consumer has disconnected."""
+        return self._consumer_disconnected
 
     # ------------------------------------------------------------------
     # Typed helpers (avoid magic strings at call sites)
@@ -392,14 +517,140 @@ class SseQueue:
     # Async generator for StreamingResponse
     # ------------------------------------------------------------------
 
-    async def stream(self) -> AsyncGenerator[str, None]:
+    def resume_gap(self, last_event_id: int | None) -> bool:
+        """
+        Report whether resuming from last_event_id would skip evicted output.
+
+        The replay buffer retains only the most recent events; a resumption id
+        older than the retained range would replay the survivors (potentially
+        including `done`) without signalling the missed output. Callers must
+        reject such resumptions instead of streaming.
+        """
+        return (
+            last_event_id is not None and last_event_id < self._evicted_up_to
+        )
+
+    def replay_after(self, last_event_id: int) -> list[str]:
+        """
+        Return retained chunks with id > last_event_id, without a live tail.
+
+        Used to serve the terminal outcome of an already-completed turn:
+        attaching a live stream() to a dead turn could park on _q.get()
+        forever once the retained queue is drained.
+        """
+        return [
+            chunk for eid, chunk in list(self._replay_buffer) if eid > last_event_id
+        ]
+
+    async def stream(
+        self, last_event_id: int | None = None
+    ) -> AsyncGenerator[str, None]:
         """
         Async generator consumed by FastAPI's StreamingResponse.
 
-        Yields SSE chunks until the sentinel is received.
+        Yields SSE chunks until the sentinel is received or client disconnects.
+        If last_event_id is specified, replays buffered events with id > last_event_id first.
+
+        Raises:
+            ResumeGapError: If last_event_id predates the retained replay
+                window. Callers should pre-check resume_gap() and reject the
+                resumption before attaching to the stream.
         """
-        while True:
-            item = await self._q.get()
-            if item is _STREAM_DONE:
-                break
-            yield item
+        if self.resume_gap(last_event_id):
+            raise ResumeGapError(
+                "Last-Event-ID "
+                f"{last_event_id} predates the retained replay window "
+                f"(evicted through event {self._evicted_up_to}); "
+                "resuming would silently skip missed output."
+            )
+        # Claim ownership of the live connection. A reconnect may attach while
+        # the previous generator has not exited yet; both would then share
+        # this queue, and the old generator's finally block would clear
+        # _consumer_active and drain live events out from under the new one.
+        # The handoff event retires the previous reader deterministically: it
+        # is a dedicated signal, so (unlike a queue marker) the replacement
+        # can never consume it out from under the reader it supersedes.
+        self._stream_generation += 1
+        my_generation = self._stream_generation
+        handover = asyncio.Event()
+        previous_handover = self._active_handover
+        self._active_handover = handover
+        if previous_handover is not None:
+            previous_handover.set()
+        self._consumer_active = True
+        self._consumer_disconnected = False
+        max_yielded_id = last_event_id if last_event_id is not None else 0
+        try:
+            # Replay any missed events if client is reconnecting/resuming
+            if last_event_id is not None:
+                for eid, chunk in list(self._replay_buffer):
+                    if eid > last_event_id:
+                        yield chunk
+                        if eid > max_yielded_id:
+                            max_yielded_id = eid
+
+            while True:
+                if self._stream_generation != my_generation:
+                    # Superseded while yielding replay: exit without consuming
+                    # live events, so delivery is not split across readers.
+                    break
+                getter = asyncio.ensure_future(self._q.get())
+                waiter = asyncio.ensure_future(handover.wait())
+                try:
+                    await asyncio.wait(
+                        {getter, waiter},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except BaseException:
+                    # Generator closed or task cancelled while parked: drop
+                    # both waits, let the cancellations land, then propagate.
+                    getter.cancel()
+                    waiter.cancel()
+                    await asyncio.sleep(0)
+                    raise
+                if waiter.done() and not getter.done():
+                    # Superseded while parked: exit silently. The replacement
+                    # owns the flags and the queue now.
+                    getter.cancel()
+                    try:
+                        await getter
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    break
+                # An item arrived (possibly in the same tick as supersession).
+                if not waiter.done():
+                    waiter.cancel()
+                try:
+                    item = getter.result()
+                except (asyncio.CancelledError, Exception):
+                    break
+                if item is _STREAM_DONE:
+                    if my_generation != self._stream_generation:
+                        # Hand the terminal marker back to the owning
+                        # generator. This always succeeds: the get() above
+                        # freed exactly one queue slot.
+                        try:
+                            self._q.put_nowait(_STREAM_DONE)
+                        except asyncio.QueueFull:
+                            logger.warning(
+                                "SseQueue: lost terminal marker during generator handover"
+                            )
+                    break
+                eid = _extract_event_id(item) if isinstance(item, str) else None
+                if eid is None or eid > max_yielded_id or max_yielded_id == 0:
+                    yield item
+                    if eid is not None and eid > max_yielded_id:
+                        max_yielded_id = eid
+        except (GeneratorExit, asyncio.CancelledError):
+            logger.info("SseQueue: consumer disconnected mid-stream")
+            raise
+        finally:
+            # Only the owning (latest) generator may retire the connection. A
+            # superseded generator exits silently so the replacement consumer
+            # keeps receiving live events.
+            if my_generation == self._stream_generation:
+                self._consumer_active = False
+                self._consumer_disconnected = True
+                if self._active_handover is handover:
+                    self._active_handover = None
+                self.drain()

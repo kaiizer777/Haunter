@@ -23,6 +23,7 @@ Validates:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pytest
 
@@ -32,6 +33,7 @@ from app.services.session_streamer import (
     _redact_secrets,
     _redact_string,
     format_sse_event,
+    ResumeGapError,
     SseQueue,
 )
 
@@ -183,3 +185,183 @@ async def test_sse_queue_streaming_flow() -> None:
     assert events[1].startswith("event: tool_call\n")
     assert events[2].startswith("event: file_diff\n")
     assert events[3].startswith("event: done\n")
+
+
+@pytest.mark.asyncio
+async def test_sse_queue_never_deadlocks_on_overflow() -> None:
+    """Producer does not deadlock when pushing more events than queue maxsize without a consumer."""
+    small_queue = SseQueue(maxsize=5)
+
+    # Push 20 events into a maxsize=5 queue without reading
+    for i in range(20):
+        await small_queue.put_thought(f"Thought step {i}")
+
+    await small_queue.put_done("session-overflow", staged_files_count=0)
+
+    # Verify stream still yields the latest events + done marker without hanging
+    events: list[str] = []
+    async for chunk in small_queue.stream():
+        events.append(chunk)
+
+    # Drop-oldest must retain the newest payloads in order, terminated by done:
+    # 20 thoughts fill the 5-slot queue with [15..19]; put_done evicts 15 and
+    # close evicts 16, leaving [thought 17, thought 18, thought 19, done].
+    assert len(events) == 4
+    assert "Thought step 17" in events[0]
+    assert "Thought step 18" in events[1]
+    assert "Thought step 19" in events[2]
+    assert "event: done" in events[3]
+
+
+@pytest.mark.asyncio
+async def test_sse_queue_client_disconnect_draining() -> None:
+    """When a client disconnects mid-stream, stream() exits cleanly and marks queue disconnected."""
+    queue = SseQueue(maxsize=10)
+
+    for i in range(5):
+        await queue.put_thought(f"Step {i}")
+
+    # Consumer reads 2 events and then disconnects (closes generator)
+    gen = queue.stream()
+    read_events: list[str] = []
+    read_events.append(await anext(gen))
+    read_events.append(await anext(gen))
+    assert len(read_events) == 2
+
+    # Simulate ASGI client disconnect
+    await gen.aclose()
+
+    assert queue.is_disconnected is True
+
+    # Producer continues emitting after consumer disconnect — must not block
+    for i in range(10):
+        await queue.put_thought(f"Post-disconnect step {i}")
+
+    await queue.put_done("session-disconnect", staged_files_count=0)
+    assert queue.is_disconnected is True
+
+
+@pytest.mark.asyncio
+async def test_sse_queue_resumption_with_last_event_id() -> None:
+    """stream(last_event_id=N) replays buffered events with id > N."""
+    queue = SseQueue(maxsize=50, replay_buffer_size=50)
+
+    await queue.put_thought("Event 1")
+    await queue.put_thought("Event 2")
+    await queue.put_thought("Event 3")
+    await queue.close()
+
+    # Replay from event 1 (should yield events 2 and 3)
+    replayed: list[str] = []
+    async for chunk in queue.stream(last_event_id=1):
+        replayed.append(chunk)
+
+    assert len(replayed) == 2
+    assert "Event 2" in replayed[0]
+    assert "Event 3" in replayed[1]
+
+
+def test_format_sse_event_with_id_and_retry() -> None:
+    """format_sse_event correctly formats optional event_id and retry fields per SSE spec."""
+    formatted = format_sse_event(
+        event="thought",
+        data={"delta": "Processing..."},
+        event_id=42,
+        retry=5000,
+    )
+    assert "event: thought\n" in formatted
+    assert "id: 42\n" in formatted
+    assert "retry: 5000\n" in formatted
+    assert 'data: {"delta":"Processing..."}\n\n' in formatted
+
+
+async def _collect(gen, sink: list[str]) -> None:
+    """Drain an async generator into sink (helper for overlap tests)."""
+    async for chunk in gen:
+        sink.append(chunk)
+
+
+@pytest.mark.asyncio
+async def test_sse_queue_generator_handover_preserves_live_events() -> None:
+    """A reconnecting generator supersedes a blocked one without losing live events.
+
+    Regression: the old generator's finally block used to clear
+    _consumer_active and drain the queue while the replacement waited on
+    _q.get(), dropping live events (or hanging the new stream).
+    """
+    queue = SseQueue(maxsize=10, replay_buffer_size=50)
+    await queue.put_thought("first")
+
+    old_gen = queue.stream()
+    assert "first" in await anext(old_gen)
+
+    # Reconnect attaches a replacement while the old generator is blocked.
+    new_gen = queue.stream()
+    old_events: list[str] = []
+    new_events: list[str] = []
+    old_task = asyncio.create_task(_collect(old_gen, old_events))
+    new_task = asyncio.create_task(_collect(new_gen, new_events))
+    await asyncio.sleep(0.05)
+
+    # The superseded generator exits on its own without retiring the connection.
+    await asyncio.wait_for(old_task, timeout=2.0)
+    assert old_events == []
+    assert queue.is_disconnected is False
+
+    # Live events emitted after the handover still reach the replacement.
+    await queue.put_thought("live-after-handover")
+    await queue.put_done("session-handover", staged_files_count=0)
+    await asyncio.wait_for(new_task, timeout=2.0)
+
+    assert any("live-after-handover" in e for e in new_events)
+    assert any("event: done" in e for e in new_events)
+
+
+@pytest.mark.asyncio
+async def test_sse_queue_resume_gap_rejected() -> None:
+    """Resuming from an id older than the retained replay window is rejected.
+
+    Otherwise stream(last_event_id=...) would replay only the survivors
+    (potentially ending with done) without signalling the missed output.
+    """
+    queue = SseQueue(maxsize=512, replay_buffer_size=4)
+    for i in range(10):
+        await queue.put_thought(f"Event {i}")
+
+    # Buffer retains ids 7..10; ids 1..6 were evicted.
+    assert queue.resume_gap(None) is False
+    assert queue.resume_gap(6) is False
+    assert queue.resume_gap(9) is False
+    assert queue.resume_gap(5) is True
+    assert queue.resume_gap(0) is True
+
+    with pytest.raises(ResumeGapError):
+        async for _chunk in queue.stream(last_event_id=5):
+            pass
+
+    # A non-stale resumption still replays the retained survivors.
+    await queue.put_done("session-gap", staged_files_count=0)
+    replayed: list[str] = []
+    async for chunk in queue.stream(last_event_id=7):
+        replayed.append(chunk)
+    assert any("Event 8" in e for e in replayed)
+    assert any("event: done" in e for e in replayed)
+
+
+@pytest.mark.asyncio
+async def test_sse_queue_replay_after_returns_survivors_without_live_tail() -> None:
+    """replay_after() serves retained events (incl. done) with no queue attach."""
+    queue = SseQueue(maxsize=512, replay_buffer_size=50)
+
+    await queue.put_thought("Event 1")
+    await queue.put_thought("Event 2")
+    await queue.put_done("session-replay", staged_files_count=0)
+
+    replayed = queue.replay_after(1)
+    assert len(replayed) == 2
+    assert "Event 2" in replayed[0]
+    assert "event: done" in replayed[1]
+
+    # Nothing newer than the terminal event: empty replay, no hang.
+    assert queue.replay_after(3) == []
+
