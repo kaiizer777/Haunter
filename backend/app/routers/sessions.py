@@ -160,8 +160,16 @@ async def create_session(
             ),
         )
 
-    # Resolve target branch.
-    branch_name: str = body.branch_name or repo.default_branch or "main"
+    # Resolve target branch:
+    # When branch_name is omitted (null), never default to repo.default_branch as a writable target.
+    # Mint a dedicated topic branch (e.g. haunter/session-{id[:8]}) and resolve base_sha from repo default_branch.
+    session_id: uuid.UUID = uuid.uuid4()
+    if body.branch_name:
+        branch_name: str = body.branch_name
+        ref_to_fetch: str = branch_name
+    else:
+        branch_name = f"haunter/session-{str(session_id)[:8]}"
+        ref_to_fetch = repo.default_branch or "main"
 
     # Resolve base SHA via GitHub App installation token.
     # Falls back to settings.github_token for local dev (get_installation_token does this internally).
@@ -174,7 +182,7 @@ async def create_session(
         base_sha: str = await fetch_branch_sha(
             owner=repo.owner,
             repo=repo.name,
-            branch=branch_name,
+            branch=ref_to_fetch,
             token=gh_token,
         )
     except GitHubResourceNotFoundError:
@@ -229,6 +237,7 @@ async def create_session(
         )
 
     session = AgentSession(
+        id=session_id,
         user_id=current_user.id,
         repo_id=repo.id,
         title=body.title or "Pairing Session",
@@ -657,7 +666,6 @@ async def commit_session(
         create_pull_request as _create_pr,
         fetch_commit_tree_sha as _fetch_commit_tree,
         fetch_file_content as _fetch_file,
-        update_branch_ref as _update_ref,
     )
     from app.services.patch_applier import apply_unified_diff
 
@@ -711,16 +719,23 @@ async def commit_session(
 
     repo = session.repo
     default_branch = repo.default_branch or "main"
-    target_branch = session.branch_name
-    if not target_branch or target_branch == default_branch:
+    target_branch = body.branch_name or session.branch_name
+    if not target_branch:
         target_branch = f"haunter/session-{str(session.id)[:8]}"
 
+    # Protected-branch guard: reject protected branches or default branch before ANY external call
     try:
         _validate_branch(target_branch, allow_protected=False)
     except GitHubPRValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
+        )
+
+    if target_branch.lower() == default_branch.lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot commit directly to default branch '{target_branch}'. A topic branch must be used.",
         )
 
     session.branch_name = target_branch
@@ -913,28 +928,50 @@ async def commit_session(
     # ------------------------------------------------------------------
     # 7. Update or create branch ref.
     # ------------------------------------------------------------------
+    from app.github.pr import (
+        create_branch as _pr_create_branch,
+        delete_branch_ref as _pr_delete_ref,
+        get_branch_ref as _pr_get_ref,
+        restore_branch_ref as _pr_restore_ref,
+        update_branch_ref as _pr_update_ref,
+    )
+
     _validate_branch(target_branch, allow_protected=False)
+    branch_was_created = False
+    original_target_sha: Optional[str] = None
+
     try:
-        await _update_ref(
+        original_target_sha = await _pr_get_ref(
             owner=repo.owner,
             repo=repo.name,
             branch=target_branch,
-            commit_sha=commit_sha,
-            force=False,
-            installation_token=gh_token,
+            token=gh_token,
         )
     except GitHubResourceNotFoundError:
-        # Topic branch does not exist yet — create the branch ref.
-        from app.github.pr import create_branch
+        original_target_sha = None
+    except Exception as exc:
+        logger.error(
+            "sessions/commit: get_branch_ref failed for session %s branch %s: %s",
+            session_id,
+            target_branch,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to inspect branch ref via GitHub API: {exc}",
+        )
 
+    if original_target_sha is None:
+        # Topic branch does not exist yet — create the branch ref.
         try:
-            await create_branch(
+            await _pr_create_branch(
                 owner=repo.owner,
                 repo=repo.name,
                 branch=target_branch,
                 sha=commit_sha,
                 token=gh_token,
             )
+            branch_was_created = True
         except Exception as exc:
             logger.error(
                 "sessions/commit: create_branch failed for session %s branch %s: %s",
@@ -946,17 +983,27 @@ async def commit_session(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Failed to create branch ref via GitHub API: {exc}",
             )
-    except _GHErr as exc:
-        logger.error(
-            "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
-            session_id,
-            target_branch,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to update branch ref via GitHub API: {exc}",
-        )
+    else:
+        try:
+            await _pr_update_ref(
+                owner=repo.owner,
+                repo=repo.name,
+                branch=target_branch,
+                sha=commit_sha,
+                token=gh_token,
+                force=False,
+            )
+        except Exception as exc:
+            logger.error(
+                "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
+                session_id,
+                target_branch,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to update branch ref via GitHub API: {exc}",
+            )
 
     # ------------------------------------------------------------------
     # 8. Open pull request against repo default branch.
@@ -972,12 +1019,68 @@ async def commit_session(
             body=body.body,
             installation_token=gh_token,
         )
-    except _GHErr as exc:
+    except Exception as exc:
         logger.error(
             "sessions/commit: create_pull_request failed for session %s: %s",
             session_id,
             exc,
         )
+        # Rollback: ensure no commit is left on a non-PR branch without a PR.
+        # Guard against overwriting concurrent writer commits: only rollback if the
+        # branch ref still points to this session's commit_sha.
+        try:
+            current_ref_sha = await _pr_get_ref(
+                owner=repo.owner,
+                repo=repo.name,
+                branch=target_branch,
+                token=gh_token,
+            )
+        except Exception as ref_exc:
+            logger.warning(
+                "sessions/commit: failed to inspect current ref for %s during rollback: %s",
+                target_branch,
+                ref_exc,
+            )
+            current_ref_sha = None
+
+        if current_ref_sha is not None and current_ref_sha != commit_sha:
+            logger.warning(
+                "sessions/commit: skipping branch rollback for %s; ref advanced to %s (expected %s)",
+                target_branch,
+                current_ref_sha,
+                commit_sha,
+            )
+        elif branch_was_created:
+            try:
+                await _pr_delete_ref(
+                    owner=repo.owner,
+                    repo=repo.name,
+                    branch=target_branch,
+                    token=gh_token,
+                    expected_sha=commit_sha,
+                )
+            except Exception as del_exc:
+                logger.warning(
+                    "sessions/commit: cleanup delete_branch_ref failed for %s: %s",
+                    target_branch,
+                    del_exc,
+                )
+        elif original_target_sha is not None:
+            try:
+                await _pr_restore_ref(
+                    owner=repo.owner,
+                    repo=repo.name,
+                    branch=target_branch,
+                    sha=original_target_sha,
+                    token=gh_token,
+                    expected_sha=commit_sha,
+                )
+            except Exception as reset_exc:
+                logger.warning(
+                    "sessions/commit: rollback restore_branch_ref failed for %s: %s",
+                    target_branch,
+                    reset_exc,
+                )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to open pull request via GitHub API: {exc}",

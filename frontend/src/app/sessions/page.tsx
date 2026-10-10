@@ -116,7 +116,7 @@ function NewSessionModal({ repos, onClose, onCreated }: NewSessionModalProps) {
       const selectedRepo = repos.find((r) => r.id === repoId);
       const payload: SessionCreateIn = {
         repo_id: repoId,
-        branch_name: branch.trim() || selectedRepo?.default_branch || null,
+        branch_name: branch.trim() || null,
         title: title.trim() || null,
       };
       const session = await api.createSession(payload);
@@ -185,16 +185,14 @@ function NewSessionModal({ repos, onClose, onCreated }: NewSessionModalProps) {
           <div className="space-y-1.5">
             <label className="block text-[11px] font-medium text-zinc-400 uppercase tracking-wide font-mono">
               Branch{" "}
-              <span className="text-zinc-600 normal-case tracking-normal">(leave blank for default)</span>
+              <span className="text-zinc-600 normal-case tracking-normal">(leave blank for auto topic branch)</span>
             </label>
             <input
               id="session-branch-input"
               type="text"
               value={branch}
               onChange={(e) => setBranch(e.target.value)}
-              placeholder={
-                repos.find((r) => r.id === repoId)?.default_branch ?? "main"
-              }
+              placeholder="auto: haunter/session-*"
               className="w-full rounded-lg border border-zinc-700/60 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-amber-500/50 transition-all font-mono"
             />
           </div>
@@ -424,7 +422,7 @@ function SessionsContent() {
           setAutoLoadStatus(`Creating new session on ${defaultRepo.owner}/${defaultRepo.name}…`);
           const newSession = await api.createSession({
             repo_id: defaultRepo.id,
-            branch_name: defaultRepo.default_branch || "main",
+            branch_name: null,
             title: `Pairing on ${defaultRepo.name}`,
           });
           if (cancelledRef.current) {
@@ -481,7 +479,7 @@ function SessionsContent() {
       setError(null);
       const newSession = await api.createSession({
         repo_id: defaultRepo.id,
-        branch_name: defaultRepo.default_branch || "main",
+        branch_name: null,
         title: `Pairing on ${defaultRepo.name}`,
       });
       router.push(`/sessions/workspace?id=${newSession.id}`);

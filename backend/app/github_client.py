@@ -2400,6 +2400,13 @@ async def update_branch_ref(
         raise GitHubClientError("Force update is not permitted")
 
     clean_branch = branch.removeprefix("refs/heads/")
+    from app.schemas import is_protected_branch
+
+    if is_protected_branch(clean_branch):
+        raise GitHubClientError(
+            f"Cannot target protected branch {branch!r} directly"
+        )
+
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
     headers = _build_headers(
         token=installation_token, accept="application/vnd.github+json"
@@ -2445,6 +2452,177 @@ async def update_branch_ref(
         raise GitHubClientError(
             f"GitHub API returned error {response.status_code}: {response.text[:200]}"
         )
+
+
+async def restore_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    commit_sha: str,
+    installation_token: Optional[str] = None,
+    expected_sha: Optional[str] = None,
+) -> bool:
+    """
+    Rollback / restore a non-protected branch ref to a prior commit SHA.
+    Explicitly rejects protected branches and sends force=True to allow rewinding.
+    If expected_sha is provided, verifies that the branch ref still matches before updating.
+    """
+    clean_branch = branch.removeprefix("refs/heads/")
+    from app.schemas import is_protected_branch
+
+    if is_protected_branch(clean_branch):
+        raise GitHubClientError(
+            f"Cannot target protected branch {branch!r} directly"
+        )
+
+    if expected_sha is not None:
+        try:
+            current_sha = await fetch_branch_sha(
+                owner=owner,
+                repo=repo,
+                branch=clean_branch,
+                token=installation_token,
+            )
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github_client: restore_branch_ref skipped for %s/%s:%s; SHA %s != expected %s",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            logger.warning(
+                "github_client: restore_branch_ref skipped for %s/%s:%s; branch not found",
+                owner,
+                repo,
+                clean_branch,
+            )
+            return False
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
+    payload = {"sha": commit_sha, "force": True}
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.patch(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error restoring branch ref for %s/%s branch %s",
+                owner,
+                repo,
+                branch,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Branch {branch!r} not found on {owner}/{repo}"
+        )
+    if response.status_code == 422:
+        error_msg = response.text
+        if (
+            "reference does not exist" in error_msg.lower()
+            or "not found" in error_msg.lower()
+        ):
+            raise GitHubResourceNotFoundError(
+                f"Branch {branch!r} not found (422) on {owner}/{repo}"
+            )
+        raise GitHubClientError(
+            f"Failed to restore ref heads/{clean_branch} (422): {error_msg[:200]}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
+    return True
+
+
+async def delete_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    installation_token: Optional[str] = None,
+    expected_sha: Optional[str] = None,
+) -> bool:
+    """
+    Delete a branch ref.
+
+    DELETE /repos/{owner}/{repo}/git/refs/heads/{branch}
+    If expected_sha is provided, verifies that the branch ref still matches before deleting.
+    """
+    clean_branch = branch.removeprefix("refs/heads/")
+
+    if expected_sha is not None:
+        try:
+            current_sha = await fetch_branch_sha(
+                owner=owner,
+                repo=repo,
+                branch=clean_branch,
+                token=installation_token,
+            )
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github_client: delete_branch_ref skipped for %s/%s:%s; SHA %s != expected %s",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            return True
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.delete(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error deleting branch ref for %s/%s branch %s",
+                owner,
+                repo,
+                branch,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code in (204, 404):
+        return True
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
+    return True
 
 
 async def create_pull_request(
