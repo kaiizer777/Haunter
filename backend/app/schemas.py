@@ -18,6 +18,15 @@ from app.models import UserRole
 _BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9/_.-]+$")
 _REPO_IDENT_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
 _PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "develop", "dev"})
+PROTECTED_BRANCHES: frozenset[str] = _PROTECTED_BRANCHES
+
+
+def is_protected_branch(branch: Optional[str]) -> bool:
+    """Return True if branch name (stripped of refs/heads/) is a protected branch."""
+    if not branch:
+        return False
+    clean = branch.strip().removeprefix("refs/heads/")
+    return clean.lower() in _PROTECTED_BRANCHES
 
 
 def validate_repo_ident(value: str, label: str = "identifier") -> str:
@@ -96,7 +105,7 @@ def _validate_git_branch(
                 f"Invalid Git branch name format: {branch!r}. Branch component cannot contain '..': {comp!r}."
             )
 
-    if not allow_protected and clean.lower() in _PROTECTED_BRANCHES:
+    if not allow_protected and is_protected_branch(clean):
         raise ValueError(
             f"Target branch cannot be a protected branch: {branch!r}. "
             f"Protected branches: {sorted(_PROTECTED_BRANCHES)}"

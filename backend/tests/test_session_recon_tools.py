@@ -508,7 +508,9 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
             owner="org",
             repo="repo",
             base_sha="sha1",
+            staged_patches={},
             token="dummy-token",
+            session_id=None,
         )
 
     # 2. grep_search dispatch
@@ -534,7 +536,9 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
             owner="org",
             repo="repo",
             base_sha="sha1",
+            staged_patches={},
             token="dummy-token",
+            session_id=None,
         )
 
     # 3. glob_files dispatch
@@ -552,6 +556,15 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
             queue=mock_queue,
         )
         assert res == "src/a.py\nsrc/b.py"
+        m.assert_awaited_once_with(
+            pattern="src/*.py",
+            exclude_hidden=True,
+            owner="org",
+            repo="repo",
+            base_sha="sha1",
+            staged_patches={},
+            token="dummy-token",
+        )
 
     # 4. list_directory dispatch
     with patch(
@@ -568,6 +581,15 @@ async def test_orchestrator_dispatch_recon_tools() -> None:
             queue=mock_queue,
         )
         assert res == "app/\nmain.py"
+        m.assert_awaited_once_with(
+            path=".",
+            depth=1,
+            owner="org",
+            repo="repo",
+            base_sha="sha1",
+            staged_patches={},
+            token="dummy-token",
+        )
 
     # 5. Error containment (e.g. ValueError or GitHubClientError returns error string)
     with patch(
@@ -594,8 +616,20 @@ async def test_tool_git_diff_working_tree_and_staged() -> None:
         "app/test.py": "--- a/app/test.py\n+++ b/app/test.py\n@@ -1 +1 @@\n-old\n+new\n"
     }
 
-    # Test querying working / uncommitted
-    diff_worktree = await tool_git_diff(
+    # Test querying staged patches
+    diff_staged = await tool_git_diff(
+        base="HEAD",
+        head="staged",
+        owner="org",
+        repo="repo",
+        token="token",
+        staged_patches=staged,
+    )
+    assert "app/test.py" in diff_staged
+    assert "+new" in diff_staged
+
+    # Test querying working tree with no local checkout returns explicit error
+    diff_worktree_no_local = await tool_git_diff(
         base="HEAD",
         head="working",
         owner="org",
@@ -603,8 +637,7 @@ async def test_tool_git_diff_working_tree_and_staged() -> None:
         token="token",
         staged_patches=staged,
     )
-    assert "app/test.py" in diff_worktree
-    assert "+new" in diff_worktree
+    assert "No local repository checkout available in this environment. Use head='staged' to inspect in-memory staged patches." in diff_worktree_no_local
 
     # Test base == head with staged patches notifies user
     diff_same = await tool_git_diff(
@@ -669,4 +702,616 @@ async def test_tool_git_diff_untracked_symlink_ignored(tmp_path) -> None:
     assert "No uncommitted working-tree differences found." in res
 
 
+# ---------------------------------------------------------------------------
+# Issue #66 Comprehensive Tests (Staged Read Tools & Git Diff Scoping)
+# tool_read_file & read_file_slice Deep Edge Case Tests
+# ---------------------------------------------------------------------------
 
+
+@pytest.mark.asyncio
+async def test_resolve_read_content_staged_overlay() -> None:
+    """resolve_read_content properly overlays staged modifications, creations, and deletions."""
+    from app.services.session_tools.recon import resolve_read_content
+
+    base_content = "def foo():\n    return 42\n"
+    mod_diff = "--- a/src/foo.py\n+++ b/src/foo.py\n@@ -1,2 +1,2 @@\n def foo():\n-    return 42\n+    return 100\n"
+    create_diff = "--- /dev/null\n+++ b/src/bar.py\n@@ -0,0 +1,2 @@\n+def bar():\n+    return 'new'\n"
+    del_diff = "--- a/src/baz.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-def baz():\n-    pass\n"
+
+    staged = {
+        "src/foo.py": mod_diff,
+        "src/bar.py": create_diff,
+        "src/baz.py": del_diff,
+    }
+
+    with patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock) as mock_fetch:
+        mock_fetch.side_effect = lambda owner, repo, path, sha, token: base_content if path == "src/foo.py" else None
+
+        # 1. Modified file reflects patched content
+        res_mod = await resolve_read_content(
+            path="src/foo.py",
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert res_mod == "def foo():\n    return 100\n"
+
+        # 2. Created file returns full created content
+        res_create = await resolve_read_content(
+            path="src/bar.py",
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert res_create == "def bar():\n    return 'new'"
+
+        # 3. Deleted file returns None
+        res_del = await resolve_read_content(
+            path="src/baz.py",
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert res_del is None
+
+
+@pytest.mark.asyncio
+async def test_read_file_and_slice_consistency() -> None:
+    """_tool_read_file and tool_read_file_slice return identical content on staged edits."""
+    from app.services.session_orchestrator import SessionOrchestrator
+    from app.services.session_tools.recon import tool_read_file_slice
+
+    orchestrator = SessionOrchestrator(session_id=None, db=AsyncMock(), gh_token="dummy-token")
+    base_file = "line1\nline2\nline3\nline4\n"
+    diff = "--- a/app/main.py\n+++ b/app/main.py\n@@ -2,2 +2,2 @@\n-line2\n-line3\n+line2_updated\n+line3_updated\n"
+    staged = {"app/main.py": diff}
+
+    with patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock, return_value=base_file):
+        full_read = await orchestrator._tool_read_file(
+            args={"path": "app/main.py"},
+            repo_owner="org",
+            repo_name="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        slice_read = await tool_read_file_slice(
+            path="app/main.py",
+            start_line=1,
+            end_line=4,
+            owner="org",
+            repo="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+
+        expected_lines = ["line1", "line2_updated", "line3_updated", "line4"]
+        assert full_read.splitlines() == expected_lines
+        assert [line.split(": ", 1)[1] for line in slice_read.splitlines()] == expected_lines
+
+
+@pytest.mark.asyncio
+async def test_recon_tools_reflect_staged_overlay() -> None:
+    """glob_files, grep_search, and list_directory reflect staged creations, modifications, deletions."""
+    mock_tree = {
+        "tree": [
+            {"path": "src/existing.py", "type": "blob"},
+            {"path": "src/deleted.py", "type": "blob"},
+        ]
+    }
+    staged = {
+        "src/existing.py": "--- a/src/existing.py\n+++ b/src/existing.py\n@@ -1 +1 @@\n-val = 1\n+val = 999_SPECIAL\n",
+        "src/created.py": "--- /dev/null\n+++ b/src/created.py\n@@ -0,0 +1 @@\n+val = 999_SPECIAL\n",
+        "src/deleted.py": "--- a/src/deleted.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-val = 999_SPECIAL\n",
+    }
+
+    with patch("app.services.session_tools.recon.fetch_git_tree", new_callable=AsyncMock, return_value=mock_tree), \
+         patch("app.services.session_tools.recon.fetch_file_content", new_callable=AsyncMock, return_value="val = 1\n"):
+
+        # 1. glob_files includes created, excludes deleted
+        globs = await tool_glob_files(
+            pattern="src/*.py",
+            owner="org",
+            repo="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert "src/created.py" in globs
+        assert "src/existing.py" in globs
+        assert "src/deleted.py" not in globs
+
+        # 2. grep_search finds matches in created and modified, skips deleted
+        grep_res = await tool_grep_search(
+            query="999_SPECIAL",
+            owner="org",
+            repo="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert "src/existing.py:1: val = 999_SPECIAL" in grep_res
+        assert "src/created.py:1: val = 999_SPECIAL" in grep_res
+        assert "src/deleted.py" not in grep_res
+
+        # 3. list_directory includes new paths
+        dir_entries = await tool_list_directory(
+            path="src",
+            depth=1,
+            owner="org",
+            repo="repo",
+            base_sha="sha1",
+            staged_patches=staged,
+        )
+        assert "created.py" in dir_entries
+        assert "existing.py" in dir_entries
+        assert "deleted.py" not in dir_entries
+
+
+@pytest.mark.asyncio
+async def test_tool_git_diff_path_and_stat_scoping() -> None:
+    """tool_git_diff filters by path and outputs git diffstat formatting with stat_only=True."""
+    from app.services.session_tools.git import tool_git_diff
+
+    multi_diff = (
+        "diff --git a/src/a.py b/src/a.py\n"
+        "--- a/src/a.py\n"
+        "+++ b/src/a.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " a\n"
+        "-old_a\n"
+        "+new_a\n"
+        "+extra_a\n"
+        "diff --git a/src/b.py b/src/b.py\n"
+        "--- a/src/b.py\n"
+        "+++ b/src/b.py\n"
+        "@@ -1 +1 @@\n"
+        "-old_b\n"
+        "+new_b\n"
+    )
+
+    with patch("app.services.session_tools.git.fetch_diff", new_callable=AsyncMock, return_value=multi_diff):
+        # 1. Path filter returns only targeted file
+        diff_a = await tool_git_diff(
+            base="main",
+            head="feat",
+            path="src/a.py",
+            owner="org",
+            repo="repo",
+        )
+        assert "src/a.py" in diff_a
+        assert "src/b.py" not in diff_a
+
+        # 2. stat_only returns diffstat format
+        stat_res = await tool_git_diff(
+            base="main",
+            head="feat",
+            stat_only=True,
+            owner="org",
+            repo="repo",
+        )
+        assert "src/a.py | 3 ++-" in stat_res
+        assert "src/b.py | 2 +-" in stat_res
+        assert "2 files changed, 3 insertions(+), 2 deletions(-)" in stat_res
+
+    # 3. head='staged' with path filter and stat_only
+    staged = {
+        "src/x.py": "--- a/src/x.py\n+++ b/src/x.py\n@@ -1 +1,2 @@\n-old\n+new\n+added\n",
+        "src/y.py": "--- a/src/y.py\n+++ b/src/y.py\n@@ -1 +1 @@\n-y\n+y2\n",
+    }
+    staged_stat = await tool_git_diff(
+        base="HEAD",
+        head="staged",
+        stat_only=True,
+        staged_patches=staged,
+    )
+    assert "src/x.py | 3 ++-" in staged_stat
+    assert "src/y.py | 2 +-" in staged_stat
+    assert "2 files changed, 3 insertions(+), 2 deletions(-)" in staged_stat
+
+    staged_scoped = await tool_git_diff(
+        base="HEAD",
+        head="staged",
+        path="src/x.py",
+        staged_patches=staged,
+    )
+    assert "src/x.py" in staged_scoped
+    assert "src/y.py" not in staged_scoped
+
+
+@pytest.mark.asyncio
+async def test_list_staged_files_tool_and_prompt_formatting() -> None:
+    """_tool_list_staged_files formats statuses and system prompt incorporates staged changes."""
+    from app.services.session_orchestrator import SessionOrchestrator, _build_system_prompt
+
+    orchestrator = SessionOrchestrator(session_id=None, db=AsyncMock(), gh_token="dummy-token")
+    staged = {
+        "src/mod.py": "--- a/src/mod.py\n+++ b/src/mod.py\n@@ -1 +1 @@\n-1\n+2\n",
+        "src/new.py": "--- /dev/null\n+++ b/src/new.py\n@@ -0,0 +1 @@\n+created\n",
+        "src/del.py": "--- a/src/del.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-deleted\n",
+    }
+
+    result = orchestrator._tool_list_staged_files(staged_patches=staged)
+    assert "Staged files (3):" in result
+    assert "  - src/del.py (deleted, +0/-1)" in result
+    assert "  - src/mod.py (modified, +1/-1)" in result
+    assert "  - src/new.py (created, +1/-0)" in result
+
+    prompt = _build_system_prompt(
+        repo_owner="test-owner",
+        repo_name="test-repo",
+        branch_name="fix-branch",
+        base_sha="12345678abcdef",
+        staged_patches=staged,
+    )
+    assert "list_staged_files" in prompt
+    assert "- src/mod.py" in prompt
+    assert "- src/new.py" in prompt
+    assert "- src/del.py" in prompt
+
+
+@pytest.mark.asyncio
+async def test_tool_read_file_invalid_path_returns_error_string() -> None:
+    """tool_read_file safely returns error strings on invalid paths instead of raising ValueError."""
+    from app.services.session_tools.recon import tool_read_file
+
+    res_traversal = await tool_read_file(path="../../etc/passwd")
+    assert res_traversal.startswith("Error: ")
+    assert "Directory traversal rejected" in res_traversal
+
+    res_absolute = await tool_read_file(path="/etc/shadow")
+    assert res_absolute.startswith("Error: ")
+    assert "Absolute path rejected" in res_absolute
+
+    res_chars = await tool_read_file(path="file; rm -rf /")
+    assert res_chars.startswith("Error: ")
+    assert "disallowed characters" in res_chars
+
+
+@pytest.mark.asyncio
+async def test_tool_read_file_truncation_flag() -> None:
+    """tool_read_file respects truncate=False for full content slicing."""
+    from app.services.session_tools.recon import tool_read_file
+
+    large_content = "x" * 60_000
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content",
+        new_callable=AsyncMock,
+        return_value=large_content,
+    ):
+        truncated = await tool_read_file("large.txt", truncate=True)
+        assert len(truncated) < 60_000
+        assert "[...truncated at 50000 chars]" in truncated
+
+        untruncated = await tool_read_file("large.txt", truncate=False)
+        assert len(untruncated) == 60_000
+        assert "[...truncated" not in untruncated
+
+
+@pytest.mark.asyncio
+async def test_read_file_slice_on_large_file_with_staged_overlay(tmp_path) -> None:
+    """read_file_slice on a large file (>50k chars) reads beyond 50k without truncation artifacts."""
+    from app.services.session_tools.recon import tool_read_file_slice
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    large_file = repo_dir / "large.py"
+    # Create a 3000-line file (~66k chars): well past the 50,000-char
+    # truncation boundary (~line 2270), so the slice below genuinely exercises
+    # the untruncated path. A smaller fixture would pass even with truncation.
+    lines = [f"def func_{i}(): pass" for i in range(3000)]
+    raw = "\n".join(lines)
+    assert len(raw) > 50_000
+    large_file.write_text(raw, encoding="utf-8")
+
+    staged = {
+        "large.py": "--- a/large.py\n+++ b/large.py\n@@ -2900,1 +2900,1 @@\n-def func_2899(): pass\n+def func_2899_modified(): pass\n"
+    }
+
+    with patch("app.services.session_tools.sandbox.resolve_repo_dir", return_value=(str(repo_dir), None)):
+        res = await tool_read_file_slice(
+            path="large.py",
+            start_line=2895,
+            end_line=2905,
+            repo="test-repo",
+            staged_patches=staged,
+        )
+        assert "2900: def func_2899_modified(): pass" in res
+        assert "truncated" not in res
+
+
+@pytest.mark.asyncio
+async def test_read_file_slice_file_starting_with_error_word() -> None:
+    """read_file_slice handles a file whose content starts with 'Error' correctly without mistaking it for a failure."""
+    from app.services.session_tools.recon import tool_read_file_slice
+
+    error_code = "ErrorMessage = 'Something went wrong'\nErrorCode = 500\n"
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content",
+        new_callable=AsyncMock,
+        return_value=error_code,
+    ):
+        res = await tool_read_file_slice(
+            path="errors.py",
+            start_line=1,
+            end_line=2,
+        )
+        assert res == "1: ErrorMessage = 'Something went wrong'\n2: ErrorCode = 500"
+
+
+def _init_git_repo_with_commit(repo_dir: object, files: dict[str, str]) -> str:
+    """Init a git repo under repo_dir with files committed; return HEAD sha."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git binary unavailable")
+    root = str(repo_dir)
+
+    def _git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                *args,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+
+    _git("init", "-q")
+    for rel, text in files.items():
+        target = str(repo_dir / rel)  # type: ignore[operator]
+        with open(target, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    _git("add", ".")
+    _git("commit", "-qm", "base")
+    out = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_read_file_disk_creation_existing_file_is_authoritative(tmp_path) -> None:
+    """A disk file colliding with a staged creation patch is returned unchanged."""
+    from app.services.session_tools.recon import tool_read_file
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    with open(repo_dir / "created.py", "w", encoding="utf-8", newline="\n") as f:
+        f.write("print('existing other content')\n")
+    staged = {
+        "created.py": "--- /dev/null\n+++ b/created.py\n@@ -0,0 +1 @@\n+print('hello world')\n"
+    }
+    with patch(
+        "app.services.session_tools.sandbox.resolve_repo_dir",
+        return_value=(str(repo_dir), None),
+    ):
+        res = await tool_read_file(
+            path="created.py",
+            owner="o",
+            repo="r",
+            base_sha="s",
+            staged_patches=staged,
+        )
+    # Overlaying the creation patch would insert its lines into the existing
+    # file; disk content must win instead.
+    assert res == "print('existing other content')\n"
+
+
+@pytest.mark.asyncio
+async def test_read_file_disk_modify_synced_stale_diverged(tmp_path) -> None:
+    """Disk-vs-staged decision for modify diffs: synced/diverged return disk, stale overlays."""
+    from app.services.session_tools.recon import tool_read_file
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    base_text = "old_val\nold_val\n"
+    base_sha = _init_git_repo_with_commit(repo_dir, {"f.py": base_text})
+    target = repo_dir / "f.py"
+    staged = {
+        "f.py": "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-old_val\n+new_val\n"
+    }
+
+    async def _read() -> str:
+        with patch(
+            "app.services.session_tools.sandbox.resolve_repo_dir",
+            return_value=(str(repo_dir), None),
+        ):
+            return await tool_read_file(
+                path="f.py",
+                owner="o",
+                repo="r",
+                base_sha=base_sha,
+                staged_patches=staged,
+            )
+
+    def _write(text: str) -> None:
+        with open(target, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+
+    # Stale disk (still clean base): overlay applies so reads observe staged content.
+    _write(base_text)
+    assert await _read() == "new_val\nold_val\n"
+
+    # Synced disk (old text duplicated elsewhere): must NOT re-apply the diff
+    # onto the wrong occurrence; disk is returned as-is.
+    _write("new_val\nold_val\n")
+    assert await _read() == "new_val\nold_val\n"
+
+    # Diverged disk (terminal edits): disk is authoritative.
+    _write("terminal_edit\nold_val\n")
+    assert await _read() == "terminal_edit\nold_val\n"
+
+
+# ---------------------------------------------------------------------------
+# Review regression tests (PR #94): diff counting, quoted paths, header parsing
+# ---------------------------------------------------------------------------
+
+
+def test_strip_git_prefix_does_not_mangle_brick_paths() -> None:
+    """Exact prefix removal keeps names like brick.py intact (lstrip regression)."""
+    from app.services.session_tools.git import _filter_diff_by_path, _strip_git_prefix
+
+    assert _strip_git_prefix("a/brick.py") == "brick.py"
+    assert _strip_git_prefix("b/brick.py") == "brick.py"
+    diff = (
+        "diff --git a/brick.py b/brick.py\n"
+        "--- a/brick.py\n+++ b/brick.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    assert _filter_diff_by_path(diff, "brick.py") is not None
+    assert _filter_diff_by_path(diff, "rick.py") is None
+
+
+def test_count_diff_lines_counts_header_shaped_hunk_content() -> None:
+    """Hunk lines shaped like file headers ("+++ x"/"---y") are changes, not headers."""
+    from app.services.session_tools.recon import _count_diff_lines
+
+    diff = (
+        "--- a/vars.css\n+++ b/vars.css\n@@ -1,2 +1,2 @@\n---brand: red\n+++brand: blue\n"
+    )
+    assert _count_diff_lines(diff) == (1, 1)
+
+    plus_plus = "--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+++ helper\n"
+    assert _count_diff_lines(plus_plus) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_diff_stat_counts_header_shaped_hunk_content() -> None:
+    """_format_diff_stat totals include hunk lines that look like file headers."""
+    from app.services.session_tools.git import _format_diff_stat
+
+    diff = (
+        "diff --git a/vars.css b/vars.css\n"
+        "--- a/vars.css\n+++ b/vars.css\n@@ -1,2 +1,2 @@\n---brand: red\n+++brand: blue\n"
+    )
+    stat = _format_diff_stat(diff)
+    assert "vars.css | 2 +-" in stat
+    assert "1 file changed, 1 insertion(+), 1 deletion(-)" in stat
+
+
+@pytest.mark.asyncio
+async def test_git_diff_handles_quoted_paths_with_spaces() -> None:
+    """diff --git headers with quoted space-containing paths filter and stat correctly."""
+    from app.services.session_tools.git import tool_git_diff
+
+    quoted_diff = (
+        'diff --git "a/my file.py" "b/my file.py"\n'
+        "--- a/my file.py\n+++ b/my file.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    with patch(
+        "app.services.session_tools.git.fetch_diff",
+        new_callable=AsyncMock,
+        return_value=quoted_diff,
+    ):
+        filtered = await tool_git_diff(
+            base="main", head="feat", path="my file.py", owner="org", repo="repo"
+        )
+        assert "old" in filtered and "new" in filtered
+        stat = await tool_git_diff(
+            base="main", head="feat", stat_only=True, owner="org", repo="repo"
+        )
+        assert "my file.py | 2 +-" in stat
+
+
+@pytest.mark.asyncio
+async def test_read_file_patch_body_with_diff_literal_stays_modified() -> None:
+    """A modified file whose added lines embed diff literals is not misclassified."""
+    from app.services.session_tools.recon import tool_read_file
+
+    base = "doc intro\n"
+    staged = {
+        "docs/guide.md": (
+            "--- a/docs/guide.md\n+++ b/docs/guide.md\n@@ -1 +1,3 @@\n doc intro\n"
+            "++++ /dev/null is a git marker\n"
+            "+---- /dev/null likewise\n"
+        )
+    }
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content",
+        new_callable=AsyncMock,
+        return_value=base,
+    ):
+        res = await tool_read_file(
+            path="docs/guide.md",
+            owner="o",
+            repo="r",
+            base_sha="s",
+            staged_patches=staged,
+        )
+    assert "deleted in staged changes" not in res
+    assert "doc intro" in res
+    assert "++ /dev/null is a git marker" in res
+    assert "--- /dev/null likewise" in res
+
+
+@pytest.mark.asyncio
+async def test_read_file_slice_reports_staged_deletion_hint() -> None:
+    """tool_read_file_slice preserves the staged-deletion diagnostic."""
+    staged = {"gone.py": "--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"}
+    res = await tool_read_file_slice(
+        path="gone.py", start_line=1, end_line=5, staged_patches=staged
+    )
+    assert res == "File not found: 'gone.py' (deleted in staged changes)"
+
+
+@pytest.mark.asyncio
+async def test_resolve_read_content_ignores_main_checkout_for_session(tmp_path) -> None:
+    """Session flows without a session-isolated checkout resolve from base_sha, not disk."""
+    from app.services.session_tools.recon import resolve_read_content
+
+    main_root = tmp_path / "main-checkout"
+    main_root.mkdir()
+    (main_root / "notes.txt").write_text("DISK DIRTY\n", encoding="utf-8")
+
+    with (
+        patch(
+            "app.services.session_tools.sandbox.resolve_repo_dir",
+            return_value=(str(main_root), None),
+        ),
+        patch(
+            "app.services.session_tools.recon.fetch_file_content",
+            new_callable=AsyncMock,
+            return_value="BASE CLEAN\n",
+        ),
+    ):
+        unscoped = await resolve_read_content(
+            path="notes.txt",
+            repo_owner="o",
+            repo_name="r",
+            base_sha="s",
+            staged_patches=None,
+            session_id="sid123",
+        )
+        assert unscoped == "BASE CLEAN\n"
+
+        scoped_root = main_root / ".haunter_sessions" / "sid123"
+        scoped_root.mkdir(parents=True)
+        (scoped_root / "notes.txt").write_text("DISK SCOPED\n", encoding="utf-8")
+        with patch(
+            "app.services.session_tools.sandbox.resolve_repo_dir",
+            return_value=(str(scoped_root), None),
+        ):
+            scoped = await resolve_read_content(
+                path="notes.txt",
+                repo_owner="o",
+                repo_name="r",
+                base_sha="s",
+                staged_patches=None,
+                session_id="sid123",
+            )
+            assert scoped == "DISK SCOPED\n"

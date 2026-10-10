@@ -66,7 +66,7 @@ def classify_failure(
         failure_reason directly.
     """
     # Only classify terminal failure states.
-    if run.status not in ("fallback", "error"):
+    if run.status not in ("fallback", "fallback_commented", "error"):
         return None
 
     # Phase 15: defer to the orchestrator-written failure_reason when present.
@@ -113,9 +113,17 @@ def classify_failure(
 
     # -------------------------------------------------------------------------
     # 3. wrong_fix — attempts exist but none ever reached sandbox verification
-    #    (verification_status is None means patch was rejected before submission)
+    #    (verification_status is None means patch was rejected before submission).
+    #    When verification is skipped by repo settings, return None to avoid
+    #    misclassifying policy/config bypass as an invalid patch.
     # -------------------------------------------------------------------------
-    sandbox_reached = [a for a in attempts if a.verification_status is not None]
+    if all(a.verification_status == "skipped" for a in attempts):
+        return None
+
+    sandbox_reached = [
+        a for a in attempts
+        if a.verification_status is not None and a.verification_status != "skipped"
+    ]
     if not sandbox_reached:
         return "wrong_fix"
 

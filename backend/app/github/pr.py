@@ -33,7 +33,7 @@ import httpx
 
 from app.config import settings
 from app.github_client import GitHubResourceNotFoundError
-from app.schemas import validate_repo_ident
+from app.schemas import _PROTECTED_BRANCHES, is_protected_branch, validate_repo_ident
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,8 @@ _BRANCH_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9/_\-\.]+$")
 _BRANCH_MAX_LEN = 255
 
 # Protected base branches — Haunter must never push directly to these.
-_PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "develop", "dev"})
+# Single source of truth imported from app.schemas.
+_PROTECTED_BRANCHES: frozenset[str] = _PROTECTED_BRANCHES
 
 # ---------------------------------------------------------------------------
 # Secret redaction (import from context_gatherer to keep a single source of truth)
@@ -135,7 +136,7 @@ def _validate_branch(branch: str, allow_protected: bool = True) -> None:
             r"Only [a-zA-Z0-9/_\-.] are allowed."
         )
     clean = branch.removeprefix("refs/heads/")
-    if not allow_protected and clean.lower() in _PROTECTED_BRANCHES:
+    if not allow_protected and is_protected_branch(clean):
         raise GitHubPRValidationError(
             f"Cannot target protected branch {branch!r} directly."
         )
@@ -675,7 +676,7 @@ def _build_auth_headers(token: str) -> dict[str, str]:
     }
 
 
-async def _get_repo_default_branch_sha(
+async def get_branch_ref(
     owner: str, repo: str, branch: str, token: str
 ) -> str:
     """Fetch the HEAD SHA of `branch` in the repo."""
@@ -712,6 +713,9 @@ async def _get_repo_default_branch_sha(
             f"Failed to fetch ref heads/{clean_branch}: HTTP {resp.status_code}"
         )
     return resp.json()["object"]["sha"]
+
+
+_get_repo_default_branch_sha = get_branch_ref
 
 
 async def update_branch_ref(
@@ -785,6 +789,94 @@ async def update_branch_ref(
     )
 
 
+async def restore_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    sha: str,
+    token: str,
+    expected_sha: Optional[str] = None,
+) -> bool:
+    """
+    Rollback / restore a non-protected branch ref to a prior commit SHA.
+
+    Used strictly in rollback scenarios (e.g. when PR creation fails after advancing
+    an existing topic branch). Explicitly rejects protected branches (allow_protected=False)
+    and sends force=True to allow rewinding the ref to the pre-commit SHA.
+
+    If `expected_sha` is provided, verifies that the branch still points to `expected_sha`
+    before restoring; if another writer has advanced the branch, rollback is safely skipped.
+    """
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    _validate_branch(branch, allow_protected=False)
+
+    clean_branch = branch.removeprefix("refs/heads/")
+
+    if expected_sha is not None:
+        try:
+            current_sha = await get_branch_ref(owner, repo, clean_branch, token)
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github.pr: skipping restore_branch_ref for %s/%s:%s because ref SHA %s != expected %s (advanced by concurrent writer)",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            logger.warning(
+                "github.pr: skipping restore_branch_ref for %s/%s:%s because branch ref was not found",
+                owner,
+                repo,
+                clean_branch,
+            )
+            return False
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_auth_headers(token)
+    payload = {"sha": sha, "force": True}
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        try:
+            resp = await client.patch(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error restoring branch ref {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+    if resp.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+        )
+    if resp.status_code == 422:
+        error_msg = resp.text
+        if "reference does not exist" in error_msg.lower() or "not found" in error_msg.lower():
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+            )
+        raise GitHubPRError(
+            f"Failed to restore ref heads/{clean_branch} (422): {error_msg[:200]}"
+        )
+    if resp.status_code in (401, 403):
+        raise GitHubPRAuthError(f"Auth failed restoring branch ref ({resp.status_code}).")
+    if resp.is_error:
+        raise GitHubPRError(
+            f"Failed to restore ref heads/{clean_branch}: HTTP {resp.status_code}"
+        )
+
+    logger.info(
+        "github.pr: restored ref %s/%s:%s to sha=%s",
+        owner,
+        repo,
+        clean_branch,
+        sha[:8],
+    )
+    return True
+
+
 async def create_branch(
     owner: str,
     repo: str,
@@ -835,6 +927,70 @@ async def create_branch(
     logger.info(
         "github.pr: created branch %s/%s:%s at sha=%s", owner, repo, branch, sha[:8]
     )
+
+
+async def delete_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    token: str,
+    expected_sha: Optional[str] = None,
+) -> bool:
+    """
+    Delete a branch ref from the repo.
+
+    Never deletes protected branches (allow_protected=False). Safely handles 204 (deleted) and 404 (already gone).
+    If `expected_sha` is provided, verifies that the branch still points to `expected_sha` before deleting.
+    """
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    _validate_branch(branch, allow_protected=False)
+
+    clean_branch = branch.removeprefix("refs/heads/")
+
+    if expected_sha is not None:
+        try:
+            current_sha = await get_branch_ref(owner, repo, clean_branch, token)
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github.pr: skipping delete_branch_ref for %s/%s:%s because ref SHA %s != expected %s (advanced by concurrent writer)",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            return True
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_auth_headers(token)
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        try:
+            resp = await client.delete(url, headers=headers)
+        except httpx.RequestError as exc:
+            raise GitHubPRError(
+                f"Network error deleting branch ref {branch!r}: {exc.__class__.__name__}"
+            ) from exc
+
+    if resp.status_code in (204, 404):
+        logger.info(
+            "github.pr: deleted branch ref %s/%s:%s (status %d)",
+            owner,
+            repo,
+            clean_branch,
+            resp.status_code,
+        )
+        return True
+    if resp.status_code in (401, 403):
+        raise GitHubPRAuthError(f"Auth failed deleting branch ref ({resp.status_code}).")
+    if resp.is_error:
+        raise GitHubPRError(
+            f"Failed to delete branch ref heads/{clean_branch}: HTTP {resp.status_code}"
+        )
+    return True
 
 
 def _parse_patch_files(patch_text: str) -> dict[str, str]:

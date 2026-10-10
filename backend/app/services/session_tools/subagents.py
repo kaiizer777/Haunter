@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from app.github_client import GitHubClientError, fetch_file_content
+from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
 from app.models import AgentSession
@@ -45,7 +45,10 @@ from app.services.session_tools.git import (
     tool_git_show,
 )
 from app.services.session_tools.recon import (
+    _is_staged_creation,
+    _is_staged_deletion,
     _validate_file_path,
+    resolve_read_content,
     tool_glob_files,
     tool_grep_search,
     tool_list_directory,
@@ -184,6 +187,7 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
                 "verify_in_ci_sandbox",
                 "glob_files",
                 "read_file_slice",
+                "read_file",
             }
         ),
         max_iterations=8,
@@ -191,8 +195,8 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
             "You are SandboxVerifier, a test-execution and validation specialist. "
             "Run verify_in_ci_sandbox for cloud CI verification, or run_targeted_tests, "
             "run_linter, and run_terminal_command when local checkout is available to "
-            "validate correctness. Use glob_files and read_file_slice only to "
-            "locate targets. You are read-only — never write or modify code."
+            "validate correctness. Use glob_files, read_file, and read_file_slice only to "
+            "locate targets and inspect test outputs. You are read-only — never write or modify code."
         ),
     ),
     "code_guardian": RoleConfig(
@@ -617,20 +621,23 @@ class SubagentRunner:
             path = _validate_file_path(path)
         except ValueError as exc:
             return f"Error: {exc}"
-        try:
-            content = await fetch_file_content(
-                owner=self.repo_owner,
-                repo=self.repo_name,
-                path=path,
-                sha=self.base_sha,
-                token=self.gh_token,
-            )
-        except GitHubClientError as exc:
-            logger.warning(
-                "subagent_runner: read_file GitHub error path=%s: %s", path, exc
-            )
-            return f"Error reading file: {exc}"
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
+        content = await resolve_read_content(
+            path=path,
+            repo_owner=self.repo_owner,
+            repo_name=self.repo_name,
+            base_sha=self.base_sha,
+            staged_patches=self.staged_patches,
+            gh_token=self.gh_token,
+            session_id=session_id_str,
+        )
         if content is None:
+            if self.staged_patches and path in self.staged_patches:
+                staged_diff = self.staged_patches[path]
+                if _is_staged_deletion(staged_diff):
+                    return f"File not found: {path!r} (deleted in staged changes)"
+                if not _is_staged_creation(staged_diff):
+                    return f"Error reading file: base content for {path!r} is unavailable."
             return f"File not found: {path!r}"
         max_chars = 50_000
         if len(content) > max_chars:
@@ -645,6 +652,7 @@ class SubagentRunner:
             max_results: int = int(args.get("max_results", 25))
         except (TypeError, ValueError):
             max_results = 25
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         try:
             return await tool_grep_search(
                 query=query,
@@ -654,7 +662,9 @@ class SubagentRunner:
                 owner=self.repo_owner,
                 repo=self.repo_name,
                 base_sha=self.base_sha,
+                staged_patches=self.staged_patches,
                 token=self.gh_token,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -669,6 +679,7 @@ class SubagentRunner:
                 owner=self.repo_owner,
                 repo=self.repo_name,
                 base_sha=self.base_sha,
+                staged_patches=self.staged_patches,
                 token=self.gh_token,
             )
             return (
@@ -686,6 +697,11 @@ class SubagentRunner:
             end_line: int = int(args.get("end_line", 1))
         except (TypeError, ValueError):
             return "Error: start_line and end_line must be valid integers."
+        session_id_str = (
+            str(self.session.id)
+            if (self.session and getattr(self.session, "id", None))
+            else None
+        )
         try:
             return await tool_read_file_slice(
                 path=path,
@@ -695,6 +711,8 @@ class SubagentRunner:
                 repo=self.repo_name,
                 base_sha=self.base_sha,
                 token=self.gh_token,
+                staged_patches=self.staged_patches,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -712,6 +730,7 @@ class SubagentRunner:
                 owner=self.repo_owner,
                 repo=self.repo_name,
                 base_sha=self.base_sha,
+                staged_patches=self.staged_patches,
                 token=self.gh_token,
             )
             return (
@@ -724,6 +743,7 @@ class SubagentRunner:
 
     async def _exec_get_file_outline(self, args: dict[str, Any]) -> str:
         path: str = str(args.get("path", ""))
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         try:
             return await tool_get_file_outline(
                 path=path,
@@ -732,6 +752,7 @@ class SubagentRunner:
                 base_sha=self.base_sha,
                 staged_patches=self.staged_patches,
                 gh_token=self.gh_token,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -739,6 +760,7 @@ class SubagentRunner:
     async def _exec_find_symbol(self, args: dict[str, Any]) -> str:
         name: str = str(args.get("name", ""))
         kind: str | None = args.get("kind") or None
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         try:
             return await tool_find_symbol(
                 name=name,
@@ -748,6 +770,7 @@ class SubagentRunner:
                 base_sha=self.base_sha,
                 staged_patches=self.staged_patches,
                 gh_token=self.gh_token,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -755,6 +778,7 @@ class SubagentRunner:
     async def _exec_find_references(self, args: dict[str, Any]) -> str:
         symbol: str = str(args.get("symbol", ""))
         path: str | None = args.get("path") or None
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         try:
             return await tool_find_references(
                 symbol=symbol,
@@ -764,6 +788,7 @@ class SubagentRunner:
                 base_sha=self.base_sha,
                 staged_patches=self.staged_patches,
                 gh_token=self.gh_token,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -932,14 +957,21 @@ class SubagentRunner:
     async def _exec_git_diff(self, args: dict[str, Any]) -> str:
         base: str = str(args.get("base", ""))
         head: str = str(args.get("head", ""))
+        path: str | None = args.get("path") or None
+        stat_only: bool = bool(args.get("stat_only", False))
         if not base or not head:
             return "Error: 'base' and 'head' are both required for git_diff."
+        session_id_str = str(self.session.id) if (self.session and getattr(self.session, "id", None)) else None
         return await tool_git_diff(
             base=base,
             head=head,
+            path=path,
+            stat_only=stat_only,
             owner=self.repo_owner,
             repo=self.repo_name,
             token=self.gh_token,
+            staged_patches=self.staged_patches,
+            session_id=session_id_str,
         )
 
     def _exec_scan_security(self, args: dict[str, Any]) -> str:
