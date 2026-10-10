@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 from typing import Any
 
 from app.github_client import (
@@ -58,6 +59,33 @@ def _validate_file_path(path: str) -> str:
 
 
 validate_file_path = _validate_file_path
+
+
+def _read_clean_base(
+    repo_root: str | None, path: str, base_sha: str
+) -> str | None:
+    """
+    Best-effort read of the clean base content for ``path`` at ``base_sha``.
+
+    Uses ``git show base_sha:path`` against the local checkout. Returns None
+    when unavailable (no checkout, no base_sha, unknown ref) so callers fall
+    back to heuristic handling. Never raises.
+    """
+    if not repo_root or not base_sha or not base_sha.strip():
+        return None
+    try:
+        git_path = path.replace("\\", "/")
+        res = subprocess.run(
+            ["git", "-C", repo_root, "show", f"{base_sha.strip()}:{git_path}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode == 0:
+            return res.stdout
+    except Exception as e:
+        logger.debug("recon: clean-base read failed for %s: %s", path, e)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +167,7 @@ async def tool_read_file(
 
     content: str | None = None
     read_from_disk = False
+    disk_root: str | None = None
 
     # 1. Check local checkout if available
     if repo and repo.strip():
@@ -158,6 +187,7 @@ async def tool_read_file(
                         with open(real_target, "r", encoding="utf-8", errors="replace") as f:
                             content = f.read()
                         read_from_disk = True
+                        disk_root = real_root
         except Exception as e:
             logger.debug("Failed reading file from local checkout: %s", e)
 
@@ -189,9 +219,33 @@ async def tool_read_file(
         if content is None and "--- /dev/null" not in diff:
             return f"Error reading file: base content for {path!r} is unavailable."
         if read_from_disk and content:
-            from app.services.session_tools.editor import _is_diff_applied
-            if not _is_diff_applied(content, diff):
-                content = apply_unified_diff(content, diff)
+            if "--- /dev/null" in diff:
+                # Staged creation while the file already exists on disk (synced
+                # creation or terminal-created file): disk is authoritative.
+                # Overlaying a creation patch here would insert its lines into
+                # the existing file instead of returning what the verifier runs.
+                pass
+            else:
+                clean_base = _read_clean_base(disk_root, path, base_sha)
+                if clean_base is not None:
+                    from app.services.session_tools.editor import _is_diff_applied
+
+                    if content == clean_base:
+                        # Disk still holds the clean base (never synced):
+                        # overlay the staged modify so reads observe staged content.
+                        content = apply_unified_diff(content, diff)
+                    elif _is_diff_applied(
+                        content, diff, base_content=clean_base
+                    ):
+                        # Already synchronized: return disk as-is.
+                        pass
+                    # Else disk diverged from both base and staged result
+                    # (terminal/formatter edits): disk is authoritative,
+                    # leave content untouched.
+                else:
+                    from app.services.session_tools.editor import _is_diff_applied
+                    if not _is_diff_applied(content, diff):
+                        content = apply_unified_diff(content, diff)
         else:
             content = apply_unified_diff(content or "", diff)
 

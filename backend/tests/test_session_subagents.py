@@ -504,6 +504,20 @@ async def test_sandbox_verifier_e2e_regression_broken_staged_test() -> None:
     }
     llm.complete.side_effect = [step1, step2, step3]
 
+    def _staged_aware_tests(*args: Any, **kwargs: Any) -> str:
+        # The staged breakage must reach the test runner: only report the
+        # staged failure when the breaking staged patch was actually forwarded.
+        staged_arg = kwargs.get("staged_patches") or {}
+        if staged_arg.get("tests/test_math.py") != staged["tests/test_math.py"]:
+            return (
+                "Test runner: pytest\nTargets: tests/test_math.py\n"
+                "Status: PASSED\nExit code: 0"
+            )
+        return (
+            "Test runner: pytest\nTargets: tests/test_math.py\nStatus: FAILED\n"
+            "Exit code: 1\nOUTPUT:\nAssertionError: assert 1 == 2"
+        )
+
     with patch(
         "app.services.session_tools.recon.fetch_file_content",
         new_callable=AsyncMock,
@@ -511,12 +525,23 @@ async def test_sandbox_verifier_e2e_regression_broken_staged_test() -> None:
     ), patch(
         "app.services.session_tools.subagents.tool_run_targeted_tests",
         new_callable=AsyncMock,
-        return_value="Test runner: pytest\nTargets: tests/test_math.py\nStatus: FAILED\nExit code: 1\nOUTPUT:\nAssertionError: assert 1 == 2",
+        side_effect=_staged_aware_tests,
     ) as mock_tests:
         summary = await runner.run()
 
         assert "Verification FAILED" in summary
         assert "assert 1 == 2 failed" in summary
+        # The staged failure must have flowed through the tool into the LLM
+        # context: the step-3 prompt has to contain the tool-reported failure.
+        # A mock returning FAILED unconditionally would pass even if staged
+        # content were ignored, so this assertion closes that gap.
+        step3_messages = llm.complete.call_args_list[2].kwargs["messages"]
+        tool_contents = [
+            m.get("content", "")
+            for m in step3_messages
+            if m.get("role") == "tool"
+        ]
+        assert any("assert 1 == 2" in c for c in tool_contents)
         mock_tests.assert_awaited_once_with(
             test_targets=["tests/test_math.py"],
             timeout_sec=120,

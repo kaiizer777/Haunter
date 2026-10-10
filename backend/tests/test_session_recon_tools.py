@@ -720,23 +720,28 @@ async def test_read_file_slice_on_large_file_with_staged_overlay(tmp_path) -> No
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     large_file = repo_dir / "large.py"
-    # Create a 2000-line file
-    lines = [f"def func_{i}(): pass" for i in range(2000)]
-    large_file.write_text("\n".join(lines), encoding="utf-8")
+    # Create a 3000-line file (~66k chars): well past the 50,000-char
+    # truncation boundary (~line 2270), so the slice below genuinely exercises
+    # the untruncated path. A smaller fixture would pass even with truncation.
+    lines = [f"def func_{i}(): pass" for i in range(3000)]
+    raw = "\n".join(lines)
+    assert len(raw) > 50_000
+    large_file.write_text(raw, encoding="utf-8")
 
     staged = {
-        "large.py": "--- a/large.py\n+++ b/large.py\n@@ -1900,1 +1900,1 @@\n-def func_1899(): pass\n+def func_1899_modified(): pass\n"
+        "large.py": "--- a/large.py\n+++ b/large.py\n@@ -2900,1 +2900,1 @@\n-def func_2899(): pass\n+def func_2899_modified(): pass\n"
     }
 
     with patch("app.services.session_tools.sandbox.resolve_repo_dir", return_value=(str(repo_dir), None)):
         res = await tool_read_file_slice(
             path="large.py",
-            start_line=1895,
-            end_line=1905,
+            start_line=2895,
+            end_line=2905,
             repo="test-repo",
             staged_patches=staged,
         )
-        assert "1900: def func_1899_modified(): pass" in res
+        assert "2900: def func_2899_modified(): pass" in res
+        assert "truncated" not in res
 
 
 @pytest.mark.asyncio
@@ -756,6 +761,125 @@ async def test_read_file_slice_file_starting_with_error_word() -> None:
             end_line=2,
         )
         assert res == "1: ErrorMessage = 'Something went wrong'\n2: ErrorCode = 500"
+
+
+def _init_git_repo_with_commit(repo_dir: object, files: dict[str, str]) -> str:
+    """Init a git repo under repo_dir with files committed; return HEAD sha."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git binary unavailable")
+    root = str(repo_dir)
+
+    def _git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=test",
+                *args,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+
+    _git("init", "-q")
+    for rel, text in files.items():
+        target = str(repo_dir / rel)  # type: ignore[operator]
+        with open(target, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    _git("add", ".")
+    _git("commit", "-qm", "base")
+    out = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_read_file_disk_creation_existing_file_is_authoritative(tmp_path) -> None:
+    """A disk file colliding with a staged creation patch is returned unchanged."""
+    from app.services.session_tools.recon import tool_read_file
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    with open(repo_dir / "created.py", "w", encoding="utf-8", newline="\n") as f:
+        f.write("print('existing other content')\n")
+    staged = {
+        "created.py": "--- /dev/null\n+++ b/created.py\n@@ -0,0 +1 @@\n+print('hello world')\n"
+    }
+    with patch(
+        "app.services.session_tools.sandbox.resolve_repo_dir",
+        return_value=(str(repo_dir), None),
+    ):
+        res = await tool_read_file(
+            path="created.py",
+            owner="o",
+            repo="r",
+            base_sha="s",
+            staged_patches=staged,
+        )
+    # Overlaying the creation patch would insert its lines into the existing
+    # file; disk content must win instead.
+    assert res == "print('existing other content')\n"
+
+
+@pytest.mark.asyncio
+async def test_read_file_disk_modify_synced_stale_diverged(tmp_path) -> None:
+    """Disk-vs-staged decision for modify diffs: synced/diverged return disk, stale overlays."""
+    from app.services.session_tools.recon import tool_read_file
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    base_text = "old_val\nold_val\n"
+    base_sha = _init_git_repo_with_commit(repo_dir, {"f.py": base_text})
+    target = repo_dir / "f.py"
+    staged = {
+        "f.py": "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-old_val\n+new_val\n"
+    }
+
+    async def _read() -> str:
+        with patch(
+            "app.services.session_tools.sandbox.resolve_repo_dir",
+            return_value=(str(repo_dir), None),
+        ):
+            return await tool_read_file(
+                path="f.py",
+                owner="o",
+                repo="r",
+                base_sha=base_sha,
+                staged_patches=staged,
+            )
+
+    def _write(text: str) -> None:
+        with open(target, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+
+    # Stale disk (still clean base): overlay applies so reads observe staged content.
+    _write(base_text)
+    assert await _read() == "new_val\nold_val\n"
+
+    # Synced disk (old text duplicated elsewhere): must NOT re-apply the diff
+    # onto the wrong occurrence; disk is returned as-is.
+    _write("new_val\nold_val\n")
+    assert await _read() == "new_val\nold_val\n"
+
+    # Diverged disk (terminal edits): disk is authoritative.
+    _write("terminal_edit\nold_val\n")
+    assert await _read() == "terminal_edit\nold_val\n"
 
 
 
