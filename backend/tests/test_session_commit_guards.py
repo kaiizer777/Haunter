@@ -241,6 +241,33 @@ async def test_commit_deletion_patch_creates_tree_entry_with_null_sha() -> None:
 
 
 @pytest.mark.asyncio
+async def test_commit_deletion_patch_with_nonempty_content_raises_422() -> None:
+    """A patch with '+++ /dev/null' whose applied content is non-empty must raise HTTP 422."""
+    user, session = _make_mock_user_and_session(
+        staged_patches={
+            "app/bad_del.py": "--- a/app/bad_del.py\n+++ /dev/null\n@@ -1,2 +1,1 @@\n-line1\n line2\n"
+        }
+    )
+    mock_db = _make_mock_db(session)
+    body = SessionCommitIn(title="Malformed delete")
+
+    with (
+        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="line1\nline2\n"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await commit_session(
+                session_id=session.id,
+                body=body,
+                current_user=user,
+                db=mock_db,
+            )
+
+    assert exc_info.value.status_code == 422
+    assert "resulted in non-empty content" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
 async def test_commit_tree_resolution_failure_raises_502() -> None:
     """If fetch_commit_tree_sha raises GitHubClientError, commit_session returns HTTP 502 instead of falling back to commit SHA."""
     user, session = _make_mock_user_and_session(

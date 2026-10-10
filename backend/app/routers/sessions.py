@@ -782,6 +782,16 @@ async def commit_session(
             line.strip() == "+++ /dev/null" for line in patch_text.splitlines()
         )
         if is_deletion_patch:
+            if patched_content:
+                logger.error(
+                    "sessions/commit: deletion patch for '%s' in session %s resulted in non-empty content",
+                    file_path,
+                    session_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Deletion patch for '{file_path}' resulted in non-empty content.",
+                )
             tree_entries.append(
                 {
                     "path": file_path,
