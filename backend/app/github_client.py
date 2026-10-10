@@ -2415,7 +2415,7 @@ async def restore_branch_ref(
                 owner=owner,
                 repo=repo,
                 branch=clean_branch,
-                installation_token=installation_token,
+                token=installation_token,
             )
             if current_sha != expected_sha:
                 logger.warning(
@@ -2508,7 +2508,7 @@ async def delete_branch_ref(
                 owner=owner,
                 repo=repo,
                 branch=clean_branch,
-                installation_token=installation_token,
+                token=installation_token,
             )
             if current_sha != expected_sha:
                 logger.warning(
