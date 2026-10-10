@@ -93,6 +93,7 @@ vi.mock("@/lib/api", () => ({
     verifySession: vi.fn(),
     closeSession: vi.fn(),
     commitSession: vi.fn(),
+    clarifySession: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     status: number;
@@ -163,6 +164,7 @@ describe("SessionWorkspaceClient (app/sessions/workspace/SessionWorkspaceClient.
       anthropic: [],
       groq: [],
     });
+    vi.mocked(api.clarifySession).mockResolvedValue(mockSession as any);
   });
 
   it("disables Commit & PR button when no staged patches, or when isStreaming is true", async () => {
@@ -283,5 +285,135 @@ describe("SessionWorkspaceClient (app/sessions/workspace/SessionWorkspaceClient.
     });
 
     expect(mockSetStagedPatches).not.toHaveBeenCalled();
+  });
+
+  it("promotes ask_user_clarification into prominent active blocking prompt in transcript", async () => {
+    mockUseSessionStreamState = {
+      ...mockUseSessionStreamState,
+      messages: [
+        {
+          role: "assistant",
+          content: "I investigated the authentication failure. We have two implementation strategies.",
+          toolCalls: [
+            {
+              name: "ask_user_clarification",
+              args: {
+                question: "Should we migrate to OAuth2 or keep password hash?",
+                options: ["Migrate to OAuth2", "Keep password hash"],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    render(<SessionWorkspaceClient sessionId="sess_abc123" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("clarification-card-active")).toBeInTheDocument();
+      expect(screen.getByText(/action required · agent blocked/i)).toBeInTheDocument();
+      expect(screen.getByText("Should we migrate to OAuth2 or keep password hash?")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /migrate to oauth2/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /keep password hash/i })).toBeInTheDocument();
+    });
+  });
+
+  it("allows submitting clarification answer via option buttons directly in transcript", async () => {
+    mockUseSessionStreamState = {
+      ...mockUseSessionStreamState,
+      messages: [
+        {
+          role: "assistant",
+          content: "Need clarification",
+          toolCalls: [
+            {
+              name: "ask_user_clarification",
+              args: {
+                question: "Pick database provider",
+                options: ["Neon Postgres", "Hermetic SQLite"],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    render(<SessionWorkspaceClient sessionId="sess_abc123" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /neon postgres/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /neon postgres/i }));
+
+    await waitFor(() => {
+      expect(api.clarifySession).toHaveBeenCalledWith("sess_abc123", { response: "Neon Postgres" });
+      expect(mockSendChatMessage).toHaveBeenCalledWith("Proceed with: Neon Postgres", expect.anything());
+    });
+  });
+
+  it("orders and distinguishes multiple outstanding clarification questions", async () => {
+    mockUseSessionStreamState = {
+      ...mockUseSessionStreamState,
+      messages: [
+        {
+          role: "assistant",
+          content: "Two decisions required.",
+          toolCalls: [
+            {
+              name: "ask_user_clarification",
+              args: {
+                question: "Choose database",
+                options: ["Postgres", "SQLite"],
+              },
+            },
+            {
+              name: "ask_user_clarification",
+              args: {
+                question: "Run migrations automatically?",
+                options: ["Yes", "No"],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    render(<SessionWorkspaceClient sessionId="sess_abc123" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Question 1 of 2")).toBeInTheDocument();
+      expect(screen.getByText("Question 2 of 2")).toBeInTheDocument();
+      expect(screen.getByText("Choose database")).toBeInTheDocument();
+      expect(screen.getByText("Run migrations automatically?")).toBeInTheDocument();
+    });
+  });
+
+  it("preserves update_plan chip and planning execution summary without regression", async () => {
+    mockUseSessionStreamState = {
+      ...mockUseSessionStreamState,
+      messages: [
+        {
+          role: "assistant",
+          content: "Here is the plan.",
+          toolCalls: [
+            {
+              name: "update_plan",
+              args: {
+                completed_count: 2,
+                total_count: 5,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    render(<SessionWorkspaceClient sessionId="sess_abc123" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Planning execution")).toBeInTheDocument();
+      expect(screen.getByText("Updated task checklist (2/5)")).toBeInTheDocument();
+    });
   });
 });
