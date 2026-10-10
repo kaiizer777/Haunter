@@ -1415,6 +1415,7 @@ class SessionOrchestrator:
                     branch_name=session.branch_name,
                     base_sha=session.base_sha,
                     staged_patches=staged_patches,
+                    checkpoints=list(session.checkpoints or []),
                 ),
             }
 

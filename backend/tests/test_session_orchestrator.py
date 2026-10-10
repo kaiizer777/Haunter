@@ -1013,3 +1013,51 @@ async def test_persist_fallback_uses_pre_rollback_snapshot() -> None:
     assert written["waiting_input"] == {"question": "q?"}
 
 
+@pytest.mark.asyncio
+async def test_tool_loop_system_prompt_rebuild_keeps_checkpoints() -> None:
+    """Per-iteration system prompt rebuilds keep checkpoint IDs for checkpoint_restore."""
+    from app.services.session_orchestrator import SessionOrchestrator
+
+    mock_db = AsyncMock()
+    orch = SessionOrchestrator(
+        session_id=uuid.uuid4(),
+        db=mock_db,
+        gh_token=None,
+    )
+
+    mock_session = MagicMock()
+    mock_session.id = orch.session_id
+    mock_session.repo = MagicMock(owner="test-owner", name="test-repo")
+    mock_session.branch_name = "fix-branch"
+    mock_session.base_sha = "abc123def456"
+    mock_session.conversation_history = []
+    mock_session.staged_patches = {}
+    mock_session.checkpoints = [
+        {
+            "checkpoint_id": "cp_keep_me",
+            "turn": 1,
+            "description": "before risky edit",
+            "staged_patches": {},
+        }
+    ]
+
+    orch._load_session = AsyncMock(return_value=mock_session)
+    orch._persist = AsyncMock()
+    orch._llm = AsyncMock()
+    orch._llm.complete = AsyncMock(
+        return_value={
+            "content": "Done.",
+            "tool_calls": None,
+            "model": "nemotron-3.5-lightning-free",
+        }
+    )
+
+    queue = SseQueue()
+    await orch.run(user_message="hello", queue=queue)
+
+    orch._llm.complete.assert_awaited_once()
+    sent_messages = orch._llm.complete.call_args.kwargs["messages"]
+    assert sent_messages[0]["role"] == "system"
+    assert "cp_keep_me" in sent_messages[0]["content"]
+
+

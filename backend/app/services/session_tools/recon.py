@@ -32,6 +32,15 @@ _SAFE_PATH_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_./ \-\[\]@+#]+$")
 _MAX_PATH_LEN = 500
 
 
+def _is_diff_header_line(line: str) -> bool:
+    """True only for unified-diff file header lines (``--- ``/``+++ ``).
+
+    Hunk content lines may legitimately begin with ``--``/``++`` (e.g. a
+    deleted CSS ``--var`` line renders as ``---var``); those must be counted.
+    """
+    return line.startswith(("--- ", "+++ ")) or line in ("---", "+++")
+
+
 def _is_staged_deletion(diff: str) -> bool:
     """True if a staged unified diff deletes the file (+++ header targets /dev/null).
 
@@ -56,17 +65,53 @@ def _is_staged_creation(diff: str) -> bool:
 
 
 def _count_diff_lines(diff: str) -> tuple[int, int]:
-    """Count (insertions, deletions) in a staged unified diff, excluding headers."""
+    """Count (insertions, deletions) in a staged unified diff.
+
+    File headers (``--- ``/``+++ ``) are skipped only before the first hunk
+    (``@@ ``). After hunks begin, header-shaped lines are real content (e.g.
+    an added ``++ x`` line renders as ``+++ x``) and must be counted.
+    """
     ins = 0
     dels = 0
+    in_hunk = False
     for line in diff.splitlines():
-        if line.startswith("+++ ") or line.startswith("--- ") or line in ("+++", "---"):
+        if line.startswith("@@ "):
+            in_hunk = True
+            continue
+        if line.startswith("diff --git "):
+            in_hunk = False
+            continue
+        if not in_hunk and _is_diff_header_line(line):
             continue
         if line.startswith("+"):
             ins += 1
         elif line.startswith("-"):
             dels += 1
     return ins, dels
+
+
+def _is_session_scoped_root(root_real: str, session_id: str) -> bool:
+    """True when a resolved checkout path is session-isolated for ``session_id``.
+
+    Mirrors the layouts in ``sandbox._resolve_session_root`` without touching
+    disk: ``.haunter_sessions/<sid>[/<repo>]``, ``.worktrees/session-<sid>``,
+    or ``session-<sid>``. A main-checkout fallback never matches.
+    """
+    sid = (session_id or "").strip()
+    if not sid:
+        return False
+    cur = os.path.normpath(root_real)
+    for _ in range(6):
+        base = os.path.basename(cur)
+        parent = os.path.dirname(cur)
+        if base == f"session-{sid}":
+            return True
+        if base == sid and os.path.basename(parent) == ".haunter_sessions":
+            return True
+        if parent == cur:
+            break
+        cur = parent
+    return False
 
 
 def _validate_file_path(path: str) -> str:
@@ -231,17 +276,31 @@ async def resolve_read_content(
             )
             if repo_root and os.path.isdir(repo_root):
                 real_root = os.path.realpath(repo_root)
-                local_path = os.path.normpath(os.path.join(real_root, path))
-                real_target = os.path.realpath(local_path)
                 if (
-                    os.path.commonpath([real_root, real_target]) == real_root
-                    and os.path.isfile(real_target)
-                    and not os.path.islink(local_path)
+                    session_id
+                    and session_id.strip()
+                    and not _is_session_scoped_root(real_root, session_id)
                 ):
-                    with open(
-                        real_target, "r", encoding="utf-8", errors="replace"
-                    ) as f:
-                        content = f.read()
+                    # Session flow without a session-isolated checkout:
+                    # resolve_repo_dir fell back to the main checkout, whose
+                    # uncommitted edits may belong to another workflow. Skip
+                    # disk and resolve from base_sha plus staged patches below.
+                    logger.debug(
+                        "recon: ignoring non-session checkout for session %s",
+                        session_id,
+                    )
+                else:
+                    local_path = os.path.normpath(os.path.join(real_root, path))
+                    real_target = os.path.realpath(local_path)
+                    if (
+                        os.path.commonpath([real_root, real_target]) == real_root
+                        and os.path.isfile(real_target)
+                        and not os.path.islink(local_path)
+                    ):
+                        with open(
+                            real_target, "r", encoding="utf-8", errors="replace"
+                        ) as f:
+                            content = f.read()
         except Exception as exc:
             logger.debug("recon: failed reading file from local checkout: %s", exc)
 
@@ -299,7 +358,7 @@ async def tool_read_file(
     # If file is staged for deletion, report deleted
     if staged_patches and path in staged_patches:
         diff = staged_patches[path]
-        if "+++ /dev/null" in diff:
+        if _is_staged_deletion(diff):
             return f"File not found: {path!r} (deleted in staged changes)"
 
     content: str | None = None
@@ -353,10 +412,10 @@ async def tool_read_file(
         from app.sandbox.mirror import apply_unified_diff
 
         diff = staged_patches[path]
-        if content is None and "--- /dev/null" not in diff:
+        if content is None and not _is_staged_creation(diff):
             return f"Error reading file: base content for {path!r} is unavailable."
         if read_from_disk and content:
-            if "--- /dev/null" in diff:
+            if _is_staged_creation(diff):
                 # Staged creation while the file already exists on disk (synced
                 # creation or terminal-created file): disk is authoritative.
                 # Overlaying a creation patch here would insert its lines into

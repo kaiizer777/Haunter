@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import subprocess
 from typing import Any
 
@@ -25,7 +26,11 @@ from app.github_client import (
     fetch_commits,
     fetch_diff,
 )
-from app.services.session_tools.recon import _normalize_rel_path, _validate_file_path
+from app.services.session_tools.recon import (
+    _count_diff_lines,
+    _normalize_rel_path,
+    _validate_file_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +49,18 @@ def _strip_git_prefix(p: str) -> str:
     return p
 
 
-def _is_diff_header_line(line: str) -> bool:
-    """True only for unified-diff file header lines (``--- ``/``+++ ``).
+def _parse_diff_git_paths(line: str) -> tuple[str, str] | None:
+    """Split a ``diff --git`` header into (source, dest), honoring Git quoting.
 
-    Hunk content lines may legitimately begin with ``--``/``++`` (e.g. a
-    deleted CSS ``--var`` line renders as ``---var``); those must be counted.
+    Falls back to whitespace splitting when the header is not shell-parseable.
     """
-    return line.startswith(("--- ", "+++ ")) or line in ("---", "+++")
+    try:
+        parts = shlex.split(line)
+    except ValueError:
+        parts = line.strip().split()
+    if len(parts) >= 4 and parts[0] == "diff" and parts[1] == "--git":
+        return parts[2], parts[3]
+    return None
 
 
 async def tool_git_log(
@@ -257,10 +267,10 @@ def _filter_diff_by_path(diff_text: str, path: str) -> str | None:
     for chunk in chunks:
         for line in chunk.splitlines():
             if line.startswith("diff --git "):
-                parts = line.strip().split()
-                if len(parts) >= 4:
-                    p1 = _strip_git_prefix(parts[2])
-                    p2 = _strip_git_prefix(parts[3])
+                parsed = _parse_diff_git_paths(line)
+                if parsed is not None:
+                    p1 = _strip_git_prefix(parsed[0])
+                    p2 = _strip_git_prefix(parsed[1])
                     if p1 == norm_target or p2 == norm_target:
                         return chunk.strip()
             elif line.startswith("--- ") or line.startswith("+++ "):
@@ -309,9 +319,9 @@ def _format_diff_stat(diff_text: str) -> str:
         file_path = ""
         for line in chunk.splitlines():
             if line.startswith("diff --git "):
-                parts = line.strip().split()
-                if len(parts) >= 4:
-                    file_path = _strip_git_prefix(parts[3])
+                parsed = _parse_diff_git_paths(line)
+                if parsed is not None:
+                    file_path = _strip_git_prefix(parsed[1])
                     break
             elif line.startswith("+++ ") and line[4:].strip() != "/dev/null":
                 file_path = _strip_git_prefix(
@@ -334,16 +344,7 @@ def _format_diff_stat(diff_text: str) -> str:
         if not file_path:
             file_path = "file"
 
-        ins = 0
-        dels = 0
-        for line in chunk.splitlines():
-            if _is_diff_header_line(line):
-                continue
-            if line.startswith("+"):
-                ins += 1
-            elif line.startswith("-"):
-                dels += 1
-
+        ins, dels = _count_diff_lines(chunk)
         total_files += 1
         total_ins += ins
         total_del += dels
@@ -370,15 +371,7 @@ def _format_diff_stat_from_patches(patches: dict[str, str]) -> str:
     total_ins = 0
     total_del = 0
     for p, d in sorted(patches.items()):
-        ins = 0
-        dels = 0
-        for ln in d.splitlines():
-            if _is_diff_header_line(ln):
-                continue
-            if ln.startswith("+"):
-                ins += 1
-            elif ln.startswith("-"):
-                dels += 1
+        ins, dels = _count_diff_lines(d)
         total_files += 1
         total_ins += ins
         total_del += dels

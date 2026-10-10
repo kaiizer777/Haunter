@@ -1156,3 +1156,162 @@ async def test_read_file_disk_modify_synced_stale_diverged(tmp_path) -> None:
     # Diverged disk (terminal edits): disk is authoritative.
     _write("terminal_edit\nold_val\n")
     assert await _read() == "terminal_edit\nold_val\n"
+
+
+# ---------------------------------------------------------------------------
+# Review regression tests (PR #94): diff counting, quoted paths, header parsing
+# ---------------------------------------------------------------------------
+
+
+def test_strip_git_prefix_does_not_mangle_brick_paths() -> None:
+    """Exact prefix removal keeps names like brick.py intact (lstrip regression)."""
+    from app.services.session_tools.git import _filter_diff_by_path, _strip_git_prefix
+
+    assert _strip_git_prefix("a/brick.py") == "brick.py"
+    assert _strip_git_prefix("b/brick.py") == "brick.py"
+    diff = (
+        "diff --git a/brick.py b/brick.py\n"
+        "--- a/brick.py\n+++ b/brick.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    assert _filter_diff_by_path(diff, "brick.py") is not None
+    assert _filter_diff_by_path(diff, "rick.py") is None
+
+
+def test_count_diff_lines_counts_header_shaped_hunk_content() -> None:
+    """Hunk lines shaped like file headers ("+++ x"/"---y") are changes, not headers."""
+    from app.services.session_tools.recon import _count_diff_lines
+
+    diff = (
+        "--- a/vars.css\n+++ b/vars.css\n@@ -1,2 +1,2 @@\n---brand: red\n+++brand: blue\n"
+    )
+    assert _count_diff_lines(diff) == (1, 1)
+
+    plus_plus = "--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+++ helper\n"
+    assert _count_diff_lines(plus_plus) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_diff_stat_counts_header_shaped_hunk_content() -> None:
+    """_format_diff_stat totals include hunk lines that look like file headers."""
+    from app.services.session_tools.git import _format_diff_stat
+
+    diff = (
+        "diff --git a/vars.css b/vars.css\n"
+        "--- a/vars.css\n+++ b/vars.css\n@@ -1,2 +1,2 @@\n---brand: red\n+++brand: blue\n"
+    )
+    stat = _format_diff_stat(diff)
+    assert "vars.css | 2 +-" in stat
+    assert "1 file changed, 1 insertion(+), 1 deletion(-)" in stat
+
+
+@pytest.mark.asyncio
+async def test_git_diff_handles_quoted_paths_with_spaces() -> None:
+    """diff --git headers with quoted space-containing paths filter and stat correctly."""
+    from app.services.session_tools.git import tool_git_diff
+
+    quoted_diff = (
+        'diff --git "a/my file.py" "b/my file.py"\n'
+        "--- a/my file.py\n+++ b/my file.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+    with patch(
+        "app.services.session_tools.git.fetch_diff",
+        new_callable=AsyncMock,
+        return_value=quoted_diff,
+    ):
+        filtered = await tool_git_diff(
+            base="main", head="feat", path="my file.py", owner="org", repo="repo"
+        )
+        assert "old" in filtered and "new" in filtered
+        stat = await tool_git_diff(
+            base="main", head="feat", stat_only=True, owner="org", repo="repo"
+        )
+        assert "my file.py | 2 +-" in stat
+
+
+@pytest.mark.asyncio
+async def test_read_file_patch_body_with_diff_literal_stays_modified() -> None:
+    """A modified file whose added lines embed diff literals is not misclassified."""
+    from app.services.session_tools.recon import tool_read_file
+
+    base = "doc intro\n"
+    staged = {
+        "docs/guide.md": (
+            "--- a/docs/guide.md\n+++ b/docs/guide.md\n@@ -1 +1,3 @@\n doc intro\n"
+            "++++ /dev/null is a git marker\n"
+            "+---- /dev/null likewise\n"
+        )
+    }
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content",
+        new_callable=AsyncMock,
+        return_value=base,
+    ):
+        res = await tool_read_file(
+            path="docs/guide.md",
+            owner="o",
+            repo="r",
+            base_sha="s",
+            staged_patches=staged,
+        )
+    assert "deleted in staged changes" not in res
+    assert "doc intro" in res
+    assert "++ /dev/null is a git marker" in res
+    assert "--- /dev/null likewise" in res
+
+
+@pytest.mark.asyncio
+async def test_read_file_slice_reports_staged_deletion_hint() -> None:
+    """tool_read_file_slice preserves the staged-deletion diagnostic."""
+    staged = {"gone.py": "--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"}
+    res = await tool_read_file_slice(
+        path="gone.py", start_line=1, end_line=5, staged_patches=staged
+    )
+    assert res == "File not found: 'gone.py' (deleted in staged changes)"
+
+
+@pytest.mark.asyncio
+async def test_resolve_read_content_ignores_main_checkout_for_session(tmp_path) -> None:
+    """Session flows without a session-isolated checkout resolve from base_sha, not disk."""
+    from app.services.session_tools.recon import resolve_read_content
+
+    main_root = tmp_path / "main-checkout"
+    main_root.mkdir()
+    (main_root / "notes.txt").write_text("DISK DIRTY\n", encoding="utf-8")
+
+    with (
+        patch(
+            "app.services.session_tools.sandbox.resolve_repo_dir",
+            return_value=(str(main_root), None),
+        ),
+        patch(
+            "app.services.session_tools.recon.fetch_file_content",
+            new_callable=AsyncMock,
+            return_value="BASE CLEAN\n",
+        ),
+    ):
+        unscoped = await resolve_read_content(
+            path="notes.txt",
+            repo_owner="o",
+            repo_name="r",
+            base_sha="s",
+            staged_patches=None,
+            session_id="sid123",
+        )
+        assert unscoped == "BASE CLEAN\n"
+
+        scoped_root = main_root / ".haunter_sessions" / "sid123"
+        scoped_root.mkdir(parents=True)
+        (scoped_root / "notes.txt").write_text("DISK SCOPED\n", encoding="utf-8")
+        with patch(
+            "app.services.session_tools.sandbox.resolve_repo_dir",
+            return_value=(str(scoped_root), None),
+        ):
+            scoped = await resolve_read_content(
+                path="notes.txt",
+                repo_owner="o",
+                repo_name="r",
+                base_sha="s",
+                staged_patches=None,
+                session_id="sid123",
+            )
+            assert scoped == "DISK SCOPED\n"
