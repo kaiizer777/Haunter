@@ -388,6 +388,44 @@ def _format_diff_stat_from_patches(patches: dict[str, str]) -> str:
     return "\n".join(stat_lines)
 
 
+def _render_staged_patches(
+    staged_patches: dict[str, str], path: str | None, stat_only: bool
+) -> str | None:
+    """Render in-memory staged patches for git_diff, honoring path/stat limits.
+
+    Returns None when there is nothing to show (no patches, or no patch for
+    `path`), so callers can fall through to their default message. Output is
+    truncated at _MAX_DIFF_CHARS like every other diff output.
+    """
+    if not staged_patches:
+        return None
+    if path:
+        norm_p = _normalize_rel_path(path)
+        if norm_p in staged_patches:
+            target_patches = {norm_p: staged_patches[norm_p]}
+        else:
+            return None
+    else:
+        target_patches = staged_patches
+
+    if stat_only:
+        return _format_diff_stat_from_patches(target_patches)
+
+    diff_text = "\n\n".join(
+        f"# Staged patch: {p}\n{d.strip()}"
+        for p, d in target_patches.items()
+        if d and d.strip()
+    )
+    if not diff_text:
+        return None
+    if len(diff_text) > _MAX_DIFF_CHARS:
+        return (
+            diff_text[:_MAX_DIFF_CHARS]
+            + f"\n\n[...diff truncated at {_MAX_DIFF_CHARS} chars]"
+        )
+    return diff_text
+
+
 async def tool_git_diff(
     base: str,
     head: str,
@@ -440,36 +478,19 @@ async def tool_git_diff(
         ):
             if not staged_patches:
                 return "No staged patches currently in session."
-
-            if path:
-                norm_p = _normalize_rel_path(path)
-                if norm_p in staged_patches:
-                    target_patches = {norm_p: staged_patches[norm_p]}
-                else:
+            rendered = _render_staged_patches(staged_patches, path, stat_only)
+            if rendered is None:
+                if path:
                     return f"No staged patch found for {path!r}."
-            else:
-                target_patches = staged_patches
-
-            if stat_only:
-                return _format_diff_stat_from_patches(target_patches)
-
-            diff_text = "\n\n".join(
-                f"# Staged patch: {p}\n{d.strip()}"
-                for p, d in target_patches.items()
-                if d and d.strip()
-            )
-            return (
-                diff_text
-                if diff_text
-                else "No staged patches currently in session."
-            )
+                return "No staged patches currently in session."
+            return rendered
 
         # 2. Check local repo checkout if available
+        local_err: str | None = None
         if repo:
             try:
                 from app.services.session_tools.sandbox import resolve_repo_dir
-
-                repo_root, _ = resolve_repo_dir(
+                repo_root, err_msg = resolve_repo_dir(
                     repo_name=repo, repo_owner=owner, session_id=session_id
                 )
                 if repo_root and os.path.isdir(repo_root):
@@ -487,8 +508,10 @@ async def tool_git_diff(
                     cmd.extend(["--end-of-options", ref_target])
                     if path:
                         cmd.extend(["--", path])
+                    # check=True: a rejected ref or broken checkout must surface
+                    # as an inspection error, never as a clean worktree.
                     p = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=10
+                        cmd, capture_output=True, text=True, timeout=10, check=True
                     )
                     diff_parts: list[str] = []
                     if p.stdout and p.stdout.strip():
@@ -506,7 +529,7 @@ async def tool_git_diff(
                         "--untracked-files=all",
                     ]
                     sp = subprocess.run(
-                        status_cmd, capture_output=True, text=True, timeout=5
+                        status_cmd, capture_output=True, text=True, timeout=5, check=True
                     )
                     if sp.stdout:
                         for entry in sp.stdout.split("\0"):
@@ -600,11 +623,17 @@ async def tool_git_diff(
                         if path
                         else "No uncommitted working-tree differences found."
                     )
+                else:
+                    local_err = err_msg or f"Error: Local checkout for repository '{repo}' was not found on this machine."
             except Exception as exc:
                 logger.debug("git_diff: local git diff failed: %s", exc)
+                local_err = f"Error: Failed to inspect local repository checkout: {exc}."
+        else:
+            local_err = "Error: Repository name is required to inspect local working-tree differences."
 
+        err_prefix = f"{local_err} " if local_err else ""
         return (
-            "No local repository checkout available in this environment. "
+            f"{err_prefix}No local repository checkout available in this environment. "
             "Use head='staged' to inspect in-memory staged patches."
         )
 
