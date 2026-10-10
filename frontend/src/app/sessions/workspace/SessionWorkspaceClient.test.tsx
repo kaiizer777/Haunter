@@ -284,4 +284,62 @@ describe("SessionWorkspaceClient (app/sessions/workspace/SessionWorkspaceClient.
 
     expect(mockSetStagedPatches).not.toHaveBeenCalled();
   });
+
+  it("renders subagent cards in chronological position inside the assistant message and not pinned at the transcript end", async () => {
+    mockUseSessionStreamState = {
+      ...mockUseSessionStreamState,
+      messages: [
+        {
+          role: "user",
+          content: "Fix the tests in sandbox",
+        },
+        {
+          role: "assistant",
+          content: "Verification finished.",
+          subagents: [
+            {
+              role: "sandbox_verifier",
+              task: "verify session patches in CI sandbox",
+              startedAt: 1000,
+              status: "done",
+              summary: "Verdict: Cannot confirm — the file does not exist at base SHA a0bb921a",
+              patchesModified: [],
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: "Explore more options",
+        },
+        {
+          role: "assistant",
+          content: "Currently exploring repository architecture and alternatives.",
+        },
+      ],
+    };
+
+    render(<SessionWorkspaceClient sessionId="sess_abc123" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Verdict: Cannot confirm — the file does not exist at base SHA a0bb921a")
+      ).toBeInTheDocument();
+    });
+
+    const subagentSummary = screen.getByText(
+      "Verdict: Cannot confirm — the file does not exist at base SHA a0bb921a"
+    );
+    const turn2UserMsg = screen.getByText("Explore more options");
+    const turn2AssistantMsg = screen.getByText(
+      "Currently exploring repository architecture and alternatives."
+    );
+
+    // Verify chronological ordering in DOM: subagent card appears BEFORE Turn 2 user & assistant messages
+    expect(
+      subagentSummary.compareDocumentPosition(turn2UserMsg) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      subagentSummary.compareDocumentPosition(turn2AssistantMsg) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
 });

@@ -31,6 +31,7 @@ export interface ChatMessage {
   model?: string;
   provider?: string;
   auditScan?: AuditCardState;
+  subagents?: SubagentCardState[];
 }
 
 export interface ToolCallChip {
@@ -110,6 +111,15 @@ export interface AuditCardState {
     statusText?: string;
   };
   report?: AuditReportEvent;
+}
+
+export interface SubagentCardState {
+  role: string;
+  task: string;
+  startedAt: number;
+  status: "running" | "done";
+  summary?: string;
+  patchesModified?: string[];
 }
 
 export interface SubagentStartEvent {
@@ -579,17 +589,107 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
               break;
             }
             case "subagent_start": {
-              const { role, task } = frame.data as { role: string; task: string };
-              optionsRef.current?.onSubagentStart?.({ role, task, startedAt: Date.now() });
+              const d = frame.data as Record<string, unknown>;
+              const role = (d?.role as string) ?? "subagent";
+              const task = (d?.task as string) ?? "";
+              const startedAt = typeof d?.startedAt === "number" ? d.startedAt : Date.now();
+              const startEvt: SubagentStartEvent = { role, task, startedAt };
+              optionsRef.current?.onSubagentStart?.(startEvt);
+
+              const newSubagent: SubagentCardState = {
+                role,
+                task,
+                startedAt,
+                status: "running",
+              };
+
+              setMessages((prev) => {
+                const copy = [...prev];
+                const last = copy[copy.length - 1];
+                if (last && last.role === "assistant") {
+                  copy[copy.length - 1] = {
+                    ...last,
+                    subagents: [...(last.subagents || []), newSubagent],
+                  };
+                  return copy;
+                }
+                return [
+                  ...copy,
+                  {
+                    role: "assistant",
+                    content: assistantContent,
+                    thoughts,
+                    toolCalls,
+                    thoughtDurationSeconds: streamThoughtDuration,
+                    subagents: [newSubagent],
+                    model: requestedModel,
+                    provider: requestedProvider,
+                  },
+                ];
+              });
               break;
             }
             case "subagent_done": {
-              const { role, summary, patches_modified } = frame.data as {
-                role: string;
-                summary: string;
-                patches_modified: string[];
+              const d = frame.data as Record<string, unknown>;
+              const role = (d?.role as string) ?? "";
+              const summary = (d?.summary as string) ?? "";
+              const patchesModified = Array.isArray(d?.patches_modified)
+                ? (d.patches_modified as string[])
+                : Array.isArray(d?.patchesModified)
+                  ? (d.patchesModified as string[])
+                  : [];
+              const doneEvt: SubagentDoneEvent = {
+                role,
+                summary,
+                patchesModified,
               };
-              optionsRef.current?.onSubagentDone?.({ role, summary, patchesModified: patches_modified ?? [] });
+              optionsRef.current?.onSubagentDone?.(doneEvt);
+
+              setMessages((prev) => {
+                const copy = [...prev];
+                for (let i = copy.length - 1; i >= 0; i--) {
+                  if (copy[i].role === "assistant" && copy[i].subagents) {
+                    const subs = copy[i].subagents!;
+                    const runningIdx = subs
+                      .map((s, idx) => ({ s, idx }))
+                      .reverse()
+                      .find(({ s }) => s.role === role && s.status === "running")?.idx;
+                    if (runningIdx !== undefined) {
+                      const updatedSubs = [...subs];
+                      updatedSubs[runningIdx] = {
+                        ...updatedSubs[runningIdx],
+                        status: "done",
+                        summary,
+                        patchesModified,
+                      };
+                      copy[i] = {
+                        ...copy[i],
+                        subagents: updatedSubs,
+                      };
+                      return copy;
+                    }
+                  }
+                }
+                const last = copy[copy.length - 1];
+                if (last && last.role === "assistant") {
+                  copy[copy.length - 1] = {
+                    ...last,
+                    subagents: [
+                      ...(last.subagents || []),
+                      {
+                        role,
+                        task: "",
+                        startedAt: Date.now(),
+                        status: "done",
+                        summary,
+                        patchesModified,
+                      },
+                    ],
+                  };
+                  return copy;
+                }
+                return copy;
+              });
               break;
             }
             case "audit_scan_start": {
@@ -945,11 +1045,15 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
                 const copy = [...prev];
                 const last = copy[copy.length - 1];
                 if (last?.role === "assistant") {
+                  const finalizedSubagents = last.subagents?.map((s) =>
+                    s.status === "running" ? { ...s, status: "done" as const } : s
+                  );
                   copy[copy.length - 1] = {
                     ...last,
                     content: finalContent || last.content,
                     thoughts: displayThoughts.length ? displayThoughts : last.thoughts,
                     toolCalls,
+                    subagents: finalizedSubagents ?? last.subagents,
                     thoughtDurationSeconds: streamThoughtDuration || last.thoughtDurationSeconds,
                     model: actualModel || last.model,
                     provider: requestedProvider || last.provider,
@@ -1027,6 +1131,20 @@ export function useSessionStream(sessionId: string, options?: UseSessionStreamOp
       abortRef.current.abort();
       abortRef.current = null;
     }
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.role === "assistant" && last.subagents?.some((s) => s.status === "running")) {
+        const copy = [...prev];
+        copy[copy.length - 1] = {
+          ...last,
+          subagents: last.subagents.map((s) =>
+            s.status === "running" ? { ...s, status: "done" as const } : s
+          ),
+        };
+        return copy;
+      }
+      return prev;
+    });
     setIsStreaming(false);
   }, []);
 
