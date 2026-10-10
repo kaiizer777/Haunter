@@ -696,10 +696,19 @@ def _extract_file_path_from_chunk(chunk_lines: list[str]) -> str:
     return ""
 
 
-def split_diff_by_files(diff_text: str) -> list[tuple[str, str]]:
+MAX_SPLIT_DIFF_CHARS = 5_000_000
+
+
+def split_diff_by_files(
+    diff_text: str,
+    max_chars: int = MAX_SPLIT_DIFF_CHARS,
+) -> list[tuple[str, str]]:
     raw = str(diff_text or "")
     if not raw.strip():
         return []
+
+    if len(raw) > max_chars:
+        raw, _ = _diff_prefix(raw, max_chars)
 
     lines = raw.splitlines(keepends=True)
     chunks: list[list[str]] = []
@@ -723,8 +732,17 @@ def split_diff_by_files(diff_text: str) -> list[tuple[str, str]]:
             chunks[0] = preamble + chunks[0]
     else:
         current_chunk = []
-        for line in lines:
-            if line.startswith("--- ") and current_chunk and any(chunk_line.startswith("+++ ") for chunk_line in current_chunk):
+        for idx, line in enumerate(lines):
+            is_file_start = False
+            if line.startswith("--- "):
+                is_dev_null, path = _diff_header_path(line, "--- ")
+                if is_dev_null or path is not None:
+                    for next_line in lines[idx + 1 : idx + 3]:
+                        next_dev_null, next_path = _diff_header_path(next_line, "+++ ")
+                        if next_dev_null or next_path is not None:
+                            is_file_start = True
+                            break
+            if is_file_start and current_chunk and any(chunk_line.startswith("+++ ") for chunk_line in current_chunk):
                 chunks.append(current_chunk)
                 current_chunk = [line]
             else:
@@ -739,12 +757,18 @@ def split_diff_by_files(diff_text: str) -> list[tuple[str, str]]:
     return results
 
 
-def filter_audit_diff_noise(diff_text: str) -> tuple[str, list[str]]:
+def filter_audit_diff_noise(
+    diff_text: str,
+    max_chars: int = MAX_SPLIT_DIFF_CHARS,
+) -> tuple[str, list[str]]:
     raw = str(diff_text or "")
     if not raw.strip():
         return raw, []
 
-    files = split_diff_by_files(raw)
+    if len(raw) > max_chars:
+        raw, _ = _diff_prefix(raw, max_chars)
+
+    files = split_diff_by_files(raw, max_chars=max_chars)
     if not files:
         return raw, []
 
@@ -813,10 +837,16 @@ def partition_and_budget_diff(
             break
 
         if len(chunk_to_add) > remaining_budget:
-            allowed_total = max(0, remaining_budget - len(total_budget_marker))
-            prefix, _ = _diff_prefix(chunk_to_add, allowed_total)
-            budgeted_chunks.append(prefix + total_budget_marker)
-            current_chars += len(prefix) + len(total_budget_marker)
+            if remaining_budget >= len(total_budget_marker):
+                allowed_total = remaining_budget - len(total_budget_marker)
+                prefix, _ = _diff_prefix(chunk_to_add, allowed_total)
+                budgeted_chunks.append(prefix + total_budget_marker)
+                current_chars += len(prefix) + len(total_budget_marker)
+            else:
+                prefix, _ = _diff_prefix(chunk_to_add, remaining_budget)
+                if prefix:
+                    budgeted_chunks.append(prefix)
+                    current_chars += len(prefix)
             was_truncated = True
             if path and path not in affected_paths:
                 affected_paths.append(path)
@@ -883,7 +913,7 @@ def build_diff_grounding(
             removed_lines += hunk.removed
         hunk = None
 
-    def mark_truncated() -> None:
+    def mark_truncated(is_budget_truncated: bool = False) -> None:
         """Close out a hunk whose declared counts were never reached.
 
         The body may simply have been cut off by the caller's character bound,
@@ -891,10 +921,10 @@ def build_diff_grounding(
         hunk that ran short because the diff text was malformed is dropped
         instead, and its file is rejected.
         """
-        nonlocal hunk_count, added_lines, removed_lines
+        nonlocal hunk_count, added_lines, removed_lines, hunk
         if hunk is None or current_path is None:
             return
-        if clipped:
+        if clipped or is_budget_truncated:
             if hunk.lines:
                 index.setdefault(current_path, set()).update(hunk.lines)
             valid_paths.add(current_path)
@@ -905,30 +935,35 @@ def build_diff_grounding(
             truncated_ranges.setdefault(current_path, set()).add(
                 (hunk.next_new, hunk.new_start + hunk.new_count - 1)
             )
-        if not clipped:
-            # Only a genuinely short body means a malformed diff. A clipped one
-            # was just cut off by the character bound, and rejecting it here put
-            # the same path in `rejected_paths` and `valid_paths` at once: the
-            # summary then announced a file it had just accepted as "Rejected
-            # non-text or malformed", which is a statement about the diff the
-            # report is citing, not about the auditor's own bound. The truncation
-            # is reported on its own line, by `truncated_ranges` and `clipped`.
+        if not (clipped or is_budget_truncated):
             reject_current()
+        hunk = None
 
     for line in text.splitlines():
+        if (
+            line.startswith("[...DIFF ")
+            or line.startswith("[TRUNCATED")
+            or line.startswith("# Notice:")
+        ):
+            if hunk is not None:
+                mark_truncated(is_budget_truncated=True)
+            continue
+
         if hunk is not None:
+            if line.startswith("diff --git "):
+                mark_truncated(is_budget_truncated=True)
+                current_path = None
+                old_dev_null = False
+                new_dev_null = False
+                old_path = None
+                new_path = None
+                continue
             if (
-                line.startswith("diff --git ")
-                or line.startswith("--- ")
+                line.startswith("--- ")
                 or line.startswith("+++ ")
                 or line.startswith("Binary files ")
                 or line.startswith("GIT binary patch")
             ):
-                # A file header is never read while a hunk body is open. The
-                # `+++` of a forged or trailing hunk would otherwise be taken
-                # for the start of another file, and everything after an
-                # unsatisfied hunk is ungroundable, so the walk stops here
-                # rather than guessing where the real content resumes.
                 invalidate_hunk()
                 break
             if line.startswith("\\ No newline at end of file"):
@@ -1984,42 +2019,41 @@ async def run_audit(
         )
 
     filtered_diff, omitted_noise = filter_audit_diff_noise(raw_diff)
-    raw_diff_truncated = False
-    if len(filtered_diff) > MAX_RAW_DIFF_CHARS:
-        filtered_diff, raw_diff_truncated = _diff_prefix(filtered_diff, MAX_RAW_DIFF_CHARS)
-
-    clean_diff = _redact_preserving_line_anchors(filtered_diff)
-    budgeted_diff, budget_truncated, _ = partition_and_budget_diff(
-        clean_diff,
+    budgeted_diff, budget_truncated, affected_paths = partition_and_budget_diff(
+        filtered_diff,
         max_total_chars=AUDIT_MAX_DIFF_CHARS,
         max_per_file_chars=25_000,
     )
-    clean_diff = budgeted_diff
-    was_truncated = raw_diff_truncated or budget_truncated
+    clean_diff = _redact_preserving_line_anchors(budgeted_diff)
+    was_truncated = budget_truncated
 
     ast_summary = await build_ast_diff_summary_async(clean_diff)
     supplied_ast = _redact_audit_secrets(str(ast_context or ""))
     if supplied_ast.strip():
         supplied_ast = _clip(supplied_ast, MAX_AST_CONTEXT_CHARS // 2)
-        ast_summary = _clip(
-            f"{ast_summary}\n\nCaller-supplied parser context:\n{supplied_ast}",
-            MAX_AST_CONTEXT_CHARS,
-        )
+        ast_summary = f"{ast_summary}\n\nCaller-supplied parser context:\n{supplied_ast}"
+
+    notices: list[str] = []
     if was_truncated:
-        ast_summary = _clip(
-            ast_summary
-            + f"\nInput was truncated to {AUDIT_MAX_DIFF_CHARS} characters.",
-            MAX_AST_CONTEXT_CHARS,
-        )
+        trunc_msg = f"Input diff was partitioned/truncated to {AUDIT_MAX_DIFF_CHARS} characters."
+        if affected_paths:
+            trunc_files = ", ".join(affected_paths[:5])
+            if len(affected_paths) > 5:
+                trunc_files += f" and {len(affected_paths) - 5} more"
+            trunc_msg += f" Budget limits affected: {trunc_files}."
+        notices.append(trunc_msg)
     if omitted_noise:
         omitted_str = ", ".join(omitted_noise[:10])
         if len(omitted_noise) > 10:
             omitted_str += f" and {len(omitted_noise) - 10} more"
-        ast_summary = _clip(
-            ast_summary
-            + f"\nOmitted {len(omitted_noise)} noise/lockfile file(s) from audit: {omitted_str}.",
-            MAX_AST_CONTEXT_CHARS,
+        notices.append(
+            f"Omitted {len(omitted_noise)} noise/lockfile file(s) from audit: {omitted_str}."
         )
+
+    if notices:
+        notice_block = "\n".join(notices)
+        ast_summary = f"{notice_block}\n\n{ast_summary}"
+    ast_summary = _clip(ast_summary, MAX_AST_CONTEXT_CHARS)
     clean_repo_context = _clip(
         _redact_audit_secrets(str(repo_context or "")),
         MAX_REPO_CONTEXT_CHARS,
@@ -2086,7 +2120,7 @@ async def run_audit(
         asyncio.to_thread(
             synthesize_findings,
             executed_perspectives,
-            filtered_diff,
+            budgeted_diff,
             overall_confidence=overall_confidence,
         ),
         timeout=AST_ANALYSIS_TIMEOUT_S,

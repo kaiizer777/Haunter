@@ -6089,3 +6089,65 @@ async def test_run_audit_large_diff_over_2mb_completes_gracefully():
         patcher.stop()
 
 
+def test_split_diff_by_files_preserves_removed_sql_comment():
+    from app.subagents.auditor import split_diff_by_files
+
+    # Fallback diff (without `diff --git `) containing a removed SQL comment `--- -- old sql comment`
+    diff_with_sql_comment = (
+        "--- a/queries.sql\n"
+        "+++ b/queries.sql\n"
+        "@@ -10,3 +10,2 @@\n"
+        "--- -- old sql comment\n"
+        " SELECT * FROM users;\n"
+    )
+    files = split_diff_by_files(diff_with_sql_comment)
+    assert len(files) == 1
+    path, chunk = files[0]
+    assert path == "queries.sql"
+    assert "--- -- old sql comment" in chunk
+
+
+def test_partition_and_budget_diff_strict_max_total_chars():
+    from app.subagents.auditor import partition_and_budget_diff
+
+    # Ensure total length never exceeds max_total_chars even when remaining budget < marker length
+    file_diff = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        + ("+x\n" * 50)
+    )
+    budgeted, was_truncated, _ = partition_and_budget_diff(
+        file_diff,
+        max_total_chars=120,
+        max_per_file_chars=200,
+    )
+    assert was_truncated is True
+    assert len(budgeted) <= 120
+
+
+@pytest.mark.asyncio
+async def test_run_audit_large_non_noise_diff_budgeted_gracefully():
+    from app.subagents.auditor import run_audit
+
+    large_code = (
+        "diff --git a/backend/app/auth.py b/backend/app/auth.py\n"
+        "--- a/backend/app/auth.py\n"
+        "+++ b/backend/app/auth.py\n"
+        "@@ -1,100 +1,100 @@\n"
+        + ("+line_data_auth_code = True\n" * 2000)
+    )
+    patcher, _, _ = _patched_llm(_four_perspective_router())
+    try:
+        result = await run_audit(
+            diff_text=large_code,
+            audit_id="audit-999999999999",
+        )
+        assert result.confidence >= 75
+        assert "Budget limits affected" in result.analysis_metadata
+    finally:
+        patcher.stop()
+
+
+
