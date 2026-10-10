@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from app.github_client import GitHubClientError, fetch_file_content
+from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
 from app.models import AgentSession
@@ -45,10 +45,10 @@ from app.services.session_tools.git import (
     tool_git_show,
 )
 from app.services.session_tools.recon import (
-    _validate_file_path,
     tool_glob_files,
     tool_grep_search,
     tool_list_directory,
+    tool_read_file,
     tool_read_file_slice,
 )
 from app.services.session_tools.sandbox import (
@@ -181,14 +181,15 @@ ROLE_CONFIGS: dict[str, RoleConfig] = {
                 "run_terminal_command",
                 "glob_files",
                 "read_file_slice",
+                "read_file",
             }
         ),
         max_iterations=8,
         system_prompt_suffix=(
             "You are SandboxVerifier, a test-execution and validation specialist. "
             "Run run_targeted_tests, run_linter, and run_terminal_command to "
-            "validate correctness. Use glob_files and read_file_slice only to "
-            "locate targets. You are read-only — never write or modify code."
+            "validate correctness. Use glob_files, read_file, and read_file_slice only to "
+            "locate targets and inspect test outputs. You are read-only — never write or modify code."
         ),
     ),
     "code_guardian": RoleConfig(
@@ -607,29 +608,23 @@ class SubagentRunner:
 
     async def _exec_read_file(self, args: dict[str, Any]) -> str:
         path: str = str(args.get("path", ""))
+        session_id_str = (
+            str(self.session.id)
+            if (self.session and getattr(self.session, "id", None))
+            else None
+        )
         try:
-            path = _validate_file_path(path)
-        except ValueError as exc:
-            return f"Error: {exc}"
-        try:
-            content = await fetch_file_content(
+            return await tool_read_file(
+                path=path,
                 owner=self.repo_owner,
                 repo=self.repo_name,
-                path=path,
-                sha=self.base_sha,
+                base_sha=self.base_sha,
                 token=self.gh_token,
+                staged_patches=self.staged_patches,
+                session_id=session_id_str,
             )
-        except GitHubClientError as exc:
-            logger.warning(
-                "subagent_runner: read_file GitHub error path=%s: %s", path, exc
-            )
-            return f"Error reading file: {exc}"
-        if content is None:
-            return f"File not found: {path!r}"
-        max_chars = 50_000
-        if len(content) > max_chars:
-            content = content[:max_chars] + f"\n\n[...truncated at {max_chars} chars]"
-        return content
+        except ValueError as exc:
+            return f"Error: {exc}"
 
     async def _exec_grep_search(self, args: dict[str, Any]) -> str:
         query: str = str(args.get("query", ""))
@@ -680,6 +675,11 @@ class SubagentRunner:
             end_line: int = int(args.get("end_line", 1))
         except (TypeError, ValueError):
             return "Error: start_line and end_line must be valid integers."
+        session_id_str = (
+            str(self.session.id)
+            if (self.session and getattr(self.session, "id", None))
+            else None
+        )
         try:
             return await tool_read_file_slice(
                 path=path,
@@ -689,6 +689,8 @@ class SubagentRunner:
                 repo=self.repo_name,
                 base_sha=self.base_sha,
                 token=self.gh_token,
+                staged_patches=self.staged_patches,
+                session_id=session_id_str,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -911,6 +913,7 @@ class SubagentRunner:
             owner=self.repo_owner,
             repo=self.repo_name,
             token=self.gh_token,
+            staged_patches=self.staged_patches,
         )
 
     def _exec_scan_security(self, args: dict[str, Any]) -> str:

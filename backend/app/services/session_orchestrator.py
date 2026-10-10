@@ -1627,6 +1627,8 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "list_directory":
             return await self._tool_list_directory(
@@ -1851,84 +1853,28 @@ class SessionOrchestrator:
         Read file contents with support for local checkout synchronization,
         staged patches overlay, symlink containment, and deletion detection.
         """
-        path: str = args.get("path", "")
+        path: str = str(args.get("path", ""))
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
+        from app.services.session_tools.recon import tool_read_file
+
         try:
-            path = _validate_file_path(path)
+            return await tool_read_file(
+                path=path,
+                owner=repo_owner,
+                repo=repo_name,
+                base_sha=base_sha,
+                token=self.gh_token,
+                staged_patches=staged_patches,
+                session_id=effective_sid,
+                fetcher=fetch_file_content,
+            )
         except ValueError as exc:
             return f"Error: {exc}"
-
-        # If file is staged for deletion, report deleted
-        if staged_patches and path in staged_patches:
-            diff = staged_patches[path]
-            if "+++ /dev/null" in diff:
-                return f"File not found: {path!r} (deleted in staged changes)"
-
-        content: str | None = None
-
-        # 1. Check local checkout if available
-        if repo_name and repo_name.strip():
-            try:
-                from app.services.session_tools.sandbox import resolve_repo_dir
-                effective_sid = session_id
-                if effective_sid is None:
-                    try:
-                        effective_sid = str(self.session_id) if self.session_id else None
-                    except Exception:
-                        effective_sid = None
-                repo_root, _ = resolve_repo_dir(
-                    repo_name=repo_name, repo_owner=repo_owner, session_id=effective_sid
-                )
-                if repo_root:
-                    real_root = os.path.realpath(repo_root)
-                    local_path = os.path.normpath(os.path.join(real_root, path))
-                    real_target = os.path.realpath(local_path)
-                    # Symlink / traversal check
-                    if os.path.commonpath([real_root, real_target]) == real_root:
-                        if os.path.isfile(real_target):
-                            with open(real_target, "r", encoding="utf-8", errors="replace") as f:
-                                content = f.read()
-            except Exception as e:
-                logger.debug("Failed reading file from local checkout: %s", e)
-
-        # 2. If not on local disk, fetch from GitHub
-        if content is None:
-            try:
-                content = await fetch_file_content(
-                    owner=repo_owner,
-                    repo=repo_name,
-                    path=path,
-                    sha=base_sha,
-                    token=self.gh_token,
-                )
-            except GitHubClientError as exc:
-                logger.warning(
-                    "session_orchestrator: read_file GitHub error for path=%s: %s",
-                    path,
-                    exc,
-                )
-                if not (staged_patches and path in staged_patches):
-                    return f"Error reading file: {exc}"
-
-            # If fetched from GitHub and staged_patches has an entry, overlay via apply_unified_diff
-            if staged_patches and path in staged_patches:
-                from app.sandbox.mirror import apply_unified_diff
-                diff = staged_patches[path]
-                if content is None and "--- /dev/null" not in diff:
-                    return f"Error reading file: base content for {path!r} is unavailable."
-                content = apply_unified_diff(content or "", diff)
-
-        if content is None:
-            return f"File not found: {path!r}"
-
-        # Truncate very large files to avoid bloating the context window.
-        MAX_CONTENT_CHARS = 50_000
-        if len(content) > MAX_CONTENT_CHARS:
-            content = (
-                content[:MAX_CONTENT_CHARS]
-                + f"\n\n[...truncated at {MAX_CONTENT_CHARS} chars]"
-            )
-
-        return content
 
     async def _tool_stage_patch(
         self,
@@ -2285,6 +2231,8 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         path: str = str(args.get("path", ""))
         try:
@@ -2292,6 +2240,19 @@ class SessionOrchestrator:
             end_line: int = int(args.get("end_line", 1))
         except (TypeError, ValueError):
             return "Error: start_line and end_line must be valid integers."
+
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
+
+        extra_kwargs: dict[str, Any] = {}
+        if staged_patches:
+            extra_kwargs["staged_patches"] = staged_patches
+        if effective_sid:
+            extra_kwargs["session_id"] = effective_sid
 
         try:
             return await tool_read_file_slice(
@@ -2302,6 +2263,7 @@ class SessionOrchestrator:
                 repo=repo_name,
                 base_sha=base_sha,
                 token=self.gh_token,
+                **extra_kwargs,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"

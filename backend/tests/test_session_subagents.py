@@ -341,3 +341,216 @@ async def test_subagent_telemetry_logged() -> None:
     assert out_tokens == 5
     assert isinstance(latency_ms, int) and latency_ms >= 0
     assert iterations == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. Issue #68: sandbox_verifier allowlist includes read_file
+# ---------------------------------------------------------------------------
+
+
+def test_sandbox_verifier_allowlist_has_read_file() -> None:
+    """Issue #68: sandbox_verifier must be permitted to read files."""
+    allowed = ROLE_CONFIGS["sandbox_verifier"].allowed_tools
+    assert "read_file" in allowed
+    assert "read_file_slice" in allowed
+    assert "glob_files" in allowed
+    assert "run_targeted_tests" in allowed
+
+
+# ---------------------------------------------------------------------------
+# 10. Issue #68: Subagent read_file observes staged patches (created, modified, deleted)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subagent_read_file_observes_staged_content() -> None:
+    """Issue #68: _exec_read_file observes staged creations, modifications, and deletions."""
+    staged: dict[str, str] = {
+        "created.py": "--- /dev/null\n+++ b/created.py\n@@ -0,0 +1 @@\n+print('hello world')\n",
+        "modified.py": "--- a/modified.py\n+++ b/modified.py\n@@ -1 +1 @@\n-old_val\n+new_val\n",
+        "deleted.py": "--- a/deleted.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-old_code\n",
+    }
+    runner, _queue, _llm, _ = _make_runner(
+        role="sandbox_verifier",
+        task="Verify staged changes.",
+        staged_patches=staged,
+    )
+
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content",
+        new_callable=AsyncMock,
+    ) as mock_fetch:
+        async def _fetch(owner: str, repo: str, path: str, sha: str, token: str | None = None) -> str | None:
+            if path == "modified.py":
+                return "old_val\n"
+            if path == "clean.py":
+                return "clean_code\n"
+            return None
+
+        mock_fetch.side_effect = _fetch
+
+        # 1. Staged creation
+        res_created = await runner._exec_read_file({"path": "created.py"})
+        assert "print('hello world')" in res_created
+
+        # 2. Staged modification overlaid on base
+        res_mod = await runner._exec_read_file({"path": "modified.py"})
+        assert "new_val" in res_mod
+        assert "old_val" not in res_mod
+
+        # 3. Staged deletion
+        res_del = await runner._exec_read_file({"path": "deleted.py"})
+        assert "deleted in staged changes" in res_del
+
+        # 4. Clean un-staged file from base
+        res_clean = await runner._exec_read_file({"path": "clean.py"})
+        assert res_clean == "clean_code\n"
+
+
+# ---------------------------------------------------------------------------
+# 11. Issue #68: Subagent git_diff observes staged patches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subagent_git_diff_observes_staged_patches() -> None:
+    """Issue #68: _exec_git_diff passes staged_patches into tool_git_diff."""
+    staged: dict[str, str] = {
+        "src/auth.py": "--- a/src/auth.py\n+++ b/src/auth.py\n@@ -1 +1 @@\n-old\n+new\n"
+    }
+    runner, _queue, _llm, _ = _make_runner(
+        role="code_guardian",
+        task="Review staged diff.",
+        staged_patches=staged,
+    )
+
+    diff_res = await runner._exec_git_diff({"base": "HEAD", "head": "staged"})
+    assert "src/auth.py" in diff_res
+    assert "+new" in diff_res
+
+
+# ---------------------------------------------------------------------------
+# 12. Issue #68: sandbox_verifier passes staged_patches to run_targeted_tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sandbox_verifier_run_targeted_tests_passes_staged_context() -> None:
+    """Issue #68: _exec_run_targeted_tests passes staged_patches, base_sha, and session_id."""
+    staged: dict[str, str] = {
+        "tests/test_x.py": "--- a/tests/test_x.py\n+++ b/tests/test_x.py\n@@ -1 +1 @@\n-pass\n+fail\n"
+    }
+    runner, _queue, _llm, _ = _make_runner(
+        role="sandbox_verifier",
+        task="Run test targets.",
+        staged_patches=staged,
+    )
+
+    with patch(
+        "app.services.session_tools.subagents.tool_run_targeted_tests",
+        new_callable=AsyncMock,
+    ) as mock_tests:
+        mock_tests.return_value = "Test runner: pytest\nStatus: FAILED\nExit code: 1"
+        res = await runner._exec_run_targeted_tests({"test_targets": ["tests/test_x.py"]})
+
+        assert "Status: FAILED" in res
+        mock_tests.assert_awaited_once_with(
+            test_targets=["tests/test_x.py"],
+            timeout_sec=120,
+            queue=runner.queue,
+            cwd=None,
+            repo_owner="test-org",
+            repo_name="test-repo",
+            staged_patches=staged,
+            base_sha="a" * 40,
+            session_id="session-test",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 13. Issue #68: End-to-end regression: staged breakage causes test failure in subagent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sandbox_verifier_e2e_regression_broken_staged_test() -> None:
+    """Regression test: stage a change that breaks tests, invoke sandbox_verifier, assert it reports failure."""
+    staged: dict[str, str] = {
+        "tests/test_math.py": "--- a/tests/test_math.py\n+++ b/tests/test_math.py\n@@ -1 +1 @@\n-assert 1 == 1\n+assert 1 == 2\n"
+    }
+    runner, queue, llm, _ = _make_runner(
+        role="sandbox_verifier",
+        task="Verify test suite against staged changes.",
+        staged_patches=staged,
+    )
+
+    # Step 1: LLM reads staged file
+    step1 = {
+        "content": None,
+        "tool_calls": [_tool_call("read_file", {"path": "tests/test_math.py"}, call_id="c1")],
+        "usage": {"input_tokens": 15, "output_tokens": 5},
+    }
+    # Step 2: LLM runs targeted tests
+    step2 = {
+        "content": None,
+        "tool_calls": [_tool_call("run_targeted_tests", {"test_targets": ["tests/test_math.py"]}, call_id="c2")],
+        "usage": {"input_tokens": 20, "output_tokens": 5},
+    }
+    # Step 3: LLM summarizes failure
+    step3 = {
+        "content": "Verification FAILED: assert 1 == 2 failed in tests/test_math.py.",
+        "tool_calls": None,
+        "usage": {"input_tokens": 10, "output_tokens": 10},
+    }
+    llm.complete.side_effect = [step1, step2, step3]
+
+    def _staged_aware_tests(*args: Any, **kwargs: Any) -> str:
+        # The staged breakage must reach the test runner: only report the
+        # staged failure when the breaking staged patch was actually forwarded.
+        staged_arg = kwargs.get("staged_patches") or {}
+        if staged_arg.get("tests/test_math.py") != staged["tests/test_math.py"]:
+            return (
+                "Test runner: pytest\nTargets: tests/test_math.py\n"
+                "Status: PASSED\nExit code: 0"
+            )
+        return (
+            "Test runner: pytest\nTargets: tests/test_math.py\nStatus: FAILED\n"
+            "Exit code: 1\nOUTPUT:\nAssertionError: assert 1 == 2"
+        )
+
+    with patch(
+        "app.services.session_tools.recon.fetch_file_content",
+        new_callable=AsyncMock,
+        return_value="assert 1 == 1\n",
+    ), patch(
+        "app.services.session_tools.subagents.tool_run_targeted_tests",
+        new_callable=AsyncMock,
+        side_effect=_staged_aware_tests,
+    ) as mock_tests:
+        summary = await runner.run()
+
+        assert "Verification FAILED" in summary
+        assert "assert 1 == 2 failed" in summary
+        # The staged failure must have flowed through the tool into the LLM
+        # context: the step-3 prompt has to contain the tool-reported failure.
+        # A mock returning FAILED unconditionally would pass even if staged
+        # content were ignored, so this assertion closes that gap.
+        step3_messages = llm.complete.call_args_list[2].kwargs["messages"]
+        tool_contents = [
+            m.get("content", "")
+            for m in step3_messages
+            if m.get("role") == "tool"
+        ]
+        assert any("assert 1 == 2" in c for c in tool_contents)
+        mock_tests.assert_awaited_once_with(
+            test_targets=["tests/test_math.py"],
+            timeout_sec=120,
+            queue=queue,
+            cwd=None,
+            repo_owner="test-org",
+            repo_name="test-repo",
+            staged_patches=staged,
+            base_sha="a" * 40,
+            session_id="session-test",
+        )
+
