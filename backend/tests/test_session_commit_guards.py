@@ -143,7 +143,8 @@ async def test_commit_resolves_tree_sha_from_commit() -> None:
         patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, return_value=fake_tree_sha) as mock_fetch_tree,
         patch("app.github_client.create_git_tree", mock_create_tree),
         patch("app.github_client.create_git_commit", new_callable=AsyncMock, return_value="new_commit_sha"),
-        patch("app.github_client.update_branch_ref", new_callable=AsyncMock, return_value=None),
+        patch("app.github.pr.get_branch_ref", new_callable=AsyncMock, return_value="existing_branch_sha"),
+        patch("app.github.pr.update_branch_ref", new_callable=AsyncMock, return_value=None),
         patch("app.github_client.create_pull_request", new_callable=AsyncMock, return_value={"html_url": "https://github.com/pr/1", "number": 1}),
     ):
         result = await commit_session(
@@ -187,7 +188,8 @@ async def test_commit_creation_patch_allows_none_base() -> None:
         patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, return_value="base_tree_sha"),
         patch("app.github_client.create_git_tree", new_callable=AsyncMock, return_value="tree_new"),
         patch("app.github_client.create_git_commit", new_callable=AsyncMock, return_value="commit_new"),
-        patch("app.github_client.update_branch_ref", new_callable=AsyncMock, return_value=None),
+        patch("app.github.pr.get_branch_ref", new_callable=AsyncMock, return_value="existing_branch_sha"),
+        patch("app.github.pr.update_branch_ref", new_callable=AsyncMock, return_value=None),
         patch("app.github_client.create_pull_request", new_callable=AsyncMock, return_value={"html_url": "https://github.com/pr/2", "number": 2}),
     ):
         result = await commit_session(
@@ -220,7 +222,8 @@ async def test_commit_deletion_patch_creates_tree_entry_with_null_sha() -> None:
         patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, return_value="base_tree_sha"),
         patch("app.github_client.create_git_tree", mock_create_tree),
         patch("app.github_client.create_git_commit", new_callable=AsyncMock, return_value="commit_delete"),
-        patch("app.github_client.update_branch_ref", new_callable=AsyncMock, return_value=None),
+        patch("app.github.pr.get_branch_ref", new_callable=AsyncMock, return_value="existing_branch_sha"),
+        patch("app.github.pr.update_branch_ref", new_callable=AsyncMock, return_value=None),
         patch("app.github_client.create_pull_request", new_callable=AsyncMock, return_value={"html_url": "https://github.com/pr/3", "number": 3}),
     ):
         result = await commit_session(
