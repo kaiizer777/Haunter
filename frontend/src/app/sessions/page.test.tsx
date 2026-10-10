@@ -91,7 +91,7 @@ describe("SessionsPage (app/sessions/page.tsx)", () => {
     });
   });
 
-  it("auto-creates a session on the default branch when no active session exists", async () => {
+  it("auto-creates a session with auto topic branch (null branch) when no active session exists", async () => {
     mockSearchParamsGet.mockReturnValue(null); // auto-load mode
     vi.mocked(api.listSessions).mockResolvedValue({
       sessions: [],
@@ -104,7 +104,7 @@ describe("SessionsPage (app/sessions/page.tsx)", () => {
       expect(api.createSession).toHaveBeenCalledWith(
         expect.objectContaining({
           repo_id: "repo_1",
-          branch_name: "main",
+          branch_name: null,
           title: "Pairing on Haunter",
         })
       );
@@ -139,7 +139,7 @@ describe("SessionsPage (app/sessions/page.tsx)", () => {
     expect(mockRouterReplace).not.toHaveBeenCalled();
   });
 
-  it("auto launch button creates a session on the default branch", async () => {
+  it("auto launch button creates a session with auto topic branch (null branch)", async () => {
     mockSearchParamsGet.mockReturnValue("true");
     render(<SessionsPage />);
 
@@ -154,7 +154,7 @@ describe("SessionsPage (app/sessions/page.tsx)", () => {
       expect(api.createSession).toHaveBeenCalledWith(
         expect.objectContaining({
           repo_id: "repo_1",
-          branch_name: "main",
+          branch_name: null,
         })
       );
       expect(mockRouterPush).toHaveBeenCalledWith("/sessions/workspace?id=sess_12345678");

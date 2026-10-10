@@ -7,10 +7,12 @@ from app.services.session_tools.recon import (
     glob_files,
     grep_search,
     list_directory,
+    read_file,
     read_file_slice,
     tool_glob_files,
     tool_grep_search,
     tool_list_directory,
+    tool_read_file,
     tool_read_file_slice,
     validate_file_path,
 )
@@ -67,6 +69,8 @@ __all__ = [
     # recon
     "_validate_file_path",
     "validate_file_path",
+    "tool_read_file",
+    "read_file",
     "tool_grep_search",
     "grep_search",
     "tool_glob_files",
