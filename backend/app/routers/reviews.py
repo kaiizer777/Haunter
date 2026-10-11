@@ -5,6 +5,7 @@ Exposes:
   GET /repos/{repo_id}/reviews — Paginated list of code reviews for a specific repo.
   GET /reviews                 — Filterable, paginated list of code reviews across all user's repos.
   GET /reviews/{review_id}     — Detail view for a specific code review.
+  GET /reviews/{review_id}/associated-pr — On-demand associated-PR lookup for a review.
 
 Security invariants:
 - Requires authentication via get_current_user.
@@ -17,8 +18,10 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 from typing import Annotated, Optional
+from urllib.parse import quote
 import uuid
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import ColumnElement, and_, case, cast, column, func, literal, select
@@ -27,7 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth import get_current_user
+from app.config import settings
 from app.db import get_db
+from app.github_client import GITHUB_API_BASE
 from app.models import CodeReview, Repo, User
 
 logger = logging.getLogger(__name__)
@@ -82,6 +87,16 @@ class CodeReviewListOut(BaseModel):
 
     reviews: list[CodeReviewOut]
     total: int
+
+
+class AssociatedPROut(BaseModel):
+    number: int
+    url: str
+    title: Optional[str] = None
+
+
+class AssociatedPRResponse(BaseModel):
+    associated_pr: Optional[AssociatedPROut] = None
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +189,96 @@ def _map_review_to_out(
         input_tokens=review.input_tokens,
         output_tokens=review.output_tokens,
         created_at=review.created_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Associated-PR lookup
+# ---------------------------------------------------------------------------
+
+
+#: Timeout for the on-demand associated-PR GitHub call (seconds). Deliberately
+#: short: this endpoint backs a per-row dashboard call, so a slow GitHub
+#: answers ``null`` instead of stalling the page.
+_ASSOCIATED_PR_TIMEOUT_SECONDS = 5.0
+
+
+async def _lookup_commit_pr(
+    owner: str, repo: str, sha: str
+) -> Optional[AssociatedPROut]:
+    """
+    Return the PR associated with ``sha`` via
+    ``GET /repos/{owner}/{repo}/commits/{sha}/pulls``.
+
+    Never raises: a missing token, any non-200 status, a network/timeout
+    failure, or an unparseable body all answer ``None`` (logged at warning) so
+    the caller renders the row as a plain push. No DB writes.
+    """
+    token = settings.github_token
+    if not token or not token.strip():
+        return None
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/commits/{quote(sha, safe='')}/pulls"
+    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "Haunter-Autonomous-Agent/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Authorization": f"Bearer {token}",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_ASSOCIATED_PR_TIMEOUT_SECONDS) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.RequestError as exc:
+        logger.warning(
+            "associated-pr lookup network error for %s/%s @ %s: %s",
+            owner,
+            repo,
+            sha,
+            type(exc).__name__,
+        )
+        return None
+    if response.status_code != 200:
+        logger.warning(
+            "associated-pr lookup GitHub status %s for %s/%s @ %s",
+            response.status_code,
+            owner,
+            repo,
+            sha,
+        )
+        return None
+    try:
+        items = response.json()
+    except ValueError:
+        logger.warning(
+            "associated-pr lookup unparseable body for %s/%s @ %s",
+            owner,
+            repo,
+            sha,
+        )
+        return None
+    if not isinstance(items, list) or not items:
+        return None
+    candidates = [
+        p for p in items if isinstance(p, dict) and isinstance(p.get("number"), int)
+    ]
+    if not candidates:
+        return None
+    open_prs = [p for p in candidates if p.get("state") == "open"]
+    pick = open_prs[0] if open_prs else max(candidates, key=lambda p: p["number"])
+    number = pick["number"]
+    html_url = pick.get("html_url")
+    pr_url = (
+        html_url
+        if isinstance(html_url, str) and html_url
+        else f"https://github.com/{owner}/{repo}/pull/{number}"
+    )
+    title = pick.get("title")
+    return AssociatedPROut(
+        number=number,
+        url=pr_url,
+        title=title if isinstance(title, str) else None,
     )
 
 
@@ -341,3 +446,53 @@ async def get_review_detail(
         )
 
     return _map_review_to_out(review)
+
+
+@router.get("/reviews/{review_id}/associated-pr", response_model=AssociatedPRResponse)
+async def get_review_associated_pr(
+    review_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AssociatedPRResponse:
+    """
+    On-demand associated-PR lookup for a single code review.
+
+    Read-only: no DB writes, no ingestion/dedup side effects. Answers
+    ``{"associated_pr": null}`` (HTTP 200) whenever no PR can be established —
+    direct-to-main pushes genuinely have none — so the dashboard row keeps
+    rendering as a plain push instead of failing the page.
+
+    Resolution order: the row's own ``pr_number`` first (no GitHub call),
+    else ``GET /repos/{owner}/{repo}/commits/{sha}/pulls`` with the server
+    token, preferring an open PR and falling back to the highest PR number.
+    """
+    stmt = (
+        select(CodeReview)
+        .join(Repo, CodeReview.repo_id == Repo.id)
+        .options(selectinload(CodeReview.repo))
+        .where(CodeReview.id == review_id, Repo.user_id == current_user.id)
+    )
+    res = await db.execute(stmt)
+    review = res.scalars().first()
+
+    if not review:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Code review not found"
+        )
+
+    repo = review.repo
+    owner = repo.owner if repo is not None else None
+    name = repo.name if repo is not None else None
+
+    if review.pr_number is not None and owner and name:
+        return AssociatedPRResponse(
+            associated_pr=AssociatedPROut(
+                number=review.pr_number,
+                url=f"https://github.com/{owner}/{name}/pull/{review.pr_number}",
+                title=None,
+            )
+        )
+    if not owner or not name or not review.commit_sha:
+        return AssociatedPRResponse(associated_pr=None)
+    associated = await _lookup_commit_pr(owner, name, review.commit_sha)
+    return AssociatedPRResponse(associated_pr=associated)
