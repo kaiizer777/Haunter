@@ -23,6 +23,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -55,8 +56,10 @@ class _ScriptedSession:
     def __init__(self, user: User, review: Optional[CodeReview]) -> None:
         self._user = user
         self._review = review
+        self.statements: list[Any] = []
 
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> FakeResult:
+        self.statements.append(statement)
         entity = statement.column_descriptions[0].get("entity")
         if entity is User:
             return FakeResult([self._user])
@@ -325,12 +328,143 @@ async def test_github_network_error_returns_null(
 async def test_missing_or_unowned_review_returns_404(
     make_auth_client, install_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Unknown id (or a row in another tenant's repo) answers 404, like detail."""
+    """Unknown id (or a row in another tenant's repo) answers 404, like detail.
+
+    The 404 must come from the ownership-scoped lookup, not from a blanket
+    "no rows" answer: the captured ``select(CodeReview)`` statement is
+    asserted to filter by both the requested review id and the caller's user
+    id, so an unowned row can never match.
+    """
     monkeypatch.setattr(settings, "github_token", "test-token")
     user = _user()
-    install_db(user, None)
+    session = install_db(user, None)
 
+    missing_id = uuid.uuid4()
     async with make_auth_client(user.id) as ac:
-        resp = await ac.get(f"/reviews/{uuid.uuid4()}/associated-pr")
+        resp = await ac.get(f"/reviews/{missing_id}/associated-pr")
 
     assert resp.status_code == 404, resp.text
+    review_stmts = [
+        s
+        for s in session.statements
+        if s.column_descriptions[0].get("entity") is CodeReview
+    ]
+    assert len(review_stmts) == 1, (
+        "expected exactly one ownership-scoped CodeReview lookup, "
+        f"got {len(review_stmts)}"
+    )
+    compiled = str(review_stmts[0].compile(compile_kwargs={"literal_binds": True}))
+    # UUIDs render dashless under literal binds; strip dashes before comparing.
+    assert str(missing_id).replace("-", "") in compiled.replace(
+        "-", ""
+    ), "the CodeReview lookup must filter by the requested review id"
+    assert str(user.id).replace("-", "") in compiled.replace(
+        "-", ""
+    ), "the CodeReview lookup must be scoped to the caller's user id"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_installation_token_preferred_over_global_pat(
+    make_auth_client, install_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A minted installation token is sent to GitHub, not the global PAT."""
+    monkeypatch.setattr(settings, "github_token", "global-pat")
+    user = _user()
+    repo = _repo(user)
+    review = _review(repo, pr_number=None)
+    install_db(user, review)
+
+    route = respx.get(_PULLS_URL).respond(status_code=200, json=[_pr(9)])
+    with patch(
+        "app.routers.reviews.get_installation_token",
+        new=AsyncMock(return_value="install-token"),
+    ):
+        async with make_auth_client(user.id) as ac:
+            resp = await ac.get(f"/reviews/{review.id}/associated-pr")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "associated_pr": {
+            "number": 9,
+            "url": "https://github.com/acme/widgets/pull/9",
+            "title": "Change #9",
+        }
+    }
+    assert route.calls.last.request.headers["authorization"] == "Bearer install-token"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_installation_token_failure_falls_back_to_global_pat(
+    make_auth_client, install_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No App credentials: the lookup still works via the server PAT."""
+    monkeypatch.setattr(settings, "github_token", "global-pat")
+    user = _user()
+    repo = _repo(user)
+    review = _review(repo, pr_number=None)
+    install_db(user, review)
+
+    route = respx.get(_PULLS_URL).respond(status_code=200, json=[_pr(9)])
+    with patch(
+        "app.routers.reviews.get_installation_token",
+        new=AsyncMock(side_effect=RuntimeError("no App credentials")),
+    ):
+        async with make_auth_client(user.id) as ac:
+            resp = await ac.get(f"/reviews/{review.id}/associated-pr")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["associated_pr"]["number"] == 9
+    assert route.calls.last.request.headers["authorization"] == "Bearer global-pat"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_no_token_at_all_returns_null_without_github_call(
+    make_auth_client, install_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installation mint fails AND no PAT: null, and GitHub is never called."""
+    monkeypatch.setattr(settings, "github_token", None)
+    user = _user()
+    repo = _repo(user)
+    review = _review(repo, pr_number=None)
+    install_db(user, review)
+
+    pulls = respx.get(_PULLS_URL).respond(status_code=200, json=[_pr(9)])
+    with patch(
+        "app.routers.reviews.get_installation_token",
+        new=AsyncMock(side_effect=RuntimeError("no GitHub auth configured")),
+    ):
+        async with make_auth_client(user.id) as ac:
+            resp = await ac.get(f"/reviews/{review.id}/associated-pr")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"associated_pr": None}
+    assert pulls.called is False, "no usable token must short-circuit before GitHub"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_associated_prefers_highest_open_pr_number(
+    make_auth_client, install_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multiple open PRs: the highest number wins, not list order."""
+    monkeypatch.setattr(settings, "github_token", "test-token")
+    user = _user()
+    repo = _repo(user)
+    review = _review(repo, pr_number=None)
+    install_db(user, review)
+
+    respx.get(_PULLS_URL).respond(status_code=200, json=[_pr(7), _pr(12), _pr(9)])
+    async with make_auth_client(user.id) as ac:
+        resp = await ac.get(f"/reviews/{review.id}/associated-pr")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "associated_pr": {
+            "number": 12,
+            "url": "https://github.com/acme/widgets/pull/12",
+            "title": "Change #12",
+        }
+    }

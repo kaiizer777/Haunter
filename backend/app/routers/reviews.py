@@ -32,7 +32,8 @@ from sqlalchemy.orm import selectinload
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
-from app.github_client import GITHUB_API_BASE
+from app.github.pr import get_installation_token
+from app.github_client import GITHUB_API_BASE, _bounded_get, _build_headers
 from app.models import CodeReview, Repo, User
 
 logger = logging.getLogger(__name__)
@@ -204,34 +205,39 @@ _ASSOCIATED_PR_TIMEOUT_SECONDS = 5.0
 
 
 async def _lookup_commit_pr(
-    owner: str, repo: str, sha: str
+    owner: str, repo: str, sha: str, token: Optional[str] = None
 ) -> Optional[AssociatedPROut]:
     """
     Return the PR associated with ``sha`` via
     ``GET /repos/{owner}/{repo}/commits/{sha}/pulls``.
 
+    Auth prefers the caller's ``token`` — a repo-scoped installation token
+    minted by :func:`app.github.pr.get_installation_token` — and falls back to
+    the server ``settings.github_token`` PAT for local dev. This mirrors the
+    try-installation-then-PAT pattern ``app/routers/sessions.py`` uses
+    (:200-202, :459-461, :714-716, :830-832, :983-985); :func:`_build_headers`
+    applies the same fallback internally, so there is one HTTP convention.
+
     Never raises: a missing token, any non-200 status, a network/timeout
-    failure, or an unparseable body all answer ``None`` (logged at warning) so
-    the caller renders the row as a plain push. No DB writes.
+    failure, an over-large body, or an unparseable body all answer ``None``
+    (logged at debug — this endpoint backs a per-row dashboard call, so a
+    warning per row would spam the logs) so the caller renders the row as a
+    plain push. No DB writes. The 5s timeout keeps a slow GitHub from
+    stalling the page.
     """
-    token = settings.github_token
-    if not token or not token.strip():
+    effective_token = token or settings.github_token
+    if not effective_token or not effective_token.strip():
         return None
     url = (
         f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
         f"/commits/{quote(sha, safe='')}/pulls"
     )
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "Haunter-Autonomous-Agent/1.0",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Authorization": f"Bearer {token}",
-    }
+    headers = _build_headers(token=effective_token)
     try:
         async with httpx.AsyncClient(timeout=_ASSOCIATED_PR_TIMEOUT_SECONDS) as client:
-            response = await client.get(url, headers=headers)
+            response = await _bounded_get(client, url, headers=headers)
     except httpx.RequestError as exc:
-        logger.warning(
+        logger.debug(
             "associated-pr lookup network error for %s/%s @ %s: %s",
             owner,
             repo,
@@ -239,8 +245,17 @@ async def _lookup_commit_pr(
             type(exc).__name__,
         )
         return None
+    except Exception as exc:
+        logger.debug(
+            "associated-pr lookup degraded for %s/%s @ %s: %s",
+            owner,
+            repo,
+            sha,
+            type(exc).__name__,
+        )
+        return None
     if response.status_code != 200:
-        logger.warning(
+        logger.debug(
             "associated-pr lookup GitHub status %s for %s/%s @ %s",
             response.status_code,
             owner,
@@ -251,7 +266,7 @@ async def _lookup_commit_pr(
     try:
         items = response.json()
     except ValueError:
-        logger.warning(
+        logger.debug(
             "associated-pr lookup unparseable body for %s/%s @ %s",
             owner,
             repo,
@@ -266,13 +281,14 @@ async def _lookup_commit_pr(
     if not candidates:
         return None
     open_prs = [p for p in candidates if p.get("state") == "open"]
-    pick = open_prs[0] if open_prs else max(candidates, key=lambda p: p["number"])
+    pick = max(open_prs or candidates, key=lambda p: p["number"])
     number = pick["number"]
     html_url = pick.get("html_url")
     pr_url = (
         html_url
         if isinstance(html_url, str) and html_url
-        else f"https://github.com/{owner}/{repo}/pull/{number}"
+        else f"https://github.com/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/pull/{number}"
     )
     title = pick.get("title")
     return AssociatedPROut(
@@ -463,8 +479,9 @@ async def get_review_associated_pr(
     rendering as a plain push instead of failing the page.
 
     Resolution order: the row's own ``pr_number`` first (no GitHub call),
-    else ``GET /repos/{owner}/{repo}/commits/{sha}/pulls`` with the server
-    token, preferring an open PR and falling back to the highest PR number.
+    else ``GET /repos/{owner}/{repo}/commits/{sha}/pulls`` with the repo
+    installation token (server PAT fallback), preferring the highest open PR
+    number and falling back to the highest PR number.
     """
     stmt = (
         select(CodeReview)
@@ -488,11 +505,21 @@ async def get_review_associated_pr(
         return AssociatedPRResponse(
             associated_pr=AssociatedPROut(
                 number=review.pr_number,
-                url=f"https://github.com/{owner}/{name}/pull/{review.pr_number}",
+                url=(
+                    f"https://github.com/{quote(owner, safe='')}"
+                    f"/{quote(name, safe='')}/pull/{review.pr_number}"
+                ),
                 title=None,
             )
         )
     if not owner or not name or not review.commit_sha:
         return AssociatedPRResponse(associated_pr=None)
-    associated = await _lookup_commit_pr(owner, name, review.commit_sha)
+    # Prefer the repo-scoped installation token, as the sibling sessions
+    # router does; get_installation_token already falls back to the server PAT
+    # in dev, so this except only fires when no GitHub auth is configured.
+    try:
+        gh_token: Optional[str] = await get_installation_token(repo)
+    except Exception:
+        gh_token = None
+    associated = await _lookup_commit_pr(owner, name, review.commit_sha, token=gh_token)
     return AssociatedPRResponse(associated_pr=associated)
