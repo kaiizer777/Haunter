@@ -104,7 +104,7 @@ const QUEUED_SUMMARY = "Autonomous code review queued.";
 function hasCompletedAnalysis(review: CodeReviewOut): boolean {
   if (review.input_tokens > 0 || review.output_tokens > 0) return true;
   const summary = (review.summary ?? "").trim();
-  return summary.length > 0 && summary !== QUEUED_SUMMARY;
+  return summary.length > 0 && summary.toLowerCase() !== QUEUED_SUMMARY.toLowerCase();
 }
 
 /** Suppressed row with no saved audit — legacy row or suppress-before-save

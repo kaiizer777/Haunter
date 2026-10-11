@@ -877,7 +877,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getByText("Publication skipped")).toBeInTheDocument();
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
       const avgTab = screen.getByText(/avg risk/i).closest("button")!;
-      expect(avgTab).toHaveTextContent("0");
+      expect(screen.getByTitle(/Mean of 1 scored review/)).toHaveTextContent(/^0 \/ 100$/);
       expect(avgTab.textContent).toMatch(/1 scored/i);
     });
   });
