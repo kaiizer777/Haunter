@@ -1292,5 +1292,34 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(await screen.findByText("PR #77")).toBeInTheDocument();
       expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(2);
     });
+
+    it("list Refresh keeps a resolved (success) lookup instead of refetching it", async () => {
+      // Fresh row objects per list fetch, like real API JSON payloads.
+      vi.mocked(api.getCodeReviews).mockImplementation(async () => ({
+        reviews: [{ ...pushRowForAssoc("rev_assoc_keep", "1234abcd1234abcd") }],
+        total: 1,
+      }));
+      vi.mocked(api.getAssociatedPr).mockResolvedValue({
+        associated_pr: {
+          number: 42,
+          url: "https://github.com/acme/sentinel/pull/42",
+          title: "Kept PR",
+        },
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #42")).toBeInTheDocument();
+      await waitFor(() =>
+        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1)
+      );
+
+      // Refresh delivers fresh rows but must not refetch the resolved PR.
+      fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+      expect(await screen.findByText("PR #42")).toBeInTheDocument();
+      // Mount effects flush inside the findBy act cycle, so any stray
+      // refetch would already be recorded — assert the count directly.
+      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -16,6 +16,7 @@ Security invariants:
 from __future__ import annotations
 
 from datetime import datetime
+import asyncio
 import logging
 from typing import Annotated, Optional
 from urllib.parse import quote
@@ -203,6 +204,13 @@ def _map_review_to_out(
 #: answers ``null`` instead of stalling the page.
 _ASSOCIATED_PR_TIMEOUT_SECONDS = 5.0
 
+#: Timeout for minting the repo-scoped installation token before the lookup
+#: (seconds). The mint path (``get_installation_token``) uses the 30s
+#: ``DEFAULT_TIMEOUT_SECONDS`` transport, which would blow the 5s lookup
+#: budget above on a cold cache + slow GitHub/SSM; a slow mint answers
+#: ``None`` so the caller falls through to the server PAT / null path.
+_MINT_TIMEOUT_SECONDS = 3.0
+
 
 async def _lookup_commit_pr(
     owner: str, repo: str, sha: str, token: Optional[str] = None
@@ -220,13 +228,23 @@ async def _lookup_commit_pr(
 
     Never raises: a missing token, any non-200 status, a network/timeout
     failure, an over-large body, or an unparseable body all answer ``None``
-    (logged at debug — this endpoint backs a per-row dashboard call, so a
-    warning per row would spam the logs) so the caller renders the row as a
-    plain push. No DB writes. The 5s timeout keeps a slow GitHub from
-    stalling the page.
+    so the caller renders the row as a plain push. No DB writes. The 5s
+    timeout keeps a slow GitHub from stalling the page.
+
+    Log levels: auth/rate-limit/server failures (401/403/429/5xx) log at
+    warning — those signal a fixable credential or quota problem; expected
+    misses (404/422), a missing token, timeouts, and unparseable bodies log
+    at debug — this endpoint backs a per-row dashboard call, so a warning
+    per row would spam the logs.
     """
     effective_token = token or settings.github_token
     if not effective_token or not effective_token.strip():
+        logger.debug(
+            "associated-pr lookup skipped (no token) for %s/%s @ %s",
+            owner,
+            repo,
+            sha,
+        )
         return None
     url = (
         f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
@@ -255,13 +273,22 @@ async def _lookup_commit_pr(
         )
         return None
     if response.status_code != 200:
-        logger.debug(
-            "associated-pr lookup GitHub status %s for %s/%s @ %s",
-            response.status_code,
-            owner,
-            repo,
-            sha,
-        )
+        if response.status_code in (401, 403, 429) or response.status_code >= 500:
+            logger.warning(
+                "associated-pr lookup GitHub status %s for %s/%s @ %s",
+                response.status_code,
+                owner,
+                repo,
+                sha,
+            )
+        else:
+            logger.debug(
+                "associated-pr lookup GitHub status %s for %s/%s @ %s",
+                response.status_code,
+                owner,
+                repo,
+                sha,
+            )
         return None
     try:
         items = response.json()
@@ -516,10 +543,25 @@ async def get_review_associated_pr(
         return AssociatedPRResponse(associated_pr=None)
     # Prefer the repo-scoped installation token, as the sibling sessions
     # router does; get_installation_token already falls back to the server PAT
-    # in dev, so this except only fires when no GitHub auth is configured.
+    # in dev. The mint runs under a shorter timeout than the lookup itself:
+    # its transport allows 30s (DEFAULT_TIMEOUT_SECONDS), which would blow
+    # the 5s lookup budget on a cold cache — a slow mint answers None so the
+    # lookup falls through to the PAT / null path instead of stalling the row.
     try:
-        gh_token: Optional[str] = await get_installation_token(repo)
-    except Exception:
+        gh_token: Optional[str] = await asyncio.wait_for(
+            get_installation_token(repo), timeout=_MINT_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        logger.debug(
+            "associated-pr lookup installation-token mint timed out after %.1fs",
+            _MINT_TIMEOUT_SECONDS,
+        )
+        gh_token = None
+    except Exception as exc:
+        logger.debug(
+            "associated-pr lookup installation-token mint failed: %s",
+            type(exc).__name__,
+        )
         gh_token = None
     associated = await _lookup_commit_pr(owner, name, review.commit_sha, token=gh_token)
     return AssociatedPRResponse(associated_pr=associated)

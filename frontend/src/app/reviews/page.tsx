@@ -671,20 +671,34 @@ function PushPill({ commitSha, commitUrl, repoName }: { commitSha: string; commi
  * token-missing / error) silently — the row keeps rendering `Push @ sha`
  * with no skeleton and no layout shift beyond the pill text swap. Only the
  * rendered page window fetches (~PAGE_SIZE calls max); rows that already
- * carry `pr_number` never fetch. List Refresh / detail Retry clear the cache
- * (see clearAssociatedPrCache) so failed lookups genuinely retry.
+ * carry `pr_number` never fetch. List Refresh / detail Retry evict only the
+ * failed (null) entries (see clearFailedAssociatedPrCache) so misses
+ * genuinely retry while resolved PRs are kept, not refetched.
  */
 const associatedPrCache = new Map<string, AssociatedPROut | null>();
 const associatedPrInflight = new Map<string, Promise<AssociatedPROut | null>>();
 
 /**
- * Drop every cached + in-flight associated-PR entry. Called by the list
- * Refresh and detail Retry paths so failed/null lookups refetch instead of
- * serving a stale miss forever; success entries are simply re-fetched once
- * on the next lookup and re-cached.
+ * Drop every cached + in-flight associated-PR entry. Only the test reset
+ * uses the full clear (suite isolation); product paths use
+ * clearFailedAssociatedPrCache below so resolved PRs survive a Refresh.
  */
 export function clearAssociatedPrCache(): void {
   associatedPrCache.clear();
+  associatedPrInflight.clear();
+}
+
+/**
+ * Drop only failed (null) cached entries + in-flight lookups. Called by the
+ * list Refresh and detail Retry paths: null misses genuinely retry on the
+ * fresh row objects, while success entries are kept so resolved `PR #n`
+ * pills never refetch (a full clear would re-fire ~PAGE_SIZE GitHub-backed
+ * lookups on every Refresh, defeating the cache above).
+ */
+export function clearFailedAssociatedPrCache(): void {
+  for (const [key, value] of associatedPrCache) {
+    if (value == null) associatedPrCache.delete(key);
+  }
   associatedPrInflight.clear();
 }
 
@@ -1970,9 +1984,10 @@ export default function ReviewsPage() {
   }, [selectedId, reviews, listLoaded, detailRetry]);
 
   const handleRefresh = () => {
-    // Clear first so failed/null associated-PR lookups genuinely retry when
-    // the fresh rows arrive (the hook re-runs on the new row objects).
-    clearAssociatedPrCache();
+    // Evict only failed (null) entries so misses genuinely retry when the
+    // fresh rows arrive (the hook re-runs on the new row objects), while
+    // resolved PRs are kept and never refetch.
+    clearFailedAssociatedPrCache();
     setRefreshing(true);
     fetchReviews();
   };
@@ -1982,7 +1997,7 @@ export default function ReviewsPage() {
   // the detail endpoint too. Bumping detailRetry alone is a no-op for cached
   // rows because the resolver above returns early on cache hit.
   const handleDetailRetry = useCallback(() => {
-    clearAssociatedPrCache();
+    clearFailedAssociatedPrCache();
     setRefreshing(true);
     fetchReviews();
     setDetailRetry((n) => n + 1);

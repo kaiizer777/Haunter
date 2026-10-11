@@ -20,6 +20,8 @@ Postgres, no token. Marked ``fast``: no ``db`` / ``user_factory`` /
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
@@ -468,3 +470,99 @@ async def test_associated_prefers_highest_open_pr_number(
             "title": "Change #12",
         }
     }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_slow_installation_token_mint_falls_back_to_global_pat(
+    make_auth_client, install_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hanging token mint never stalls the row: the mint bound fires and
+    the lookup proceeds with the server PAT."""
+    monkeypatch.setattr(settings, "github_token", "global-pat")
+    # Shrink the bound so the test proves the wait_for wiring, not the 3s value.
+    monkeypatch.setattr("app.routers.reviews._MINT_TIMEOUT_SECONDS", 0.05)
+    user = _user()
+    repo = _repo(user)
+    review = _review(repo, pr_number=None)
+    install_db(user, review)
+
+    async def _slow_mint(_repo: object) -> str:
+        await asyncio.sleep(5.0)
+        return "late-token"
+
+    route = respx.get(_PULLS_URL).respond(status_code=200, json=[_pr(9)])
+    with patch("app.routers.reviews.get_installation_token", new=_slow_mint):
+        async with make_auth_client(user.id) as ac:
+            resp = await ac.get(f"/reviews/{review.id}/associated-pr")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["associated_pr"]["number"] == 9
+    assert route.calls.last.request.headers["authorization"] == "Bearer global-pat"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_slow_installation_token_mint_without_pat_returns_null(
+    make_auth_client, install_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hanging mint with no PAT either: null, and GitHub is never called."""
+    monkeypatch.setattr(settings, "github_token", None)
+    monkeypatch.setattr("app.routers.reviews._MINT_TIMEOUT_SECONDS", 0.05)
+    user = _user()
+    repo = _repo(user)
+    review = _review(repo, pr_number=None)
+    install_db(user, review)
+
+    async def _slow_mint(_repo: object) -> str:
+        await asyncio.sleep(5.0)
+        return "late-token"
+
+    pulls = respx.get(_PULLS_URL).respond(status_code=200, json=[_pr(9)])
+    with patch("app.routers.reviews.get_installation_token", new=_slow_mint):
+        async with make_auth_client(user.id) as ac:
+            resp = await ac.get(f"/reviews/{review.id}/associated-pr")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"associated_pr": None}
+    assert pulls.called is False, "timed-out mint with no PAT must not reach GitHub"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_github_status_log_levels_warning_for_auth_debug_for_missing(
+    make_auth_client,
+    install_db,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """403 (auth/rate-limit) logs at warning; 404 (genuine miss) stays at debug."""
+    monkeypatch.setattr(settings, "github_token", "test-token")
+    user = _user()
+    repo = _repo(user)
+    review = _review(repo, pr_number=None)
+    install_db(user, review)
+
+    respx.get(_PULLS_URL).mock(
+        side_effect=[
+            httpx.Response(403, json={"message": "rate limited"}),
+            httpx.Response(404, json={"message": "not found"}),
+        ]
+    )
+    with caplog.at_level(logging.DEBUG, logger="app.routers.reviews"):
+        async with make_auth_client(user.id) as ac:
+            resp_forbidden = await ac.get(f"/reviews/{review.id}/associated-pr")
+            resp_missing = await ac.get(f"/reviews/{review.id}/associated-pr")
+
+    assert resp_forbidden.status_code == 200, resp_forbidden.text
+    assert resp_forbidden.json() == {"associated_pr": None}
+    assert resp_missing.status_code == 200, resp_missing.text
+    assert resp_missing.json() == {"associated_pr": None}
+    assoc_records = [
+        r for r in caplog.records if "associated-pr lookup GitHub status" in r.message
+    ]
+    by_status = {
+        r.message.rsplit("status ", 1)[1].split(" ")[0]: r for r in assoc_records
+    }
+    assert by_status["403"].levelno == logging.WARNING
+    assert by_status["404"].levelno == logging.DEBUG
