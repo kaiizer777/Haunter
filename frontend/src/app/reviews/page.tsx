@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { SelectDropdown } from "@/components/ui/select-dropdown";
 import {
   api,
+  AssociatedPROut,
   CodeReviewOut,
   RepoOut,
   ReviewFindingOut,
@@ -657,6 +658,88 @@ function PushPill({ commitSha, commitUrl, repoName }: { commitSha: string; commi
 }
 
 /**
+ * On-demand associated-PR lookup for push rows (`pr_number` NULL at rest).
+ * Rows that belong to a PR (squash-merged, fast-forwarded) resolve to the PR
+ * so the card can show `PR #n` instead of `Push @ sha`.
+ *
+ * Module-level cache keyed by commit sha: back/forward + re-renders never
+ * refetch, and simultaneous mounts for one sha share a single in-flight
+ * request. Resolves null (no PR / token-missing / error) silently — the row
+ * keeps rendering `Push @ sha` with no skeleton and no layout shift beyond
+ * the pill text swap. Only the rendered page window fetches (~PAGE_SIZE
+ * calls max); rows that already carry `pr_number` never fetch.
+ */
+const associatedPrCache = new Map<string, AssociatedPROut | null>();
+const associatedPrInflight = new Map<string, Promise<AssociatedPROut | null>>();
+
+/** Test-only reset for the module-level associated-PR cache (vitest). */
+export function __resetAssociatedPrCacheForTests(): void {
+  associatedPrCache.clear();
+  associatedPrInflight.clear();
+}
+
+function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
+  const [resolved, setResolved] = useState<AssociatedPROut | null>(
+    () => associatedPrCache.get(review.commit_sha) ?? null
+  );
+  useEffect(() => {
+    if (review.pr_number != null) return;
+    const sha = review.commit_sha;
+    if (!sha) return;
+    const cached = associatedPrCache.get(sha);
+    if (cached !== undefined) {
+      setResolved(cached);
+      return;
+    }
+    if (typeof api.getAssociatedPr !== "function") return;
+    let cancelled = false;
+    let pending = associatedPrInflight.get(sha);
+    if (!pending) {
+      const request = api.getAssociatedPr(review.id).then(
+        (res) => {
+          const pr = res?.associated_pr ?? null;
+          associatedPrCache.set(sha, pr);
+          return pr;
+        },
+        () => null
+      );
+      pending = request.finally(() => {
+        associatedPrInflight.delete(sha);
+      });
+      associatedPrInflight.set(sha, pending);
+    }
+    pending.then((pr) => {
+      if (!cancelled) setResolved(pr);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [review.id, review.commit_sha, review.pr_number]);
+  if (review.pr_number != null) return null;
+  return resolved;
+}
+
+/**
+ * Single identity-pill call site for every card + the detail header: amber
+ * `PR #n` when PR-associated (directly or via associated-PR resolution),
+ * equal-weight `Push @ sha` otherwise. Same PrPill component either way, so
+ * no visual drift between direct-PR rows and resolved push rows.
+ */
+function IdentityPill({ review }: { review: CodeReviewOut }) {
+  const associated = useAssociatedPr(review);
+  const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
+  if (review.pr_number != null) {
+    const prUrl = review.pr_url || (review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
+    return <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />;
+  }
+  if (associated) {
+    return <PrPill prNumber={associated.number} prUrl={associated.url} repoName={repoName} />;
+  }
+  const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
+  return <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />;
+}
+
+/**
  * Honest error row for analyses that never completed (status "error" or a
  * `failure_reason` such as "All 9 free-tier models exhausted"). Renders NO
  * verdict telemetry — ERROR pill, em-dash confidence, neutral gauge, the raw
@@ -674,7 +757,6 @@ function FailedReviewCard({
 }) {
   const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
   const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
-  const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
   const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
   const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
   const errorText = review.failure_reason ?? review.summary;
@@ -705,11 +787,7 @@ function FailedReviewCard({
               <span>{repoName}</span>
             </span>
           )}
-          {review.pr_number ? (
-            <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
-          ) : (
-            <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
-          )}
+          <IdentityPill review={review} />
           <span className="inline-flex items-center rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
             Error
           </span>
@@ -773,11 +851,7 @@ function FailedReviewCard({
                 <span>{repoName}</span>
               </span>
             )}
-            {review.pr_number ? (
-              <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
-            ) : (
-              <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
-            )}
+            <IdentityPill review={review} />
             <span className="inline-flex items-center rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
               Error
             </span>
@@ -920,8 +994,6 @@ function PendingReviewCard({
 }) {
   const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
   const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
-  const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
-  const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
   const label = isSuppressedUnscored(review) ? "Suppressed" : pendingLabelFor(review);
 
   return (
@@ -951,11 +1023,7 @@ function PendingReviewCard({
                 <span>{repoName}</span>
               </span>
             )}
-            {review.pr_number ? (
-              <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
-            ) : (
-              <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
-            )}
+            <IdentityPill review={review} />
             <span className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-400">
               {label}
             </span>
@@ -1025,7 +1093,6 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
   const [copyShaError, setCopyShaError] = useState<string | null>(null);
   const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
   const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
-  const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
   const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
 
   // Category counts
@@ -1114,11 +1181,7 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
                 Push @ sha for direct pushes (pr_number NULL), verdict pill
                 alongside in both cases */}
             <div className="inline-flex items-center gap-1.5">
-              {review.pr_number ? (
-                <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
-              ) : (
-                <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
-              )}
+              <IdentityPill review={review} />
               <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-mono font-semibold", verdict.color)}>
                 {verdict.label}
               </span>
@@ -1381,7 +1444,6 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
 
   const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
   const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
-  const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
   const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
   const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
 
@@ -1421,11 +1483,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
                   <span>{repoName}</span>
                 </span>
               )}
-              {review.pr_number ? (
-                <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
-              ) : (
-                <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
-              )}
+              <IdentityPill review={review} />
               {failed && (
                 <span className="inline-flex items-center rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
                   Error

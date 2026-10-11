@@ -1,8 +1,8 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import ReviewsPage from "./page";
+import ReviewsPage, { __resetAssociatedPrCacheForTests } from "./page";
 import { api, CodeReviewOut, RepoOut } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 
@@ -23,6 +23,7 @@ vi.mock("@/lib/api", () => ({
     getRepos: vi.fn(),
     getCodeReviews: vi.fn(),
     getReviewDetail: vi.fn(),
+    getAssociatedPr: vi.fn(),
     getModelConfig: vi.fn().mockResolvedValue({
       id: "cfg_1",
       provider: "opencode_zen",
@@ -115,6 +116,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetAssociatedPrCacheForTests();
     localStorage.clear();
     window.history.replaceState({}, "", "/reviews");
     vi.mocked(useAuth).mockReturnValue({
@@ -139,6 +141,9 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       const found = mockReviews.find((r) => r.id === id);
       return found ? Promise.resolve(found) : Promise.reject(new Error("not found"));
     });
+    // Default: no associated PR — push rows keep the Push pill unless a test
+    // overrides this per-case below.
+    vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
 
     const writeTextMock = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -1149,6 +1154,97 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       );
       expect(await screen.findByText("No Code Reviews Found")).toBeInTheDocument();
       expect(screen.queryByText(/push-row-boom/i)).not.toBeInTheDocument();
+    });
+  });
+
+  describe("associated-PR pill swap (push rows that belong to a PR)", () => {
+    // Completed push row: pr_number NULL at rest, so the card renders the
+    // Push pill until the associated-PR lookup resolves.
+    const pushRowForAssoc = (id: string, sha: string): CodeReviewOut => ({
+      ...mockReviews[1],
+      id,
+      commit_sha: sha,
+      pr_number: null,
+      pr_title: null,
+      pr_author: null,
+      pr_author_avatar: null,
+      head_branch: null,
+      base_branch: null,
+      pr_url: null,
+    });
+
+    it("resolved PR swaps the Push pill to an amber PR #n pill linking the PR URL", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [pushRowForAssoc("rev_assoc_82", "aaaabbbbccccdddd")],
+        total: 1,
+      });
+      vi.mocked(api.getAssociatedPr).mockResolvedValue({
+        associated_pr: {
+          number: 82,
+          url: "https://github.com/acme/sentinel/pull/82",
+          title: null,
+        },
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #82")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /PR #82/ })).toHaveAttribute(
+        "href",
+        "https://github.com/acme/sentinel/pull/82"
+      );
+      expect(screen.queryByText(/Push @/)).not.toBeInTheDocument();
+      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_82");
+    });
+
+    it("null resolution keeps the Push pill (direct-to-main push)", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [pushRowForAssoc("rev_assoc_null", "eeeffff00001111")],
+        total: 1,
+      });
+      vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText(/Push @ eeeffff/i)).toBeInTheDocument();
+      await waitFor(() =>
+        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_null")
+      );
+      expect(screen.queryByText(/PR #\d+/)).not.toBeInTheDocument();
+    });
+
+    it("network error keeps the Push pill (silent fail, no fake PR#)", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [pushRowForAssoc("rev_assoc_err", "2222333344445555")],
+        total: 1,
+      });
+      vi.mocked(api.getAssociatedPr).mockRejectedValue(new Error("backend down"));
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText(/Push @ 2222333/i)).toBeInTheDocument();
+      await waitFor(() =>
+        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_err")
+      );
+      expect(screen.queryByText(/PR #\d+/)).not.toBeInTheDocument();
+    });
+
+    it("caches by commit sha: re-render fetches once, never refetches", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [pushRowForAssoc("rev_assoc_cache", "6666777788889999")],
+        total: 1,
+      });
+      vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
+      const first = render(<ReviewsPage />);
+
+      expect(await screen.findByText(/Push @ 6666777/i)).toBeInTheDocument();
+      await waitFor(() =>
+        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1)
+      );
+      first.unmount();
+
+      render(<ReviewsPage />);
+      expect(await screen.findByText(/Push @ 6666777/i)).toBeInTheDocument();
+      // Let any stray refetch land, then assert the cache held.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1);
     });
   });
 });
