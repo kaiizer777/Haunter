@@ -620,7 +620,7 @@ function FailedReviewCard({
   // Retry stays outside it — same pattern as the detail error banner.
   if (!expanded) {
     return (
-      <div className="rounded-xl border border-rose-500/20 bg-[#0d0d10] px-4 py-3 opacity-80 transition-opacity hover:opacity-100 focus-within:opacity-100">
+      <div className="rounded-xl border border-rose-500/20 bg-[#0d0d10] px-4 py-3 opacity-90 transition-opacity hover:opacity-100 focus-within:opacity-100">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           {repoUrl ? (
             <a
@@ -643,10 +643,10 @@ function FailedReviewCard({
           ) : (
             <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
           )}
-          <span className="inline-flex items-center rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300/80">
+          <span className="inline-flex items-center rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
             Error
           </span>
-          <span className="min-w-0 flex-1 basis-40 truncate text-xs font-mono text-zinc-500" title={errorText}>
+          <span className="min-w-0 flex-1 basis-40 truncate text-xs font-mono text-zinc-400" title={errorText}>
             {errorExcerpt}
           </span>
           <span className="text-xs text-zinc-500 font-mono">
@@ -933,7 +933,7 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
                 <button
                   type="button"
                   onClick={handleCopySha}
-                  className="text-zinc-500 hover:text-zinc-200 transition-colors focus:outline-none"
+                  className="rounded-sm text-zinc-500 hover:text-zinc-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70"
                   title="Copy commit SHA"
                   aria-label="Copy commit SHA"
                 >
@@ -991,7 +991,7 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
               <button
                 type="button"
                 onClick={handleCopySha}
-                className="pl-1.5 hover:text-zinc-200 transition-colors focus:outline-none"
+                className="rounded-sm pl-1.5 hover:text-zinc-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70"
                 title="Copy commit SHA"
                 aria-label="Copy commit SHA"
               >
@@ -1254,15 +1254,24 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
                   <span className="text-amber-400 font-medium">{review.head_branch || "head"}</span>
                 </div>
               )}
+              {/* Commit SHA chip — PR rows only, mirroring the overview card.
+                  Push rows carry the sha in the Push pill with their own copy
+                  affordance alongside (same pattern as the overview row). */}
+              {review.pr_number ? (
               <div className="inline-flex items-center rounded bg-zinc-900/80 border border-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">
                 <a href={commitUrl || `https://github.com/${repoName}/commit/${review.commit_sha}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors pr-1.5 border-r border-zinc-800" title="View commit on GitHub">
                   <GitCommit className="h-3 w-3 text-zinc-500" />
                   <span>{commitShort}</span>
                 </a>
-                <button type="button" onClick={handleCopySha} className="pl-1.5 hover:text-zinc-200 transition-colors focus:outline-none" title="Copy commit SHA" aria-label="Copy commit SHA">
+                <button type="button" onClick={handleCopySha} className="rounded-sm pl-1.5 hover:text-zinc-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70" title="Copy commit SHA" aria-label="Copy commit SHA">
                   {copiedSha ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3 text-zinc-500 hover:text-zinc-300" />}
                 </button>
               </div>
+              ) : (
+                <button type="button" onClick={handleCopySha} className="rounded-sm text-zinc-500 hover:text-zinc-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70" title="Copy commit SHA" aria-label="Copy commit SHA">
+                  {copiedSha ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                </button>
+              )}
               {copyShaError && (
                 <p role="alert" className="text-[11px] font-mono text-rose-400">
                   {copyShaError}

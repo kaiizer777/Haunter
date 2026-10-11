@@ -797,5 +797,54 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       await user.click(show);
       expect(screen.getByText(/push-row-boom/i)).toBeInTheDocument();
     });
+
+    it("Clear Filters resets hideFailed and restores failed rows", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [failedPushRow, ...mockReviews],
+        total: 3,
+      });
+      render(<ReviewsPage />);
+
+      // hideFailed ON plus a search filter that empties the list, so the
+      // empty-state Clear Filters button appears.
+      await user.click(await screen.findByRole("button", { name: /hide failed/i }));
+      expect(screen.queryByText(/push-row-boom/i)).not.toBeInTheDocument();
+      await user.type(
+        screen.getByPlaceholderText("Search findings, commits, files..."),
+        "zzz-no-such-review"
+      );
+      expect(await screen.findByText("No Code Reviews Found")).toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: /clear filters/i }));
+
+      // Failed rows return, the toggle flips back OFF, search is cleared.
+      expect(await screen.findByText(/push-row-boom/i)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /hide failed/i })).toHaveAttribute(
+        "aria-pressed",
+        "false"
+      );
+      expect(
+        screen.getByPlaceholderText("Search findings, commits, files...")
+      ).toHaveValue("");
+    });
+
+    it("hideFailed composes with search: a search hit on a failed row stays hidden", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [failedPushRow, ...mockReviews],
+        total: 3,
+      });
+      render(<ReviewsPage />);
+
+      await user.click(await screen.findByRole("button", { name: /hide failed/i }));
+      // Query matches only the failed row's failure_reason — hideFailed still wins.
+      await user.type(
+        screen.getByPlaceholderText("Search findings, commits, files..."),
+        "push-row-boom"
+      );
+      expect(await screen.findByText("No Code Reviews Found")).toBeInTheDocument();
+      expect(screen.queryByText(/push-row-boom/i)).not.toBeInTheDocument();
+    });
   });
 });
