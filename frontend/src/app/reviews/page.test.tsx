@@ -62,7 +62,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       pr_url: "https://github.com/acme/sentinel/pull/101",
       risk_score: 85,
       summary: "Critical security vulnerability detected in token parser middleware.",
-      status: "open",
+      status: "completed",
       input_tokens: 1200,
       output_tokens: 350,
       created_at: new Date(Date.now() - 3600000).toISOString(),
@@ -575,6 +575,99 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getAllByText("Great to Merge")).toHaveLength(2);
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
       expect(screen.queryByText("free-tier models exhausted")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("pending/in-progress analyses (honest neutral states)", () => {
+    const pendingReview: CodeReviewOut = {
+      id: "rev_pending",
+      repo_id: "repo_1",
+      repo_owner: "acme",
+      repo_name: "sentinel",
+      commit_sha: "feedface12345678",
+      pr_number: 104,
+      pr_title: "feat: queued pipeline run",
+      pr_author: "octocat",
+      pr_author_avatar: null,
+      head_branch: "feat/queued",
+      base_branch: "main",
+      pr_url: "https://github.com/acme/sentinel/pull/104",
+      risk_score: 0,
+      summary: "Autonomous code review queued.",
+      status: "pending",
+      input_tokens: 0,
+      output_tokens: 0,
+      created_at: new Date().toISOString(),
+      diff_stats: null,
+      findings: [],
+    };
+
+    it("renders a neutral Queued row: pill + em-dash confidence, no fake verdict", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [pendingReview],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #104")).toBeInTheDocument();
+      // Neutral pill renders twice on the card: badge row + Status cell.
+      expect(screen.getAllByText("Queued")).toHaveLength(2);
+      expect(screen.getByText("Autonomous code review queued.")).toBeInTheDocument();
+
+      // Lying UI must be gone: the 0 default score used to render as
+      // 10/10 confidence + SAFE gauge + Great-to-Merge verdict.
+      expect(screen.queryByText("10/10")).not.toBeInTheDocument();
+      expect(screen.queryByText("SAFE")).not.toBeInTheDocument();
+      expect(screen.queryByText("Great to Merge")).not.toBeInTheDocument();
+      expect(screen.queryByText("Changes Requested")).not.toBeInTheDocument();
+      expect(screen.queryByText("Review Advised")).not.toBeInTheDocument();
+      expect(screen.getByText("NO SCORE")).toBeInTheDocument();
+      // Honest neutral markers (exact: gauge + 3 telemetry cells in the
+      // card + Avg tile em-dash when nothing scored — same count as the
+      // failed-row test).
+      expect(screen.getAllByText("—")).toHaveLength(5);
+    });
+
+    it("in-progress rows render Analyzing and stay out of Avg Risk", async () => {
+      const running: CodeReviewOut = {
+        ...pendingReview,
+        id: "rev_running",
+        status: "in_progress",
+      };
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [mockReviews[0], running],
+        total: 2,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #104")).toBeInTheDocument();
+      expect(screen.getAllByText("Analyzing")).toHaveLength(2);
+      expect(screen.queryByText("Great to Merge")).not.toBeInTheDocument();
+
+      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      // 85 alone — the unscored 0 must not pollute the mean.
+      expect(avgTab).toHaveTextContent("85");
+      expect(avgTab.textContent).not.toMatch(/43/);
+      expect(avgTab.textContent).toMatch(/1 scored/i);
+    });
+
+    it("pending detail shows a neutral panel with em-dash confidence", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [pendingReview],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #104")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: /full audit/i }));
+
+      expect(await screen.findByText("Haunter Autonomous Audit Report")).toBeInTheDocument();
+      expect(screen.queryByText("10/10")).not.toBeInTheDocument();
+      expect(screen.queryByText("Great to Merge")).not.toBeInTheDocument();
+      expect(screen.queryByText("Changes Requested")).not.toBeInTheDocument();
+      expect(screen.getByText("Findings Summary (0)")).toBeInTheDocument();
+      expect(screen.getByText(/no findings yet/i)).toBeInTheDocument();
     });
   });
 

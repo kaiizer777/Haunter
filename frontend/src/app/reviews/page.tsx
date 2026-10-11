@@ -58,6 +58,28 @@ function isReviewFailed(review: CodeReviewOut): boolean {
   return review.status?.toLowerCase() === "error";
 }
 
+/** A review with no completed analysis to report — never render verdict telemetry for it.
+ * Fail-closed: only status "completed" carries a real score. Everything else —
+ * "pending" (row created at enqueue with risk_score 0 + findings [],
+ * backend/app/webhooks.py:2271 + :2455), "in_progress" (orchestrator running,
+ * risk_score still the 0 default until post-analysis), "suppressed" (publish
+ * skipped before analysis, so the score is still 0) or anything unknown —
+ * renders neutrally. Without this gate a queued row reads as Great-to-Merge /
+ * SAFE with 10/10 confidence. Checked after isReviewFailed; "error" rows keep
+ * the honest error panel. */
+function isReviewPending(review: CodeReviewOut): boolean {
+  const s = review.status?.toLowerCase();
+  return s !== "completed" && s !== "error";
+}
+
+/** Neutral status-pill label for unscored rows. Reuses existing zinc pill chrome. */
+function pendingLabelFor(review: CodeReviewOut): string {
+  const s = review.status?.toLowerCase();
+  if (s === "pending") return "Queued";
+  if (s === "suppressed") return "Suppressed";
+  return "Analyzing";
+}
+
 /**
  * Calibrated tactile physical gauge for Risk Score (0-100).
  * Replaces unearned neon glow with a clean circular bezel,
@@ -831,6 +853,119 @@ function FailedReviewCard({
 }
 
 /**
+ * Honest neutral row for analyses that have not completed (status "pending" /
+ * "in_progress" — or anything but completed/error, fail-closed). Renders NO
+ * verdict telemetry — Queued/Analyzing pill, em-dash confidence, neutral
+ * gauge, the queued summary verbatim. A pending row carries the column
+ * defaults (risk_score 0, findings []) which would otherwise read as
+ * Great-to-Merge / SAFE with 10/10 confidence. No Retry: nothing failed —
+ * Refresh re-polls the GET-only list.
+ */
+function PendingReviewCard({
+  review,
+  onOpen,
+}: {
+  review: CodeReviewOut;
+  onOpen: (id: string) => void;
+}) {
+  const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
+  const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
+  const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
+  const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
+  const label = pendingLabelFor(review);
+
+  return (
+    <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]">
+      <div className="flex flex-col md:flex-row md:items-start justify-between gap-5">
+        {/* Left: neutral gauge — no score implied */}
+        <div className="flex items-center md:flex-col justify-start md:justify-center gap-4 md:min-w-[80px]">
+          <RiskGauge score={review.risk_score} size={64} neutral />
+        </div>
+
+        {/* Center: identity + queued summary + em-dash telemetry */}
+        <div className="flex-1 min-w-0 space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            {repoUrl ? (
+              <a
+                href={repoUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100 hover:text-white transition-colors"
+              >
+                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
+                <span>{repoName}</span>
+              </a>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100">
+                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
+                <span>{repoName}</span>
+              </span>
+            )}
+            {review.pr_number ? (
+              <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
+            ) : (
+              <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
+            )}
+            <span className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-400">
+              {label}
+            </span>
+            <span className="text-xs text-zinc-400 font-mono">
+              {formatRelativeTime(review.created_at)}
+            </span>
+          </div>
+
+          {review.pr_title && (
+            <h3 className="text-base font-bold tracking-tight text-zinc-50 leading-snug">
+              {review.pr_title}
+            </h3>
+          )}
+
+          <p className="text-xs text-zinc-400 leading-relaxed font-sans">
+            {review.summary}
+          </p>
+
+          {/* No telemetry: every verdict cell is an em-dash */}
+          <dl className="grid grid-cols-2 lg:grid-cols-4 gap-px overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-800/80 text-xs font-mono">
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Status</dt>
+              <dd><span className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-semibold text-zinc-400">{label}</span></dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">PR Confidence</dt>
+              <dd className="text-lg font-bold text-zinc-500" title="No score — analysis has not completed">—</dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blockers</dt>
+              <dd className="text-zinc-500">—</dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blast Radius</dt>
+              <dd className="text-zinc-500">—</dd>
+            </div>
+          </dl>
+        </div>
+
+        {/* Right: audit only — no retry, nothing failed */}
+        <div className="flex flex-row md:flex-col items-end justify-between gap-3 min-w-[120px]">
+          <div className="flex flex-col items-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onOpen(review.id)}
+              aria-label={`Full audit for ${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ""}${review.pr_title ? ` — ${review.pr_title}` : ""} (${review.id})`}
+              className="h-7 px-2.5 text-xs gap-1.5 border-amber-500/40 bg-amber-950/30 hover:bg-amber-900/40 text-amber-200"
+            >
+              <span>Full audit</span>
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Main Review Card (overview row). Compact by design: identity, confidence,
  * blast-radius strip, category pills. Full audit opens via `onOpen`.
  */
@@ -873,6 +1008,11 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
   const failed = isReviewFailed(review);
   if (failed) {
     return <FailedReviewCard review={review} onOpen={onOpen} onRetry={onRetry} />;
+  }
+
+  // Non-terminal rows never reach verdict telemetry — neutral pending card.
+  if (isReviewPending(review)) {
+    return <PendingReviewCard review={review} onOpen={onOpen} />;
   }
 
   // Blast Radius Telemetry (shared helper — overview strip + detail report agree)
@@ -1164,6 +1304,8 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
   const [copiedSha, setCopiedSha] = useState(false);
   const [copyShaError, setCopyShaError] = useState<string | null>(null);
   const failed = isReviewFailed(review);
+  const pending = !failed && isReviewPending(review);
+  const pendingLabel = pendingLabelFor(review);
   const errorText = review.failure_reason ?? review.summary;
   const blast = getBlastStats(review);
   const confidence = confidenceFromRisk(review.risk_score);
@@ -1227,6 +1369,11 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
                   Error
                 </span>
               )}
+              {pending && (
+                <span className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-400">
+                  {pendingLabel}
+                </span>
+              )}
               {review.pr_author && (
                 <div className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
                   {review.pr_author_avatar ? (
@@ -1282,7 +1429,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
           </div>
 
           <div className="flex items-start justify-start lg:justify-center">
-            <RiskGauge score={review.risk_score} size={84} neutral={failed} />
+            <RiskGauge score={review.risk_score} size={84} neutral={failed || pending} />
           </div>
         </div>
       </div>
@@ -1342,6 +1489,50 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
             </div>
             <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-xs font-mono text-zinc-500">
               No findings — the analysis did not complete.
+            </div>
+          </section>
+        </>
+      ) : pending ? (
+        <>
+          {/* Honest pending panel: queued summary verbatim, no verdict telemetry. */}
+          <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5">
+            <h3 className="text-xs font-mono font-semibold uppercase tracking-[0.16em] text-zinc-300">PR Summary</h3>
+            <p className="mt-2 text-sm text-zinc-400 leading-relaxed">{review.summary}</p>
+          </section>
+
+          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+              <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Status</div>
+              <span className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2.5 py-1 text-xs font-mono font-semibold text-zinc-400">
+                {pendingLabel}
+              </span>
+            </div>
+            <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+              <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">PR Confidence</div>
+              <div className="font-mono text-xl font-bold text-zinc-500" title="No score — analysis has not completed">—</div>
+              <div className="text-[11px] text-zinc-500">No score — analysis has not completed</div>
+            </div>
+            <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+              <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Blockers</div>
+              <div className="font-mono text-sm text-zinc-500">—</div>
+            </div>
+            <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+              <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Blast Radius</div>
+              <div className="font-mono text-sm text-zinc-500">—</div>
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5">
+            <h3 className="text-xs font-mono font-semibold uppercase tracking-[0.16em] text-zinc-300">Structural &amp; Blast Radius Analysis</h3>
+            <p className="mt-2 text-xs text-zinc-500 leading-relaxed">Unavailable — the analysis has not completed yet, so there is no structural telemetry to report.</p>
+          </section>
+
+          <section className="space-y-3">
+            <div className="flex items-center justify-between text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono">
+              <span>Findings Summary (0)</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-xs font-mono text-zinc-500">
+              No findings yet — analysis in progress.
             </div>
           </section>
         </>
@@ -1677,13 +1868,15 @@ export default function ReviewsPage() {
   // Metric rollups — computed from the current page only (`reviews` holds a
   // single PAGE_SIZE window). Reviews Scanned uses the server-side
   // `totalCount` instead, so every tile derived here is explicitly labeled
-  // "this page" in the ribbon below. Avg Risk excludes failed analyses
-  // (risk_score defaults to 0 there — averaging it in would lie, e.g. 85+0→43)
-  // and reports how many rows actually scored.
+  // "this page" in the ribbon below. Avg Risk scores completed analyses only:
+  // failed rows default risk_score to 0 (averaging it in would lie, e.g.
+  // 85+0→43), and pending / in-progress / suppressed rows are still at the 0
+  // default because analysis never ran — only "completed" carries a real
+  // score. Reports how many rows actually scored.
   const pageStats = useMemo(() => {
     const total = reviews.length;
     const highRisk = reviews.filter((r) => r.risk_score >= RISK_CRITICAL).length;
-    const scored = reviews.filter((r) => !isReviewFailed(r));
+    const scored = reviews.filter((r) => r.status?.toLowerCase() === "completed");
     const avgScore = scored.length > 0 ? Math.round(scored.reduce((acc, r) => acc + r.risk_score, 0) / scored.length) : 0;
     const totalPatches = reviews.reduce((acc, r) => acc + r.findings.filter((f) => !!f.suggested_patch).length, 0);
     return { total, highRisk, avgScore, totalPatches, scoredCount: scored.length };
@@ -1850,7 +2043,7 @@ export default function ReviewsPage() {
               </div>
               <div
                 className="text-xl font-bold font-mono text-zinc-100"
-                title={pageStats.scoredCount === 0 ? "No scored reviews on this page — failed analyses excluded" : `Mean of ${pageStats.scoredCount} scored ${pageStats.scoredCount === 1 ? "review" : "reviews"} · failed analyses excluded`}
+                title={pageStats.scoredCount === 0 ? "No scored reviews on this page — only completed analyses score" : `Mean of ${pageStats.scoredCount} scored ${pageStats.scoredCount === 1 ? "review" : "reviews"} · only completed analyses score`}
               >
                 {pageStats.scoredCount === 0 ? (
                   <span className="text-zinc-500" title="No score — no completed analyses on this page">—</span>
