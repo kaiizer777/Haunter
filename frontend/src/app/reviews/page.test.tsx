@@ -373,4 +373,62 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     expect(await screen.findByText("PR Summary")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /staged fix/i })).toBeInTheDocument();
   });
+
+  it("deep-link to an off-page review falls back to getReviewDetail", async () => {
+    const offPage: CodeReviewOut = {
+      ...mockReviews[0],
+      id: "rev_offpage",
+      pr_title: "fix: off-page fallback review",
+    };
+    vi.mocked(api.getReviewDetail).mockResolvedValue(offPage);
+    window.history.replaceState({}, "", "/reviews?review=rev_offpage");
+    render(<ReviewsPage />);
+
+    expect(await screen.findByText("fix: off-page fallback review")).toBeInTheDocument();
+    expect(vi.mocked(api.getReviewDetail)).toHaveBeenCalledWith("rev_offpage");
+    expect(screen.getByText("PR Summary")).toBeInTheDocument();
+  });
+
+  it("rejected detail fetch shows an alert and Retry recovers", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", "/reviews?review=rev_missing");
+    render(<ReviewsPage />);
+
+    // Default mock rejects unknown ids.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't load that review/i);
+
+    // Retry re-fires the detail request; this time it resolves.
+    vi.mocked(api.getReviewDetail).mockResolvedValueOnce(mockReviews[0]);
+    await user.click(screen.getByRole("button", { name: /retry/i }));
+    expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+    expect(screen.getByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("clears a stale detail error when back/forward lands on a cached review", async () => {
+    window.history.replaceState({}, "", "/reviews?review=rev_missing");
+    render(<ReviewsPage />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't load that review/i);
+
+    window.history.replaceState({}, "", "/reviews?review=rev_2");
+    window.dispatchEvent(new Event("popstate"));
+
+    expect(await screen.findByText("Great to Merge")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("moves focus to Back when the detail opens and back to the list on close", async () => {
+    const user = userEvent.setup();
+    render(<ReviewsPage />);
+
+    await screen.findByText("feat: autonomous remediation sentinel pipeline");
+    await user.click(screen.getAllByRole("button", { name: /full audit/i })[0]);
+    expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /back to reviews/i })).toHaveFocus();
+
+    await user.click(screen.getByRole("button", { name: /back to reviews/i }));
+    expect(await screen.findByText("docs: update API documentation")).toBeInTheDocument();
+    expect(document.activeElement).not.toBe(document.body);
+  });
 });

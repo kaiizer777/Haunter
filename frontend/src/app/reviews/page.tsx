@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { AppLayout } from "@/components/layout/app-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -527,6 +527,7 @@ function FindingItem({
 function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [copiedSha, setCopiedSha] = useState(false);
+  const [copyShaError, setCopyShaError] = useState<string | null>(null);
   const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
   const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
   const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
@@ -546,12 +547,17 @@ function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: st
 
   const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
 
-  const handleCopySha = (e: React.MouseEvent) => {
+  const handleCopySha = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!review.commit_sha) return;
-    navigator.clipboard.writeText(review.commit_sha);
-    setCopiedSha(true);
-    setTimeout(() => setCopiedSha(false), 2000);
+    setCopyShaError(null);
+    try {
+      await navigator.clipboard.writeText(review.commit_sha);
+      setCopiedSha(true);
+      setTimeout(() => setCopiedSha(false), 2000);
+    } catch {
+      setCopyShaError("Copy failed — clipboard unavailable.");
+    }
   };
 
   const prStatus = review.status?.toLowerCase() === "merged"
@@ -685,6 +691,12 @@ function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: st
             </span>
           </div>
 
+          {copyShaError && (
+            <p role="alert" className="text-[11px] font-mono text-rose-400">
+              {copyShaError}
+            </p>
+          )}
+
           {/* Hero PR Title */}
           {review.pr_title && (
             <h3 className="text-sm font-semibold text-zinc-100 leading-snug">
@@ -766,6 +778,7 @@ function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: st
               variant="outline"
               size="sm"
               onClick={() => onOpen(review.id)}
+              aria-label={`Full audit for ${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ""}${review.pr_title ? ` — ${review.pr_title}` : ""} (${review.id})`}
               className="h-7 px-2.5 text-xs gap-1.5 border-amber-500/40 bg-amber-950/30 hover:bg-amber-900/40 text-amber-200"
             >
               <span>Full audit</span>
@@ -817,6 +830,7 @@ function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: st
  */
 function ReviewDetail({ review }: { review: CodeReviewOut }) {
   const [copiedSha, setCopiedSha] = useState(false);
+  const [copyShaError, setCopyShaError] = useState<string | null>(null);
   const blast = getBlastStats(review);
   const confidence = confidenceFromRisk(review.risk_score);
   const blockers = blockerCounts(review);
@@ -833,11 +847,16 @@ function ReviewDetail({ review }: { review: CodeReviewOut }) {
   const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
   const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
 
-  const handleCopySha = () => {
+  const handleCopySha = async () => {
     if (!review.commit_sha) return;
-    navigator.clipboard.writeText(review.commit_sha);
-    setCopiedSha(true);
-    setTimeout(() => setCopiedSha(false), 2000);
+    setCopyShaError(null);
+    try {
+      await navigator.clipboard.writeText(review.commit_sha);
+      setCopiedSha(true);
+      setTimeout(() => setCopiedSha(false), 2000);
+    } catch {
+      setCopyShaError("Copy failed — clipboard unavailable.");
+    }
   };
 
   const shownFiles = touchedFiles.slice(0, 8);
@@ -904,6 +923,11 @@ function ReviewDetail({ review }: { review: CodeReviewOut }) {
                   {copiedSha ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3 text-zinc-500 hover:text-zinc-300" />}
                 </button>
               </div>
+              {copyShaError && (
+                <p role="alert" className="text-[11px] font-mono text-rose-400">
+                  {copyShaError}
+                </p>
+              )}
               <span className="text-zinc-500">{formatRelativeTime(review.created_at)}</span>
             </div>
           </div>
@@ -1128,6 +1152,23 @@ export default function ReviewsPage() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
+  // Keep keyboard focus on a live element across detail open/close: opening
+  // the detail unmounts the triggering "Full audit" button, closing unmounts
+  // Back — both would otherwise drop focus to <body>.
+  const backButtonRef = useRef<HTMLButtonElement>(null);
+  const listTopRef = useRef<HTMLDivElement>(null);
+  const prevSelectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (selectedId) {
+      backButtonRef.current?.focus();
+    } else if (prevSelectedRef.current) {
+      listTopRef.current?.focus();
+    }
+    prevSelectedRef.current = selectedId;
+    // Intentionally transition-only: re-focusing on detail payload arrival
+    // would yank focus away from wherever the user moved it.
+  }, [selectedId]);
+
   // Escape closes the detail view.
   useEffect(() => {
     if (!selectedId) return;
@@ -1150,6 +1191,7 @@ export default function ReviewsPage() {
     const found = reviews.find((r) => r.id === selectedId);
     if (found) {
       setDetailReview(found);
+      setDetailError(null);
       setDetailLoading(false);
       return;
     }
@@ -1246,11 +1288,12 @@ export default function ReviewsPage() {
     >
       <div className="space-y-6 pb-12">
         {selectedId ? (
-          <>
+          <div aria-live="polite">
             <Button
               variant="outline"
               size="sm"
               onClick={closeReview}
+              ref={backButtonRef}
               className="h-8 gap-1.5 border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
@@ -1258,7 +1301,7 @@ export default function ReviewsPage() {
             </Button>
 
             {detailLoading || (!detailReview && !detailError) ? (
-              <div className="space-y-4" aria-label="Loading review detail">
+              <div className="space-y-4" role="status" aria-label="Loading review detail">
                 <Skeleton className="h-8 w-64" />
                 <div className="rounded-xl border border-zinc-800/80 bg-[#111114] p-5 space-y-3">
                   <Skeleton className="h-5 w-48" />
@@ -1289,15 +1332,16 @@ export default function ReviewsPage() {
             ) : (
               <ReviewDetail review={detailReview} />
             )}
-          </>
+          </div>
         ) : (
           <>
         {/* Interactive Telemetry Ribbon doubling as Filter Tabs */}
-        <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#141418] via-[#101013] to-[#0a0a0d] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_16px_rgba(0,0,0,0.35)]">
+        <div ref={listTopRef} tabIndex={-1} className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#141418] via-[#101013] to-[#0a0a0d] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_16px_rgba(0,0,0,0.35)] outline-none">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-1.5">
             {/* Tab 1: All Reviews */}
             <button
               type="button"
+              aria-pressed={activeTab === "all" && !highRiskOnly}
               onClick={() => {
                 setActiveTab("all");
                 setHighRiskOnly(false);
@@ -1321,6 +1365,7 @@ export default function ReviewsPage() {
             {/* Tab 2: High Risk Flagged */}
             <button
               type="button"
+              aria-pressed={highRiskOnly || activeTab === "high_risk"}
               onClick={() => {
                 setActiveTab("high_risk");
                 setHighRiskOnly(true);
@@ -1344,6 +1389,7 @@ export default function ReviewsPage() {
             {/* Tab 3: Avg Risk Score */}
             <button
               type="button"
+              aria-pressed={activeTab === "avg_risk"}
               onClick={() => {
                 setActiveTab("avg_risk");
                 setHighRiskOnly(false);
@@ -1369,6 +1415,7 @@ export default function ReviewsPage() {
             {/* Tab 4: Actionable Patches */}
             <button
               type="button"
+              aria-pressed={activeTab === "patches"}
               onClick={() => {
                 setActiveTab("patches");
                 setPage(0);
