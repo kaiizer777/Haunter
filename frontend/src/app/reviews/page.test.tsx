@@ -671,6 +671,89 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     });
   });
 
+  describe("suppressed analyses (saved audit + publication skipped)", () => {
+    const suppressedReview: CodeReviewOut = {
+      ...mockReviews[0],
+      id: "rev_sup",
+      status: "suppressed",
+      failure_reason: "PR comments disabled by repo settings; review published nowhere",
+    };
+
+    it("renders the saved audit like completed: verdict + findings + neutral publication indicator", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [suppressedReview],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #101")).toBeInTheDocument();
+      // Real verdict telemetry survives the publish-skip.
+      expect(screen.getByText("2/10")).toBeInTheDocument();
+      expect(screen.getAllByText("Changes Requested").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("1 finding").length).toBeGreaterThanOrEqual(1);
+      // Neutral publish-state indicator, not an error.
+      expect(screen.getByText("Publication skipped")).toBeInTheDocument();
+      // Pending chrome must be gone: no neutral gauge, no in-progress copy.
+      expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
+      expect(screen.queryByText(/no findings yet/i)).not.toBeInTheDocument();
+      expect(screen.queryByText("Queued")).not.toBeInTheDocument();
+      expect(screen.queryByText("Analyzing")).not.toBeInTheDocument();
+    });
+
+    it("suppressed detail shows the full audit with patches + indicator, no Retry", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [suppressedReview],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #101")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: /full audit/i }));
+
+      expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+      expect(screen.getByText("Critical security vulnerability detected in token parser middleware.")).toBeInTheDocument();
+      expect(screen.getByText("Findings Summary (1)")).toBeInTheDocument();
+      expect(screen.getByText(/jwt\.verify/)).toBeInTheDocument();
+      expect(screen.getByText("Publication skipped")).toBeInTheDocument();
+      expect(screen.queryByText(/no findings yet/i)).not.toBeInTheDocument();
+      // Suppressed is terminal like completed — nothing failed, no Retry.
+      expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    });
+
+    it("suppressed rows score in Avg Risk while pending rows stay out", async () => {
+      const pendingRow: CodeReviewOut = {
+        ...mockReviews[1],
+        id: "rev_pending_avg",
+        status: "pending",
+        risk_score: 0,
+        summary: "Autonomous code review queued.",
+        findings: [],
+      };
+      const suppressedLow: CodeReviewOut = {
+        ...mockReviews[1],
+        id: "rev_sup_avg",
+        status: "suppressed",
+        risk_score: 15,
+      };
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [mockReviews[0], suppressedLow, pendingRow],
+        total: 3,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      // (85+15)/2 = 50 — the pending 0 must not pollute the mean (would be 33).
+      expect(avgTab).toHaveTextContent("50");
+      expect(avgTab.textContent).not.toMatch(/33/);
+      expect(avgTab.textContent).toMatch(/2 scored/i);
+      // Pending row stays neutral alongside the scored suppressed row.
+      expect(screen.getAllByText("Queued").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText("Publication skipped")).toBeInTheDocument();
+    });
+  });
+
   it("Avg Risk excludes failed rows and discloses the scored count", async () => {
     const failedRow: CodeReviewOut = {
       id: "rev_fail",

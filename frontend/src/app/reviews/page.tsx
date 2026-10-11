@@ -58,18 +58,29 @@ function isReviewFailed(review: CodeReviewOut): boolean {
   return review.status?.toLowerCase() === "error";
 }
 
-/** A review with no completed analysis to report — never render verdict telemetry for it.
- * Fail-closed: only status "completed" carries a real score. Everything else —
- * "pending" (row created at enqueue with risk_score 0 + findings [],
- * backend/app/webhooks.py:2271 + :2455), "in_progress" (orchestrator running,
- * risk_score still the 0 default until post-analysis), "suppressed" (publish
- * skipped before analysis, so the score is still 0) or anything unknown —
- * renders neutrally. Without this gate a queued row reads as Great-to-Merge /
- * SAFE with 10/10 confidence. Checked after isReviewFailed; "error" rows keep
- * the honest error panel. */
+/** A review with no finished analysis to report — never render verdict telemetry for it.
+ * Fail-closed: only "completed" and "suppressed" carry a real score.
+ * "suppressed" is terminal WITH a saved audit: the orchestrator persists
+ * risk_score + summary + findings BEFORE the publish guard
+ * (backend/app/services/review_orchestrator.py:1233-1239), then records
+ * status="suppressed" when enable_pr_comments is false (:1287) keeping the
+ * saved data. Everything else — "pending" (row created at enqueue with
+ * risk_score 0 + findings [], backend/app/webhooks.py:2271 + :2455),
+ * "in_progress" (orchestrator running, risk_score still the 0 default until
+ * post-analysis) or anything unknown — renders neutrally. Without this gate
+ * a queued row reads as Great-to-Merge / SAFE with 10/10 confidence.
+ * Checked after isReviewFailed; "error" rows keep the honest error panel. */
 function isReviewPending(review: CodeReviewOut): boolean {
   const s = review.status?.toLowerCase();
-  return s !== "completed" && s !== "error";
+  return s !== "completed" && s !== "error" && s !== "suppressed";
+}
+
+/** Publication was skipped by repo settings, but the saved audit is real.
+ * Zinc/neutral indicator only — never hides verdict telemetry. Suppressed
+ * rows render the saved audit exactly like completed (same card + detail
+ * branches); suppressed is terminal so no Retry, like completed. */
+function isSuppressed(review: CodeReviewOut): boolean {
+  return review.status?.toLowerCase() === "suppressed";
 }
 
 /** Neutral status-pill label for unscored rows. Reuses existing zinc pill chrome. */
@@ -853,8 +864,10 @@ function FailedReviewCard({
 }
 
 /**
- * Honest neutral row for analyses that have not completed (status "pending" /
- * "in_progress" — or anything but completed/error, fail-closed). Renders NO
+ * Honest neutral row for analyses that have not finished (status "pending" /
+ * "in_progress" — or anything but completed/error/suppressed, fail-closed).
+ * "suppressed" is terminal WITH a saved audit so it renders the full
+ * completed branches, never this card. Renders NO
  * verdict telemetry — Queued/Analyzing pill, em-dash confidence, neutral
  * gauge, the queued summary verbatim. A pending row carries the column
  * defaults (risk_score 0, findings []) which would otherwise read as
@@ -1006,6 +1019,7 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
   };
 
   const failed = isReviewFailed(review);
+  const suppressed = isSuppressed(review);
   if (failed) {
     return <FailedReviewCard review={review} onOpen={onOpen} onRetry={onRetry} />;
   }
@@ -1069,6 +1083,14 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
               <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-mono font-semibold", verdict.color)}>
                 {verdict.label}
               </span>
+              {suppressed && (
+                <span
+                  className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-semibold text-zinc-400"
+                  title="Analysis finished — publishing to GitHub was skipped by repo settings"
+                >
+                  Publication skipped
+                </span>
+              )}
               {!review.pr_number && (
                 <button
                   type="button"
@@ -1305,6 +1327,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
   const [copyShaError, setCopyShaError] = useState<string | null>(null);
   const failed = isReviewFailed(review);
   const pending = !failed && isReviewPending(review);
+  const suppressed = !failed && !pending && isSuppressed(review);
   const pendingLabel = pendingLabelFor(review);
   const errorText = review.failure_reason ?? review.summary;
   const blast = getBlastStats(review);
@@ -1372,6 +1395,14 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
               {pending && (
                 <span className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-400">
                   {pendingLabel}
+                </span>
+              )}
+              {suppressed && (
+                <span
+                  className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-400"
+                  title="Analysis finished — publishing to GitHub was skipped by repo settings"
+                >
+                  Publication skipped
                 </span>
               )}
               {review.pr_author && (
@@ -1868,15 +1899,20 @@ export default function ReviewsPage() {
   // Metric rollups — computed from the current page only (`reviews` holds a
   // single PAGE_SIZE window). Reviews Scanned uses the server-side
   // `totalCount` instead, so every tile derived here is explicitly labeled
-  // "this page" in the ribbon below. Avg Risk scores completed analyses only:
+  // "this page" in the ribbon below. Avg Risk scores finished analyses only:
   // failed rows default risk_score to 0 (averaging it in would lie, e.g.
-  // 85+0→43), and pending / in-progress / suppressed rows are still at the 0
-  // default because analysis never ran — only "completed" carries a real
-  // score. Reports how many rows actually scored.
+  // 85+0→43), and pending / in_progress rows are still at the 0
+  // default because analysis never ran — only "completed" and "suppressed"
+  // carry a real score ("suppressed" is terminal WITH a saved audit:
+  // backend/app/services/review_orchestrator.py:1233-1239 + :1287).
+  // Reports how many rows actually scored.
   const pageStats = useMemo(() => {
     const total = reviews.length;
     const highRisk = reviews.filter((r) => r.risk_score >= RISK_CRITICAL).length;
-    const scored = reviews.filter((r) => r.status?.toLowerCase() === "completed");
+    const scored = reviews.filter((r) => {
+      const s = r.status?.toLowerCase();
+      return s === "completed" || s === "suppressed";
+    });
     const avgScore = scored.length > 0 ? Math.round(scored.reduce((acc, r) => acc + r.risk_score, 0) / scored.length) : 0;
     const totalPatches = reviews.reduce((acc, r) => acc + r.findings.filter((f) => !!f.suggested_patch).length, 0);
     return { total, highRisk, avgScore, totalPatches, scoredCount: scored.length };
@@ -2043,10 +2079,10 @@ export default function ReviewsPage() {
               </div>
               <div
                 className="text-xl font-bold font-mono text-zinc-100"
-                title={pageStats.scoredCount === 0 ? "No scored reviews on this page — only completed analyses score" : `Mean of ${pageStats.scoredCount} scored ${pageStats.scoredCount === 1 ? "review" : "reviews"} · only completed analyses score`}
+                title={pageStats.scoredCount === 0 ? "No scored reviews on this page — only completed + publication-skipped analyses score" : `Mean of ${pageStats.scoredCount} scored ${pageStats.scoredCount === 1 ? "review" : "reviews"} · only completed + publication-skipped analyses score`}
               >
                 {pageStats.scoredCount === 0 ? (
-                  <span className="text-zinc-500" title="No score — no completed analyses on this page">—</span>
+                  <span className="text-zinc-500" title="No score — no completed or publication-skipped analyses on this page">—</span>
                 ) : (
                   <>{pageStats.avgScore} <span className="text-[11px] text-zinc-400 font-normal">/ 100</span></>
                 )}
