@@ -1616,10 +1616,9 @@ export default function ReviewsPage() {
               </div>
             ) : detailError || !detailReview ? (
               <div
-                role="alert"
                 className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-2.5 text-xs font-mono text-rose-300"
               >
-                <span>{detailError ?? "Review not found."}</span>
+                <span role="alert">{detailError ?? "Review not found."}</span>
                 <Button
                   variant="outline"
                   size="sm"
