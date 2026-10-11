@@ -22,6 +22,7 @@ vi.mock("@/lib/api", () => ({
   api: {
     getRepos: vi.fn(),
     getCodeReviews: vi.fn(),
+    getReviewDetail: vi.fn(),
     getModelConfig: vi.fn().mockResolvedValue({
       id: "cfg_1",
       provider: "opencode_zen",
@@ -115,6 +116,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    window.history.replaceState({}, "", "/reviews");
     vi.mocked(useAuth).mockReturnValue({
       user: {
         id: "usr_1",
@@ -132,6 +134,10 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     vi.mocked(api.getCodeReviews).mockResolvedValue({
       reviews: mockReviews,
       total: mockReviews.length,
+    });
+    vi.mocked(api.getReviewDetail).mockImplementation((id: string) => {
+      const found = mockReviews.find((r) => r.id === id);
+      return found ? Promise.resolve(found) : Promise.reject(new Error("not found"));
     });
 
     const writeTextMock = vi.fn().mockResolvedValue(undefined);
@@ -285,8 +291,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
   });
 
-  it("keeps ribbon stats page-scoped while Reviews Scanned shows the server total", async () => {
-    // Server reports 28 total but only a 2-item page is delivered: the tiles
+  it("keeps ribbon stats page-scoped while Reviews Scanned shows the server total", async () => {    // Server reports 28 total but only a 2-item page is delivered: the tiles
     // must not disagree silently — page-derived tiles say "this page".
     vi.mocked(api.getCodeReviews).mockResolvedValue({ reviews: mockReviews, total: 28 });
     render(<ReviewsPage />);
@@ -302,5 +307,70 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
     expect(screen.getByText("Across this page")).toBeInTheDocument();
     expect(screen.getByText(/1-click github suggestions · this page/i)).toBeInTheDocument();
+  });
+
+  it("overview rows show confidence and open a full audit detail view", async () => {
+    const user = userEvent.setup();
+    render(<ReviewsPage />);
+
+    expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+    // Confidence derived from risk: 85 -> 2/10, 15 -> 9/10
+    expect(screen.getByText("2/10")).toBeInTheDocument();
+    expect(screen.getByText("9/10")).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole("button", { name: /full audit/i })[0]);
+
+    expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+    expect(screen.getByText("PR Confidence")).toBeInTheDocument();
+    expect(screen.getByText("Blockers")).toBeInTheDocument();
+    expect(screen.getByText(/structural & blast radius analysis/i)).toBeInTheDocument();
+    expect(screen.getByText("Findings Summary (1)")).toBeInTheDocument();
+    expect(screen.getByText("Changes Requested")).toBeInTheDocument();
+    expect(window.location.search).toContain("review=rev_1");
+    // Overview list is replaced by the report
+    expect(screen.queryByText("docs: update API documentation")).not.toBeInTheDocument();
+  });
+
+  it("back button and Escape return to the overview", async () => {
+    const user = userEvent.setup();
+    render(<ReviewsPage />);
+
+    await screen.findByText("feat: autonomous remediation sentinel pipeline");
+    await user.click(screen.getAllByRole("button", { name: /full audit/i })[0]);
+    expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /back to reviews/i }));
+    expect(await screen.findByText("docs: update API documentation")).toBeInTheDocument();
+    expect(window.location.search).not.toContain("review=");
+
+    await user.click(screen.getAllByRole("button", { name: /full audit/i })[0]);
+    expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(await screen.findByText("docs: update API documentation")).toBeInTheDocument();
+  });
+
+  it("deep-link ?review= renders the detail report directly", async () => {
+    window.history.replaceState({}, "", "/reviews?review=rev_2");
+    render(<ReviewsPage />);
+
+    expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+    expect(screen.getByText("Great to Merge")).toBeInTheDocument();
+    expect(screen.getByText("9/10")).toBeInTheDocument();
+    expect(screen.getByText(/no regressions detected/i)).toBeInTheDocument();
+  });
+
+  it("staged fixes stay visible in the detail view", async () => {
+    // NB: fireEvent, not userEvent — userEvent.setup() replaces
+    // navigator.clipboard with its own stub, hiding the beforeEach mock.
+    render(<ReviewsPage />);
+
+    const reviewButton = await screen.findByRole("button", { name: /review \(1\)/i });
+    fireEvent.click(reviewButton);
+    fireEvent.click(screen.getByRole("button", { name: /stage fix/i }));
+    expect(screen.getByText("Staged Fix")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: /full audit/i })[0]);
+    expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /staged fix/i })).toBeInTheDocument();
   });
 });

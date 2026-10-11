@@ -33,6 +33,7 @@ import {
   Boxes,
   Sparkles,
   ArrowUpRight,
+  ArrowLeft,
   ExternalLink,
   FileDiff,
 } from "lucide-react";
@@ -179,6 +180,95 @@ function getSeverityBadge(severity: string) {
         </span>
       );
   }
+}
+
+/**
+ * Derived audit-report metrics. All client-side derivations from the GET-only
+ * review payload — no backend writes involved.
+ */
+
+/** PR Confidence x/10 derived from risk score: low risk ⇒ high confidence. */
+function confidenceFromRisk(riskScore: number): number {
+  const clamped = Math.max(0, Math.min(100, riskScore));
+  return Math.max(1, Math.min(10, Math.round((100 - clamped) / 10)));
+}
+
+/** Blocker counts: Must-Fix = critical+high findings, Should-Fix = medium. */
+function blockerCounts(review: CodeReviewOut): { mustFix: number; shouldFix: number } {
+  let mustFix = 0;
+  let shouldFix = 0;
+  for (const f of review.findings) {
+    const sev = f.severity.toLowerCase();
+    if (sev === "critical" || sev === "high") mustFix++;
+    else if (sev === "medium") shouldFix++;
+  }
+  return { mustFix, shouldFix };
+}
+
+/** Blast-radius telemetry shared by the overview strip and the detail report. */
+function getBlastStats(review: CodeReviewOut): {
+  filesCount: number;
+  additions: number;
+  deletions: number;
+  scope: "Targeted" | "Moderate" | "Extensive";
+  scopeColor: string;
+} {
+  const filesCount = review.diff_stats?.files_changed ?? new Set(review.findings.map((f) => f.file_path)).size;
+  const additions = review.diff_stats?.additions ?? review.findings.reduce((acc, f) => {
+    if (!f.suggested_patch) return acc;
+    const added = (f.suggested_patch.match(/^\+[^+]/gm) || []).length;
+    return acc + (added || 1);
+  }, 0);
+  const deletions = review.diff_stats?.deletions ?? review.findings.reduce((acc, f) => {
+    if (!f.suggested_patch) return acc;
+    const removed = (f.suggested_patch.match(/^-[^-]/gm) || []).length;
+    return acc + (removed || 0);
+  }, 0);
+
+  const totalModifications = additions + deletions;
+  let scope: "Targeted" | "Moderate" | "Extensive" = "Targeted";
+  let scopeColor = "border-emerald-500/30 bg-emerald-950/40 text-emerald-300";
+
+  if (filesCount > 8 || totalModifications > 250 || review.risk_score > 70) {
+    scope = "Extensive";
+    scopeColor = "border-rose-500/30 bg-rose-950/40 text-rose-300";
+  } else if (filesCount > 3 || totalModifications > 60 || review.risk_score > 35) {
+    scope = "Moderate";
+    scopeColor = "border-amber-500/30 bg-amber-950/40 text-amber-300";
+  }
+  return { filesCount, additions, deletions, scope, scopeColor };
+}
+
+/** Merge verdict for the detail report header grid. */
+function verdictFor(review: CodeReviewOut): { label: string; color: string } {
+  const { mustFix, shouldFix } = blockerCounts(review);
+  if (mustFix > 0 || review.risk_score >= 71) {
+    return { label: "Changes Requested", color: "bg-rose-950/60 text-rose-300 border-rose-500/40" };
+  }
+  if (review.risk_score <= 30 && shouldFix === 0) {
+    return { label: "Great to Merge", color: "bg-emerald-950/60 text-emerald-300 border-emerald-500/40" };
+  }
+  return { label: "Review Advised", color: "bg-amber-950/60 text-amber-300 border-amber-500/40" };
+}
+
+/** Human-readable blast-radius scope label + one-line explanation. */
+function blastRadiusSummary(review: CodeReviewOut): { label: string; explanation: string } {
+  const blast = getBlastStats(review);
+  const label = blast.scope === "Targeted" ? "Isolated" : blast.scope;
+  const touched = [...new Set(review.findings.map((f) => f.file_path))];
+  const area = touched.length > 0
+    ? touched.length === 1 ? touched[0].split("/").slice(-2).join("/") : `${touched.length} components`
+    : "no finding locations";
+  return {
+    label,
+    explanation: `${blast.filesCount} ${blast.filesCount === 1 ? "file" : "files"}, +${blast.additions}/-${blast.deletions} across ${area}`,
+  };
+}
+
+/** Read a deep-linked review id from the URL (`?review=<id>`). */
+function readReviewParam(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("review");
 }
 
 /**
@@ -431,9 +521,10 @@ function FindingItem({
 }
 
 /**
- * Main Review Card
+ * Main Review Card (overview row). Compact by design: identity, confidence,
+ * blast-radius strip, category pills. Full audit opens via `onOpen`.
  */
-function ReviewCard({ review }: { review: CodeReviewOut }) {
+function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [copiedSha, setCopiedSha] = useState(false);
   const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
@@ -469,30 +560,14 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
     ? { label: "Closed", color: "bg-zinc-800 text-zinc-400 border-zinc-700" }
     : { label: "Open", color: "bg-emerald-950/60 text-emerald-300 border-emerald-500/40" };
 
-  // Blast Radius Telemetry calculation
-  const filesCount = review.diff_stats?.files_changed ?? new Set(review.findings.map((f) => f.file_path)).size;
-  const additions = review.diff_stats?.additions ?? review.findings.reduce((acc, f) => {
-    if (!f.suggested_patch) return acc;
-    const added = (f.suggested_patch.match(/^\+[^+]/gm) || []).length;
-    return acc + (added || 1);
-  }, 0);
-  const deletions = review.diff_stats?.deletions ?? review.findings.reduce((acc, f) => {
-    if (!f.suggested_patch) return acc;
-    const removed = (f.suggested_patch.match(/^-[^-]/gm) || []).length;
-    return acc + (removed || 0);
-  }, 0);
-
-  const totalModifications = additions + deletions;
-  let mutationScope = "Targeted";
-  let mutationScopeColor = "border-emerald-500/30 bg-emerald-950/40 text-emerald-300";
-
-  if (filesCount > 8 || totalModifications > 250 || review.risk_score > 70) {
-    mutationScope = "Extensive";
-    mutationScopeColor = "border-rose-500/30 bg-rose-950/40 text-rose-300";
-  } else if (filesCount > 3 || totalModifications > 60 || review.risk_score > 35) {
-    mutationScope = "Moderate";
-    mutationScopeColor = "border-amber-500/30 bg-amber-950/40 text-amber-300";
-  }
+  // Blast Radius Telemetry (shared helper — overview strip + detail report agree)
+  const blast = getBlastStats(review);
+  const filesCount = blast.filesCount;
+  const additions = blast.additions;
+  const deletions = blast.deletions;
+  const mutationScope = blast.scope;
+  const mutationScopeColor = blast.scopeColor;
+  const confidence = confidenceFromRisk(review.risk_score);
 
   return (
     <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)] transition-all hover:border-zinc-700/90">
@@ -679,21 +754,35 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
         {/* Right: Actions & Telemetry */}
         <div className="flex flex-row md:flex-col items-end justify-between gap-3 min-w-[120px]">
           <div className="text-right text-[11px] font-mono text-zinc-400 space-y-0.5">
+            <div title={`PR Confidence ${confidence}/10 derived from risk score ${review.risk_score}`}>
+              <span className="text-zinc-100 font-semibold">{confidence}/10</span> conf
+            </div>
             <div>{review.input_tokens + review.output_tokens} tok</div>
             <div className="text-zinc-400 text-[10px] uppercase font-semibold">{review.status}</div>
           </div>
 
-          {review.findings.length > 0 && (
+          <div className="flex flex-col items-end gap-2">
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setExpanded(!expanded)}
-              className="h-7 px-2.5 text-xs gap-1.5 border-zinc-700 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200"
+              onClick={() => onOpen(review.id)}
+              className="h-7 px-2.5 text-xs gap-1.5 border-amber-500/40 bg-amber-950/30 hover:bg-amber-900/40 text-amber-200"
             >
-              <span>{expanded ? "Collapse" : `Review (${review.findings.length})`}</span>
-              {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              <span>Full audit</span>
+              <ArrowUpRight className="h-3.5 w-3.5" />
             </Button>
-          )}
+            {review.findings.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setExpanded(!expanded)}
+                className="h-7 px-2.5 text-xs gap-1.5 border-zinc-700 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200"
+              >
+                <span>{expanded ? "Collapse" : `Review (${review.findings.length})`}</span>
+                {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -721,6 +810,235 @@ function ReviewCard({ review }: { review: CodeReviewOut }) {
   );
 }
 
+/**
+ * Full professional audit report (detail view). Mirrors the shipped audit
+ * comment format: header identity, PR summary, status/confidence/blockers/
+ * blast-radius grid, structural analysis, findings, metadata.
+ */
+function ReviewDetail({ review }: { review: CodeReviewOut }) {
+  const [copiedSha, setCopiedSha] = useState(false);
+  const blast = getBlastStats(review);
+  const confidence = confidenceFromRisk(review.risk_score);
+  const blockers = blockerCounts(review);
+  const verdict = verdictFor(review);
+  const radius = blastRadiusSummary(review);
+  const touchedFiles = useMemo(
+    () => [...new Set(review.findings.map((f) => f.file_path))],
+    [review.findings]
+  );
+
+  const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
+  const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
+  const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
+  const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
+  const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
+
+  const handleCopySha = () => {
+    if (!review.commit_sha) return;
+    navigator.clipboard.writeText(review.commit_sha);
+    setCopiedSha(true);
+    setTimeout(() => setCopiedSha(false), 2000);
+  };
+
+  const shownFiles = touchedFiles.slice(0, 8);
+  const hiddenFiles = touchedFiles.length - shownFiles.length;
+
+  return (
+    <div className="space-y-5">
+      {/* Header: identity */}
+      <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]">
+        <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-5">
+          <div className="flex-1 min-w-0 space-y-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              {repoUrl ? (
+                <a href={repoUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 font-mono text-sm font-semibold text-zinc-100 hover:text-white transition-colors">
+                  <FolderGit2 className="h-4 w-4 text-zinc-400" />
+                  <span>{repoName}</span>
+                </a>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 font-mono text-sm font-semibold text-zinc-100">
+                  <FolderGit2 className="h-4 w-4 text-zinc-400" />
+                  <span>{repoName}</span>
+                </span>
+              )}
+              {review.pr_number && (
+                <a href={prUrl || `https://github.com/${repoName}/pull/${review.pr_number}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono font-medium text-amber-400 hover:text-amber-300 hover:bg-zinc-700/80 transition-colors border border-zinc-700/50">
+                  <GitPullRequest className="h-3 w-3" />
+                  <span>PR #{review.pr_number}</span>
+                  <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
+                </a>
+              )}
+              {review.pr_author && (
+                <div className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
+                  {review.pr_author_avatar ? (
+                    <img src={review.pr_author_avatar} alt={review.pr_author} className="h-3.5 w-3.5 rounded-full object-cover" />
+                  ) : (
+                    <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-zinc-800 text-[9px] font-bold text-zinc-300">
+                      {review.pr_author[0]?.toUpperCase()}
+                    </span>
+                  )}
+                  <span className="font-mono text-xs text-zinc-300">@{review.pr_author}</span>
+                </div>
+              )}
+            </div>
+
+            {review.pr_title && (
+              <h2 className="text-lg font-semibold text-zinc-50 leading-snug">{review.pr_title}</h2>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+              {(review.head_branch || review.base_branch) && (
+                <div className="inline-flex items-center gap-1.5 rounded bg-zinc-900/90 border border-zinc-800 px-2 py-0.5">
+                  <GitBranch className="h-3 w-3 text-zinc-500" />
+                  <span className="text-zinc-400">{review.base_branch || "main"}</span>
+                  <span className="text-zinc-500">←</span>
+                  <span className="text-amber-400 font-medium">{review.head_branch || "head"}</span>
+                </div>
+              )}
+              <div className="inline-flex items-center rounded bg-zinc-900/80 border border-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">
+                <a href={commitUrl || `https://github.com/${repoName}/commit/${review.commit_sha}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors pr-1.5 border-r border-zinc-800" title="View commit on GitHub">
+                  <GitCommit className="h-3 w-3 text-zinc-500" />
+                  <span>{commitShort}</span>
+                </a>
+                <button type="button" onClick={handleCopySha} className="pl-1.5 hover:text-zinc-200 transition-colors focus:outline-none" title="Copy commit SHA" aria-label="Copy commit SHA">
+                  {copiedSha ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3 text-zinc-500 hover:text-zinc-300" />}
+                </button>
+              </div>
+              <span className="text-zinc-500">{formatRelativeTime(review.created_at)}</span>
+            </div>
+          </div>
+
+          <div className="flex items-start justify-start lg:justify-center">
+            <RiskGauge score={review.risk_score} size={84} />
+          </div>
+        </div>
+      </div>
+
+      {/* PR Summary */}
+      <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5">
+        <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400">PR Summary</h3>
+        <p className="mt-2 text-sm text-zinc-200 leading-relaxed">{review.summary}</p>
+      </section>
+
+      {/* Status grid */}
+      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+          <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Status</div>
+          <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-mono font-semibold", verdict.color)}>
+            {verdict.label}
+          </span>
+        </div>
+        <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+          <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">PR Confidence</div>
+          <div className="font-mono text-xl font-bold text-zinc-100">{confidence}/10</div>
+          <div className="text-[11px] text-zinc-500">Derived from risk score {review.risk_score}</div>
+        </div>
+        <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+          <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Blockers</div>
+          <div className="font-mono text-sm text-zinc-200">
+            Must-Fix <span className={cn("font-bold", blockers.mustFix > 0 ? "text-rose-400" : "text-emerald-400")}>{blockers.mustFix}</span>
+            <span className="text-zinc-600"> · </span>
+            Should-Fix <span className={cn("font-bold", blockers.shouldFix > 0 ? "text-amber-400" : "text-emerald-400")}>{blockers.shouldFix}</span>
+          </div>
+          <div className="text-[11px] text-zinc-500">Critical/high vs medium findings</div>
+        </div>
+        <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+          <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Blast Radius</div>
+          <div className="font-mono text-sm font-bold text-zinc-100">{radius.label}</div>
+          <div className="text-[11px] text-zinc-500">{radius.explanation}</div>
+        </div>
+      </section>
+
+      {/* Structural & Blast Radius Analysis */}
+      <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5 space-y-3">
+        <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400">Structural &amp; Blast Radius Analysis</h3>
+        <ul className="space-y-2.5 text-xs text-zinc-300 leading-relaxed list-disc pl-5">
+          <li>
+            <span className="font-semibold text-zinc-100">Impact Surface:</span> {radius.label} — {radius.explanation}.
+          </li>
+          <li>
+            <span className="font-semibold text-zinc-100">Files Modified:</span>{" "}
+            <span className="font-mono">{blast.filesCount} {blast.filesCount === 1 ? "file" : "files"}</span>{" "}
+            <span className="font-mono text-emerald-400">+{blast.additions}</span>
+            <span className="font-mono text-zinc-500">/</span>
+            <span className="font-mono text-rose-400">-{blast.deletions}</span>{" "}
+            <span className={cn("ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider border", blast.scopeColor)}>
+              {blast.scope} mutation scope
+            </span>
+          </li>
+          {touchedFiles.length > 0 && (
+            <li>
+              <span className="font-semibold text-zinc-100">Touched Components:</span>{" "}
+              <span className="inline-flex flex-wrap gap-1.5 align-middle">
+                {shownFiles.map((f) => (
+                  <span key={f} className="font-mono text-[10px] text-zinc-300 bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">{f}</span>
+                ))}
+                {hiddenFiles > 0 && (
+                  <span className="font-mono text-[10px] text-zinc-500">+{hiddenFiles} more</span>
+                )}
+              </span>
+            </li>
+          )}
+          <li>
+            <span className="font-semibold text-zinc-100">Risk Assessment:</span>{" "}
+            {blockers.mustFix > 0
+              ? `Risk ${review.risk_score}/100 with ${blockers.mustFix} must-fix ${blockers.mustFix === 1 ? "finding" : "findings"} — address blockers before merge.`
+              : review.risk_score <= 30
+                ? `Risk ${review.risk_score}/100 with no must-fix findings — safe to merge pending routine review.`
+                : `Risk ${review.risk_score}/100 with no must-fix findings — merge after a focused review pass.`}
+          </li>
+        </ul>
+      </section>
+
+      {/* Findings Summary */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono">
+          <span>Findings Summary ({review.findings.length})</span>
+          {review.findings.length > 0 && (
+            <span className="text-[10px] text-zinc-500 font-normal">Pre-verified candidate patches</span>
+          )}
+        </div>
+        {review.findings.length === 0 ? (
+          <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-4 py-3 text-xs font-mono text-emerald-300">
+            <Check className="h-4 w-4 text-emerald-400" />
+            No regressions detected — no actionable findings on this review.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {review.findings.map((f, i) => (
+              <FindingItem
+                key={i}
+                finding={f}
+                repoOwner={review.repo_owner}
+                repoName={review.repo_name}
+                commitSha={review.commit_sha}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Metadata footer */}
+      <section className="flex flex-wrap items-center gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-950/70 px-3 py-2 text-[11px] font-mono text-zinc-400">
+        <span>{review.input_tokens + review.output_tokens} tokens</span>
+        <span className="text-zinc-700">|</span>
+        <span className="uppercase tracking-wider text-[10px]">Mutation scope:</span>
+        <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider border", blast.scopeColor)}>
+          {blast.scope}
+        </span>
+        <span className="text-zinc-700">|</span>
+        <span className="uppercase text-[10px] text-zinc-500">{review.status}</span>
+        {review.findings.length === 0 && (
+          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-950/30 px-2 py-0.5 text-[10px] text-emerald-300">
+            <Check className="h-2.5 w-2.5 text-emerald-400" />
+            No regressions
+          </span>
+        )}
+      </section>
+    </div>
+  );
+}
+
 export default function ReviewsPage() {
   const [reviews, setReviews] = useState<CodeReviewOut[]>([]);
   const [repos, setRepos] = useState<RepoOut[]>([]);
@@ -734,6 +1052,14 @@ export default function ReviewsPage() {
   const [page, setPage] = useState<number>(0);
   const [totalCount, setTotalCount] = useState<number>(0);
   const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // Detail view: selected review id, deep-linkable via `?review=<id>`.
+  const [selectedId, setSelectedId] = useState<string | null>(() => readReviewParam());
+  const [detailReview, setDetailReview] = useState<CodeReviewOut | null>(null);
+  const [detailLoading, setDetailLoading] = useState<boolean>(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailRetry, setDetailRetry] = useState<number>(0);
+  const [listLoaded, setListLoaded] = useState<boolean>(false);
 
   // Load repos for filter
   useEffect(() => {
@@ -776,12 +1102,80 @@ export default function ReviewsPage() {
     } finally {
       setLoading(false);
       setRefreshing(false);
+      setListLoaded(true);
     }
   }, [selectedRepoId, highRiskOnly, selectedSeverity, page]);
 
   useEffect(() => {
     fetchReviews();
   }, [fetchReviews]);
+
+  const openReview = useCallback((id: string) => {
+    window.history.pushState({ review: id }, "", `${window.location.pathname}?review=${encodeURIComponent(id)}`);
+    setDetailError(null);
+    setSelectedId(id);
+  }, []);
+
+  const closeReview = useCallback(() => {
+    window.history.pushState({}, "", window.location.pathname);
+    setSelectedId(null);
+  }, []);
+
+  // Back/forward buttons stay in sync with the deep link.
+  useEffect(() => {
+    const onPopState = () => setSelectedId(readReviewParam());
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  // Escape closes the detail view.
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeReview();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedId, closeReview]);
+
+  // Resolve the detail payload: prefer the already-fetched page row, fall
+  // back to the existing GET detail endpoint for deep links / other pages.
+  useEffect(() => {
+    if (!selectedId) {
+      setDetailReview(null);
+      setDetailError(null);
+      setDetailLoading(false);
+      return;
+    }
+    const found = reviews.find((r) => r.id === selectedId);
+    if (found) {
+      setDetailReview(found);
+      setDetailLoading(false);
+      return;
+    }
+    if (!listLoaded) return;
+    let cancelled = false;
+    setDetailLoading(true);
+    setDetailError(null);
+    api.getReviewDetail(selectedId).then(
+      (r) => {
+        if (!cancelled) {
+          setDetailReview(r);
+          setDetailLoading(false);
+        }
+      },
+      () => {
+        if (!cancelled) {
+          setDetailReview(null);
+          setDetailError("Couldn't load that review. It may have moved pages — go back and retry.");
+          setDetailLoading(false);
+        }
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, reviews, listLoaded, detailRetry]);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -851,6 +1245,53 @@ export default function ReviewsPage() {
       }
     >
       <div className="space-y-6 pb-12">
+        {selectedId ? (
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={closeReview}
+              className="h-8 gap-1.5 border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              <span>Back to reviews</span>
+            </Button>
+
+            {detailLoading || (!detailReview && !detailError) ? (
+              <div className="space-y-4" aria-label="Loading review detail">
+                <Skeleton className="h-8 w-64" />
+                <div className="rounded-xl border border-zinc-800/80 bg-[#111114] p-5 space-y-3">
+                  <Skeleton className="h-5 w-48" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-3/4" />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {[1, 2, 3, 4].map((n) => (
+                    <Skeleton key={n} className="h-20 w-full" />
+                  ))}
+                </div>
+              </div>
+            ) : detailError || !detailReview ? (
+              <div
+                role="alert"
+                className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-2.5 text-xs font-mono text-rose-300"
+              >
+                <span>{detailError ?? "Review not found."}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setDetailRetry((n) => n + 1)}
+                  className="h-7 border-rose-500/40 text-xs text-rose-200 hover:bg-rose-900/40"
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : (
+              <ReviewDetail review={detailReview} />
+            )}
+          </>
+        ) : (
+          <>
         {/* Interactive Telemetry Ribbon doubling as Filter Tabs */}
         <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#141418] via-[#101013] to-[#0a0a0d] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_16px_rgba(0,0,0,0.35)]">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-1.5">
@@ -1082,7 +1523,7 @@ export default function ReviewsPage() {
         ) : (
           <div className="space-y-4">
             {filteredReviews.map((review) => (
-              <ReviewCard key={review.id} review={review} />
+              <ReviewCard key={review.id} review={review} onOpen={openReview} />
             ))}
           </div>
         )}
@@ -1114,6 +1555,8 @@ export default function ReviewsPage() {
               </Button>
             </div>
           </div>
+        )}
+          </>
         )}
       </div>
     </AppLayout>
