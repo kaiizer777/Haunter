@@ -49,9 +49,12 @@ const PAGE_SIZE = 15;
 const RISK_CRITICAL = 71;
 const RISK_MODERATE = 31;
 
-/** A review whose analysis never completed — never render verdict telemetry for it. */
+/** A review whose analysis never completed — never render verdict telemetry for it.
+ * Failed iff the backend reports status "error". A stale `failure_reason` on a
+ * completed review must NOT hide its real verdict (the API type allows the
+ * combination), so `failure_reason` alone is intentionally ignored here. */
 function isReviewFailed(review: CodeReviewOut): boolean {
-  return review.status?.toLowerCase() === "error" || !!review.failure_reason;
+  return review.status?.toLowerCase() === "error";
 }
 
 /**
@@ -254,7 +257,7 @@ function getBlastStats(review: CodeReviewOut): {
   if (filesCount > 8 || totalModifications > 250 || review.risk_score >= RISK_CRITICAL) {
     scope = "Extensive";
     scopeColor = "border-rose-500/30 bg-rose-950/40 text-rose-300";
-  } else if (filesCount > 3 || totalModifications > 60 || review.risk_score > 35) {
+  } else if (filesCount > 3 || totalModifications > 60 || review.risk_score >= RISK_MODERATE) {
     scope = "Moderate";
     scopeColor = "border-amber-500/30 bg-amber-950/40 text-amber-300";
   }
@@ -267,7 +270,7 @@ function verdictFor(review: CodeReviewOut): { label: string; color: string } {
   if (mustFix > 0 || review.risk_score >= RISK_CRITICAL) {
     return { label: "Changes Requested", color: "bg-rose-950/60 text-rose-300 border-rose-500/40" };
   }
-  if (review.risk_score <= 30 && shouldFix === 0) {
+  if (review.risk_score < RISK_MODERATE && shouldFix === 0) {
     return { label: "Great to Merge", color: "bg-emerald-950/60 text-emerald-300 border-emerald-500/40" };
   }
   return { label: "Review Advised", color: "bg-amber-950/60 text-amber-300 border-amber-500/40" };
@@ -1161,9 +1164,11 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
 
       {failed ? (
         <>
-          {/* Honest failure panel: raw error, no verdict telemetry */}
-          <div role="alert" className="flex items-start justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-xs leading-relaxed text-rose-200">
-            <span className="flex items-start gap-2">
+          {/* Honest failure panel: raw error, no verdict telemetry.
+              The alert covers the error text only — the Retry button stays
+              outside role=alert so assistive tech doesn't trap interaction. */}
+          <div className="flex items-start justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-xs leading-relaxed text-rose-200">
+            <span role="alert" className="flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-rose-400" />
               <span>{errorText}</span>
             </span>
@@ -1286,7 +1291,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
             <span className="font-semibold text-zinc-100">Risk Assessment:</span>{" "}
             {blockers.mustFix > 0
               ? `Risk ${review.risk_score}/100 with ${blockers.mustFix} must-fix ${blockers.mustFix === 1 ? "finding" : "findings"} — address blockers before merge.`
-              : review.risk_score <= 30
+              : review.risk_score < RISK_MODERATE
                 ? `Risk ${review.risk_score}/100 with no must-fix findings — safe to merge pending routine review.`
                 : `Risk ${review.risk_score}/100 with no must-fix findings — merge after a focused review pass.`}
           </li>
@@ -1505,6 +1510,16 @@ export default function ReviewsPage() {
     fetchReviews();
   };
 
+  // Detail Retry honestly re-polls the GET-only list (there is no analysis
+  // re-run endpoint) AND bumps detailRetry so off-page deep links refetch
+  // the detail endpoint too. Bumping detailRetry alone is a no-op for cached
+  // rows because the resolver above returns early on cache hit.
+  const handleDetailRetry = useCallback(() => {
+    setRefreshing(true);
+    fetchReviews();
+    setDetailRetry((n) => n + 1);
+  }, [fetchReviews]);
+
   // Client-side text search & ribbon tab filtering
   const filteredReviews = useMemo(() => {
     let list = reviews;
@@ -1532,13 +1547,16 @@ export default function ReviewsPage() {
   // Metric rollups — computed from the current page only (`reviews` holds a
   // single PAGE_SIZE window). Reviews Scanned uses the server-side
   // `totalCount` instead, so every tile derived here is explicitly labeled
-  // "this page" in the ribbon below.
+  // "this page" in the ribbon below. Avg Risk excludes failed analyses
+  // (risk_score defaults to 0 there — averaging it in would lie, e.g. 85+0→43)
+  // and reports how many rows actually scored.
   const pageStats = useMemo(() => {
     const total = reviews.length;
     const highRisk = reviews.filter((r) => r.risk_score >= RISK_CRITICAL).length;
-    const avgScore = total > 0 ? Math.round(reviews.reduce((acc, r) => acc + r.risk_score, 0) / total) : 0;
+    const scored = reviews.filter((r) => !isReviewFailed(r));
+    const avgScore = scored.length > 0 ? Math.round(scored.reduce((acc, r) => acc + r.risk_score, 0) / scored.length) : 0;
     const totalPatches = reviews.reduce((acc, r) => acc + r.findings.filter((f) => !!f.suggested_patch).length, 0);
-    return { total, highRisk, avgScore, totalPatches };
+    return { total, highRisk, avgScore, totalPatches, scoredCount: scored.length };
   }, [reviews]);
 
   const repoOptions = [
@@ -1605,14 +1623,14 @@ export default function ReviewsPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setDetailRetry((n) => n + 1)}
+                  onClick={handleDetailRetry}
                   className="h-7 border-rose-500/40 text-xs text-rose-200 hover:bg-rose-900/40"
                 >
                   Retry
                 </Button>
               </div>
             ) : (
-              <ReviewDetail review={detailReview} onRetry={() => setDetailRetry((n) => n + 1)} />
+              <ReviewDetail review={detailReview} onRetry={handleDetailRetry} />
             )}
           </div>
         ) : (
@@ -1697,10 +1715,17 @@ export default function ReviewsPage() {
                   <Sparkles className="h-3.5 w-3.5 text-amber-400" />
                   <span>Avg Risk</span>
                 </div>
-                <div className="mt-0.5 text-[11px] text-zinc-500 font-sans">Mean score · this page</div>
+                <div className="mt-0.5 text-[11px] text-zinc-500 font-sans">Mean score · this page · {pageStats.scoredCount === 0 ? "no scored reviews" : `${pageStats.scoredCount} scored`}</div>
               </div>
-              <div className="text-xl font-bold font-mono text-zinc-100">
-                {pageStats.avgScore} <span className="text-[11px] text-zinc-400 font-normal">/ 100</span>
+              <div
+                className="text-xl font-bold font-mono text-zinc-100"
+                title={pageStats.scoredCount === 0 ? "No scored reviews on this page — failed analyses excluded" : `Mean of ${pageStats.scoredCount} scored ${pageStats.scoredCount === 1 ? "review" : "reviews"} · failed analyses excluded`}
+              >
+                {pageStats.scoredCount === 0 ? (
+                  <span className="text-zinc-500" title="No score — no completed analyses on this page">—</span>
+                ) : (
+                  <>{pageStats.avgScore} <span className="text-[11px] text-zinc-400 font-normal">/ 100</span></>
+                )}
               </div>
             </button>
 
@@ -1800,13 +1825,13 @@ export default function ReviewsPage() {
           </div>
         </div>
 
-        {/* Fetch error banner (replaces silent console-only failure) */}
+        {/* Fetch error banner (replaces silent console-only failure).
+            Alert covers the message only; Retry stays outside role=alert. */}
         {fetchError && (
           <div
-            role="alert"
             className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-2.5 text-xs font-mono text-rose-300"
           >
-            <span>{fetchError}</span>
+            <span role="alert">{fetchError}</span>
             <Button
               variant="outline"
               size="sm"

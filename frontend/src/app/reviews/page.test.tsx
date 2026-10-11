@@ -469,10 +469,11 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getByText("PR #103")).toBeInTheDocument();
       expect(screen.getByText("feat: risky storage migration")).toBeInTheDocument();
 
-      // Honest error markers
-      expect(screen.getAllByText("Error").length).toBeGreaterThanOrEqual(1);
+      // Honest error markers (exact: ERROR pill + Status cell; gauge + 3
+      // telemetry cells in the card + Avg tile em-dash when nothing scored)
+      expect(screen.getAllByText("Error")).toHaveLength(2);
       expect(screen.getByText(/all 9 free-tier models exhausted/i)).toBeInTheDocument();
-      expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
+      expect(screen.getAllByText("—")).toHaveLength(5);
       expect(screen.getByText("NO SCORE")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
 
@@ -503,6 +504,138 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.queryByText("Changes Requested")).not.toBeInTheDocument();
       expect(screen.getByText("Findings Summary (0)")).toBeInTheDocument();
     });
+
+    it("failed-row Retry re-polls the list; detail Retry re-polls instead of no-op", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [failedReview],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #103")).toBeInTheDocument();
+      const callsBefore = vi.mocked(api.getCodeReviews).mock.calls.length;
+      await user.click(screen.getByRole("button", { name: /retry/i }));
+      expect(vi.mocked(api.getCodeReviews).mock.calls.length).toBeGreaterThan(callsBefore);
+
+      // Detail view: Retry must also re-poll the GET-only list (bumping
+      // detailRetry alone is a no-op for cached rows).
+      await user.click(screen.getByRole("button", { name: /full audit/i }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(/free-tier models exhausted/i);
+      const callsMid = vi.mocked(api.getCodeReviews).mock.calls.length;
+      await user.click(screen.getByRole("button", { name: /retry/i }));
+      expect(vi.mocked(api.getCodeReviews).mock.calls.length).toBeGreaterThan(callsMid);
+    });
+
+    it("search matches failure_reason text on failed rows", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [failedReview, ...mockReviews],
+        total: 3,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #103")).toBeInTheDocument();
+      expect(screen.getByText("docs: update API documentation")).toBeInTheDocument();
+
+      await user.type(
+        screen.getByPlaceholderText(/search findings/i),
+        "free-tier models exhausted"
+      );
+      expect(screen.getByText("PR #103")).toBeInTheDocument();
+      expect(screen.queryByText("docs: update API documentation")).not.toBeInTheDocument();
+      expect(screen.queryByText("feat: autonomous remediation sentinel pipeline")).not.toBeInTheDocument();
+    });
+
+    it("completed review with a stale failure_reason still shows its verdict", async () => {
+      const stale: CodeReviewOut = {
+        ...mockReviews[1],
+        failure_reason: "stale reason from an earlier attempt",
+      };
+      vi.mocked(api.getCodeReviews).mockResolvedValue({ reviews: [stale], total: 1 });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("docs: update API documentation")).toBeInTheDocument();
+      // Real verdict telemetry survives: confidence + merge verdict render,
+      // and no honest-error chrome appears. (Verdict pill renders twice on
+      // the overview card: PR badge row + Status cell.)
+      expect(screen.getByText("9/10")).toBeInTheDocument();
+      expect(screen.getAllByText("Great to Merge")).toHaveLength(2);
+      expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
+      expect(screen.queryByText("free-tier models exhausted")).not.toBeInTheDocument();
+    });
+  });
+
+  it("Avg Risk excludes failed rows and discloses the scored count", async () => {
+    const failedRow: CodeReviewOut = {
+      id: "rev_fail",
+      repo_id: "repo_1",
+      repo_owner: "acme",
+      repo_name: "sentinel",
+      commit_sha: "deadbeef12345678",
+      pr_number: 103,
+      pr_title: "feat: risky storage migration",
+      pr_author: "octocat",
+      pr_author_avatar: null,
+      head_branch: "feat/migration",
+      base_branch: "main",
+      pr_url: "https://github.com/acme/sentinel/pull/103",
+      risk_score: 0,
+      summary: "Analysis did not complete.",
+      status: "error",
+      failure_reason: "All 9 free-tier models exhausted (18 total attempts)",
+      input_tokens: 0,
+      output_tokens: 0,
+      created_at: new Date().toISOString(),
+      diff_stats: null,
+      findings: [],
+    };
+    vi.mocked(api.getCodeReviews).mockResolvedValue({
+      reviews: [mockReviews[0], failedRow],
+      total: 2,
+    });
+    render(<ReviewsPage />);
+
+    expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+
+    const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+    // 85 alone — not (85+0)/2 = 43.
+    expect(avgTab).toHaveTextContent("85");
+    expect(avgTab.textContent).not.toMatch(/43/);
+    expect(avgTab.textContent).toMatch(/1 scored/i);
+  });
+
+  it("Avg Risk shows an honest em-dash when no rows scored", async () => {
+    const failedOnly: CodeReviewOut = {
+      id: "rev_fail",
+      repo_id: "repo_1",
+      repo_owner: "acme",
+      repo_name: "sentinel",
+      commit_sha: "deadbeef12345678",
+      pr_number: 103,
+      pr_title: "feat: risky storage migration",
+      pr_author: "octocat",
+      pr_author_avatar: null,
+      head_branch: "feat/migration",
+      base_branch: "main",
+      pr_url: "https://github.com/acme/sentinel/pull/103",
+      risk_score: 0,
+      summary: "Analysis did not complete.",
+      status: "error",
+      failure_reason: "All 9 free-tier models exhausted (18 total attempts)",
+      input_tokens: 0,
+      output_tokens: 0,
+      created_at: new Date().toISOString(),
+      diff_stats: null,
+      findings: [],
+    };
+    vi.mocked(api.getCodeReviews).mockResolvedValue({ reviews: [failedOnly], total: 1 });
+    render(<ReviewsPage />);
+
+    expect(await screen.findByText("PR #103")).toBeInTheDocument();
+    const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+    expect(avgTab.textContent).toMatch(/no scored reviews/i);
+    expect(avgTab.querySelector("span.text-zinc-500")).toHaveTextContent("—");
   });
 
   it("unifies the high-risk bar at >= 71: ribbon label, toggle label and min_risk API param", async () => {
