@@ -24,8 +24,11 @@ import {
   riskBand,
   scoredOutcome,
   sortByAttention,
+  outcomeMeaning,
   FAILED_OUTCOME,
+  OUTCOME_ORDER,
   SORT_OPTIONS,
+  type FailureCluster,
   type Outcome,
   type OutcomeKey,
   type SortKey,
@@ -155,8 +158,11 @@ function pendingLabelFor(review: CodeReviewOut): string {
  *
  * `neutral` renders the honest no-score state for analyses that never
  * finished: zinc track, em-dash, NO SCORE badge — never a fake 10/10.
+ *
+ * Named `ConfidenceGauge` because it renders confidence. It still *takes* a
+ * risk score, because confidence is derived from risk (see confidenceFromRisk).
  */
-function RiskGauge({ riskScore, size = 68, neutral = false }: { riskScore: number; size?: number; neutral?: boolean }) {
+function ConfidenceGauge({ riskScore, size = 68, neutral = false }: { riskScore: number; size?: number; neutral?: boolean }) {
   const strokeWidth = 5;
   const radius = (size - strokeWidth - 8) / 2;
   const circumference = 2 * Math.PI * radius;
@@ -803,7 +809,8 @@ function IdentityPill({ review }: { review: CodeReviewOut }) {
  * failure strip and a three-column detail card), which is why the right edge
  * of the list was ragged row to row.
  *
- * `RIBBON` is the identity line; `ASIDE` is the right-hand action column.
+ * `RowIdentity` below is the identity line; the `md:w-[164px]` column is the
+ * right-hand action column.
  */
 const ROW_SURFACE =
   "rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]";
@@ -861,10 +868,26 @@ function RowIdentity({
   );
 }
 
-/** Small labelled fact used in the shared row footer. */
-function MetaFact({ label, value, tone }: { label: string; value: React.ReactNode; tone?: string }) {
+/**
+ * Small labelled fact used in the row footer of every list card — scored,
+ * pending and failed. `title` puts the explanation on the wrapper, so both the
+ * label and the value are part of the hover target — that is what removes the
+ * need for the hand-rolled copies of this markup that used to exist for "Risk"
+ * and "Blast".
+ */
+function MetaFact({
+  label,
+  value,
+  tone,
+  title,
+}: {
+  label: string;
+  value: React.ReactNode;
+  tone?: string;
+  title?: string;
+}) {
   return (
-    <span className="inline-flex items-baseline gap-1.5">
+    <span className="inline-flex items-baseline gap-1.5" title={title}>
       <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">{label}</span>
       <span className={cn("font-mono text-xs", tone ?? "text-zinc-300")}>{value}</span>
     </span>
@@ -923,12 +946,12 @@ function FailedReviewCard({
   );
 
   return (
-    <div className={cn(ROW_SURFACE, "border-rose-500/25")}>
+    <div className={cn(ROW_SURFACE, "border-rose-500/25")} data-testid="failed-review-card">
       <div className="flex flex-col gap-4 p-5">
         {/* One skeleton, same as a scored row: gauge | content | actions */}
         <div className="flex flex-col gap-5 md:flex-row md:items-start">
           <div className="flex items-center gap-4 md:min-w-[84px] md:flex-col md:justify-center">
-            <RiskGauge riskScore={review.risk_score} size={64} neutral />
+            <ConfidenceGauge riskScore={review.risk_score} size={64} neutral />
           </div>
 
           <div className="min-w-0 flex-1 space-y-3">
@@ -942,14 +965,20 @@ function FailedReviewCard({
 
             {/* Full text, never truncated. Scrolls instead of clipping so a
                 long "Last errors: ..." tail is always reachable.
-                role="alert" is applied only once the row is expanded: this
-                text is static content that is present at load, and marking
-                every permanently-visible failure box as a live alert would
-                make a screen reader announce each one on arrival. */}
-            <div
-              role={expanded ? "alert" : undefined}
-              className="rounded-lg border border-rose-500/30 bg-rose-950/20 px-3 py-2.5"
-            >
+
+                No role="alert" here, expanded or not. The reason text is static
+                content that is mounted with the collapsed row, and WAI-ARIA
+                forbids a live region around content present at load. Toggling
+                the role attribute onto an already-mounted node is also not a
+                reliable way to announce anything: a live region speaks when its
+                *content* changes or when the node is newly inserted, neither of
+                which happens when this row expands. This box is deliberately
+                NOT inside the Expand button's disclosure: aria-controls points
+                at the "Failure details" panel below (line 1039), while this
+                reason text is always visible, collapsed or not. It is static
+                text a screen reader reaches by reading the row, so it needs no
+                live-region announcement. */}
+            <div className="rounded-lg border border-rose-500/30 bg-rose-950/20 px-3 py-2.5">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" aria-hidden="true" />
                 <p className="max-h-32 min-w-0 flex-1 overflow-y-auto font-mono text-[11px] leading-relaxed break-words text-rose-100">
@@ -961,13 +990,12 @@ function FailedReviewCard({
 
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <MetaFact label="Status" value={<span className="text-rose-300">Failed</span>} />
-              <span
-                className="inline-flex items-baseline gap-1.5"
+              <MetaFact
+                label="Risk"
+                value={<span>Not scored</span>}
+                tone="text-zinc-500"
                 title="No score — the analysis never produced a risk assessment"
-              >
-                <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Risk</span>
-                <span className="font-mono text-xs text-zinc-500">Not scored</span>
-              </span>
+              />
               <a
                 href={commitUrl || `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}`}
                 target="_blank"
@@ -1109,7 +1137,7 @@ function PendingReviewCard({
     <div className={ROW_SURFACE}>
       <div className="flex flex-col gap-5 p-5 md:flex-row md:items-start">
         <div className="flex items-center gap-4 md:min-w-[84px] md:flex-col md:justify-center">
-          <RiskGauge riskScore={review.risk_score} size={64} neutral />
+          <ConfidenceGauge riskScore={review.risk_score} size={64} neutral />
         </div>
 
         <div className="min-w-0 flex-1 space-y-3">
@@ -1154,6 +1182,61 @@ function PendingReviewCard({
 }
 
 /**
+ * Presentation for each triage chip. Module-scope and frozen: this is
+ * invariant data, and rebuilding a 5-element array on every render of a
+ * component that re-renders on every filter change is pure waste.
+ *
+ * Only the *visual* language lives here. The chip tooltip is NOT copied in
+ * from review-triage — it comes from outcomeMeaning(), the same source the
+ * verdict panel reads, so the strip and the row can never describe the same
+ * outcome differently.
+ */
+const TRIAGE_CHIP_STYLES: Readonly<
+  Record<OutcomeKey, { label: string; dot: string; active: string }>
+> = Object.freeze({
+  changes_requested: {
+    label: "Need changes",
+    dot: "bg-rose-400",
+    active: "border-rose-500/60 bg-rose-950/40 text-rose-200",
+  },
+  advisory: {
+    label: "Review advised",
+    dot: "bg-amber-400",
+    active: "border-amber-500/60 bg-amber-950/40 text-amber-200",
+  },
+  in_progress: {
+    label: "In progress",
+    dot: "bg-zinc-400",
+    active: "border-zinc-500/60 bg-zinc-800 text-zinc-100",
+  },
+  failed: {
+    label: "Failed",
+    dot: "bg-rose-300",
+    active: "border-rose-500/60 bg-rose-950/40 text-rose-100",
+  },
+  clean: {
+    label: "Great to merge",
+    dot: "bg-emerald-400",
+    active: "border-emerald-500/60 bg-emerald-950/40 text-emerald-200",
+  },
+});
+
+/** Chip rows in attention order, driven by the shared OUTCOME_ORDER. */
+const TRIAGE_BUCKETS: readonly {
+  key: OutcomeKey;
+  label: string;
+  dot: string;
+  active: string;
+  meaning: string;
+}[] = Object.freeze(
+  OUTCOME_ORDER.map((key) => ({
+    key,
+    ...TRIAGE_CHIP_STYLES[key],
+    meaning: outcomeMeaning(key),
+  }))
+);
+
+/**
  * Triage Summary — the one-glance answer to "what needs my attention?".
  *
  * Five outcome counters, ordered by how much they demand a human decision.
@@ -1175,62 +1258,12 @@ function TriageSummary({
   activeOutcome: OutcomeKey | null;
   onToggle: (key: OutcomeKey | null) => void;
 }) {
-  const buckets: {
-    key: OutcomeKey;
-    label: string;
-    dot: string;
-    text: string;
-    active: string;
-    meaning: string;
-  }[] = [
-    {
-      key: "changes_requested",
-      label: "Need changes",
-      dot: "bg-rose-400",
-      text: "text-rose-300",
-      active: "border-rose-500/60 bg-rose-950/40 text-rose-200",
-      meaning: "Must-fix findings or a critical risk score. Address before merge.",
-    },
-    {
-      key: "advisory",
-      label: "Review advised",
-      dot: "bg-amber-400",
-      text: "text-amber-300",
-      active: "border-amber-500/60 bg-amber-950/40 text-amber-200",
-      meaning: "No must-fix findings, but the change carries real risk.",
-    },
-    {
-      key: "in_progress",
-      label: "In progress",
-      dot: "bg-zinc-400",
-      text: "text-zinc-300",
-      active: "border-zinc-500/60 bg-zinc-800 text-zinc-100",
-      meaning: "Still running. A verdict appears here once the analysis lands.",
-    },
-    {
-      key: "failed",
-      label: "Failed",
-      dot: "bg-rose-300",
-      text: "text-rose-200",
-      active: "border-rose-500/60 bg-rose-950/40 text-rose-100",
-      meaning: "The analysis never completed. Retry, or inspect the failure reason.",
-    },
-    {
-      key: "clean",
-      label: "Great to merge",
-      dot: "bg-emerald-400",
-      text: "text-emerald-300",
-      active: "border-emerald-500/60 bg-emerald-950/40 text-emerald-200",
-      meaning: "No blockers and a low risk score. Routine review is enough.",
-    },
-  ];
-
   const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
   const actionable = counts.changes_requested + counts.advisory;
 
   return (
     <section
-      aria-label="Review triage summary"
+      aria-label="Review triage summary for this page"
       className="rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
     >
       <div className="flex flex-wrap items-center gap-3">
@@ -1257,8 +1290,16 @@ function TriageSummary({
           )}
         </p>
 
-        {/* Counters act as filters. */}
+        {/* Counters act as filters, and every other number on this page is
+            scoped ("this page", "of N reviews"), so the strip says so too.
+            "In view", not "This page": these counts are computed over
+            `filteredReviews`, which is the loaded window minus the search box,
+            the Patches tab and the hide-failed toggle — strictly narrower than
+            the page whenever any of those are active. */}
         <div className="flex flex-wrap items-center gap-1.5">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+            In view
+          </span>
           <button
             type="button"
             onClick={() => onToggle(null)}
@@ -1273,7 +1314,7 @@ function TriageSummary({
             All
             <span className="text-zinc-500">{total}</span>
           </button>
-          {buckets.map((bucket) => {
+          {TRIAGE_BUCKETS.map((bucket) => {
             const count = counts[bucket.key];
             const isActive = activeOutcome === bucket.key;
             return (
@@ -1311,8 +1352,12 @@ function TriageSummary({
  * Only rendered when there are two or more failures. With a single failure the
  * row itself already states the cause in full, so a banner would just print
  * the same sentence twice.
+ *
+ * Typed with the clusterFailures() return type rather than a hand-copied
+ * structural shape, so a change to the cluster contract fails here instead of
+ * silently drifting.
  */
-function FailureClusterBanner({ clusters }: { clusters: { signature: string; count: number }[] }) {
+function FailureClusterBanner({ clusters }: { clusters: readonly FailureCluster[] }) {
   const total = clusters.reduce((sum, c) => sum + c.count, 0);
   if (clusters.length === 0 || total < 2) return null;
   return (
@@ -1324,7 +1369,12 @@ function FailureClusterBanner({ clusters }: { clusters: { signature: string; cou
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" aria-hidden="true" />
         <div className="min-w-0 flex-1">
           <h3 className="text-xs font-semibold text-rose-100">
-            {total} failed {clusters.length === 1 ? "analysis" : "analyses"}
+            {/* Pluralised on `total` (the failure count), not on the number of
+                clusters: nine rows sharing one cause is "9 failed analyses",
+                never "9 failed analysis". The singular is unreachable — the
+                guard above returns null below two failures — so it is not
+                spelled out here. */}
+            {total} failed analyses
             {clusters.length > 1 && ` across ${clusters.length} causes`}
           </h3>
           <ul className="mt-1.5 space-y-1">
@@ -1437,7 +1487,7 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
         {/* Gauge — same footprint in every state, so the identity line always
             starts at the same horizontal offset. */}
         <div className="flex items-center gap-4 md:min-w-[84px] md:flex-col md:justify-center">
-          <RiskGauge riskScore={review.risk_score} size={64} />
+          <ConfidenceGauge riskScore={review.risk_score} size={64} />
         </div>
 
         {/* Center: report identity, summary, decision line */}
@@ -1565,12 +1615,12 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
                 </span>
               }
             />
-            <span className="inline-flex items-baseline gap-1.5">
-              <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Blast</span>
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400" title={radius.explanation}>
-                {radius.label}
-              </span>
-            </span>
+            <MetaFact
+              label="Blast"
+              value={radius.label}
+              tone="text-[10px] font-semibold uppercase tracking-wider text-zinc-400"
+              title={radius.explanation}
+            />
             <span className="text-zinc-600">{review.input_tokens + review.output_tokens} tok</span>
           </div>
 
@@ -1802,7 +1852,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
           </div>
 
           <div className="flex items-start justify-start lg:justify-center">
-            <RiskGauge riskScore={review.risk_score} size={84} neutral={failed || pending} />
+            <ConfidenceGauge riskScore={review.risk_score} size={84} neutral={failed || pending} />
           </div>
         </div>
       </div>
@@ -2152,6 +2202,24 @@ export default function ReviewsPage() {
     fetchReviews();
   }, [fetchReviews]);
 
+  // Clamp the page index when the server-side result set shrinks beneath it.
+  // The server filters by repo / high-risk / severity, and a Refresh can also
+  // come back with fewer rows after rows disappear upstream, so the user can
+  // be parked on a page that no longer exists — the footer would claim
+  // "Showing 46 to 60 of 10" and Next would dead-end.
+  //
+  // This clamps AFTER the response rather than before the request, and that is
+  // deliberate: the shrink is only knowable from the response that discovers
+  // it, so no pre-flight check could have skipped that call. Hoisting the clamp
+  // into fetchReviews() would require `totalCount` in its useCallback deps,
+  // which re-creates the callback on every total change and makes the fetch
+  // effect above fire a second, redundant request on mount — trading one
+  // unavoidable round trip for a permanent extra one.
+  const maxPage = Math.max(0, Math.ceil(totalCount / PAGE_SIZE) - 1);
+  useEffect(() => {
+    if (page > maxPage) setPage(maxPage);
+  }, [page, maxPage]);
+
   const openReview = useCallback((id: string) => {
     window.history.pushState({ review: id }, "", `${window.location.pathname}?review=${encodeURIComponent(id)}`);
     setDetailError(null);
@@ -2300,9 +2368,12 @@ export default function ReviewsPage() {
     []
   );
 
-  // Counts drive the triage summary. Computed over the whole loaded window,
-  // not the filtered subset, so switching a filter never makes the summary
-  // contradict itself.
+  // Counts drive the triage summary, so they are computed over the same
+  // population the outcome chips filter within: `filteredReviews`. Deriving
+  // them from the raw `reviews` window let a chip advertise "Need changes 3"
+  // while the search box or the failed-rows toggle had already excluded every
+  // one of those three — clicking it then showed an empty list. The chips are
+  // navigation, so their numbers must match what they reveal.
   const triageCounts = useMemo(() => {
     const counts: Record<OutcomeKey, number> = {
       changes_requested: 0,
@@ -2311,18 +2382,11 @@ export default function ReviewsPage() {
       in_progress: 0,
       failed: 0,
     };
-    for (const review of reviews) {
+    for (const review of filteredReviews) {
       counts[outcomeOf(review).key] += 1;
     }
     return counts;
-  }, [reviews, outcomeOf]);
-
-  // Distinct root causes behind the failures on this page — stated once in
-  // the cluster banner instead of repeated on every failed row.
-  const failureClusters = useMemo(
-    () => clusterFailures(reviews.filter((r) => isReviewFailed(r))),
-    [reviews]
-  );
+  }, [filteredReviews, outcomeOf]);
 
   // Triage filter + sort. Applied after the existing repo/severity/search
   // filters so the new controls compose rather than replace them.
@@ -2332,6 +2396,17 @@ export default function ReviewsPage() {
       : filteredReviews;
     return sortByAttention(filtered, outcomeOf, sortKey);
   }, [filteredReviews, activeOutcome, outcomeOf, sortKey]);
+
+  // Distinct root causes behind the failures on this page — stated once in
+  // the cluster banner instead of repeated on every failed row.
+  //
+  // Derived from `sortedReviews`, not from the raw window, so the banner can
+  // never announce "3 failed analyses" while zero failed rows are on screen
+  // (which is exactly what happens with a non-failure outcome chip active).
+  const failureClusters = useMemo(
+    () => clusterFailures(sortedReviews.filter((r) => isReviewFailed(r))),
+    [sortedReviews]
+  );
 
   // Metric rollups — computed from the current page only (`reviews` holds a
   // single PAGE_SIZE window). Reviews Scanned uses the server-side
@@ -2635,19 +2710,37 @@ export default function ReviewsPage() {
           <div className="flex items-center gap-2">
             {/* Sort — default "Attention" floats merge-blocking reviews above
                 clean ones and sinks failures to the bottom, so a page full of
-                identical infrastructure errors cannot bury a real finding. */}
+                identical infrastructure errors cannot bury a real finding.
+
+                Scope, stated plainly because it is genuinely limited: the list
+                is one server page of PAGE_SIZE rows. The backend already
+                returns created_at DESC for every page, so "Newest" matches the
+                incoming order and changes nothing in practice; "Attention"
+                can only reorder the window in front of the user, not pull an
+                actionable review off another page. Client-side sorting across
+                pages would need a server sort parameter, which is out of scope
+                here — so the labels say what they actually do rather than
+                implying a global reorder. */}
             <div
               className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1"
               role="group"
-              aria-label="Sort reviews"
+              aria-label="Sort reviews on this page"
             >
               <SlidersHorizontal className="ml-1.5 h-3.5 w-3.5 shrink-0 text-zinc-500" aria-hidden="true" />
               {SORT_OPTIONS.map((opt) => (
                 <button
                   key={opt.value}
                   type="button"
-                  onClick={() => setSortKey(opt.value)}
+                  onClick={() => {
+                    setSortKey(opt.value);
+                    setPage(0);
+                  }}
                   aria-pressed={sortKey === opt.value}
+                  title={
+                    opt.value === "attention"
+                      ? "Reorders the reviews on this page: blockers first, clean last, failures at the bottom."
+                      : "Newest first. The server already returns this page newest-first, so this normally changes nothing."
+                  }
                   className={cn(
                     "rounded-md px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400",
                     sortKey === opt.value
@@ -2697,14 +2790,22 @@ export default function ReviewsPage() {
           <TriageSummary
             counts={triageCounts}
             activeOutcome={activeOutcome}
-            onToggle={setActiveOutcome}
+            // Reset to page 0 like every other filter on this page: the
+            // outcome chips filter the current 15-row window client-side, so
+            // activating one from page 3 filtered rows 31-45 and left the
+            // reviews the user was actually looking for on page 1.
+            onToggle={(key) => {
+              setActiveOutcome(key);
+              setPage(0);
+            }}
           />
         )}
 
-        {/* Distinct root causes behind the failures, stated once. */}
-        {failureClusters.length > 0 && activeOutcome !== "changes_requested" && (
-          <FailureClusterBanner clusters={failureClusters} />
-        )}
+        {/* Distinct root causes behind the failures, stated once. No
+            activeOutcome guard is needed any more: failureClusters is derived
+            from the rendered rows, so when the active chip excludes failures
+            the list is simply empty and the banner hides itself. */}
+        {failureClusters.length > 0 && <FailureClusterBanner clusters={failureClusters} />}
 
         {/* Review Cards Stream */}
         {loading && reviews.length === 0 ? (

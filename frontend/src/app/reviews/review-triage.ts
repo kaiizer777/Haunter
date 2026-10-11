@@ -16,9 +16,12 @@
  * Page-owned: only app/reviews/page.tsx imports this. Nothing else in the app
  * depends on it, so the blast radius of changing it is exactly one page.
  *
- * Contrast: every tone below meets WCAG 2.2 AA (>=4.5:1) for small text on the
- * card surface (#0c0c0e - #111115). Muted labels deliberately use zinc-400
- * (~7.1:1) rather than zinc-500 (~3.9:1, which fails AA for 10px labels).
+ * Contrast: the band text/chip colours below are chosen to read clearly on the
+ * card surface (#0c0c0e - #111115). This module does NOT claim a measured
+ * contrast ratio — none has been verified here, so no number is asserted.
+ * Note that the surrounding page still uses zinc-500 for de-emphasized 10px
+ * chrome (see MetaFact in page.tsx), which is below the AA 4.5:1 threshold for
+ * small text; migrating that is a page-wide visual change, not a token edit.
  */
 
 /** Same high-risk boundary the gauge, the API min_risk param and the
@@ -26,7 +29,7 @@
 export const RISK_CRITICAL = 71;
 export const RISK_MODERATE = 31;
 
-export type RiskBandKey = "critical" | "elevated" | "low" | "none";
+type RiskBandKey = "critical" | "elevated" | "low" | "none";
 
 export interface RiskBand {
   key: RiskBandKey;
@@ -36,11 +39,10 @@ export interface RiskBand {
    *  text is real DOM text rather than a CSS-only transform — assistive tech
    *  and the test suite both read the literal. */
   chipLabel: string;
-  /** Full sentence alternative for assistive tech on the gauge. */
-  description: string;
   /** Ring stroke for the gauge. */
   stroke: string;
-  /** Text colour that clears 4.5:1 on the card surface. */
+  /** Text colour for the band's value text on the card surface. No contrast
+   *  ratio is claimed here — see the module header. */
   text: string;
   /** Translucent chip: border + background, per the existing badge vocabulary. */
   chip: string;
@@ -48,49 +50,48 @@ export interface RiskBand {
   dot: string;
 }
 
-const BAND_NONE: RiskBand = {
+/** Module-level and frozen: riskBand() hands these objects straight to the
+ *  page, which reads `.chip` / `.dot` / `.text` into className strings. Frozen
+ *  so one careless consumer cannot corrupt another row's band. */
+const BAND_NONE: RiskBand = Object.freeze({
   key: "none",
   label: "No score",
   chipLabel: "NO SCORE",
-  description: "No risk score — the analysis did not complete",
   stroke: "#52525b",
   text: "text-zinc-400",
   chip: "border-zinc-700 bg-zinc-900 text-zinc-300",
   dot: "bg-zinc-500",
-};
+});
 
-const BAND_LOW: RiskBand = {
+const BAND_LOW: RiskBand = Object.freeze({
   key: "low",
   label: "Low",
   chipLabel: "LOW RISK",
-  description: "Low risk",
   stroke: "#10b981",
   text: "text-emerald-400",
   chip: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200",
   dot: "bg-emerald-400",
-};
+});
 
-const BAND_ELEVATED: RiskBand = {
+const BAND_ELEVATED: RiskBand = Object.freeze({
   key: "elevated",
   label: "Elevated",
   chipLabel: "ELEVATED",
-  description: "Elevated risk — review before merging",
   stroke: "#f59e0b",
   text: "text-amber-400",
   chip: "border-amber-500/40 bg-amber-500/10 text-amber-200",
   dot: "bg-amber-400",
-};
+});
 
-const BAND_CRITICAL: RiskBand = {
+const BAND_CRITICAL: RiskBand = Object.freeze({
   key: "critical",
   label: "Critical",
   chipLabel: "CRITICAL",
-  description: "Critical risk — changes requested",
   stroke: "#f43f5e",
   text: "text-rose-400",
   chip: "border-rose-500/50 bg-rose-500/15 text-rose-200",
   dot: "bg-rose-400",
-};
+});
 
 /**
  * The one severity mapping. `scored=false` is the honest no-score state for
@@ -115,8 +116,6 @@ export interface Outcome {
   key: OutcomeKey;
   /** Merge advice, phrased as the decision the user has to make. */
   label: string;
-  /** Screen-reader context for the chip. */
-  description: string;
   band: RiskBand;
   /** Sort rank in the default "Attention" order. Lower sorts first. */
   rank: number;
@@ -124,11 +123,30 @@ export interface Outcome {
   meaning: string;
 }
 
+/**
+ * The canonical one-line explanation per outcome. Single source for the
+ * outcome builders below AND the page's triage chips, so the chip tooltip and
+ * the detail panel can never drift apart. Every outcome carries the meaning of
+ * its key — not a per-row string, which is what made the two drift.
+ */
+export function outcomeMeaning(key: OutcomeKey): string {
+  switch (key) {
+    case "changes_requested":
+      return "Must-fix findings or a critical risk score. Address before merge.";
+    case "advisory":
+      return "No must-fix findings, but the change carries real risk.";
+    case "in_progress":
+      return "Still running. A verdict appears here once the analysis lands.";
+    case "failed":
+      return "The analysis never completed. Retry, or inspect the failure reason.";
+    case "clean":
+      return "No blockers and a low risk score. Routine review is enough.";
+  }
+}
+
 export interface TriageInput {
   risk_score: number;
-  status?: string | null;
   findings: { severity: string }[];
-  failure_reason?: string | null;
 }
 
 /** Must-fix = critical + high findings. Should-fix = medium. */
@@ -154,11 +172,16 @@ export function confidenceFromRisk(riskScore: number): number {
 
 /**
  * Outcome for a review that actually produced a verdict.
- * Merge semantics unchanged: must-fix findings or a critical score request
- * changes; a clean low-risk audit is safe; everything else is advisory.
+ *
+ * Merge semantics are unchanged from the pre-redesign verdictFor(): must-fix
+ * findings or a critical score request changes; a LOW-risk review is safe to
+ * merge only when it is also free of should-fix (medium) findings; everything
+ * else is advisory. Dropping the `shouldFix === 0` half of that condition is
+ * how a review carrying real medium findings came to be labelled "Great to
+ * Merge", so it is asserted directly in review-triage.test.ts.
  */
 export function scoredOutcome(input: TriageInput): Outcome {
-  const { mustFix } = blockerCounts(input.findings);
+  const { mustFix, shouldFix } = blockerCounts(input.findings);
   const risk = Math.max(0, Math.min(100, input.risk_score));
   const band = riskBand(risk, true);
 
@@ -166,32 +189,26 @@ export function scoredOutcome(input: TriageInput): Outcome {
     return {
       key: "changes_requested",
       label: "Changes Requested",
-      description:
-        mustFix > 0
-          ? `Changes requested — ${mustFix} must-fix ${mustFix === 1 ? "finding" : "findings"}`
-          : "Changes requested — critical risk score",
       band,
       rank: 0,
-      meaning: "Must-fix findings or a critical risk score. Address before merge.",
+      meaning: outcomeMeaning("changes_requested"),
     };
   }
-  if (risk < RISK_MODERATE) {
+  if (risk < RISK_MODERATE && shouldFix === 0) {
     return {
       key: "clean",
       label: "Great to Merge",
-      description: "Great to merge — no blockers and a low risk score",
       band,
       rank: 3,
-      meaning: "No blockers and a low risk score. Routine review is enough.",
+      meaning: outcomeMeaning("clean"),
     };
   }
   return {
     key: "advisory",
     label: "Review Advised",
-    description: "Review advised — worth a focused pass before merge",
     band,
     rank: 1,
-    meaning: "No must-fix findings, but the change carries real risk.",
+    meaning: outcomeMeaning("advisory"),
   };
 }
 
@@ -201,38 +218,37 @@ export function pendingOutcome(status?: string | null): Outcome {
   return {
     key: "in_progress",
     label: s === "pending" ? "Queued" : "Analyzing",
-    description: "Analysis has not completed yet — no verdict available",
     band: BAND_NONE,
     rank: 2,
-    meaning: "Still running. A verdict appears here once the analysis lands.",
+    meaning: outcomeMeaning("in_progress"),
   };
 }
 
-export const FAILED_OUTCOME: Outcome = {
+export const FAILED_OUTCOME: Outcome = Object.freeze({
   key: "failed",
   label: "Analysis failed",
-  description: "Analysis failed — no verdict was produced",
   band: BAND_NONE,
   rank: 4,
-  meaning: "The analysis never completed. Retry, or inspect the failure reason.",
-};
+  meaning: outcomeMeaning("failed"),
+});
 
 /** Order the triage chips render in — highest attention first. */
-export const OUTCOME_ORDER: OutcomeKey[] = [
+export const OUTCOME_ORDER: readonly OutcomeKey[] = Object.freeze([
   "changes_requested",
   "advisory",
   "in_progress",
   "failed",
   "clean",
-];
+] as OutcomeKey[]);
 
 /**
  * Collapse repeated failure text into a cause signature so a page full of
  * "All 9 free-tier models exhausted (18 total attempts)" states the cause
  * once instead of nine times. Parenthesised detail (attempt counts, HTTP
- * bodies) is dropped from the signature but kept verbatim on the row.
+ * bodies) is dropped from the signature; the raw text stays on the row, where
+ * it is redacted and collapsed, and never leaves the row through a cluster.
  */
-export function failureSignature(reason: string | null | undefined): string {
+function failureSignature(reason: string | null | undefined): string {
   const text = (reason ?? "").trim();
   if (!text) return "No failure reason recorded";
   const head = text.split("(")[0].trim();
@@ -243,11 +259,15 @@ export function failureSignature(reason: string | null | undefined): string {
 export interface FailureCluster {
   signature: string;
   count: number;
-  /** The raw reason text of the first row in the cluster, shown verbatim. */
-  sample: string;
 }
 
-/** Group failed rows by root cause, most frequent first. */
+/**
+ * Group failed rows by root cause, most frequent first.
+ *
+ * The raw `failure_reason` is deliberately not part of the result. It is
+ * unredacted backend text of unbounded length, and a cluster renders as a bare
+ * badge — shipping it here served no consumer.
+ */
 export function clusterFailures<T extends { failure_reason?: string | null }>(
   failed: T[],
 ): FailureCluster[] {
@@ -258,11 +278,7 @@ export function clusterFailures<T extends { failure_reason?: string | null }>(
     if (existing) {
       existing.count += 1;
     } else {
-      bySignature.set(signature, {
-        signature,
-        count: 1,
-        sample: row.failure_reason ?? signature,
-      });
+      bySignature.set(signature, { signature, count: 1 });
     }
   }
   return [...bySignature.values()].sort(
@@ -272,26 +288,46 @@ export function clusterFailures<T extends { failure_reason?: string | null }>(
 
 export type SortKey = "attention" | "newest";
 
-export const SORT_OPTIONS: { value: SortKey; label: string }[] = [
-  { value: "attention", label: "Attention" },
-  { value: "newest", label: "Newest" },
-];
+export const SORT_OPTIONS: readonly { readonly value: SortKey; readonly label: string }[] =
+  Object.freeze([
+    { value: "attention", label: "Attention" },
+    { value: "newest", label: "Newest" },
+  ] as const);
+
+/**
+ * Parse a backend timestamp. An unparseable value sorts to -Infinity rather
+ * than NaN: NaN would survive the arithmetic below and make the comparator
+ * return NaN, which Array.sort coerces to 0 — i.e. a malformed timestamp would
+ * silently make the whole "Newest" control a no-op instead of visibly sinking
+ * the rows it cannot date.
+ */
+function timestampOf(value: string | null | undefined): number {
+  const parsed = Date.parse(value ?? "");
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
+/** Stable final tiebreak so the comparator is a total order on distinct ids. */
+function byId(a: { id: string }, b: { id: string }): number {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
 
 /**
  * Default sort is by attention: things that block a merge float to the top,
  * finished-and-clean rows sink, and failures sink to the very bottom so a
  * page full of identical infrastructure errors cannot bury a real finding.
  */
-export function sortByAttention<T extends TriageInput & { created_at: string }>(
+export function sortByAttention<T extends TriageInput & { created_at: string; id: string }>(
   rows: T[],
   outcomeOf: (row: T) => Outcome,
   sort: SortKey,
 ): T[] {
   const copy = [...rows];
   if (sort === "newest") {
-    return copy.sort(
-      (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)
-    );
+    return copy.sort((a, b) => {
+      const ta = timestampOf(a.created_at);
+      const tb = timestampOf(b.created_at);
+      return ta === tb ? byId(a, b) : tb - ta;
+    });
   }
   return copy.sort((a, b) => {
     const ra = outcomeOf(a).rank;
@@ -302,6 +338,8 @@ export function sortByAttention<T extends TriageInput & { created_at: string }>(
       const risk = b.risk_score - a.risk_score;
       if (risk !== 0) return risk;
     }
-    return Date.parse(b.created_at) - Date.parse(a.created_at);
+    const ta = timestampOf(a.created_at);
+    const tb = timestampOf(b.created_at);
+    return ta === tb ? byId(a, b) : tb - ta;
   });
 }

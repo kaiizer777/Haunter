@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ReviewsPage, { __resetAssociatedPrCacheForTests } from "./page";
 import { api, CodeReviewOut, RepoOut } from "@/lib/api";
@@ -536,13 +536,31 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       // Honest error markers: the failure chip + the neutral "Failed" status
       // fact, the full reason text in a scroll region, and the neutral gauge.
       expect(screen.getByText("Analysis failed")).toBeInTheDocument();
-      expect(screen.getAllByText("Failed").length).toBeGreaterThanOrEqual(1);
-      expect(screen.getByText(/all 9 free-tier models exhausted/i)).toBeInTheDocument();
-      // The reason is no longer clipped to a 140-char excerpt: the full text
-      // lives in a scrollable region instead of a CSS truncate.
-      expect(
-        screen.getByRole("alert").querySelector("p")?.className
-      ).toMatch(/overflow-y-auto/);
+      // Scoped to the row, and exact: exactly one "Failed" status fact on the
+      // card. A global count would also sweep up the triage chip of the same
+      // name, which is a different element with a different job. The card is
+      // located by its test id, not by a Tailwind class, so a restyle cannot
+      // silently re-scope this assertion onto an ancestor.
+      const failedCard = screen.getByTestId("failed-review-card");
+      expect(within(failedCard).getAllByText("Failed")).toHaveLength(1);
+
+      // The reason is no longer clipped to a 140-char excerpt. Assert the
+      // rendered TEXT: an `overflow-y-auto` class check passes just as
+      // happily on a box holding a single character.
+      const reasonText = screen.getByText("All 9 free-tier models exhausted (18 total attempts)");
+      expect(reasonText).toBeInTheDocument();
+      // Layout is a separate guarantee from content, so it gets its own
+      // assertion: the box must stay a bounded scroll region. Drop
+      // `max-h-32 overflow-y-auto` and a long "Last errors: ..." tail is
+      // clipped with no way to reach the remainder — a content-only test
+      // above would still pass.
+      expect(reasonText.className).toContain("max-h-32");
+      expect(reasonText.className).toContain("overflow-y-auto");
+      // The unscored risk slot must stay honest. Without this the row could
+      // render "0/100" (risk_score really is 0 here) and every other assertion
+      // would still pass.
+      expect(screen.getByText("Not scored")).toBeInTheDocument();
+      expect(screen.queryByText(/^0\/100$/)).not.toBeInTheDocument();
       expect(screen.getByText("NO SCORE")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
 
@@ -1133,10 +1151,18 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
       await user.click(expand);
-      // Expanding reveals the full failure text in a scroll region plus the
-      // supporting context. No verdict telemetry exists for a failed row.
-      expect(screen.getByRole("alert")).toHaveTextContent(/push-row-boom/i);
+      // Expanding reveals the full failure text plus the supporting context.
+      // Asserting only the absence of "PR Confidence" would still pass if the
+      // panel expanded to nothing, so name the actual content.
+      expect(screen.getByText(/push-row-boom/i)).toBeInTheDocument();
       expect(screen.getByText("Failure details")).toBeInTheDocument();
+      expect(
+        screen.getByText(/No risk score, confidence or blocker telemetry exists/i)
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /copy reason/i })).toBeInTheDocument();
+      // The reason box is static content mounted with the collapsed row, so it
+      // is deliberately not a live region in either state.
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
       const collapse = screen.getByRole("button", { name: /collapse error details/i });
       expect(collapse).toHaveAttribute("aria-expanded", "true");
 
@@ -1385,6 +1411,281 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       // Mount effects flush inside the findBy act cycle, so any stray
       // refetch would already be recorded — assert the count directly.
       expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  /**
+   * Coverage for the triage-first surfaces added by the redesign. The strip,
+   * the cluster banner and the sort control are ~200 lines of new UI; before
+   * this block none of them had a single assertion.
+   */
+  describe("triage strip, failure clusters and sort", () => {
+    const row = (over: Partial<CodeReviewOut> & { id: string }): CodeReviewOut => ({
+      repo_id: "repo_1",
+      repo_owner: "acme",
+      repo_name: "sentinel",
+      commit_sha: "abcdef0123456789",
+      pr_number: 101,
+      pr_title: "feat: sentinel",
+      pr_author: "octocat",
+      pr_author_avatar: null,
+      head_branch: "feat/x",
+      base_branch: "main",
+      pr_url: "https://github.com/acme/sentinel/pull/101",
+      risk_score: 0,
+      summary: "summary",
+      status: "completed",
+      input_tokens: 0,
+      output_tokens: 0,
+      created_at: new Date().toISOString(),
+      diff_stats: null,
+      findings: [],
+      ...over,
+    } as CodeReviewOut);
+
+    const blocker = row({ id: "r_block", pr_title: "alpha blocker", risk_score: 90 });
+    const advisory = row({
+      id: "r_adv",
+      pr_title: "beta advisory",
+      risk_score: 45,
+    });
+    const clean = row({ id: "r_clean", pr_title: "gamma clean", risk_score: 10 });
+    const pending = row({ id: "r_pend", pr_title: "delta pending", status: "pending" });
+    const failed = (id: string, title: string, reason: string) =>
+      row({
+        id,
+        pr_title: title,
+        status: "error",
+        failure_reason: reason,
+      });
+
+    const counterOf = (strip: HTMLElement, name: RegExp) =>
+      within(strip).getByRole("button", { name }).lastElementChild;
+
+    it("counts every outcome exactly once and shows the page total", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [blocker, advisory, clean, pending, failed("r_fail", "epsilon failed", "boom")],
+        total: 5,
+      });
+      render(<ReviewsPage />);
+
+      const strip = await screen.findByRole("region", { name: /review triage summary/i });
+      expect(counterOf(strip, /need changes/i)).toHaveTextContent("1");
+      expect(counterOf(strip, /review advised/i)).toHaveTextContent("1");
+      expect(counterOf(strip, /in progress/i)).toHaveTextContent("1");
+      expect(counterOf(strip, /failed/i)).toHaveTextContent("1");
+      expect(counterOf(strip, /great to merge/i)).toHaveTextContent("1");
+      expect(counterOf(strip, /^all/i)).toHaveTextContent("5");
+
+      // The strip carries the shared outcome vocabulary, not a private copy.
+      expect(
+        within(strip).getByRole("button", { name: /need changes/i })
+      ).toHaveAttribute(
+        "title",
+        "Must-fix findings or a critical risk score. Address before merge."
+      );
+      // Every other number on the page is scoped; so is this one. "In view",
+      // not "This page": these counters are computed over the search / tab /
+      // hide-failed filtered list, which is narrower than the page itself.
+      expect(within(strip).getByText("In view")).toBeInTheDocument();
+    });
+
+    it("counts the rows the outcome chips can actually reveal", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [blocker, advisory, clean],
+        total: 3,
+      });
+      render(<ReviewsPage />);
+      await screen.findByRole("region", { name: /review triage summary/i });
+
+      // A chip must never advertise rows that the current filters exclude:
+      // the "Patches" ribbon tab hides every row here (none carry a patch).
+      await user.click(screen.getByRole("button", { name: /patches/i }));
+      expect(await screen.findByText(/nothing matches these filters/i)).toBeInTheDocument();
+      const emptied = screen.getByRole("region", { name: /review triage summary/i });
+      expect(counterOf(emptied, /^all/i)).toHaveTextContent("0");
+      for (const label of [/need changes/i, /review advised/i, /great to merge/i]) {
+        expect(counterOf(emptied, label)).toHaveTextContent("0");
+      }
+    });
+
+    it("suppresses the failure banner for a single failure", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [failed("r_f1", "first failure", "Provider quota exhausted (9 attempts)")],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+      await screen.findByText("first failure");
+      // One cause stated once is noise — the row already says it in full.
+      expect(screen.queryByText(/failed analysis/i)).not.toBeInTheDocument();
+      expect(screen.getByText("Provider quota exhausted (9 attempts)")).toBeInTheDocument();
+    });
+
+    it("shows the failure banner once the same cause hits two rows", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [
+          failed("r_f1", "first failure", "Provider quota exhausted (9 attempts)"),
+          failed("r_f2", "second failure", "Provider quota exhausted (12 attempts)"),
+        ],
+        total: 2,
+      });
+      render(<ReviewsPage />);
+      expect(await screen.findByText(/2 failed analyses/)).toBeInTheDocument();
+      // The signature appears in the banner and on both rows.
+      expect(screen.getAllByText(/Provider quota exhausted/)).toHaveLength(3);
+    });
+
+    it("reports the causes behind failures across several distinct clusters", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [
+          failed("r_f1", "a", "Provider quota exhausted (9 attempts)"),
+          failed("r_f2", "b", "Provider quota exhausted (12 attempts)"),
+          failed("r_f3", "c", "GitHub 404 not found"),
+        ],
+        total: 3,
+      });
+      render(<ReviewsPage />);
+      expect(await screen.findByText(/3 failed analyses across 2 causes/)).toBeInTheDocument();
+      // banner + the two rows that share the cause
+      expect(screen.getAllByText(/Provider quota exhausted/)).toHaveLength(3);
+      // banner + the one row with its own cause
+      expect(screen.getAllByText(/GitHub 404 not found/)).toHaveLength(2);
+    });
+
+    it("reorders the rendered rows when the sort control changes", async () => {
+      const user = userEvent.setup();
+      const olderBlocker = row({
+        id: "r_b",
+        pr_title: "older blocker",
+        risk_score: 90,
+        created_at: new Date(Date.now() - 7200000).toISOString(),
+      });
+      const newerAdvisory = row({
+        id: "r_a",
+        pr_title: "newer advisory",
+        risk_score: 45,
+        created_at: new Date().toISOString(),
+      });
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [olderBlocker, newerAdvisory],
+        total: 2,
+      });
+      render(<ReviewsPage />);
+
+      const blockerTitle = await screen.findByText("older blocker");
+      const advisoryTitle = screen.getByText("newer advisory");
+      const precedes = (a: Element, b: Element) =>
+        Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+      // Default "Attention": the merge blocker outranks the advisory row.
+      expect(precedes(blockerTitle, advisoryTitle)).toBe(true);
+
+      await user.click(screen.getByRole("button", { name: /^newest$/i }));
+      // "Newest" wins on recency instead: the advisory row is the newer one.
+      expect(precedes(advisoryTitle, blockerTitle)).toBe(true);
+
+      await user.click(screen.getByRole("button", { name: /^attention$/i }));
+      expect(precedes(blockerTitle, advisoryTitle)).toBe(true);
+    });
+
+    it("returns to the first page when an outcome chip or the sort control is used", async () => {
+      const user = userEvent.setup();
+      // total must exceed PAGE_SIZE or the pagination controls never render.
+      const pageOne = blocker;
+      const pageTwo = clean;
+      vi.mocked(api.getCodeReviews).mockImplementation(async (params) =>
+        (params?.offset ?? 0) === 0
+          ? { reviews: [pageOne], total: 40 }
+          : { reviews: [pageTwo], total: 40 }
+      );
+      render(<ReviewsPage />);
+
+      await screen.findByText("alpha blocker");
+      await user.click(screen.getByRole("button", { name: /^next$/i }));
+      await waitFor(() =>
+        expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(15)
+      );
+      expect(await screen.findByText("gamma clean")).toBeInTheDocument();
+      expect(screen.queryByText("alpha blocker")).not.toBeInTheDocument();
+
+      // Filtering rows 16-30 client-side would have produced an empty list
+      // here; resetting to page 0 is what makes the chip find its rows.
+      await user.click(screen.getByRole("button", { name: /need changes/i }));
+      await waitFor(() =>
+        expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(0)
+      );
+      expect(await screen.findByText("alpha blocker")).toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: /^next$/i }));
+      await waitFor(() =>
+        expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(15)
+      );
+      await user.click(screen.getByRole("button", { name: /^newest$/i }));
+      expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(0);
+    });
+
+    /**
+     * The page index is only ever parked past the end of the result set by the
+     * server shrinking UNDERNEATH it, because every filter control on this page
+     * resets to page 0. Refresh does not reset: it re-polls the current page,
+     * which is exactly how a user ends up on page 3 when only 20 rows remain.
+     * Without the clamp that leaves the footer claiming "Showing 46 to 60 of 20
+     * reviews" and Next dead-ending on an offset the server has no rows for.
+     */
+    it("clamps the page when a refresh shrinks the result set beneath it", async () => {
+      const user = userEvent.setup();
+      // `total` is mutable so the same mock can serve four full pages and then
+      // report a shrunken set on the refresh.
+      let total = 60;
+      vi.mocked(api.getCodeReviews).mockImplementation(async (params) => {
+        const offset = params?.offset ?? 0;
+        const reviewsForPage =
+          offset === 0
+            ? blocker
+            : row({ id: `r_off${offset}`, pr_title: `row at offset ${offset}`, risk_score: 10 });
+        return { reviews: [reviewsForPage], total };
+      });
+      render(<ReviewsPage />);
+
+      await screen.findByText("alpha blocker");
+      for (let i = 1; i <= 3; i += 1) {
+        await user.click(screen.getByRole("button", { name: /^next$/i }));
+        await waitFor(() =>
+          expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(15 * i)
+        );
+      }
+      // Parked on the last page: 46-60 of 60.
+      expect(screen.getByText("Showing 46 to 60 of 60 reviews")).toBeInTheDocument();
+
+      // The dataset shrank upstream and Refresh re-polls without resetting the
+      // page, so the response for offset 45 now reports only 20 rows total.
+      total = 20;
+      await user.click(screen.getByRole("button", { name: /^refresh$/i }));
+
+      // Clamped to the surviving last page: 16-20 of 20, never 46-60 of 20.
+      await waitFor(() =>
+        expect(screen.getByText("Showing 16 to 20 of 20 reviews")).toBeInTheDocument()
+      );
+      expect(screen.queryByText("Showing 46 to 60 of 20 reviews")).not.toBeInTheDocument();
+      // And it refetched the page it clamped to instead of leaving the dead
+      // offset on screen.
+      expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(15);
+    });
+
+    it("shows the never-reviewed empty state when the API returns no reviews", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({ reviews: [], total: 0 });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("No Code Reviews Found")).toBeInTheDocument();
+      expect(
+        screen.getByText(/push commits or open a pull request/i)
+      ).toBeInTheDocument();
+      // No rows means no triage strip and no cluster banner to keep honest.
+      expect(screen.queryByRole("region", { name: /review triage summary/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /clear filters/i })).not.toBeInTheDocument();
+      // Not the sibling "filtered everything away" branch.
+      expect(screen.queryByText(/nothing matches these filters/i)).not.toBeInTheDocument();
     });
   });
 });
