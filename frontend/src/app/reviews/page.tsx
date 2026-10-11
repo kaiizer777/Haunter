@@ -631,6 +631,7 @@ function PrPill({ prNumber, prUrl, repoName }: { prNumber: number; prUrl?: strin
       href={prUrl || `https://github.com/${repoName}/pull/${prNumber}`}
       target="_blank"
       rel="noreferrer"
+      title="View pull request on GitHub"
       className={cn(IDENTITY_PILL_BASE, "bg-amber-500/15 text-amber-300 border-amber-400/40 hover:text-amber-200 hover:bg-amber-500/25")}
     >
       <GitPullRequest className="h-3.5 w-3.5" />
@@ -662,51 +663,65 @@ function PushPill({ commitSha, commitUrl, repoName }: { commitSha: string; commi
  * Rows that belong to a PR (squash-merged, fast-forwarded) resolve to the PR
  * so the card can show `PR #n` instead of `Push @ sha`.
  *
- * Module-level cache keyed by commit sha: back/forward + re-renders never
- * refetch, and simultaneous mounts for one sha share a single in-flight
- * request. Resolves null (no PR / token-missing / error) silently — the row
- * keeps rendering `Push @ sha` with no skeleton and no layout shift beyond
- * the pill text swap. Only the rendered page window fetches (~PAGE_SIZE
- * calls max); rows that already carry `pr_number` never fetch.
+ * Module-level cache keyed by review id: back/forward + re-renders never
+ * refetch, and simultaneous mounts for one review share a single in-flight
+ * request. Keyed by id — NOT by commit sha — because the lookup itself is
+ * review-scoped (`GET /reviews/{id}/associated-pr`): the same sha can appear
+ * in two repos/forks and must never share one entry. Resolves null (no PR /
+ * token-missing / error) silently — the row keeps rendering `Push @ sha`
+ * with no skeleton and no layout shift beyond the pill text swap. Only the
+ * rendered page window fetches (~PAGE_SIZE calls max); rows that already
+ * carry `pr_number` never fetch. List Refresh / detail Retry clear the cache
+ * (see clearAssociatedPrCache) so failed lookups genuinely retry.
  */
 const associatedPrCache = new Map<string, AssociatedPROut | null>();
 const associatedPrInflight = new Map<string, Promise<AssociatedPROut | null>>();
 
-/** Test-only reset for the module-level associated-PR cache (vitest). */
-export function __resetAssociatedPrCacheForTests(): void {
+/**
+ * Drop every cached + in-flight associated-PR entry. Called by the list
+ * Refresh and detail Retry paths so failed/null lookups refetch instead of
+ * serving a stale miss forever; success entries are simply re-fetched once
+ * on the next lookup and re-cached.
+ */
+export function clearAssociatedPrCache(): void {
   associatedPrCache.clear();
   associatedPrInflight.clear();
 }
 
+/** Test-only reset for the module-level associated-PR cache (vitest). */
+export function __resetAssociatedPrCacheForTests(): void {
+  clearAssociatedPrCache();
+}
+
 function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
   const [resolved, setResolved] = useState<AssociatedPROut | null>(
-    () => associatedPrCache.get(review.commit_sha) ?? null
+    () => associatedPrCache.get(review.id) ?? null
   );
   useEffect(() => {
     if (review.pr_number != null) return;
     const sha = review.commit_sha;
     if (!sha) return;
-    const cached = associatedPrCache.get(sha);
+    const key = review.id;
+    const cached = associatedPrCache.get(key);
     if (cached !== undefined) {
       setResolved(cached);
       return;
     }
-    if (typeof api.getAssociatedPr !== "function") return;
     let cancelled = false;
-    let pending = associatedPrInflight.get(sha);
+    let pending = associatedPrInflight.get(key);
     if (!pending) {
       const request = api.getAssociatedPr(review.id).then(
         (res) => {
           const pr = res?.associated_pr ?? null;
-          associatedPrCache.set(sha, pr);
+          associatedPrCache.set(key, pr);
           return pr;
         },
         () => null
       );
       pending = request.finally(() => {
-        associatedPrInflight.delete(sha);
+        associatedPrInflight.delete(key);
       });
-      associatedPrInflight.set(sha, pending);
+      associatedPrInflight.set(key, pending);
     }
     pending.then((pr) => {
       if (!cancelled) setResolved(pr);
@@ -714,7 +729,11 @@ function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
     return () => {
       cancelled = true;
     };
-  }, [review.id, review.commit_sha, review.pr_number]);
+    // Identity dep on purpose: a list Refresh / detail Retry delivers fresh
+    // row objects, which re-runs the lookup (cache cleared by the handler →
+    // genuine retry; cache intact → hit, no refetch). Plain re-renders and
+    // back-nav reuse the same refs, so success caching still holds.
+  }, [review]);
   if (review.pr_number != null) return null;
   return resolved;
 }
@@ -1951,6 +1970,9 @@ export default function ReviewsPage() {
   }, [selectedId, reviews, listLoaded, detailRetry]);
 
   const handleRefresh = () => {
+    // Clear first so failed/null associated-PR lookups genuinely retry when
+    // the fresh rows arrive (the hook re-runs on the new row objects).
+    clearAssociatedPrCache();
     setRefreshing(true);
     fetchReviews();
   };
@@ -1960,6 +1982,7 @@ export default function ReviewsPage() {
   // the detail endpoint too. Bumping detailRetry alone is a no-op for cached
   // rows because the resolver above returns early on cache hit.
   const handleDetailRetry = useCallback(() => {
+    clearAssociatedPrCache();
     setRefreshing(true);
     fetchReviews();
     setDetailRetry((n) => n + 1);

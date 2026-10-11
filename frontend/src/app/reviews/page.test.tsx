@@ -1226,7 +1226,25 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.queryByText(/PR #\d+/)).not.toBeInTheDocument();
     });
 
-    it("caches by commit sha: re-render fetches once, never refetches", async () => {
+    it("keys by review id: different reviews sharing one sha fetch independently (no cross-contamination)", async () => {
+      const sharedSha = "7777888899990000";
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [pushRowForAssoc("rev_assoc_a", sharedSha), pushRowForAssoc("rev_assoc_b", sharedSha)],
+        total: 2,
+      });
+      vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
+      render(<ReviewsPage />);
+
+      expect(await screen.findAllByText(/Push @ 7777888/i)).toHaveLength(2);
+      // One fetch per review — a sha-keyed cache would dedupe these into 1.
+      await waitFor(() =>
+        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(2)
+      );
+      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_a");
+      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_b");
+    });
+
+    it("caches by review id: re-render fetches once, never refetches", async () => {
       vi.mocked(api.getCodeReviews).mockResolvedValue({
         reviews: [pushRowForAssoc("rev_assoc_cache", "6666777788889999")],
         total: 1,
@@ -1242,9 +1260,37 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
       render(<ReviewsPage />);
       expect(await screen.findByText(/Push @ 6666777/i)).toBeInTheDocument();
-      // Let any stray refetch land, then assert the cache held.
-      await new Promise((r) => setTimeout(r, 50));
+      // Mount effects flush inside the findBy act cycle, so any stray
+      // refetch would already be recorded — assert the count directly.
       expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1);
+    });
+
+    it("list Refresh retries a failed (null) lookup instead of serving the stale miss", async () => {
+      // Fresh row objects per list fetch, like real API JSON payloads.
+      vi.mocked(api.getCodeReviews).mockImplementation(async () => ({
+        reviews: [{ ...pushRowForAssoc("rev_assoc_retry", "abcd1234abcd1234") }],
+        total: 1,
+      }));
+      vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText(/Push @ abcd123/i)).toBeInTheDocument();
+      await waitFor(() =>
+        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1)
+      );
+
+      // Backend can resolve the PR now — Refresh must retry, not serve cache.
+      vi.mocked(api.getAssociatedPr).mockResolvedValue({
+        associated_pr: {
+          number: 77,
+          url: "https://github.com/acme/sentinel/pull/77",
+          title: null,
+        },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+      expect(await screen.findByText("PR #77")).toBeInTheDocument();
+      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(2);
     });
   });
 });
