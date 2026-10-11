@@ -35,6 +35,7 @@ import {
   ArrowUpRight,
   ArrowLeft,
   ExternalLink,
+  EyeOff,
   FileDiff,
 } from "lucide-react";
 
@@ -126,12 +127,12 @@ function RiskGauge({ score, size = 68, neutral = false }: { score: number; size?
           />
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className={cn("font-mono text-sm font-bold tracking-tight", textClass)}>
+          <span className={cn("font-mono text-base font-extrabold tabular-nums tracking-tight", textClass)}>
             {neutral ? "—" : clampedScore}
           </span>
         </div>
       </div>
-      <span className={cn("mt-1.5 rounded-[4px] border px-1.5 py-0.5 text-[9px] font-mono font-bold tracking-wider uppercase", badgeColor)}>
+      <span className={cn("mt-1.5 rounded-[4px] border px-2 py-0.5 text-[10px] font-mono font-bold tracking-wider uppercase", badgeColor)}>
         {label}
       </span>
     </div>
@@ -264,16 +265,18 @@ function getBlastStats(review: CodeReviewOut): {
   return { filesCount, additions, deletions, scope, scopeColor };
 }
 
-/** Merge verdict for the detail report header grid. */
+/** Merge verdict for the detail report header grid. Fills are deliberately
+ * saturated (500/20 + 200-text) so the verdict wins the eye as the single
+ * Tier-3 status moment per card — semantics unchanged. */
 function verdictFor(review: CodeReviewOut): { label: string; color: string } {
   const { mustFix, shouldFix } = blockerCounts(review);
   if (mustFix > 0 || review.risk_score >= RISK_CRITICAL) {
-    return { label: "Changes Requested", color: "bg-rose-950/60 text-rose-300 border-rose-500/40" };
+    return { label: "Changes Requested", color: "bg-rose-500/20 text-rose-200 border-rose-400/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.3)]" };
   }
   if (review.risk_score < RISK_MODERATE && shouldFix === 0) {
-    return { label: "Great to Merge", color: "bg-emerald-950/60 text-emerald-300 border-emerald-500/40" };
+    return { label: "Great to Merge", color: "bg-emerald-500/20 text-emerald-200 border-emerald-400/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.3)]" };
   }
-  return { label: "Review Advised", color: "bg-amber-950/60 text-amber-300 border-amber-500/40" };
+  return { label: "Review Advised", color: "bg-amber-500/20 text-amber-200 border-amber-400/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.3)]" };
 }
 
 /** Human-readable blast-radius scope label + one-line explanation. */
@@ -546,6 +549,47 @@ function FindingItem({
 }
 
 /**
+ * Identity pills — PR# vs Push parity. Push rows arrive with `pr_number` NULL
+ * (direct pushes, never PR-associated), so the Push pill carries the SAME
+ * size/weight/position as the amber PR# pill: `Push @ <short-sha>` linking to
+ * the commit. Never render a fake PR#.
+ */
+const IDENTITY_PILL_BASE =
+  "inline-flex items-center gap-1 rounded px-2 py-0.5 text-sm font-mono font-bold border transition-colors";
+
+function PrPill({ prNumber, prUrl, repoName }: { prNumber: number; prUrl?: string; repoName: string }) {
+  return (
+    <a
+      href={prUrl || `https://github.com/${repoName}/pull/${prNumber}`}
+      target="_blank"
+      rel="noreferrer"
+      className={cn(IDENTITY_PILL_BASE, "bg-amber-500/15 text-amber-300 border-amber-400/40 hover:text-amber-200 hover:bg-amber-500/25")}
+    >
+      <GitPullRequest className="h-3.5 w-3.5" />
+      <span>PR #{prNumber}</span>
+      <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
+    </a>
+  );
+}
+
+function PushPill({ commitSha, commitUrl, repoName }: { commitSha: string; commitUrl?: string; repoName: string }) {
+  const short = commitSha ? commitSha.substring(0, 7) : "unknown";
+  return (
+    <a
+      href={commitUrl || `https://github.com/${repoName}/commit/${commitSha}`}
+      target="_blank"
+      rel="noreferrer"
+      title="View push commit on GitHub"
+      className={cn(IDENTITY_PILL_BASE, "bg-zinc-800 text-zinc-100 border-zinc-600/60 hover:bg-zinc-700 hover:text-white")}
+    >
+      <GitCommit className="h-3.5 w-3.5 text-zinc-300" />
+      <span>Push @ {short}</span>
+      <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
+    </a>
+  );
+}
+
+/**
  * Honest error row for analyses that never completed (status "error" or a
  * `failure_reason` such as "All 9 free-tier models exhausted"). Renders NO
  * verdict telemetry — ERROR pill, em-dash confidence, neutral gauge, the raw
@@ -567,6 +611,73 @@ function FailedReviewCard({
   const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
   const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
   const errorText = review.failure_reason ?? review.summary;
+  const [expanded, setExpanded] = useState(false);
+  const errorExcerpt = errorText.length > 140 ? `${errorText.slice(0, 140).trimEnd()}…` : errorText;
+  const identityLabel = `${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ` Push @ ${commitShort}`}`;
+
+  // Collapsed default: dimmed single-line row so failed analyses don't
+  // dominate the stream. role=alert lives on the expanded panel only, and
+  // Retry stays outside it — same pattern as the detail error banner.
+  if (!expanded) {
+    return (
+      <div className="rounded-xl border border-rose-500/20 bg-[#0d0d10] px-4 py-3 opacity-80 transition-opacity hover:opacity-100 focus-within:opacity-100">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          {repoUrl ? (
+            <a
+              href={repoUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-300 hover:text-white transition-colors"
+            >
+              <FolderGit2 className="h-3.5 w-3.5 text-zinc-500" />
+              <span>{repoName}</span>
+            </a>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-300">
+              <FolderGit2 className="h-3.5 w-3.5 text-zinc-500" />
+              <span>{repoName}</span>
+            </span>
+          )}
+          {review.pr_number ? (
+            <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
+          ) : (
+            <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
+          )}
+          <span className="inline-flex items-center rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300/80">
+            Error
+          </span>
+          <span className="min-w-0 flex-1 basis-40 truncate text-xs font-mono text-zinc-500" title={errorText}>
+            {errorExcerpt}
+          </span>
+          <span className="text-xs text-zinc-500 font-mono">
+            {formatRelativeTime(review.created_at)}
+          </span>
+          <span className="ml-auto inline-flex items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRetry}
+              aria-label={`Retry loading reviews (failed: ${identityLabel})`}
+              className="h-7 px-2.5 text-xs gap-1.5 border-rose-500/30 bg-transparent hover:bg-rose-900/30 text-rose-200/90"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              <span>Retry</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setExpanded(true)}
+              aria-expanded={false}
+              aria-label={`Expand error details for ${identityLabel}`}
+              className="h-7 w-7 p-0 border-zinc-800 bg-transparent hover:bg-zinc-800 text-zinc-400"
+            >
+              <ChevronDown className="h-3.5 w-3.5" />
+            </Button>
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-xl border border-rose-500/30 bg-gradient-to-b from-[#141114] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]">
@@ -577,7 +688,7 @@ function FailedReviewCard({
         </div>
 
         {/* Center: identity + raw error */}
-        <div className="flex-1 min-w-0 space-y-3">
+        <div className="flex-1 min-w-0 space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             {repoUrl ? (
               <a
@@ -596,21 +707,9 @@ function FailedReviewCard({
               </span>
             )}
             {review.pr_number ? (
-              <a
-                href={prUrl || `https://github.com/${repoName}/pull/${review.pr_number}`}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-sm font-mono font-bold text-amber-400 hover:text-amber-300 hover:bg-zinc-700/80 transition-colors border border-zinc-700/50"
-              >
-                <GitPullRequest className="h-3.5 w-3.5" />
-                <span>PR #{review.pr_number}</span>
-                <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
-              </a>
+              <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
             ) : (
-              <span className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono text-zinc-300 border border-zinc-700/50">
-                <GitCommit className="h-3 w-3 text-zinc-400" />
-                Push
-              </span>
+              <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
             )}
             <span className="inline-flex items-center rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
               Error
@@ -621,7 +720,7 @@ function FailedReviewCard({
           </div>
 
           {review.pr_title && (
-            <h3 className="text-sm font-semibold text-zinc-100 leading-snug">
+            <h3 className="text-base font-bold tracking-tight text-zinc-50 leading-snug">
               {review.pr_title}
             </h3>
           )}
@@ -697,7 +796,7 @@ function FailedReviewCard({
               variant="outline"
               size="sm"
               onClick={onRetry}
-              aria-label={`Retry loading reviews (failed: ${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ""})`}
+              aria-label={`Retry loading reviews (failed: ${identityLabel})`}
               className="h-7 px-2.5 text-xs gap-1.5 border-rose-500/40 bg-rose-950/30 hover:bg-rose-900/40 text-rose-200"
             >
               <RefreshCw className="h-3.5 w-3.5" />
@@ -712,6 +811,17 @@ function FailedReviewCard({
             >
               <span>Full audit</span>
               <ArrowUpRight className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setExpanded(false)}
+              aria-expanded={true}
+              aria-label={`Collapse error details for ${identityLabel}`}
+              className="h-7 px-2.5 text-xs gap-1.5 border-zinc-700 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-300"
+            >
+              <span>Collapse</span>
+              <ChevronUp className="h-3.5 w-3.5" />
             </Button>
           </div>
         </div>
@@ -787,7 +897,7 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
         </div>
 
         {/* Center: report identity, summary, audit strip */}
-        <div className="flex-1 min-w-0 space-y-3">
+        <div className="flex-1 min-w-0 space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             {/* Repo link — prominent report identity */}
             {repoUrl ? (
@@ -807,29 +917,34 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
               </span>
             )}
 
-            {/* PR number — prominent, always visible when present */}
-            {review.pr_number ? (
-              <div className="inline-flex items-center gap-1.5">
-                <a
-                  href={prUrl || `https://github.com/${repoName}/pull/${review.pr_number}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-sm font-mono font-bold text-amber-400 hover:text-amber-300 hover:bg-zinc-700/80 transition-colors border border-zinc-700/50"
-                >
-                  <GitPullRequest className="h-3.5 w-3.5" />
-                  <span>PR #{review.pr_number}</span>
-                  <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
-                </a>
-                <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-mono font-semibold", verdict.color)}>
-                  {verdict.label}
-                </span>
-              </div>
-            ) : (
-              <span className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono text-zinc-300 border border-zinc-700/50">
-                <GitCommit className="h-3 w-3 text-zinc-400" />
-                Push
+            {/* Identity pill — amber PR# when PR-associated, equal-weight
+                Push @ sha for direct pushes (pr_number NULL), verdict pill
+                alongside in both cases */}
+            <div className="inline-flex items-center gap-1.5">
+              {review.pr_number ? (
+                <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
+              ) : (
+                <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
+              )}
+              <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-mono font-semibold", verdict.color)}>
+                {verdict.label}
               </span>
-            )}
+              {!review.pr_number && (
+                <button
+                  type="button"
+                  onClick={handleCopySha}
+                  className="text-zinc-500 hover:text-zinc-200 transition-colors focus:outline-none"
+                  title="Copy commit SHA"
+                  aria-label="Copy commit SHA"
+                >
+                  {copiedSha ? (
+                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              )}
+            </div>
 
             {/* Author Badge */}
             {review.pr_author && (
@@ -859,7 +974,9 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
               </div>
             )}
 
-            {/* Commit SHA with 1-click copy */}
+            {/* Commit SHA with 1-click copy — PR rows only. Push rows carry
+                the sha in the Push pill with its own copy affordance above. */}
+            {review.pr_number ? (
             <div className="inline-flex items-center rounded bg-zinc-900/80 border border-zinc-800 px-1.5 py-0.5 text-xs font-mono text-zinc-400">
               <a
                 href={commitUrl || `https://github.com/${repoName}/commit/${review.commit_sha}`}
@@ -885,6 +1002,7 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
                 )}
               </button>
             </div>
+            ) : null}
 
             <span className="text-zinc-500">•</span>
             <span className="text-xs text-zinc-400 font-mono">
@@ -900,7 +1018,7 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
 
           {/* Hero PR Title */}
           {review.pr_title && (
-            <h3 className="text-sm font-semibold text-zinc-100 leading-snug">
+            <h3 className="text-base font-bold tracking-tight text-zinc-50 leading-snug">
               {review.pr_title}
             </h3>
           )}
@@ -1079,10 +1197,10 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
   const hiddenFiles = touchedFiles.length - shownFiles.length;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       {/* Header: identity */}
       <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]">
-        <div className="text-[11px] font-mono font-semibold uppercase tracking-[0.14em] text-zinc-500">
+        <div className="text-[11px] font-mono font-semibold uppercase tracking-[0.16em] text-zinc-400">
           Haunter Autonomous Audit Report
         </div>
         <div className="mt-2.5 flex flex-col lg:flex-row lg:items-start justify-between gap-5">
@@ -1099,12 +1217,10 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
                   <span>{repoName}</span>
                 </span>
               )}
-              {review.pr_number && (
-                <a href={prUrl || `https://github.com/${repoName}/pull/${review.pr_number}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono font-medium text-amber-400 hover:text-amber-300 hover:bg-zinc-700/80 transition-colors border border-zinc-700/50">
-                  <GitPullRequest className="h-3 w-3" />
-                  <span>PR #{review.pr_number}</span>
-                  <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
-                </a>
+              {review.pr_number ? (
+                <PrPill prNumber={review.pr_number} prUrl={prUrl} repoName={repoName} />
+              ) : (
+                <PushPill commitSha={review.commit_sha} commitUrl={commitUrl} repoName={repoName} />
               )}
               {failed && (
                 <span className="inline-flex items-center rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
@@ -1126,7 +1242,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
             </div>
 
             {review.pr_title && (
-              <h2 className="text-lg font-semibold text-zinc-50 leading-snug">{review.pr_title}</h2>
+              <h2 className="text-xl font-bold tracking-tight text-zinc-50 leading-snug">{review.pr_title}</h2>
             )}
 
             <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
@@ -1207,7 +1323,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
           </section>
 
           <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5">
-            <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400">Structural &amp; Blast Radius Analysis</h3>
+            <h3 className="text-xs font-mono font-semibold uppercase tracking-[0.16em] text-zinc-300">Structural &amp; Blast Radius Analysis</h3>
             <p className="mt-2 text-xs text-zinc-500 leading-relaxed">Unavailable — the analysis did not complete, so there is no structural telemetry to report.</p>
           </section>
 
@@ -1224,7 +1340,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
         <>
       {/* PR Summary */}
       <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5">
-        <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400">PR Summary</h3>
+        <h3 className="text-xs font-mono font-semibold uppercase tracking-[0.16em] text-zinc-300">PR Summary</h3>
         <p className="mt-2 text-sm text-zinc-200 leading-relaxed">{review.summary}</p>
       </section>
 
@@ -1259,7 +1375,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
 
       {/* Structural & Blast Radius Analysis */}
       <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5 space-y-3">
-        <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400">Structural &amp; Blast Radius Analysis</h3>
+        <h3 className="text-xs font-mono font-semibold uppercase tracking-[0.16em] text-zinc-300">Structural &amp; Blast Radius Analysis</h3>
         <ul className="space-y-2.5 text-xs text-zinc-300 leading-relaxed list-disc pl-5">
           <li>
             <span className="font-semibold text-zinc-100">Impact Surface:</span> {radius.label} — {radius.explanation}.
@@ -1355,6 +1471,7 @@ export default function ReviewsPage() {
   const [selectedRepoId, setSelectedRepoId] = useState<string>("all");
   const [selectedSeverity, setSelectedSeverity] = useState<string>("all");
   const [highRiskOnly, setHighRiskOnly] = useState<boolean>(false);
+  const [hideFailed, setHideFailed] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<"all" | "high_risk" | "avg_risk" | "patches">("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
@@ -1523,6 +1640,10 @@ export default function ReviewsPage() {
   // Client-side text search & ribbon tab filtering
   const filteredReviews = useMemo(() => {
     let list = reviews;
+    // Explicit opt-in only — default OFF so failed rows are never hidden silently.
+    if (hideFailed) {
+      list = list.filter((r) => !isReviewFailed(r));
+    }
     if (activeTab === "patches") {
       list = list.filter((r) => r.findings.some((f) => !!f.suggested_patch));
     }
@@ -1542,7 +1663,7 @@ export default function ReviewsPage() {
       );
       return matchSummary || matchFailure || matchCommit || matchRepo || matchPr || matchFindings;
     });
-  }, [reviews, searchQuery, activeTab]);
+  }, [reviews, searchQuery, activeTab, hideFailed]);
 
   // Metric rollups — computed from the current page only (`reviews` holds a
   // single PAGE_SIZE window). Reviews Scanned uses the server-side
@@ -1566,6 +1687,8 @@ export default function ReviewsPage() {
       label: `${r.owner}/${r.name}`,
     })),
   ];
+
+  const failedCount = useMemo(() => reviews.filter((r) => isReviewFailed(r)).length, [reviews]);
 
   return (
     <AppLayout
@@ -1809,6 +1932,24 @@ export default function ReviewsPage() {
               <ShieldAlert className="h-3.5 w-3.5 text-rose-400" />
               <span>Risk ≥ 71</span>
             </button>
+
+            {/* Hide-failed toggle — default OFF, session state only. Explicit
+                opt-in: failed rows are never hidden silently. */}
+            {failedCount > 0 && (
+              <button
+                onClick={() => setHideFailed((v) => !v)}
+                aria-pressed={hideFailed}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-mono transition-all",
+                  hideFailed
+                    ? "border-zinc-500/60 bg-zinc-800 text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_4px_rgba(0,0,0,0.3)]"
+                    : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                )}
+              >
+                <EyeOff className="h-3.5 w-3.5 text-zinc-500" />
+                <span>{hideFailed ? `Show failed (${failedCount})` : `Hide failed (${failedCount})`}</span>
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -1867,7 +2008,7 @@ export default function ReviewsPage() {
                 Push commits or open a pull request on your connected repositories to trigger Haunter&apos;s Sentinel.
               </p>
             </div>
-            {(selectedRepoId !== "all" || highRiskOnly || activeTab !== "all" || selectedSeverity !== "all" || searchQuery) && (
+            {(selectedRepoId !== "all" || highRiskOnly || hideFailed || activeTab !== "all" || selectedSeverity !== "all" || searchQuery) && (
               <Button
                 variant="outline"
                 size="sm"
@@ -1875,6 +2016,7 @@ export default function ReviewsPage() {
                   setSelectedRepoId("all");
                   setSelectedSeverity("all");
                   setHighRiskOnly(false);
+                  setHideFailed(false);
                   setActiveTab("all");
                   setSearchQuery("");
                   setPage(0);
@@ -1886,7 +2028,7 @@ export default function ReviewsPage() {
             )}
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-5">
             {filteredReviews.map((review) => (
               <ReviewCard key={review.id} review={review} onOpen={openReview} onRetry={handleRefresh} />
             ))}

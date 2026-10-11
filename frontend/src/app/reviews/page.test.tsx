@@ -457,16 +457,25 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       findings: [],
     };
 
-    it("renders an honest error row: repo+PR#, ERROR pill, em-dash confidence, no fake 10/10 or SAFE", async () => {
+    it("renders an honest error row: collapsed by default, full telemetry on expand, no fake 10/10 or SAFE", async () => {
+      const user = userEvent.setup();
       vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
         reviews: [failedReview],
         total: 1,
       });
       render(<ReviewsPage />);
 
-      // Identity stays prominent even on error rows
+      // Collapsed default: identity + ERROR pill + excerpt stay, the full
+      // panel (telemetry, title, Full audit) hides until expanded.
       expect(await screen.findByText("acme/sentinel")).toBeInTheDocument();
       expect(screen.getByText("PR #103")).toBeInTheDocument();
+      expect(screen.getByText(/all 9 free-tier models exhausted/i)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /expand error details/i })).toBeInTheDocument();
+      expect(screen.queryByText("PR Confidence")).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+      // Expand to the full honest panel.
+      await user.click(screen.getByRole("button", { name: /expand error details/i }));
       expect(screen.getByText("feat: risky storage migration")).toBeInTheDocument();
 
       // Honest error markers (exact: ERROR pill + Status cell; gauge + 3
@@ -493,6 +502,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       render(<ReviewsPage />);
 
       expect(await screen.findByText("PR #103")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: /expand error details/i }));
       await user.click(screen.getByRole("button", { name: /full audit/i }));
 
       expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -518,8 +528,10 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       await user.click(screen.getByRole("button", { name: /retry/i }));
       expect(vi.mocked(api.getCodeReviews).mock.calls.length).toBeGreaterThan(callsBefore);
 
-      // Detail view: Retry must also re-poll the GET-only list (bumping
+      // Detail view: expand first (collapsed rows hide Full audit), then
+      // Retry must also re-poll the GET-only list (bumping
       // detailRetry alone is a no-op for cached rows).
+      await user.click(screen.getByRole("button", { name: /expand error details/i }));
       await user.click(screen.getByRole("button", { name: /full audit/i }));
       expect(await screen.findByRole("alert")).toHaveTextContent(/free-tier models exhausted/i);
       const callsMid = vi.mocked(api.getCodeReviews).mock.calls.length;
@@ -674,5 +686,116 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     expect(follows(blockers, blast)).toBe(true);
     expect(follows(blast, structural)).toBe(true);
     expect(follows(structural, findings)).toBe(true);
+  });
+
+  describe("push identity parity, collapsed errors, hide-failed toggle", () => {
+    // Direct push: pr_number NULL at rest (backend hardcodes pr_number=None
+    // for pushes), so no PR chrome may render for this row.
+    const pushReview: CodeReviewOut = {
+      ...mockReviews[1],
+      id: "rev_push",
+      pr_number: null,
+      pr_title: null,
+      pr_author: null,
+      pr_author_avatar: null,
+      head_branch: null,
+      base_branch: null,
+      pr_url: null,
+    };
+
+    const failedPushRow: CodeReviewOut = {
+      ...mockReviews[0],
+      id: "rev_fail_push",
+      pr_number: null,
+      pr_title: null,
+      pr_author: null,
+      pr_author_avatar: null,
+      head_branch: null,
+      base_branch: null,
+      pr_url: null,
+      status: "error",
+      risk_score: 0,
+      failure_reason: "push-row-boom",
+      input_tokens: 0,
+      output_tokens: 0,
+      diff_stats: null,
+      findings: [],
+    };
+
+    it("push rows render an equal-weight Push @ sha pill linking to the commit", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({ reviews: [pushReview], total: 1 });
+      render(<ReviewsPage />);
+
+      const pill = await screen.findByRole("link", { name: /push @ 1234567/i });
+      expect(pill).toHaveAttribute(
+        "href",
+        "https://github.com/acme/sentinel/commit/1234567890abcdef"
+      );
+      // Parity with the PR# pill: same text-sm font-bold pill treatment,
+      // not the old tiny mono afterthought.
+      expect(pill.className).toMatch(/text-sm/);
+      expect(pill.className).toMatch(/font-bold/);
+    });
+
+    it("never renders a fake PR# for push rows (overview and detail)", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValue({ reviews: [pushReview], total: 1 });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText(/push @ 1234567/i)).toBeInTheDocument();
+      expect(screen.queryByText(/PR #\d+/)).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: /full audit/i }));
+      expect(await screen.findByText(/push @ 1234567/i)).toBeInTheDocument();
+      expect(screen.queryByText(/PR #\d+/)).not.toBeInTheDocument();
+    });
+
+    it("failed rows collapse by default and expand/collapse on demand", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValue({ reviews: [failedPushRow], total: 1 });
+      render(<ReviewsPage />);
+
+      // Collapsed default: dimmed single-line row, no telemetry, no alert.
+      expect(await screen.findByText(/push @ abcdef1/i)).toBeInTheDocument();
+      const expand = screen.getByRole("button", { name: /expand error details/i });
+      expect(expand).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByText("PR Confidence")).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+      await user.click(expand);
+      expect(screen.getByText("PR Confidence")).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent(/push-row-boom/i);
+      const collapse = screen.getByRole("button", { name: /collapse error details/i });
+      expect(collapse).toHaveAttribute("aria-expanded", "true");
+
+      await user.click(collapse);
+      expect(screen.queryByText("PR Confidence")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /expand error details/i })).toBeInTheDocument();
+    });
+
+    it("hide-failed toggle is OFF by default and filters failed rows only when enabled", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [failedPushRow, ...mockReviews],
+        total: 3,
+      });
+      render(<ReviewsPage />);
+
+      const toggle = await screen.findByRole("button", { name: /hide failed/i });
+      expect(toggle).toHaveAttribute("aria-pressed", "false");
+      // Default OFF: failed row visible alongside completed rows.
+      expect(screen.getByText(/push-row-boom/i)).toBeInTheDocument();
+      expect(screen.getByText("docs: update API documentation")).toBeInTheDocument();
+
+      await user.click(toggle);
+      expect(screen.queryByText(/push-row-boom/i)).not.toBeInTheDocument();
+      expect(screen.getByText("docs: update API documentation")).toBeInTheDocument();
+      expect(screen.getByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+      const show = screen.getByRole("button", { name: /show failed/i });
+      expect(show).toHaveAttribute("aria-pressed", "true");
+
+      await user.click(show);
+      expect(screen.getByText(/push-row-boom/i)).toBeInTheDocument();
+    });
   });
 });
