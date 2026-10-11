@@ -14,6 +14,17 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/reviews",
 }));
 
+/**
+ * Confidence now lives in the gauge, which renders the numeral and the
+ * "/10" suffix as two sibling spans (so the suffix can sit at a smaller
+ * size). Plain getByText("9/10") can no longer match it. This asserts the
+ * ring's accessible name instead, which is what a screen reader actually
+ * announces and is unaffected by the visual split.
+ */
+function expectConfidence(value: number) {
+  return expect(screen.getByRole("img", { name: new RegExp(`Confidence ${value} of 10`, "i") })).toBeInTheDocument();
+}
+
 vi.mock("@/lib/auth-context", () => ({
   useAuth: vi.fn(),
 }));
@@ -320,14 +331,16 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
     expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
     // Confidence derived from risk: 85 -> 2/10, 15 -> 9/10
-    expect(screen.getByText("2/10")).toBeInTheDocument();
-    expect(screen.getByText("9/10")).toBeInTheDocument();
+    expectConfidence(2);
+    expectConfidence(9);
 
     await user.click(screen.getAllByRole("button", { name: /full audit/i })[0]);
 
     expect(await screen.findByText("PR Summary")).toBeInTheDocument();
-    expect(screen.getByText("PR Confidence")).toBeInTheDocument();
-    expect(screen.getByText("Blockers")).toBeInTheDocument();
+    expect(screen.getByText("Merge recommendation")).toBeInTheDocument();
+    expect(screen.getByText("Confidence")).toBeInTheDocument();
+    expect(screen.getByText("Must-Fix")).toBeInTheDocument();
+    expect(screen.getByText("Blast Radius")).toBeInTheDocument();
     expect(screen.getByText(/structural & blast radius analysis/i)).toBeInTheDocument();
     expect(screen.getByText("Findings Summary (1)")).toBeInTheDocument();
     expect(screen.getByText("Changes Requested")).toBeInTheDocument();
@@ -360,7 +373,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
     expect(await screen.findByText("PR Summary")).toBeInTheDocument();
     expect(screen.getByText("Great to Merge")).toBeInTheDocument();
-    expect(screen.getByText("9/10")).toBeInTheDocument();
+    expectConfidence(9);
     expect(screen.getByText(/no regressions detected/i)).toBeInTheDocument();
   });
 
@@ -437,6 +450,43 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     expect(document.activeElement).not.toBe(document.body);
   });
 
+  describe("confidence ring (0-10, not 0-100)", () => {
+    it("shows confidence on a 0-10 scale and never leaks the raw risk score into the ring", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [mockReviews[0]],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      await screen.findByText("feat: autonomous remediation sentinel pipeline");
+
+      // Risk 85 -> confidence 2/10, announced on the ring itself.
+      expectConfidence(2);
+
+      const ring = screen.getByRole("img", { name: /confidence 2 of 10/i });
+      // The ring must not be a risk dial any more.
+      expect(ring.textContent).not.toContain("85");
+      // The raw 0-100 score stays available as text so nothing is hidden.
+      expect(screen.getByText("85/100")).toBeInTheDocument();
+      // Severity is still spelled out, never colour alone.
+      expect(screen.getByText("CRITICAL")).toBeInTheDocument();
+    });
+
+    it("keeps the ring neutral for a failed analysis — never a fake 10/10", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [{ ...mockReviews[0], status: "error", failure_reason: "boom" }],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(
+        await screen.findByRole("img", { name: /no confidence score/i })
+      ).toBeInTheDocument();
+      expect(screen.queryByText("10/10")).not.toBeInTheDocument();
+      expect(screen.getByText("NO SCORE")).toBeInTheDocument();
+    });
+  });
+
   describe("failed analyses (honest error states)", () => {
     const failedReview: CodeReviewOut = {
       id: "rev_fail",
@@ -483,11 +533,16 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       await user.click(screen.getByRole("button", { name: /expand error details/i }));
       expect(screen.getByText("feat: risky storage migration")).toBeInTheDocument();
 
-      // Honest error markers (exact: ERROR pill + Status cell; gauge + 3
-      // telemetry cells in the card + Avg tile em-dash when nothing scored)
-      expect(screen.getAllByText("Error")).toHaveLength(2);
+      // Honest error markers: the failure chip + the neutral "Failed" status
+      // fact, the full reason text in a scroll region, and the neutral gauge.
+      expect(screen.getByText("Analysis failed")).toBeInTheDocument();
+      expect(screen.getAllByText("Failed").length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText(/all 9 free-tier models exhausted/i)).toBeInTheDocument();
-      expect(screen.getAllByText("—")).toHaveLength(5);
+      // The reason is no longer clipped to a 140-char excerpt: the full text
+      // lives in a scrollable region instead of a CSS truncate.
+      expect(
+        screen.getByRole("alert").querySelector("p")?.className
+      ).toMatch(/overflow-y-auto/);
       expect(screen.getByText("NO SCORE")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
 
@@ -576,7 +631,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       // Real verdict telemetry survives: confidence + merge verdict render,
       // and no honest-error chrome appears. (Verdict pill renders twice on
       // the overview card: PR badge row + Status cell.)
-      expect(screen.getByText("9/10")).toBeInTheDocument();
+      expectConfidence(9);
       expect(screen.getAllByText("Great to Merge")).toHaveLength(2);
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
       expect(screen.queryByText("free-tier models exhausted")).not.toBeInTheDocument();
@@ -615,7 +670,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       render(<ReviewsPage />);
 
       expect(await screen.findByText("PR #104")).toBeInTheDocument();
-      // Neutral pill renders twice on the card: badge row + Status cell.
+      // Neutral pill renders twice on the row: identity chip + status fact.
       expect(screen.getAllByText("Queued")).toHaveLength(2);
       expect(screen.getByText("Autonomous code review queued.")).toBeInTheDocument();
 
@@ -627,10 +682,9 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.queryByText("Changes Requested")).not.toBeInTheDocument();
       expect(screen.queryByText("Review Advised")).not.toBeInTheDocument();
       expect(screen.getByText("NO SCORE")).toBeInTheDocument();
-      // Honest neutral markers (exact: gauge + 3 telemetry cells in the
-      // card + Avg tile em-dash when nothing scored — same count as the
-      // failed-row test).
-      expect(screen.getAllByText("—")).toHaveLength(5);
+      // Honest neutral marker: the row states "Not scored" rather than
+      // implying a zero-risk verdict.
+      expect(screen.getByText("Not scored")).toBeInTheDocument();
     });
 
     it("in-progress rows render Analyzing and stay out of Avg Risk", async () => {
@@ -693,9 +747,12 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
       expect(await screen.findByText("PR #101")).toBeInTheDocument();
       // Real verdict telemetry survives the publish-skip.
-      expect(screen.getByText("2/10")).toBeInTheDocument();
+      expectConfidence(2);
       expect(screen.getAllByText("Changes Requested").length).toBeGreaterThanOrEqual(1);
-      expect(screen.getAllByText("1 finding").length).toBeGreaterThanOrEqual(1);
+      // The finding count is stated once, on the findings toggle — the old
+      // footer meta line repeated it alongside counts already shown above.
+      expect(screen.getByRole("button", { name: /review \(1\)/i })).toBeInTheDocument();
+      expect(screen.queryByText("1 finding")).not.toBeInTheDocument();
       // Neutral publish-state indicator, not an error.
       expect(screen.getByText("Publication skipped")).toBeInTheDocument();
       // Pending chrome must be gone: no neutral gauge, no in-progress copy.
@@ -845,7 +902,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
       expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
       // Full audit chrome: verdict + confidence + publication indicator.
-      expect(screen.getByText("10/10")).toBeInTheDocument();
+      expectConfidence(10);
       expect(screen.getAllByText("Great to Merge").length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText("Publication skipped").length).toBeGreaterThanOrEqual(1);
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
@@ -877,7 +934,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       render(<ReviewsPage />);
 
       expect(await screen.findByText("PR #102")).toBeInTheDocument();
-      expect(screen.getByText("10/10")).toBeInTheDocument();
+      expectConfidence(10);
       expect(screen.getAllByText("Great to Merge").length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText("Publication skipped")).toBeInTheDocument();
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
@@ -980,9 +1037,13 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     await user.click(screen.getAllByRole("button", { name: /full audit/i })[0]);
 
     const reportTitle = await screen.findByText("Haunter Autonomous Audit Report");
+    // Reading order: report title -> summary (what the analysis found) ->
+    // merge recommendation (what to do) -> confidence/blast -> structural
+    // analysis -> findings. The decision panel replaces the old flat 4-cell
+    // status grid.
     const summary = screen.getByText("PR Summary");
-    const confidence = screen.getByText("PR Confidence");
-    const blockers = screen.getByText("Blockers");
+    const decision = screen.getByText("Merge recommendation");
+    const confidence = screen.getByText("Confidence");
     const blast = screen.getByText("Blast Radius");
     const structural = screen.getByText(/structural & blast radius analysis/i);
     const findings = screen.getByText("Findings Summary (1)");
@@ -990,9 +1051,9 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     const follows = (a: Element, b: Element) =>
       (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
     expect(follows(reportTitle, summary)).toBe(true);
-    expect(follows(summary, confidence)).toBe(true);
-    expect(follows(confidence, blockers)).toBe(true);
-    expect(follows(blockers, blast)).toBe(true);
+    expect(follows(summary, decision)).toBe(true);
+    expect(follows(decision, confidence)).toBe(true);
+    expect(follows(confidence, blast)).toBe(true);
     expect(follows(blast, structural)).toBe(true);
     expect(follows(structural, findings)).toBe(true);
   });
@@ -1072,13 +1133,15 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
       await user.click(expand);
-      expect(screen.getByText("PR Confidence")).toBeInTheDocument();
+      // Expanding reveals the full failure text in a scroll region plus the
+      // supporting context. No verdict telemetry exists for a failed row.
       expect(screen.getByRole("alert")).toHaveTextContent(/push-row-boom/i);
+      expect(screen.getByText("Failure details")).toBeInTheDocument();
       const collapse = screen.getByRole("button", { name: /collapse error details/i });
       expect(collapse).toHaveAttribute("aria-expanded", "true");
 
       await user.click(collapse);
-      expect(screen.queryByText("PR Confidence")).not.toBeInTheDocument();
+      expect(screen.queryByText("Failure details")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: /expand error details/i })).toBeInTheDocument();
     });
 
@@ -1123,7 +1186,9 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         screen.getByPlaceholderText("Search findings, commits, files..."),
         "zzz-no-such-review"
       );
-      expect(await screen.findByText("No Code Reviews Found")).toBeInTheDocument();
+      // Reviews exist but none match, so this is the filtered-empty state,
+      // not the "nothing has ever been reviewed" state.
+      expect(await screen.findByText("Nothing matches these filters")).toBeInTheDocument();
 
       await user.click(screen.getByRole("button", { name: /clear filters/i }));
 
@@ -1152,7 +1217,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         screen.getByPlaceholderText("Search findings, commits, files..."),
         "push-row-boom"
       );
-      expect(await screen.findByText("No Code Reviews Found")).toBeInTheDocument();
+      expect(await screen.findByText("Nothing matches these filters")).toBeInTheDocument();
       expect(screen.queryByText(/push-row-boom/i)).not.toBeInTheDocument();
     });
   });

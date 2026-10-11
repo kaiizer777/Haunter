@@ -15,6 +15,22 @@ import {
 } from "@/lib/api";
 import { formatRelativeTime, cn } from "@/lib/utils";
 import {
+  RISK_CRITICAL,
+  RISK_MODERATE,
+  blockerCounts,
+  clusterFailures,
+  confidenceFromRisk,
+  pendingOutcome,
+  riskBand,
+  scoredOutcome,
+  sortByAttention,
+  FAILED_OUTCOME,
+  SORT_OPTIONS,
+  type Outcome,
+  type OutcomeKey,
+  type SortKey,
+} from "./review-triage";
+import {
   ShieldCheck,
   ShieldAlert,
   AlertTriangle,
@@ -38,18 +54,11 @@ import {
   ExternalLink,
   EyeOff,
   FileDiff,
+  SlidersHorizontal,
+  Inbox,
 } from "lucide-react";
 
 const PAGE_SIZE = 15;
-
-/**
- * Single source of truth for the high-risk boundary. Ribbon counts,
- * the Risk toggle + `min_risk` API param, page stats, verdicts, gauges and
- * blast-scope heuristics all derive from these — previously the ribbon said
- * >=71 while the toggle sent min_risk=50 and the gauge used >70.
- */
-const RISK_CRITICAL = 71;
-const RISK_MODERATE = 31;
 
 /** A review whose analysis never completed — never render verdict telemetry for it.
  * Failed iff the backend reports status "error". A stale `failure_reason` on a
@@ -127,50 +136,54 @@ function pendingLabelFor(review: CodeReviewOut): string {
 }
 
 /**
- * Calibrated tactile physical gauge for Risk Score (0-100).
- * Replaces unearned neon glow with a clean circular bezel,
- * neutral dark contact shadow, and high-contrast score.
+ * Confidence ring (0-10) for a completed review.
  *
- * `neutral` renders the honest no-score state for failed analyses:
- * zinc track, em-dash, NO SCORE badge — never a fake 0/SAFE.
+ * The ring shows CONFIDENCE on a 0-10 scale, not the raw 0-100 risk score:
+ * risk 45 → "6/10". A fuller arc means "more trustworthy", which is the
+ * inverse of the old risk ring and reads correctly at a glance — a nearly
+ * full ring next to a must-fix badge tells the user the model was sure of
+ * itself, not that the change is safe.
+ *
+ * The COLOUR still comes from the single risk band (./review-triage), so
+ * severity keeps exactly one colour language across the gauge, the verdict
+ * chip and the blocker counts. The chip below states that band in words, so
+ * severity is never carried by colour alone.
+ *
+ * Accessibility: the ring SVG is decorative (`aria-hidden`); the group is
+ * announced once as "Confidence N of 10 — <band>". The 0-100 risk score stays
+ * visible as text in the row so nothing is hidden by this choice.
+ *
+ * `neutral` renders the honest no-score state for analyses that never
+ * finished: zinc track, em-dash, NO SCORE badge — never a fake 10/10.
  */
-function RiskGauge({ score, size = 68, neutral = false }: { score: number; size?: number; neutral?: boolean }) {
+function RiskGauge({ riskScore, size = 68, neutral = false }: { riskScore: number; size?: number; neutral?: boolean }) {
   const strokeWidth = 5;
   const radius = (size - strokeWidth - 8) / 2;
   const circumference = 2 * Math.PI * radius;
-  const clampedScore = Math.max(0, Math.min(100, score));
-  const offset = neutral ? circumference : circumference - (clampedScore / 100) * circumference;
+  const clampedRisk = Math.max(0, Math.min(100, riskScore));
+  const confidence = confidenceFromRisk(clampedRisk);
+  const fraction = confidence / 10;
+  const offset = neutral ? circumference : circumference * (1 - fraction);
 
-  let strokeColor = "#10b981"; // emerald
-  let textClass = "text-emerald-400";
-  let label = "SAFE";
-  let badgeColor = "bg-emerald-950/60 text-emerald-300 border-emerald-500/30";
-
-  if (neutral) {
-    strokeColor = "#52525b"; // zinc — no verdict implied
-    textClass = "text-zinc-500";
-    label = "NO SCORE";
-    badgeColor = "bg-zinc-900 text-zinc-500 border-zinc-700/60";
-  } else if (clampedScore >= RISK_CRITICAL) {
-    strokeColor = "#f43f5e"; // rose
-    textClass = "text-rose-400";
-    label = "CRITICAL";
-    badgeColor = "bg-rose-950/60 text-rose-300 border-rose-500/30";
-  } else if (clampedScore >= RISK_MODERATE) {
-    strokeColor = "#f59e0b"; // amber
-    textClass = "text-amber-400";
-    label = "MODERATE";
-    badgeColor = "bg-amber-950/60 text-amber-300 border-amber-500/30";
-  }
+  const band = riskBand(clampedRisk, !neutral);
+  const compact = size <= 72;
 
   return (
-    <div className="flex flex-col items-center justify-center">
+    <div
+      className="flex flex-col items-center justify-center"
+      role="img"
+      aria-label={
+        neutral
+          ? "No confidence score — the analysis did not complete"
+          : `Confidence ${confidence} of 10 — ${band.label.toLowerCase()} risk`
+      }
+    >
       {/* Tactile circular bezel housing */}
       <div
         className="relative flex items-center justify-center rounded-full border border-zinc-800/90 bg-gradient-to-b from-[#18181b] via-[#111114] to-[#09090b] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_8px_rgba(0,0,0,0.5)]"
         style={{ width: size, height: size }}
       >
-        <svg className="rotate-[-90deg]" width={size} height={size}>
+        <svg className="rotate-[-90deg]" width={size} height={size} aria-hidden="true">
           <circle
             cx={size / 2}
             cy={size / 2}
@@ -183,7 +196,7 @@ function RiskGauge({ score, size = 68, neutral = false }: { score: number; size?
             cx={size / 2}
             cy={size / 2}
             r={radius}
-            stroke={strokeColor}
+            stroke={band.stroke}
             strokeWidth={strokeWidth}
             fill="transparent"
             strokeDasharray={circumference}
@@ -194,14 +207,25 @@ function RiskGauge({ score, size = 68, neutral = false }: { score: number; size?
             }}
           />
         </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className={cn("font-mono text-base font-extrabold tabular-nums tracking-tight", textClass)}>
-            {neutral ? "—" : clampedScore}
+        <div className="absolute inset-0 flex items-baseline justify-center">
+          <span
+            className={cn(
+              "font-mono font-extrabold tabular-nums tracking-tight",
+              compact ? "text-base" : "text-2xl",
+              band.text
+            )}
+          >
+            {neutral ? "—" : confidence}
           </span>
+          {!neutral && (
+            <span className={cn("ml-0.5 font-mono font-bold text-zinc-500", compact ? "text-[9px]" : "text-xs")}>
+              /10
+            </span>
+          )}
         </div>
       </div>
-      <span className={cn("mt-1.5 rounded-[4px] border px-2 py-0.5 text-[10px] font-mono font-bold tracking-wider uppercase", badgeColor)}>
-        {label}
+      <span className={cn("mt-1.5 rounded-[4px] border px-2 py-0.5 text-[10px] font-mono font-bold tracking-wider uppercase", band.chip)}>
+        {band.chipLabel}
       </span>
     </div>
   );
@@ -278,26 +302,10 @@ function getSeverityBadge(severity: string) {
 
 /**
  * Derived audit-report metrics. All client-side derivations from the GET-only
- * review payload — no backend writes involved.
+ * review payload — no backend writes involved. Confidence and blocker counts
+ * now come from ./review-triage so the row, the detail grid and the gauge can
+ * never disagree about what a score means.
  */
-
-/** PR Confidence x/10 derived from risk score: low risk ⇒ high confidence. */
-function confidenceFromRisk(riskScore: number): number {
-  const clamped = Math.max(0, Math.min(100, riskScore));
-  return Math.max(1, Math.min(10, Math.round((100 - clamped) / 10)));
-}
-
-/** Blocker counts: Must-Fix = critical+high findings, Should-Fix = medium. */
-function blockerCounts(review: CodeReviewOut): { mustFix: number; shouldFix: number } {
-  let mustFix = 0;
-  let shouldFix = 0;
-  for (const f of review.findings) {
-    const sev = f.severity.toLowerCase();
-    if (sev === "critical" || sev === "high") mustFix++;
-    else if (sev === "medium") shouldFix++;
-  }
-  return { mustFix, shouldFix };
-}
 
 /** Blast-radius telemetry shared by the overview strip and the detail report. */
 function getBlastStats(review: CodeReviewOut): {
@@ -333,18 +341,17 @@ function getBlastStats(review: CodeReviewOut): {
   return { filesCount, additions, deletions, scope, scopeColor };
 }
 
-/** Merge verdict for the detail report header grid. Fills are deliberately
- * saturated (500/20 + 200-text) so the verdict wins the eye as the single
- * Tier-3 status moment per card — semantics unchanged. */
-function verdictFor(review: CodeReviewOut): { label: string; color: string } {
-  const { mustFix, shouldFix } = blockerCounts(review);
-  if (mustFix > 0 || review.risk_score >= RISK_CRITICAL) {
-    return { label: "Changes Requested", color: "bg-rose-500/20 text-rose-200 border-rose-400/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.3)]" };
-  }
-  if (review.risk_score < RISK_MODERATE && shouldFix === 0) {
-    return { label: "Great to Merge", color: "bg-emerald-500/20 text-emerald-200 border-emerald-400/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.3)]" };
-  }
-  return { label: "Review Advised", color: "bg-amber-500/20 text-amber-200 border-amber-400/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.3)]" };
+/**
+ * Merge verdict for the detail report header grid. Delegates to the shared
+ * outcome vocabulary so the chip, the gauge ring and the blocker colours are
+ * all driven by one severity band instead of three independent palettes.
+ * Terminal-only: callers gate pending/failed rows out first.
+ */
+function verdictFor(review: CodeReviewOut): Outcome {
+  return scoredOutcome({
+    risk_score: review.risk_score,
+    findings: review.findings,
+  });
 }
 
 /** Human-readable blast-radius scope label + one-line explanation. */
@@ -753,6 +760,19 @@ function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
 }
 
 /**
+ * Whether this row is PR-associated for chrome purposes — either the row
+ * carries a PR number directly, or the associated-PR lookup resolved one for
+ * a push row. The SHA chip and the copy affordance must key off THIS, not
+ * raw `pr_number`: a push row that resolved to PR #91 renders the PR pill,
+ * so keying the chip off `pr_number` alone gave it the push-row "Copy SHA"
+ * button and hid its commit link.
+ */
+function useIsPrAssociated(review: CodeReviewOut): boolean {
+  const associated = useAssociatedPr(review);
+  return review.pr_number != null || associated != null;
+}
+
+/**
  * Single identity-pill call site for every card + the detail header: amber
  * `PR #n` when PR-associated (directly or via associated-PR resolution),
  * equal-weight `Push @ sha` otherwise. Same PrPill component either way, so
@@ -773,11 +793,94 @@ function IdentityPill({ review }: { review: CodeReviewOut }) {
 }
 
 /**
- * Honest error row for analyses that never completed (status "error" or a
- * `failure_reason` such as "All 9 free-tier models exhausted"). Renders NO
- * verdict telemetry — ERROR pill, em-dash confidence, neutral gauge, the raw
- * error text, and a Retry that refetches the list. Showing 10/10 + SAFE here
+ * Shared row skeleton.
+ *
+ * Every state of every card — collapsed failure, expanded failure, pending,
+ * scored-collapsed, scored-expanded — renders through these two primitives, so
+ * the repo name, PR pill, verdict chip and time stamp always sit on the same
+ * baseline and the right-hand action column always ends on the same right
+ * edge. The page previously had two unrelated card layouts (a one-line
+ * failure strip and a three-column detail card), which is why the right edge
+ * of the list was ragged row to row.
+ *
+ * `RIBBON` is the identity line; `ASIDE` is the right-hand action column.
+ */
+const ROW_SURFACE =
+  "rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]";
+
+/**
+ * Identity line: repo → PR/Push pill → verdict chip → author → branch → sha →
+ * time. Shared by every card state so the leading edge never shifts.
+ */
+function RowIdentity({
+  review,
+  chip,
+  compact = false,
+}: {
+  review: CodeReviewOut;
+  /** Verdict / status chip, or null when the caller renders it elsewhere. */
+  chip?: React.ReactNode;
+  compact?: boolean;
+}) {
+  const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
+  const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
+
+  const nameClass = compact
+    ? "inline-flex items-center gap-1.5 font-mono text-[13px] font-bold text-zinc-100 hover:text-white transition-colors"
+    : "inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100 hover:text-white transition-colors";
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
+      {repoUrl ? (
+        <a href={repoUrl} target="_blank" rel="noreferrer" className={nameClass}>
+          <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
+          <span>{repoName}</span>
+        </a>
+      ) : (
+        <span className={nameClass}>
+          <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
+          <span>{repoName}</span>
+        </span>
+      )}
+      <IdentityPill review={review} />
+      {chip}
+      {review.pr_author && (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-[11px] text-zinc-300">
+          {review.pr_author_avatar ? (
+            <img src={review.pr_author_avatar} alt="" className="h-3.5 w-3.5 rounded-full object-cover" />
+          ) : (
+            <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-zinc-800 text-[9px] font-bold text-zinc-300">
+              {review.pr_author[0]?.toUpperCase()}
+            </span>
+          )}
+          <span className="font-mono">@{review.pr_author}</span>
+        </span>
+      )}
+      <span className="text-xs font-mono text-zinc-400">{formatRelativeTime(review.created_at)}</span>
+    </div>
+  );
+}
+
+/** Small labelled fact used in the shared row footer. */
+function MetaFact({ label, value, tone }: { label: string; value: React.ReactNode; tone?: string }) {
+  return (
+    <span className="inline-flex items-baseline gap-1.5">
+      <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">{label}</span>
+      <span className={cn("font-mono text-xs", tone ?? "text-zinc-300")}>{value}</span>
+    </span>
+  );
+}
+
+/**
+ * Honest error row for analyses that never completed (status "error").
+ * Renders NO verdict telemetry — the neutral gauge, the raw error text with no
+ * truncation, and a Retry that re-polls the list. Showing 10/10 + SAFE here
  * (the risk_score column defaults to 0) would be lying UI.
+ *
+ * The failure text is shown in full inside a scroll region. The previous
+ * collapsed row clipped it at 140 characters with a CSS `truncate` and a
+ * `title` tooltip, which was unreadable on touch and gave keyboard users no
+ * path to the remainder at all.
  */
 function FailedReviewCard({
   review,
@@ -788,217 +891,182 @@ function FailedReviewCard({
   onOpen: (id: string) => void;
   onRetry: () => void;
 }) {
-  const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
-  const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
-  const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
-  const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
-  const errorText = review.failure_reason ?? review.summary;
   const [expanded, setExpanded] = useState(false);
-  const errorExcerpt = errorText.length > 140 ? `${errorText.slice(0, 140).trimEnd()}…` : errorText;
-  const identityLabel = `${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ` Push @ ${commitShort}`}`;
+  const [copiedError, setCopiedError] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const errorText = review.failure_reason ?? review.summary;
+  const panelId = `failure-detail-${review.id}`;
+  const commitUrl = review.repo_owner && review.repo_name
+    ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}`
+    : undefined;
+  const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
+  const identityLabel = `${review.repo_owner ?? "Repository"}/${review.repo_name ?? ""}${
+    review.pr_number ? ` PR #${review.pr_number}` : ` Push @ ${commitShort}`
+  }`;
 
-  // Collapsed default: dimmed single-line row so failed analyses don't
-  // dominate the stream. role=alert lives on the expanded panel only, and
-  // Retry stays outside it — same pattern as the detail error banner.
-  if (!expanded) {
-    return (
-      <div className="rounded-xl border border-rose-500/20 bg-[#0d0d10] px-4 py-3 opacity-90 transition-opacity hover:opacity-100 focus-within:opacity-100">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          {repoUrl ? (
-            <a
-              href={repoUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-300 hover:text-white transition-colors"
-            >
-              <FolderGit2 className="h-3.5 w-3.5 text-zinc-500" />
-              <span>{repoName}</span>
-            </a>
-          ) : (
-            <span className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-300">
-              <FolderGit2 className="h-3.5 w-3.5 text-zinc-500" />
-              <span>{repoName}</span>
-            </span>
-          )}
-          <IdentityPill review={review} />
-          <span className="inline-flex items-center rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
-            Error
-          </span>
-          <span className="min-w-0 flex-1 basis-40 truncate text-xs font-mono text-zinc-400" title={errorText}>
-            {errorExcerpt}
-          </span>
-          <span className="text-xs text-zinc-500 font-mono">
-            {formatRelativeTime(review.created_at)}
-          </span>
-          <span className="ml-auto inline-flex items-center gap-1.5">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onRetry}
-              aria-label={`Retry loading reviews (failed: ${identityLabel})`}
-              className="h-7 px-2.5 text-xs gap-1.5 border-rose-500/30 bg-transparent hover:bg-rose-900/30 text-rose-200/90"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              <span>Retry</span>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setExpanded(true)}
-              aria-expanded={false}
-              aria-label={`Expand error details for ${identityLabel}`}
-              className="h-7 w-7 p-0 border-zinc-800 bg-transparent hover:bg-zinc-800 text-zinc-400"
-            >
-              <ChevronDown className="h-3.5 w-3.5" />
-            </Button>
-          </span>
-        </div>
-      </div>
-    );
-  }
+  const handleCopyError = async () => {
+    setCopyError(null);
+    try {
+      await navigator.clipboard.writeText(errorText);
+      setCopiedError(true);
+      setTimeout(() => setCopiedError(false), 2000);
+    } catch {
+      setCopyError("Copy failed — clipboard unavailable.");
+    }
+  };
+
+  const errorChip = (
+    <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/40 bg-rose-500/10 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-200">
+      <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+      Analysis failed
+    </span>
+  );
 
   return (
-    <div className="rounded-xl border border-rose-500/30 bg-gradient-to-b from-[#141114] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]">
-      <div className="flex flex-col md:flex-row md:items-start justify-between gap-5">
-        {/* Left: neutral gauge — no score implied */}
-        <div className="flex items-center md:flex-col justify-start md:justify-center gap-4 md:min-w-[80px]">
-          <RiskGauge score={review.risk_score} size={64} neutral />
-        </div>
+    <div className={cn(ROW_SURFACE, "border-rose-500/25")}>
+      <div className="flex flex-col gap-4 p-5">
+        {/* One skeleton, same as a scored row: gauge | content | actions */}
+        <div className="flex flex-col gap-5 md:flex-row md:items-start">
+          <div className="flex items-center gap-4 md:min-w-[84px] md:flex-col md:justify-center">
+            <RiskGauge riskScore={review.risk_score} size={64} neutral />
+          </div>
 
-        {/* Center: identity + raw error */}
-        <div className="flex-1 min-w-0 space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            {repoUrl ? (
+          <div className="min-w-0 flex-1 space-y-3">
+            <RowIdentity review={review} chip={errorChip} compact />
+
+            {review.pr_title && (
+              <h3 className="text-[15px] font-bold leading-snug tracking-tight text-zinc-50">
+                {review.pr_title}
+              </h3>
+            )}
+
+            {/* Full text, never truncated. Scrolls instead of clipping so a
+                long "Last errors: ..." tail is always reachable.
+                role="alert" is applied only once the row is expanded: this
+                text is static content that is present at load, and marking
+                every permanently-visible failure box as a live alert would
+                make a screen reader announce each one on arrival. */}
+            <div
+              role={expanded ? "alert" : undefined}
+              className="rounded-lg border border-rose-500/30 bg-rose-950/20 px-3 py-2.5"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" aria-hidden="true" />
+                <p className="max-h-32 min-w-0 flex-1 overflow-y-auto font-mono text-[11px] leading-relaxed break-words text-rose-100">
+                  {errorText}
+                </p>
+              </div>
+              {copyError && <p className="mt-1.5 text-[11px] font-mono text-rose-300">{copyError}</p>}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <MetaFact label="Status" value={<span className="text-rose-300">Failed</span>} />
+              <span
+                className="inline-flex items-baseline gap-1.5"
+                title="No score — the analysis never produced a risk assessment"
+              >
+                <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Risk</span>
+                <span className="font-mono text-xs text-zinc-500">Not scored</span>
+              </span>
               <a
-                href={repoUrl}
+                href={commitUrl || `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}`}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100 hover:text-white transition-colors"
+                className="inline-flex items-center gap-1 font-mono text-xs text-zinc-400 hover:text-zinc-100 transition-colors"
+                title="View commit on GitHub"
               >
-                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
-                <span>{repoName}</span>
+                <GitCommit className="h-3 w-3 text-zinc-500" aria-hidden="true" />
+                {commitShort}
               </a>
-            ) : (
-              <span className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100">
-                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
-                <span>{repoName}</span>
-              </span>
-            )}
-            <IdentityPill review={review} />
-            <span className="inline-flex items-center rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
-              Error
-            </span>
-            <span className="text-xs text-zinc-400 font-mono">
-              {formatRelativeTime(review.created_at)}
-            </span>
+            </div>
           </div>
 
-          {review.pr_title && (
-            <h3 className="text-base font-bold tracking-tight text-zinc-50 leading-snug">
-              {review.pr_title}
-            </h3>
-          )}
-
-          <div role="alert" className="flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-950/20 px-3 py-2 text-xs text-rose-200 leading-relaxed">
-            <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-rose-400" />
-            <span>{errorText}</span>
-          </div>
-
-          {/* No telemetry: every verdict cell is an em-dash */}
-          <dl className="grid grid-cols-2 lg:grid-cols-4 gap-px overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-800/80 text-xs font-mono">
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Status</dt>
-              <dd className="text-rose-300 font-semibold">Error</dd>
-            </div>
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">PR Confidence</dt>
-              <dd className="text-lg font-bold text-zinc-500" title="No score — analysis did not complete">—</dd>
-            </div>
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blockers</dt>
-              <dd className="text-zinc-500">—</dd>
-            </div>
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blast Radius</dt>
-              <dd className="text-zinc-500">—</dd>
-            </div>
-          </dl>
-
-          {/* Compact factual meta: author / branch / SHA only */}
-          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-zinc-400">
-            {review.pr_author && (
-              <span className="inline-flex items-center gap-1">
-                {review.pr_author_avatar ? (
-                  <img
-                    src={review.pr_author_avatar}
-                    alt={review.pr_author}
-                    className="h-3.5 w-3.5 rounded-full object-cover"
-                  />
-                ) : (
-                  <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-zinc-800 text-[9px] font-bold text-zinc-300">
-                    {review.pr_author[0]?.toUpperCase()}
-                  </span>
-                )}
-                <span>@{review.pr_author}</span>
-              </span>
-            )}
-            {(review.head_branch || review.base_branch) && (
-              <span className="inline-flex items-center gap-1">
-                <GitBranch className="h-3 w-3 text-zinc-500" />
-                <span>{review.base_branch || "main"}</span>
-                <span className="text-zinc-600">←</span>
-                <span className="text-zinc-300">{review.head_branch || "head"}</span>
-              </span>
-            )}
-            <a
-              href={commitUrl || `https://github.com/${repoName}/commit/${review.commit_sha}`}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors"
-              title="View commit on GitHub"
-            >
-              <GitCommit className="h-3 w-3 text-zinc-500" />
-              <span>{commitShort}</span>
-            </a>
-          </div>
-        </div>
-
-        {/* Right: retry + audit */}
-        <div className="flex flex-row md:flex-col items-end justify-between gap-3 min-w-[120px]">
-          <div className="flex flex-col items-end gap-2">
+          {/* Right column: fixed width + right-aligned so every row's actions
+              end on the same edge regardless of expand state. */}
+          <div className="flex shrink-0 items-start gap-2 md:w-[164px] md:justify-end">
             <Button
               variant="outline"
               size="sm"
               onClick={onRetry}
               aria-label={`Retry loading reviews (failed: ${identityLabel})`}
-              className="h-7 px-2.5 text-xs gap-1.5 border-rose-500/40 bg-rose-950/30 hover:bg-rose-900/40 text-rose-200"
+              className="h-7 shrink-0 gap-1.5 border-rose-500/40 bg-rose-950/20 px-2.5 text-xs text-rose-200 hover:bg-rose-900/40"
             >
-              <RefreshCw className="h-3.5 w-3.5" />
-              <span>Retry</span>
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+              Retry
             </Button>
             <Button
               variant="outline"
               size="sm"
-              onClick={() => onOpen(review.id)}
-              aria-label={`Full audit for ${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ""}${review.pr_title ? ` — ${review.pr_title}` : ""} (${review.id})`}
-              className="h-7 px-2.5 text-xs gap-1.5 border-amber-500/40 bg-amber-950/30 hover:bg-amber-900/40 text-amber-200"
+              onClick={() => setExpanded((v) => !v)}
+              aria-expanded={expanded}
+              aria-controls={panelId}
+              aria-label={expanded ? `Collapse error details for ${identityLabel}` : `Expand error details for ${identityLabel}`}
+              className="h-7 shrink-0 gap-1.5 border-zinc-700 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 hover:bg-zinc-800"
             >
-              <span>Full audit</span>
-              <ArrowUpRight className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setExpanded(false)}
-              aria-expanded={true}
-              aria-label={`Collapse error details for ${identityLabel}`}
-              className="h-7 px-2.5 text-xs gap-1.5 border-zinc-700 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-300"
-            >
-              <span>Collapse</span>
-              <ChevronUp className="h-3.5 w-3.5" />
+              <span>{expanded ? "Collapse" : "Details"}</span>
+              {expanded ? <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" /> : <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />}
             </Button>
           </div>
         </div>
+
+        {/* Progressive disclosure: identity, failure text and the commit are
+            always visible; everything below is on demand. */}
+        {expanded && (
+          <div id={panelId} className="space-y-4 border-t border-zinc-800/80 pt-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="text-[11px] font-mono font-semibold uppercase tracking-[0.16em] text-zinc-400">
+                Failure details
+              </h4>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCopyError}
+                  className="inline-flex items-center gap-1.5 rounded-[5px] border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-300 transition-colors hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+                >
+                  {copiedError ? (
+                    <>
+                      <Check className="h-3 w-3 text-emerald-400" aria-hidden="true" />
+                      <span className="text-emerald-300">Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3 w-3 text-zinc-400" aria-hidden="true" />
+                      Copy reason
+                    </>
+                  )}
+                </button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onOpen(review.id)}
+                  aria-label={`Full audit for ${identityLabel} (${review.id})`}
+                  className="h-7 gap-1.5 border-zinc-700 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 hover:bg-zinc-800"
+                >
+                  <span>Full audit</span>
+                  <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+                </Button>
+              </div>
+            </div>
+
+            <p className="text-[11px] leading-relaxed text-zinc-400">
+              No risk score, confidence or blocker telemetry exists for this review — the analysis
+              never completed. Retry re-polls the review list; it does not re-run the model, because
+              the reviews API is read-only.
+            </p>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-zinc-400">
+              {(review.head_branch || review.base_branch) && (
+                <span className="inline-flex items-center gap-1">
+                  <GitBranch className="h-3 w-3 text-zinc-500" aria-hidden="true" />
+                  <span>{review.base_branch || "main"}</span>
+                  <span className="text-zinc-600">←</span>
+                  <span className="text-zinc-300">{review.head_branch || "head"}</span>
+                </span>
+              )}
+              {review.pr_author && <span>opened by @{review.pr_author}</span>}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1011,12 +1079,11 @@ function FailedReviewCard({
  * completed branches, never this card; unscored suppressed rows (no token
  * telemetry + no real summary, see hasCompletedAnalysis) render this card
  * with a "Suppressed" pill.
- * Renders NO
- * verdict telemetry — Queued/Analyzing pill, em-dash confidence, neutral
- * gauge, the queued summary verbatim. A pending row carries the column
- * defaults (risk_score 0, findings []) which would otherwise read as
- * Great-to-Merge / SAFE with 10/10 confidence. No Retry: nothing failed —
- * Refresh re-polls the GET-only list.
+ *
+ * Renders NO verdict telemetry — the queued summary verbatim, a "not scored"
+ * label instead of a fabricated 10/10. No Retry: nothing failed. Renders
+ * through the same RowIdentity skeleton as every other state so an in-flight
+ * row keeps the same baseline as a scored one.
  */
 function PendingReviewCard({
   review,
@@ -1025,91 +1092,251 @@ function PendingReviewCard({
   review: CodeReviewOut;
   onOpen: (id: string) => void;
 }) {
-  const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
-  const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
   const label = isSuppressedUnscored(review) ? "Suppressed" : pendingLabelFor(review);
+  const outcome = pendingOutcome(review.status);
+
+  const statusChip = (
+    <span className="inline-flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
+      <span className="relative flex h-1.5 w-1.5" aria-hidden="true">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-zinc-400 opacity-60" />
+        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-zinc-400" />
+      </span>
+      {label}
+    </span>
+  );
 
   return (
-    <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]">
-      <div className="flex flex-col md:flex-row md:items-start justify-between gap-5">
-        {/* Left: neutral gauge — no score implied */}
-        <div className="flex items-center md:flex-col justify-start md:justify-center gap-4 md:min-w-[80px]">
-          <RiskGauge score={review.risk_score} size={64} neutral />
+    <div className={ROW_SURFACE}>
+      <div className="flex flex-col gap-5 p-5 md:flex-row md:items-start">
+        <div className="flex items-center gap-4 md:min-w-[84px] md:flex-col md:justify-center">
+          <RiskGauge riskScore={review.risk_score} size={64} neutral />
         </div>
 
-        {/* Center: identity + queued summary + em-dash telemetry */}
-        <div className="flex-1 min-w-0 space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            {repoUrl ? (
-              <a
-                href={repoUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100 hover:text-white transition-colors"
-              >
-                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
-                <span>{repoName}</span>
-              </a>
-            ) : (
-              <span className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100">
-                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
-                <span>{repoName}</span>
-              </span>
-            )}
-            <IdentityPill review={review} />
-            <span className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-400">
-              {label}
-            </span>
-            <span className="text-xs text-zinc-400 font-mono">
-              {formatRelativeTime(review.created_at)}
-            </span>
-          </div>
+        <div className="min-w-0 flex-1 space-y-3">
+          <RowIdentity review={review} chip={statusChip} compact />
 
           {review.pr_title && (
-            <h3 className="text-base font-bold tracking-tight text-zinc-50 leading-snug">
+            <h3 className="text-[15px] font-bold leading-snug tracking-tight text-zinc-50">
               {review.pr_title}
             </h3>
           )}
 
-          <p className="text-xs text-zinc-400 leading-relaxed font-sans">
-            {review.summary}
-          </p>
+          <p className="text-xs leading-relaxed text-zinc-400">{review.summary}</p>
 
-          {/* No telemetry: every verdict cell is an em-dash */}
-          <dl className="grid grid-cols-2 lg:grid-cols-4 gap-px overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-800/80 text-xs font-mono">
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Status</dt>
-              <dd><span className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-semibold text-zinc-400">{label}</span></dd>
-            </div>
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">PR Confidence</dt>
-              <dd className="text-lg font-bold text-zinc-500" title="No score — analysis has not completed">—</dd>
-            </div>
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blockers</dt>
-              <dd className="text-zinc-500">—</dd>
-            </div>
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blast Radius</dt>
-              <dd className="text-zinc-500">—</dd>
-            </div>
-          </dl>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <MetaFact label="Status" value={<span className="text-zinc-300">{label}</span>} />
+            <MetaFact
+              label="Risk"
+              value={<span className="text-zinc-500">Not scored</span>}
+              tone="text-zinc-500"
+            />
+          </div>
         </div>
 
-        {/* Right: audit only — no retry, nothing failed */}
-        <div className="flex flex-row md:flex-col items-end justify-between gap-3 min-w-[120px]">
-          <div className="flex flex-col items-end gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => onOpen(review.id)}
-              aria-label={`Full audit for ${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ""}${review.pr_title ? ` — ${review.pr_title}` : ""} (${review.id})`}
-              className="h-7 px-2.5 text-xs gap-1.5 border-amber-500/40 bg-amber-950/30 hover:bg-amber-900/40 text-amber-200"
-            >
-              <span>Full audit</span>
-              <ArrowUpRight className="h-3.5 w-3.5" />
-            </Button>
-          </div>
+        <div className="flex shrink-0 items-start gap-2 md:w-[164px] md:justify-end">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onOpen(review.id)}
+            aria-label={`Full audit for ${review.repo_owner ?? "Repository"}/${review.repo_name ?? ""}${
+              review.pr_number ? ` PR #${review.pr_number}` : ""
+            }${review.pr_title ? ` — ${review.pr_title}` : ""} (${review.id})`}
+            className="h-7 shrink-0 gap-1.5 border-zinc-700 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 hover:bg-zinc-800"
+          >
+            <span>Full audit</span>
+            <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Button>
+        </div>
+      </div>
+      <span className="sr-only">{outcome.meaning}</span>
+    </div>
+  );
+}
+
+/**
+ * Triage Summary — the one-glance answer to "what needs my attention?".
+ *
+ * Five outcome counters, ordered by how much they demand a human decision.
+ * Each is a real toggle filter with `aria-pressed`, so the strip is both
+ * orientation and control. Counts are honest: a review contributes to exactly
+ * one bucket, and failed / in-progress rows never inflate the scored numbers.
+ *
+ * This sits directly under the header and directly above the list, so the
+ * eye lands on "3 need changes" before it lands on nine identical failure
+ * rows. The dot + label pairing means every counter is readable without
+ * colour.
+ */
+function TriageSummary({
+  counts,
+  activeOutcome,
+  onToggle,
+}: {
+  counts: Record<OutcomeKey, number>;
+  activeOutcome: OutcomeKey | null;
+  onToggle: (key: OutcomeKey | null) => void;
+}) {
+  const buckets: {
+    key: OutcomeKey;
+    label: string;
+    dot: string;
+    text: string;
+    active: string;
+    meaning: string;
+  }[] = [
+    {
+      key: "changes_requested",
+      label: "Need changes",
+      dot: "bg-rose-400",
+      text: "text-rose-300",
+      active: "border-rose-500/60 bg-rose-950/40 text-rose-200",
+      meaning: "Must-fix findings or a critical risk score. Address before merge.",
+    },
+    {
+      key: "advisory",
+      label: "Review advised",
+      dot: "bg-amber-400",
+      text: "text-amber-300",
+      active: "border-amber-500/60 bg-amber-950/40 text-amber-200",
+      meaning: "No must-fix findings, but the change carries real risk.",
+    },
+    {
+      key: "in_progress",
+      label: "In progress",
+      dot: "bg-zinc-400",
+      text: "text-zinc-300",
+      active: "border-zinc-500/60 bg-zinc-800 text-zinc-100",
+      meaning: "Still running. A verdict appears here once the analysis lands.",
+    },
+    {
+      key: "failed",
+      label: "Failed",
+      dot: "bg-rose-300",
+      text: "text-rose-200",
+      active: "border-rose-500/60 bg-rose-950/40 text-rose-100",
+      meaning: "The analysis never completed. Retry, or inspect the failure reason.",
+    },
+    {
+      key: "clean",
+      label: "Great to merge",
+      dot: "bg-emerald-400",
+      text: "text-emerald-300",
+      active: "border-emerald-500/60 bg-emerald-950/40 text-emerald-200",
+      meaning: "No blockers and a low risk score. Routine review is enough.",
+    },
+  ];
+
+  const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+  const actionable = counts.changes_requested + counts.advisory;
+
+  return (
+    <section
+      aria-label="Review triage summary"
+      className="rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        {/* Lead sentence — the triage verdict in words. */}
+        <p className="mr-1 text-xs text-zinc-400">
+          {actionable > 0 ? (
+            <>
+              <span className="font-semibold text-zinc-100">{actionable}</span>{" "}
+              {actionable === 1 ? "review needs" : "reviews need"} a decision before merge
+              {counts.failed > 0 && (
+                <>
+                  {" · "}
+                  <span className="font-semibold text-rose-300">{counts.failed}</span> failed to analyse
+                </>
+              )}
+            </>
+          ) : counts.in_progress > 0 ? (
+            <>
+              <span className="font-semibold text-zinc-100">{counts.in_progress}</span>{" "}
+              {counts.in_progress === 1 ? "analysis is" : "analyses are"} still running
+            </>
+          ) : (
+            <>Nothing needs a decision right now</>
+          )}
+        </p>
+
+        {/* Counters act as filters. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onToggle(null)}
+            aria-pressed={activeOutcome === null}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400",
+              activeOutcome === null
+                ? "border-zinc-500/60 bg-zinc-800 font-semibold text-zinc-100"
+                : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+            )}
+          >
+            All
+            <span className="text-zinc-500">{total}</span>
+          </button>
+          {buckets.map((bucket) => {
+            const count = counts[bucket.key];
+            const isActive = activeOutcome === bucket.key;
+            return (
+              <button
+                key={bucket.key}
+                type="button"
+                onClick={() => onToggle(isActive ? null : bucket.key)}
+                aria-pressed={isActive}
+                title={bucket.meaning}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400",
+                  isActive ? cn("font-semibold", bucket.active) : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                )}
+              >
+                <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", bucket.dot)} aria-hidden="true" />
+                <span>{bucket.label}</span>
+                <span className={isActive ? "opacity-80" : "text-zinc-500"}>{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Failure cluster banner.
+ *
+ * Rendered once per distinct root cause instead of repeating the same sentence
+ * on every failed row. This is the difference between "the free tier is
+ * exhausted, nine times" as a fact the user can act on, and nine cards of
+ * noise that bury the reviews they actually need to read.
+ *
+ * Only rendered when there are two or more failures. With a single failure the
+ * row itself already states the cause in full, so a banner would just print
+ * the same sentence twice.
+ */
+function FailureClusterBanner({ clusters }: { clusters: { signature: string; count: number }[] }) {
+  const total = clusters.reduce((sum, c) => sum + c.count, 0);
+  if (clusters.length === 0 || total < 2) return null;
+  return (
+    <div
+      role="status"
+      className="rounded-xl border border-rose-500/30 bg-rose-950/20 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+    >
+      <div className="flex items-start gap-2.5">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <h3 className="text-xs font-semibold text-rose-100">
+            {total} failed {clusters.length === 1 ? "analysis" : "analyses"}
+            {clusters.length > 1 && ` across ${clusters.length} causes`}
+          </h3>
+          <ul className="mt-1.5 space-y-1">
+            {clusters.map((cluster) => (
+              <li key={cluster.signature} className="flex items-baseline gap-2 text-[11px]">
+                <span className="shrink-0 rounded border border-rose-500/30 bg-rose-950/40 px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums text-rose-300">
+                  {cluster.count}
+                </span>
+                <span className="min-w-0 flex-1 font-mono text-rose-100/90">{cluster.signature}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       </div>
     </div>
@@ -1117,15 +1344,26 @@ function PendingReviewCard({
 }
 
 /**
- * Main Review Card (overview row). Compact by design: identity, confidence,
- * blast-radius strip, category pills. Full audit opens via `onOpen`.
+ * Main Review Card (overview row).
+ *
+ * Hierarchy, in the order the eye should move:
+ *   1. Verdict chip — the merge decision, on the identity line.
+ *   2. Must-fix blocker count — the only number that means "act on this".
+ *   3. Title + summary.
+ *   4. Confidence / diff / blast radius / tokens — one quiet line.
+ *
+ * The previous layout gave `risk 45/100`, `6/10` confidence, blocker counts
+ * and blast radius four equal-weight bordered cells, so nothing said where to
+ * look first; and it printed the finding count three times (blocker cell,
+ * footer meta, right-hand telemetry). Collapsed and expanded rows now share
+ * one structure, so the right edge no longer shifts when a row expands.
  */
 function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen: (id: string) => void; onRetry: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [copiedSha, setCopiedSha] = useState(false);
   const [copyShaError, setCopyShaError] = useState<string | null>(null);
+  const findingsPanelId = `findings-${review.id}`;
   const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
-  const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
   const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
 
   // Category counts
@@ -1155,9 +1393,11 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
     }
   };
 
-  const failed = isReviewFailed(review);
-  const suppressed = isSuppressed(review);
-  if (failed) {
+  // Must run before the early returns below: React requires hooks in a stable
+  // order across renders, and a failed/pending row would otherwise skip it.
+  const isPrAssociated = useIsPrAssociated(review);
+
+  if (isReviewFailed(review)) {
     return <FailedReviewCard review={review} onOpen={onOpen} onRetry={onRetry} />;
   }
 
@@ -1173,258 +1413,229 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
   const filesCount = blast.filesCount;
   const additions = blast.additions;
   const deletions = blast.deletions;
-  const confidence = confidenceFromRisk(review.risk_score);
-  const blockers = blockerCounts(review);
+  const blockers = blockerCounts(review.findings);
   const verdict = verdictFor(review);
   const radius = blastRadiusSummary(review);
+  const suppressed = isSuppressed(review);
+  const findingCount = review.findings.length;
+
+  const verdictChip = (
+    <span
+      className={cn(
+        "inline-flex items-center whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-mono font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]",
+        verdict.band.chip
+      )}
+    >
+      <span className={cn("mr-1.5 h-1.5 w-1.5 shrink-0 rounded-full", verdict.band.dot)} aria-hidden="true" />
+      {verdict.label}
+    </span>
+  );
 
   return (
-    <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)] transition-all hover:border-zinc-700/90">
-      <div className="flex flex-col md:flex-row md:items-start justify-between gap-5">
-        {/* Left: Gauge + risk score */}
-        <div className="flex items-center md:flex-col justify-start md:justify-center gap-1.5 md:min-w-[80px]">
-          <RiskGauge score={review.risk_score} size={64} />
-          <span className="md:text-center text-[10px] font-mono text-zinc-500">
-            risk <span className="text-zinc-300 font-semibold">{review.risk_score}/100</span>
-          </span>
+    <div className={cn(ROW_SURFACE, "transition-colors hover:border-zinc-700/80")}>
+      <div className="flex flex-col gap-5 p-5 md:flex-row md:items-start">
+        {/* Gauge — same footprint in every state, so the identity line always
+            starts at the same horizontal offset. */}
+        <div className="flex items-center gap-4 md:min-w-[84px] md:flex-col md:justify-center">
+          <RiskGauge riskScore={review.risk_score} size={64} />
         </div>
 
-        {/* Center: report identity, summary, audit strip */}
-        <div className="flex-1 min-w-0 space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Repo link — prominent report identity */}
-            {repoUrl ? (
-              <a
-                href={repoUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100 hover:text-white transition-colors"
+        {/* Center: report identity, summary, decision line */}
+        <div className="min-w-0 flex-1 space-y-3">
+          {/* RowIdentity renders repo -> PR/Push pill -> verdict chip ->
+              author -> time. Shared with the failure and pending rows so the
+              leading edge of every card is identical. */}
+          <RowIdentity review={review} chip={verdictChip} />
+
+          {/* Secondary identity facts, one step down from the repo line. */}
+          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+            {suppressed && (
+              <span
+                className="inline-flex items-center rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-400"
+                title="Analysis finished - publishing to GitHub was skipped by repo settings"
               >
-                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
-                <span>{repoName}</span>
-              </a>
-            ) : (
-              <span className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100">
-                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
-                <span>{repoName}</span>
+                Publication skipped
               </span>
             )}
-
-            {/* Identity pill — amber PR# when PR-associated, equal-weight
-                Push @ sha for direct pushes (pr_number NULL), verdict pill
-                alongside in both cases */}
-            <div className="inline-flex items-center gap-1.5">
-              <IdentityPill review={review} />
-              <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-mono font-semibold", verdict.color)}>
-                {verdict.label}
+            {(review.head_branch || review.base_branch) && (
+              <span className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-900/60 px-1.5 py-0.5">
+                <GitBranch className="h-3 w-3 text-zinc-500" aria-hidden="true" />
+                <span className="text-zinc-400">{review.base_branch || "main"}</span>
+                <span className="text-zinc-600" aria-hidden="true">&#8592;</span>
+                <span className="text-amber-400">{review.head_branch || "head"}</span>
               </span>
-              {suppressed && (
-                <span
-                  className="inline-flex items-center rounded-full border border-zinc-700/60 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-semibold text-zinc-400"
-                  title="Analysis finished — publishing to GitHub was skipped by repo settings"
+            )}
+            {isPrAssociated ? (
+              <span className="inline-flex items-center rounded border border-zinc-800 bg-zinc-900/60">
+                <a
+                  href={commitUrl || `https://github.com/${repoName}/commit/${review.commit_sha}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 border-r border-zinc-800 py-0.5 pl-1.5 pr-1.5 text-zinc-400 transition-colors hover:text-zinc-100"
+                  title="View commit on GitHub"
                 >
-                  Publication skipped
-                </span>
-              )}
-              {!review.pr_number && (
+                  <GitCommit className="h-3 w-3 text-zinc-500" aria-hidden="true" />
+                  {commitShort}
+                </a>
                 <button
                   type="button"
                   onClick={handleCopySha}
-                  className="rounded-sm text-zinc-500 hover:text-zinc-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70"
+                  className="rounded-sm py-0.5 pl-1.5 pr-1 text-zinc-500 transition-colors hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
                   title="Copy commit SHA"
                   aria-label="Copy commit SHA"
                 >
                   {copiedSha ? (
-                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    <Check className="h-3 w-3 text-emerald-400" aria-hidden="true" />
                   ) : (
-                    <Copy className="h-3.5 w-3.5" />
+                    <Copy className="h-3 w-3" aria-hidden="true" />
                   )}
                 </button>
-              )}
-            </div>
-
-            {/* Author Badge */}
-            {review.pr_author && (
-              <div className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
-                {review.pr_author_avatar ? (
-                  <img
-                    src={review.pr_author_avatar}
-                    alt={review.pr_author}
-                    className="h-3.5 w-3.5 rounded-full object-cover"
-                  />
-                ) : (
-                  <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-zinc-800 text-[9px] font-bold text-zinc-300">
-                    {review.pr_author[0]?.toUpperCase()}
-                  </span>
-                )}
-                <span className="font-mono text-xs text-zinc-300">@{review.pr_author}</span>
-              </div>
-            )}
-
-            {/* Branch Flow Pill */}
-            {(review.head_branch || review.base_branch) && (
-              <div className="inline-flex items-center gap-1.5 rounded bg-zinc-900/90 border border-zinc-800 px-2 py-0.5 text-[11px] font-mono">
-                <GitBranch className="h-3 w-3 text-zinc-500" />
-                <span className="text-zinc-400">{review.base_branch || "main"}</span>
-                <span className="text-zinc-500">←</span>
-                <span className="text-amber-400 font-medium">{review.head_branch || "head"}</span>
-              </div>
-            )}
-
-            {/* Commit SHA with 1-click copy — PR rows only. Push rows carry
-                the sha in the Push pill with its own copy affordance above. */}
-            {review.pr_number ? (
-            <div className="inline-flex items-center rounded bg-zinc-900/80 border border-zinc-800 px-1.5 py-0.5 text-xs font-mono text-zinc-400">
-              <a
-                href={commitUrl || `https://github.com/${repoName}/commit/${review.commit_sha}`}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors pr-1.5 border-r border-zinc-800"
-                title="View commit on GitHub"
-              >
-                <GitCommit className="h-3 w-3 text-zinc-500" />
-                <span>{commitShort}</span>
-              </a>
+              </span>
+            ) : (
+              /* Push rows carry the sha inside the Push pill; give them the
+                 same one-click copy affordance PR rows get. */
               <button
                 type="button"
                 onClick={handleCopySha}
-                className="rounded-sm pl-1.5 hover:text-zinc-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70"
+                className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-900/60 py-0.5 pl-1.5 pr-1.5 text-zinc-500 transition-colors hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
                 title="Copy commit SHA"
                 aria-label="Copy commit SHA"
               >
                 {copiedSha ? (
-                  <Check className="h-3 w-3 text-emerald-400" />
+                  <Check className="h-3 w-3 text-emerald-400" aria-hidden="true" />
                 ) : (
-                  <Copy className="h-3 w-3 text-zinc-500 hover:text-zinc-300" />
+                  <Copy className="h-3 w-3" aria-hidden="true" />
                 )}
+                Copy SHA
               </button>
-            </div>
-            ) : null}
-
-            <span className="text-zinc-500">•</span>
-            <span className="text-xs text-zinc-400 font-mono">
-              {formatRelativeTime(review.created_at)}
-            </span>
+            )}
           </div>
 
           {copyShaError && (
-            <p role="alert" className="text-[11px] font-mono text-rose-400">
-              {copyShaError}
-            </p>
+            <p role="alert" className="font-mono text-[11px] text-rose-400">{copyShaError}</p>
           )}
 
           {/* Hero PR Title */}
           {review.pr_title && (
-            <h3 className="text-base font-bold tracking-tight text-zinc-50 leading-snug">
+            <h3 className="text-[15px] font-bold leading-snug tracking-tight text-zinc-50">
               {review.pr_title}
             </h3>
           )}
 
-          <p className="text-xs text-zinc-300 leading-relaxed font-sans">
-            {review.summary}
-          </p>
+          <p className="text-xs leading-relaxed text-zinc-300">{review.summary}</p>
 
-          {/* Audit strip: mirrors the shipped audit comment's status table */}
-          <dl className="grid grid-cols-2 lg:grid-cols-4 gap-px overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-800/80 text-xs font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Status</dt>
-              <dd><span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold", verdict.color)}>{verdict.label}</span></dd>
-            </div>
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">PR Confidence</dt>
-              <dd className="text-lg font-bold text-zinc-100" title={`PR Confidence ${confidence}/10 derived from risk score ${review.risk_score}`}>{confidence}/10</dd>
-            </div>
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blockers</dt>
-              <dd className="text-zinc-200">
-                Must-Fix <span className={cn("font-bold", blockers.mustFix > 0 ? "text-rose-400" : "text-emerald-400")}>{blockers.mustFix}</span>
-                <span className="text-zinc-600"> · </span>
-                Should-Fix <span className={cn("font-bold", blockers.shouldFix > 0 ? "text-amber-400" : "text-emerald-400")}>{blockers.shouldFix}</span>
-              </dd>
-            </div>
-            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
-              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blast Radius</dt>
-              <dd className="font-bold text-zinc-100">{radius.label}</dd>
-              <dd className="text-[10px] text-zinc-500 font-sans">{radius.explanation}</dd>
-            </div>
-          </dl>
-
-          {/* Compact diff telemetry + findings count */}
-          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono text-zinc-400">
-            <span className="text-zinc-100 font-semibold">{filesCount} {filesCount === 1 ? "file" : "files"}</span>
-            <span className="text-emerald-400 font-semibold">+{additions}</span>
-            <span className="text-rose-400 font-semibold">-{deletions}</span>
-            <span className="text-zinc-700">|</span>
-            <span>{review.findings.length} {review.findings.length === 1 ? "finding" : "findings"}</span>
-            <span className="text-zinc-700">|</span>
-            <span>{review.input_tokens + review.output_tokens} tok</span>
+          {/* Tier 1 - the decision. The verdict is restated as a word plus
+              the blocker split, which is the only number on this row that
+              means "act on this". The finding total is deliberately NOT
+              repeated here; it appears once, in the findings toggle. */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-l-2 border-zinc-800 pl-3">
+            <span className={cn("inline-flex items-center gap-1.5 text-sm font-semibold", verdict.band.text)}>
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+              {verdict.label}
+            </span>
+            <span className="inline-flex items-center gap-1.5 text-xs text-zinc-400">
+              Must-Fix
+              <span className={cn("font-mono text-sm font-bold tabular-nums", blockers.mustFix > 0 ? "text-rose-400" : "text-emerald-400")}>
+                {blockers.mustFix}
+              </span>
+              <span className="text-zinc-700" aria-hidden="true">&#183;</span>
+              Should-Fix
+              <span className={cn("font-mono text-sm font-bold tabular-nums", blockers.shouldFix > 0 ? "text-amber-400" : "text-emerald-400")}>
+                {blockers.shouldFix}
+              </span>
+            </span>
           </div>
 
-          {/* Finding Category Badges */}
-          <div className="flex flex-wrap items-center gap-2 pt-1">
+          {/* Tier 2 - supporting telemetry on one quiet line, no boxes.
+              Confidence lives in the ring, so this line carries the raw
+              0-100 risk score the ring no longer shows. */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 font-mono text-[11px]">
+            <MetaFact
+              label="Risk"
+              value={`${review.risk_score}/100`}
+              tone={cn("tabular-nums", verdict.band.text)}
+            />
+            <MetaFact
+              label="Diff"
+              value={
+                <span>
+                  {filesCount} {filesCount === 1 ? "file" : "files"}{" "}
+                  <span className="text-emerald-400">+{additions}</span>
+                  <span className="text-rose-400">-{deletions}</span>
+                </span>
+              }
+            />
+            <span className="inline-flex items-baseline gap-1.5">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Blast</span>
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400" title={radius.explanation}>
+                {radius.label}
+              </span>
+            </span>
+            <span className="text-zinc-600">{review.input_tokens + review.output_tokens} tok</span>
+          </div>
+
+          {/* Tier 3 - finding categories. Last thing read, never competing
+              with the decision line above. */}
+          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
             {categoryCounts.security > 0 && (
               <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/30 bg-rose-950/40 px-2 py-0.5 text-[10px] font-mono text-rose-300">
-                <Lock className="h-2.5 w-2.5 text-rose-400" />
+                <Lock className="h-2.5 w-2.5 text-rose-400" aria-hidden="true" />
                 {categoryCounts.security} Security
               </span>
             )}
             {categoryCounts.logic > 0 && (
               <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-950/40 px-2 py-0.5 text-[10px] font-mono text-amber-300">
-                <Bug className="h-2.5 w-2.5 text-amber-400" />
+                <Bug className="h-2.5 w-2.5 text-amber-400" aria-hidden="true" />
                 {categoryCounts.logic} Logic
               </span>
             )}
             {categoryCounts.performance > 0 && (
               <span className="inline-flex items-center gap-1 rounded-full border border-cyan-500/30 bg-cyan-950/40 px-2 py-0.5 text-[10px] font-mono text-cyan-300">
-                <Zap className="h-2.5 w-2.5 text-cyan-400" />
+                <Zap className="h-2.5 w-2.5 text-cyan-400" aria-hidden="true" />
                 {categoryCounts.performance} Perf
               </span>
             )}
             {categoryCounts.api_compatibility > 0 && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-purple-500/30 bg-purple-950/40 px-2 py-0.5 text-[10px] font-mono text-purple-300">
-                <Boxes className="h-2.5 w-2.5 text-purple-400" />
+              <span className="inline-flex items-center gap-1 rounded-full border border-zinc-600/50 bg-zinc-900/60 px-2 py-0.5 text-[10px] font-mono text-zinc-300">
+                <Boxes className="h-2.5 w-2.5 text-zinc-400" aria-hidden="true" />
                 {categoryCounts.api_compatibility} API
               </span>
             )}
-            {review.findings.length === 0 && (
+            {findingCount === 0 && (
               <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-950/30 px-2 py-0.5 text-[10px] font-mono text-emerald-300">
-                <Check className="h-2.5 w-2.5 text-emerald-400" />
+                <Check className="h-2.5 w-2.5 text-emerald-400" aria-hidden="true" />
                 No regressions detected
               </span>
             )}
           </div>
         </div>
 
-        {/* Right: Actions & Telemetry */}
-        <div className="flex flex-row md:flex-col items-end justify-between gap-3 min-w-[120px]">
-          <div className="text-right text-[11px] font-mono text-zinc-400 space-y-0.5">
-            <div>{review.findings.length} {review.findings.length === 1 ? "finding" : "findings"}</div>
-            <div>{review.input_tokens + review.output_tokens} tok</div>
-          </div>
-
-          <div className="flex flex-col items-end gap-2">
+        {/* Right column - fixed width so every row's actions end on the same
+            edge whether or not the findings panel is open. */}
+        <div className="flex shrink-0 flex-col items-stretch gap-2 md:w-[164px] md:items-end">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onOpen(review.id)}
+            aria-label={`Full audit for ${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ""}${review.pr_title ? ` - ${review.pr_title}` : ""} (${review.id})`}
+            className="h-7 shrink-0 gap-1.5 border-zinc-700 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 hover:bg-zinc-800"
+          >
+            <span>Full audit</span>
+            <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Button>
+          {findingCount > 0 && (
             <Button
               variant="outline"
               size="sm"
-              onClick={() => onOpen(review.id)}
-              aria-label={`Full audit for ${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ""}${review.pr_title ? ` — ${review.pr_title}` : ""} (${review.id})`}
-              className="h-7 px-2.5 text-xs gap-1.5 border-amber-500/40 bg-amber-950/30 hover:bg-amber-900/40 text-amber-200"
+              onClick={() => setExpanded(!expanded)}
+              aria-expanded={expanded}
+              aria-controls={findingsPanelId}
+              className="h-7 shrink-0 gap-1.5 border-zinc-700 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 hover:bg-zinc-800"
             >
-              <span>Full audit</span>
-              <ArrowUpRight className="h-3.5 w-3.5" />
+              <span>{expanded ? "Hide findings" : `Review (${findingCount})`}</span>
+              {expanded ? <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" /> : <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />}
             </Button>
-            {review.findings.length > 0 && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setExpanded(!expanded)}
-                className="h-7 px-2.5 text-xs gap-1.5 border-zinc-700 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200"
-              >
-                <span>{expanded ? "Collapse" : `Review (${review.findings.length})`}</span>
-                {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-              </Button>
-            )}
-          </div>
+          )}
         </div>
       </div>
 
@@ -1467,7 +1678,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
   const errorText = review.failure_reason ?? review.summary;
   const blast = getBlastStats(review);
   const confidence = confidenceFromRisk(review.risk_score);
-  const blockers = blockerCounts(review);
+  const blockers = blockerCounts(review.findings);
   const verdict = verdictFor(review);
   const radius = blastRadiusSummary(review);
   const touchedFiles = useMemo(
@@ -1494,6 +1705,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
 
   const shownFiles = touchedFiles.slice(0, 8);
   const hiddenFiles = touchedFiles.length - shownFiles.length;
+  const isPrAssociated = useIsPrAssociated(review);
 
   return (
     <div className="space-y-6">
@@ -1562,10 +1774,10 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
                   <span className="text-amber-400 font-medium">{review.head_branch || "head"}</span>
                 </div>
               )}
-              {/* Commit SHA chip — PR rows only, mirroring the overview card.
-                  Push rows carry the sha in the Push pill with their own copy
-                  affordance alongside (same pattern as the overview row). */}
-              {review.pr_number ? (
+              {/* Commit SHA chip — shown for PR-associated rows (direct or resolved),
+                  mirroring the overview card. Push rows carry the sha in the
+                  Push pill with their own copy affordance alongside. */}
+              {isPrAssociated ? (
               <div className="inline-flex items-center rounded bg-zinc-900/80 border border-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">
                 <a href={commitUrl || `https://github.com/${repoName}/commit/${review.commit_sha}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors pr-1.5 border-r border-zinc-800" title="View commit on GitHub">
                   <GitCommit className="h-3 w-3 text-zinc-500" />
@@ -1590,7 +1802,7 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
           </div>
 
           <div className="flex items-start justify-start lg:justify-center">
-            <RiskGauge score={review.risk_score} size={84} neutral={failed || pending} />
+            <RiskGauge riskScore={review.risk_score} size={84} neutral={failed || pending} />
           </div>
         </div>
       </div>
@@ -1699,39 +1911,79 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
         </>
       ) : (
         <>
-      {/* PR Summary */}
+      {/* PR Summary — the verdict rationale, so it reads as prose at the size a
+          human actually scans, not as a small mono fragment. */}
       <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5">
-        <h3 className="text-xs font-mono font-semibold uppercase tracking-[0.16em] text-zinc-300">PR Summary</h3>
-        <p className="mt-2 text-sm text-zinc-200 leading-relaxed">{review.summary}</p>
+        <h3 className="text-[10px] font-mono font-semibold uppercase tracking-[0.16em] text-zinc-500">PR Summary</h3>
+        <p className="mt-2 max-w-[68ch] text-sm leading-relaxed text-zinc-200">{review.summary}</p>
       </section>
 
-      {/* Status grid */}
-      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
-          <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Status</div>
-          <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-mono font-semibold", verdict.color)}>
-            {verdict.label}
-          </span>
-        </div>
-        <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
-          <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">PR Confidence</div>
-          <div className="font-mono text-xl font-bold text-zinc-100">{confidence}/10</div>
-          <div className="text-[11px] text-zinc-500">Derived from risk score {review.risk_score}</div>
-        </div>
-        <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
-          <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Blockers</div>
-          <div className="font-mono text-sm text-zinc-200">
-            Must-Fix <span className={cn("font-bold", blockers.mustFix > 0 ? "text-rose-400" : "text-emerald-400")}>{blockers.mustFix}</span>
-            <span className="text-zinc-600"> · </span>
-            Should-Fix <span className={cn("font-bold", blockers.shouldFix > 0 ? "text-amber-400" : "text-emerald-400")}>{blockers.shouldFix}</span>
+      {/* Decision panel. The verdict leads because it is the only thing that
+          requires a human decision; confidence lives in the ring, so this
+          states the raw risk score instead of repeating confidence/10. */}
+      <section className="overflow-hidden rounded-xl border border-zinc-800/80 bg-[#0f0f12]">
+        <div className="flex flex-col gap-4 border-b border-zinc-800/80 p-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 space-y-1.5">
+            <div className="text-[10px] font-mono font-semibold uppercase tracking-[0.16em] text-zinc-500">
+              Merge recommendation
+            </div>
+            <div className={cn("flex flex-wrap items-center gap-2 text-lg font-bold tracking-tight", verdict.band.text)}>
+              <ShieldCheck className="h-5 w-5 shrink-0" aria-hidden="true" />
+              {verdict.label}
+            </div>
+            <p className="text-xs leading-relaxed text-zinc-400">{verdict.meaning}</p>
           </div>
-          <div className="text-[11px] text-zinc-500">Critical/high vs medium findings</div>
+          <dl className="grid shrink-0 grid-cols-3 gap-px overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-800/80 font-mono sm:w-auto">
+            <div className="bg-zinc-950/90 px-3.5 py-2.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500">Risk</dt>
+              <dd className={cn("text-base font-bold tabular-nums", verdict.band.text)}>
+                {review.risk_score}
+                <span className="text-[10px] text-zinc-500">/100</span>
+              </dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3.5 py-2.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500">Must-Fix</dt>
+              <dd className={cn("text-base font-bold tabular-nums", blockers.mustFix > 0 ? "text-rose-400" : "text-emerald-400")}>
+                {blockers.mustFix}
+              </dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3.5 py-2.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500">Should-Fix</dt>
+              <dd className={cn("text-base font-bold tabular-nums", blockers.shouldFix > 0 ? "text-amber-400" : "text-emerald-400")}>
+                {blockers.shouldFix}
+              </dd>
+            </div>
+          </dl>
         </div>
-        <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
-          <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Blast Radius</div>
-          <div className="font-mono text-sm font-bold text-zinc-100">{radius.label}</div>
-          <div className="text-[11px] text-zinc-500">{radius.explanation}</div>
-        </div>
+
+        {/* Supporting facts, quieter than the decision above. */}
+        <dl className="grid grid-cols-1 gap-px bg-zinc-800/80 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="bg-zinc-950/90 px-4 py-3 space-y-0.5">
+            <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Confidence</dt>
+            <dd className="text-sm font-bold text-zinc-100">
+              {confidence}/10
+              <span className="ml-1.5 text-[10px] font-normal text-zinc-500">in the ring</span>
+            </dd>
+          </div>
+          <div className="bg-zinc-950/90 px-4 py-3 space-y-0.5">
+            <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Diff</dt>
+            <dd className="font-mono text-sm text-zinc-100">
+              {blast.filesCount} {blast.filesCount === 1 ? "file" : "files"}{" "}
+              <span className="text-emerald-400">+{blast.additions}</span>
+              <span className="text-rose-400">-{blast.deletions}</span>
+            </dd>
+          </div>
+          <div className="bg-zinc-950/90 px-4 py-3 space-y-0.5">
+            <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blast Radius</dt>
+            <dd className="font-mono text-sm font-bold text-zinc-100">{radius.label}</dd>
+            <dd className="text-[10px] text-zinc-500 font-sans">{radius.explanation}</dd>
+          </div>
+          <div className="bg-zinc-950/90 px-4 py-3 space-y-0.5">
+            <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Analysis cost</dt>
+            <dd className="font-mono text-sm text-zinc-100">{review.input_tokens + review.output_tokens} tok</dd>
+            <dd className="text-[10px] text-zinc-500 uppercase">{review.status}</dd>
+          </div>
+        </dl>
       </section>
 
       {/* Structural & Blast Radius Analysis */}
@@ -1833,6 +2085,8 @@ export default function ReviewsPage() {
   const [selectedSeverity, setSelectedSeverity] = useState<string>("all");
   const [highRiskOnly, setHighRiskOnly] = useState<boolean>(false);
   const [hideFailed, setHideFailed] = useState<boolean>(false);
+  const [sortKey, setSortKey] = useState<SortKey>("attention");
+  const [activeOutcome, setActiveOutcome] = useState<OutcomeKey | null>(null);
   const [activeTab, setActiveTab] = useState<"all" | "high_risk" | "avg_risk" | "patches">("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
@@ -2030,6 +2284,54 @@ export default function ReviewsPage() {
       return matchSummary || matchFailure || matchCommit || matchRepo || matchPr || matchFindings;
     });
   }, [reviews, searchQuery, activeTab, hideFailed]);
+
+  /**
+   * Outcome for a row, using the same honesty gates as the cards: a failed
+   * analysis is a failure, an unfinished one is in-progress, and only a
+   * genuinely scored row gets a verdict. Each row lands in exactly one
+   * bucket, so the triage counters always sum to the row count.
+   */
+  const outcomeOf = useCallback(
+    (review: CodeReviewOut): Outcome => {
+      if (isReviewFailed(review)) return FAILED_OUTCOME;
+      if (isReviewPending(review) || isSuppressedUnscored(review)) return pendingOutcome(review.status);
+      return scoredOutcome({ risk_score: review.risk_score, findings: review.findings });
+    },
+    []
+  );
+
+  // Counts drive the triage summary. Computed over the whole loaded window,
+  // not the filtered subset, so switching a filter never makes the summary
+  // contradict itself.
+  const triageCounts = useMemo(() => {
+    const counts: Record<OutcomeKey, number> = {
+      changes_requested: 0,
+      advisory: 0,
+      clean: 0,
+      in_progress: 0,
+      failed: 0,
+    };
+    for (const review of reviews) {
+      counts[outcomeOf(review).key] += 1;
+    }
+    return counts;
+  }, [reviews, outcomeOf]);
+
+  // Distinct root causes behind the failures on this page — stated once in
+  // the cluster banner instead of repeated on every failed row.
+  const failureClusters = useMemo(
+    () => clusterFailures(reviews.filter((r) => isReviewFailed(r))),
+    [reviews]
+  );
+
+  // Triage filter + sort. Applied after the existing repo/severity/search
+  // filters so the new controls compose rather than replace them.
+  const sortedReviews = useMemo(() => {
+    const filtered = activeOutcome
+      ? filteredReviews.filter((r) => outcomeOf(r).key === activeOutcome)
+      : filteredReviews;
+    return sortByAttention(filtered, outcomeOf, sortKey);
+  }, [filteredReviews, activeOutcome, outcomeOf, sortKey]);
 
   // Metric rollups — computed from the current page only (`reviews` holds a
   // single PAGE_SIZE window). Reviews Scanned uses the server-side
@@ -2331,6 +2633,33 @@ export default function ReviewsPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Sort — default "Attention" floats merge-blocking reviews above
+                clean ones and sinks failures to the bottom, so a page full of
+                identical infrastructure errors cannot bury a real finding. */}
+            <div
+              className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1"
+              role="group"
+              aria-label="Sort reviews"
+            >
+              <SlidersHorizontal className="ml-1.5 h-3.5 w-3.5 shrink-0 text-zinc-500" aria-hidden="true" />
+              {SORT_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setSortKey(opt.value)}
+                  aria-pressed={sortKey === opt.value}
+                  className={cn(
+                    "rounded-md px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400",
+                    sortKey === opt.value
+                      ? "bg-zinc-800 font-semibold text-zinc-100 shadow-[0_1px_3px_rgba(0,0,0,0.3)]"
+                      : "text-zinc-500 hover:text-zinc-300"
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
             <div className="relative flex-1 md:w-64">
               <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-500" />
               <Input
@@ -2361,32 +2690,69 @@ export default function ReviewsPage() {
           </div>
         )}
 
+        {/* Triage summary — "what needs attention" in one glance. Hidden
+            while the first load is in flight so it cannot flash empty
+            counters before any data exists. */}
+        {!loading && reviews.length > 0 && (
+          <TriageSummary
+            counts={triageCounts}
+            activeOutcome={activeOutcome}
+            onToggle={setActiveOutcome}
+          />
+        )}
+
+        {/* Distinct root causes behind the failures, stated once. */}
+        {failureClusters.length > 0 && activeOutcome !== "changes_requested" && (
+          <FailureClusterBanner clusters={failureClusters} />
+        )}
+
         {/* Review Cards Stream */}
         {loading && reviews.length === 0 ? (
           <div className="space-y-4">
             {[1, 2, 3].map((n) => (
-              <div key={n} className="rounded-xl border border-zinc-800/80 bg-[#111114] p-5 space-y-3">
-                <div className="flex items-center justify-between">
-                  <Skeleton className="h-5 w-48" />
-                  <Skeleton className="h-5 w-24" />
+              <div key={n} className={cn(ROW_SURFACE, "space-y-4 p-5")}>
+                <div className="flex flex-col gap-5 md:flex-row md:items-start">
+                  <Skeleton className="h-16 w-16 rounded-full md:min-w-[84px]" />
+                  <div className="flex-1 space-y-3">
+                    <div className="flex items-center gap-2.5">
+                      <Skeleton className="h-4 w-48" />
+                      <Skeleton className="h-4 w-24 rounded-full" />
+                      <Skeleton className="h-4 w-16 rounded-full" />
+                    </div>
+                    <Skeleton className="h-4 w-3/5" />
+                    <Skeleton className="h-3 w-full" />
+                    <Skeleton className="h-3 w-2/3" />
+                    <Skeleton className="h-3 w-1/3" />
+                  </div>
+                  <div className="space-y-2 md:w-[164px]">
+                    <Skeleton className="h-7 w-full" />
+                    <Skeleton className="h-7 w-full" />
+                  </div>
                 </div>
-                <Skeleton className="h-4 w-full" />
-                <Skeleton className="h-4 w-3/4" />
               </div>
             ))}
           </div>
-        ) : filteredReviews.length === 0 ? (
+        ) : sortedReviews.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800 bg-[#0c0c0e] py-16 text-center space-y-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 border border-zinc-800 text-zinc-500">
-              <ShieldCheck className="h-6 w-6 text-zinc-500" />
+              {reviews.length === 0 ? (
+                <ShieldCheck className="h-6 w-6 text-zinc-500" />
+              ) : (
+                <Inbox className="h-6 w-6 text-zinc-500" />
+              )}
             </div>
             <div className="space-y-1">
-              <h3 className="text-sm font-semibold text-zinc-200">No Code Reviews Found</h3>
+              <h3 className="text-sm font-semibold text-zinc-200">
+                {reviews.length === 0 ? "No Code Reviews Found" : "Nothing matches these filters"}
+              </h3>
               <p className="text-xs text-zinc-400 max-w-sm">
-                Push commits or open a pull request on your connected repositories to trigger Haunter&apos;s Sentinel.
+                {reviews.length === 0
+                  ? "Push commits or open a pull request on your connected repositories to trigger Haunter's Sentinel."
+                  : "No review on this page matches the current filter combination. Widen or clear the filters to see the rest."}
               </p>
             </div>
-            {(selectedRepoId !== "all" || highRiskOnly || hideFailed || activeTab !== "all" || selectedSeverity !== "all" || searchQuery) && (
+            {(reviews.length > 0 &&
+              (selectedRepoId !== "all" || highRiskOnly || hideFailed || activeTab !== "all" || selectedSeverity !== "all" || searchQuery || activeOutcome !== null)) && (
               <Button
                 variant="outline"
                 size="sm"
@@ -2397,6 +2763,7 @@ export default function ReviewsPage() {
                   setHideFailed(false);
                   setActiveTab("all");
                   setSearchQuery("");
+                  setActiveOutcome(null);
                   setPage(0);
                 }}
                 className="mt-2 text-xs border-zinc-700 hover:bg-zinc-800 text-zinc-300"
@@ -2407,7 +2774,7 @@ export default function ReviewsPage() {
           </div>
         ) : (
           <div className="space-y-5">
-            {filteredReviews.map((review) => (
+            {sortedReviews.map((review) => (
               <ReviewCard key={review.id} review={review} onOpen={openReview} onRetry={handleRefresh} />
             ))}
           </div>
