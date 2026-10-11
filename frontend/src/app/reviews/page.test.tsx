@@ -222,16 +222,16 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
     expect(screen.getByText("docs: update API documentation")).toBeInTheDocument();
 
-    // Click 'Actionable Patches' ribbon tab (only rev_1 has patches)
-    const patchesTab = screen.getByRole("button", { name: /actionable patches/i });
+    // Click 'Patches' ribbon tab (only rev_1 has patches)
+    const patchesTab = screen.getByRole("button", { name: /patches/i });
     await user.click(patchesTab);
 
     // rev_1 should remain visible, rev_2 should be filtered out
     expect(screen.getByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
     expect(screen.queryByText("docs: update API documentation")).not.toBeInTheDocument();
 
-    // Click 'All Reviews' tab to restore
-    const allTab = screen.getByRole("button", { name: /reviews scanned/i });
+    // Click 'Scanned' tab to restore
+    const allTab = screen.getByRole("button", { name: /scanned/i });
     await user.click(allTab);
 
     expect(screen.getByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
@@ -298,15 +298,15 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
     expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
 
-    const scanned = screen.getByText("Reviews Scanned").closest("button")!;
+    const scanned = screen.getByText("Scanned").closest("button")!;
     expect(scanned).toHaveTextContent("28");
 
-    const highRisk = screen.getByText("High Risk Flagged").closest("button")!;
+    const highRisk = screen.getByText(/high-risk ≥ 71/i).closest("button")!;
     expect(highRisk).toHaveTextContent("1");
     expect(highRisk.textContent).toMatch(/this page/i);
 
-    expect(screen.getByText("Across this page")).toBeInTheDocument();
-    expect(screen.getByText(/1-click github suggestions · this page/i)).toBeInTheDocument();
+    expect(screen.getByText(/mean score · this page/i)).toBeInTheDocument();
+    expect(screen.getByText(/with suggested fix · this page/i)).toBeInTheDocument();
   });
 
   it("overview rows show confidence and open a full audit detail view", async () => {
@@ -430,5 +430,116 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     await user.click(screen.getByRole("button", { name: /back to reviews/i }));
     expect(await screen.findByText("docs: update API documentation")).toBeInTheDocument();
     expect(document.activeElement).not.toBe(document.body);
+  });
+
+  describe("failed analyses (honest error states)", () => {
+    const failedReview: CodeReviewOut = {
+      id: "rev_fail",
+      repo_id: "repo_1",
+      repo_owner: "acme",
+      repo_name: "sentinel",
+      commit_sha: "deadbeef12345678",
+      pr_number: 103,
+      pr_title: "feat: risky storage migration",
+      pr_author: "octocat",
+      pr_author_avatar: null,
+      head_branch: "feat/migration",
+      base_branch: "main",
+      pr_url: "https://github.com/acme/sentinel/pull/103",
+      risk_score: 0,
+      summary: "Analysis did not complete.",
+      status: "error",
+      failure_reason: "All 9 free-tier models exhausted (18 total attempts)",
+      input_tokens: 0,
+      output_tokens: 0,
+      created_at: new Date().toISOString(),
+      diff_stats: null,
+      findings: [],
+    };
+
+    it("renders an honest error row: repo+PR#, ERROR pill, em-dash confidence, no fake 10/10 or SAFE", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [failedReview],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      // Identity stays prominent even on error rows
+      expect(await screen.findByText("acme/sentinel")).toBeInTheDocument();
+      expect(screen.getByText("PR #103")).toBeInTheDocument();
+      expect(screen.getByText("feat: risky storage migration")).toBeInTheDocument();
+
+      // Honest error markers
+      expect(screen.getAllByText("Error").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText(/all 9 free-tier models exhausted/i)).toBeInTheDocument();
+      expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
+      expect(screen.getByText("NO SCORE")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+
+      // Lying UI must be gone: risk_score defaults to 0, which used to
+      // render as 10/10 confidence + SAFE gauge.
+      expect(screen.queryByText("10/10")).not.toBeInTheDocument();
+      expect(screen.queryByText("SAFE")).not.toBeInTheDocument();
+      expect(screen.queryByText("Great to Merge")).not.toBeInTheDocument();
+    });
+
+    it("shows an honest error panel with em-dash confidence for failed analyses in detail", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [failedReview],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #103")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: /full audit/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /free-tier models exhausted/i
+      );
+      expect(screen.getByText("NO SCORE")).toBeInTheDocument();
+      expect(screen.queryByText("PR Summary")).not.toBeInTheDocument();
+      expect(screen.queryByText("10/10")).not.toBeInTheDocument();
+      expect(screen.queryByText("Changes Requested")).not.toBeInTheDocument();
+      expect(screen.getByText("Findings Summary (0)")).toBeInTheDocument();
+    });
+  });
+
+  it("unifies the high-risk bar at >= 71: ribbon label, toggle label and min_risk API param", async () => {
+    const user = userEvent.setup();
+    render(<ReviewsPage />);
+
+    expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+    expect(screen.getByText(/high-risk ≥ 71/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Risk ≥ 71" }));
+    expect(vi.mocked(api.getCodeReviews)).toHaveBeenCalledWith(
+      expect.objectContaining({ min_risk: 71 })
+    );
+  });
+
+  it("orders detail sections like the audit comment: summary, status grid, structural analysis, findings", async () => {
+    const user = userEvent.setup();
+    render(<ReviewsPage />);
+
+    await screen.findByText("feat: autonomous remediation sentinel pipeline");
+    await user.click(screen.getAllByRole("button", { name: /full audit/i })[0]);
+
+    const reportTitle = await screen.findByText("Haunter Autonomous Audit Report");
+    const summary = screen.getByText("PR Summary");
+    const confidence = screen.getByText("PR Confidence");
+    const blockers = screen.getByText("Blockers");
+    const blast = screen.getByText("Blast Radius");
+    const structural = screen.getByText(/structural & blast radius analysis/i);
+    const findings = screen.getByText("Findings Summary (1)");
+
+    const follows = (a: Element, b: Element) =>
+      (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    expect(follows(reportTitle, summary)).toBe(true);
+    expect(follows(summary, confidence)).toBe(true);
+    expect(follows(confidence, blockers)).toBe(true);
+    expect(follows(blockers, blast)).toBe(true);
+    expect(follows(blast, structural)).toBe(true);
+    expect(follows(structural, findings)).toBe(true);
   });
 });

@@ -41,28 +41,50 @@ import {
 const PAGE_SIZE = 15;
 
 /**
+ * Single source of truth for the high-risk boundary. Ribbon counts,
+ * the Risk toggle + `min_risk` API param, page stats, verdicts, gauges and
+ * blast-scope heuristics all derive from these — previously the ribbon said
+ * >=71 while the toggle sent min_risk=50 and the gauge used >70.
+ */
+const RISK_CRITICAL = 71;
+const RISK_MODERATE = 31;
+
+/** A review whose analysis never completed — never render verdict telemetry for it. */
+function isReviewFailed(review: CodeReviewOut): boolean {
+  return review.status?.toLowerCase() === "error" || !!review.failure_reason;
+}
+
+/**
  * Calibrated tactile physical gauge for Risk Score (0-100).
  * Replaces unearned neon glow with a clean circular bezel,
  * neutral dark contact shadow, and high-contrast score.
+ *
+ * `neutral` renders the honest no-score state for failed analyses:
+ * zinc track, em-dash, NO SCORE badge — never a fake 0/SAFE.
  */
-function RiskGauge({ score, size = 68 }: { score: number; size?: number }) {
+function RiskGauge({ score, size = 68, neutral = false }: { score: number; size?: number; neutral?: boolean }) {
   const strokeWidth = 5;
   const radius = (size - strokeWidth - 8) / 2;
   const circumference = 2 * Math.PI * radius;
   const clampedScore = Math.max(0, Math.min(100, score));
-  const offset = circumference - (clampedScore / 100) * circumference;
+  const offset = neutral ? circumference : circumference - (clampedScore / 100) * circumference;
 
   let strokeColor = "#10b981"; // emerald
   let textClass = "text-emerald-400";
   let label = "SAFE";
   let badgeColor = "bg-emerald-950/60 text-emerald-300 border-emerald-500/30";
 
-  if (clampedScore > 70) {
+  if (neutral) {
+    strokeColor = "#52525b"; // zinc — no verdict implied
+    textClass = "text-zinc-500";
+    label = "NO SCORE";
+    badgeColor = "bg-zinc-900 text-zinc-500 border-zinc-700/60";
+  } else if (clampedScore >= RISK_CRITICAL) {
     strokeColor = "#f43f5e"; // rose
     textClass = "text-rose-400";
     label = "CRITICAL";
     badgeColor = "bg-rose-950/60 text-rose-300 border-rose-500/30";
-  } else if (clampedScore > 30) {
+  } else if (clampedScore >= RISK_MODERATE) {
     strokeColor = "#f59e0b"; // amber
     textClass = "text-amber-400";
     label = "MODERATE";
@@ -102,7 +124,7 @@ function RiskGauge({ score, size = 68 }: { score: number; size?: number }) {
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
           <span className={cn("font-mono text-sm font-bold tracking-tight", textClass)}>
-            {clampedScore}
+            {neutral ? "—" : clampedScore}
           </span>
         </div>
       </div>
@@ -229,7 +251,7 @@ function getBlastStats(review: CodeReviewOut): {
   let scope: "Targeted" | "Moderate" | "Extensive" = "Targeted";
   let scopeColor = "border-emerald-500/30 bg-emerald-950/40 text-emerald-300";
 
-  if (filesCount > 8 || totalModifications > 250 || review.risk_score > 70) {
+  if (filesCount > 8 || totalModifications > 250 || review.risk_score >= RISK_CRITICAL) {
     scope = "Extensive";
     scopeColor = "border-rose-500/30 bg-rose-950/40 text-rose-300";
   } else if (filesCount > 3 || totalModifications > 60 || review.risk_score > 35) {
@@ -242,7 +264,7 @@ function getBlastStats(review: CodeReviewOut): {
 /** Merge verdict for the detail report header grid. */
 function verdictFor(review: CodeReviewOut): { label: string; color: string } {
   const { mustFix, shouldFix } = blockerCounts(review);
-  if (mustFix > 0 || review.risk_score >= 71) {
+  if (mustFix > 0 || review.risk_score >= RISK_CRITICAL) {
     return { label: "Changes Requested", color: "bg-rose-950/60 text-rose-300 border-rose-500/40" };
   }
   if (review.risk_score <= 30 && shouldFix === 0) {
@@ -521,10 +543,185 @@ function FindingItem({
 }
 
 /**
+ * Honest error row for analyses that never completed (status "error" or a
+ * `failure_reason` such as "All 9 free-tier models exhausted"). Renders NO
+ * verdict telemetry — ERROR pill, em-dash confidence, neutral gauge, the raw
+ * error text, and a Retry that refetches the list. Showing 10/10 + SAFE here
+ * (the risk_score column defaults to 0) would be lying UI.
+ */
+function FailedReviewCard({
+  review,
+  onOpen,
+  onRetry,
+}: {
+  review: CodeReviewOut;
+  onOpen: (id: string) => void;
+  onRetry: () => void;
+}) {
+  const repoName = review.repo_owner && review.repo_name ? `${review.repo_owner}/${review.repo_name}` : "Repository";
+  const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
+  const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
+  const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
+  const commitShort = review.commit_sha ? review.commit_sha.substring(0, 7) : "unknown";
+  const errorText = review.failure_reason ?? review.summary;
+
+  return (
+    <div className="rounded-xl border border-rose-500/30 bg-gradient-to-b from-[#141114] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]">
+      <div className="flex flex-col md:flex-row md:items-start justify-between gap-5">
+        {/* Left: neutral gauge — no score implied */}
+        <div className="flex items-center md:flex-col justify-start md:justify-center gap-4 md:min-w-[80px]">
+          <RiskGauge score={review.risk_score} size={64} neutral />
+        </div>
+
+        {/* Center: identity + raw error */}
+        <div className="flex-1 min-w-0 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            {repoUrl ? (
+              <a
+                href={repoUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100 hover:text-white transition-colors"
+              >
+                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
+                <span>{repoName}</span>
+              </a>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100">
+                <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
+                <span>{repoName}</span>
+              </span>
+            )}
+            {review.pr_number ? (
+              <a
+                href={prUrl || `https://github.com/${repoName}/pull/${review.pr_number}`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-sm font-mono font-bold text-amber-400 hover:text-amber-300 hover:bg-zinc-700/80 transition-colors border border-zinc-700/50"
+              >
+                <GitPullRequest className="h-3.5 w-3.5" />
+                <span>PR #{review.pr_number}</span>
+                <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
+              </a>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono text-zinc-300 border border-zinc-700/50">
+                <GitCommit className="h-3 w-3 text-zinc-400" />
+                Push
+              </span>
+            )}
+            <span className="inline-flex items-center rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
+              Error
+            </span>
+            <span className="text-xs text-zinc-400 font-mono">
+              {formatRelativeTime(review.created_at)}
+            </span>
+          </div>
+
+          {review.pr_title && (
+            <h3 className="text-sm font-semibold text-zinc-100 leading-snug">
+              {review.pr_title}
+            </h3>
+          )}
+
+          <div role="alert" className="flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-950/20 px-3 py-2 text-xs text-rose-200 leading-relaxed">
+            <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-rose-400" />
+            <span>{errorText}</span>
+          </div>
+
+          {/* No telemetry: every verdict cell is an em-dash */}
+          <dl className="grid grid-cols-2 lg:grid-cols-4 gap-px overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-800/80 text-xs font-mono">
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Status</dt>
+              <dd className="text-rose-300 font-semibold">Error</dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">PR Confidence</dt>
+              <dd className="text-lg font-bold text-zinc-500" title="No score — analysis did not complete">—</dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blockers</dt>
+              <dd className="text-zinc-500">—</dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blast Radius</dt>
+              <dd className="text-zinc-500">—</dd>
+            </div>
+          </dl>
+
+          {/* Compact factual meta: author / branch / SHA only */}
+          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-zinc-400">
+            {review.pr_author && (
+              <span className="inline-flex items-center gap-1">
+                {review.pr_author_avatar ? (
+                  <img
+                    src={review.pr_author_avatar}
+                    alt={review.pr_author}
+                    className="h-3.5 w-3.5 rounded-full object-cover"
+                  />
+                ) : (
+                  <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-zinc-800 text-[9px] font-bold text-zinc-300">
+                    {review.pr_author[0]?.toUpperCase()}
+                  </span>
+                )}
+                <span>@{review.pr_author}</span>
+              </span>
+            )}
+            {(review.head_branch || review.base_branch) && (
+              <span className="inline-flex items-center gap-1">
+                <GitBranch className="h-3 w-3 text-zinc-500" />
+                <span>{review.base_branch || "main"}</span>
+                <span className="text-zinc-600">←</span>
+                <span className="text-zinc-300">{review.head_branch || "head"}</span>
+              </span>
+            )}
+            <a
+              href={commitUrl || `https://github.com/${repoName}/commit/${review.commit_sha}`}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors"
+              title="View commit on GitHub"
+            >
+              <GitCommit className="h-3 w-3 text-zinc-500" />
+              <span>{commitShort}</span>
+            </a>
+          </div>
+        </div>
+
+        {/* Right: retry + audit */}
+        <div className="flex flex-row md:flex-col items-end justify-between gap-3 min-w-[120px]">
+          <div className="flex flex-col items-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRetry}
+              aria-label={`Retry loading reviews (failed: ${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ""})`}
+              className="h-7 px-2.5 text-xs gap-1.5 border-rose-500/40 bg-rose-950/30 hover:bg-rose-900/40 text-rose-200"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              <span>Retry</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onOpen(review.id)}
+              aria-label={`Full audit for ${repoName}${review.pr_number ? ` PR #${review.pr_number}` : ""}${review.pr_title ? ` — ${review.pr_title}` : ""} (${review.id})`}
+              className="h-7 px-2.5 text-xs gap-1.5 border-amber-500/40 bg-amber-950/30 hover:bg-amber-900/40 text-amber-200"
+            >
+              <span>Full audit</span>
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Main Review Card (overview row). Compact by design: identity, confidence,
  * blast-radius strip, category pills. Full audit opens via `onOpen`.
  */
-function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: string) => void }) {
+function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen: (id: string) => void; onRetry: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [copiedSha, setCopiedSha] = useState(false);
   const [copyShaError, setCopyShaError] = useState<string | null>(null);
@@ -560,67 +757,68 @@ function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: st
     }
   };
 
-  const prStatus = review.status?.toLowerCase() === "merged"
-    ? { label: "Merged", color: "bg-purple-950/60 text-purple-300 border-purple-500/40" }
-    : review.status?.toLowerCase() === "closed"
-    ? { label: "Closed", color: "bg-zinc-800 text-zinc-400 border-zinc-700" }
-    : { label: "Open", color: "bg-emerald-950/60 text-emerald-300 border-emerald-500/40" };
+  const failed = isReviewFailed(review);
+  if (failed) {
+    return <FailedReviewCard review={review} onOpen={onOpen} onRetry={onRetry} />;
+  }
 
   // Blast Radius Telemetry (shared helper — overview strip + detail report agree)
   const blast = getBlastStats(review);
   const filesCount = blast.filesCount;
   const additions = blast.additions;
   const deletions = blast.deletions;
-  const mutationScope = blast.scope;
-  const mutationScopeColor = blast.scopeColor;
   const confidence = confidenceFromRisk(review.risk_score);
+  const blockers = blockerCounts(review);
+  const verdict = verdictFor(review);
+  const radius = blastRadiusSummary(review);
 
   return (
     <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)] transition-all hover:border-zinc-700/90">
       <div className="flex flex-col md:flex-row md:items-start justify-between gap-5">
-        {/* Left: Gauge */}
-        <div className="flex items-center md:flex-col justify-start md:justify-center gap-4 md:min-w-[80px]">
+        {/* Left: Gauge + risk score */}
+        <div className="flex items-center md:flex-col justify-start md:justify-center gap-1.5 md:min-w-[80px]">
           <RiskGauge score={review.risk_score} size={64} />
+          <span className="md:text-center text-[10px] font-mono text-zinc-500">
+            risk <span className="text-zinc-300 font-semibold">{review.risk_score}/100</span>
+          </span>
         </div>
 
-        {/* Center: Info & Findings overview */}
+        {/* Center: report identity, summary, audit strip */}
         <div className="flex-1 min-w-0 space-y-3">
           <div className="flex flex-wrap items-center gap-2">
-            {/* Repo link */}
+            {/* Repo link — prominent report identity */}
             {repoUrl ? (
               <a
                 href={repoUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold text-zinc-200 hover:text-white transition-colors"
+                className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100 hover:text-white transition-colors"
               >
                 <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
                 <span>{repoName}</span>
               </a>
             ) : (
-              <span className="inline-flex items-center gap-1.5 font-mono text-xs font-semibold text-zinc-200">
+              <span className="inline-flex items-center gap-1.5 font-mono text-sm font-bold text-zinc-100">
                 <FolderGit2 className="h-3.5 w-3.5 text-zinc-400" />
                 <span>{repoName}</span>
               </span>
             )}
 
-            <span className="text-zinc-500">•</span>
-
-            {/* PR Badge with status pill */}
+            {/* PR number — prominent, always visible when present */}
             {review.pr_number ? (
               <div className="inline-flex items-center gap-1.5">
                 <a
                   href={prUrl || `https://github.com/${repoName}/pull/${review.pr_number}`}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-xs font-mono font-medium text-amber-400 hover:text-amber-300 hover:bg-zinc-700/80 transition-colors border border-zinc-700/50"
+                  className="inline-flex items-center gap-1 rounded bg-zinc-800/80 px-2 py-0.5 text-sm font-mono font-bold text-amber-400 hover:text-amber-300 hover:bg-zinc-700/80 transition-colors border border-zinc-700/50"
                 >
-                  <GitPullRequest className="h-3 w-3" />
+                  <GitPullRequest className="h-3.5 w-3.5" />
                   <span>PR #{review.pr_number}</span>
                   <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
                 </a>
-                <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-mono font-medium uppercase tracking-wider", prStatus.color)}>
-                  {prStatus.label}
+                <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-mono font-semibold", verdict.color)}>
+                  {verdict.label}
                 </span>
               </div>
             ) : (
@@ -708,24 +906,40 @@ function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: st
             {review.summary}
           </p>
 
-          {/* Blast Radius Telemetry Strip */}
-          <div className="flex flex-wrap items-center gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-950/70 px-3 py-1.5 text-xs font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
-            <div className="flex items-center gap-1.5 text-zinc-300">
-              <span className="text-[10px] text-zinc-400 font-semibold uppercase tracking-wider">Blast Radius:</span>
-              <span className="text-zinc-100 font-semibold">{filesCount} {filesCount === 1 ? "file" : "files"}</span>
+          {/* Audit strip: mirrors the shipped audit comment's status table */}
+          <dl className="grid grid-cols-2 lg:grid-cols-4 gap-px overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-800/80 text-xs font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]">
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Status</dt>
+              <dd><span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold", verdict.color)}>{verdict.label}</span></dd>
             </div>
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">PR Confidence</dt>
+              <dd className="text-lg font-bold text-zinc-100" title={`PR Confidence ${confidence}/10 derived from risk score ${review.risk_score}`}>{confidence}/10</dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blockers</dt>
+              <dd className="text-zinc-200">
+                Must-Fix <span className={cn("font-bold", blockers.mustFix > 0 ? "text-rose-400" : "text-emerald-400")}>{blockers.mustFix}</span>
+                <span className="text-zinc-600"> · </span>
+                Should-Fix <span className={cn("font-bold", blockers.shouldFix > 0 ? "text-amber-400" : "text-emerald-400")}>{blockers.shouldFix}</span>
+              </dd>
+            </div>
+            <div className="bg-zinc-950/90 px-3 py-2 space-y-0.5">
+              <dt className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Blast Radius</dt>
+              <dd className="font-bold text-zinc-100">{radius.label}</dd>
+              <dd className="text-[10px] text-zinc-500 font-sans">{radius.explanation}</dd>
+            </div>
+          </dl>
+
+          {/* Compact diff telemetry + findings count */}
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono text-zinc-400">
+            <span className="text-zinc-100 font-semibold">{filesCount} {filesCount === 1 ? "file" : "files"}</span>
+            <span className="text-emerald-400 font-semibold">+{additions}</span>
+            <span className="text-rose-400 font-semibold">-{deletions}</span>
             <span className="text-zinc-700">|</span>
-            <div className="flex items-center gap-2">
-              <span className="text-emerald-400 font-semibold">+{additions}</span>
-              <span className="text-rose-400 font-semibold">-{deletions}</span>
-            </div>
+            <span>{review.findings.length} {review.findings.length === 1 ? "finding" : "findings"}</span>
             <span className="text-zinc-700">|</span>
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Mutation Scope:</span>
-              <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider border", mutationScopeColor)}>
-                {mutationScope}
-              </span>
-            </div>
+            <span>{review.input_tokens + review.output_tokens} tok</span>
           </div>
 
           {/* Finding Category Badges */}
@@ -766,11 +980,8 @@ function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: st
         {/* Right: Actions & Telemetry */}
         <div className="flex flex-row md:flex-col items-end justify-between gap-3 min-w-[120px]">
           <div className="text-right text-[11px] font-mono text-zinc-400 space-y-0.5">
-            <div title={`PR Confidence ${confidence}/10 derived from risk score ${review.risk_score}`}>
-              <span className="text-zinc-100 font-semibold">{confidence}/10</span> conf
-            </div>
+            <div>{review.findings.length} {review.findings.length === 1 ? "finding" : "findings"}</div>
             <div>{review.input_tokens + review.output_tokens} tok</div>
-            <div className="text-zinc-400 text-[10px] uppercase font-semibold">{review.status}</div>
           </div>
 
           <div className="flex flex-col items-end gap-2">
@@ -828,9 +1039,11 @@ function ReviewCard({ review, onOpen }: { review: CodeReviewOut; onOpen: (id: st
  * comment format: header identity, PR summary, status/confidence/blockers/
  * blast-radius grid, structural analysis, findings, metadata.
  */
-function ReviewDetail({ review }: { review: CodeReviewOut }) {
+function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: () => void }) {
   const [copiedSha, setCopiedSha] = useState(false);
   const [copyShaError, setCopyShaError] = useState<string | null>(null);
+  const failed = isReviewFailed(review);
+  const errorText = review.failure_reason ?? review.summary;
   const blast = getBlastStats(review);
   const confidence = confidenceFromRisk(review.risk_score);
   const blockers = blockerCounts(review);
@@ -866,7 +1079,10 @@ function ReviewDetail({ review }: { review: CodeReviewOut }) {
     <div className="space-y-5">
       {/* Header: identity */}
       <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]">
-        <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-5">
+        <div className="text-[11px] font-mono font-semibold uppercase tracking-[0.14em] text-zinc-500">
+          Haunter Autonomous Audit Report
+        </div>
+        <div className="mt-2.5 flex flex-col lg:flex-row lg:items-start justify-between gap-5">
           <div className="flex-1 min-w-0 space-y-2.5">
             <div className="flex flex-wrap items-center gap-2">
               {repoUrl ? (
@@ -886,6 +1102,11 @@ function ReviewDetail({ review }: { review: CodeReviewOut }) {
                   <span>PR #{review.pr_number}</span>
                   <ArrowUpRight className="h-2.5 w-2.5 opacity-70" />
                 </a>
+              )}
+              {failed && (
+                <span className="inline-flex items-center rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300">
+                  Error
+                </span>
               )}
               {review.pr_author && (
                 <div className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
@@ -933,11 +1154,69 @@ function ReviewDetail({ review }: { review: CodeReviewOut }) {
           </div>
 
           <div className="flex items-start justify-start lg:justify-center">
-            <RiskGauge score={review.risk_score} size={84} />
+            <RiskGauge score={review.risk_score} size={84} neutral={failed} />
           </div>
         </div>
       </div>
 
+      {failed ? (
+        <>
+          {/* Honest failure panel: raw error, no verdict telemetry */}
+          <div role="alert" className="flex items-start justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-3 text-xs leading-relaxed text-rose-200">
+            <span className="flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-rose-400" />
+              <span>{errorText}</span>
+            </span>
+            {onRetry && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onRetry}
+                className="h-7 shrink-0 border-rose-500/40 text-xs text-rose-200 hover:bg-rose-900/40"
+              >
+                Retry
+              </Button>
+            )}
+          </div>
+
+          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="rounded-xl border border-rose-500/30 bg-[#0f0f12] p-4 space-y-1">
+              <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Status</div>
+              <span className="inline-flex items-center rounded-full border border-rose-500/40 bg-rose-950/60 px-2.5 py-1 text-xs font-mono font-semibold text-rose-300">
+                Error
+              </span>
+            </div>
+            <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+              <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">PR Confidence</div>
+              <div className="font-mono text-xl font-bold text-zinc-500" title="No score — analysis did not complete">—</div>
+              <div className="text-[11px] text-zinc-500">No score — analysis did not complete</div>
+            </div>
+            <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+              <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Blockers</div>
+              <div className="font-mono text-sm text-zinc-500">—</div>
+            </div>
+            <div className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-4 space-y-1">
+              <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-500">Blast Radius</div>
+              <div className="font-mono text-sm text-zinc-500">—</div>
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5">
+            <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400">Structural &amp; Blast Radius Analysis</h3>
+            <p className="mt-2 text-xs text-zinc-500 leading-relaxed">Unavailable — the analysis did not complete, so there is no structural telemetry to report.</p>
+          </section>
+
+          <section className="space-y-3">
+            <div className="flex items-center justify-between text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono">
+              <span>Findings Summary (0)</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-xs font-mono text-zinc-500">
+              No findings — the analysis did not complete.
+            </div>
+          </section>
+        </>
+      ) : (
+        <>
       {/* PR Summary */}
       <section className="rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-5">
         <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400">PR Summary</h3>
@@ -1059,6 +1338,8 @@ function ReviewDetail({ review }: { review: CodeReviewOut }) {
           </span>
         )}
       </section>
+        </>
+      )}
     </div>
   );
 }
@@ -1110,7 +1391,7 @@ export default function ReviewsPage() {
         params.repo_id = selectedRepoId;
       }
       if (highRiskOnly) {
-        params.min_risk = 50;
+        params.min_risk = RISK_CRITICAL;
       }
       if (selectedSeverity !== "all") {
         params.severity = selectedSeverity;
@@ -1234,6 +1515,7 @@ export default function ReviewsPage() {
     const q = searchQuery.toLowerCase();
     return list.filter((r) => {
       const matchSummary = r.summary?.toLowerCase().includes(q);
+      const matchFailure = r.failure_reason?.toLowerCase().includes(q);
       const matchCommit = r.commit_sha?.toLowerCase().includes(q);
       const matchRepo = (r.repo_owner && r.repo_name) ? `${r.repo_owner}/${r.repo_name}`.toLowerCase().includes(q) : false;
       const matchPr = r.pr_title?.toLowerCase().includes(q) || (r.pr_author && r.pr_author.toLowerCase().includes(q));
@@ -1243,7 +1525,7 @@ export default function ReviewsPage() {
           f.critique.toLowerCase().includes(q) ||
           (f.symbol_name && f.symbol_name.toLowerCase().includes(q))
       );
-      return matchSummary || matchCommit || matchRepo || matchPr || matchFindings;
+      return matchSummary || matchFailure || matchCommit || matchRepo || matchPr || matchFindings;
     });
   }, [reviews, searchQuery, activeTab]);
 
@@ -1253,7 +1535,7 @@ export default function ReviewsPage() {
   // "this page" in the ribbon below.
   const pageStats = useMemo(() => {
     const total = reviews.length;
-    const highRisk = reviews.filter((r) => r.risk_score >= 71).length;
+    const highRisk = reviews.filter((r) => r.risk_score >= RISK_CRITICAL).length;
     const avgScore = total > 0 ? Math.round(reviews.reduce((acc, r) => acc + r.risk_score, 0) / total) : 0;
     const totalPatches = reviews.reduce((acc, r) => acc + r.findings.filter((f) => !!f.suggested_patch).length, 0);
     return { total, highRisk, avgScore, totalPatches };
@@ -1330,14 +1612,18 @@ export default function ReviewsPage() {
                 </Button>
               </div>
             ) : (
-              <ReviewDetail review={detailReview} />
+              <ReviewDetail review={detailReview} onRetry={() => setDetailRetry((n) => n + 1)} />
             )}
           </div>
         ) : (
           <>
-        {/* Interactive Telemetry Ribbon doubling as Filter Tabs */}
+        {/* Report header: slim telemetry strip doubling as filter tabs.
+            Definitions: Reviews Scanned is the server-side total across all
+            pages; every other figure is counted on this page only. High-risk
+            means risk >= 71 — the same bar as the Risk toggle, stats, gauge
+            and merge verdict. */}
         <div ref={listTopRef} tabIndex={-1} className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#141418] via-[#101013] to-[#0a0a0d] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_16px_rgba(0,0,0,0.35)] outline-none">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-1.5">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-1.5">
             {/* Tab 1: All Reviews */}
             <button
               type="button"
@@ -1348,18 +1634,20 @@ export default function ReviewsPage() {
                 setPage(0);
               }}
               className={cn(
-                "flex flex-col justify-between rounded-lg p-3.5 text-left transition-all",
+                "flex items-baseline justify-between gap-2 rounded-lg px-3 py-2 text-left transition-all",
                 activeTab === "all" && !highRiskOnly
                   ? "bg-zinc-800/90 border border-zinc-700/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_2px_6px_rgba(0,0,0,0.4)]"
                   : "bg-transparent border border-transparent hover:bg-zinc-900/60 hover:border-zinc-800/60"
               )}
             >
-              <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
-                <span className="uppercase tracking-wider text-[11px] font-semibold text-zinc-300">Reviews Scanned</span>
-                <ShieldCheck className="h-4 w-4 text-emerald-400" />
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
+                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Scanned</span>
+                </div>
+                <div className="mt-0.5 text-[11px] text-zinc-500 font-sans">Push &amp; PR scans · server total</div>
               </div>
-              <div className="mt-2 text-2xl font-bold font-mono text-zinc-100">{totalCount}</div>
-              <div className="mt-1 text-[11px] text-zinc-400 font-sans">Autonomous CI push & PR scans</div>
+              <div className="text-xl font-bold font-mono text-zinc-100">{totalCount}</div>
             </button>
 
             {/* Tab 2: High Risk Flagged */}
@@ -1372,18 +1660,20 @@ export default function ReviewsPage() {
                 setPage(0);
               }}
               className={cn(
-                "flex flex-col justify-between rounded-lg p-3.5 text-left transition-all",
+                "flex items-baseline justify-between gap-2 rounded-lg px-3 py-2 text-left transition-all",
                 highRiskOnly || activeTab === "high_risk"
                   ? "bg-rose-950/30 border border-rose-500/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_6px_rgba(0,0,0,0.4)]"
                   : "bg-transparent border border-transparent hover:bg-zinc-900/60 hover:border-zinc-800/60"
               )}
             >
-              <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
-                <span className="uppercase tracking-wider text-[11px] font-semibold text-rose-300">High Risk Flagged</span>
-                <ShieldAlert className="h-4 w-4 text-rose-400" />
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-[11px] font-mono font-semibold uppercase tracking-wider text-rose-300">
+                  <ShieldAlert className="h-3.5 w-3.5 text-rose-400" />
+                  <span>High-Risk ≥ 71</span>
+                </div>
+                <div className="mt-0.5 text-[11px] text-zinc-500 font-sans" title="Scores >= 71 request changes · counted on this page only">Changes requested · this page</div>
               </div>
-              <div className="mt-2 text-2xl font-bold font-mono text-rose-400">{pageStats.highRisk}</div>
-              <div className="mt-1 text-[11px] text-zinc-400 font-sans" title="Scores >= 71 request changes · counted on this page only">Score &gt;= 71 · this page</div>
+              <div className="text-xl font-bold font-mono text-rose-400">{pageStats.highRisk}</div>
             </button>
 
             {/* Tab 3: Avg Risk Score */}
@@ -1396,20 +1686,22 @@ export default function ReviewsPage() {
                 setPage(0);
               }}
               className={cn(
-                "flex flex-col justify-between rounded-lg p-3.5 text-left transition-all",
+                "flex items-baseline justify-between gap-2 rounded-lg px-3 py-2 text-left transition-all",
                 activeTab === "avg_risk"
                   ? "bg-zinc-800/90 border border-zinc-700/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_2px_6px_rgba(0,0,0,0.4)]"
                   : "bg-transparent border border-transparent hover:bg-zinc-900/60 hover:border-zinc-800/60"
               )}
             >
-              <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
-                <span className="uppercase tracking-wider text-[11px] font-semibold text-amber-300">Avg Risk Score</span>
-                <Sparkles className="h-4 w-4 text-amber-400" />
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-[11px] font-mono font-semibold uppercase tracking-wider text-amber-300">
+                  <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+                  <span>Avg Risk</span>
+                </div>
+                <div className="mt-0.5 text-[11px] text-zinc-500 font-sans">Mean score · this page</div>
               </div>
-              <div className="mt-2 text-2xl font-bold font-mono text-zinc-100">
-                {pageStats.avgScore} <span className="text-xs text-zinc-400 font-normal">/ 100</span>
+              <div className="text-xl font-bold font-mono text-zinc-100">
+                {pageStats.avgScore} <span className="text-[11px] text-zinc-400 font-normal">/ 100</span>
               </div>
-              <div className="mt-1 text-[11px] text-zinc-400 font-sans">Across this page</div>
             </button>
 
             {/* Tab 4: Actionable Patches */}
@@ -1421,18 +1713,20 @@ export default function ReviewsPage() {
                 setPage(0);
               }}
               className={cn(
-                "flex flex-col justify-between rounded-lg p-3.5 text-left transition-all",
+                "flex items-baseline justify-between gap-2 rounded-lg px-3 py-2 text-left transition-all",
                 activeTab === "patches"
                   ? "bg-cyan-950/30 border border-cyan-500/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_6px_rgba(0,0,0,0.4)]"
                   : "bg-transparent border border-transparent hover:bg-zinc-900/60 hover:border-zinc-800/60"
               )}
             >
-              <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
-                <span className="uppercase tracking-wider text-[11px] font-semibold text-cyan-300">Actionable Patches</span>
-                <Zap className="h-4 w-4 text-cyan-400" />
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-[11px] font-mono font-semibold uppercase tracking-wider text-cyan-300">
+                  <Zap className="h-3.5 w-3.5 text-cyan-400" />
+                  <span>Patches</span>
+                </div>
+                <div className="mt-0.5 text-[11px] text-zinc-500 font-sans">With suggested fix · this page</div>
               </div>
-              <div className="mt-2 text-2xl font-bold font-mono text-cyan-400">{pageStats.totalPatches}</div>
-              <div className="mt-1 text-[11px] text-zinc-400 font-sans">1-click GitHub suggestions · this page</div>
+              <div className="text-xl font-bold font-mono text-cyan-400">{pageStats.totalPatches}</div>
             </button>
           </div>
         </div>
@@ -1473,7 +1767,7 @@ export default function ReviewsPage() {
               ))}
             </div>
 
-            {/* High Risk score filter toggle (> 50) */}
+            {/* High Risk score filter toggle (risk >= 71 — same bar as the ribbon, stats and verdict) */}
             <button
               onClick={() => {
                 const nextVal = !highRiskOnly;
@@ -1489,7 +1783,7 @@ export default function ReviewsPage() {
               )}
             >
               <ShieldAlert className="h-3.5 w-3.5 text-rose-400" />
-              <span>Risk &gt; 50</span>
+              <span>Risk ≥ 71</span>
             </button>
           </div>
 
@@ -1570,7 +1864,7 @@ export default function ReviewsPage() {
         ) : (
           <div className="space-y-4">
             {filteredReviews.map((review) => (
-              <ReviewCard key={review.id} review={review} onOpen={openReview} />
+              <ReviewCard key={review.id} review={review} onOpen={openReview} onRetry={handleRefresh} />
             ))}
           </div>
         )}
