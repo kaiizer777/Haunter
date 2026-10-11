@@ -753,14 +753,16 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getByText("Publication skipped")).toBeInTheDocument();
     });
 
-    it("unscored suppressed rows (risk 0 + no findings) render neutral, never Great-to-Merge/SAFE", async () => {
+    it("unscored suppressed rows (no completion signal) render neutral, never Great-to-Merge/SAFE", async () => {
       const unscored: CodeReviewOut = {
         ...mockReviews[1],
         id: "rev_sup_unscored",
         status: "suppressed",
         risk_score: 0,
-        summary: "Review suppressed before audit saved.",
+        summary: "Autonomous code review queued.",
         findings: [],
+        input_tokens: 0,
+        output_tokens: 0,
       };
       vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
         reviews: [unscored],
@@ -792,8 +794,10 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         id: "rev_sup_unscored_detail",
         status: "suppressed",
         risk_score: 0,
-        summary: "Review suppressed before audit saved.",
+        summary: "Autonomous code review queued.",
         findings: [],
+        input_tokens: 0,
+        output_tokens: 0,
       };
       vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
         reviews: [unscored],
@@ -811,6 +815,70 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.queryByText("Changes Requested")).not.toBeInTheDocument();
       expect(screen.queryByText("Publication skipped")).not.toBeInTheDocument();
       expect(screen.getByText(/no findings yet/i)).toBeInTheDocument();
+    });
+
+    it("clean suppressed audit (0 risk, no findings, real summary + tokens) renders scored + counts in Avg Risk", async () => {
+      // The bot-finding shape: score+findings are indistinguishable from an
+      // unsaved row, but the persisted LLM summary + token telemetry prove
+      // analysis finished — must render the full audit, never neutral.
+      const clean: CodeReviewOut = {
+        ...mockReviews[1],
+        id: "rev_sup_clean",
+        status: "suppressed",
+        risk_score: 0,
+        summary: "Clean review: no blocking issues detected. Changes look safe.",
+        findings: [],
+        input_tokens: 800,
+        output_tokens: 150,
+        failure_reason: "PR comments disabled by repo settings; review published nowhere",
+      };
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [mockReviews[0], clean],
+        total: 2,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+      // Full audit chrome: verdict + confidence + publication indicator.
+      expect(screen.getByText("10/10")).toBeInTheDocument();
+      expect(screen.getAllByText("Great to Merge").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Publication skipped").length).toBeGreaterThanOrEqual(1);
+      expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
+      // Avg Risk counts it: (85+0)/2 = 43 across 2 scored.
+      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      expect(avgTab).toHaveTextContent("43");
+      expect(avgTab.textContent).toMatch(/2 scored/i);
+    });
+
+    it("empty-diff suppressed audit (0 tokens, real summary) still scores", async () => {
+      // code_reviewer short-circuits empty diffs with 0/0 tokens but a real
+      // persisted summary — tokens alone would miss it, the summary branch
+      // of the completion signal catches it.
+      const emptyDiff: CodeReviewOut = {
+        ...mockReviews[1],
+        id: "rev_sup_emptydiff",
+        status: "suppressed",
+        risk_score: 0,
+        summary: "No code changes detected in diff.",
+        findings: [],
+        input_tokens: 0,
+        output_tokens: 0,
+        failure_reason: "PR comments disabled by repo settings; review published nowhere",
+      };
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [emptyDiff],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #102")).toBeInTheDocument();
+      expect(screen.getByText("10/10")).toBeInTheDocument();
+      expect(screen.getAllByText("Great to Merge").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText("Publication skipped")).toBeInTheDocument();
+      expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
+      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      expect(avgTab).toHaveTextContent("0");
+      expect(avgTab.textContent).toMatch(/1 scored/i);
     });
   });
 

@@ -84,12 +84,36 @@ function isSuppressed(review: CodeReviewOut): boolean {
   return review.status?.toLowerCase() === "suppressed";
 }
 
+/** Enqueue placeholder written before analysis runs — the only summary a row
+ * can carry when the orchestrator never persisted a result
+ * (backend/app/webhooks.py:2276 + :2460). A non-empty summary alone therefore
+ * proves nothing; it must differ from this. */
+const QUEUED_SUMMARY = "Autonomous code review queued.";
+
+/** Explicit completion signal: the orchestrator persists risk_score + summary
+ * + findings + token telemetry TOGETHER before the publish guard
+ * (backend/app/services/review_orchestrator.py:1233-1239), and the suppressed
+ * path (:1287) only flips status, keeping the saved data. So a suppressed
+ * row whose tokens are nonzero ran the LLM, and a row whose summary differs
+ * from the enqueue placeholder got a persisted result — including the
+ * empty-diff short-circuit, which returns 0/0 tokens with its own real
+ * summary (backend/app/subagents/code_reviewer.py:691-702). Score + findings
+ * alone cannot signal this: a genuine CLEAN audit is also 0 risk + empty.
+ * (CodeReviewOut carries no updated_at — backend/app/routers/reviews.py — so
+ * a timestamp comparison is unavailable.) */
+function hasCompletedAnalysis(review: CodeReviewOut): boolean {
+  if (review.input_tokens > 0 || review.output_tokens > 0) return true;
+  const summary = (review.summary ?? "").trim();
+  return summary.length > 0 && summary !== QUEUED_SUMMARY;
+}
+
 /** Suppressed row with no saved audit — legacy row or suppress-before-save
- * race: risk_score still the 0 column default AND findings empty. Fail-closed:
- * renders neutrally like pending, never as Great-to-Merge / SAFE. Scored
- * suppressed rows (real audit) are unaffected. */
+ * race: analysis never persisted, so neither token telemetry nor a real
+ * summary exists. Fail-closed: renders neutrally like pending, never as
+ * Great-to-Merge / SAFE. Scored suppressed rows (real audit, even a clean
+ * 0-risk/empty one) are unaffected. */
 function isSuppressedUnscored(review: CodeReviewOut): boolean {
-  return isSuppressed(review) && review.risk_score === 0 && review.findings.length === 0;
+  return isSuppressed(review) && !hasCompletedAnalysis(review);
 }
 
 /** Neutral status-pill label for unscored rows. Reuses existing zinc pill chrome.
@@ -877,8 +901,9 @@ function FailedReviewCard({
  * Honest neutral row for analyses that have not finished (status "pending" /
  * "in_progress" — or anything but completed/error/suppressed, fail-closed).
  * Scored "suppressed" is terminal WITH a saved audit so it renders the full
- * completed branches, never this card; unscored suppressed rows (risk 0 +
- * no findings, no saved audit) render this card with a "Suppressed" pill.
+ * completed branches, never this card; unscored suppressed rows (no token
+ * telemetry + no real summary, see hasCompletedAnalysis) render this card
+ * with a "Suppressed" pill.
  * Renders NO
  * verdict telemetry — Queued/Analyzing pill, em-dash confidence, neutral
  * gauge, the queued summary verbatim. A pending row carries the column
@@ -1036,7 +1061,8 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
     return <FailedReviewCard review={review} onOpen={onOpen} onRetry={onRetry} />;
   }
 
-  // Non-terminal rows — plus unscored suppressed rows with no saved audit —
+  // Non-terminal rows — plus unscored suppressed rows with no completion
+  // signal (see hasCompletedAnalysis) —
   // never reach verdict telemetry: neutral pending card.
   if (isReviewPending(review) || isSuppressedUnscored(review)) {
     return <PendingReviewCard review={review} onOpen={onOpen} />;
@@ -1917,8 +1943,10 @@ export default function ReviewsPage() {
   // 85+0→43), and pending / in_progress rows are still at the 0
   // default because analysis never ran — only "completed" and scored
   // "suppressed" carry a real score ("suppressed" is terminal WITH a saved audit:
-  // backend/app/services/review_orchestrator.py:1233-1239 + :1287; unscored
-  // suppressed rows with risk 0 + no findings stay out like pending).
+  // backend/app/services/review_orchestrator.py:1233-1239 + :1287; suppressed
+  // rows WITHOUT a completion signal (see hasCompletedAnalysis) stay out
+  // like pending — a clean 0-risk/empty audit still scores because its
+  // summary + token telemetry prove analysis ran).
   // Reports how many rows actually scored.
   const pageStats = useMemo(() => {
     const total = reviews.length;
