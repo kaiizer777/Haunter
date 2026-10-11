@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ReviewsPage from "./page";
 import { api, CodeReviewOut, RepoOut } from "@/lib/api";
@@ -114,6 +114,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     vi.mocked(useAuth).mockReturnValue({
       user: {
         id: "usr_1",
@@ -229,5 +230,77 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
     expect(screen.getByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
     expect(screen.getByText("docs: update API documentation")).toBeInTheDocument();
+  });
+
+  it("stage fix persists locally and never touches the clipboard (distinct from copy)", async () => {
+    // NB: fireEvent, not userEvent — userEvent.setup() replaces
+    // navigator.clipboard with its own stub, hiding the beforeEach mock.
+    render(<ReviewsPage />);
+
+    const reviewButton = await screen.findByRole("button", { name: /review \(1\)/i });
+    fireEvent.click(reviewButton);
+
+    const clipboardWriteText = navigator.clipboard.writeText as unknown as ReturnType<typeof vi.fn>;
+
+    // Stage: persists locally, does NOT copy
+    fireEvent.click(screen.getByRole("button", { name: /stage fix/i }));
+    expect(screen.getByText("Staged Fix")).toBeInTheDocument();
+    expect(clipboardWriteText).not.toHaveBeenCalled();
+    expect(localStorage.getItem("haunter-staged-fixes")).toContain("src/auth/jwt.ts");
+
+    // Copy: writes clipboard, does NOT stage anything new
+    fireEvent.click(screen.getByRole("button", { name: /copy patch/i }));
+    expect(clipboardWriteText).toHaveBeenCalledWith(expect.stringContaining("jwt.verify"));
+    expect(await screen.findByText("Copied")).toBeInTheDocument();
+
+    // Toggle off: unstages and removes the persisted entry
+    fireEvent.click(screen.getByRole("button", { name: /staged fix/i }));
+    expect(screen.getByText("Stage Fix")).toBeInTheDocument();
+    expect(localStorage.getItem("haunter-staged-fixes")).not.toContain("src/auth/jwt.ts");
+  });
+
+  it("surfaces clipboard errors instead of failing silently", async () => {
+    // NB: fireEvent, not userEvent (see above).
+    (navigator.clipboard.writeText as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("denied")
+    );
+    render(<ReviewsPage />);
+
+    const reviewButton = await screen.findByRole("button", { name: /review \(1\)/i });
+    fireEvent.click(reviewButton);
+
+    fireEvent.click(screen.getByRole("button", { name: /copy patch/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/copy failed/i);
+  });
+
+  it("shows fetch error banner with retry when the reviews request fails", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getCodeReviews).mockRejectedValueOnce(new Error("network down"));
+    render(<ReviewsPage />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't load code reviews/i);
+
+    // Retry re-fires the request (beforeEach mock resolves on subsequent calls)
+    await user.click(screen.getByRole("button", { name: /retry/i }));
+    expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+  });
+
+  it("keeps ribbon stats page-scoped while Reviews Scanned shows the server total", async () => {
+    // Server reports 28 total but only a 2-item page is delivered: the tiles
+    // must not disagree silently — page-derived tiles say "this page".
+    vi.mocked(api.getCodeReviews).mockResolvedValue({ reviews: mockReviews, total: 28 });
+    render(<ReviewsPage />);
+
+    expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+
+    const scanned = screen.getByText("Reviews Scanned").closest("button")!;
+    expect(scanned).toHaveTextContent("28");
+
+    const highRisk = screen.getByText("High Risk Flagged").closest("button")!;
+    expect(highRisk).toHaveTextContent("1");
+    expect(highRisk.textContent).toMatch(/this page/i);
+
+    expect(screen.getByText("Across this page")).toBeInTheDocument();
+    expect(screen.getByText(/1-click github suggestions · this page/i)).toBeInTheDocument();
   });
 });

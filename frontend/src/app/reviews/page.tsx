@@ -214,6 +214,43 @@ function DiffViewer({ patch }: { patch: string }) {
 }
 
 /**
+ * Local staged-fix store. There is no backend stage/apply endpoint for code
+ * reviews (backend/app/routers/reviews.py is GET-only; the staged_patches
+ * flow in sessions.py belongs to chat sessions and is not wired to this UI),
+ * so Stage Fix persists the patch in this browser until a server-side apply
+ * endpoint exists. Deliberately distinct from Copy Patch, which only touches
+ * the clipboard and never persists anything.
+ */
+const STAGED_FIXES_KEY = "haunter-staged-fixes";
+
+function stagedFixKey(finding: ReviewFindingOut): string {
+  const patch = finding.suggested_patch ?? "";
+  return `${finding.file_path}:${finding.line_start}-${finding.line_end}:${patch.length}:${patch.slice(0, 64)}`;
+}
+
+function readStagedFixes(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(STAGED_FIXES_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, string>;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+function isFixStaged(finding: ReviewFindingOut): boolean {
+  try {
+    return stagedFixKey(finding) in readStagedFixes();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Finding Card component with direct GitHub file link and dual tactile actions
  */
 function FindingItem({
@@ -228,22 +265,48 @@ function FindingItem({
   commitSha?: string;
 }) {
   const [copied, setCopied] = useState(false);
-  const [staged, setStaged] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [staged, setStaged] = useState<boolean>(() => isFixStaged(finding));
+  const [staging, setStaging] = useState(false);
+  const [stageError, setStageError] = useState<string | null>(null);
   const meta = getCategoryMeta(finding.category);
   const Icon = meta.icon;
 
-  const handleCopy = () => {
+  const handleCopy = async () => {
     if (!finding.suggested_patch) return;
-    navigator.clipboard.writeText(finding.suggested_patch);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopyError(null);
+    try {
+      await navigator.clipboard.writeText(finding.suggested_patch);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopyError("Copy failed — clipboard unavailable.");
+    }
   };
 
+  // Toggle local staging. Never touches the clipboard: staging persists the
+  // patch in this browser (see STAGED_FIXES_KEY), copying does not. Staged
+  // state persists across reloads; copied state is transient.
   const handleStage = () => {
-    if (!finding.suggested_patch) return;
-    navigator.clipboard.writeText(finding.suggested_patch);
-    setStaged(true);
-    setTimeout(() => setStaged(false), 2500);
+    if (!finding.suggested_patch || staging) return;
+    setStageError(null);
+    setStaging(true);
+    try {
+      const stored = readStagedFixes();
+      const key = stagedFixKey(finding);
+      if (key in stored) {
+        delete stored[key];
+        setStaged(false);
+      } else {
+        stored[key] = finding.suggested_patch;
+        setStaged(true);
+      }
+      localStorage.setItem(STAGED_FIXES_KEY, JSON.stringify(stored));
+    } catch {
+      setStageError("Couldn't stage fix in this browser.");
+    } finally {
+      setStaging(false);
+    }
   };
 
   const lineRangeSuffix = finding.line_start
@@ -317,10 +380,16 @@ function FindingItem({
                 )}
               </button>
 
-              {/* Dual tactile action: Stage Fix */}
+              {/* Dual tactile action: Stage Fix (local staging, see STAGED_FIXES_KEY) */}
               <button
                 type="button"
                 onClick={handleStage}
+                disabled={staging}
+                title={
+                  staged
+                    ? "Staged in this browser — click to unstage"
+                    : "Stage this fix in this browser (server-side apply pending)"
+                }
                 className={cn(
                   "inline-flex items-center gap-1.5 h-6 px-2.5 rounded-[5px] text-[11px] font-mono font-medium transition-all active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)]",
                   staged
@@ -333,6 +402,11 @@ function FindingItem({
                     <Check className="h-3 w-3 text-emerald-200" />
                     <span>Staged Fix</span>
                   </>
+                ) : staging ? (
+                  <>
+                    <FileDiff className="h-3 w-3 text-blue-200" />
+                    <span>Staging…</span>
+                  </>
                 ) : (
                   <>
                     <FileDiff className="h-3 w-3 text-blue-200" />
@@ -342,6 +416,12 @@ function FindingItem({
               </button>
             </div>
           </div>
+
+          {(copyError || stageError) && (
+            <p role="alert" className="text-[11px] font-mono text-rose-400">
+              {copyError ?? stageError}
+            </p>
+          )}
 
           <DiffViewer patch={finding.suggested_patch} />
         </div>
@@ -653,6 +733,7 @@ export default function ReviewsPage() {
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [page, setPage] = useState<number>(0);
   const [totalCount, setTotalCount] = useState<number>(0);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   // Load repos for filter
   useEffect(() => {
@@ -688,8 +769,10 @@ export default function ReviewsPage() {
       const res = await api.getCodeReviews(params);
       setReviews(res.reviews || []);
       setTotalCount(res.total || 0);
+      setFetchError(null);
     } catch (err) {
       console.error("Failed to fetch code reviews:", err);
+      setFetchError("Couldn't load code reviews. Check your connection and retry.");
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -728,8 +811,11 @@ export default function ReviewsPage() {
     });
   }, [reviews, searchQuery, activeTab]);
 
-  // Metric rollups
-  const stats = useMemo(() => {
+  // Metric rollups — computed from the current page only (`reviews` holds a
+  // single PAGE_SIZE window). Reviews Scanned uses the server-side
+  // `totalCount` instead, so every tile derived here is explicitly labeled
+  // "this page" in the ribbon below.
+  const pageStats = useMemo(() => {
     const total = reviews.length;
     const highRisk = reviews.filter((r) => r.risk_score >= 71).length;
     const avgScore = total > 0 ? Math.round(reviews.reduce((acc, r) => acc + r.risk_score, 0) / total) : 0;
@@ -810,8 +896,8 @@ export default function ReviewsPage() {
                 <span className="uppercase tracking-wider text-[11px] font-semibold text-rose-300">High Risk Flagged</span>
                 <ShieldAlert className="h-4 w-4 text-rose-400" />
               </div>
-              <div className="mt-2 text-2xl font-bold font-mono text-rose-400">{stats.highRisk}</div>
-              <div className="mt-1 text-[11px] text-zinc-400 font-sans">Score &gt;= 71 (Changes Requested)</div>
+              <div className="mt-2 text-2xl font-bold font-mono text-rose-400">{pageStats.highRisk}</div>
+              <div className="mt-1 text-[11px] text-zinc-400 font-sans" title="Scores >= 71 request changes · counted on this page only">Score &gt;= 71 · this page</div>
             </button>
 
             {/* Tab 3: Avg Risk Score */}
@@ -834,9 +920,9 @@ export default function ReviewsPage() {
                 <Sparkles className="h-4 w-4 text-amber-400" />
               </div>
               <div className="mt-2 text-2xl font-bold font-mono text-zinc-100">
-                {stats.avgScore} <span className="text-xs text-zinc-400 font-normal">/ 100</span>
+                {pageStats.avgScore} <span className="text-xs text-zinc-400 font-normal">/ 100</span>
               </div>
-              <div className="mt-1 text-[11px] text-zinc-400 font-sans">Across current batch</div>
+              <div className="mt-1 text-[11px] text-zinc-400 font-sans">Across this page</div>
             </button>
 
             {/* Tab 4: Actionable Patches */}
@@ -857,8 +943,8 @@ export default function ReviewsPage() {
                 <span className="uppercase tracking-wider text-[11px] font-semibold text-cyan-300">Actionable Patches</span>
                 <Zap className="h-4 w-4 text-cyan-400" />
               </div>
-              <div className="mt-2 text-2xl font-bold font-mono text-cyan-400">{stats.totalPatches}</div>
-              <div className="mt-1 text-[11px] text-zinc-400 font-sans">1-click GitHub suggestions ready</div>
+              <div className="mt-2 text-2xl font-bold font-mono text-cyan-400">{pageStats.totalPatches}</div>
+              <div className="mt-1 text-[11px] text-zinc-400 font-sans">1-click GitHub suggestions · this page</div>
             </button>
           </div>
         </div>
@@ -931,6 +1017,24 @@ export default function ReviewsPage() {
             </div>
           </div>
         </div>
+
+        {/* Fetch error banner (replaces silent console-only failure) */}
+        {fetchError && (
+          <div
+            role="alert"
+            className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-2.5 text-xs font-mono text-rose-300"
+          >
+            <span>{fetchError}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRefresh}
+              className="h-7 border-rose-500/40 text-xs text-rose-200 hover:bg-rose-900/40"
+            >
+              Retry
+            </Button>
+          </div>
+        )}
 
         {/* Review Cards Stream */}
         {loading && reviews.length === 0 ? (
