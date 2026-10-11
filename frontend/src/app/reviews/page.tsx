@@ -76,18 +76,28 @@ function isReviewPending(review: CodeReviewOut): boolean {
 }
 
 /** Publication was skipped by repo settings, but the saved audit is real.
- * Zinc/neutral indicator only — never hides verdict telemetry. Suppressed
- * rows render the saved audit exactly like completed (same card + detail
- * branches); suppressed is terminal so no Retry, like completed. */
+ * Zinc/neutral indicator only — never hides verdict telemetry. Scored
+ * suppressed rows render the saved audit exactly like completed (same card +
+ * detail branches); suppressed is terminal so no Retry, like completed.
+ * Unscored suppressed rows (see isSuppressedUnscored) render neutrally. */
 function isSuppressed(review: CodeReviewOut): boolean {
   return review.status?.toLowerCase() === "suppressed";
 }
 
-/** Neutral status-pill label for unscored rows. Reuses existing zinc pill chrome. */
+/** Suppressed row with no saved audit — legacy row or suppress-before-save
+ * race: risk_score still the 0 column default AND findings empty. Fail-closed:
+ * renders neutrally like pending, never as Great-to-Merge / SAFE. Scored
+ * suppressed rows (real audit) are unaffected. */
+function isSuppressedUnscored(review: CodeReviewOut): boolean {
+  return isSuppressed(review) && review.risk_score === 0 && review.findings.length === 0;
+}
+
+/** Neutral status-pill label for unscored rows. Reuses existing zinc pill chrome.
+ * Only non-terminal rows reach this via isReviewPending; unscored suppressed
+ * rows label themselves "Suppressed" at the PendingReviewCard gate below. */
 function pendingLabelFor(review: CodeReviewOut): string {
   const s = review.status?.toLowerCase();
   if (s === "pending") return "Queued";
-  if (s === "suppressed") return "Suppressed";
   return "Analyzing";
 }
 
@@ -866,8 +876,10 @@ function FailedReviewCard({
 /**
  * Honest neutral row for analyses that have not finished (status "pending" /
  * "in_progress" — or anything but completed/error/suppressed, fail-closed).
- * "suppressed" is terminal WITH a saved audit so it renders the full
- * completed branches, never this card. Renders NO
+ * Scored "suppressed" is terminal WITH a saved audit so it renders the full
+ * completed branches, never this card; unscored suppressed rows (risk 0 +
+ * no findings, no saved audit) render this card with a "Suppressed" pill.
+ * Renders NO
  * verdict telemetry — Queued/Analyzing pill, em-dash confidence, neutral
  * gauge, the queued summary verbatim. A pending row carries the column
  * defaults (risk_score 0, findings []) which would otherwise read as
@@ -885,7 +897,7 @@ function PendingReviewCard({
   const repoUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}` : undefined;
   const prUrl = review.pr_url || (review.repo_owner && review.repo_name && review.pr_number ? `https://github.com/${review.repo_owner}/${review.repo_name}/pull/${review.pr_number}` : undefined);
   const commitUrl = review.repo_owner && review.repo_name ? `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}` : undefined;
-  const label = pendingLabelFor(review);
+  const label = isSuppressedUnscored(review) ? "Suppressed" : pendingLabelFor(review);
 
   return (
     <div className="rounded-xl border border-zinc-800/90 bg-gradient-to-b from-[#111115] to-[#0c0c0e] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_20px_rgba(0,0,0,0.4)]">
@@ -1024,8 +1036,9 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
     return <FailedReviewCard review={review} onOpen={onOpen} onRetry={onRetry} />;
   }
 
-  // Non-terminal rows never reach verdict telemetry — neutral pending card.
-  if (isReviewPending(review)) {
+  // Non-terminal rows — plus unscored suppressed rows with no saved audit —
+  // never reach verdict telemetry: neutral pending card.
+  if (isReviewPending(review) || isSuppressedUnscored(review)) {
     return <PendingReviewCard review={review} onOpen={onOpen} />;
   }
 
@@ -1326,9 +1339,9 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
   const [copiedSha, setCopiedSha] = useState(false);
   const [copyShaError, setCopyShaError] = useState<string | null>(null);
   const failed = isReviewFailed(review);
-  const pending = !failed && isReviewPending(review);
+  const pending = !failed && (isReviewPending(review) || isSuppressedUnscored(review));
   const suppressed = !failed && !pending && isSuppressed(review);
-  const pendingLabel = pendingLabelFor(review);
+  const pendingLabel = isSuppressedUnscored(review) ? "Suppressed" : pendingLabelFor(review);
   const errorText = review.failure_reason ?? review.summary;
   const blast = getBlastStats(review);
   const confidence = confidenceFromRisk(review.risk_score);
@@ -1902,16 +1915,19 @@ export default function ReviewsPage() {
   // "this page" in the ribbon below. Avg Risk scores finished analyses only:
   // failed rows default risk_score to 0 (averaging it in would lie, e.g.
   // 85+0→43), and pending / in_progress rows are still at the 0
-  // default because analysis never ran — only "completed" and "suppressed"
-  // carry a real score ("suppressed" is terminal WITH a saved audit:
-  // backend/app/services/review_orchestrator.py:1233-1239 + :1287).
+  // default because analysis never ran — only "completed" and scored
+  // "suppressed" carry a real score ("suppressed" is terminal WITH a saved audit:
+  // backend/app/services/review_orchestrator.py:1233-1239 + :1287; unscored
+  // suppressed rows with risk 0 + no findings stay out like pending).
   // Reports how many rows actually scored.
   const pageStats = useMemo(() => {
     const total = reviews.length;
     const highRisk = reviews.filter((r) => r.risk_score >= RISK_CRITICAL).length;
     const scored = reviews.filter((r) => {
       const s = r.status?.toLowerCase();
-      return s === "completed" || s === "suppressed";
+      if (s === "completed") return true;
+      if (s === "suppressed") return !isSuppressedUnscored(r);
+      return false;
     });
     const avgScore = scored.length > 0 ? Math.round(scored.reduce((acc, r) => acc + r.risk_score, 0) / scored.length) : 0;
     const totalPatches = reviews.reduce((acc, r) => acc + r.findings.filter((f) => !!f.suggested_patch).length, 0);

@@ -752,6 +752,66 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getAllByText("Queued").length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText("Publication skipped")).toBeInTheDocument();
     });
+
+    it("unscored suppressed rows (risk 0 + no findings) render neutral, never Great-to-Merge/SAFE", async () => {
+      const unscored: CodeReviewOut = {
+        ...mockReviews[1],
+        id: "rev_sup_unscored",
+        status: "suppressed",
+        risk_score: 0,
+        summary: "Review suppressed before audit saved.",
+        findings: [],
+      };
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [unscored],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #102")).toBeInTheDocument();
+      // Neutral treatment: Suppressed pill twice (badge row + Status cell),
+      // no-score gauge, em-dash telemetry.
+      expect(screen.getAllByText("Suppressed")).toHaveLength(2);
+      expect(screen.getByText("NO SCORE")).toBeInTheDocument();
+      // The 0 default must not read as a finished audit.
+      expect(screen.queryByText("10/10")).not.toBeInTheDocument();
+      expect(screen.queryByText("SAFE")).not.toBeInTheDocument();
+      expect(screen.queryByText("Great to Merge")).not.toBeInTheDocument();
+      expect(screen.queryByText("Changes Requested")).not.toBeInTheDocument();
+      expect(screen.queryByText("Review Advised")).not.toBeInTheDocument();
+      // No saved audit, so no publication indicator and no unscored mean.
+      expect(screen.queryByText("Publication skipped")).not.toBeInTheDocument();
+      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      expect(avgTab.textContent).toMatch(/no scored reviews/i);
+    });
+
+    it("unscored suppressed detail shows the neutral panel, not the full audit", async () => {
+      const user = userEvent.setup();
+      const unscored: CodeReviewOut = {
+        ...mockReviews[1],
+        id: "rev_sup_unscored_detail",
+        status: "suppressed",
+        risk_score: 0,
+        summary: "Review suppressed before audit saved.",
+        findings: [],
+      };
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [unscored],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #102")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: /full audit/i }));
+
+      expect(await screen.findByText("Haunter Autonomous Audit Report")).toBeInTheDocument();
+      expect(screen.getAllByText("Suppressed").length).toBeGreaterThanOrEqual(1);
+      expect(screen.queryByText("10/10")).not.toBeInTheDocument();
+      expect(screen.queryByText("Great to Merge")).not.toBeInTheDocument();
+      expect(screen.queryByText("Changes Requested")).not.toBeInTheDocument();
+      expect(screen.queryByText("Publication skipped")).not.toBeInTheDocument();
+      expect(screen.getByText(/no findings yet/i)).toBeInTheDocument();
+    });
   });
 
   it("Avg Risk excludes failed rows and discloses the scored count", async () => {
