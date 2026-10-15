@@ -10,7 +10,7 @@ Handles incoming GitHub webhook events with strict security controls:
 5. Immediate 2xx response (<200ms) with async pipeline scheduling via BackgroundTasks.
 6. Phase 5.1 (future02 §1.5) Auditor Mode trigger filter: pull_request
    (opened/synchronize), workflow_run.completed (failure/success), and
-   issue_comment.created (@haunter audit) are evaluated against
+   issue_comment.created (@haunter-auditor audit) are evaluated against
    app.services.audit_pipeline triggers after signature verification,
    repo registration, branch guards, and the per-repo kill-switch, then
 dispatched through a durable, independent audit queue (never git push / PR creation).
@@ -18,7 +18,7 @@ dispatched through a durable, independent audit queue (never git push / PR creat
    mentions are classified by app.services.followup_commands into
    `fix` / `address` (refine and commit) or `test-fix` (verify only), and the
    resulting child Run is threaded to the originating run via parent_run_id.
-   A mention carrying no fix command (`@haunter audit`) never reaches the
+   A mention carrying no fix command (`@haunter-auditor audit`) never reaches the
    fix pipeline.
 8. Feature 8 health log + replay: the decision branches that reach a registered
    repository also append a webhook_deliveries row (see
@@ -34,6 +34,7 @@ dispatched through a durable, independent audit queue (never git push / PR creat
    tenancy the delivery does not have — so it appears in no tenant's history.
 """
 
+import asyncio
 import base64
 import binascii
 import contextvars
@@ -74,7 +75,7 @@ from app.llm.prompts.audit_prompts import (
     sanitize_output_markdown,
 )
 from app.log_hygiene import sanitize_log_value
-from app.models import CodeReview, Repo, Run, User, WebhookDelivery
+from app.models import AuditJob, CodeReview, Repo, Run, User, WebhookDelivery
 from app.schemas import (
     IssueCommentWebhookPayload,
     PullRequestReviewCommentWebhookPayload,
@@ -104,10 +105,13 @@ _WEBHOOK_REASON_MAX_CHARS = 500
 _WEBHOOK_EVENT_MAX_CHARS = 64
 _WEBHOOK_STATUS_MAX_CHARS = 32
 
-# Replay buffer cap. Payloads larger than this are recorded with payload=NULL
-# and report as not replayable: a truncated body cannot be re-validated, and
-# replaying one would silently evaluate a different payload than the one GitHub
-# signed.
+# Replay buffer cap for the general health log. Payloads larger than this are
+# recorded with payload=NULL and report as not replayable: a truncated body
+# cannot be re-validated, and replaying one would silently evaluate a different
+# payload than the one GitHub signed. The auditor ack paths
+# (`auditor_queued`, `audit_accepted`) bypass this cap via
+# `retain_full_payload` and retain up to MAX_PAYLOAD_SIZE_BYTES instead: an
+# ack names recoverable work, so its row must always be replayable.
 _WEBHOOK_PAYLOAD_MAX_BYTES = 128 * 1024
 
 # Replay cooldown. A second replay of the same delivery inside this window is
@@ -187,13 +191,28 @@ _AUDITOR_TRIGGER_DIFF_MAX_CHARS = 4_000
 # dashboard and replay can tell the two schedulers apart.
 _AUDITOR_QUEUED_STATUS = "auditor_queued"
 
+# Worker-liveness status for the Q&A path. The background worker records this
+# best-effort row before doing any GitHub/LLM work; it is what separates "the
+# ack named work that started" from "the ack named work that never ran" (a
+# 503 between the queued-row commit and `add_task`, or a dead worker). See
+# the redelivery branch below.
+_AUDITOR_RUNNING_STATUS = "auditor_running"
+
 # Delivery rows that mean "this GitHub delivery already owns Q&A work": a
 # redelivery with one of these statuses is answered `duplicate` without a
 # second LLM call or reply. `error` is deliberately absent — a failed attempt
 # stays retryable, mirroring the CodeReview guard that excludes
-# REVIEW_STATUS_ERROR from its handled set.
+# REVIEW_STATUS_ERROR from its handled set. `auditor_queued` without a later
+# `auditor_running` row means no worker ever started, so the duplicate answer
+# re-schedules the background task instead of losing the question silently.
 _AUDITOR_DEDUP_STATUSES = frozenset(
-    {_AUDITOR_QUEUED_STATUS, "auditor_replied", "duplicate", "queued"}
+    {
+        _AUDITOR_QUEUED_STATUS,
+        _AUDITOR_RUNNING_STATUS,
+        "auditor_replied",
+        "duplicate",
+        "queued",
+    }
 )
 
 AUDITOR_QA_SYSTEM_PROMPT = (
@@ -605,6 +624,24 @@ async def _run_auditor_mention_background(
                     sanitize_log_value(delivery_id, 64),
                 )
                 return
+            # Liveness row, recorded before any GitHub/LLM work: the request
+            # path acked `auditor_queued` and scheduled this task, but a 503
+            # between the queued-row commit and `add_task` (or a dead worker)
+            # leaves that row as the latest state with no work behind it. A
+            # redelivery then answers `duplicate` — and, seeing no running
+            # row, re-schedules this worker to recover the question. Best
+            # effort (never raises): if this insert fails the work still runs
+            # and the worst case is a duplicate-scheduled second run, i.e.
+            # at-least-once answers instead of a silently lost one.
+            await _record_webhook_delivery(
+                db,
+                event=event,
+                delivery_id=delivery_id,
+                status_value=_AUDITOR_RUNNING_STATUS,
+                reason=f"auditor_started pr={pr_number} comment={comment_id}",
+                repo=f"{repo_owner}/{repo_name}",
+                repo_id=repo.id,
+            )
             comment_obj = SimpleNamespace(
                 id=comment_id,
                 body=comment_body,
@@ -663,6 +700,83 @@ async def _run_auditor_mention_background(
                 )
         except Exception:
             pass
+
+
+# Immediate-ack status for the manual-audit path. The request resolves the
+# installation token + PR endpoints synchronously BEFORE the ack (a
+# BackgroundTasks task would never run on Lambda) and records the replayable
+# delivery row first, so `audit_accepted` always names recoverable work: a
+# durably queued job on success, a replayable delivery otherwise. Distinct
+# from "audit_queued" (the synchronous review_comment dispatch) so the
+# dashboard and replay can tell the two schedulers apart.
+_MANUAL_AUDIT_ACCEPTED_STATUS = "audit_accepted"
+
+
+async def _resolve_manual_audit_endpoints(
+    repo: Repo,
+    *,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    delivery_id: Any,
+) -> Optional[tuple[Any, Any, Any]]:
+    """Read live PR endpoints for an issue_comment manual audit. Never raises.
+
+    An `issue_comment` payload carries no pinned PR endpoints, so the
+    base/head SHAs are read live from GitHub with an auditor-scoped token
+    only (never the global fallback) under the same bounded waits the audit
+    worker uses. Runs in the request path BEFORE the ack: BackgroundTasks
+    tasks never run on Lambda (the execution context freezes after the
+    response — see app.adapters.hosting), so post-ack resolution would ack
+    `audit_accepted` with no job and no replayable delivery. A slow
+    resolution may breach GitHub's ~10s deadline and cause a redelivery, but
+    the durable `dispatch_audit` claim is idempotent on `delivery_id`, so the
+    redelivery deduplicates instead of double-queueing. Returns
+    `(base_sha, head_sha, head_ref)` or None when the endpoints cannot be
+    established (fail-closed: the caller still records the replayable
+    delivery and acks `audit_accepted`).
+    """
+    from app import github_client
+    from app.github import auditor as github_auditor
+
+    try:
+        from app.subagents import auditor as _auditor_timeouts
+
+        token = await asyncio.wait_for(
+            github_auditor.get_auditor_installation_token(repo),
+            timeout=audit_pipeline.AUDIT_TOKEN_TIMEOUT_S,
+        )
+        pr_meta = await asyncio.wait_for(
+            github_client.fetch_pull_request(
+                owner=repo_owner,
+                repo=repo_name,
+                pr_number=pr_number,
+                token=token,
+                allow_global_token=False,
+            ),
+            timeout=_auditor_timeouts.AUDIT_FETCH_TIMEOUT_S,
+        )
+    except Exception as exc:
+        logger.info(
+            "Manual audit skipped %s PR #%s: endpoint resolution failed (%s)",
+            _log_repo(repo_owner, repo_name),
+            sanitize_log_value(pr_number, 16),
+            type(exc).__name__,
+        )
+        return None
+    head = pr_meta.get("head") if isinstance(pr_meta, dict) else None
+    base = pr_meta.get("base") if isinstance(pr_meta, dict) else None
+    head_sha = head.get("sha") if isinstance(head, dict) else None
+    base_sha = base.get("sha") if isinstance(base, dict) else None
+    head_ref = head.get("ref") if isinstance(head, dict) else None
+    if not isinstance(base_sha, str) or not isinstance(head_sha, str):
+        logger.info(
+            "Manual audit skipped %s PR #%s: endpoint resolution returned no SHAs",
+            _log_repo(repo_owner, repo_name),
+            sanitize_log_value(pr_number, 16),
+        )
+        return None
+    return base_sha, head_sha, head_ref
 
 
 def _log_repo(owner: Any, name: Any) -> str:
@@ -840,15 +954,25 @@ async def _dispatch_review(
         ) from exc
 
 
-def _encode_replay_buffer(raw_body: Optional[bytes]) -> Optional[str]:
+def _encode_replay_buffer(
+    raw_body: Optional[bytes], *, retain_full: bool = False
+) -> Optional[str]:
     """Base64 the verified raw body so replay re-verifies the exact same bytes.
 
     Base64 rather than a text column: HMAC verification runs over raw bytes,
     so any decode/encode round-trip that is not byte-exact would produce a
     signature mismatch on replay. Oversized bodies return None, which marks
     the row not replayable instead of storing a body that cannot be trusted.
+
+    `retain_full` lifts the cap to MAX_PAYLOAD_SIZE_BYTES for the auditor ack
+    paths, whose rows are the recovery path for accepted work: every body that
+    passed ingestion is at most MAX_PAYLOAD_SIZE_BYTES, so the retained buffer
+    stays bounded while remaining byte-exact and replayable.
     """
-    if raw_body is None or len(raw_body) > _WEBHOOK_PAYLOAD_MAX_BYTES:
+    if raw_body is None:
+        return None
+    limit = MAX_PAYLOAD_SIZE_BYTES if retain_full else _WEBHOOK_PAYLOAD_MAX_BYTES
+    if len(raw_body) > limit:
         return None
     return base64.b64encode(raw_body).decode("ascii")
 
@@ -874,13 +998,23 @@ async def _record_webhook_delivery(
     repo_id: Optional[uuid.UUID] = None,
     payload: Optional[bytes] = None,
     level: str = "info",
-) -> None:
+    strict: bool = False,
+    retain_full_payload: bool = False,
+) -> Optional[uuid.UUID]:
     """Persist a webhook decision alongside the structured log line.
 
     Feature 8 health log: every call emits the CloudWatch-parseable
     _log_webhook_decision line AND best-effort inserts a WebhookDelivery row.
-    DB failures are swallowed (rollback + warning) so ingestion latency and
-    2xx responses are never affected by health-log pressure.
+    By default DB failures are swallowed (rollback + warning) so ingestion
+    latency and 2xx responses are never affected by health-log pressure.
+
+    `strict` is for ack paths whose response names recoverable work
+    (`auditor_queued`, `audit_accepted`): the delivery row IS the recovery
+    path there, so a lost insert must not be acked. On failure the session is
+    rolled back and a retryable 503 is raised, so GitHub redelivers instead of
+    the audit being silently lost. `retain_full_payload` pairs with it: the
+    acked row retains the verified body up to MAX_PAYLOAD_SIZE_BYTES so it is
+    always replayable, never a payload=NULL acceptance.
 
     `payload` is the raw body whose HMAC already verified; it is stored as the
     replay buffer only. The signature header is never accepted here, so no
@@ -888,6 +1022,8 @@ async def _record_webhook_delivery(
 
     Inside replay_webhook_delivery() this stamps replay_of automatically so the
     re-driven handler's own record is linked to the delivery it re-ran.
+
+    Returns the inserted row id, or None when a non-strict insert failed.
     """
     _log_webhook_decision(
         event=event,
@@ -909,17 +1045,27 @@ async def _record_webhook_delivery(
             reason=_truncate_reason(reason),
             repo=repo_text,
             repo_id=repo_id,
-            payload=_encode_replay_buffer(payload),
+            payload=_encode_replay_buffer(payload, retain_full=retain_full_payload),
             replay_of=_replay_of_var.get(),
         )
         db.add(row)
         await db.commit()
-    except Exception:
+        return row.id
+    except Exception as exc:
         try:
             await db.rollback()
         except Exception:
             pass
+        if strict:
+            logger.warning(
+                "webhook delivery health-log insert failed (strict)", exc_info=True
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Webhook delivery could not be recorded. Please retry.",
+            ) from exc
         logger.warning("webhook delivery health-log insert failed", exc_info=True)
+        return None
 
 
 class WebhookDeliveryOut(BaseModel):
@@ -2177,7 +2323,7 @@ async def github_webhook(
         #     and the dashboard read.
         #
         # The auditor's own gates (audit_pipeline.evaluate_pr) and its other
-        # trigger paths (workflow_run, `@haunter audit`) are untouched; only
+        # trigger paths (workflow_run, `@haunter-auditor audit`) are untouched; only
         # the pull_request double-publish is removed.
         _auditor_owns_delivery = False
         _audit_id: Optional[str] = None
@@ -2571,7 +2717,7 @@ async def github_webhook(
     # `@haunter address`, `@haunter test-fix` (verify-only, no branch
     # commit). A bare `@haunter` mention defaults to `fix` for backward
     # compatibility with the pre-router pipeline; a mention addressed to
-    # another subsystem's command (`@haunter audit`) is not a fix request
+    # another subsystem's command (`@haunter-auditor audit`) is not a fix request
     # and is filtered out in step 5c — after the auditor has had its turn.
     followup = parse_followup_command(comment_body)
     is_explicit_auto_fix = bool(_EXPLICIT_FIX_CMD_RE.search(comment_body))
@@ -2637,7 +2783,12 @@ async def github_webhook(
     # and its redelivery never double-posts. Exclusive: a Q&A mention never
     # spawns a fix Run (the followup router would otherwise read
     # "@haunter-auditor ..." as bare "@haunter" -> fix).
-    if has_auditor_mention(comment_body):
+    # A body that carries a manual-audit request (`@haunter-auditor audit …`)
+    # is exempt here: it falls through to the 5b manual-audit dispatch below.
+    # Q&A-only mentions (no `audit` word) are still answered here.
+    if has_auditor_mention(comment_body) and not audit_pipeline.is_manual_audit_comment(
+        comment_body
+    ):
         logger.info(
             "Auditor mention pr=%s delivery_id=%s event=%s",
             sanitize_log_value(pr_number, 16),
@@ -2663,6 +2814,36 @@ async def github_webhook(
         except Exception:
             prior = None
         if prior is not None and str(getattr(prior, "status", "")) in _AUDITOR_DEDUP_STATUSES:
+            if str(getattr(prior, "status", "")) == _AUDITOR_QUEUED_STATUS:
+                # Recovery: the queued row is the latest state, so no worker
+                # ever started (`auditor_running` would have followed it) —
+                # the ack named work that never ran. This is the 503 edge: the
+                # queued-row commit landed but the 503 left `add_task`
+                # unreached, and every redelivery since answered `duplicate`
+                # for a question nobody is answering. Re-schedule the
+                # background task with the same snapshots as the main path,
+                # and still answer `duplicate`: the delivery itself is a
+                # repeat. At-least-once by design: if the original worker is
+                # merely slow and its running row is not yet visible, two
+                # workers answer — a duplicate reply, not a lost question.
+                _dup_trigger = _extract_triggering_review_context(
+                    data.get("comment")
+                )
+                background_tasks.add_task(
+                    _run_auditor_mention_background,
+                    repo_id=repo.id,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
+                    pr_number=pr_number,
+                    comment_id=comment_obj.id,
+                    comment_body=comment_obj.body or "",
+                    comment_login=comment_login or "reviewer",
+                    author_association=comment_obj.author_association or "",
+                    in_reply_to_id=getattr(comment_obj, "in_reply_to_id", None),
+                    event=x_github_event,
+                    delivery_id=x_github_delivery,
+                    trigger_context=_dup_trigger,
+                )
             logger.info(
                 "Duplicate auditor mention (delivery_id=%s): prior status=%s",
                 x_github_delivery,
@@ -2680,6 +2861,23 @@ async def github_webhook(
         _qa_login = comment_login or "reviewer"
         _qa_assoc = comment_obj.author_association or ""
         _qa_reply_to = getattr(comment_obj, "in_reply_to_id", None)
+        # Recorded BEFORE scheduling and BEFORE the ack, strictly: this row is
+        # the redelivery dedupe key, so a lost insert must 503 (GitHub
+        # redelivers) rather than ack queueing work no redelivery can dedupe.
+        # add_task is infallible in-memory work queued only after the durable
+        # row exists.
+        await _record_webhook_delivery(
+            db,
+            event=x_github_event,
+            delivery_id=x_github_delivery,
+            status_value=_AUDITOR_QUEUED_STATUS,
+            reason=f"auditor_qa pr={pr_number} comment={_qa_comment_id}",
+            repo=f"{repo_owner}/{repo_name}",
+            repo_id=_qa_repo_id,
+            payload=raw_body,
+            strict=True,
+            retain_full_payload=True,
+        )
         background_tasks.add_task(
             _run_auditor_mention_background,
             repo_id=_qa_repo_id,
@@ -2695,16 +2893,6 @@ async def github_webhook(
             delivery_id=x_github_delivery,
             trigger_context=trigger_context,
         )
-        await _record_webhook_delivery(
-            db,
-            event=x_github_event,
-            delivery_id=x_github_delivery,
-            status_value=_AUDITOR_QUEUED_STATUS,
-            reason=f"auditor_qa pr={pr_number} comment={_qa_comment_id}",
-            repo=f"{repo_owner}/{repo_name}",
-            repo_id=_qa_repo_id,
-            payload=raw_body,
-        )
         return {
             "status": _AUDITOR_QUEUED_STATUS,
             "delivery_id": x_github_delivery,
@@ -2715,14 +2903,26 @@ async def github_webhook(
 
     # 5b. Phase 5.1 Auditor Mode manual-mention filter (after HMAC
     # verification, mention gate, and collaborator check above).
-    # `@haunter audit` dispatches a read-only background audit that works on
+    # `@haunter-auditor audit` dispatches a read-only background audit that works on
     # any PR branch (no haunter/* requirement, no parent Run required).
     # Disabled features exit here with no audit scheduled.
     #
     # A manual audit is a PR audit: it must carry the exact base and head SHAs
-    # the request was made against. issue_comment payloads do not include pull
-    # request endpoints at all, so those requests are refused rather than
-    # resolved against whatever the PR head happens to be when the audit runs.
+    # the request was made against. issue_comment payloads carry no PR
+    # endpoints, so they are resolved synchronously in the request path via
+    # `_resolve_manual_audit_endpoints` (auditor-scoped GitHub read, bounded
+    # waits) BEFORE the ack — never in a BackgroundTasks task, which never
+    # runs on Lambda — and the replayable delivery row is recorded first, so
+    # `audit_accepted` always names recoverable work. pull_request_review_comment
+    # already carries pinned endpoints above, which must never be widened by
+    # a live read, so it keeps dispatching synchronously in the request path
+    # (DB-only, no GitHub I/O).
+    # The live-read TOCTOU (the PR head may advance between the comment and
+    # the read) is accepted by design: the dispatched job pins the resolved
+    # SHAs, and payload SHAs are never adopted — there are none to forge on
+    # this event type. A slow resolution may breach GitHub's ~10s deadline
+    # and cause a redelivery, but the `dispatch_audit` claim is idempotent on
+    # `delivery_id`, so the redelivery deduplicates instead of double-queueing.
     _auditor_scheduled = False
     _auditor_skip_reason: Optional[str] = None
     _audit_id: Optional[str] = None
@@ -2733,6 +2933,130 @@ async def github_webhook(
             _trigger, action, comment_body
         )
         if _decision.should_audit and _decision.audit_type:
+            if x_github_event == "issue_comment" and (not pr_base_sha or not pr_head_sha):
+                # issue_comment-only: resolve endpoints synchronously.
+                # Redelivery pre-check BEFORE resolving (DB-only, no GitHub
+                # I/O): the same delivery already owning a job is answered
+                # `duplicate` here, so a head advance between delivery and
+                # redelivery can never mint a new fingerprint and 409.
+                try:
+                    _existing_audit = await db.scalar(
+                        select(AuditJob).where(
+                            AuditJob.delivery_id == str(x_github_delivery),
+                        )
+                    )
+                except Exception:
+                    _existing_audit = None
+                if _existing_audit is not None:
+                    logger.info(
+                        "Duplicate manual audit (delivery_id=%s): audit_id=%s already owns it",
+                        x_github_delivery,
+                        sanitize_log_value(
+                            getattr(_existing_audit, "audit_id", "?"), 32
+                        ),
+                    )
+                    return {
+                        "status": "duplicate",
+                        "delivery_id": x_github_delivery,
+                    }
+                # Snapshot the id before the delivery recorder commits: the
+                # commit expires ORM instances in this session.
+                _manual_repo_id = repo.id
+                _manual_endpoints = await _resolve_manual_audit_endpoints(
+                    repo,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
+                    pr_number=pr_number,
+                    delivery_id=x_github_delivery,
+                )
+                # Recorded BEFORE the ack on every path below, success or
+                # skip: the row carries the verified raw body, so a skipped
+                # request stays replayable instead of silently dropped. Strict:
+                # this row is the only durable recovery path when no job is
+                # queued, so a lost insert 503s (GitHub redelivers) rather than
+                # acking an audit that can never run nor replay. The full body
+                # (up to the ingestion cap) is retained so the row is always
+                # replayable, whatever its size.
+                await _record_webhook_delivery(
+                    db,
+                    event=x_github_event,
+                    delivery_id=x_github_delivery,
+                    status_value=_MANUAL_AUDIT_ACCEPTED_STATUS,
+                    reason=f"manual_audit_accepted pr={pr_number} comment={comment_obj.id}",
+                    repo=f"{repo_owner}/{repo_name}",
+                    repo_id=_manual_repo_id,
+                    payload=raw_body,
+                    strict=True,
+                    retain_full_payload=True,
+                )
+                if _manual_endpoints is None:
+                    return {
+                        "status": _MANUAL_AUDIT_ACCEPTED_STATUS,
+                        "delivery_id": x_github_delivery,
+                        "repo": f"{repo_owner}/{repo_name}",
+                        "pr_number": pr_number,
+                        "comment_id": comment_obj.id,
+                    }
+                _manual_base_sha, _manual_head_sha, _manual_head_ref = _manual_endpoints
+                try:
+                    _audit_id = await audit_pipeline.dispatch_audit(
+                        db=db,
+                        repo_id=_manual_repo_id,
+                        audit_type=_decision.audit_type,
+                        repo_full_name=f"{repo_owner}/{repo_name}",
+                        delivery_id=str(x_github_delivery),
+                        ref=_manual_head_ref or pr_head_branch,
+                        pr_number=pr_number,
+                        base_sha=_manual_base_sha,
+                        head_sha=_manual_head_sha,
+                        settings_version=_trigger.settings_version,
+                    )
+                except audit_pipeline.AuditDeliveryConflictError:
+                    # Same-delivery race: a redelivery passed the pre-check
+                    # above before this request claimed the delivery_id, then
+                    # resolved different endpoints after a head advance, so its
+                    # fingerprint conflicts with the now-claimed job. The first
+                    # request already owns this delivery and queued the audit,
+                    # so answer `duplicate` — the work exists — instead of 409.
+                    # A genuine conflict (no job owns the delivery) re-raises to
+                    # the outer 409 handler below.
+                    try:
+                        _raced = await db.scalar(
+                            select(AuditJob).where(
+                                AuditJob.delivery_id == str(x_github_delivery),
+                            )
+                        )
+                    except Exception:
+                        _raced = None
+                    if _raced is not None:
+                        logger.info(
+                            "Duplicate manual audit (delivery_id=%s): audit_id=%s already owns it",
+                            x_github_delivery,
+                            sanitize_log_value(getattr(_raced, "audit_id", "?"), 32),
+                        )
+                        return {
+                            "status": "duplicate",
+                            "delivery_id": x_github_delivery,
+                        }
+                    raise
+                logger.info(
+                    "Auditor queued audit_id=%s type=%s repo=%s pr=%s delivery_id=%s comment=%s",
+                    _audit_id,
+                    _decision.audit_type,
+                    _log_repo(repo_owner, repo_name),
+                    sanitize_log_value(pr_number, 16),
+                    sanitize_log_value(x_github_delivery, 64),
+                    sanitize_log_value(comment_obj.id, 16),
+                )
+                return {
+                    "status": _MANUAL_AUDIT_ACCEPTED_STATUS,
+                    "audit_id": _audit_id,
+                    "delivery_id": x_github_delivery,
+                    "repo": f"{repo_owner}/{repo_name}",
+                    "pr_number": pr_number,
+                    "comment_id": comment_obj.id,
+                }
+
             if not pr_base_sha or not pr_head_sha:
                 _auditor_skip_reason = (
                     "manual audit requires pinned pull request endpoints, "
@@ -2774,6 +3098,12 @@ async def github_webhook(
                 x_github_delivery,
                 _decision.reason,
             )
+    except HTTPException:
+        # The strict delivery recorder above raises a retryable 503 when the
+        # audit_accepted row cannot be persisted. It must reach GitHub as a
+        # 503 (redeliver) — the generic handler below would swallow it into a
+        # fix-pipeline `ignored` and lose the audit silently.
+        raise
     except audit_pipeline.AuditDeliveryConflictError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -2787,7 +3117,7 @@ async def github_webhook(
         )
 
     # 5c. The follow-up router owns the fix pipeline. A mention that carries
-    # no fix command (`@haunter audit`) must never spawn a refinement Run —
+    # no fix command (`@haunter-auditor audit`) must never spawn a refinement Run —
     # the auditor is read-only and nobody asked for a patch. Placed after the
     # auditor block so a queued audit still answers the delivery.
     if followup is None:
@@ -2842,7 +3172,7 @@ async def github_webhook(
                 followup=followup,
             )
 
-        # A manual `@haunter audit` request is still served by the auditor
+        # A manual `@haunter-auditor audit` request is still served by the auditor
         # even when no fix-pipeline Run exists for this PR.
         if _auditor_scheduled:
             return _audit_queued_payload(

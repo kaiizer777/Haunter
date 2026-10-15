@@ -28,7 +28,7 @@ import httpx
 import pytest
 
 from app.config import settings
-from app.models import Repo
+from app.models import Repo, RepoSettings
 from app.webhooks import (
     AUDITOR_QA_SYSTEM_PROMPT,
     _bound_auditor_text,
@@ -990,6 +990,114 @@ async def _post_router_with_delivery(
 
 
 @pytest.mark.asyncio
+async def test_audit_trail_question_stays_on_qa_path(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """P1: a question naming `audit` as a noun is answered, never queued as an audit.
+
+    `@haunter-auditor what does this audit trail require?` must stay on the
+    5a Q&A path (`auditor_queued` + background answer) — including when manual
+    audits are disabled, where the old substring gate ignored it outright.
+    """
+    repo = await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    fake_audit_db.add(
+        RepoSettings(
+            repo_id=repo.id,
+            enable_auditor_mode=False,
+            audit_trigger_on_pr=False,
+            audit_trigger_on_ci_failure=False,
+            audit_trigger_on_ci_success=False,
+            audit_trigger_on_manual_mention=False,
+        )
+    )
+    await fake_audit_db.commit()
+    payload = _issue_comment_payload(
+        body="@haunter-auditor what does this audit trail require?"
+    )
+    patches = _no_auditor_side_effects()
+    with patches[0] as llm_cls, patches[1] as post_mock, patches[2] as thread_mock, patches[
+        3
+    ] as pr_mock, patches[4] as issue_mock, patches[5] as review_mock, patches[
+        6
+    ] as diff_mock:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ) as bg_mock:
+            with patch(
+                "app.services.audit_pipeline.dispatch_audit",
+                new_callable=AsyncMock,
+            ) as spy_dispatch:
+                resp = await _post_router(client, "issue_comment", payload)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "auditor_queued"
+    bg_mock.assert_awaited_once()
+    spy_dispatch.assert_not_called()
+    llm_cls.assert_not_called()
+    post_mock.assert_not_called()
+    thread_mock.assert_not_called()
+    pr_mock.assert_not_called()
+    issue_mock.assert_not_called()
+    review_mock.assert_not_called()
+    diff_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_capability_question_stays_on_qa_path(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """P2: a capability question is answered, never queued as an audit.
+
+    `@haunter-auditor what can you audit?` carries the handle and the word
+    `audit`, but asks what the auditor is capable of — it must stay on the
+    5a Q&A path (`auditor_queued` + background answer). The auditor is
+    deliberately ENABLED here so a misclassification would actually dispatch;
+    a named target (`can you audit this PR?`) keeps the command reading.
+    """
+    repo = await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    fake_audit_db.add(
+        RepoSettings(
+            repo_id=repo.id,
+            enable_auditor_mode=True,
+            audit_trigger_on_pr=False,
+            audit_trigger_on_ci_failure=False,
+            audit_trigger_on_ci_success=False,
+            audit_trigger_on_manual_mention=True,
+        )
+    )
+    await fake_audit_db.commit()
+    payload = _issue_comment_payload(body="@haunter-auditor what can you audit?")
+    patches = _no_auditor_side_effects()
+    with patches[0] as llm_cls, patches[1] as post_mock, patches[2] as thread_mock, patches[
+        3
+    ] as pr_mock, patches[4] as issue_mock, patches[5] as review_mock, patches[
+        6
+    ] as diff_mock:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ) as bg_mock:
+            with patch(
+                "app.services.audit_pipeline.dispatch_audit",
+                new_callable=AsyncMock,
+            ) as spy_dispatch:
+                resp = await _post_router(client, "issue_comment", payload)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "auditor_queued"
+    bg_mock.assert_awaited_once()
+    spy_dispatch.assert_not_called()
+    llm_cls.assert_not_called()
+    post_mock.assert_not_called()
+    thread_mock.assert_not_called()
+    pr_mock.assert_not_called()
+    issue_mock.assert_not_called()
+    review_mock.assert_not_called()
+    diff_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_auditor_mention_acks_queued_and_schedules_background(
     client: httpx.AsyncClient,
     fake_audit_db: FakeAsyncSession,
@@ -1030,12 +1138,22 @@ async def test_auditor_mention_acks_queued_and_schedules_background(
 
 
 @pytest.mark.asyncio
-async def test_auditor_mention_redelivery_is_duplicate_without_reschedule(
+async def test_auditor_mention_redelivery_while_running_is_duplicate_without_reschedule(
     client: httpx.AsyncClient,
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ) -> None:
-    """Redelivery of the same GitHub delivery is retry-safe: no second LLM+reply."""
+    """In-flight worker: redelivery is a pure duplicate, no second task.
+
+    The background worker records `auditor_running` before doing any work;
+    a redelivery that finds it answers `duplicate` without re-scheduling.
+    Only a delivery stuck at `auditor_queued` (no worker ever started)
+    recovers via re-schedule — see the 503 test below.
+    """
+    from sqlalchemy import select
+
+    from app.models import WebhookDelivery
+
     await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
     payload = _issue_comment_payload(body="@haunter-auditor explain this?")
     delivery_id = str(uuid.uuid4())
@@ -1050,6 +1168,69 @@ async def test_auditor_mention_redelivery_is_duplicate_without_reschedule(
             assert first.status_code == 200
             assert first.json()["status"] == "auditor_queued"
             assert bg_mock.await_count == 1
+            # Simulate the scheduled worker starting: it appends an
+            # `auditor_running` row. Collapsed into the queued row's status
+            # here because the hermetic store cannot order latest-wins
+            # (ORDER BY ... DESC sorts as ASC — see the xfail tests below);
+            # the worker's own append behavior is covered by
+            # test_background_worker_records_running_row.
+            queued_row = (
+                await fake_audit_db.execute(
+                    select(WebhookDelivery).where(
+                        WebhookDelivery.delivery_id == delivery_id
+                    )
+                )
+            ).scalars().one()
+            queued_row.status = "auditor_running"
+            second = await _post_router_with_delivery(
+                client, "issue_comment", payload, delivery_id
+            )
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["delivery_id"] == delivery_id
+    assert bg_mock.await_count == 1
+    llm_cls.assert_not_called()
+    post_mock.assert_not_called()
+    thread_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auditor_queued_503_then_redelivery_recovers(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """503 after the queued row persisted: redelivery re-schedules the work.
+
+    The strict queued-row commit lands but raises (connection lost after
+    commit), so the 200 ack — and `add_task` — never happen. The redelivery
+    finds `auditor_queued` with no worker behind it, re-schedules the
+    background task, and still answers `duplicate` for the repeated
+    delivery id. Without the recovery the question is silently lost: every
+    redelivery would dedupe against work that never ran.
+    """
+    await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    payload = _issue_comment_payload(body="@haunter-auditor explain this?")
+    delivery_id = str(uuid.uuid4())
+    patches = _no_auditor_side_effects()
+    with patches[0] as llm_cls, patches[1] as post_mock, patches[2] as thread_mock:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ) as bg_mock:
+            # The fake store applies `add` immediately and `commit` is a
+            # no-op, so a raising commit is exactly "row persisted, 503
+            # before add_task".
+            with patch.object(
+                FakeAsyncSession,
+                "commit",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("database unavailable"),
+            ):
+                first = await _post_router_with_delivery(
+                    client, "issue_comment", payload, delivery_id
+                )
+            assert first.status_code == 503
+            assert bg_mock.await_count == 0
             second = await _post_router_with_delivery(
                 client, "issue_comment", payload, delivery_id
             )
@@ -1124,6 +1305,54 @@ async def test_background_worker_failure_records_error_row(
         )
     ).scalars().all()
     assert any(getattr(row, "status", "") == "error" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_background_worker_records_running_row(
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """The worker marks liveness before working: `auditor_running`, then terminal.
+
+    The running row is what tells a redelivery "work started, stay
+    deduplicated" apart from "queued but no worker ever ran, recover". Both
+    rows are appended; latest-wins ordering is real-Postgres behavior (see
+    the xfail tests below), so this asserts the appended set only.
+    """
+    from sqlalchemy import select
+
+    from app.models import WebhookDelivery
+    from app.webhooks import _run_auditor_mention_background
+
+    repo = await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    delivery_id = str(uuid.uuid4())
+    with patch(
+        "app.webhooks._handle_auditor_mention",
+        new_callable=AsyncMock,
+        return_value={"status": "auditor_replied", "channel": "pr_comment"},
+    ):
+        await _run_auditor_mention_background(
+            repo_id=repo.id,
+            repo_owner=ROUTER_OWNER,
+            repo_name=ROUTER_REPO,
+            pr_number=42,
+            comment_id=900001,
+            comment_body="@haunter-auditor explain this?",
+            comment_login="senior-reviewer",
+            author_association="MEMBER",
+            in_reply_to_id=None,
+            event="issue_comment",
+            delivery_id=delivery_id,
+        )
+    rows = (
+        await fake_audit_db.execute(
+            select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+        )
+    ).scalars().all()
+    assert {getattr(row, "status", "") for row in rows} == {
+        "auditor_running",
+        "auditor_replied",
+    }
 
 
 @pytest.mark.xfail(

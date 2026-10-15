@@ -44,8 +44,129 @@ AUDIT_TYPES = frozenset(
     {"pr_audit", "ci_failure_audit", "ci_success_audit", "manual_audit"}
 )
 
-_MANUAL_MENTION = "@haunter"
+#: Manual-audit trigger handle. A single handle, not "@haunter" plus a word:
+#: "@haunter audit" notifies the real GitHub user `haunter`, so the manual
+#: trigger is "@haunter-auditor" plus the whole word `audit`. Bare "@haunter
+#: audit" bodies never dispatch.
+#:
+#: The handle uses the same complete-mention boundary as the Q&A route
+#: (`has_auditor_mention` in app.webhooks): the optional `[bot]` suffix is
+#: allowed, but a longer handle (`@haunter-auditor-extra`,
+#: `@haunter-auditorbot`) is a different account and never dispatches.
+_MANUAL_MENTION_RE: re.Pattern[str] = re.compile(
+    r"@haunter-auditor(?:\[bot\])?(?![A-Za-z0-9_-])", re.IGNORECASE
+)
 _MANUAL_AUDIT_WORD_RE = re.compile(r"\baudit\b", re.IGNORECASE)
+#: Words before `audit` that mark noun use ("this audit trail", "the audit
+#: log"): a question about audits, not an instruction to run one. Such bodies
+#: stay on the Q&A path even when they name the auditor handle.
+_AUDIT_NOUN_PRECEDERS = frozenset(
+    {
+        "this",
+        "that",
+        "these",
+        "those",
+        "the",
+        "a",
+        "an",
+        "your",
+        "our",
+        "its",
+        "their",
+        "his",
+        "her",
+        "my",
+        "last",
+        "latest",
+        "previous",
+        "current",
+        "full",
+        "entire",
+        "recent",
+    }
+)
+#: Words before `audit` that mark an explicit request to run one (`please
+#: audit ...`, `kindly audit ...`): an instruction verb even when the word
+#: after `audit` is a noun (`please audit reports from this PR` audits the
+#: reports — the direct object — rather than asking about them).
+_AUDIT_IMPERATIVE_PRECEDERS = frozenset({"please", "kindly"})
+#: Fragments of the `@haunter-auditor[bot]` handle itself: never a real
+#: preceder. The word before `audit` in `@haunter-auditor audit ...` is
+#: `auditor`, which is the mention — not a noun-phrase determiner — so such
+#: an `audit` is sentence-initial, i.e. the instruction verb.
+_AUDIT_HANDLE_WORDS = frozenset({"haunter", "auditor", "bot"})
+#: Openers of a capability question (`what can you audit?`): answered on the
+#: Q&A path, never queued. A specific target (`can you audit this PR?`)
+#: keeps the command reading — see _AUDIT_COMMAND_TARGET_RE.
+_AUDIT_INTERROGATIVES = frozenset(
+    {
+        "what",
+        "which",
+        "how",
+        "can",
+        "could",
+        "does",
+        "do",
+        "is",
+        "are",
+        "would",
+        "should",
+        "will",
+        "when",
+        "where",
+        "who",
+    }
+)
+#: Phrases that pin an audit request to a concrete target. A question that
+#: names one (`can you audit this PR?`, `can you audit the security of my
+#: fork?`) is a command; one that names none (`what can you audit?`) asks
+#: what the auditor is capable of. Matched only inside the audit-request
+#: sentence (see _is_capability_question), never across the whole comment.
+_AUDIT_COMMAND_TARGET_RE = re.compile(
+    r"\b(this|that|these|those|my|your|our|the)\s+"
+    r"(prs?|pull|diffs?|code|commits?|changes?|branch(?:es)?|repo|repos|"
+    r"repositor(?:y|ies)|fork|forks|securit(?:y|ies)|vulnerabilit(?:y|ies))\b"
+    r"|\bpull\s+requests?\b"
+    r"|\bfork(?:s)?\b"
+    r"|\bsecurit(?:y|ies)\b"
+    r"|\bvulnerabilit(?:y|ies)\b",
+    re.IGNORECASE,
+)
+#: Words that open a question about *categories* of coverage (`what types
+#: of security can you audit?`, `which kinds of vulnerabilities do you
+#: audit?`): a capability question even when the category names a target
+#: domain. Checked before the target veto in `_is_capability_question`, so a
+#: domain word (`security`, `vulnerabilities`, `fork`) inside the category
+#: phrase cannot flip the question into a command. Openers are deliberately
+#: `what`/`which` only: `can you audit the security of my fork?` takes the
+#: domain as the audit's direct object and stays a command.
+_AUDIT_CAPABILITY_CATEGORY_RE = re.compile(
+    r"\b(what|which)\b[^?!]*\b(types?|kinds?|sorts?|categor(?:y|ies))\b[^?!]*\bof\b",
+    re.IGNORECASE,
+)
+#: Words after `audit` that mark a noun compound ("audit trail", "audit log"):
+#: likewise a question about audits, not an audit request — unless the
+#: preceder is an explicit request marker or `audit` is the sentence verb
+#: (see _is_imperative_audit_use).
+_AUDIT_NOUN_FOLLOWERS = frozenset(
+    {
+        "trail",
+        "trails",
+        "log",
+        "logs",
+        "report",
+        "reports",
+        "history",
+        "histories",
+        "result",
+        "results",
+        "finding",
+        "findings",
+        "record",
+        "records",
+    }
+)
+_WORD_RE = re.compile(r"[A-Za-z]+")
 _AUDIT_ID_RE = re.compile(r"^audit-[0-9a-f]{12}$", re.ASCII)
 _REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,255}$", re.ASCII)
 _DELIVERY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$", re.ASCII)
@@ -272,12 +393,186 @@ def is_workflow_audit_conclusion(conclusion: Optional[str]) -> bool:
     return conclusion in AUDIT_WORKFLOW_CONCLUSIONS
 
 
-def is_manual_audit_comment(body: Optional[str]) -> bool:
-    if not body:
-        return False
+def _is_abbrev_dot(body: str, idx: int) -> bool:
+    """True when the `.` at `idx` belongs to an abbreviation, not a boundary.
+
+    Sentence splitting must not cut at the dots in `e.g.`, `i.e.`, `etc.`,
+    or `vs.` — cutting `@haunter-auditor can you audit e.g. this PR?` after
+    `e` re-scopes the audit sentence to `can you audit e`, which then reads
+    as a capability question and the command is lost. Both dots of the
+    two-letter forms are covered: the terminal dot (`e.g|i.e|etc|vs.`) and
+    the first dot (`e.|i.` before `g.|e.`).
+    """
+    before = body[max(0, idx - 4) : idx]
+    if re.search(r"(?i)\b(e\.g|i\.e|etc|vs)\.$", before + "."):
+        return True
     return (
-        _MANUAL_MENTION in body.lower()
-        and _MANUAL_AUDIT_WORD_RE.search(body) is not None
+        re.search(r"(?i)\b[ei]$", before) is not None
+        and re.match(r"(?i)[eg]\.", body[idx + 1 : idx + 3]) is not None
+    )
+
+
+def _is_url_dot(body: str, idx: int) -> bool:
+    """True when the `.` at `idx` sits inside a URL token, not a boundary.
+
+    A dot with non-whitespace on both sides inside a `scheme://` or `www.`
+    token (`https://example.com/a.b`) never ends a sentence. A dot ending
+    the token (`see https://example.com.`) still does.
+    """
+    start = idx
+    while start > 0 and not body[start - 1].isspace():
+        start -= 1
+    head = body[start:idx]
+    if "://" not in head and not head.lower().startswith("www."):
+        return False
+    return idx + 1 < len(body) and not body[idx + 1].isspace()
+
+
+def _prev_sentence_dot(body: str, start: int) -> int:
+    """Rightmost sentence-ending `.` before `start`, or -1 when none."""
+    idx = body.rfind(".", 0, start)
+    while idx != -1 and (_is_abbrev_dot(body, idx) or _is_url_dot(body, idx)):
+        idx = body.rfind(".", 0, idx)
+    return idx
+
+
+def _next_sentence_dot(body: str, end: int) -> int:
+    """Leftmost sentence-ending `.` at or after `end`, or -1 when none."""
+    idx = body.find(".", end)
+    while idx != -1 and (_is_abbrev_dot(body, idx) or _is_url_dot(body, idx)):
+        idx = body.find(".", idx + 1)
+    return idx
+
+
+def _audit_request_sentence(body: str, match: re.Match[str]) -> tuple[str, int]:
+    """The sentence containing one `audit` occurrence, plus its start offset.
+
+    The sentence runs from after the previous `.`/`!`/`?`/newline to the next
+    one (inclusive), or the body edges when no boundary exists. The offset lets
+    callers slice the sentence-local prefix before the match.
+    """
+    start = match.start()
+    prev = max(
+        _prev_sentence_dot(body, start),
+        body.rfind("!", 0, start),
+        body.rfind("?", 0, start),
+        body.rfind("\n", 0, start),
+    )
+    sent_start = prev + 1
+    end = match.end()
+    nexts = [
+        index
+        for index in (
+            _next_sentence_dot(body, end),
+            body.find("!", end),
+            body.find("?", end),
+            body.find("\n", end),
+        )
+        if index != -1
+    ]
+    sent_end = min(nexts) + 1 if nexts else len(body)
+    return body[sent_start:sent_end], sent_start
+
+
+def _is_capability_question(body: str, match: re.Match[str]) -> bool:
+    """True when an `audit` occurrence sits inside a capability question.
+
+    `what can you audit?` asks what the auditor is capable of and belongs on
+    the Q&A path; `can you audit this PR?` (or `can you audit the security of
+    my fork?`) names a concrete target and stays a command. Every signal is
+    scoped to the sentence holding the `audit` occurrence: a target named in
+    another sentence (`what can you audit? I am reviewing this PR`) must not
+    flip the question into a command, and a question mark in another sentence
+    must not flip a command into a question. Fires only when an interrogative
+    opener precedes `audit` within its sentence, no target phrase is named in
+    that same sentence — except a `what/which types|kinds|sorts|categories
+    of X` category phrase, which stays a capability question even when X
+    names a target domain (`what types of security can you audit?`) — and the
+    sentence reads as a question (a question mark,
+    or an interrogative-first sentence) — so plain modals (`you can audit
+    now`) never trip it.
+    """
+    sentence, sent_start = _audit_request_sentence(body, match)
+    before = sentence[: match.start() - sent_start]
+    words = [word.group(0).lower() for word in _WORD_RE.finditer(before)]
+    real = [word for word in words if word not in _AUDIT_HANDLE_WORDS]
+    if not any(word in _AUDIT_INTERROGATIVES for word in real):
+        return False
+    if _AUDIT_CAPABILITY_CATEGORY_RE.search(sentence) is not None:
+        # `what types of security can you audit?` asks about categories of
+        # coverage — a capability question even though `security` names a
+        # target domain. Decided before the target veto below, which would
+        # otherwise flip it into a queued audit. Same question discipline as
+        # the general case: a question mark, or an interrogative-first
+        # sentence, so a flat statement never trips it.
+        if "?" in sentence:
+            return True
+        return bool(real) and real[0] in _AUDIT_INTERROGATIVES
+    if _AUDIT_COMMAND_TARGET_RE.search(sentence) is not None:
+        return False
+    if "?" in sentence:
+        return True
+    return bool(real) and real[0] in _AUDIT_INTERROGATIVES
+
+
+def _is_imperative_audit_use(body: str, match: re.Match[str]) -> bool:
+    """True when one `audit` occurrence is an instruction verb, not a noun.
+
+    Noun uses ("this audit trail", "the audit log", "audit-trail") are
+    questions *about* audits and must stay on the Q&A path: if manual audits
+    are disabled such a question would otherwise be ignored, and if enabled
+    an audit would be queued instead of an answer. Verb uses ("audit this
+    PR", "please audit", "can you audit this?", "please audit reports from
+    this PR") dispatch.
+
+    The noun-follower veto ("audit reports" reads as a noun compound) yields
+    when the preceder is an explicit request marker ("please", "kindly") or
+    when `audit` is the sentence verb — i.e. nothing precedes it once the
+    `@haunter-auditor[bot]` handle itself is skipped — because there `audit`
+    takes the follower as its direct object ("audit reports from this PR"
+    audits the reports). Capability questions are rejected first.
+    """
+    after = body[match.end() :]
+    if after.startswith("-"):
+        # Hyphenated compound (`audit-trail`, `audit-log`): noun.
+        return False
+    if _is_capability_question(body, match):
+        return False
+    follower = _WORD_RE.match(after.lstrip())
+    follower_is_noun = (
+        follower is not None and follower.group(0).lower() in _AUDIT_NOUN_FOLLOWERS
+    )
+    before = body[: match.start()].rstrip()
+    preceder: Optional[re.Match[str]] = None
+    for word in _WORD_RE.finditer(before):
+        if word.group(0).lower() in _AUDIT_HANDLE_WORDS:
+            continue
+        preceder = word
+    if preceder is not None and preceder.group(0).lower() in _AUDIT_NOUN_PRECEDERS:
+        return False
+    if follower_is_noun:
+        if preceder is None or preceder.group(0).lower() in _AUDIT_IMPERATIVE_PRECEDERS:
+            return True
+        return False
+    return True
+
+
+def is_manual_audit_comment(body: Optional[str]) -> bool:
+    """True only for an imperative audit request addressed to @haunter-auditor.
+
+    Both halves are bounded: the handle needs the complete-mention boundary
+    (mirroring the Q&A route, so `@haunter-auditor-extra` and
+    `@haunter-auditorbot` never match), and `audit` must read as an
+    instruction verb (see `_is_imperative_audit_use`), not a noun inside
+    "audit trail" / "the audit log" / a question about audits.
+    """
+    if not isinstance(body, str) or not body:
+        return False
+    if _MANUAL_MENTION_RE.search(body) is None:
+        return False
+    return any(
+        _is_imperative_audit_use(body, match)
+        for match in _MANUAL_AUDIT_WORD_RE.finditer(body)
     )
 
 
@@ -326,7 +621,7 @@ def evaluate_manual_comment(
     if action != "created":
         return AuditDecision(False, f"unsupported comment action: {action}")
     if not is_manual_audit_comment(body):
-        return AuditDecision(False, "no @haunter audit request")
+        return AuditDecision(False, "no @haunter-auditor audit request")
     return AuditDecision(True, "manual-mention trigger matched", "manual_audit")
 
 

@@ -538,7 +538,7 @@ async def test_b5_manual_mention_still_reaches_a_pr_audit(
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
 ):
-    """`@haunter audit` on a review comment still queues the PR audit.
+    """`@haunter-auditor audit` on a review comment still queues the PR audit.
 
     B5 made the automatic PR trigger mutually exclusive with the sentinel. The
     manual mention is the auditor's remaining route to a PR audit and is the one
@@ -557,7 +557,7 @@ async def test_b5_manual_mention_still_reaches_a_pr_audit(
         headers, body = _signed_headers(
             "pull_request_review_comment",
             _review_comment_payload(
-                comment_id=9300001, body="@haunter audit this PR for security issues"
+                comment_id=9300001, body="@haunter-auditor audit this PR for security issues"
             ),
         )
         resp = await client.post("/webhooks/github", headers=headers, content=body)
