@@ -118,11 +118,18 @@ _AUDIT_INTERROGATIVES = frozenset(
     }
 )
 #: Phrases that pin an audit request to a concrete target. A question that
-#: names one (`can you audit this PR?`) is a command; one that names none
-#: (`what can you audit?`) asks what the auditor is capable of.
+#: names one (`can you audit this PR?`, `can you audit the security of my
+#: fork?`) is a command; one that names none (`what can you audit?`) asks
+#: what the auditor is capable of. Matched only inside the audit-request
+#: sentence (see _is_capability_question), never across the whole comment.
 _AUDIT_COMMAND_TARGET_RE = re.compile(
-    r"\b(this|that|these|those)\s+(prs?|pull|diffs?|code|commits?|changes?|branch(?:es)?|repo)\b"
-    r"|\bpull\s+requests?\b",
+    r"\b(this|that|these|those|my|your|our|the)\s+"
+    r"(prs?|pull|diffs?|code|commits?|changes?|branch(?:es)?|repo|repos|"
+    r"repositor(?:y|ies)|fork|forks|securit(?:y|ies)|vulnerabilit(?:y|ies))\b"
+    r"|\bpull\s+requests?\b"
+    r"|\bfork(?:s)?\b"
+    r"|\bsecurit(?:y|ies)\b"
+    r"|\bvulnerabilit(?:y|ies)\b",
     re.IGNORECASE,
 )
 #: Words after `audit` that mark a noun compound ("audit trail", "audit log"):
@@ -374,24 +381,60 @@ def is_workflow_audit_conclusion(conclusion: Optional[str]) -> bool:
     return conclusion in AUDIT_WORKFLOW_CONCLUSIONS
 
 
+def _audit_request_sentence(body: str, match: re.Match[str]) -> tuple[str, int]:
+    """The sentence containing one `audit` occurrence, plus its start offset.
+
+    The sentence runs from after the previous `.`/`!`/`?`/newline to the next
+    one (inclusive), or the body edges when no boundary exists. The offset lets
+    callers slice the sentence-local prefix before the match.
+    """
+    start = match.start()
+    prev = max(
+        body.rfind(".", 0, start),
+        body.rfind("!", 0, start),
+        body.rfind("?", 0, start),
+        body.rfind("\n", 0, start),
+    )
+    sent_start = prev + 1
+    end = match.end()
+    nexts = [
+        index
+        for index in (
+            body.find(".", end),
+            body.find("!", end),
+            body.find("?", end),
+            body.find("\n", end),
+        )
+        if index != -1
+    ]
+    sent_end = min(nexts) + 1 if nexts else len(body)
+    return body[sent_start:sent_end], sent_start
+
+
 def _is_capability_question(body: str, match: re.Match[str]) -> bool:
     """True when an `audit` occurrence sits inside a capability question.
 
     `what can you audit?` asks what the auditor is capable of and belongs on
-    the Q&A path; `can you audit this PR?` names a concrete target and stays
-    a command. Fires only when an interrogative opener precedes `audit`, no
-    target phrase is named anywhere, and the body reads as a question (a
-    question mark, or an interrogative-first sentence) — so plain modals
-    (`you can audit now`) never trip it.
+    the Q&A path; `can you audit this PR?` (or `can you audit the security of
+    my fork?`) names a concrete target and stays a command. Every signal is
+    scoped to the sentence holding the `audit` occurrence: a target named in
+    another sentence (`what can you audit? I am reviewing this PR`) must not
+    flip the question into a command, and a question mark in another sentence
+    must not flip a command into a question. Fires only when an interrogative
+    opener precedes `audit` within its sentence, no target phrase is named in
+    that same sentence, and the sentence reads as a question (a question mark,
+    or an interrogative-first sentence) — so plain modals (`you can audit
+    now`) never trip it.
     """
-    before = body[: match.start()]
+    sentence, sent_start = _audit_request_sentence(body, match)
+    before = sentence[: match.start() - sent_start]
     words = [word.group(0).lower() for word in _WORD_RE.finditer(before)]
     real = [word for word in words if word not in _AUDIT_HANDLE_WORDS]
     if not any(word in _AUDIT_INTERROGATIVES for word in real):
         return False
-    if _AUDIT_COMMAND_TARGET_RE.search(body) is not None:
+    if _AUDIT_COMMAND_TARGET_RE.search(sentence) is not None:
         return False
-    if "?" in body:
+    if "?" in sentence:
         return True
     return bool(real) and real[0] in _AUDIT_INTERROGATIVES
 

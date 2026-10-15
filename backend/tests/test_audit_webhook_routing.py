@@ -62,7 +62,7 @@ from app.github_client import (
     GitHubRateLimitError,
     GitHubResourceNotFoundError,
 )
-from app.models import AuditJob, Repo, RepoSettings
+from app.models import AuditJob, Repo, RepoSettings, WebhookDelivery
 from app.services import audit_pipeline
 from app.services.audit_pipeline import AuditorTriggerSettings
 from tests.conftest import async_session_maker, truncate_all
@@ -1186,14 +1186,12 @@ async def test_issue_comment_manual_audit_resolves_endpoints_synchronously(
         pr_number=77,
         comment_id=9101001,
     )
+    delivery_id = f"ack-{uuid.uuid4().hex[:12]}"
     fake_pr_meta = {
         "head": {"sha": head_sha, "ref": "feature-branch"},
         "base": {"sha": base_sha, "ref": "main"},
     }
     with patch(
-        "app.webhooks._record_webhook_delivery",
-        new_callable=AsyncMock,
-    ) as mock_record, patch(
         "app.github.auditor.get_auditor_installation_token",
         new_callable=AsyncMock,
         return_value="ghs_auditor_token",
@@ -1202,7 +1200,7 @@ async def test_issue_comment_manual_audit_resolves_endpoints_synchronously(
         new_callable=AsyncMock,
         return_value=fake_pr_meta,
     ) as mock_fetch:
-        resp = await post_signed(client, "issue_comment", payload)
+        resp = await post_signed(client, "issue_comment", payload, delivery_id=delivery_id)
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "audit_accepted"
@@ -1228,14 +1226,13 @@ async def test_issue_comment_manual_audit_resolves_endpoints_synchronously(
     assert job.status == "queued"
     assert job.base_sha == base_sha
     assert job.head_sha == head_sha
-    # ... and a replayable delivery row (verified raw body retained).
-    replayable = [
-        call
-        for call in mock_record.await_args_list
-        if call.kwargs.get("status_value") == "audit_accepted"
-        and call.kwargs.get("payload") is not None
-    ]
-    assert replayable, "audit_accepted ack without a replayable delivery row"
+    # ... and a persisted replayable delivery row (verified raw body retained).
+    row = await fake_audit_db.scalar(
+        select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+    )
+    assert row is not None
+    assert row.status == "audit_accepted"
+    assert row.payload is not None, "audit_accepted ack without a replayable delivery row"
 
 
 @pytest.mark.asyncio
@@ -1264,10 +1261,8 @@ async def test_issue_comment_manual_audit_worker_skips_without_credential(
         pr_number=77,
         comment_id=9101001,
     )
+    delivery_id = f"skip-{uuid.uuid4().hex[:12]}"
     with patch(
-        "app.webhooks._record_webhook_delivery",
-        new_callable=AsyncMock,
-    ) as mock_record, patch(
         "app.github.auditor.get_auditor_installation_token",
         new_callable=AsyncMock,
         side_effect=AuditorCredentialError(
@@ -1277,7 +1272,7 @@ async def test_issue_comment_manual_audit_worker_skips_without_credential(
         "app.github_client.fetch_pull_request",
         new_callable=AsyncMock,
     ) as mock_fetch:
-        resp = await post_signed(client, "issue_comment", payload)
+        resp = await post_signed(client, "issue_comment", payload, delivery_id=delivery_id)
     # The ack is unconditional; the skip happens synchronously in the request
     # path, before the ack is returned.
     assert resp.status_code == 200
@@ -1291,14 +1286,13 @@ async def test_issue_comment_manual_audit_worker_skips_without_credential(
         )
     )
     assert job is None
-    # Skipped, but not lost: the replayable delivery row was recorded first.
-    replayable = [
-        call
-        for call in mock_record.await_args_list
-        if call.kwargs.get("status_value") == "audit_accepted"
-        and call.kwargs.get("payload") is not None
-    ]
-    assert replayable, "skipped audit without a replayable delivery row"
+    # Skipped, but not lost: the persisted replayable delivery row was recorded.
+    row = await fake_audit_db.scalar(
+        select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+    )
+    assert row is not None
+    assert row.status == "audit_accepted"
+    assert row.payload is not None, "skipped audit without a replayable delivery row"
 
 
 @pytest.mark.asyncio
@@ -1333,10 +1327,8 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
     payload["issue"]["pull_request"]["base"] = {"ref": "main", "sha": stale_base}
     payload["issue"]["pull_request"]["head"] = {"ref": "stale", "sha": stale_head}
 
+    delivery_id = f"forge-{uuid.uuid4().hex[:12]}"
     with patch(
-        "app.webhooks._record_webhook_delivery",
-        new_callable=AsyncMock,
-    ) as mock_record, patch(
         "app.github.auditor.get_auditor_installation_token",
         new_callable=AsyncMock,
         side_effect=AuditorCredentialError(
@@ -1346,7 +1338,7 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
         "app.github_client.fetch_pull_request",
         new_callable=AsyncMock,
     ) as mock_fetch:
-        resp = await post_signed(client, "issue_comment", payload)
+        resp = await post_signed(client, "issue_comment", payload, delivery_id=delivery_id)
 
     # The ack is unconditional; the skip happens synchronously in the request
     # path, before the ack is returned.
@@ -1361,14 +1353,13 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
         )
     )
     assert job is None
-    # Skipped, but not lost: the replayable delivery row was recorded first.
-    replayable = [
-        call
-        for call in mock_record.await_args_list
-        if call.kwargs.get("status_value") == "audit_accepted"
-        and call.kwargs.get("payload") is not None
-    ]
-    assert replayable, "skipped audit without a replayable delivery row"
+    # Skipped, but not lost: the persisted replayable delivery row was recorded.
+    row = await fake_audit_db.scalar(
+        select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+    )
+    assert row is not None
+    assert row.status == "audit_accepted"
+    assert row.payload is not None, "skipped audit without a replayable delivery row"
     # Nothing anywhere in the outbox was pinned to the injected SHAs.
     stale = (
         await fake_audit_db.scalars(
@@ -1590,6 +1581,228 @@ async def test_issue_comment_manual_audit_redelivery_after_head_advance_is_dupli
 
 
 @pytest.mark.asyncio
+async def test_concurrent_manual_audit_redelivery_never_conflicts(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
+    """Same-delivery race: concurrent redelivery across a head advance is duplicate, never 409.
+
+    Both requests pass the delivery pre-check before either claims the
+    delivery_id, then resolve different endpoints (H1 vs H2 after a head
+    advance). The loser of the dispatch race finds the winner's job and
+    answers `duplicate` instead of surfacing a 409 for work that was queued.
+    The assertions hold whatever the interleaving: sequential runs dedupe at
+    the pre-check, true races at the conflict recovery — neither 409s and
+    exactly one job exists.
+    """
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "race-org", "race-repo"
+    )
+    await set_repo_auditor_settings(fake_audit_db, repo)
+    base_sha = "1" * 40
+    first_head = "a" * 40
+    advanced_head = "b" * 40
+    payload = make_issue_comment_payload(
+        owner="race-org",
+        repo="race-repo",
+        comment_body="@haunter-auditor audit this PR",
+        pr_number=86,
+        comment_id=9101011,
+    )
+    delivery_id = f"race-{uuid.uuid4().hex[:12]}"
+
+    async def _post_with_head(head_sha: str) -> httpx.Response:
+        meta = {
+            "head": {"sha": head_sha, "ref": "feature-branch"},
+            "base": {"sha": base_sha, "ref": "main"},
+        }
+        with patch(
+            "app.github_client.fetch_pull_request",
+            new_callable=AsyncMock,
+            return_value=meta,
+        ), patch(
+            "app.github.auditor.get_auditor_installation_token",
+            new_callable=AsyncMock,
+            return_value="ghs_auditor_token",
+        ):
+            return await post_signed(
+                client, "issue_comment", payload, delivery_id=delivery_id
+            )
+
+    first_resp, second_resp = await asyncio.gather(
+        _post_with_head(first_head), _post_with_head(advanced_head)
+    )
+    statuses = {first_resp.json()["status"], second_resp.json()["status"]}
+    assert first_resp.status_code == 200
+    assert second_resp.status_code == 200
+    assert statuses <= {"audit_accepted", "duplicate"}
+    assert "duplicate" in statuses
+    assert "audit_accepted" in statuses
+    jobs = (
+        await fake_audit_db.scalars(
+            select(AuditJob).where(
+                AuditJob.repo_id == repo.id,
+                AuditJob.audit_type == "manual_audit",
+            )
+        )
+    ).all()
+    assert len(jobs) == 1
+    assert jobs[0].head_sha in (first_head, advanced_head)
+    assert jobs[0].base_sha == base_sha
+
+
+@pytest.mark.asyncio
+async def test_manual_audit_delivery_recorder_failure_is_retryable(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
+    """A lost audit_accepted row 503s instead of acking unrecoverable work.
+
+    The strict delivery recorder raises a retryable 503 when its insert fails,
+    so GitHub redelivers rather than the audit being acked with neither a job
+    nor a replayable delivery.
+    """
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "strict-org", "strict-repo"
+    )
+    await set_repo_auditor_settings(fake_audit_db, repo)
+    payload = make_issue_comment_payload(
+        owner="strict-org",
+        repo="strict-repo",
+        comment_body="@haunter-auditor audit this PR",
+        pr_number=87,
+        comment_id=9101012,
+    )
+    delivery_id = f"strict-{uuid.uuid4().hex[:12]}"
+    with patch(
+        "app.github.auditor.get_auditor_installation_token",
+        new_callable=AsyncMock,
+        return_value="ghs_auditor_token",
+    ), patch(
+        "app.github_client.fetch_pull_request",
+        new_callable=AsyncMock,
+        return_value={
+            "head": {"sha": "2" * 40, "ref": "feature-branch"},
+            "base": {"sha": "1" * 40, "ref": "main"},
+        },
+    ), patch.object(
+        FakeAsyncSession,
+        "commit",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("database unavailable"),
+    ):
+        resp = await post_signed(client, "issue_comment", payload, delivery_id=delivery_id)
+    assert resp.status_code == 503
+    assert "retry" in resp.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_oversized_manual_audit_body_stays_replayable(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
+    """Bodies over the general 128 KiB replay cap are still replayable when acked.
+
+    The auditor ack rows retain the verified body up to the ingestion cap, so
+    an `audit_accepted` for a large comment carries a replay buffer instead of
+    acking work that can never be re-driven.
+    """
+    from app.webhooks import _WEBHOOK_PAYLOAD_MAX_BYTES
+
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "big-org", "big-repo"
+    )
+    await set_repo_auditor_settings(fake_audit_db, repo)
+    padding = "x" * (_WEBHOOK_PAYLOAD_MAX_BYTES + 1024)
+    payload = make_issue_comment_payload(
+        owner="big-org",
+        repo="big-repo",
+        comment_body=f"@haunter-auditor audit this PR {padding}",
+        pr_number=88,
+        comment_id=9101013,
+    )
+    delivery_id = f"big-{uuid.uuid4().hex[:12]}"
+    with patch(
+        "app.github.auditor.get_auditor_installation_token",
+        new_callable=AsyncMock,
+        return_value="ghs_auditor_token",
+    ), patch(
+        "app.github_client.fetch_pull_request",
+        new_callable=AsyncMock,
+        return_value={
+            "head": {"sha": "2" * 40, "ref": "feature-branch"},
+            "base": {"sha": "1" * 40, "ref": "main"},
+        },
+    ):
+        resp = await post_signed(client, "issue_comment", payload, delivery_id=delivery_id)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "audit_accepted"
+    row = await fake_audit_db.scalar(
+        select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+    )
+    assert row is not None
+    assert row.payload is not None, "oversized ack body stored without a replay buffer"
+
+
+@pytest.mark.asyncio
+async def test_fork_security_request_dispatches_manual_audit(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
+    """`can you audit the security of my fork?` is a command, not a capability question."""
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "fork-org", "fork-repo"
+    )
+    await set_repo_auditor_settings(fake_audit_db, repo)
+    base_sha = "1" * 40
+    head_sha = "2" * 40
+    payload = make_issue_comment_payload(
+        owner="fork-org",
+        repo="fork-repo",
+        comment_body="@haunter-auditor can you audit the security of my fork?",
+        pr_number=89,
+        comment_id=9101014,
+    )
+    delivery_id = f"fork-{uuid.uuid4().hex[:12]}"
+    with patch(
+        "app.github.auditor.get_auditor_installation_token",
+        new_callable=AsyncMock,
+        return_value="ghs_auditor_token",
+    ), patch(
+        "app.github_client.fetch_pull_request",
+        new_callable=AsyncMock,
+        return_value={
+            "head": {"sha": head_sha, "ref": "feature-branch"},
+            "base": {"sha": base_sha, "ref": "main"},
+        },
+    ):
+        resp = await post_signed(client, "issue_comment", payload, delivery_id=delivery_id)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "audit_accepted"
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(
+            AuditJob.repo_id == repo.id,
+            AuditJob.audit_type == "manual_audit",
+        )
+    )
+    assert job is not None
+    assert job.base_sha == base_sha
+    assert job.head_sha == head_sha
+
+
+def test_capability_question_with_elsewhere_target_stays_qa():
+    """`what can you audit?` stays Q&A even when `this PR` appears in another sentence."""
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor what can you audit? I am reviewing this PR"
+        )
+        is False
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor can you audit the security of my fork?"
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
 async def test_issue_comment_manual_audit_worker_skips_on_resolution_timeout(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
@@ -1711,14 +1924,12 @@ async def test_issue_comment_manual_audit_needs_no_background_tasks(
         "head": {"sha": head_sha, "ref": "feature-branch"},
         "base": {"sha": base_sha, "ref": "main"},
     }
+    delivery_id = f"lambda-{uuid.uuid4().hex[:12]}"
     with patch.object(
         BackgroundTasks,
         "add_task",
         side_effect=AssertionError("post-response work does not run on Lambda"),
     ), patch(
-        "app.webhooks._record_webhook_delivery",
-        new_callable=AsyncMock,
-    ) as mock_record, patch(
         "app.github.auditor.get_auditor_installation_token",
         new_callable=AsyncMock,
         return_value="ghs_auditor_token",
@@ -1727,7 +1938,7 @@ async def test_issue_comment_manual_audit_needs_no_background_tasks(
         new_callable=AsyncMock,
         return_value=fake_pr_meta,
     ):
-        resp = await post_signed(client, "issue_comment", payload)
+        resp = await post_signed(client, "issue_comment", payload, delivery_id=delivery_id)
     assert resp.status_code == 200
     assert resp.json()["status"] == "audit_accepted"
     job = await fake_audit_db.scalar(
@@ -1740,13 +1951,12 @@ async def test_issue_comment_manual_audit_needs_no_background_tasks(
     assert job.status == "queued"
     assert job.base_sha == base_sha
     assert job.head_sha == head_sha
-    replayable = [
-        call
-        for call in mock_record.await_args_list
-        if call.kwargs.get("status_value") == "audit_accepted"
-        and call.kwargs.get("payload") is not None
-    ]
-    assert replayable, "audit_accepted ack without a replayable delivery row"
+    row = await fake_audit_db.scalar(
+        select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+    )
+    assert row is not None
+    assert row.status == "audit_accepted"
+    assert row.payload is not None, "audit_accepted ack without a replayable delivery row"
 
 
 @pytest.mark.asyncio
