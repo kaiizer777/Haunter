@@ -28,7 +28,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any, AsyncGenerator, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -337,6 +337,10 @@ async def _is_turn_active_elsewhere(db: AsyncSession, session_id: uuid.UUID) -> 
             .with_for_update(nowait=True)
         )
         await db.execute(probe_stmt)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         return False
     except (OperationalError, DBAPIError) as exc:
         try:
@@ -548,12 +552,145 @@ async def close_session(
 # ---------------------------------------------------------------------------
 
 
+def _format_chunk(event_id: int, event: str, chunk: str) -> str:
+    """Format an SSE wire chunk for StreamingResponse."""
+    if chunk.startswith("event:") or "\ndata:" in chunk:
+        return chunk if chunk.endswith("\n\n") else (chunk + "\n\n")
+    return f"id: {event_id}\nevent: {event}\ndata: {chunk}\n\n"
+
+
+async def _stream_from_db(
+    session_id: uuid.UUID,
+    turn_id: str,
+    last_event_id: int,
+    request: Optional[Request] = None,
+) -> AsyncGenerator[str, None]:
+    """
+    Async generator that reads and streams SSE events from PostgreSQL.
+
+    Serves cross-environment resumption on AWS Lambda:
+    1. Fetches and yields any events already persisted with event_id > last_event_id.
+    2. If a terminal event ('done' or 'error') is yielded, returns immediately.
+    3. If the turn is still running in another environment, polls with a 0.35s sleep
+       until a terminal event is persisted, the turn worker drops its row lock,
+       the client disconnects, or a 900s timeout is reached.
+    """
+    from app.db import async_session_maker
+    from app.models import SessionStreamEvent
+
+    max_yielded_id = last_event_id
+
+    # 1. Fetch initial batch of existing events
+    async with async_session_maker() as poll_db:
+        stmt = (
+            select(SessionStreamEvent)
+            .where(
+                SessionStreamEvent.session_id == session_id,
+                SessionStreamEvent.turn_id == turn_id,
+                SessionStreamEvent.event_id > max_yielded_id,
+            )
+            .order_by(SessionStreamEvent.event_id.asc())
+        )
+        res = await poll_db.execute(stmt)
+        initial_rows = res.scalars().all()
+
+    for row in initial_rows:
+        if row.event_id <= 0 or row.event == "turn_start":
+            continue
+        yield _format_chunk(row.event_id, row.event, row.chunk)
+        if row.event_id > max_yielded_id:
+            max_yielded_id = row.event_id
+        if row.event in ("done", "error"):
+            return
+
+    # 2. Poll for emerging events if the turn is in-flight on another Lambda worker
+    timeout_s = 900.0  # Max Lambda execution time
+    start_time = time.monotonic()
+
+    while True:
+        if time.monotonic() - start_time > timeout_s:
+            logger.warning(
+                "_stream_from_db: reached timeout (%.1fs) for session %s turn %s",
+                timeout_s,
+                session_id,
+                turn_id,
+            )
+            break
+
+        if request is not None:
+            try:
+                if await request.is_disconnected():
+                    logger.info(
+                        "_stream_from_db: client disconnected for session %s",
+                        session_id,
+                    )
+                    break
+            except Exception:
+                pass
+
+        await _asyncio.sleep(0.35)
+
+        async with async_session_maker() as poll_db:
+            stmt = (
+                select(SessionStreamEvent)
+                .where(
+                    SessionStreamEvent.session_id == session_id,
+                    SessionStreamEvent.turn_id == turn_id,
+                    SessionStreamEvent.event_id > max_yielded_id,
+                )
+                .order_by(SessionStreamEvent.event_id.asc())
+            )
+            res = await poll_db.execute(stmt)
+            rows = res.scalars().all()
+
+            for row in rows:
+                if row.event_id <= 0 or row.event == "turn_start":
+                    continue
+                yield _format_chunk(row.event_id, row.event, row.chunk)
+                if row.event_id > max_yielded_id:
+                    max_yielded_id = row.event_id
+                if row.event in ("done", "error"):
+                    return
+
+            is_active = await _is_turn_active_elsewhere(poll_db, session_id)
+            if not is_active:
+                # Turn lock released: drain any final event committed right before lock release.
+                # If terminal event hasn't landed yet, poll a few short attempts before closing.
+                terminal_seen = False
+                for _ in range(5):
+                    async with async_session_maker() as drain_db:
+                        final_stmt = (
+                            select(SessionStreamEvent)
+                            .where(
+                                SessionStreamEvent.session_id == session_id,
+                                SessionStreamEvent.turn_id == turn_id,
+                                SessionStreamEvent.event_id > max_yielded_id,
+                            )
+                            .order_by(SessionStreamEvent.event_id.asc())
+                        )
+                        final_res = await drain_db.execute(final_stmt)
+                        for row in final_res.scalars().all():
+                            if row.event_id <= 0 or row.event == "turn_start":
+                                continue
+                            yield _format_chunk(row.event_id, row.event, row.chunk)
+                            if row.event_id > max_yielded_id:
+                                max_yielded_id = row.event_id
+                            if row.event in ("done", "error"):
+                                terminal_seen = True
+                                return
+                    if terminal_seen:
+                        break
+                    await _asyncio.sleep(0.1)
+                break
+
+
 @router.post("/sessions/{session_id}/chat")
 async def chat_session(
     session_id: uuid.UUID,
     body: SessionChatIn,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request = None,  # type: ignore[assignment]
     last_event_id_header: Annotated[Optional[str], Header(alias="Last-Event-ID")] = None,
     last_event_id_query: Annotated[Optional[int], Query(alias="last_event_id")] = None,
 ) -> StreamingResponse:
@@ -667,21 +804,103 @@ async def chat_session(
                     },
                 )
             _forget_turn(str(session_id))
-        # No live turn in this execution environment. The registry is
-        # process-local, so on Lambda the turn may still be running on another
-        # environment — probe the shared row lock before giving up.
+
+        # No live turn in this local execution environment.
+        # Query DB for latest turn_id from stream events for cross-environment Lambda replay.
+        from app.models import SessionStreamEvent
+
+        latest_turn_stmt = (
+            select(SessionStreamEvent.turn_id)
+            .where(SessionStreamEvent.session_id == session_id)
+            .order_by(SessionStreamEvent.id.desc())
+            .limit(1)
+        )
+        latest_turn_res = await db.execute(latest_turn_stmt)
+        active_turn_id = latest_turn_res.scalars().first()
+
+        # If turn is active elsewhere, the orchestrator might be in the middle of
+        # turn startup (clearing old events and publishing turn_start). Retry turn
+        # discovery for up to 2.5s (25 x 0.1s) until events for the new turn appear.
         if await _is_turn_active_elsewhere(db, session_id):
+            if active_turn_id is None:
+                for _ in range(25):
+                    await _asyncio.sleep(0.1)
+                    retry_res = await db.execute(latest_turn_stmt)
+                    active_turn_id = retry_res.scalars().first()
+                    if active_turn_id is not None:
+                        break
+
+            # If still None or has no events after discovery retry
+            if active_turn_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "TURN_ACTIVE_ELSEWHERE: a turn for this session is still running "
+                        "on another worker. Retry this resumption shortly; keep the "
+                        "same Last-Event-ID."
+                    ),
+                )
+        elif active_turn_id is None:
+            active_turn_id = session.active_turn_id
+
+        if active_turn_id is None:
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
+                status_code=status.HTTP_410_GONE,
+                detail="No resumable turn for this session. Please send your message again as a new request.",
+            )
+
+        event_bounds_stmt = (
+            select(
+                func.min(SessionStreamEvent.event_id),
+                func.max(SessionStreamEvent.event_id),
+            )
+            .where(
+                SessionStreamEvent.session_id == session_id,
+                SessionStreamEvent.turn_id == active_turn_id,
+            )
+        )
+        bounds_res = await db.execute(event_bounds_stmt)
+        min_event_id, max_event_id = bounds_res.first() or (None, None)
+
+        if min_event_id is None:
+            if await _is_turn_active_elsewhere(db, session_id):
+                return StreamingResponse(
+                    _stream_from_db(
+                        session_id, active_turn_id, parsed_last_event_id, request=request
+                    ),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="No resumable turn for this session. Please send your message again as a new request.",
+            )
+
+        if parsed_last_event_id < min_event_id - 1 or parsed_last_event_id < 0:
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
                 detail=(
-                    "TURN_ACTIVE_ELSEWHERE: a turn for this session is still running "
-                    "on another worker. Retry this resumption shortly; keep the "
-                    "same Last-Event-ID."
+                    "RESUME_GAP: Last-Event-ID predates the retained replay "
+                    "window; some events were evicted before this reconnect. "
+                    "Reload the session state and send your message again "
+                    "as a new request."
                 ),
             )
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail="No resumable turn for this session. Please send your message again as a new request.",
+
+        return StreamingResponse(
+            _stream_from_db(
+                session_id, active_turn_id, parsed_last_event_id, request=request
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     # Overlapping non-resumption POST while a turn owns this session: reject

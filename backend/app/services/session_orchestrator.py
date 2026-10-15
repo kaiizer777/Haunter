@@ -23,6 +23,7 @@ Security:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -1282,11 +1283,55 @@ class SessionOrchestrator:
         session_id: uuid.UUID,
         db: AsyncSession,
         gh_token: str | None = None,
+        turn_id: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.db = db
         self.gh_token = gh_token
+        self.turn_id = turn_id
         self._llm = LLMClient(timeout=120.0)
+        self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
+        self._mirror_worker_task: asyncio.Task | None = None
+
+    async def _mirror_worker(self) -> None:
+        """Background worker that serializes event mirroring in strict monotonic event_id order."""
+        from app.db import async_session_maker
+        from app.models import SessionStreamEvent
+
+        while True:
+            item = await self._mirror_queue.get()
+            if item is None:
+                self._mirror_queue.task_done()
+                break
+            event_id, event, chunk = item
+            try:
+                async with async_session_maker() as mirror_db:
+                    stream_event = SessionStreamEvent(
+                        session_id=self.session_id,
+                        turn_id=self.turn_id,
+                        event_id=event_id,
+                        event=event,
+                        chunk=chunk,
+                    )
+                    mirror_db.add(stream_event)
+                    await mirror_db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "session_orchestrator: failed to mirror event %s (id=%s) to DB for session=%s: %s",
+                    event,
+                    event_id,
+                    self.session_id,
+                    exc,
+                )
+            finally:
+                self._mirror_queue.task_done()
+
+    async def _drain_mirror_queue(self) -> None:
+        """Wait for all pending mirrored events to commit to DB and shut down the worker."""
+        if self._mirror_worker_task and not self._mirror_worker_task.done():
+            await self._mirror_queue.put(None)
+            await self._mirror_worker_task
+            self._mirror_worker_task = None
 
     async def run(
         self,
@@ -1313,6 +1358,11 @@ class SessionOrchestrator:
         All exceptions are caught here; an `error` SSE event is emitted and
         the queue is closed so the HTTP response terminates cleanly.
         """
+        if not self.turn_id:
+            self.turn_id = str(uuid.uuid4())
+        queue.mirror_sink = self._mirror_event
+        self._mirror_worker_task = asyncio.create_task(self._mirror_worker())
+
         try:
             await self._execute(user_message, queue, model=model, provider=provider)
         except SessionBusyError:
@@ -1356,6 +1406,16 @@ class SessionOrchestrator:
                 "INTERNAL_ERROR",
             )
             await queue.close()
+        finally:
+            # Drain any pending database mirror commits before concluding the turn
+            try:
+                await self._drain_mirror_queue()
+            except Exception as drain_exc:
+                logger.warning(
+                    "session_orchestrator: error draining mirror queue for session=%s: %s",
+                    self.session_id,
+                    drain_exc,
+                )
 
     async def _execute(
         self,
@@ -1377,6 +1437,42 @@ class SessionOrchestrator:
             )
             await queue.close()
             return
+
+        # Record this turn as the session's active_turn_id for cross-environment resumption
+        session.active_turn_id = self.turn_id
+        # Keep row lock held on self.db throughout turn execution (do not commit self.db here).
+        # We publish the new turn immediately into session_stream_events and prune prior turn
+        # events via a separate isolated transaction so cross-env workers discover the new turn_id
+        # immediately without lock conflict with self.db's FOR NO KEY UPDATE row lock.
+        from app.db import async_session_maker
+        from app.models import SessionStreamEvent
+        from sqlalchemy import delete
+
+        try:
+            async with async_session_maker() as meta_db:
+                # Prune prior turn events for this session to prevent unbounded table growth
+                del_stmt = delete(SessionStreamEvent).where(
+                    SessionStreamEvent.session_id == self.session_id,
+                    SessionStreamEvent.turn_id != self.turn_id,
+                )
+                await meta_db.execute(del_stmt)
+
+                # Publish turn_start initialization event (event_id=0) so other workers immediately
+                # discover this active turn in session_stream_events
+                init_event = SessionStreamEvent(
+                    session_id=self.session_id,
+                    turn_id=self.turn_id,
+                    event_id=0,
+                    event="turn_start",
+                    chunk="",
+                )
+                meta_db.add(init_event)
+                await meta_db.commit()
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: failed to publish turn_start / prune events in meta_db: %s",
+                exc,
+            )
 
         repo = session.repo  # selectinloaded by _load_session
 
@@ -3188,7 +3284,7 @@ class SessionOrchestrator:
                     AgentSession.id == self.session_id,
                     AgentSession.status == "active",
                 )
-                .with_for_update(nowait=True)
+                .with_for_update(nowait=True, key_share=True)
             )
             result = await self.db.execute(stmt)
             return result.scalars().first()
@@ -3238,6 +3334,11 @@ class SessionOrchestrator:
         fallback_checkpoints = session.checkpoints
         fallback_plan = session.plan
         fallback_waiting_input = session.waiting_input
+        fallback_active_turn_id = getattr(session, "active_turn_id", None) or self.turn_id
+        try:
+            session.active_turn_id = fallback_active_turn_id
+        except Exception:
+            pass
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
@@ -3266,6 +3367,7 @@ class SessionOrchestrator:
                 res = await fallback_db.execute(stmt)
                 db_session = res.scalars().first()
                 if db_session:
+                    db_session.active_turn_id = fallback_active_turn_id
                     db_session.conversation_history = updated_history
                     db_session.staged_patches = updated_patches
                     db_session.updated_at = datetime.now(timezone.utc)
@@ -3274,3 +3376,11 @@ class SessionOrchestrator:
                     db_session.plan = fallback_plan
                     db_session.waiting_input = fallback_waiting_input
                     await fallback_db.commit()
+
+    async def _mirror_event(self, event_id: int, event: str, chunk: str) -> None:
+        """Mirror an emitted SSE event to PostgreSQL for cross-environment resumption via sequential worker."""
+        if not self.turn_id:
+            return
+        await self._mirror_queue.put((event_id, event, chunk))
+
+    run_turn = run
