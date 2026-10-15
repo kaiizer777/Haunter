@@ -97,14 +97,7 @@ Whether you're **debugging an open issue**, **implementing a new feature**, or *
 ---
 
 <br/>
-*** Begin Patch
-*** Update File: README.md
-@@
--Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and full per-run agent traces. 
-+Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and (when enabled) full per-run agent traces. 
-*** End Patch
-
-Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and full per-run agent traces. 
+Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and (when enabled) full per-run agent traces.
 
 An **eval harness** with 20 golden fixtures lets you benchmark and compare quality across any configuration change.
 
