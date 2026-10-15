@@ -10,7 +10,7 @@ Handles incoming GitHub webhook events with strict security controls:
 5. Immediate 2xx response (<200ms) with async pipeline scheduling via BackgroundTasks.
 6. Phase 5.1 (future02 §1.5) Auditor Mode trigger filter: pull_request
    (opened/synchronize), workflow_run.completed (failure/success), and
-   issue_comment.created (@haunter audit) are evaluated against
+   issue_comment.created (@haunter-auditor audit) are evaluated against
    app.services.audit_pipeline triggers after signature verification,
    repo registration, branch guards, and the per-repo kill-switch, then
 dispatched through a durable, independent audit queue (never git push / PR creation).
@@ -18,7 +18,7 @@ dispatched through a durable, independent audit queue (never git push / PR creat
    mentions are classified by app.services.followup_commands into
    `fix` / `address` (refine and commit) or `test-fix` (verify only), and the
    resulting child Run is threaded to the originating run via parent_run_id.
-   A mention carrying no fix command (`@haunter audit`) never reaches the
+   A mention carrying no fix command (`@haunter-auditor audit`) never reaches the
    fix pipeline.
 8. Feature 8 health log + replay: the decision branches that reach a registered
    repository also append a webhook_deliveries row (see
@@ -2177,7 +2177,7 @@ async def github_webhook(
         #     and the dashboard read.
         #
         # The auditor's own gates (audit_pipeline.evaluate_pr) and its other
-        # trigger paths (workflow_run, `@haunter audit`) are untouched; only
+        # trigger paths (workflow_run, `@haunter-auditor audit`) are untouched; only
         # the pull_request double-publish is removed.
         _auditor_owns_delivery = False
         _audit_id: Optional[str] = None
@@ -2571,7 +2571,7 @@ async def github_webhook(
     # `@haunter address`, `@haunter test-fix` (verify-only, no branch
     # commit). A bare `@haunter` mention defaults to `fix` for backward
     # compatibility with the pre-router pipeline; a mention addressed to
-    # another subsystem's command (`@haunter audit`) is not a fix request
+    # another subsystem's command (`@haunter-auditor audit`) is not a fix request
     # and is filtered out in step 5c — after the auditor has had its turn.
     followup = parse_followup_command(comment_body)
     is_explicit_auto_fix = bool(_EXPLICIT_FIX_CMD_RE.search(comment_body))
@@ -2637,7 +2637,12 @@ async def github_webhook(
     # and its redelivery never double-posts. Exclusive: a Q&A mention never
     # spawns a fix Run (the followup router would otherwise read
     # "@haunter-auditor ..." as bare "@haunter" -> fix).
-    if has_auditor_mention(comment_body):
+    # A body that carries a manual-audit request (`@haunter-auditor audit …`)
+    # is exempt here: it falls through to the 5b manual-audit dispatch below.
+    # Q&A-only mentions (no `audit` word) are still answered here.
+    if has_auditor_mention(comment_body) and not audit_pipeline.is_manual_audit_comment(
+        comment_body
+    ):
         logger.info(
             "Auditor mention pr=%s delivery_id=%s event=%s",
             sanitize_log_value(pr_number, 16),
@@ -2715,14 +2720,17 @@ async def github_webhook(
 
     # 5b. Phase 5.1 Auditor Mode manual-mention filter (after HMAC
     # verification, mention gate, and collaborator check above).
-    # `@haunter audit` dispatches a read-only background audit that works on
+    # `@haunter-auditor audit` dispatches a read-only background audit that works on
     # any PR branch (no haunter/* requirement, no parent Run required).
     # Disabled features exit here with no audit scheduled.
     #
     # A manual audit is a PR audit: it must carry the exact base and head SHAs
-    # the request was made against. issue_comment payloads do not include pull
-    # request endpoints at all, so those requests are refused rather than
-    # resolved against whatever the PR head happens to be when the audit runs.
+    # the request was made against. issue_comment payloads carry no PR
+    # endpoints, so they are resolved live via an auditor-scoped GitHub read
+    # at dispatch time. The live-read TOCTOU (the PR head may advance between
+    # the comment and the read) is accepted by design: the queued job pins the
+    # resolved SHAs, and payload SHAs are never adopted — there are none to
+    # forge on this event type.
     _auditor_scheduled = False
     _auditor_skip_reason: Optional[str] = None
     _audit_id: Optional[str] = None
@@ -2734,22 +2742,34 @@ async def github_webhook(
         )
         if _decision.should_audit and _decision.audit_type:
             if x_github_event == "issue_comment" and (not pr_base_sha or not pr_head_sha):
-                # Attempt to fetch PR endpoints from GitHub API
-                try:
-                    from app.github.auditor import get_auditor_installation_token
-                    from app.github_client import fetch_pull_request
+                # issue_comment-only: pull_request_review_comment already
+                # carries pinned endpoints above, which must never be widened
+                # by a live read. Auditor token only, never the global fallback.
+                from app import github_client
+                from app.github import auditor as github_auditor
+                from app.github.auditor import AuditorCredentialError
 
-                    token = await get_auditor_installation_token(repo)
-                    pr_meta = await fetch_pull_request(
+                try:
+                    token = await github_auditor.get_auditor_installation_token(repo)
+                    pr_meta = await github_client.fetch_pull_request(
                         owner=repo_owner,
                         repo=repo_name,
                         pr_number=pr_number,
                         token=token,
                         allow_global_token=False,
                     )
-                    pr_head_sha = pr_meta.get("head", {}).get("sha")
-                    pr_base_sha = pr_meta.get("base", {}).get("sha")
-                    pr_head_branch = pr_meta.get("head", {}).get("ref")
+                    head = pr_meta.get("head") if isinstance(pr_meta, dict) else None
+                    base = pr_meta.get("base") if isinstance(pr_meta, dict) else None
+                    pr_head_sha = head.get("sha") if isinstance(head, dict) else None
+                    pr_base_sha = base.get("sha") if isinstance(base, dict) else None
+                    pr_head_branch = head.get("ref") if isinstance(head, dict) else None
+                except AuditorCredentialError:
+                    logger.info(
+                        "Auditor credential unavailable for %s PR #%s: "
+                        "skipping manual audit",
+                        _log_repo(repo_owner, repo_name),
+                        sanitize_log_value(pr_number, 16),
+                    )
                 except Exception as exc:
                     logger.info(
                         "Failed to resolve PR endpoints for %s PR #%s: %s",
@@ -2812,7 +2832,7 @@ async def github_webhook(
         )
 
     # 5c. The follow-up router owns the fix pipeline. A mention that carries
-    # no fix command (`@haunter audit`) must never spawn a refinement Run —
+    # no fix command (`@haunter-auditor audit`) must never spawn a refinement Run —
     # the auditor is read-only and nobody asked for a patch. Placed after the
     # auditor block so a queued audit still answers the delivery.
     if followup is None:
@@ -2867,7 +2887,7 @@ async def github_webhook(
                 followup=followup,
             )
 
-        # A manual `@haunter audit` request is still served by the auditor
+        # A manual `@haunter-auditor audit` request is still served by the auditor
         # even when no fix-pipeline Run exists for this PR.
         if _auditor_scheduled:
             return _audit_queued_payload(

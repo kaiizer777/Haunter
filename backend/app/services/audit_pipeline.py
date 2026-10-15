@@ -44,7 +44,11 @@ AUDIT_TYPES = frozenset(
     {"pr_audit", "ci_failure_audit", "ci_success_audit", "manual_audit"}
 )
 
-_MANUAL_MENTION = "@haunter"
+#: Manual-audit trigger handle. A single handle, not "@haunter" plus a word:
+#: "@haunter audit" notifies the real GitHub user `haunter`, so the manual
+#: trigger is "@haunter-auditor" plus the whole word `audit`. Bare "@haunter
+#: audit" bodies never dispatch.
+_MANUAL_MENTION = "@haunter-auditor"
 _MANUAL_AUDIT_WORD_RE = re.compile(r"\baudit\b", re.IGNORECASE)
 _AUDIT_ID_RE = re.compile(r"^audit-[0-9a-f]{12}$", re.ASCII)
 _REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,255}$", re.ASCII)
@@ -326,7 +330,7 @@ def evaluate_manual_comment(
     if action != "created":
         return AuditDecision(False, f"unsupported comment action: {action}")
     if not is_manual_audit_comment(body):
-        return AuditDecision(False, "no @haunter audit request")
+        return AuditDecision(False, "no @haunter-auditor audit request")
     return AuditDecision(True, "manual-mention trigger matched", "manual_audit")
 
 

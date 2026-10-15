@@ -10,7 +10,7 @@ Covers:
   4. pull_request opened / synchronize dispatch audit; unsupported action ignored.
   5. workflow_run.completed failure dispatches; success ignored by default
      and queued when `on_ci_success` is enabled.
-  6. issue_comment.created `@haunter audit` dispatches (branch-agnostic,
+  6. issue_comment.created `@haunter-auditor audit` dispatches (branch-agnostic,
      no parent Run required).
   7. Disabled-feature early exit (no audit scheduled, fast, no mutation).
 
@@ -55,6 +55,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.github.auditor import AuditorCredentialError
 from app.github_client import (
     GitHubAuthError,
     GitHubNetworkError,
@@ -191,7 +192,7 @@ def make_workflow_payload(
 def make_issue_comment_payload(
     owner: str = "audit-org",
     repo: str = "audit-repo",
-    comment_body: str = "@haunter audit this PR for security issues",
+    comment_body: str = "@haunter-auditor audit this PR for security issues",
     author_association: str = "MEMBER",
     pr_number: int = 77,
     comment_id: int = 9101001,
@@ -222,7 +223,7 @@ def make_issue_comment_payload(
 def make_review_comment_payload(
     owner: str = "audit-org",
     repo: str = "audit-repo",
-    comment_body: str = "@haunter audit this PR for security issues",
+    comment_body: str = "@haunter-auditor audit this PR for security issues",
     author_association: str = "MEMBER",
     pr_number: int = 88,
     comment_id: int = 9202001,
@@ -1154,7 +1155,7 @@ async def test_audit_workflow_run_success_queued_when_enabled(
 
 
 # ---------------------------------------------------------------------------
-# 6. issue_comment @haunter audit
+# 6. issue_comment @haunter-auditor audit
 # ---------------------------------------------------------------------------
 
 
@@ -1162,10 +1163,15 @@ async def test_audit_workflow_run_success_queued_when_enabled(
 async def test_issue_comment_manual_audit_is_refused_without_pinned_endpoints(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    """issue_comment carries no PR endpoints, so a manual audit cannot be pinned.
+    """Without resolvable PR endpoints, a manual audit stays unpinned and is skipped.
 
-    Queuing one anyway would let the worker resolve the PR's *current* head at
-    execution time and audit a commit the requester never referenced.
+    issue_comment carries no PR endpoints, so the handler resolves them live
+    via an auditor-scoped GitHub read. When that resolution fails — here, no
+    auditor credential exists for the repo — the request is skipped
+    fail-closed instead of being queued against whatever the PR head happens
+    to be. The credential failure is mocked explicitly (an unseeded install
+    id raises through the same path, which must not be relied on), and the PR
+    read must never be attempted without a token.
     """
     repo = await seed_repo(
         fake_audit_db, fake_audit_user_factory, "m-audit-org", "m-audit-repo"
@@ -1174,15 +1180,27 @@ async def test_issue_comment_manual_audit_is_refused_without_pinned_endpoints(
     payload = make_issue_comment_payload(
         owner="m-audit-org",
         repo="m-audit-repo",
-        comment_body="@haunter audit this PR for security issues please",
+        comment_body="@haunter-auditor audit this PR for security issues please",
         pr_number=77,
         comment_id=9101001,
     )
-    resp = await post_signed(client, "issue_comment", payload)
+    with patch(
+        "app.github.auditor.get_auditor_installation_token",
+        new_callable=AsyncMock,
+        side_effect=AuditorCredentialError(
+            "repository has no auditor GitHub installation"
+        ),
+    ) as mock_token, patch(
+        "app.github_client.fetch_pull_request",
+        new_callable=AsyncMock,
+    ) as mock_fetch:
+        resp = await post_signed(client, "issue_comment", payload)
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ignored"
     assert "pinned pull request endpoints" in data["reason"]
+    mock_token.assert_awaited_once()
+    mock_fetch.assert_not_awaited()
     job = await fake_audit_db.scalar(
         select(AuditJob).where(
             AuditJob.repo_id == repo.id,
@@ -1196,14 +1214,14 @@ async def test_issue_comment_manual_audit_is_refused_without_pinned_endpoints(
 async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    """Endpoints in the payload are not the PR's endpoints, so they are refused.
+    """Forged payload endpoints are never adopted; only a live read pins SHAs.
 
     An `issue_comment` payload has no trustworthy PR endpoints of its own. A
     sender that bolts a `pull_request` object onto the payload — or names two
-    commits in the comment body — must not have those SHAs adopted: they are not
-    the commits the request was made against, and the worker would then pin the
-    audit to commits the requester never referenced. The request is refused, not
-    silently re-pinned.
+    commits in the comment body — must not have those SHAs adopted: they are
+    not the commits the request was made against. Only the auditor-scoped
+    live read pins endpoints; here the credential lookup fails, so the
+    request is skipped and nothing is pinned to the injected SHAs.
     """
     repo = await seed_repo(
         fake_audit_db, fake_audit_user_factory, "m3-audit-org", "m3-audit-repo"
@@ -1214,7 +1232,9 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
     payload = make_issue_comment_payload(
         owner="m3-audit-org",
         repo="m3-audit-repo",
-        comment_body=("@haunter audit base " f"{stale_base} head {stale_head} please"),
+        comment_body=(
+            "@haunter-auditor audit base " f"{stale_base} head {stale_head} please"
+        ),
         pr_number=78,
         comment_id=9101002,
     )
@@ -1222,12 +1242,24 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
     payload["issue"]["pull_request"]["base"] = {"ref": "main", "sha": stale_base}
     payload["issue"]["pull_request"]["head"] = {"ref": "stale", "sha": stale_head}
 
-    resp = await post_signed(client, "issue_comment", payload)
+    with patch(
+        "app.github.auditor.get_auditor_installation_token",
+        new_callable=AsyncMock,
+        side_effect=AuditorCredentialError(
+            "repository has no auditor GitHub installation"
+        ),
+    ) as mock_token, patch(
+        "app.github_client.fetch_pull_request",
+        new_callable=AsyncMock,
+    ) as mock_fetch:
+        resp = await post_signed(client, "issue_comment", payload)
 
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ignored"
     assert "pinned pull request endpoints" in data["reason"]
+    mock_token.assert_awaited_once()
+    mock_fetch.assert_not_awaited()
     job = await fake_audit_db.scalar(
         select(AuditJob).where(
             AuditJob.repo_id == repo.id,
@@ -1250,7 +1282,7 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
 async def test_issue_comment_manual_audit_dispatches_with_live_pr_endpoints(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    """When fetch_pull_request returns PR endpoints, @haunter audit in issue_comment dispatches."""
+    """When fetch_pull_request returns PR endpoints, @haunter-auditor audit in issue_comment dispatches."""
     repo = await seed_repo(
         fake_audit_db, fake_audit_user_factory, "live-audit-org", "live-audit-repo"
     )
@@ -1260,7 +1292,7 @@ async def test_issue_comment_manual_audit_dispatches_with_live_pr_endpoints(
     payload = make_issue_comment_payload(
         owner="live-audit-org",
         repo="live-audit-repo",
-        comment_body="@haunter audit this PR for vulnerabilities",
+        comment_body="@haunter-auditor audit this PR for vulnerabilities",
         pr_number=80,
         comment_id=9101005,
     )
@@ -1316,7 +1348,7 @@ async def test_issue_comment_manual_audit_falls_back_when_fetch_pull_request_fai
     payload = make_issue_comment_payload(
         owner="live-fail-org",
         repo="live-fail-repo",
-        comment_body="@haunter audit this PR",
+        comment_body="@haunter-auditor audit this PR",
         pr_number=81,
         comment_id=9101006,
     )
@@ -1498,7 +1530,7 @@ async def test_audit_disabled_feature_early_exit_manual(
     payload = make_issue_comment_payload(
         owner="off2-audit-org",
         repo="off2-audit-repo",
-        comment_body="@haunter audit this please",
+        comment_body="@haunter-auditor audit this please",
         pr_number=79,
         comment_id=9101003,
     )
@@ -1523,7 +1555,7 @@ def test_audit_trigger_unit_disabled_short_circuits():
     )
     assert (
         audit_pipeline.evaluate_manual_comment(
-            disabled, "created", "@haunter audit"
+            disabled, "created", "@haunter-auditor audit"
         ).should_audit
         is False
     )
@@ -2286,13 +2318,24 @@ async def test_dispatch_persists_idempotently_without_calling_scheduler(
 
 
 def test_audit_manual_comment_requires_whole_word():
-    assert audit_pipeline.is_manual_audit_comment("@haunter audit this PR") is True
-    assert audit_pipeline.is_manual_audit_comment("@HAUNTER please AUDIT this") is True
+    assert audit_pipeline.is_manual_audit_comment("@haunter-auditor audit this PR") is True
+    assert (
+        audit_pipeline.is_manual_audit_comment("@HAUNTER-AUDITOR please AUDIT this")
+        is True
+    )
     # Near-misses must not trigger.
-    assert audit_pipeline.is_manual_audit_comment("@haunter auditing the logs") is False
+    assert (
+        audit_pipeline.is_manual_audit_comment("@haunter-auditor auditing the logs")
+        is False
+    )
     # \b splits on the hyphen, so "audit-trail" still counts as the word.
-    assert audit_pipeline.is_manual_audit_comment("@haunter audit-trail review") is True
-    assert audit_pipeline.is_manual_audit_comment("@haunter please fix this") is False
+    assert (
+        audit_pipeline.is_manual_audit_comment("@haunter-auditor audit-trail review")
+        is True
+    )
+    assert audit_pipeline.is_manual_audit_comment("@haunter-auditor please fix") is False
+    # Bare "@haunter audit" notifies a real GitHub user and never dispatches.
+    assert audit_pipeline.is_manual_audit_comment("@haunter audit this PR") is False
     assert audit_pipeline.is_manual_audit_comment(None) is False
 
 
