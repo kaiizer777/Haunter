@@ -85,8 +85,50 @@ _AUDIT_NOUN_PRECEDERS = frozenset(
         "recent",
     }
 )
+#: Words before `audit` that mark an explicit request to run one (`please
+#: audit ...`, `kindly audit ...`): an instruction verb even when the word
+#: after `audit` is a noun (`please audit reports from this PR` audits the
+#: reports — the direct object — rather than asking about them).
+_AUDIT_IMPERATIVE_PRECEDERS = frozenset({"please", "kindly"})
+#: Fragments of the `@haunter-auditor[bot]` handle itself: never a real
+#: preceder. The word before `audit` in `@haunter-auditor audit ...` is
+#: `auditor`, which is the mention — not a noun-phrase determiner — so such
+#: an `audit` is sentence-initial, i.e. the instruction verb.
+_AUDIT_HANDLE_WORDS = frozenset({"haunter", "auditor", "bot"})
+#: Openers of a capability question (`what can you audit?`): answered on the
+#: Q&A path, never queued. A specific target (`can you audit this PR?`)
+#: keeps the command reading — see _AUDIT_COMMAND_TARGET_RE.
+_AUDIT_INTERROGATIVES = frozenset(
+    {
+        "what",
+        "which",
+        "how",
+        "can",
+        "could",
+        "does",
+        "do",
+        "is",
+        "are",
+        "would",
+        "should",
+        "will",
+        "when",
+        "where",
+        "who",
+    }
+)
+#: Phrases that pin an audit request to a concrete target. A question that
+#: names one (`can you audit this PR?`) is a command; one that names none
+#: (`what can you audit?`) asks what the auditor is capable of.
+_AUDIT_COMMAND_TARGET_RE = re.compile(
+    r"\b(this|that|these|those)\s+(prs?|pull|diffs?|code|commits?|changes?|branch(?:es)?|repo)\b"
+    r"|\bpull\s+requests?\b",
+    re.IGNORECASE,
+)
 #: Words after `audit` that mark a noun compound ("audit trail", "audit log"):
-#: likewise a question about audits, not an audit request.
+#: likewise a question about audits, not an audit request — unless the
+#: preceder is an explicit request marker or `audit` is the sentence verb
+#: (see _is_imperative_audit_use).
 _AUDIT_NOUN_FOLLOWERS = frozenset(
     {
         "trail",
@@ -332,6 +374,28 @@ def is_workflow_audit_conclusion(conclusion: Optional[str]) -> bool:
     return conclusion in AUDIT_WORKFLOW_CONCLUSIONS
 
 
+def _is_capability_question(body: str, match: re.Match[str]) -> bool:
+    """True when an `audit` occurrence sits inside a capability question.
+
+    `what can you audit?` asks what the auditor is capable of and belongs on
+    the Q&A path; `can you audit this PR?` names a concrete target and stays
+    a command. Fires only when an interrogative opener precedes `audit`, no
+    target phrase is named anywhere, and the body reads as a question (a
+    question mark, or an interrogative-first sentence) — so plain modals
+    (`you can audit now`) never trip it.
+    """
+    before = body[: match.start()]
+    words = [word.group(0).lower() for word in _WORD_RE.finditer(before)]
+    real = [word for word in words if word not in _AUDIT_HANDLE_WORDS]
+    if not any(word in _AUDIT_INTERROGATIVES for word in real):
+        return False
+    if _AUDIT_COMMAND_TARGET_RE.search(body) is not None:
+        return False
+    if "?" in body:
+        return True
+    return bool(real) and real[0] in _AUDIT_INTERROGATIVES
+
+
 def _is_imperative_audit_use(body: str, match: re.Match[str]) -> bool:
     """True when one `audit` occurrence is an instruction verb, not a noun.
 
@@ -339,20 +403,37 @@ def _is_imperative_audit_use(body: str, match: re.Match[str]) -> bool:
     questions *about* audits and must stay on the Q&A path: if manual audits
     are disabled such a question would otherwise be ignored, and if enabled
     an audit would be queued instead of an answer. Verb uses ("audit this
-    PR", "please audit", "can you audit this?") dispatch.
+    PR", "please audit", "can you audit this?", "please audit reports from
+    this PR") dispatch.
+
+    The noun-follower veto ("audit reports" reads as a noun compound) yields
+    when the preceder is an explicit request marker ("please", "kindly") or
+    when `audit` is the sentence verb — i.e. nothing precedes it once the
+    `@haunter-auditor[bot]` handle itself is skipped — because there `audit`
+    takes the follower as its direct object ("audit reports from this PR"
+    audits the reports). Capability questions are rejected first.
     """
     after = body[match.end() :]
     if after.startswith("-"):
         # Hyphenated compound (`audit-trail`, `audit-log`): noun.
         return False
-    follower = _WORD_RE.match(after.lstrip())
-    if follower is not None and follower.group(0).lower() in _AUDIT_NOUN_FOLLOWERS:
+    if _is_capability_question(body, match):
         return False
+    follower = _WORD_RE.match(after.lstrip())
+    follower_is_noun = (
+        follower is not None and follower.group(0).lower() in _AUDIT_NOUN_FOLLOWERS
+    )
     before = body[: match.start()].rstrip()
     preceder: Optional[re.Match[str]] = None
     for word in _WORD_RE.finditer(before):
+        if word.group(0).lower() in _AUDIT_HANDLE_WORDS:
+            continue
         preceder = word
     if preceder is not None and preceder.group(0).lower() in _AUDIT_NOUN_PRECEDERS:
+        return False
+    if follower_is_noun:
+        if preceder is None or preceder.group(0).lower() in _AUDIT_IMPERATIVE_PRECEDERS:
+            return True
         return False
     return True
 

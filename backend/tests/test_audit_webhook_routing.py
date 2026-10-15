@@ -1161,20 +1161,24 @@ async def test_audit_workflow_run_success_queued_when_enabled(
 
 
 @pytest.mark.asyncio
-async def test_issue_comment_manual_audit_acks_before_endpoint_resolution(
+async def test_issue_comment_manual_audit_resolves_endpoints_synchronously(
     client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
 ):
-    """P1: the issue_comment ack never waits for GitHub reads.
+    """P1 (Lambda): the issue_comment ack never depends on post-response work.
 
-    The installation-token fetch plus the PR-endpoint read can take 15s+30s
-    against GitHub's ~10s delivery deadline, so the request path must ack
-    without awaiting either: resolution runs post-ack in
-    `_run_manual_audit_resolution_background`.
+    BackgroundTasks tasks never run on Lambda — the execution context freezes
+    after the response (see app.adapters.hosting) — so endpoint resolution +
+    durable dispatch happen in the request path BEFORE the ack, and the
+    replayable delivery row is recorded first. A slow resolution may breach
+    GitHub's ~10s deadline and cause a redelivery, which deduplicates on
+    `delivery_id` instead of double-queueing.
     """
     repo = await seed_repo(
         fake_audit_db, fake_audit_user_factory, "ack-audit-org", "ack-audit-repo"
     )
     await set_repo_auditor_settings(fake_audit_db, repo)
+    base_sha = "1" * 40
+    head_sha = "2" * 40
     payload = make_issue_comment_payload(
         owner="ack-audit-org",
         repo="ack-audit-repo",
@@ -1182,25 +1186,56 @@ async def test_issue_comment_manual_audit_acks_before_endpoint_resolution(
         pr_number=77,
         comment_id=9101001,
     )
+    fake_pr_meta = {
+        "head": {"sha": head_sha, "ref": "feature-branch"},
+        "base": {"sha": base_sha, "ref": "main"},
+    }
     with patch(
-        "app.webhooks._run_manual_audit_resolution_background",
+        "app.webhooks._record_webhook_delivery",
         new_callable=AsyncMock,
-    ) as bg_mock, patch(
+    ) as mock_record, patch(
         "app.github.auditor.get_auditor_installation_token",
         new_callable=AsyncMock,
+        return_value="ghs_auditor_token",
     ) as mock_token, patch(
         "app.github_client.fetch_pull_request",
         new_callable=AsyncMock,
+        return_value=fake_pr_meta,
     ) as mock_fetch:
         resp = await post_signed(client, "issue_comment", payload)
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "audit_accepted"
     assert data["pr_number"] == 77
-    bg_mock.assert_awaited_once()
-    # Nothing heavy ran in the request path: no token fetch, no PR read.
-    mock_token.assert_not_called()
-    mock_fetch.assert_not_awaited()
+    assert data["audit_id"] is not None
+    # Resolution ran in the request path: token fetch + PR read both awaited.
+    mock_token.assert_awaited_once()
+    mock_fetch.assert_awaited_once_with(
+        owner="ack-audit-org",
+        repo="ack-audit-repo",
+        pr_number=77,
+        token="ghs_auditor_token",
+        allow_global_token=False,
+    )
+    # Durable work exists before the ack returned: the outbox job ...
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(
+            AuditJob.repo_id == repo.id,
+            AuditJob.audit_type == "manual_audit",
+        )
+    )
+    assert job is not None
+    assert job.status == "queued"
+    assert job.base_sha == base_sha
+    assert job.head_sha == head_sha
+    # ... and a replayable delivery row (verified raw body retained).
+    replayable = [
+        call
+        for call in mock_record.await_args_list
+        if call.kwargs.get("status_value") == "audit_accepted"
+        and call.kwargs.get("payload") is not None
+    ]
+    assert replayable, "audit_accepted ack without a replayable delivery row"
 
 
 @pytest.mark.asyncio
@@ -1209,13 +1244,14 @@ async def test_issue_comment_manual_audit_worker_skips_without_credential(
 ):
     """Without resolvable PR endpoints, a manual audit stays unpinned and is skipped.
 
-    issue_comment carries no PR endpoints, so the background worker resolves
-    them via an auditor-scoped GitHub read. When that resolution fails — here,
-    no auditor credential exists for the repo — the request is skipped
-    fail-closed instead of being queued against whatever the PR head happens
-    to be. The credential failure is mocked explicitly (an unseeded install
-    id raises through the same path, which must not be relied on), and the PR
-    read must never be attempted without a token.
+    issue_comment carries no PR endpoints, so the request path resolves
+    them synchronously via an auditor-scoped GitHub read. When that
+    resolution fails — here, no auditor credential exists for the repo — the
+    request is skipped fail-closed instead of being queued against whatever
+    the PR head happens to be. The credential failure is mocked explicitly
+    (an unseeded install id raises through the same path, which must not be
+    relied on), and the PR read must never be attempted without a token.
+    The ack still names recoverable work: the replayable delivery row.
     """
     repo = await seed_repo(
         fake_audit_db, fake_audit_user_factory, "m-audit-org", "m-audit-repo"
@@ -1229,6 +1265,9 @@ async def test_issue_comment_manual_audit_worker_skips_without_credential(
         comment_id=9101001,
     )
     with patch(
+        "app.webhooks._record_webhook_delivery",
+        new_callable=AsyncMock,
+    ) as mock_record, patch(
         "app.github.auditor.get_auditor_installation_token",
         new_callable=AsyncMock,
         side_effect=AuditorCredentialError(
@@ -1239,8 +1278,8 @@ async def test_issue_comment_manual_audit_worker_skips_without_credential(
         new_callable=AsyncMock,
     ) as mock_fetch:
         resp = await post_signed(client, "issue_comment", payload)
-    # The ack is unconditional; the skip happens post-ack in the worker (which
-    # the ASGI test transport runs inline before `post_signed` returns).
+    # The ack is unconditional; the skip happens synchronously in the request
+    # path, before the ack is returned.
     assert resp.status_code == 200
     assert resp.json()["status"] == "audit_accepted"
     mock_token.assert_awaited_once()
@@ -1252,6 +1291,14 @@ async def test_issue_comment_manual_audit_worker_skips_without_credential(
         )
     )
     assert job is None
+    # Skipped, but not lost: the replayable delivery row was recorded first.
+    replayable = [
+        call
+        for call in mock_record.await_args_list
+        if call.kwargs.get("status_value") == "audit_accepted"
+        and call.kwargs.get("payload") is not None
+    ]
+    assert replayable, "skipped audit without a replayable delivery row"
 
 
 @pytest.mark.asyncio
@@ -1287,6 +1334,9 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
     payload["issue"]["pull_request"]["head"] = {"ref": "stale", "sha": stale_head}
 
     with patch(
+        "app.webhooks._record_webhook_delivery",
+        new_callable=AsyncMock,
+    ) as mock_record, patch(
         "app.github.auditor.get_auditor_installation_token",
         new_callable=AsyncMock,
         side_effect=AuditorCredentialError(
@@ -1298,8 +1348,8 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
     ) as mock_fetch:
         resp = await post_signed(client, "issue_comment", payload)
 
-    # The ack is unconditional; the skip happens post-ack in the worker (which
-    # the ASGI test transport runs inline before `post_signed` returns).
+    # The ack is unconditional; the skip happens synchronously in the request
+    # path, before the ack is returned.
     assert resp.status_code == 200
     assert resp.json()["status"] == "audit_accepted"
     mock_token.assert_awaited_once()
@@ -1311,6 +1361,14 @@ async def test_issue_comment_manual_audit_never_adopts_mismatched_endpoints(
         )
     )
     assert job is None
+    # Skipped, but not lost: the replayable delivery row was recorded first.
+    replayable = [
+        call
+        for call in mock_record.await_args_list
+        if call.kwargs.get("status_value") == "audit_accepted"
+        and call.kwargs.get("payload") is not None
+    ]
+    assert replayable, "skipped audit without a replayable delivery row"
     # Nothing anywhere in the outbox was pinned to the injected SHAs.
     stale = (
         await fake_audit_db.scalars(
@@ -1610,7 +1668,7 @@ async def test_issue_comment_manual_audit_falls_back_when_fetch_pull_request_fai
         assert resp2.status_code == 200
         assert resp2.json()["status"] == "audit_accepted"
         mock_fetch.assert_awaited_once()
-    # Both failures skipped post-ack: nothing was ever queued.
+    # Both failures skip synchronously in the request path: nothing was queued.
     jobs = (
         await fake_audit_db.scalars(
             select(AuditJob).where(
@@ -1620,6 +1678,75 @@ async def test_issue_comment_manual_audit_falls_back_when_fetch_pull_request_fai
         )
     ).all()
     assert jobs == []
+
+
+@pytest.mark.asyncio
+async def test_issue_comment_manual_audit_needs_no_background_tasks(
+    client: httpx.AsyncClient, fake_audit_db: FakeAsyncSession, fake_audit_user_factory
+):
+    """P1 (Lambda): the manual-audit path schedules zero post-response work.
+
+    On Lambda the execution context freezes after the response, so any
+    BackgroundTasks task would silently never run. This test makes
+    `BackgroundTasks.add_task` fail loud — simulating a runtime where
+    post-response work does not exist — and the delivery must still queue
+    its durable job with a replayable delivery row.
+    """
+    from fastapi import BackgroundTasks
+
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "lambda-org", "lambda-repo"
+    )
+    await set_repo_auditor_settings(fake_audit_db, repo)
+    base_sha = "1" * 40
+    head_sha = "2" * 40
+    payload = make_issue_comment_payload(
+        owner="lambda-org",
+        repo="lambda-repo",
+        comment_body="@haunter-auditor audit this PR",
+        pr_number=85,
+        comment_id=9101010,
+    )
+    fake_pr_meta = {
+        "head": {"sha": head_sha, "ref": "feature-branch"},
+        "base": {"sha": base_sha, "ref": "main"},
+    }
+    with patch.object(
+        BackgroundTasks,
+        "add_task",
+        side_effect=AssertionError("post-response work does not run on Lambda"),
+    ), patch(
+        "app.webhooks._record_webhook_delivery",
+        new_callable=AsyncMock,
+    ) as mock_record, patch(
+        "app.github.auditor.get_auditor_installation_token",
+        new_callable=AsyncMock,
+        return_value="ghs_auditor_token",
+    ), patch(
+        "app.github_client.fetch_pull_request",
+        new_callable=AsyncMock,
+        return_value=fake_pr_meta,
+    ):
+        resp = await post_signed(client, "issue_comment", payload)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "audit_accepted"
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(
+            AuditJob.repo_id == repo.id,
+            AuditJob.audit_type == "manual_audit",
+        )
+    )
+    assert job is not None
+    assert job.status == "queued"
+    assert job.base_sha == base_sha
+    assert job.head_sha == head_sha
+    replayable = [
+        call
+        for call in mock_record.await_args_list
+        if call.kwargs.get("status_value") == "audit_accepted"
+        and call.kwargs.get("payload") is not None
+    ]
+    assert replayable, "audit_accepted ack without a replayable delivery row"
 
 
 @pytest.mark.asyncio
@@ -2570,6 +2697,51 @@ def test_audit_manual_comment_requires_imperative_audit_request():
     assert (
         audit_pipeline.is_manual_audit_comment("can you audit this PR? @haunter-auditor")
         is True
+    )
+    # Imperative-aware: `audit` as a verb with a direct object IS a command,
+    # even when the object is a noun (`reports`). The follower veto must yield
+    # to an explicit request marker (`please`, `kindly`) or to `audit` as the
+    # sentence verb after the handle.
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor please audit reports from this PR"
+        )
+        is True
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor audit reports from this PR"
+        )
+        is True
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor kindly audit the findings of this PR"
+        )
+        is True
+    )
+    # Capability questions are Q&A, never commands — even though they carry
+    # the handle and the word `audit`. A named target keeps the command
+    # reading (`can you audit this PR?` above stays True).
+    assert (
+        audit_pipeline.is_manual_audit_comment("@haunter-auditor what can you audit?")
+        is False
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment("@haunter-auditor what can you audit")
+        is False
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor how do I get an audit?"
+        )
+        is False
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor what do the audit reports say?"
+        )
+        is False
     )
     # Near-misses must not trigger.
     assert (

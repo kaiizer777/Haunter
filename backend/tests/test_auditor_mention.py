@@ -1044,6 +1044,60 @@ async def test_audit_trail_question_stays_on_qa_path(
 
 
 @pytest.mark.asyncio
+async def test_capability_question_stays_on_qa_path(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+) -> None:
+    """P2: a capability question is answered, never queued as an audit.
+
+    `@haunter-auditor what can you audit?` carries the handle and the word
+    `audit`, but asks what the auditor is capable of — it must stay on the
+    5a Q&A path (`auditor_queued` + background answer). The auditor is
+    deliberately ENABLED here so a misclassification would actually dispatch;
+    a named target (`can you audit this PR?`) keeps the command reading.
+    """
+    repo = await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    fake_audit_db.add(
+        RepoSettings(
+            repo_id=repo.id,
+            enable_auditor_mode=True,
+            audit_trigger_on_pr=False,
+            audit_trigger_on_ci_failure=False,
+            audit_trigger_on_ci_success=False,
+            audit_trigger_on_manual_mention=True,
+        )
+    )
+    await fake_audit_db.commit()
+    payload = _issue_comment_payload(body="@haunter-auditor what can you audit?")
+    patches = _no_auditor_side_effects()
+    with patches[0] as llm_cls, patches[1] as post_mock, patches[2] as thread_mock, patches[
+        3
+    ] as pr_mock, patches[4] as issue_mock, patches[5] as review_mock, patches[
+        6
+    ] as diff_mock:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ) as bg_mock:
+            with patch(
+                "app.services.audit_pipeline.dispatch_audit",
+                new_callable=AsyncMock,
+            ) as spy_dispatch:
+                resp = await _post_router(client, "issue_comment", payload)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "auditor_queued"
+    bg_mock.assert_awaited_once()
+    spy_dispatch.assert_not_called()
+    llm_cls.assert_not_called()
+    post_mock.assert_not_called()
+    thread_mock.assert_not_called()
+    pr_mock.assert_not_called()
+    issue_mock.assert_not_called()
+    review_mock.assert_not_called()
+    diff_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_auditor_mention_acks_queued_and_schedules_background(
     client: httpx.AsyncClient,
     fake_audit_db: FakeAsyncSession,

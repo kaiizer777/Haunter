@@ -666,159 +666,81 @@ async def _run_auditor_mention_background(
             pass
 
 
-# Immediate-ack status for the manual-audit path. The request returns this
-# without awaiting the installation-token fetch or the PR-endpoint read; the
-# resolution + dispatch run in a BackgroundTasks task. Distinct from
-# "audit_queued" (the audit is not queued yet at ack time) so the dashboard
-# and replay can tell "accepted for resolution" from "durably queued".
+# Immediate-ack status for the manual-audit path. The request resolves the
+# installation token + PR endpoints synchronously BEFORE the ack (a
+# BackgroundTasks task would never run on Lambda) and records the replayable
+# delivery row first, so `audit_accepted` always names recoverable work: a
+# durably queued job on success, a replayable delivery otherwise. Distinct
+# from "audit_queued" (the synchronous review_comment dispatch) so the
+# dashboard and replay can tell the two schedulers apart.
 _MANUAL_AUDIT_ACCEPTED_STATUS = "audit_accepted"
 
 
-async def _run_manual_audit_resolution_background(
+async def _resolve_manual_audit_endpoints(
+    repo: Repo,
     *,
-    repo_id: Any,
     repo_owner: str,
     repo_name: str,
     pr_number: int,
-    comment_id: Any,
     delivery_id: Any,
-    ref: Optional[str],
-    settings_version: int,
-) -> None:
-    """Resolve issue_comment PR endpoints post-ack, then dispatch. Never raises.
+) -> Optional[tuple[Any, Any, Any]]:
+    """Read live PR endpoints for an issue_comment manual audit. Never raises.
 
-    An `issue_comment` payload carries no pinned PR endpoints, so the base/head
-    SHAs must be read live from GitHub — but the installation-token fetch (up
-    to ~15s uncached) plus the PR read (up to ~30s) cannot run in the request
-    path without breaching GitHub's ~10s delivery deadline (the redelivery
-    that deadline causes is what double-queued audits). This worker runs after
-    the 2xx ack, mirroring `_run_auditor_mention_background`: it opens its own
-    session (the request-scoped `db` is closed by the time this runs), resolves
-    endpoints with an auditor-scoped token only (never the global fallback),
-    and dispatches through the durable `dispatch_audit` claim, which stays
-    idempotent on `delivery_id`.
-
-    Fail-closed throughout: no token, no endpoints, or a dispatch conflict
-    only skips the audit and logs why — the manual audit is best-effort, and a
-    skipped request must never become an error response after the ack.
-
-    Idempotency note: the request path answers `duplicate` when a job already
-    exists for the delivery, so a redelivery after the head advanced never
-    reaches a live read with new SHAs (the old code fetched first and the
-    changed fingerprint surfaced as HTTP 409). The residual race — a redelivery
-    that arrives before this worker dispatches — resolves inside
-    `dispatch_audit`: identical SHAs deduplicate to the same job, and diverged
-    SHAs land on the delivery-id unique constraint as a logged conflict while
-    the first claim still runs exactly once.
+    An `issue_comment` payload carries no pinned PR endpoints, so the
+    base/head SHAs are read live from GitHub with an auditor-scoped token
+    only (never the global fallback) under the same bounded waits the audit
+    worker uses. Runs in the request path BEFORE the ack: BackgroundTasks
+    tasks never run on Lambda (the execution context freezes after the
+    response — see app.adapters.hosting), so post-ack resolution would ack
+    `audit_accepted` with no job and no replayable delivery. A slow
+    resolution may breach GitHub's ~10s deadline and cause a redelivery, but
+    the durable `dispatch_audit` claim is idempotent on `delivery_id`, so the
+    redelivery deduplicates instead of double-queueing. Returns
+    `(base_sha, head_sha, head_ref)` or None when the endpoints cannot be
+    established (fail-closed: the caller still records the replayable
+    delivery and acks `audit_accepted`).
     """
     from app import github_client
     from app.github import auditor as github_auditor
 
     try:
-        from app.db import async_session_maker as _session_maker
-    except Exception:
-        logger.warning(
-            "Manual audit background skipped: no session maker (%s)",
-            type(delivery_id).__name__,
-        )
-        return
-    try:
-        async with _session_maker() as db:
-            repo = await db.get(Repo, repo_id)
-            if repo is None:
-                logger.warning(
-                    "Manual audit background skipped: repo gone pr=%s delivery_id=%s",
-                    sanitize_log_value(pr_number, 16),
-                    sanitize_log_value(delivery_id, 64),
-                )
-                return
-            try:
-                existing = await db.scalar(
-                    select(AuditJob).where(
-                        AuditJob.delivery_id == str(delivery_id),
-                    )
-                )
-            except Exception:
-                existing = None
-            if existing is not None:
-                logger.info(
-                    "Duplicate manual audit (delivery_id=%s): audit_id=%s already owns it",
-                    delivery_id,
-                    sanitize_log_value(getattr(existing, "audit_id", "?"), 32),
-                )
-                return
-            try:
-                from app.subagents import auditor as _auditor_timeouts
+        from app.subagents import auditor as _auditor_timeouts
 
-                token = await asyncio.wait_for(
-                    github_auditor.get_auditor_installation_token(repo),
-                    timeout=audit_pipeline.AUDIT_TOKEN_TIMEOUT_S,
-                )
-                pr_meta = await asyncio.wait_for(
-                    github_client.fetch_pull_request(
-                        owner=repo_owner,
-                        repo=repo_name,
-                        pr_number=pr_number,
-                        token=token,
-                        allow_global_token=False,
-                    ),
-                    timeout=_auditor_timeouts.AUDIT_FETCH_TIMEOUT_S,
-                )
-            except Exception as exc:
-                logger.info(
-                    "Manual audit skipped %s PR #%s: endpoint resolution failed (%s)",
-                    _log_repo(repo_owner, repo_name),
-                    sanitize_log_value(pr_number, 16),
-                    type(exc).__name__,
-                )
-                return
-            head = pr_meta.get("head") if isinstance(pr_meta, dict) else None
-            base = pr_meta.get("base") if isinstance(pr_meta, dict) else None
-            head_sha = head.get("sha") if isinstance(head, dict) else None
-            base_sha = base.get("sha") if isinstance(base, dict) else None
-            head_ref = head.get("ref") if isinstance(head, dict) else None
-            try:
-                audit_id = await audit_pipeline.dispatch_audit(
-                    db=db,
-                    repo_id=repo.id,
-                    audit_type="manual_audit",
-                    repo_full_name=f"{repo_owner}/{repo_name}",
-                    delivery_id=str(delivery_id),
-                    ref=head_ref or ref,
-                    pr_number=pr_number,
-                    base_sha=base_sha,
-                    head_sha=head_sha,
-                    settings_version=settings_version,
-                )
-            except audit_pipeline.AuditDeliveryConflictError:
-                logger.info(
-                    "Duplicate manual audit (delivery_id=%s): payload diverged after dispatch",
-                    delivery_id,
-                )
-                return
-            except ValueError as exc:
-                logger.info(
-                    "Manual audit skipped %s PR #%s: %s",
-                    _log_repo(repo_owner, repo_name),
-                    sanitize_log_value(pr_number, 16),
-                    type(exc).__name__,
-                )
-                return
-            logger.info(
-                "Auditor queued audit_id=%s type=manual_audit repo=%s pr=%s delivery_id=%s comment=%s",
-                audit_id,
-                _log_repo(repo_owner, repo_name),
-                sanitize_log_value(pr_number, 16),
-                sanitize_log_value(delivery_id, 64),
-                sanitize_log_value(comment_id, 16),
-            )
+        token = await asyncio.wait_for(
+            github_auditor.get_auditor_installation_token(repo),
+            timeout=audit_pipeline.AUDIT_TOKEN_TIMEOUT_S,
+        )
+        pr_meta = await asyncio.wait_for(
+            github_client.fetch_pull_request(
+                owner=repo_owner,
+                repo=repo_name,
+                pr_number=pr_number,
+                token=token,
+                allow_global_token=False,
+            ),
+            timeout=_auditor_timeouts.AUDIT_FETCH_TIMEOUT_S,
+        )
     except Exception as exc:
-        logger.warning(
-            "Manual audit background failed pr=%s delivery_id=%s (%s)",
+        logger.info(
+            "Manual audit skipped %s PR #%s: endpoint resolution failed (%s)",
+            _log_repo(repo_owner, repo_name),
             sanitize_log_value(pr_number, 16),
-            sanitize_log_value(delivery_id, 64),
             type(exc).__name__,
         )
+        return None
+    head = pr_meta.get("head") if isinstance(pr_meta, dict) else None
+    base = pr_meta.get("base") if isinstance(pr_meta, dict) else None
+    head_sha = head.get("sha") if isinstance(head, dict) else None
+    base_sha = base.get("sha") if isinstance(base, dict) else None
+    head_ref = head.get("ref") if isinstance(head, dict) else None
+    if not isinstance(base_sha, str) or not isinstance(head_sha, str):
+        logger.info(
+            "Manual audit skipped %s PR #%s: endpoint resolution returned no SHAs",
+            _log_repo(repo_owner, repo_name),
+            sanitize_log_value(pr_number, 16),
+        )
+        return None
+    return base_sha, head_sha, head_ref
 
 
 def _log_repo(owner: Any, name: Any) -> str:
@@ -2882,17 +2804,20 @@ async def github_webhook(
     #
     # A manual audit is a PR audit: it must carry the exact base and head SHAs
     # the request was made against. issue_comment payloads carry no PR
-    # endpoints, so they are resolved post-ack in
-    # `_run_manual_audit_resolution_background` via an auditor-scoped GitHub
-    # read: the token fetch plus the PR read can take 15s+30s against GitHub's
-    # ~10s delivery deadline, so awaiting them here trades one slow ack for a
-    # redelivery storm. pull_request_review_comment already carries pinned
-    # endpoints above, which must never be widened by a live read, so it keeps
-    # dispatching synchronously in the request path (DB-only, no GitHub I/O).
+    # endpoints, so they are resolved synchronously in the request path via
+    # `_resolve_manual_audit_endpoints` (auditor-scoped GitHub read, bounded
+    # waits) BEFORE the ack — never in a BackgroundTasks task, which never
+    # runs on Lambda — and the replayable delivery row is recorded first, so
+    # `audit_accepted` always names recoverable work. pull_request_review_comment
+    # already carries pinned endpoints above, which must never be widened by
+    # a live read, so it keeps dispatching synchronously in the request path
+    # (DB-only, no GitHub I/O).
     # The live-read TOCTOU (the PR head may advance between the comment and
     # the read) is accepted by design: the dispatched job pins the resolved
     # SHAs, and payload SHAs are never adopted — there are none to forge on
-    # this event type.
+    # this event type. A slow resolution may breach GitHub's ~10s deadline
+    # and cause a redelivery, but the `dispatch_audit` claim is idempotent on
+    # `delivery_id`, so the redelivery deduplicates instead of double-queueing.
     _auditor_scheduled = False
     _auditor_skip_reason: Optional[str] = None
     _audit_id: Optional[str] = None
@@ -2904,8 +2829,8 @@ async def github_webhook(
         )
         if _decision.should_audit and _decision.audit_type:
             if x_github_event == "issue_comment" and (not pr_base_sha or not pr_head_sha):
-                # issue_comment-only: resolve endpoints after the ack.
-                # Redelivery pre-check BEFORE scheduling (DB-only, no GitHub
+                # issue_comment-only: resolve endpoints synchronously.
+                # Redelivery pre-check BEFORE resolving (DB-only, no GitHub
                 # I/O): the same delivery already owning a job is answered
                 # `duplicate` here, so a head advance between delivery and
                 # redelivery can never mint a new fingerprint and 409.
@@ -2929,19 +2854,62 @@ async def github_webhook(
                         "status": "duplicate",
                         "delivery_id": x_github_delivery,
                     }
-                background_tasks.add_task(
-                    _run_manual_audit_resolution_background,
-                    repo_id=repo.id,
+                # Snapshot the id before the delivery recorder commits: the
+                # commit expires ORM instances in this session.
+                _manual_repo_id = repo.id
+                _manual_endpoints = await _resolve_manual_audit_endpoints(
+                    repo,
                     repo_owner=repo_owner,
                     repo_name=repo_name,
                     pr_number=pr_number,
-                    comment_id=comment_obj.id,
                     delivery_id=x_github_delivery,
-                    ref=pr_head_branch,
+                )
+                # Recorded BEFORE the ack on every path below, success or
+                # skip: the row carries the verified raw body, so a skipped
+                # request stays replayable instead of silently dropped.
+                await _record_webhook_delivery(
+                    db,
+                    event=x_github_event,
+                    delivery_id=x_github_delivery,
+                    status_value=_MANUAL_AUDIT_ACCEPTED_STATUS,
+                    reason=f"manual_audit_accepted pr={pr_number} comment={comment_obj.id}",
+                    repo=f"{repo_owner}/{repo_name}",
+                    repo_id=_manual_repo_id,
+                    payload=raw_body,
+                )
+                if _manual_endpoints is None:
+                    return {
+                        "status": _MANUAL_AUDIT_ACCEPTED_STATUS,
+                        "delivery_id": x_github_delivery,
+                        "repo": f"{repo_owner}/{repo_name}",
+                        "pr_number": pr_number,
+                        "comment_id": comment_obj.id,
+                    }
+                _manual_base_sha, _manual_head_sha, _manual_head_ref = _manual_endpoints
+                _audit_id = await audit_pipeline.dispatch_audit(
+                    db=db,
+                    repo_id=_manual_repo_id,
+                    audit_type=_decision.audit_type,
+                    repo_full_name=f"{repo_owner}/{repo_name}",
+                    delivery_id=str(x_github_delivery),
+                    ref=_manual_head_ref or pr_head_branch,
+                    pr_number=pr_number,
+                    base_sha=_manual_base_sha,
+                    head_sha=_manual_head_sha,
                     settings_version=_trigger.settings_version,
+                )
+                logger.info(
+                    "Auditor queued audit_id=%s type=%s repo=%s pr=%s delivery_id=%s comment=%s",
+                    _audit_id,
+                    _decision.audit_type,
+                    _log_repo(repo_owner, repo_name),
+                    sanitize_log_value(pr_number, 16),
+                    sanitize_log_value(x_github_delivery, 64),
+                    sanitize_log_value(comment_obj.id, 16),
                 )
                 return {
                     "status": _MANUAL_AUDIT_ACCEPTED_STATUS,
+                    "audit_id": _audit_id,
                     "delivery_id": x_github_delivery,
                     "repo": f"{repo_owner}/{repo_name}",
                     "pr_number": pr_number,
