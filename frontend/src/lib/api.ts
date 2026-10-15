@@ -185,6 +185,17 @@ export interface CodeReviewListOut {
   total: number;
 }
 
+/** Single PR associated with a review, via GET /reviews/{id}/associated-pr. */
+export interface AssociatedPROut {
+  number: number;
+  url: string;
+  title: string | null;
+}
+
+export interface AssociatedPRResponse {
+  associated_pr: AssociatedPROut | null;
+}
+
 
 export interface FixtureScoreItem {
   fixture_id: string;
@@ -811,6 +822,9 @@ export const api = {
 
   getReviewDetail: (reviewId: string) =>
     api.get<CodeReviewOut>(`/reviews/${reviewId}`),
+
+  getAssociatedPr: (reviewId: string) =>
+    api.get<AssociatedPRResponse>(`/reviews/${reviewId}/associated-pr`),
 
   // Session endpoints (Phase 3 -- Cloud Agentic Live Session)
   listSessions: (params?: { status?: string; limit?: number; offset?: number }) => {

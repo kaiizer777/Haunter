@@ -344,7 +344,10 @@ async def test_get_installation_token_auditor_only_uses_dev_fallback() -> None:
     repo = _make_repo(install_id=321)
     _TOKEN_CACHE.clear()
     patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
-    mock_settings = patcher.start()
+    # _mock_pr_settings already started the patcher: capture the active mock
+    # from the target instead of start()ing again (a second start() layers a
+    # new mock that the single stop() below never removes → leaks across tests).
+    mock_settings = patcher.target.settings
     mock_settings.github_token = "ghp_dev_fallback_token"
     try:
         with (
@@ -365,7 +368,9 @@ async def test_get_installation_token_auditor_only_no_token_fails_closed() -> No
     repo = _make_repo(install_id=322)
     _TOKEN_CACHE.clear()
     patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
-    mock_settings = patcher.start()
+    # Same single-start rule as above: reuse the already-active mock, the
+    # finally-stop() below then fully restores the target.
+    mock_settings = patcher.target.settings
     mock_settings.github_token = None
     try:
         with pytest.raises(GitHubPRError, match="auditor"):
