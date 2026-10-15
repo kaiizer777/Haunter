@@ -595,6 +595,8 @@ async def _stream_from_db(
         initial_rows = res.scalars().all()
 
     for row in initial_rows:
+        if row.event_id <= 0 or row.event == "turn_start":
+            continue
         yield _format_chunk(row.event_id, row.event, row.chunk)
         if row.event_id > max_yielded_id:
             max_yielded_id = row.event_id
@@ -642,6 +644,8 @@ async def _stream_from_db(
             rows = res.scalars().all()
 
             for row in rows:
+                if row.event_id <= 0 or row.event == "turn_start":
+                    continue
                 yield _format_chunk(row.event_id, row.event, row.chunk)
                 if row.event_id > max_yielded_id:
                     max_yielded_id = row.event_id
@@ -666,6 +670,8 @@ async def _stream_from_db(
                         )
                         final_res = await drain_db.execute(final_stmt)
                         for row in final_res.scalars().all():
+                            if row.event_id <= 0 or row.event == "turn_start":
+                                continue
                             yield _format_chunk(row.event_id, row.event, row.chunk)
                             if row.event_id > max_yielded_id:
                                 max_yielded_id = row.event_id
@@ -800,7 +806,7 @@ async def chat_session(
             _forget_turn(str(session_id))
 
         # No live turn in this local execution environment.
-        # Query DB for latest turn_id from stream events or session.active_turn_id for cross-environment Lambda replay.
+        # Query DB for latest turn_id from stream events for cross-environment Lambda replay.
         from app.models import SessionStreamEvent
 
         latest_turn_stmt = (
@@ -810,9 +816,22 @@ async def chat_session(
             .limit(1)
         )
         latest_turn_res = await db.execute(latest_turn_stmt)
-        active_turn_id = latest_turn_res.scalars().first() or session.active_turn_id
-        if active_turn_id is None:
-            if await _is_turn_active_elsewhere(db, session_id):
+        active_turn_id = latest_turn_res.scalars().first()
+
+        # If turn is active elsewhere, the orchestrator might be in the middle of
+        # turn startup (clearing old events and publishing turn_start). Retry turn
+        # discovery for up to 2.5s (25 x 0.1s) until events for the new turn appear.
+        if await _is_turn_active_elsewhere(db, session_id):
+            if active_turn_id is None:
+                for _ in range(25):
+                    await _asyncio.sleep(0.1)
+                    retry_res = await db.execute(latest_turn_stmt)
+                    active_turn_id = retry_res.scalars().first()
+                    if active_turn_id is not None:
+                        break
+
+            # If still None or has no events after discovery retry
+            if active_turn_id is None:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
@@ -821,6 +840,10 @@ async def chat_session(
                         "same Last-Event-ID."
                     ),
                 )
+        elif active_turn_id is None:
+            active_turn_id = session.active_turn_id
+
+        if active_turn_id is None:
             raise HTTPException(
                 status_code=status.HTTP_410_GONE,
                 detail="No resumable turn for this session. Please send your message again as a new request.",

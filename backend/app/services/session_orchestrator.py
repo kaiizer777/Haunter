@@ -1441,8 +1441,9 @@ class SessionOrchestrator:
         # Record this turn as the session's active_turn_id for cross-environment resumption
         session.active_turn_id = self.turn_id
         # Keep row lock held on self.db throughout turn execution (do not commit self.db here).
-        # We prune prior turn events via a separate isolated transaction so prior turn events
-        # are cleaned up without touching or acquiring conflicting locks on the agent_sessions row.
+        # We publish the new turn immediately into session_stream_events and prune prior turn
+        # events via a separate isolated transaction so cross-env workers discover the new turn_id
+        # immediately without lock conflict with self.db's FOR NO KEY UPDATE row lock.
         from app.db import async_session_maker
         from app.models import SessionStreamEvent
         from sqlalchemy import delete
@@ -1455,10 +1456,21 @@ class SessionOrchestrator:
                     SessionStreamEvent.turn_id != self.turn_id,
                 )
                 await meta_db.execute(del_stmt)
+
+                # Publish turn_start initialization event (event_id=0) so other workers immediately
+                # discover this active turn in session_stream_events
+                init_event = SessionStreamEvent(
+                    session_id=self.session_id,
+                    turn_id=self.turn_id,
+                    event_id=0,
+                    event="turn_start",
+                    chunk="",
+                )
+                meta_db.add(init_event)
                 await meta_db.commit()
         except Exception as exc:
             logger.warning(
-                "session_orchestrator: failed to prune events in meta_db: %s",
+                "session_orchestrator: failed to publish turn_start / prune events in meta_db: %s",
                 exc,
             )
 

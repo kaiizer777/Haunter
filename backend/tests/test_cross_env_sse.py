@@ -477,3 +477,144 @@ async def test_chat_session_cross_env_no_turn_active_elsewhere() -> None:
 
     assert exc_info.value.status_code == 409
     assert "TURN_ACTIVE_ELSEWHERE" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_stream_from_db_filters_out_turn_start_events() -> None:
+    """_stream_from_db filters out internal event_id=0 / turn_start events."""
+    session_id = uuid.uuid4()
+    turn_id = str(uuid.uuid4())
+
+    init_event = SessionStreamEvent(
+        id=1,
+        session_id=session_id,
+        turn_id=turn_id,
+        event_id=0,
+        event="turn_start",
+        chunk="",
+    )
+    thought_event = SessionStreamEvent(
+        id=2,
+        session_id=session_id,
+        turn_id=turn_id,
+        event_id=1,
+        event="thought",
+        chunk="event: thought\nid: 1\ndata: {\"delta\":\"hello\"}\n\n",
+    )
+    done_event = SessionStreamEvent(
+        id=3,
+        session_id=session_id,
+        turn_id=turn_id,
+        event_id=2,
+        event="done",
+        chunk="event: done\nid: 2\ndata: {\"session_id\":\"...\"}\n\n",
+    )
+
+    class _MockResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            class _Scalars:
+                def __init__(self, r):
+                    self._r = r
+                def all(self):
+                    return self._r
+            return _Scalars(self._rows)
+
+    class _MockDb:
+        async def execute(self, stmt):
+            return _MockResult([init_event, thought_event, done_event])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    with patch("app.db.async_session_maker", return_value=_MockDb()):
+        yielded: list[str] = []
+        async for chunk in _stream_from_db(session_id, turn_id, last_event_id=0):
+            yielded.append(chunk)
+
+        assert len(yielded) == 2
+        assert "turn_start" not in yielded[0]
+        assert "hello" in yielded[0]
+        assert "event: done" in yielded[1]
+
+
+@pytest.mark.asyncio
+async def test_chat_session_cross_env_reconnect_retry_discovery_success() -> None:
+    """Worker B reconnect retries discovery when turn is active elsewhere and discovers new turn_id."""
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    new_turn_id = str(uuid.uuid4())
+
+    mock_user = MagicMock(spec=User)
+    mock_user.id = user_id
+
+    mock_session = MagicMock(spec=AgentSession)
+    mock_session.id = session_id
+    mock_session.user_id = user_id
+    mock_session.status = "active"
+    mock_session.active_turn_id = None
+
+    _ACTIVE_TURNS.pop(str(session_id), None)
+
+    class _SessionResult:
+        def scalars(self):
+            class _S:
+                def first(self):
+                    return mock_session
+            return _S()
+
+    query_attempt = 0
+
+    class _TurnResult:
+        def __init__(self, val):
+            self._val = val
+        def scalars(self):
+            class _S:
+                def __init__(self, v):
+                    self._v = v
+                def first(self):
+                    return self._v
+            return _S(self._val)
+
+    class _BoundsResult:
+        def first(self):
+            return (0, 0)  # Only turn_start event 0 exists so far
+
+    class _MockDb:
+        async def execute(self, stmt):
+            nonlocal query_attempt
+            stmt_str = str(stmt).lower()
+            if "agent_sessions" in stmt_str:
+                return _SessionResult()
+            if "min" in stmt_str:
+                return _BoundsResult()
+            if "session_stream_events" in stmt_str:
+                query_attempt += 1
+                if query_attempt == 1:
+                    # Initially, turn_start event is still being written
+                    return _TurnResult(None)
+                # On retry, turn_id is discovered
+                return _TurnResult(new_turn_id)
+            return _SessionResult()
+
+    body = SessionChatIn(message="Resume")
+    with (
+        patch("app.routers.sessions._is_turn_active_elsewhere", new_callable=AsyncMock, return_value=True),
+        patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        resp = await chat_session(
+            session_id=session_id,
+            body=body,
+            current_user=mock_user,
+            db=_MockDb(),  # type: ignore[arg-type]
+            last_event_id_header="0",
+        )
+
+        assert resp.status_code == 200
+        assert mock_sleep.await_count >= 1
+
