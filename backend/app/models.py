@@ -767,9 +767,9 @@ class SessionStreamEvent(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     session_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False
     )
-    turn_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    turn_id: Mapped[str] = mapped_column(String(36), nullable=False)
     event_id: Mapped[int] = mapped_column(Integer, nullable=False)
     event: Mapped[str] = mapped_column(String(64), nullable=False)
     chunk: Mapped[str] = mapped_column(Text, nullable=False)

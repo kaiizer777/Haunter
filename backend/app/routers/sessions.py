@@ -594,11 +594,7 @@ async def _stream_from_db(
         yield _format_chunk(row.event_id, row.event, row.chunk)
         if row.event_id > max_yielded_id:
             max_yielded_id = row.event_id
-        if (
-            row.event in ("done", "error")
-            or '"event": "done"' in row.chunk
-            or "event: done" in row.chunk
-        ):
+        if row.event in ("done", "error"):
             return
 
     # 2. Poll for emerging events if the turn is in-flight on another Lambda worker
@@ -645,30 +641,35 @@ async def _stream_from_db(
                 yield _format_chunk(row.event_id, row.event, row.chunk)
                 if row.event_id > max_yielded_id:
                     max_yielded_id = row.event_id
-                if (
-                    row.event in ("done", "error")
-                    or '"event": "done"' in row.chunk
-                    or "event: done" in row.chunk
-                ):
+                if row.event in ("done", "error"):
                     return
 
             is_active = await _is_turn_active_elsewhere(poll_db, session_id)
             if not is_active:
-                # Turn finished: do a final query to capture any event committed right before lock release
-                final_stmt = (
-                    select(SessionStreamEvent)
-                    .where(
-                        SessionStreamEvent.session_id == session_id,
-                        SessionStreamEvent.turn_id == turn_id,
-                        SessionStreamEvent.event_id > max_yielded_id,
+                # Turn lock released: drain any final event committed right before lock release.
+                # If terminal event hasn't landed yet, poll a few short attempts before closing.
+                terminal_seen = False
+                for _ in range(5):
+                    final_stmt = (
+                        select(SessionStreamEvent)
+                        .where(
+                            SessionStreamEvent.session_id == session_id,
+                            SessionStreamEvent.turn_id == turn_id,
+                            SessionStreamEvent.event_id > max_yielded_id,
+                        )
+                        .order_by(SessionStreamEvent.event_id.asc())
                     )
-                    .order_by(SessionStreamEvent.event_id.asc())
-                )
-                final_res = await poll_db.execute(final_stmt)
-                for row in final_res.scalars().all():
-                    yield _format_chunk(row.event_id, row.event, row.chunk)
-                    if row.event_id > max_yielded_id:
-                        max_yielded_id = row.event_id
+                    final_res = await poll_db.execute(final_stmt)
+                    for row in final_res.scalars().all():
+                        yield _format_chunk(row.event_id, row.event, row.chunk)
+                        if row.event_id > max_yielded_id:
+                            max_yielded_id = row.event_id
+                        if row.event in ("done", "error"):
+                            terminal_seen = True
+                            return
+                    if terminal_seen:
+                        break
+                    await _asyncio.sleep(0.1)
                 break
 
 

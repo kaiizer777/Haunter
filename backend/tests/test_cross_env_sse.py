@@ -316,17 +316,60 @@ async def test_chat_session_cross_env_replays_completed_turn() -> None:
         async def rollback(self):
             pass
 
-    body = SessionChatIn(message="Resume")
-    resp = await chat_session(
-        session_id=session_id,
-        body=body,
-        current_user=mock_user,
-        db=_MockDb(),  # type: ignore[arg-type]
-        last_event_id_header="1",
-    )
+    events = [
+        SessionStreamEvent(
+            id=2,
+            session_id=session_id,
+            turn_id=turn_id,
+            event_id=2,
+            event="thought",
+            chunk="event: thought\nid: 2\ndata: {\"delta\":\"step 2\"}\n\n",
+        ),
+        SessionStreamEvent(
+            id=3,
+            session_id=session_id,
+            turn_id=turn_id,
+            event_id=3,
+            event="done",
+            chunk="event: done\nid: 3\ndata: {\"session_id\":\"123\"}\n\n",
+        ),
+    ]
 
-    assert resp.status_code == 200
-    assert resp.media_type == "text/event-stream"
+    class _ReplayDb:
+        async def execute(self, stmt):
+            class _MockRes:
+                def scalars(self):
+                    class _S:
+                        def all(self):
+                            return events
+                    return _S()
+            return _MockRes()
+
+        async def rollback(self):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    body = SessionChatIn(message="Resume")
+    with patch("app.db.async_session_maker", return_value=_ReplayDb()):
+        resp = await chat_session(
+            session_id=session_id,
+            body=body,
+            current_user=mock_user,
+            db=_MockDb(),  # type: ignore[arg-type]
+            last_event_id_header="1",
+        )
+
+        assert resp.status_code == 200
+        assert resp.media_type == "text/event-stream"
+        chunks = [c async for c in resp.body_iterator]
+        assert len(chunks) == 2
+        assert "event: thought" in chunks[0]
+        assert "event: done" in chunks[1]
 
 
 @pytest.mark.asyncio

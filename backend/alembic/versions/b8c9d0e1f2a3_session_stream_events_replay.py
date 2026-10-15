@@ -50,18 +50,6 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name="pk_session_stream_events"),
     )
     op.create_index(
-        "ix_session_stream_events_session_id",
-        "session_stream_events",
-        ["session_id"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_session_stream_events_turn_id",
-        "session_stream_events",
-        ["turn_id"],
-        unique=False,
-    )
-    op.create_index(
         "ix_session_stream_events_lookup",
         "session_stream_events",
         ["session_id", "turn_id", "event_id"],
@@ -71,7 +59,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_session_stream_events_lookup", table_name="session_stream_events")
-    op.drop_index("ix_session_stream_events_turn_id", table_name="session_stream_events")
-    op.drop_index("ix_session_stream_events_session_id", table_name="session_stream_events")
     op.drop_table("session_stream_events")
     op.drop_column("agent_sessions", "active_turn_id")
