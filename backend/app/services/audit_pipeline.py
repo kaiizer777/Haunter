@@ -48,8 +48,64 @@ AUDIT_TYPES = frozenset(
 #: "@haunter audit" notifies the real GitHub user `haunter`, so the manual
 #: trigger is "@haunter-auditor" plus the whole word `audit`. Bare "@haunter
 #: audit" bodies never dispatch.
-_MANUAL_MENTION = "@haunter-auditor"
+#:
+#: The handle uses the same complete-mention boundary as the Q&A route
+#: (`has_auditor_mention` in app.webhooks): the optional `[bot]` suffix is
+#: allowed, but a longer handle (`@haunter-auditor-extra`,
+#: `@haunter-auditorbot`) is a different account and never dispatches.
+_MANUAL_MENTION_RE: re.Pattern[str] = re.compile(
+    r"@haunter-auditor(?:\[bot\])?(?![A-Za-z0-9_-])", re.IGNORECASE
+)
 _MANUAL_AUDIT_WORD_RE = re.compile(r"\baudit\b", re.IGNORECASE)
+#: Words before `audit` that mark noun use ("this audit trail", "the audit
+#: log"): a question about audits, not an instruction to run one. Such bodies
+#: stay on the Q&A path even when they name the auditor handle.
+_AUDIT_NOUN_PRECEDERS = frozenset(
+    {
+        "this",
+        "that",
+        "these",
+        "those",
+        "the",
+        "a",
+        "an",
+        "your",
+        "our",
+        "its",
+        "their",
+        "his",
+        "her",
+        "my",
+        "last",
+        "latest",
+        "previous",
+        "current",
+        "full",
+        "entire",
+        "recent",
+    }
+)
+#: Words after `audit` that mark a noun compound ("audit trail", "audit log"):
+#: likewise a question about audits, not an audit request.
+_AUDIT_NOUN_FOLLOWERS = frozenset(
+    {
+        "trail",
+        "trails",
+        "log",
+        "logs",
+        "report",
+        "reports",
+        "history",
+        "histories",
+        "result",
+        "results",
+        "finding",
+        "findings",
+        "record",
+        "records",
+    }
+)
+_WORD_RE = re.compile(r"[A-Za-z]+")
 _AUDIT_ID_RE = re.compile(r"^audit-[0-9a-f]{12}$", re.ASCII)
 _REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,255}$", re.ASCII)
 _DELIVERY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$", re.ASCII)
@@ -276,12 +332,47 @@ def is_workflow_audit_conclusion(conclusion: Optional[str]) -> bool:
     return conclusion in AUDIT_WORKFLOW_CONCLUSIONS
 
 
-def is_manual_audit_comment(body: Optional[str]) -> bool:
-    if not body:
+def _is_imperative_audit_use(body: str, match: re.Match[str]) -> bool:
+    """True when one `audit` occurrence is an instruction verb, not a noun.
+
+    Noun uses ("this audit trail", "the audit log", "audit-trail") are
+    questions *about* audits and must stay on the Q&A path: if manual audits
+    are disabled such a question would otherwise be ignored, and if enabled
+    an audit would be queued instead of an answer. Verb uses ("audit this
+    PR", "please audit", "can you audit this?") dispatch.
+    """
+    after = body[match.end() :]
+    if after.startswith("-"):
+        # Hyphenated compound (`audit-trail`, `audit-log`): noun.
         return False
-    return (
-        _MANUAL_MENTION in body.lower()
-        and _MANUAL_AUDIT_WORD_RE.search(body) is not None
+    follower = _WORD_RE.match(after.lstrip())
+    if follower is not None and follower.group(0).lower() in _AUDIT_NOUN_FOLLOWERS:
+        return False
+    before = body[: match.start()].rstrip()
+    preceder: Optional[re.Match[str]] = None
+    for word in _WORD_RE.finditer(before):
+        preceder = word
+    if preceder is not None and preceder.group(0).lower() in _AUDIT_NOUN_PRECEDERS:
+        return False
+    return True
+
+
+def is_manual_audit_comment(body: Optional[str]) -> bool:
+    """True only for an imperative audit request addressed to @haunter-auditor.
+
+    Both halves are bounded: the handle needs the complete-mention boundary
+    (mirroring the Q&A route, so `@haunter-auditor-extra` and
+    `@haunter-auditorbot` never match), and `audit` must read as an
+    instruction verb (see `_is_imperative_audit_use`), not a noun inside
+    "audit trail" / "the audit log" / a question about audits.
+    """
+    if not isinstance(body, str) or not body:
+        return False
+    if _MANUAL_MENTION_RE.search(body) is None:
+        return False
+    return any(
+        _is_imperative_audit_use(body, match)
+        for match in _MANUAL_AUDIT_WORD_RE.finditer(body)
     )
 
 

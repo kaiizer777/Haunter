@@ -800,7 +800,7 @@ Configured per repository via granular event flags evaluated in `backend/app/web
 - `on_pull_request`: Triggered on `pull_request.opened` and `pull_request.synchronize` to audit new PR diffs against the base branch.
 - `on_ci_failure`: Triggered on `workflow_run.completed` with conclusion `failure`. Conducts an automated root-cause analysis without creating an unsolicited PR.
 - `on_ci_success`: Triggered on `workflow_run.completed` with conclusion `success`. Runs regression and performance checks on verified green builds.
-- `on_manual_mention`: Triggered on `issue_comment.created` matching `@haunter audit`. Conducts an on-demand ad-hoc review of the PR or issue context.
+- `on_manual_mention`: Triggered on `issue_comment.created` matching `@haunter-auditor audit` (imperative audit request; questions about audits stay on the Q&A path). Conducts an on-demand ad-hoc review of the PR or issue context.
 
 ### 14.3 Multi-Perspective Audit Core (`backend/app/subagents/auditor.py`)
 Audits repository diffs across four comprehensive engineering perspectives:
