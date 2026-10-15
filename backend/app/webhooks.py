@@ -191,13 +191,28 @@ _AUDITOR_TRIGGER_DIFF_MAX_CHARS = 4_000
 # dashboard and replay can tell the two schedulers apart.
 _AUDITOR_QUEUED_STATUS = "auditor_queued"
 
+# Worker-liveness status for the Q&A path. The background worker records this
+# best-effort row before doing any GitHub/LLM work; it is what separates "the
+# ack named work that started" from "the ack named work that never ran" (a
+# 503 between the queued-row commit and `add_task`, or a dead worker). See
+# the redelivery branch below.
+_AUDITOR_RUNNING_STATUS = "auditor_running"
+
 # Delivery rows that mean "this GitHub delivery already owns Q&A work": a
 # redelivery with one of these statuses is answered `duplicate` without a
 # second LLM call or reply. `error` is deliberately absent — a failed attempt
 # stays retryable, mirroring the CodeReview guard that excludes
-# REVIEW_STATUS_ERROR from its handled set.
+# REVIEW_STATUS_ERROR from its handled set. `auditor_queued` without a later
+# `auditor_running` row means no worker ever started, so the duplicate answer
+# re-schedules the background task instead of losing the question silently.
 _AUDITOR_DEDUP_STATUSES = frozenset(
-    {_AUDITOR_QUEUED_STATUS, "auditor_replied", "duplicate", "queued"}
+    {
+        _AUDITOR_QUEUED_STATUS,
+        _AUDITOR_RUNNING_STATUS,
+        "auditor_replied",
+        "duplicate",
+        "queued",
+    }
 )
 
 AUDITOR_QA_SYSTEM_PROMPT = (
@@ -609,6 +624,24 @@ async def _run_auditor_mention_background(
                     sanitize_log_value(delivery_id, 64),
                 )
                 return
+            # Liveness row, recorded before any GitHub/LLM work: the request
+            # path acked `auditor_queued` and scheduled this task, but a 503
+            # between the queued-row commit and `add_task` (or a dead worker)
+            # leaves that row as the latest state with no work behind it. A
+            # redelivery then answers `duplicate` — and, seeing no running
+            # row, re-schedules this worker to recover the question. Best
+            # effort (never raises): if this insert fails the work still runs
+            # and the worst case is a duplicate-scheduled second run, i.e.
+            # at-least-once answers instead of a silently lost one.
+            await _record_webhook_delivery(
+                db,
+                event=event,
+                delivery_id=delivery_id,
+                status_value=_AUDITOR_RUNNING_STATUS,
+                reason=f"auditor_started pr={pr_number} comment={comment_id}",
+                repo=f"{repo_owner}/{repo_name}",
+                repo_id=repo.id,
+            )
             comment_obj = SimpleNamespace(
                 id=comment_id,
                 body=comment_body,
@@ -2781,6 +2814,36 @@ async def github_webhook(
         except Exception:
             prior = None
         if prior is not None and str(getattr(prior, "status", "")) in _AUDITOR_DEDUP_STATUSES:
+            if str(getattr(prior, "status", "")) == _AUDITOR_QUEUED_STATUS:
+                # Recovery: the queued row is the latest state, so no worker
+                # ever started (`auditor_running` would have followed it) —
+                # the ack named work that never ran. This is the 503 edge: the
+                # queued-row commit landed but the 503 left `add_task`
+                # unreached, and every redelivery since answered `duplicate`
+                # for a question nobody is answering. Re-schedule the
+                # background task with the same snapshots as the main path,
+                # and still answer `duplicate`: the delivery itself is a
+                # repeat. At-least-once by design: if the original worker is
+                # merely slow and its running row is not yet visible, two
+                # workers answer — a duplicate reply, not a lost question.
+                _dup_trigger = _extract_triggering_review_context(
+                    data.get("comment")
+                )
+                background_tasks.add_task(
+                    _run_auditor_mention_background,
+                    repo_id=repo.id,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
+                    pr_number=pr_number,
+                    comment_id=comment_obj.id,
+                    comment_body=comment_obj.body or "",
+                    comment_login=comment_login or "reviewer",
+                    author_association=comment_obj.author_association or "",
+                    in_reply_to_id=getattr(comment_obj, "in_reply_to_id", None),
+                    event=x_github_event,
+                    delivery_id=x_github_delivery,
+                    trigger_context=_dup_trigger,
+                )
             logger.info(
                 "Duplicate auditor mention (delivery_id=%s): prior status=%s",
                 x_github_delivery,

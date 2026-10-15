@@ -132,6 +132,18 @@ _AUDIT_COMMAND_TARGET_RE = re.compile(
     r"|\bvulnerabilit(?:y|ies)\b",
     re.IGNORECASE,
 )
+#: Words that open a question about *categories* of coverage (`what types
+#: of security can you audit?`, `which kinds of vulnerabilities do you
+#: audit?`): a capability question even when the category names a target
+#: domain. Checked before the target veto in `_is_capability_question`, so a
+#: domain word (`security`, `vulnerabilities`, `fork`) inside the category
+#: phrase cannot flip the question into a command. Openers are deliberately
+#: `what`/`which` only: `can you audit the security of my fork?` takes the
+#: domain as the audit's direct object and stays a command.
+_AUDIT_CAPABILITY_CATEGORY_RE = re.compile(
+    r"\b(what|which)\b[^?!]*\b(types?|kinds?|sorts?|categor(?:y|ies))\b[^?!]*\bof\b",
+    re.IGNORECASE,
+)
 #: Words after `audit` that mark a noun compound ("audit trail", "audit log"):
 #: likewise a question about audits, not an audit request — unless the
 #: preceder is an explicit request marker or `audit` is the sentence verb
@@ -381,6 +393,57 @@ def is_workflow_audit_conclusion(conclusion: Optional[str]) -> bool:
     return conclusion in AUDIT_WORKFLOW_CONCLUSIONS
 
 
+def _is_abbrev_dot(body: str, idx: int) -> bool:
+    """True when the `.` at `idx` belongs to an abbreviation, not a boundary.
+
+    Sentence splitting must not cut at the dots in `e.g.`, `i.e.`, `etc.`,
+    or `vs.` — cutting `@haunter-auditor can you audit e.g. this PR?` after
+    `e` re-scopes the audit sentence to `can you audit e`, which then reads
+    as a capability question and the command is lost. Both dots of the
+    two-letter forms are covered: the terminal dot (`e.g|i.e|etc|vs.`) and
+    the first dot (`e.|i.` before `g.|e.`).
+    """
+    before = body[max(0, idx - 4) : idx]
+    if re.search(r"(?i)\b(e\.g|i\.e|etc|vs)\.$", before + "."):
+        return True
+    return (
+        re.search(r"(?i)\b[ei]$", before) is not None
+        and re.match(r"(?i)[eg]\.", body[idx + 1 : idx + 3]) is not None
+    )
+
+
+def _is_url_dot(body: str, idx: int) -> bool:
+    """True when the `.` at `idx` sits inside a URL token, not a boundary.
+
+    A dot with non-whitespace on both sides inside a `scheme://` or `www.`
+    token (`https://example.com/a.b`) never ends a sentence. A dot ending
+    the token (`see https://example.com.`) still does.
+    """
+    start = idx
+    while start > 0 and not body[start - 1].isspace():
+        start -= 1
+    head = body[start:idx]
+    if "://" not in head and not head.lower().startswith("www."):
+        return False
+    return idx + 1 < len(body) and not body[idx + 1].isspace()
+
+
+def _prev_sentence_dot(body: str, start: int) -> int:
+    """Rightmost sentence-ending `.` before `start`, or -1 when none."""
+    idx = body.rfind(".", 0, start)
+    while idx != -1 and (_is_abbrev_dot(body, idx) or _is_url_dot(body, idx)):
+        idx = body.rfind(".", 0, idx)
+    return idx
+
+
+def _next_sentence_dot(body: str, end: int) -> int:
+    """Leftmost sentence-ending `.` at or after `end`, or -1 when none."""
+    idx = body.find(".", end)
+    while idx != -1 and (_is_abbrev_dot(body, idx) or _is_url_dot(body, idx)):
+        idx = body.find(".", idx + 1)
+    return idx
+
+
 def _audit_request_sentence(body: str, match: re.Match[str]) -> tuple[str, int]:
     """The sentence containing one `audit` occurrence, plus its start offset.
 
@@ -390,7 +453,7 @@ def _audit_request_sentence(body: str, match: re.Match[str]) -> tuple[str, int]:
     """
     start = match.start()
     prev = max(
-        body.rfind(".", 0, start),
+        _prev_sentence_dot(body, start),
         body.rfind("!", 0, start),
         body.rfind("?", 0, start),
         body.rfind("\n", 0, start),
@@ -400,7 +463,7 @@ def _audit_request_sentence(body: str, match: re.Match[str]) -> tuple[str, int]:
     nexts = [
         index
         for index in (
-            body.find(".", end),
+            _next_sentence_dot(body, end),
             body.find("!", end),
             body.find("?", end),
             body.find("\n", end),
@@ -422,7 +485,10 @@ def _is_capability_question(body: str, match: re.Match[str]) -> bool:
     flip the question into a command, and a question mark in another sentence
     must not flip a command into a question. Fires only when an interrogative
     opener precedes `audit` within its sentence, no target phrase is named in
-    that same sentence, and the sentence reads as a question (a question mark,
+    that same sentence — except a `what/which types|kinds|sorts|categories
+    of X` category phrase, which stays a capability question even when X
+    names a target domain (`what types of security can you audit?`) — and the
+    sentence reads as a question (a question mark,
     or an interrogative-first sentence) — so plain modals (`you can audit
     now`) never trip it.
     """
@@ -432,6 +498,16 @@ def _is_capability_question(body: str, match: re.Match[str]) -> bool:
     real = [word for word in words if word not in _AUDIT_HANDLE_WORDS]
     if not any(word in _AUDIT_INTERROGATIVES for word in real):
         return False
+    if _AUDIT_CAPABILITY_CATEGORY_RE.search(sentence) is not None:
+        # `what types of security can you audit?` asks about categories of
+        # coverage — a capability question even though `security` names a
+        # target domain. Decided before the target veto below, which would
+        # otherwise flip it into a queued audit. Same question discipline as
+        # the general case: a question mark, or an interrogative-first
+        # sentence, so a flat statement never trips it.
+        if "?" in sentence:
+            return True
+        return bool(real) and real[0] in _AUDIT_INTERROGATIVES
     if _AUDIT_COMMAND_TARGET_RE.search(sentence) is not None:
         return False
     if "?" in sentence:

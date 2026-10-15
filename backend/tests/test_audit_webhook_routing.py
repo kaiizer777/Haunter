@@ -1588,19 +1588,25 @@ async def test_concurrent_manual_audit_redelivery_never_conflicts(
 
     Both requests pass the delivery pre-check before either claims the
     delivery_id, then resolve different endpoints (H1 vs H2 after a head
-    advance). The loser of the dispatch race finds the winner's job and
-    answers `duplicate` instead of surfacing a 409 for work that was queued.
-    The assertions hold whatever the interleaving: sequential runs dedupe at
-    the pre-check, true races at the conflict recovery — neither 409s and
-    exactly one job exists.
+    advance). The loser of the dispatch race raises
+    `AuditDeliveryConflictError`, finds the winner's job, and answers
+    `duplicate` instead of surfacing a 409 for work that was queued.
+
+    The barrier after the pre-check is what makes this a true race: without
+    it the coroutines run sequentially and the second dedupes at the
+    pre-check, never touching the conflict-recovery path. The endpoint
+    resolver is patched ONCE, shared by both requests, with per-arrival
+    heads: patching it per-coroutine nests two global patches of the same
+    target, so both requests resolve through one mock (identical SHAs, no
+    conflict) and the non-LIFO unpatch order leaks the stale mock into
+    every later test in the session.
     """
     repo = await seed_repo(
         fake_audit_db, fake_audit_user_factory, "race-org", "race-repo"
     )
     await set_repo_auditor_settings(fake_audit_db, repo)
     base_sha = "1" * 40
-    first_head = "a" * 40
-    advanced_head = "b" * 40
+    heads = ["a" * 40, "b" * 40]
     payload = make_issue_comment_payload(
         owner="race-org",
         repo="race-repo",
@@ -1610,27 +1616,32 @@ async def test_concurrent_manual_audit_redelivery_never_conflicts(
     )
     delivery_id = f"race-{uuid.uuid4().hex[:12]}"
 
-    async def _post_with_head(head_sha: str) -> httpx.Response:
-        meta = {
-            "head": {"sha": head_sha, "ref": "feature-branch"},
-            "base": {"sha": base_sha, "ref": "main"},
-        }
-        with patch(
-            "app.github_client.fetch_pull_request",
-            new_callable=AsyncMock,
-            return_value=meta,
-        ), patch(
-            "app.github.auditor.get_auditor_installation_token",
-            new_callable=AsyncMock,
-            return_value="ghs_auditor_token",
-        ):
-            return await post_signed(
-                client, "issue_comment", payload, delivery_id=delivery_id
-            )
+    arrivals: list[str] = []
+    both_past_precheck = asyncio.Event()
 
-    first_resp, second_resp = await asyncio.gather(
-        _post_with_head(first_head), _post_with_head(advanced_head)
-    )
+    async def _gated_resolve(*args: Any, **kwargs: Any) -> tuple[str, str, str]:
+        # Runs after the delivery pre-check inside each request: hold both
+        # requests here until each has passed the pre-check, so the dispatch
+        # race below is real and the loser exercises the
+        # AuditDeliveryConflictError recovery instead of the pre-check.
+        head = heads[len(arrivals)] if len(arrivals) < len(heads) else heads[-1]
+        arrivals.append(head)
+        if len(arrivals) == 2:
+            both_past_precheck.set()
+        await asyncio.wait_for(both_past_precheck.wait(), timeout=10)
+        return base_sha, head, "feature-branch"
+
+    async def _post_once() -> httpx.Response:
+        return await post_signed(
+            client, "issue_comment", payload, delivery_id=delivery_id
+        )
+
+    with patch(
+        "app.webhooks._resolve_manual_audit_endpoints",
+        new_callable=AsyncMock,
+        side_effect=_gated_resolve,
+    ):
+        first_resp, second_resp = await asyncio.gather(_post_once(), _post_once())
     statuses = {first_resp.json()["status"], second_resp.json()["status"]}
     assert first_resp.status_code == 200
     assert second_resp.status_code == 200
@@ -1646,7 +1657,7 @@ async def test_concurrent_manual_audit_redelivery_never_conflicts(
         )
     ).all()
     assert len(jobs) == 1
-    assert jobs[0].head_sha in (first_head, advanced_head)
+    assert jobs[0].head_sha in (heads[0], heads[1])
     assert jobs[0].base_sha == base_sha
 
 
@@ -1800,6 +1811,66 @@ def test_capability_question_with_elsewhere_target_stays_qa():
         )
         is True
     )
+
+
+def test_capability_category_question_with_target_domain_stays_qa():
+    """`what types of security can you audit?` is a capability question, not a command.
+
+    The `what/which <category> of X` phrase is decided before the target
+    veto, so a domain word (`security`, `vulnerabilities`) inside the
+    category cannot flip the question into a queued audit. A concrete
+    direct object (`can you audit the security of my fork?`, `can you
+    audit this PR?`) keeps the command reading.
+    """
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor what types of security can you audit?"
+        )
+        is False
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor which kinds of vulnerabilities do you audit?"
+        )
+        is False
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor what sorts of forks can you audit?"
+        )
+        is False
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment(
+            "@haunter-auditor can you audit the security of my fork?"
+        )
+        is True
+    )
+    assert (
+        audit_pipeline.is_manual_audit_comment("@haunter-auditor can you audit this PR?")
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@haunter-auditor can you audit e.g. this PR?",
+        "@haunter-auditor can you audit i.e. this PR?",
+        "@haunter-auditor can you audit https://example.com/a.b this PR?",
+        "@haunter-auditor can you audit this PR (see https://example.com/a.b)?",
+    ],
+)
+def test_abbreviation_and_url_dots_do_not_end_audit_sentence(body: str):
+    """Dots inside `e.g.`/`i.e.`/URLs never split the audit sentence.
+
+    Cutting `@haunter-auditor can you audit e.g. this PR?` after `e`
+    re-scopes the audit sentence to `can you audit e`, which reads as a
+    target-less capability question — the command is lost. Likewise a URL
+    dot must not hide the question mark or the named target that follows
+    it. Every body here names `this PR` as a direct object: a command.
+    """
+    assert audit_pipeline.is_manual_audit_comment(body) is True
 
 
 @pytest.mark.asyncio
