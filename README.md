@@ -100,7 +100,7 @@ Whether you're **debugging an open issue**, **implementing a new feature**, or *
 
 ## 📊 Full Audit Trail
 
-Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and full per-run agent traces. Nothing is a black box.
+Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and full per-run agent traces. 
 
 An **eval harness** with 20 golden fixtures lets you benchmark and compare quality across any configuration change.
 
