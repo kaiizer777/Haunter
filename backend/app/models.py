@@ -729,6 +729,8 @@ class AgentSession(Base):
     checkpoints: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
     )
+    # Issue #96: Active/latest turn ID for multi-environment Lambda SSE replay
+    active_turn_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -740,11 +742,45 @@ class AgentSession(Base):
 
     user: Mapped["User"] = relationship("User", back_populates="agent_sessions")
     repo: Mapped["Repo"] = relationship("Repo", back_populates="agent_sessions")
+    stream_events: Mapped[list["SessionStreamEvent"]] = relationship(
+        "SessionStreamEvent", back_populates="session", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         # Composite index for fast active-session lookups per user.
         # Column order: equality first (user_id), then status.
         Index("ix_agent_sessions_user_id_status", "user_id", "status"),
+    )
+
+
+class SessionStreamEvent(Base):
+    """
+    Issue #96 — DB-backed SSE event store for cross-environment resumption.
+
+    Persists raw SSE events emitted during an interactive agent turn so any
+    concurrent or subsequent request routed to a different AWS Lambda worker
+    can replay the turn contiguously from Postgres rather than dropping the
+    connection with a 410 GONE or 409 TURN_ACTIVE_ELSEWHERE.
+    """
+
+    __tablename__ = "session_stream_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    turn_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    event_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    event: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunk: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    session: Mapped["AgentSession"] = relationship("AgentSession", back_populates="stream_events")
+
+    __table_args__ = (
+        Index("ix_session_stream_events_lookup", "session_id", "turn_id", "event_id"),
     )
 
 

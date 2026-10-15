@@ -30,7 +30,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +216,7 @@ class SseQueue:
         maxsize: int = 512,
         replay_buffer_size: int = 256,
         retry_ms: int = 3000,
+        mirror_sink: Optional[Callable[[int, str, str], Awaitable[None]]] = None,
     ) -> None:
         self._maxsize = maxsize
         self._q: asyncio.Queue[Any] = asyncio.Queue(maxsize=maxsize)
@@ -223,6 +224,7 @@ class SseQueue:
         self._replay_buffer: list[tuple[int, str]] = []
         self._replay_buffer_size = replay_buffer_size
         self._retry_ms = retry_ms
+        self._mirror_sink = mirror_sink
         self._consumer_active = False
         self._consumer_disconnected = False
         # Ownership generation for overlapping stream() generators. Incremented
@@ -237,6 +239,16 @@ class SseQueue:
         # evicted yet). Used to reject resumptions that would silently skip
         # evicted output (see resume_gap()).
         self._evicted_up_to = 0
+
+    @property
+    def mirror_sink(self) -> Optional[Callable[[int, str, str], Awaitable[None]]]:
+        return self._mirror_sink
+
+    @mirror_sink.setter
+    def mirror_sink(
+        self, sink: Optional[Callable[[int, str, str], Awaitable[None]]]
+    ) -> None:
+        self._mirror_sink = sink
 
     # ------------------------------------------------------------------
     # Low-level put
@@ -268,6 +280,20 @@ class SseQueue:
             evicted_id, _ = self._replay_buffer.pop(0)
             if evicted_id > self._evicted_up_to:
                 self._evicted_up_to = evicted_id
+
+        # Mirror event to external sink (e.g. database for cross-env Lambda replay)
+        if self._mirror_sink is not None:
+            try:
+                res = self._mirror_sink(event_id, event, chunk)
+                if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
+                    asyncio.create_task(res)
+            except Exception as exc:
+                logger.error(
+                    "SseQueue: failed to mirror event %s (id=%s): %s",
+                    event,
+                    event_id,
+                    exc,
+                )
 
         # The asyncio.Queue carries plain SSE strings (plus the _STREAM_DONE
         # sentinel). Event IDs live in the replay buffer and are re-derived

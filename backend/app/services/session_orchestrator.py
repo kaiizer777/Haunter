@@ -1282,10 +1282,12 @@ class SessionOrchestrator:
         session_id: uuid.UUID,
         db: AsyncSession,
         gh_token: str | None = None,
+        turn_id: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.db = db
         self.gh_token = gh_token
+        self.turn_id = turn_id
         self._llm = LLMClient(timeout=120.0)
 
     async def run(
@@ -1313,6 +1315,10 @@ class SessionOrchestrator:
         All exceptions are caught here; an `error` SSE event is emitted and
         the queue is closed so the HTTP response terminates cleanly.
         """
+        if not self.turn_id:
+            self.turn_id = str(uuid.uuid4())
+        queue.mirror_sink = self._mirror_event
+
         try:
             await self._execute(user_message, queue, model=model, provider=provider)
         except SessionBusyError:
@@ -1377,6 +1383,38 @@ class SessionOrchestrator:
             )
             await queue.close()
             return
+
+        # Record this turn as the session's active_turn_id for cross-environment resumption
+        session.active_turn_id = self.turn_id
+        try:
+            if getattr(self.db, "is_active", True):
+                await self.db.commit()
+                session = await self._load_session()
+                if session is None:
+                    await queue.put_error(
+                        "Session closed during turn start.", "SESSION_NOT_FOUND"
+                    )
+                    await queue.close()
+                    return
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: failed to commit active_turn_id (%s), using fallback",
+                exc,
+            )
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            from app.db import async_session_maker
+
+            async with async_session_maker() as fallback_db:
+                f_stmt = select(AgentSession).where(AgentSession.id == self.session_id)
+                f_res = await fallback_db.execute(f_stmt)
+                f_row = f_res.scalars().first()
+                if f_row:
+                    f_row.active_turn_id = self.turn_id
+                    await fallback_db.commit()
+            session = await self._load_session()
 
         repo = session.repo  # selectinloaded by _load_session
 
@@ -3188,7 +3226,7 @@ class SessionOrchestrator:
                     AgentSession.id == self.session_id,
                     AgentSession.status == "active",
                 )
-                .with_for_update(nowait=True)
+                .with_for_update(nowait=True, key_share=True)
             )
             result = await self.db.execute(stmt)
             return result.scalars().first()
@@ -3238,6 +3276,11 @@ class SessionOrchestrator:
         fallback_checkpoints = session.checkpoints
         fallback_plan = session.plan
         fallback_waiting_input = session.waiting_input
+        fallback_active_turn_id = getattr(session, "active_turn_id", None) or self.turn_id
+        try:
+            session.active_turn_id = fallback_active_turn_id
+        except Exception:
+            pass
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
@@ -3266,6 +3309,7 @@ class SessionOrchestrator:
                 res = await fallback_db.execute(stmt)
                 db_session = res.scalars().first()
                 if db_session:
+                    db_session.active_turn_id = fallback_active_turn_id
                     db_session.conversation_history = updated_history
                     db_session.staged_patches = updated_patches
                     db_session.updated_at = datetime.now(timezone.utc)
@@ -3274,3 +3318,33 @@ class SessionOrchestrator:
                     db_session.plan = fallback_plan
                     db_session.waiting_input = fallback_waiting_input
                     await fallback_db.commit()
+
+    async def _mirror_event(self, event_id: int, event: str, chunk: str) -> None:
+        """Mirror an emitted SSE event to PostgreSQL for cross-environment resumption."""
+        from app.db import async_session_maker
+        from app.models import SessionStreamEvent
+
+        if not self.turn_id:
+            return
+
+        try:
+            async with async_session_maker() as mirror_db:
+                stream_event = SessionStreamEvent(
+                    session_id=self.session_id,
+                    turn_id=self.turn_id,
+                    event_id=event_id,
+                    event=event,
+                    chunk=chunk,
+                )
+                mirror_db.add(stream_event)
+                await mirror_db.commit()
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: failed to mirror event %s (id=%s) to DB for session=%s: %s",
+                event,
+                event_id,
+                self.session_id,
+                exc,
+            )
+
+    run_turn = run
