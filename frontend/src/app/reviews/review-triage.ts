@@ -110,6 +110,7 @@ export type OutcomeKey =
   | "advisory"
   | "clean"
   | "in_progress"
+  | "suppressed"
   | "failed";
 
 export interface Outcome {
@@ -134,11 +135,13 @@ export function outcomeMeaning(key: OutcomeKey): string {
     case "changes_requested":
       return "Must-fix findings or a critical risk score. Address before merge.";
     case "advisory":
-      return "No must-fix findings, but the change carries real risk.";
+      return "No must-fix findings. Medium findings still need a focused pass before merge.";
     case "in_progress":
       return "Still running. A verdict appears here once the analysis lands.";
     case "failed":
       return "The analysis never completed. Retry, or inspect the failure reason.";
+    case "suppressed":
+      return "Skipped by repository settings, so no analysis was stored. Nothing is running.";
     case "clean":
       return "No blockers and a low risk score. Routine review is enough.";
   }
@@ -232,12 +235,32 @@ export const FAILED_OUTCOME: Outcome = Object.freeze({
   meaning: outcomeMeaning("failed"),
 });
 
+/**
+ * Terminal outcome for a run the orchestrator deliberately skipped: repo
+ * settings suppressed publication, so no analysis was ever stored.
+ *
+ * It must not reuse pendingOutcome(). Suppression is terminal — nothing is
+ * running and nothing will ever arrive — so routing these rows through
+ * `in_progress` counted a finished run as work in flight, sorted it above
+ * rows that actually need a decision (rank 2 vs 4), and rendered the chip
+ * tooltip "Still running. A verdict appears here once the analysis lands."
+ * on a row that will never receive one.
+ */
+export const SUPPRESSED_UNSCORED_OUTCOME: Outcome = Object.freeze({
+  key: "suppressed",
+  label: "Suppressed",
+  band: BAND_NONE,
+  rank: 4,
+  meaning: outcomeMeaning("suppressed"),
+});
+
 /** Order the triage chips render in — highest attention first. */
 export const OUTCOME_ORDER: readonly OutcomeKey[] = Object.freeze([
   "changes_requested",
   "advisory",
   "in_progress",
   "failed",
+  "suppressed",
   "clean",
 ] as OutcomeKey[]);
 
@@ -245,8 +268,9 @@ export const OUTCOME_ORDER: readonly OutcomeKey[] = Object.freeze([
  * Collapse repeated failure text into a cause signature so a page full of
  * "All 9 free-tier models exhausted (18 total attempts)" states the cause
  * once instead of nine times. Parenthesised detail (attempt counts, HTTP
- * bodies) is dropped from the signature; the raw text stays on the row, where
- * it is redacted and collapsed, and never leaves the row through a cluster.
+ * bodies) is dropped from the signature only; the unredacted text stays on
+ * the individual row, where the caller renders it, and never leaves the row
+ * through a cluster.
  */
 function failureSignature(reason: string | null | undefined): string {
   const text = (reason ?? "").trim();

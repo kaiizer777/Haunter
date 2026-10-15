@@ -392,6 +392,63 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     expect(screen.getByRole("button", { name: /staged fix/i })).toBeInTheDocument();
   });
 
+  it("failed persistence never renders a phantom Staged badge", async () => {
+    // NB: fireEvent, not userEvent (see above).
+    render(<ReviewsPage />);
+
+    const reviewButton = await screen.findByRole("button", { name: /review \(1\)/i });
+    fireEvent.click(reviewButton);
+
+    // Quota-exceeded / private-mode browser: setItem throws. State must only
+    // update AFTER the write succeeds, so the UI keeps describing storage.
+    // (Instance spy, not Storage.prototype: jsdom exposes setItem on the
+    // instance, so a prototype spy never intercepts the component's call.)
+    const setItem = vi
+      .spyOn(localStorage, "setItem")
+      .mockImplementationOnce(() => {
+        throw new Error("quota exceeded");
+      });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /stage fix/i }));
+      expect(await screen.findByText(/couldn't stage fix/i)).toBeInTheDocument();
+      expect(screen.queryByText("Staged Fix")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /stage fix/i })).toBeInTheDocument();
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it("staging is scoped to repo + commit: identical findings elsewhere stage independently", async () => {
+    // NB: fireEvent, not userEvent (see above).
+    // Same file/line/patch shape recurs across commits (the audit re-runs on
+    // every push), so the key must discriminate by commit — otherwise staging
+    // one silently toggles the other.
+    const otherCommit: CodeReviewOut = {
+      ...mockReviews[0],
+      id: "rev_other_commit",
+      commit_sha: "9999999999999999",
+    };
+    vi.mocked(api.getCodeReviews).mockResolvedValue({
+      reviews: [mockReviews[0], otherCommit],
+      total: 2,
+    });
+    render(<ReviewsPage />);
+
+    const reviewButtons = await screen.findAllByRole("button", { name: /review \(1\)/i });
+    expect(reviewButtons).toHaveLength(2);
+    fireEvent.click(reviewButtons[0]);
+    fireEvent.click(reviewButtons[1]);
+
+    const stageButtons = screen.getAllByRole("button", { name: /stage fix/i });
+    expect(stageButtons).toHaveLength(2);
+    fireEvent.click(stageButtons[0]);
+
+    // Exactly one staged, one still un-staged — and a single stored entry.
+    expect(screen.getAllByRole("button", { name: /staged fix/i })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /^stage fix$/i })).toHaveLength(1);
+    expect(Object.keys(JSON.parse(localStorage.getItem("haunter-staged-fixes") ?? "{}"))).toHaveLength(1);
+  });
+
   it("deep-link to an off-page review falls back to getReviewDetail", async () => {
     const offPage: CodeReviewOut = {
       ...mockReviews[0],
@@ -450,6 +507,89 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     expect(document.activeElement).not.toBe(document.body);
   });
 
+  it("closing the detail replaces history so Back cannot reopen it", async () => {
+    const user = userEvent.setup();
+    const pushSpy = vi.spyOn(window.history, "pushState");
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+    try {
+      render(<ReviewsPage />);
+
+      await screen.findByText("feat: autonomous remediation sentinel pipeline");
+      await user.click(screen.getAllByRole("button", { name: /full audit/i })[0]);
+      expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+      expect(pushSpy).toHaveBeenCalledTimes(1);
+      expect(pushSpy.mock.calls[0][2]).toContain("review=rev_1");
+
+      // Close must rewrite the current entry (replaceState), NOT push a
+      // second one: a pushed close leaves the ?review= entry behind us, so
+      // the next Back navigates straight back into the just-closed detail.
+      await user.click(screen.getByRole("button", { name: /back to reviews/i }));
+      expect(await screen.findByText("docs: update API documentation")).toBeInTheDocument();
+      expect(pushSpy).toHaveBeenCalledTimes(1);
+      expect(replaceSpy).toHaveBeenCalled();
+      expect(window.location.search).not.toContain("review=");
+    } finally {
+      pushSpy.mockRestore();
+      replaceSpy.mockRestore();
+    }
+  });
+
+  it("off-page deep link fetches the detail once even when the list refreshes", async () => {
+    const offPage: CodeReviewOut = {
+      ...mockReviews[0],
+      id: "rev_offpage",
+      pr_title: "fix: off-page fallback review",
+    };
+    vi.mocked(api.getReviewDetail).mockResolvedValue(offPage);
+    // Fresh row objects per list fetch, like real API JSON payloads — the
+    // detail effect depends on `reviews`, so every refresh re-runs it.
+    vi.mocked(api.getCodeReviews).mockImplementation(async () => ({
+      reviews: [...mockReviews],
+      total: mockReviews.length,
+    }));
+    window.history.replaceState({}, "", "/reviews?review=rev_offpage");
+    render(<ReviewsPage />);
+
+    expect(await screen.findByText("fix: off-page fallback review")).toBeInTheDocument();
+    expect(vi.mocked(api.getReviewDetail)).toHaveBeenCalledTimes(1);
+
+    // A list refresh re-runs the resolver effect but must not re-fire the
+    // identical GET: the fetch is keyed on (id, retry), neither changed.
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() =>
+      expect(vi.mocked(api.getCodeReviews).mock.calls.length).toBeGreaterThanOrEqual(2)
+    );
+    // Let any stray refetch land: the resolver runs synchronously after the
+    // refreshed list commits, so 100ms past the second list call is plenty.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(vi.mocked(api.getReviewDetail)).toHaveBeenCalledTimes(1);
+  });
+
+  it("unscored suppressed card announces suppression, never still-running", async () => {
+    const unscored: CodeReviewOut = {
+      ...mockReviews[1],
+      id: "rev_sup_sr",
+      status: "suppressed",
+      risk_score: 0,
+      summary: "Autonomous code review queued.",
+      findings: [],
+      input_tokens: 0,
+      output_tokens: 0,
+    };
+    vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+      reviews: [unscored],
+      total: 1,
+    });
+    render(<ReviewsPage />);
+
+    expect(await screen.findByText("PR #102")).toBeInTheDocument();
+    // The screen-reader-only outcome text carries the terminal suppressed
+    // meaning — pendingOutcome()'s "Still running" must not leak onto a row
+    // that will never produce a verdict.
+    expect(screen.getByText(/skipped by repository settings/i)).toBeInTheDocument();
+    expect(screen.queryByText(/still running/i)).not.toBeInTheDocument();
+  });
+
   describe("confidence ring (0-10, not 0-100)", () => {
     it("shows confidence on a 0-10 scale and never leaks the raw risk score into the ring", async () => {
       vi.mocked(api.getCodeReviews).mockResolvedValue({
@@ -473,8 +613,23 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     });
 
     it("keeps the ring neutral for a failed analysis — never a fake 10/10", async () => {
+      // Backend-realistic analysis failure: status error with zeroed audit
+      // fields (no persist step ever ran). Spreading a completed review
+      // without zeroing would carry its tokens + findings + risk 85, which is
+      // a shape the backend never emits and the page reads as a saved audit.
       vi.mocked(api.getCodeReviews).mockResolvedValue({
-        reviews: [{ ...mockReviews[0], status: "error", failure_reason: "boom" }],
+        reviews: [
+          {
+            ...mockReviews[0],
+            status: "error",
+            risk_score: 0,
+            summary: "Code review analysis failed: boom",
+            failure_reason: "boom",
+            input_tokens: 0,
+            output_tokens: 0,
+            findings: [],
+          },
+        ],
         total: 1,
       });
       render(<ReviewsPage />);
@@ -653,6 +808,164 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getAllByText("Great to Merge")).toHaveLength(2);
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
       expect(screen.queryByText("free-tier models exhausted")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("publish failures (saved audit, GitHub publish failed)", () => {
+    // Backend-realistic publish failure: the persist step ran (tokens +
+    // findings + nonzero risk are all written together), then the GitHub
+    // POST failed. The row keeps status error AND the full saved audit.
+    // Distinct PR identity from mockReviews[0]: several tests render both
+    // rows side by side and assert per-row content.
+    const publishFailedReview: CodeReviewOut = {
+      ...mockReviews[0],
+      id: "rev_pubfail",
+      pr_number: 103,
+      pr_title: "feat: risky storage migration",
+      status: "error",
+      failure_reason: "Failed to publish PR review: GitHub API 502 Bad Gateway",
+    };
+
+    it("overview renders the saved audit with verdict + Publication failed badge, never the error card", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [publishFailedReview],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #103")).toBeInTheDocument();
+      // The paid-for audit survives: verdict chip + confidence + findings.
+      expect(screen.getAllByText("Changes Requested").length).toBeGreaterThanOrEqual(1);
+      expectConfidence(2);
+      expect(screen.getByRole("button", { name: /review \(1\)/i })).toBeInTheDocument();
+      // Publish state is a rose badge, not the neutral error card.
+      expect(screen.getByText("Publication failed")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /expand error details/i })).not.toBeInTheDocument();
+      expect(screen.queryByText("Analysis failed")).not.toBeInTheDocument();
+      expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
+
+      // The findings are expandable and intact — nothing was hidden.
+      await user.click(screen.getByRole("button", { name: /review \(1\)/i }));
+      expect(screen.getByText("Actionable Findings (1)")).toBeInTheDocument();
+      expect(screen.getByText(/jwt\.verify/)).toBeInTheDocument();
+    });
+
+    it("detail renders the full audit with the publish failure as context, not an error panel", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [publishFailedReview],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #103")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: /full audit/i }));
+
+      expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+      expect(screen.getByText("Critical security vulnerability detected in token parser middleware.")).toBeInTheDocument();
+      expect(screen.getByText("Findings Summary (1)")).toBeInTheDocument();
+      expect(screen.getByText(/jwt\.verify/)).toBeInTheDocument();
+      expect(screen.getByText("Publication failed")).toBeInTheDocument();
+      // No honest-error chrome: the analysis is real, only delivery failed.
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(screen.queryByText("Findings Summary (0)")).not.toBeInTheDocument();
+      expect(screen.queryByText("No score — analysis did not complete")).not.toBeInTheDocument();
+    });
+
+    it("publish failures score in Avg Risk and stay out of the failure banner", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [mockReviews[0], publishFailedReview],
+        total: 2,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
+      // Both rows scored (85 + 85) — the saved audit is not dropped from the mean.
+      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      expect(avgTab).toHaveTextContent("85");
+      expect(avgTab.textContent).toMatch(/2 scored/i);
+      // The banner reads "N failed analyses": a completed analysis with a
+      // failed POST is the opposite of that, so it must not appear there.
+      expect(screen.queryByText(/failed analyses/i)).not.toBeInTheDocument();
+    });
+
+    it("hideFailed also hides publish failures; Clear Filters restores them", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [publishFailedReview, mockReviews[1]],
+        total: 2,
+      });
+      render(<ReviewsPage />);
+
+      await screen.findByText("PR #103");
+      const toggle = await screen.findByRole("button", { name: /hide failed/i });
+      await user.click(toggle);
+      expect(screen.queryByText("PR #103")).not.toBeInTheDocument();
+      expect(screen.getByText("docs: update API documentation")).toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: /show failed/i }));
+      expect(await screen.findByText("PR #103")).toBeInTheDocument();
+      expect(screen.getByText("Publication failed")).toBeInTheDocument();
+    });
+
+    it("analysis failure with a backend-written summary still renders the honest error card", async () => {
+      // The LLM-failure path writes status error + a NON-queued summary with
+      // zero tokens and no findings. Summary text alone must never flip such
+      // a row into the scored branch — that would render "Great to Merge"
+      // (risk 0, no findings) on a failed analysis.
+      const llmFailure: CodeReviewOut = {
+        ...mockReviews[1],
+        id: "rev_llmfail",
+        status: "error",
+        risk_score: 0,
+        summary: "Code review analysis failed: All 9 free-tier models exhausted (18 total attempts)",
+        failure_reason: "Code review analysis failed: All 9 free-tier models exhausted (18 total attempts)",
+        input_tokens: 0,
+        output_tokens: 0,
+        findings: [],
+      };
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [llmFailure],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #102")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /expand error details/i })).toBeInTheDocument();
+      expect(screen.queryByText("Publication failed")).not.toBeInTheDocument();
+      expect(screen.queryByText("Great to Merge")).not.toBeInTheDocument();
+      expect(screen.queryByText("Changes Requested")).not.toBeInTheDocument();
+      expect(screen.getByText("NO SCORE")).toBeInTheDocument();
+    });
+
+    it("risk 75 with no must-fix findings agrees: Changes Requested verdict + critical assessment", async () => {
+      // scoredOutcome() requests changes from risk >= 71; the detail Risk
+      // Assessment line must mirror that bar instead of advising "merge after
+      // a focused review pass" on the same page.
+      const criticalNoBlockers: CodeReviewOut = {
+        ...mockReviews[1],
+        id: "rev_crit75",
+        risk_score: 75,
+        summary: "High-risk structural change with no single must-fix finding.",
+        findings: [],
+        input_tokens: 900,
+        output_tokens: 200,
+      };
+      const user = userEvent.setup();
+      vi.mocked(api.getCodeReviews).mockResolvedValueOnce({
+        reviews: [criticalNoBlockers],
+        total: 1,
+      });
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #102")).toBeInTheDocument();
+      expect(screen.getAllByText("Changes Requested").length).toBeGreaterThanOrEqual(1);
+
+      await user.click(screen.getByRole("button", { name: /full audit/i }));
+      expect(await screen.findByText("PR Summary")).toBeInTheDocument();
+      expect(screen.getByText(/at or above the critical bar/i)).toBeInTheDocument();
+      expect(screen.queryByText(/merge after a focused review pass/i)).not.toBeInTheDocument();
     });
   });
 
@@ -851,9 +1164,10 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       render(<ReviewsPage />);
 
       expect(await screen.findByText("PR #102")).toBeInTheDocument();
-      // Neutral treatment: Suppressed pill twice (badge row + Status cell),
-      // no-score gauge, em-dash telemetry.
-      expect(screen.getAllByText("Suppressed")).toHaveLength(2);
+      // Neutral treatment: Suppressed pill on the badge row + the Status
+      // cell, plus the Suppressed triage chip — no-score gauge, em-dash
+      // telemetry.
+      expect(screen.getAllByText("Suppressed")).toHaveLength(3);
       expect(screen.getByText("NO SCORE")).toBeInTheDocument();
       // The 0 default must not read as a finished audit.
       expect(screen.queryByText("10/10")).not.toBeInTheDocument();
@@ -1103,6 +1417,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       pr_url: null,
       status: "error",
       risk_score: 0,
+      summary: "Code review analysis failed: push-row-boom",
       failure_reason: "push-row-boom",
       input_tokens: 0,
       output_tokens: 0,
@@ -1463,9 +1778,25 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       within(strip).getByRole("button", { name }).lastElementChild;
 
     it("counts every outcome exactly once and shows the page total", async () => {
+      // Suppressed-but-unscored is terminal (saved nothing, running nothing),
+      // so it counts under Suppressed — never under In progress.
+      const suppressedUnscored = row({
+        id: "r_sup",
+        pr_title: "zeta suppressed",
+        status: "suppressed",
+        risk_score: 0,
+        summary: "Autonomous code review queued.",
+      });
       vi.mocked(api.getCodeReviews).mockResolvedValue({
-        reviews: [blocker, advisory, clean, pending, failed("r_fail", "epsilon failed", "boom")],
-        total: 5,
+        reviews: [
+          blocker,
+          advisory,
+          clean,
+          pending,
+          failed("r_fail", "epsilon failed", "boom"),
+          suppressedUnscored,
+        ],
+        total: 6,
       });
       render(<ReviewsPage />);
 
@@ -1474,8 +1805,9 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(counterOf(strip, /review advised/i)).toHaveTextContent("1");
       expect(counterOf(strip, /in progress/i)).toHaveTextContent("1");
       expect(counterOf(strip, /failed/i)).toHaveTextContent("1");
+      expect(counterOf(strip, /suppressed/i)).toHaveTextContent("1");
       expect(counterOf(strip, /great to merge/i)).toHaveTextContent("1");
-      expect(counterOf(strip, /^all/i)).toHaveTextContent("5");
+      expect(counterOf(strip, /^all/i)).toHaveTextContent("6");
 
       // The strip carries the shared outcome vocabulary, not a private copy.
       expect(
@@ -1589,7 +1921,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(precedes(blockerTitle, advisoryTitle)).toBe(true);
     });
 
-    it("returns to the first page when an outcome chip or the sort control is used", async () => {
+    it("keeps the page when an outcome chip is used; the sort control still returns to the first page", async () => {
       const user = userEvent.setup();
       // total must exceed PAGE_SIZE or the pagination controls never render.
       const pageOne = blocker;
@@ -1609,17 +1941,26 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(await screen.findByText("gamma clean")).toBeInTheDocument();
       expect(screen.queryByText("alpha blocker")).not.toBeInTheDocument();
 
-      // Filtering rows 16-30 client-side would have produced an empty list
-      // here; resetting to page 0 is what makes the chip find its rows.
+      // Outcome chips filter the SAME page window the counts were computed
+      // over, so they deliberately do not refetch page 0: filtering rows 16-30
+      // client-side for a bucket with no rows here empties this window.
+      const callsBeforeChip = vi.mocked(api.getCodeReviews).mock.calls.length;
       await user.click(screen.getByRole("button", { name: /need changes/i }));
-      await waitFor(() =>
-        expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(0)
+      expect(await screen.findByText(/nothing matches these filters/i)).toBeInTheDocument();
+      expect(vi.mocked(api.getCodeReviews).mock.calls.length).toBe(callsBeforeChip);
+      expect(screen.getByRole("button", { name: /need changes/i })).toHaveAttribute(
+        "aria-pressed",
+        "true"
       );
-      expect(await screen.findByText("alpha blocker")).toBeInTheDocument();
+
+      // Toggling the chip off restores this page's rows without a refetch.
+      await user.click(screen.getByRole("button", { name: /need changes/i }));
+      expect(await screen.findByText("gamma clean")).toBeInTheDocument();
+      expect(vi.mocked(api.getCodeReviews).mock.calls.length).toBe(callsBeforeChip);
 
       await user.click(screen.getByRole("button", { name: /^next$/i }));
       await waitFor(() =>
-        expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(15)
+        expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(30)
       );
       await user.click(screen.getByRole("button", { name: /^newest$/i }));
       expect(vi.mocked(api.getCodeReviews).mock.calls.at(-1)?.[0]?.offset).toBe(0);

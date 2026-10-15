@@ -4,11 +4,13 @@ import {
   clusterFailures,
   confidenceFromRisk,
   FAILED_OUTCOME,
+  OUTCOME_ORDER,
   outcomeMeaning,
   pendingOutcome,
   riskBand,
   scoredOutcome,
   sortByAttention,
+  SUPPRESSED_UNSCORED_OUTCOME,
   RISK_CRITICAL,
   RISK_MODERATE,
   type Outcome,
@@ -71,12 +73,55 @@ describe("riskBand", () => {
 
 describe("outcomeMeaning", () => {
   it("gives every outcome key a non-empty, distinct explanation", () => {
-    const keys = ["changes_requested", "advisory", "in_progress", "failed", "clean"] as const;
+    const keys = [
+      "changes_requested",
+      "advisory",
+      "in_progress",
+      "failed",
+      "suppressed",
+      "clean",
+    ] as const;
     const meanings = keys.map(outcomeMeaning);
     for (const meaning of meanings) {
       expect(meaning.length).toBeGreaterThan(0);
     }
     expect(new Set(meanings).size).toBe(keys.length);
+  });
+
+  it("never describes a terminal suppression as still running", () => {
+    expect(outcomeMeaning("suppressed")).not.toMatch(/still running/i);
+    expect(outcomeMeaning("suppressed")).toMatch(/nothing is running/i);
+  });
+});
+
+describe("suppressedUnscoredOutcome", () => {
+  /**
+   * Suppression is terminal — the orchestrator skipped publication on purpose
+   * and no analysis will ever arrive — so these rows must not reuse
+   * pendingOutcome(): that counted a finished run as work in flight (rank 2,
+   * above rows needing a decision) and announced "Still running" forever.
+   */
+  it("is terminal: unscored, ranked with failures, carrying the suppressed meaning", () => {
+    expect(SUPPRESSED_UNSCORED_OUTCOME.key).toBe("suppressed");
+    expect(SUPPRESSED_UNSCORED_OUTCOME.label).toBe("Suppressed");
+    expect(SUPPRESSED_UNSCORED_OUTCOME.band.key).toBe("none");
+    expect(SUPPRESSED_UNSCORED_OUTCOME.rank).toBe(FAILED_OUTCOME.rank);
+    expect(SUPPRESSED_UNSCORED_OUTCOME.rank).toBeGreaterThan(
+      pendingOutcome("pending").rank
+    );
+    expect(SUPPRESSED_UNSCORED_OUTCOME.meaning).toBe(outcomeMeaning("suppressed"));
+    expect(Object.isFrozen(SUPPRESSED_UNSCORED_OUTCOME)).toBe(true);
+  });
+
+  it("sits in the shared chip order between failed and clean", () => {
+    expect(OUTCOME_ORDER).toEqual([
+      "changes_requested",
+      "advisory",
+      "in_progress",
+      "failed",
+      "suppressed",
+      "clean",
+    ]);
   });
 });
 
@@ -112,9 +157,8 @@ describe("scoredOutcome", () => {
   /**
    * The `shouldFix === 0` half of the clean condition. Without it, risk 20
    * with three medium findings sorted into the LOW band and was labelled
-   * "Great to Merge" — the redesign shipped that for a day, and no other test
-   * caught it because no fixture had low risk *with* findings. This is the
-   * regression test for that exact shape.
+   * "Great to Merge". No other test catches this shape because no fixture
+   * combined low risk *with* findings, so it is asserted directly here.
    */
   it("never calls a low-risk review clean while it still carries medium findings", () => {
     const outcome = scoredOutcome({

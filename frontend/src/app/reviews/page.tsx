@@ -26,6 +26,7 @@ import {
   sortByAttention,
   outcomeMeaning,
   FAILED_OUTCOME,
+  SUPPRESSED_UNSCORED_OUTCOME,
   OUTCOME_ORDER,
   SORT_OPTIONS,
   type FailureCluster,
@@ -71,6 +72,67 @@ function isReviewFailed(review: CodeReviewOut): boolean {
   return review.status?.toLowerCase() === "error";
 }
 
+/**
+ * A row whose analysis FAILED, as opposed to one whose analysis succeeded and
+ * whose PUBLICATION failed.
+ *
+ * The backend uses `status="error"` for both, but keeps `findings`, `summary`
+ * and token telemetry on the row for the publish-failure case — deliberately,
+ * so the dashboard stays truthful about an audit it did compute
+ * (backend/app/services/review_orchestrator.py: "Publish failures set
+ * status=error + failure_reason while keeping findings/summary so the
+ * dashboard stays truthful").
+ *
+ * Collapsing the two means `isReviewFailed` routes a perfectly good saved
+ * audit into FailedReviewCard, hiding every finding the orchestrator paid for.
+ * The saved audit is still a scored audit and is rendered as one; only the
+ * genuine analysis failures get the neutral error card.
+ *
+ * Complement of isPublishFailed below: every error row lands on exactly one
+ * side. A custom analysis-failure summary ("Code review analysis failed:
+ * ...", backend/app/services/review_orchestrator.py:1223) must NOT flip a
+ * row to the scored branch — hence the strict positive-evidence gate there
+ * instead of the summary check hasCompletedAnalysis performs.
+ */
+function isAnalysisFailed(review: CodeReviewOut): boolean {
+  return isReviewFailed(review) && !isPublishFailed(review);
+}
+
+/** status=error that still carries a completed analysis — publish failure.
+ *
+ * Strict positive-evidence gate. The orchestrator persists risk_score +
+ * findings + token telemetry TOGETHER before it attempts publication
+ * (backend/app/services/review_orchestrator.py:1233-1239), and NO
+ * analysis-failure path writes any of them: the diff-fetch failure (:1193),
+ * the LLM failure (:1222) and the repo-not-found guard (:1101) write only
+ * status + failure_reason + summary, and the timeout/crash backstop
+ * (:1034-1061) only touches status + failure_reason. So tokens, findings or
+ * a nonzero risk on an error row prove the persist step ran. (Enqueue
+ * defaults are risk 0 + findings [] + zero tokens —
+ * backend/app/webhooks.py:2271-2279.)
+ *
+ * The 0/0-tokens + empty-findings + risk-0 corner (a clean or empty-diff
+ * audit whose publish failed) is structurally identical to an LLM analysis
+ * failure, so it falls through to the failure_reason prefixes below: the
+ * three post-persist error writes are "Failed to publish PR review:"
+ * (:1411/:1517), "Failed to publish commit comment:" (:1690) and "Failed to
+ * read repository review settings:" (:1267). Anything else — including a
+ * custom analysis-failure summary — is fail-closed to analysis-failed, which
+ * renders the neutral error card and never a fake "Great to Merge" verdict.
+ */
+function isPublishFailed(review: CodeReviewOut): boolean {
+  if (!isReviewFailed(review)) return false;
+  if (review.input_tokens > 0 || review.output_tokens > 0) return true;
+  if (review.findings.length > 0) return true;
+  if (review.risk_score > 0) return true;
+  const reason = (review.failure_reason ?? "").toLowerCase();
+  return (
+    reason.startsWith("failed to publish pr review:") ||
+    reason.startsWith("failed to publish commit comment:") ||
+    reason.startsWith("failed to read repository review settings:")
+  );
+}
+
 /** A review with no finished analysis to report — never render verdict telemetry for it.
  * Fail-closed: only "completed" and "suppressed" carry a real score.
  * "suppressed" is terminal WITH a saved audit: the orchestrator persists
@@ -103,8 +165,9 @@ function isSuppressed(review: CodeReviewOut): boolean {
  * proves nothing; it must differ from this. */
 const QUEUED_SUMMARY = "Autonomous code review queued.";
 
-/** Explicit completion signal: the orchestrator persists risk_score + summary
- * + findings + token telemetry TOGETHER before the publish guard
+/** Explicit completion signal for rows whose analysis output was persisted.
+ * The orchestrator persists risk_score + summary + findings + token telemetry
+ * TOGETHER before the publish guard
  * (backend/app/services/review_orchestrator.py:1233-1239), and the suppressed
  * path (:1287) only flips status, keeping the saved data. So a suppressed
  * row whose tokens are nonzero ran the LLM, and a row whose summary differs
@@ -113,7 +176,13 @@ const QUEUED_SUMMARY = "Autonomous code review queued.";
  * summary (backend/app/subagents/code_reviewer.py:691-702). Score + findings
  * alone cannot signal this: a genuine CLEAN audit is also 0 risk + empty.
  * (CodeReviewOut carries no updated_at — backend/app/routers/reviews.py — so
- * a timestamp comparison is unavailable.) */
+ * a timestamp comparison is unavailable.)
+ *
+ * Summary-only evidence is valid for suppressed rows (no failure path writes
+ * a suppressed status) but NOT for error rows: analysis failures write their
+ * own non-queued summaries ("Code review analysis failed: ...", "Failed to
+ * fetch git diff: ...", "Repository record not found."). Error rows must go
+ * through isPublishFailed's strict gate instead — never this function alone. */
 function hasCompletedAnalysis(review: CodeReviewOut): boolean {
   if (review.input_tokens > 0 || review.output_tokens > 0) return true;
   const summary = (review.summary ?? "").trim();
@@ -422,9 +491,36 @@ function DiffViewer({ patch }: { patch: string }) {
  */
 const STAGED_FIXES_KEY = "haunter-staged-fixes";
 
-function stagedFixKey(finding: ReviewFindingOut): string {
+/**
+ * Identity of one staged fix, used as the localStorage key.
+ *
+ * Every field here must discriminate between two DIFFERENT fixes, or staging
+ * one silently toggles the other:
+ *   - repo owner/name + commit sha: the same file/line/patch shape recurs
+ *     across repos and across commits (the audit re-runs on every push to a
+ *     branch), so without them a fix staged on `main` reads as staged on the
+ *     next commit, and an identical finding in another repo collides.
+ *   - the FULL patch: length + first 64 chars still collide for two patches
+ *     that differ only after char 64, or that differ in length while sharing
+ *     a 64-char prefix. Hashing the whole patch is what makes the key unique.
+ *
+ * The patch body is hashed rather than concatenated so the key stays a fixed
+ * size for a multi-KB diff.
+ */
+function stagedFixKey(
+  finding: ReviewFindingOut,
+  scope: { repoOwner?: string | null; repoName?: string | null; commitSha?: string | null } = {}
+): string {
   const patch = finding.suggested_patch ?? "";
-  return `${finding.file_path}:${finding.line_start}-${finding.line_end}:${patch.length}:${patch.slice(0, 64)}`;
+  // FNV-1a, 32-bit — collision-resistant enough to separate two diffs in one
+  // browser's storage, and stable across sessions (no crypto dependency).
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < patch.length; i++) {
+    hash ^= patch.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  const repo = scope.repoOwner && scope.repoName ? `${scope.repoOwner}/${scope.repoName}` : "";
+  return `${repo}@${scope.commitSha ?? ""}:${finding.file_path}:${finding.line_start}-${finding.line_end}:${patch.length}:${hash.toString(16)}`;
 }
 
 function readStagedFixes(): Record<string, string> {
@@ -441,9 +537,12 @@ function readStagedFixes(): Record<string, string> {
   }
 }
 
-function isFixStaged(finding: ReviewFindingOut): boolean {
+function isFixStaged(
+  finding: ReviewFindingOut,
+  scope?: { repoOwner?: string | null; repoName?: string | null; commitSha?: string | null }
+): boolean {
   try {
-    return stagedFixKey(finding) in readStagedFixes();
+    return stagedFixKey(finding, scope) in readStagedFixes();
   } catch {
     return false;
   }
@@ -465,7 +564,7 @@ function FindingItem({
 }) {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
-  const [staged, setStaged] = useState<boolean>(() => isFixStaged(finding));
+  const [staged, setStaged] = useState<boolean>(() => isFixStaged(finding, { repoOwner, repoName, commitSha }));
   const [staging, setStaging] = useState(false);
   const [stageError, setStageError] = useState<string | null>(null);
   const meta = getCategoryMeta(finding.category);
@@ -486,21 +585,30 @@ function FindingItem({
   // Toggle local staging. Never touches the clipboard: staging persists the
   // patch in this browser (see STAGED_FIXES_KEY), copying does not. Staged
   // state persists across reloads; copied state is transient.
+  //
+  // Order matters: `localStorage.setItem` throws on a quota-exceeded or
+  // private-mode browser, and it must run BEFORE any setState. Updating state
+  // first and persisting second renders "Staged Fix" for a patch that was
+  // never written — the badge then survives a reload as "not staged", which
+  // is the worst possible failure for a control whose entire job is to
+  // promise persistence.
   const handleStage = () => {
     if (!finding.suggested_patch || staging) return;
     setStageError(null);
     setStaging(true);
     try {
       const stored = readStagedFixes();
-      const key = stagedFixKey(finding);
-      if (key in stored) {
-        delete stored[key];
-        setStaged(false);
-      } else {
+      const key = stagedFixKey(finding, { repoOwner, repoName, commitSha });
+      const nextStaged = !(key in stored);
+      if (nextStaged) {
         stored[key] = finding.suggested_patch;
-        setStaged(true);
+      } else {
+        delete stored[key];
       }
+      // May throw — nothing above this line has touched React state yet, so a
+      // persistence failure leaves the UI describing exactly what is stored.
       localStorage.setItem(STAGED_FIXES_KEY, JSON.stringify(stored));
+      setStaged(nextStaged);
     } catch {
       setStageError("Couldn't stage fix in this browser.");
     } finally {
@@ -1121,7 +1229,12 @@ function PendingReviewCard({
   onOpen: (id: string) => void;
 }) {
   const label = isSuppressedUnscored(review) ? "Suppressed" : pendingLabelFor(review);
-  const outcome = pendingOutcome(review.status);
+  // Suppressed-unscored is terminal, so it carries its own outcome: reusing
+  // pendingOutcome() would announce "Still running. A verdict appears here
+  // once the analysis lands." on a row that will never receive one.
+  const outcome = isSuppressedUnscored(review)
+    ? SUPPRESSED_UNSCORED_OUTCOME
+    : pendingOutcome(review.status);
 
   const statusChip = (
     <span className="inline-flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
@@ -1213,6 +1326,11 @@ const TRIAGE_CHIP_STYLES: Readonly<
     label: "Failed",
     dot: "bg-rose-300",
     active: "border-rose-500/60 bg-rose-950/40 text-rose-100",
+  },
+  suppressed: {
+    label: "Suppressed",
+    dot: "bg-zinc-500",
+    active: "border-zinc-500/60 bg-zinc-800 text-zinc-100",
   },
   clean: {
     label: "Great to merge",
@@ -1447,7 +1565,7 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
   // order across renders, and a failed/pending row would otherwise skip it.
   const isPrAssociated = useIsPrAssociated(review);
 
-  if (isReviewFailed(review)) {
+  if (isAnalysisFailed(review)) {
     return <FailedReviewCard review={review} onOpen={onOpen} onRetry={onRetry} />;
   }
 
@@ -1505,6 +1623,18 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
                 title="Analysis finished - publishing to GitHub was skipped by repo settings"
               >
                 Publication skipped
+              </span>
+            )}
+            {isPublishFailed(review) && (
+              <span
+                className="inline-flex items-center rounded-full border border-rose-500/30 bg-rose-950/40 px-2 py-0.5 text-[10px] text-rose-300"
+                title={
+                  review.failure_reason
+                    ? `Analysis finished and this audit is saved below, but publishing it to GitHub failed: ${review.failure_reason}`
+                    : "Analysis finished and this audit is saved below, but publishing it to GitHub failed."
+                }
+              >
+                Publication failed
               </span>
             )}
             {(review.head_branch || review.base_branch) && (
@@ -1689,9 +1819,11 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
         </div>
       </div>
 
-      {/* Accordion Findings */}
+      {/* Accordion Findings. `id` matches the Review button's aria-controls so the
+          control points at a real element in the document — without it the
+          reference dangles and assistive tech has nothing to move focus to. */}
       {expanded && review.findings.length > 0 && (
-        <div className="mt-5 pt-4 border-t border-zinc-800/80 space-y-3">
+        <div id={findingsPanelId} className="mt-5 pt-4 border-t border-zinc-800/80 space-y-3">
           <div className="flex items-center justify-between text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono">
             <span>Actionable Findings ({review.findings.length})</span>
             <span className="text-[10px] text-zinc-500 font-normal">Pre-verified candidate patches</span>
@@ -1721,9 +1853,10 @@ function ReviewCard({ review, onOpen, onRetry }: { review: CodeReviewOut; onOpen
 function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: () => void }) {
   const [copiedSha, setCopiedSha] = useState(false);
   const [copyShaError, setCopyShaError] = useState<string | null>(null);
-  const failed = isReviewFailed(review);
-  const pending = !failed && (isReviewPending(review) || isSuppressedUnscored(review));
-  const suppressed = !failed && !pending && isSuppressed(review);
+  const failed = isAnalysisFailed(review);
+  const publishFailed = isPublishFailed(review);
+  const pending = !failed && !publishFailed && (isReviewPending(review) || isSuppressedUnscored(review));
+  const suppressed = !failed && !publishFailed && !pending && isSuppressed(review);
   const pendingLabel = isSuppressedUnscored(review) ? "Suppressed" : pendingLabelFor(review);
   const errorText = review.failure_reason ?? review.summary;
   const blast = getBlastStats(review);
@@ -1795,6 +1928,18 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
                   title="Analysis finished — publishing to GitHub was skipped by repo settings"
                 >
                   Publication skipped
+                </span>
+              )}
+              {publishFailed && (
+                <span
+                  className="inline-flex items-center rounded-full border border-rose-500/40 bg-rose-950/60 px-2 py-0.5 text-[10px] font-mono font-bold uppercase tracking-wider text-rose-300"
+                  title={
+                    review.failure_reason
+                      ? `Analysis finished and this audit is saved below, but publishing it to GitHub failed: ${review.failure_reason}`
+                      : "Analysis finished and this audit is saved below, but publishing it to GitHub failed."
+                  }
+                >
+                  Publication failed
                 </span>
               )}
               {review.pr_author && (
@@ -2070,9 +2215,19 @@ function ReviewDetail({ review, onRetry }: { review: CodeReviewOut; onRetry?: ()
             <span className="font-semibold text-zinc-100">Risk Assessment:</span>{" "}
             {blockers.mustFix > 0
               ? `Risk ${review.risk_score}/100 with ${blockers.mustFix} must-fix ${blockers.mustFix === 1 ? "finding" : "findings"} — address blockers before merge.`
-              : review.risk_score < RISK_MODERATE
-                ? `Risk ${review.risk_score}/100 with no must-fix findings — safe to merge pending routine review.`
-                : `Risk ${review.risk_score}/100 with no must-fix findings — merge after a focused review pass.`}
+              : // The three branches below must mirror scoredOutcome()'s
+                // thresholds exactly (risk-triage review-triage.ts:188-196).
+                // It returned "merge after a focused review pass" for every
+                // risk >= 31 with no must-fix findings, while scoredOutcome()
+                // had already returned changes_requested from risk >= 71 — so a
+                // critical review displayed "Changes Requested" in the verdict
+                // panel and "merge after a focused review pass" one screen
+                // below it, on the same page, at the same moment.
+                review.risk_score >= RISK_CRITICAL
+                  ? `Risk ${review.risk_score}/100 is at or above the critical bar and no must-fix finding is named — the score alone requests changes; review before merging.`
+                  : review.risk_score < RISK_MODERATE
+                    ? `Risk ${review.risk_score}/100 with no must-fix findings — safe to merge pending routine review.`
+                    : `Risk ${review.risk_score}/100 with no must-fix findings — merge after a focused review pass.`}
           </li>
         </ul>
       </section>
@@ -2146,12 +2301,34 @@ export default function ReviewsPage() {
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   // Detail view: selected review id, deep-linkable via `?review=<id>`.
-  const [selectedId, setSelectedId] = useState<string | null>(() => readReviewParam());
+  //
+  // Starts null on BOTH the server and the client's first render, then adopts
+  // the URL's id in a mount effect. Seeding it with `useState(() =>
+  // readReviewParam())` made the two trees disagree: readReviewParam() returns
+  // null when `window` is undefined, so a cold-loaded `?review=<id>` rendered
+  // the overview on the server and the detail on the client — React discards
+  // the mismatched tree and re-renders, and the deep link visibly flickers.
+  // Reading after mount keeps the first client tree identical to the server's.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detailReview, setDetailReview] = useState<CodeReviewOut | null>(null);
   const [detailLoading, setDetailLoading] = useState<boolean>(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailRetry, setDetailRetry] = useState<number>(0);
   const [listLoaded, setListLoaded] = useState<boolean>(false);
+
+  // Single source for "the user is filtering", used by both the empty-state
+  // copy and the Clear Filters button. Any one control being active is enough;
+  // it deliberately does not look at `reviews.length`, because repo/risk/
+  // severity are applied server-side and a no-match filter legitimately
+  // returns zero rows.
+  const filtersActive =
+    selectedRepoId !== "all" ||
+    highRiskOnly ||
+    hideFailed ||
+    activeTab !== "all" ||
+    selectedSeverity !== "all" ||
+    searchQuery !== "" ||
+    activeOutcome !== null;
 
   // Load repos for filter
   useEffect(() => {
@@ -2220,15 +2397,18 @@ export default function ReviewsPage() {
     if (page > maxPage) setPage(maxPage);
   }, [page, maxPage]);
 
+  // Adopt the deep-linked id AFTER the first client render (see selectedId).
+  // Guarded so it can only run once: without the guard this effect depends on
+  // nothing and would not re-fire, but keeping the intent explicit prevents a
+  // later dep addition from silently turning it into a re-assert loop.
+  useEffect(() => {
+    setSelectedId(readReviewParam());
+  }, []);
+
   const openReview = useCallback((id: string) => {
     window.history.pushState({ review: id }, "", `${window.location.pathname}?review=${encodeURIComponent(id)}`);
     setDetailError(null);
     setSelectedId(id);
-  }, []);
-
-  const closeReview = useCallback(() => {
-    window.history.pushState({}, "", window.location.pathname);
-    setSelectedId(null);
   }, []);
 
   // Back/forward buttons stay in sync with the deep link.
@@ -2236,6 +2416,26 @@ export default function ReviewsPage() {
     const onPopState = () => setSelectedId(readReviewParam());
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  const closeReview = useCallback(() => {
+    // replaceState, NOT pushState.
+    //
+    // openReview pushed an entry carrying `?review=<id>`; pushing a second one
+    // on close leaves the review entry still in the stack behind us, so the
+    // next Back navigates INTO it and `onPopState` reads the id straight back
+    // out of the URL — reopening the review the user just closed. Replacing
+    // the current entry rewrites it to the overview URL, so Back steps past
+    // the detail to whatever preceded it.
+    //
+    // `history.back()` would also solve it and additionally preserve a
+    // same-origin referrer, but it is wrong here: when the page was COLD
+    // loaded at `?review=<id>` (shared link, refresh) openReview never pushed
+    // anything, so back() would navigate off the site entirely — from a
+    // "Back to reviews" control that reads as going to the review list.
+    window.history.replaceState({}, "", window.location.pathname);
+    setDetailError(null);
+    setSelectedId(null);
   }, []);
 
   // Keep keyboard focus on a live element across detail open/close: opening
@@ -2267,11 +2467,20 @@ export default function ReviewsPage() {
 
   // Resolve the detail payload: prefer the already-fetched page row, fall
   // back to the existing GET detail endpoint for deep links / other pages.
+  //
+  // `detailFetchKeyRef` guards the endpoint call. The effect's deps include
+  // `reviews`, so when a Retry's list request lands it re-runs this effect; for
+  // a review outside the current page that meant discarding the in-flight
+  // detail result and immediately issuing a second identical GET, so one click
+  // fetched the same detail twice. Keyed on (id, retry) — the two things that
+  // legitimately demand a refetch — the re-run is a no-op.
+  const detailFetchKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!selectedId) {
       setDetailReview(null);
       setDetailError(null);
       setDetailLoading(false);
+      detailFetchKeyRef.current = null;
       return;
     }
     const found = reviews.find((r) => r.id === selectedId);
@@ -2279,9 +2488,13 @@ export default function ReviewsPage() {
       setDetailReview(found);
       setDetailError(null);
       setDetailLoading(false);
+      detailFetchKeyRef.current = null;
       return;
     }
     if (!listLoaded) return;
+    const fetchKey = `${selectedId}::${detailRetry}`;
+    if (detailFetchKeyRef.current === fetchKey) return;
+    detailFetchKeyRef.current = fetchKey;
     let cancelled = false;
     setDetailLoading(true);
     setDetailError(null);
@@ -2329,6 +2542,9 @@ export default function ReviewsPage() {
   const filteredReviews = useMemo(() => {
     let list = reviews;
     // Explicit opt-in only — default OFF so failed rows are never hidden silently.
+    // Publish failures stay hidden under this control too: the row is still an
+    // error row the user asked to see less of, even though its saved audit is
+    // rendered when the control is off.
     if (hideFailed) {
       list = list.filter((r) => !isReviewFailed(r));
     }
@@ -2361,8 +2577,13 @@ export default function ReviewsPage() {
    */
   const outcomeOf = useCallback(
     (review: CodeReviewOut): Outcome => {
-      if (isReviewFailed(review)) return FAILED_OUTCOME;
-      if (isReviewPending(review) || isSuppressedUnscored(review)) return pendingOutcome(review.status);
+      if (isAnalysisFailed(review)) return FAILED_OUTCOME;
+      // Suppressed-but-unscored is TERMINAL: nothing is running and no verdict
+      // will ever arrive. Reporting it through pendingOutcome() counted a
+      // finished run as work in flight and rendered the chip tooltip "Still
+      // running" on a row that is never going to produce one.
+      if (isSuppressedUnscored(review)) return SUPPRESSED_UNSCORED_OUTCOME;
+      if (isReviewPending(review)) return pendingOutcome(review.status);
       return scoredOutcome({ risk_score: review.risk_score, findings: review.findings });
     },
     []
@@ -2381,6 +2602,7 @@ export default function ReviewsPage() {
       clean: 0,
       in_progress: 0,
       failed: 0,
+      suppressed: 0,
     };
     for (const review of filteredReviews) {
       counts[outcomeOf(review).key] += 1;
@@ -2403,8 +2625,13 @@ export default function ReviewsPage() {
   // Derived from `sortedReviews`, not from the raw window, so the banner can
   // never announce "3 failed analyses" while zero failed rows are on screen
   // (which is exactly what happens with a non-failure outcome chip active).
+  //
+  // Analysis failures only: the banner reads "N failed analyses", and a
+  // publish failure is the opposite — the analysis completed and its audit is
+  // rendered below the row. Counting it here would label a saved audit as a
+  // failed analysis.
   const failureClusters = useMemo(
-    () => clusterFailures(sortedReviews.filter((r) => isReviewFailed(r))),
+    () => clusterFailures(sortedReviews.filter((r) => isAnalysisFailed(r))),
     [sortedReviews]
   );
 
@@ -2420,6 +2647,10 @@ export default function ReviewsPage() {
   // rows WITHOUT a completion signal (see hasCompletedAnalysis) stay out
   // like pending — a clean 0-risk/empty audit still scores because its
   // summary + token telemetry prove analysis ran).
+  // "error" rows count ONLY when the analysis actually ran: a publish
+  // failure carries the same real score as the completed audit it saved, so
+  // excluding it would drop a scored audit out of "Scored this page" and out
+  // of Avg Risk.
   // Reports how many rows actually scored.
   const pageStats = useMemo(() => {
     const total = reviews.length;
@@ -2428,6 +2659,7 @@ export default function ReviewsPage() {
       const s = r.status?.toLowerCase();
       if (s === "completed") return true;
       if (s === "suppressed") return !isSuppressedUnscored(r);
+      if (s === "error") return isPublishFailed(r);
       return false;
     });
     const avgScore = scored.length > 0 ? Math.round(scored.reduce((acc, r) => acc + r.risk_score, 0) / scored.length) : 0;
@@ -2478,6 +2710,25 @@ export default function ReviewsPage() {
               <span>Back to reviews</span>
             </Button>
 
+            {/* A Retry on a CACHED row re-polls the list; the detail itself
+                only changes when that request returns. If it fails, the
+                overview banner is not on screen — the user is looking at the
+                detail — so the failure was invisible while the detail kept
+                showing the stale row. Surfaced here for the same reason. */}
+            {fetchError && (
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-2.5 text-xs font-mono text-rose-300">
+                <span role="alert">Refresh failed: {fetchError}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDetailRetry}
+                  className="h-7 border-rose-500/40 text-xs text-rose-200 hover:bg-rose-900/40"
+                >
+                  Retry
+                </Button>
+              </div>
+            )}
+
             {detailLoading || (!detailReview && !detailError) ? (
               <div className="space-y-4" role="status" aria-label="Loading review detail">
                 <Skeleton className="h-8 w-64" />
@@ -2507,7 +2758,13 @@ export default function ReviewsPage() {
                 </Button>
               </div>
             ) : (
-              <ReviewDetail review={detailReview} onRetry={handleDetailRetry} />
+              /* Keyed by review id: ReviewDetail holds local state (copied, copiedSha,
+                copyShaError, and FindingItem's per-row staged/copied flags).
+                React reconciles by position, so opening review B after review
+                A REUSED A's component instance and carried A's staged/copied
+                badges onto B's findings until the user clicked each one. A
+                remount on id change gives every review its own state. */
+              <ReviewDetail key={detailReview.id} review={detailReview} onRetry={handleDetailRetry} />
             )}
           </div>
         ) : (
@@ -2689,8 +2946,13 @@ export default function ReviewsPage() {
             </button>
 
             {/* Hide-failed toggle — default OFF, session state only. Explicit
-                opt-in: failed rows are never hidden silently. */}
-            {failedCount > 0 && (
+                opt-in: failed rows are never hidden silently.
+
+                Stays visible once switched on, even on a page that happens to
+                hold no failed rows. `failedCount > 0` alone removes the only
+                control that can undo the filter, trapping the user on a page
+                that will never show a failed row again. */}
+            {(failedCount > 0 || hideFailed) && (
               <button
                 onClick={() => setHideFailed((v) => !v)}
                 aria-pressed={hideFailed}
@@ -2790,14 +3052,19 @@ export default function ReviewsPage() {
           <TriageSummary
             counts={triageCounts}
             activeOutcome={activeOutcome}
-            // Reset to page 0 like every other filter on this page: the
-            // outcome chips filter the current 15-row window client-side, so
-            // activating one from page 3 filtered rows 31-45 and left the
-            // reviews the user was actually looking for on page 1.
-            onToggle={(key) => {
-              setActiveOutcome(key);
-              setPage(0);
-            }}
+            // Deliberately does NOT reset to page 0.
+            //
+            // The counts are page-scoped: they are computed over
+            // `filteredReviews`, the SAME 15-row window the chip filter runs
+            // over. Resetting to page 0 would make the two disagree — click
+            // "Need changes 3" while reading page 2 and the filter would be
+            // applied to the rows of page 1, which is how a visible "3" lands
+            // the user on an empty page. Keeping the page holds the scope
+            // constant: the number you clicked and the rows you get come from
+            // one window, which is exactly what the strip's own wording claims
+            // ("Review triage summary for this page", and the explicit
+            // in-view / on-this-page labels on the chips).
+            onToggle={(key) => setActiveOutcome(key)}
           />
         )}
 
@@ -2836,24 +3103,31 @@ export default function ReviewsPage() {
         ) : sortedReviews.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800 bg-[#0c0c0e] py-16 text-center space-y-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 border border-zinc-800 text-zinc-500">
-              {reviews.length === 0 ? (
-                <ShieldCheck className="h-6 w-6 text-zinc-500" />
-              ) : (
+              {filtersActive ? (
                 <Inbox className="h-6 w-6 text-zinc-500" />
+              ) : (
+                <ShieldCheck className="h-6 w-6 text-zinc-500" />
               )}
             </div>
             <div className="space-y-1">
               <h3 className="text-sm font-semibold text-zinc-200">
-                {reviews.length === 0 ? "No Code Reviews Found" : "Nothing matches these filters"}
+                {filtersActive ? "Nothing matches these filters" : "No Code Reviews Found"}
               </h3>
               <p className="text-xs text-zinc-400 max-w-sm">
-                {reviews.length === 0
-                  ? "Push commits or open a pull request on your connected repositories to trigger Haunter's Sentinel."
-                  : "No review on this page matches the current filter combination. Widen or clear the filters to see the rest."}
+                {filtersActive
+                  ? "No review matches the current filter combination. Widen or clear the filters to see the rest."
+                  : "Push commits or open a pull request on your connected repositories to trigger Haunter's Sentinel."}
               </p>
             </div>
-            {(reviews.length > 0 &&
-              (selectedRepoId !== "all" || highRiskOnly || hideFailed || activeTab !== "all" || selectedSeverity !== "all" || searchQuery || activeOutcome !== null)) && (
+            {/* Shown whenever a filter is active, NOT gated on `reviews.length`.
+                repo_id / min_risk / severity are applied SERVER-side, so a
+                filter with no matches returns reviews=[] — and gating on that
+                hid the only control that can undo the filter, leaving the user
+                on a permanently empty page with no way out. The copy above keys
+                off the same flag for the same reason: "No Code Reviews Found /
+                push some commits" is wrong when the user filtered their own
+                existing reviews down to nothing. */}
+            {filtersActive && (
               <Button
                 variant="outline"
                 size="sm"
