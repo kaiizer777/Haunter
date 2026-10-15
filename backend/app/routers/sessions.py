@@ -337,6 +337,10 @@ async def _is_turn_active_elsewhere(db: AsyncSession, session_id: uuid.UUID) -> 
             .with_for_update(nowait=True)
         )
         await db.execute(probe_stmt)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         return False
     except (OperationalError, DBAPIError) as exc:
         try:
@@ -650,23 +654,24 @@ async def _stream_from_db(
                 # If terminal event hasn't landed yet, poll a few short attempts before closing.
                 terminal_seen = False
                 for _ in range(5):
-                    final_stmt = (
-                        select(SessionStreamEvent)
-                        .where(
-                            SessionStreamEvent.session_id == session_id,
-                            SessionStreamEvent.turn_id == turn_id,
-                            SessionStreamEvent.event_id > max_yielded_id,
+                    async with async_session_maker() as drain_db:
+                        final_stmt = (
+                            select(SessionStreamEvent)
+                            .where(
+                                SessionStreamEvent.session_id == session_id,
+                                SessionStreamEvent.turn_id == turn_id,
+                                SessionStreamEvent.event_id > max_yielded_id,
+                            )
+                            .order_by(SessionStreamEvent.event_id.asc())
                         )
-                        .order_by(SessionStreamEvent.event_id.asc())
-                    )
-                    final_res = await poll_db.execute(final_stmt)
-                    for row in final_res.scalars().all():
-                        yield _format_chunk(row.event_id, row.event, row.chunk)
-                        if row.event_id > max_yielded_id:
-                            max_yielded_id = row.event_id
-                        if row.event in ("done", "error"):
-                            terminal_seen = True
-                            return
+                        final_res = await drain_db.execute(final_stmt)
+                        for row in final_res.scalars().all():
+                            yield _format_chunk(row.event_id, row.event, row.chunk)
+                            if row.event_id > max_yielded_id:
+                                max_yielded_id = row.event_id
+                            if row.event in ("done", "error"):
+                                terminal_seen = True
+                                return
                     if terminal_seen:
                         break
                     await _asyncio.sleep(0.1)
@@ -795,8 +800,17 @@ async def chat_session(
             _forget_turn(str(session_id))
 
         # No live turn in this local execution environment.
-        # Query DB for session.active_turn_id for cross-environment Lambda replay.
-        active_turn_id = session.active_turn_id
+        # Query DB for latest turn_id from stream events or session.active_turn_id for cross-environment Lambda replay.
+        from app.models import SessionStreamEvent
+
+        latest_turn_stmt = (
+            select(SessionStreamEvent.turn_id)
+            .where(SessionStreamEvent.session_id == session_id)
+            .order_by(SessionStreamEvent.id.desc())
+            .limit(1)
+        )
+        latest_turn_res = await db.execute(latest_turn_stmt)
+        active_turn_id = latest_turn_res.scalars().first() or session.active_turn_id
         if active_turn_id is None:
             if await _is_turn_active_elsewhere(db, session_id):
                 raise HTTPException(
@@ -811,8 +825,6 @@ async def chat_session(
                 status_code=status.HTTP_410_GONE,
                 detail="No resumable turn for this session. Please send your message again as a new request.",
             )
-
-        from app.models import SessionStreamEvent
 
         event_bounds_stmt = (
             select(

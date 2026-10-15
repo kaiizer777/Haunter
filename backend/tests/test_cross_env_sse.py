@@ -448,8 +448,18 @@ async def test_chat_session_cross_env_no_turn_active_elsewhere() -> None:
                     return mock_session
             return _S()
 
+    class _EmptyResult:
+        def scalars(self):
+            class _S:
+                def first(self):
+                    return None
+            return _S()
+
     class _MockDb:
         async def execute(self, stmt):
+            stmt_str = str(stmt).lower()
+            if "session_stream_events" in stmt_str:
+                return _EmptyResult()
             return _SessionResult()
 
     body = SessionChatIn(message="Resume")

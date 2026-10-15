@@ -1441,19 +1441,14 @@ class SessionOrchestrator:
         # Record this turn as the session's active_turn_id for cross-environment resumption
         session.active_turn_id = self.turn_id
         # Keep row lock held on self.db throughout turn execution (do not commit self.db here).
-        # We also record active_turn_id and prune prior turn events via a separate isolated transaction
-        # so cross-env workers immediately see the active_turn_id and prior turn events are cleaned up.
+        # We prune prior turn events via a separate isolated transaction so prior turn events
+        # are cleaned up without touching or acquiring conflicting locks on the agent_sessions row.
         from app.db import async_session_maker
         from app.models import SessionStreamEvent
         from sqlalchemy import delete
 
         try:
             async with async_session_maker() as meta_db:
-                f_stmt = select(AgentSession).where(AgentSession.id == self.session_id)
-                f_res = await meta_db.execute(f_stmt)
-                f_row = f_res.scalars().first()
-                if f_row:
-                    f_row.active_turn_id = self.turn_id
                 # Prune prior turn events for this session to prevent unbounded table growth
                 del_stmt = delete(SessionStreamEvent).where(
                     SessionStreamEvent.session_id == self.session_id,
@@ -1463,7 +1458,7 @@ class SessionOrchestrator:
                 await meta_db.commit()
         except Exception as exc:
             logger.warning(
-                "session_orchestrator: failed to record active_turn_id / prune events in meta_db: %s",
+                "session_orchestrator: failed to prune events in meta_db: %s",
                 exc,
             )
 
