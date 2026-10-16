@@ -2159,6 +2159,15 @@ class SessionOrchestrator:
                         staged_patches.update(dict(session.staged_patches or {}))
                         conversation_history = list(session.conversation_history or [])
 
+                        # Reset the patch baseline to the post-restore snapshot so
+                        # subsequent in-turn mutations (e.g. discard_patch) compare
+                        # against what is actually in the DB right now — otherwise
+                        # a discard back to the pre-turn value would compute an
+                        # empty delta, the hot-path UPDATE would emit no removal,
+                        # and the restored patch would silently remain saved
+                        # (greptile#4297093156 / cubic#4297090237).
+                        patches_before = dict(staged_patches)
+
                         # Truncate current-turn intermediate tool entries in new_entries
                         # (retaining only the user message and the checkpoint restore tool interaction)
                         # so intermediate rolled-back tool executions are not left in conversation history.

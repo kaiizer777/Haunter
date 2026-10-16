@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from sqlalchemy import Text, cast, func, literal, update
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, array
 
 from app.models import AgentSession, RunStep
 
@@ -65,7 +65,10 @@ def _coerce_tokens(value: Any) -> int:
     Providers (and test doubles) hand back ``None``, numeric strings, floats
     or negatives; each used to either crash ``int(None)`` or poison the cost
     math. Anything unparseable counts as 0 — tokens unreported are tokens
-    unbilled, which is the safe direction for a cost ceiling.
+    unbilled, which is the safe direction for a cost ceiling. ``OverflowError``
+    is caught too because ``int(float("inf"))`` (or a sufficiently large
+    float) raises it, and an overflow must not abort response processing
+    (see cubic#4297090262).
     """
     if value is None:
         return 0
@@ -73,7 +76,7 @@ def _coerce_tokens(value: Any) -> int:
         return 0
     try:
         coerced = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
     return coerced if coerced > 0 else 0
 
@@ -255,7 +258,11 @@ def set_patch_key_stmt(session_id: uuid.UUID, key: str, patch_text: str):
     Surgical single-key write for the stage/discard hot path — the rest of
     the document is never read, shipped, or rewritten by the client.
     ``to_jsonb`` is required (not a raw cast): patch text is arbitrary diff
-    output, not a JSON document.
+    output, not a JSON document. ``jsonb_set`` requires a
+    ``text[]`` path; we render it with the PostgreSQL ``ARRAY[...]``
+    array-constructor literal (not the ``array(...)`` function call,
+    which PostgreSQL parses as a function invocation — see
+    greptile#4297093145 / cubic#4297090228).
     """
     return (
         update(AgentSession)
@@ -263,7 +270,7 @@ def set_patch_key_stmt(session_id: uuid.UUID, key: str, patch_text: str):
         .values(
             staged_patches=func.jsonb_set(
                 AgentSession.staged_patches,
-                func.array(literal(key)),
+                array([literal(key)]),
                 func.to_jsonb(literal(patch_text)),
                 literal(True),
             ),

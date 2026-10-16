@@ -140,6 +140,11 @@ def test_statements_emit_partial_operators() -> None:
     set_sql = _pg_sql(ta.set_patch_key_stmt(sid, "a.py", "diff"))
     assert "jsonb_set" in set_sql
     assert "to_jsonb" in set_sql
+    # PostgreSQL parses ``array(...)`` as a function call (not a 1-element
+    # array literal) and rejects ``jsonb_set(col, array(...), ...)``. The
+    # path argument must render as the ``ARRAY[...]`` constructor.
+    assert "ARRAY[" in set_sql
+    assert " array(" not in set_sql.lower().replace("\n", " ")
 
     merge_sql = _pg_sql(ta.merge_patches_stmt(sid, {"a.py": "diff"}))
     assert "||" in merge_sql
@@ -147,6 +152,17 @@ def test_statements_emit_partial_operators() -> None:
 
     del_sql = _pg_sql(ta.delete_patch_keys_stmt(sid, ["gone.py"]))
     assert " - " in del_sql
+
+
+def test_coerce_tokens_catches_overflow() -> None:
+    """``int(float('inf'))`` raises OverflowError; it must fall through to 0."""
+    assert ta._coerce_tokens(float("inf")) == 0
+    assert ta._coerce_tokens(-float("inf")) == 0
+    # Sanity: a real provider value still round-trips.
+    assert ta._coerce_tokens(1234) == 1234
+    # And nothing else broke:
+    assert ta._coerce_tokens(None) == 0
+    assert ta._coerce_tokens("oops") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +258,41 @@ async def test_persist_falls_back_to_full_write_on_rewrite() -> None:
     db.commit.assert_awaited_once()
 
 
+async def test_persist_after_restore_discards_emit_removal() -> None:
+    """Checkpoint_restore flushed ``a.py``; a later discard must remove it.
+
+    Reproduces greptile#4297093156 / cubic#4297090237: the bug was that
+    ``patches_before`` stayed at the pre-turn snapshot, so a discard
+    back to the pre-turn value computed an empty delta and silently kept
+    the restored patch saved. The fix resets ``patches_before`` to the
+    post-restore snapshot; here we feed the post-reset delta directly
+    to ``_persist`` and assert the removal UPDATE is emitted.
+    """
+    db = AsyncMock()
+    orch = _make_orchestrator(db)
+    session = _namespace_session()
+    base = list(session.conversation_history)
+
+    # End-of-turn state after: checkpoint_restore() flushed {a.py},
+    # then discard_patch() removed it back to {}.
+    await orch._persist(
+        session,
+        base,
+        {},
+        base_history=base,
+        new_entries=[],
+        patch_upserts={},
+        patch_removed=["a.py"],
+    )
+
+    assert db.execute.await_count == 1
+    sql = _pg_sql(db.execute.await_args_list[0].args[0])
+    # Single-key removal uses ``col - 'k'`` (no ARRAY literal needed).
+    assert " - " in sql
+    assert "ARRAY[" not in sql  # single-key fast path, not the multi-key array op
+    assert "staged_patches" in sql
+
+
 async def test_persist_without_deltas_takes_legacy_path() -> None:
     """Callers without delta args (slash commands, error fallbacks) are unchanged."""
     db = AsyncMock()
@@ -309,3 +360,4 @@ def test_plan_delta_statements_selects_operators() -> None:
     removal_sql = [_pg_sql(stmt) for stmt in with_removal]
     assert not any("jsonb_set" in sql for sql in removal_sql)
     assert any(" - " in sql for sql in removal_sql)
+
