@@ -105,6 +105,10 @@ async def test_repo_settings_repeated_reads_single_select():
     # the bug and is intentionally no longer asserted).
     assert first is row
     assert second is not row
+    # The cached entry itself must be detached: copying only on return
+    # would pass the assertions above yet keep the rollback/close
+    # regression (#134-1).
+    assert _REPO_SETTINGS_CACHE[repo_id][0] is not row
     assert second.id == row.id
     assert second.repo_id == repo_id
     assert second.preset == row.preset

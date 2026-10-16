@@ -315,8 +315,12 @@ def invalidate_repo_settings_cache(repo_id: uuid.UUID | None = None) -> None:
         _REPO_SETTINGS_CACHE.pop(repo_id, None)
 
 
-def _prune_repo_settings_cache(now: float) -> None:
-    """Evict expired entries, then oldest-inserted ones past the cap."""
+def _prune_repo_settings_cache(now: float, stored_key: uuid.UUID) -> None:
+    """Evict expired entries, then oldest-inserted ones past the cap.
+
+    The size cap is only enforced when storing a new key: overwriting
+    an existing entry must not evict an unrelated repo's live entry.
+    """
     expired = [
         key
         for key, (_, cached_at) in _REPO_SETTINGS_CACHE.items()
@@ -324,8 +328,9 @@ def _prune_repo_settings_cache(now: float) -> None:
     ]
     for key in expired:
         del _REPO_SETTINGS_CACHE[key]
-    while len(_REPO_SETTINGS_CACHE) >= _REPO_SETTINGS_MAXSIZE:
-        _REPO_SETTINGS_CACHE.pop(next(iter(_REPO_SETTINGS_CACHE)))
+    if stored_key not in _REPO_SETTINGS_CACHE:
+        while len(_REPO_SETTINGS_CACHE) >= _REPO_SETTINGS_MAXSIZE:
+            _REPO_SETTINGS_CACHE.pop(next(iter(_REPO_SETTINGS_CACHE)))
 
 
 def _detached_settings_copy(row: RepoSettings) -> RepoSettings:
@@ -355,7 +360,7 @@ def _store_repo_settings_snapshot(
     """Cache a detached snapshot unless an invalidation landed mid-read."""
     if generation != _REPO_SETTINGS_GEN:
         return
-    _prune_repo_settings_cache(now)
+    _prune_repo_settings_cache(now, repo_id)
     _REPO_SETTINGS_CACHE[repo_id] = (_detached_settings_copy(row), now)
 
 

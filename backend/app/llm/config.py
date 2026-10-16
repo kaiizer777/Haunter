@@ -83,8 +83,11 @@ def _store_model_config(
     ]
     for key in expired:
         del _model_config_cache[key]
-    while len(_model_config_cache) >= _MODEL_CONFIG_MAXSIZE:
-        _model_config_cache.pop(next(iter(_model_config_cache)))
+    # Enforce the cap only for a new key: overwriting an existing
+    # entry must not evict an unrelated live entry.
+    if cache_key not in _model_config_cache:
+        while len(_model_config_cache) >= _MODEL_CONFIG_MAXSIZE:
+            _model_config_cache.pop(next(iter(_model_config_cache)))
     _model_config_cache[cache_key] = (config, now)
 
 
