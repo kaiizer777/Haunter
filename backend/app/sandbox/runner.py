@@ -68,6 +68,14 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 _MAX_FAILURE_REASON_CHARS: int = 2_000
 
+# Chars of the leading classification prefix preserved when
+# _sanitize_failure_reason truncates. Every call site puts its routing
+# signal up front ("[non-retryable] …", "Workflow run concluded
+# '<conclusion>': …", "GitHub API …", …) and traces/classify.py matches on
+# the head (startswith prefix, first-line infra status) — a pure
+# tail-truncation would silently drop that signal on long reasons.
+_SANITIZE_HEAD_KEEP_CHARS: int = 400
+
 _MAX_PATCH_BYTES: int = 512 * 1024  # 512 KB
 _MAX_REPO_REF_CHARS: int = 200
 
@@ -235,13 +243,27 @@ def _sanitize_failure_reason(raw: str) -> str:
     Strip secret patterns and cap failure_reason at 2000 chars.
 
     Applied before DB storage AND before passing to the next generate_fix call.
+
+    Oversized input keeps its leading classification prefix (e.g.
+    "[non-retryable] …", "Workflow run concluded '<conclusion>': …" — the
+    head traces/classify.py matches on) and its diagnostic tail (the log
+    lines generate_fix re-feeds and the fast-fail heuristic compares), joined
+    by a "[N chars truncated]" marker. Output never exceeds
+    _MAX_FAILURE_REASON_CHARS.
     """
     result = raw
     for pattern, replacement in _SECRET_PATTERNS:
         result = pattern.sub(replacement, result)
-    if len(result) > _MAX_FAILURE_REASON_CHARS:
-        result = result[-_MAX_FAILURE_REASON_CHARS:]
-    return result
+    if len(result) <= _MAX_FAILURE_REASON_CHARS:
+        return result
+    overflow = len(result) - _MAX_FAILURE_REASON_CHARS
+    marker = f"\n...[{overflow} chars truncated]...\n"
+    tail_keep = _MAX_FAILURE_REASON_CHARS - _SANITIZE_HEAD_KEEP_CHARS - len(marker)
+    head = result[:_SANITIZE_HEAD_KEEP_CHARS]
+    tail = result[-tail_keep:] if tail_keep > 0 else ""
+    # Defensive re-slice: guarantees the cap even if the constants above
+    # are ever retuned inconsistently. No-op under current values.
+    return (head + marker + tail)[:_MAX_FAILURE_REASON_CHARS]
 
 
 async def _run_build(

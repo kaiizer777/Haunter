@@ -616,19 +616,48 @@ def test_format_failure_reason_clips_100kb_input() -> None:
     """Issue #104: a 100KB reason string is stored clipped, never whole (TOAST bloat)."""
     from app.orchestrator import _FAILURE_REASON_MAX_CHARS, _format_failure_reason
 
+    assert _FAILURE_REASON_MAX_CHARS == 500  # documented column contract
+
     exc = ValueError("y" * 100_000)
     out = _format_failure_reason("fix_generator", exc)
-    assert len(out) <= _FAILURE_REASON_MAX_CHARS
-    assert len(out) <= 1024
+    assert len(out) == _FAILURE_REASON_MAX_CHARS
+    assert out.startswith("fix_generator: ValueError:")
+
+
+def test_format_failure_reason_cap_applies_after_escaping() -> None:
+    """Escapable characters must not expand the stored value past the cap
+    (`&` -> `&amp;` is a 5x expansion)."""
+    from app.orchestrator import _FAILURE_REASON_MAX_CHARS, _format_failure_reason
+
+    exc = ValueError("&" * 100_000 + "<script>")
+    out = _format_failure_reason("fix_generator", exc)
+    assert len(out) == _FAILURE_REASON_MAX_CHARS
+    assert "<script>" not in out
 
 
 def test_sandbox_failure_reason_clips_100kb_input() -> None:
     """Issue #104: sandbox _sanitize_failure_reason clips 100KB input to its cap."""
     from app.sandbox.runner import _MAX_FAILURE_REASON_CHARS, _sanitize_failure_reason
 
+    assert _MAX_FAILURE_REASON_CHARS == 2_000  # documented sanitizer contract
+
     out = _sanitize_failure_reason("z" * 100_000)
-    assert len(out) <= _MAX_FAILURE_REASON_CHARS
-    assert _MAX_FAILURE_REASON_CHARS <= 2048
+    assert len(out) == _MAX_FAILURE_REASON_CHARS
+
+
+def test_sandbox_failure_reason_preserves_classification_prefix() -> None:
+    """Truncation must keep the leading routing signal (which
+    traces/classify.py matches on) and the diagnostic tail, not just the
+    tail."""
+    from app.sandbox.runner import _MAX_FAILURE_REASON_CHARS, _sanitize_failure_reason
+
+    prefix = "[non-retryable] GitHub API: HTTPStatusError: 403 | body: denied "
+    raw = prefix + "T" * 5_000 + "ENDMARKER"
+    out = _sanitize_failure_reason(raw)
+    assert len(out) == _MAX_FAILURE_REASON_CHARS
+    assert out.startswith(prefix)
+    assert "chars truncated" in out
+    assert out.endswith("ENDMARKER")
 
 
 def test_format_failure_reason_html_escapes_message() -> None:
