@@ -32,7 +32,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.github_client import GitHubClientError
@@ -1240,6 +1240,19 @@ def _is_lock_conflict(exc: Exception) -> bool:
 # Main orchestrator
 # ------------------------------------------------------------------
 
+#: Max mirrored SSE events buffered before a single bulk commit. Batching
+#: commits avoids a high-frequency INSERT+COMMIT per streaming SSE token.
+_MIRROR_BATCH_MAX = 50
+
+#: Max seconds before a partial batch of mirrored events is flushed to DB,
+#: ensuring bounded replay latency even under continuous rapid streaming.
+_MIRROR_FLUSH_INTERVAL_S = 1.0
+
+#: Prior-turn stream events below this count are left in place at turn start;
+#: they are pruned once accumulation crosses the threshold. Bounds the
+#: session_stream_events table per session without a DELETE on every turn.
+_STREAM_PRUNE_THRESHOLD = 500
+
 
 def _with_interrupted_turn(
     history: list[dict[str, Any]], user_message: str
@@ -1293,38 +1306,200 @@ class SessionOrchestrator:
         self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
         self._mirror_worker_task: asyncio.Task | None = None
 
-    async def _mirror_worker(self) -> None:
-        """Background worker that serializes event mirroring in strict monotonic event_id order."""
+    async def _flush_mirror_batch(
+        self, batch: list[tuple[int, str, str]]
+    ) -> None:
+        """Persist one buffered batch of mirrored events in a single commit,
+        with per-event fallback on error to prevent dropping up to 50 replay events."""
+        if not batch:
+            return
         from app.db import async_session_maker
         from app.models import SessionStreamEvent
 
+        items_to_persist = list(batch)
+        batch.clear()
+
+        try:
+            async with async_session_maker() as mirror_db:
+                bind = getattr(mirror_db, "bind", None)
+                dialect = getattr(bind, "dialect", None)
+                dialect_name = getattr(dialect, "name", "")
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                    stmt = (
+                        pg_insert(SessionStreamEvent)
+                        .values(
+                            [
+                                {
+                                    "session_id": self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "event_id": event_id,
+                                    "event": event,
+                                    "chunk": chunk,
+                                }
+                                for event_id, event, chunk in items_to_persist
+                            ]
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=["session_id", "turn_id", "event_id"]
+                        )
+                    )
+                    await mirror_db.execute(stmt)
+                elif dialect_name == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                    stmt = (
+                        sqlite_insert(SessionStreamEvent)
+                        .values(
+                            [
+                                {
+                                    "session_id": self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "event_id": event_id,
+                                    "event": event,
+                                    "chunk": chunk,
+                                }
+                                for event_id, event, chunk in items_to_persist
+                            ]
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=["session_id", "turn_id", "event_id"]
+                        )
+                    )
+                    await mirror_db.execute(stmt)
+                else:
+                    mirror_db.add_all(
+                        [
+                            SessionStreamEvent(
+                                session_id=self.session_id,
+                                turn_id=self.turn_id,
+                                event_id=event_id,
+                                event=event,
+                                chunk=chunk,
+                            )
+                            for event_id, event, chunk in items_to_persist
+                        ]
+                    )
+                await mirror_db.commit()
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: batch commit of %d mirror events failed for session=%s (%s); "
+                "attempting per-event fallback insert",
+                len(items_to_persist),
+                self.session_id,
+                exc,
+            )
+            # Fall back to per-event insert so one bad row or transient issue
+            # doesn't drop the entire batch of replay events. Handles duplicate
+            # collisions idempotently so retries after ambiguous commit failures
+            for event_id, event, chunk in items_to_persist:
+                try:
+                    async with async_session_maker() as fallback_db:
+                        fb_bind = getattr(fallback_db, "bind", None)
+                        fb_dialect_obj = getattr(fb_bind, "dialect", None)
+                        fb_dialect = getattr(fb_dialect_obj, "name", "")
+                        if fb_dialect == "postgresql":
+                            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                            fb_stmt = (
+                                pg_insert(SessionStreamEvent)
+                                .values(
+                                    session_id=self.session_id,
+                                    turn_id=self.turn_id,
+                                    event_id=event_id,
+                                    event=event,
+                                    chunk=chunk,
+                                )
+                                .on_conflict_do_nothing(
+                                    index_elements=["session_id", "turn_id", "event_id"]
+                                )
+                            )
+                            await fallback_db.execute(fb_stmt)
+                        elif fb_dialect == "sqlite":
+                            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                            fb_stmt = (
+                                sqlite_insert(SessionStreamEvent)
+                                .values(
+                                    session_id=self.session_id,
+                                    turn_id=self.turn_id,
+                                    event_id=event_id,
+                                    event=event,
+                                    chunk=chunk,
+                                )
+                                .on_conflict_do_nothing(
+                                    index_elements=["session_id", "turn_id", "event_id"]
+                                )
+                            )
+                            await fallback_db.execute(fb_stmt)
+                        else:
+                            fallback_db.add(
+                                SessionStreamEvent(
+                                    session_id=self.session_id,
+                                    turn_id=self.turn_id,
+                                    event_id=event_id,
+                                    event=event,
+                                    chunk=chunk,
+                                )
+                            )
+                        await fallback_db.commit()
+                except Exception as ind_exc:
+                    logger.error(
+                        "session_orchestrator: fallback mirror failed for event_id=%d session=%s: %s",
+                        event_id,
+                        self.session_id,
+                        ind_exc,
+                    )
+
+    async def _mirror_worker(self) -> None:
+        """Serialize event mirroring, flushing in batches.
+        Enforces a hard deadline (_MIRROR_FLUSH_INTERVAL_S from the first event
+        enqueued in the current batch) so continuous rapid events (<1s apart)
+        cannot defer committing partial batches until 50 events accumulate or turn ends."""
+        import time
+
+        batch: list[tuple[int, str, str]] = []
+        batch_first_enqueued_at: float | None = None
+
         while True:
-            item = await self._mirror_queue.get()
+            timeout: float
+            if batch and batch_first_enqueued_at is not None:
+                elapsed = time.monotonic() - batch_first_enqueued_at
+                timeout = max(0.0, _MIRROR_FLUSH_INTERVAL_S - elapsed)
+            else:
+                timeout = _MIRROR_FLUSH_INTERVAL_S
+
+            try:
+                item = await asyncio.wait_for(
+                    self._mirror_queue.get(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                if batch:
+                    await self._flush_mirror_batch(batch)
+                    batch_first_enqueued_at = None
+                continue
+
             if item is None:
                 self._mirror_queue.task_done()
                 break
-            event_id, event, chunk = item
-            try:
-                async with async_session_maker() as mirror_db:
-                    stream_event = SessionStreamEvent(
-                        session_id=self.session_id,
-                        turn_id=self.turn_id,
-                        event_id=event_id,
-                        event=event,
-                        chunk=chunk,
-                    )
-                    mirror_db.add(stream_event)
-                    await mirror_db.commit()
-            except Exception as exc:
-                logger.warning(
-                    "session_orchestrator: failed to mirror event %s (id=%s) to DB for session=%s: %s",
-                    event,
-                    event_id,
-                    self.session_id,
-                    exc,
-                )
-            finally:
-                self._mirror_queue.task_done()
+
+            if not batch:
+                batch_first_enqueued_at = time.monotonic()
+
+            batch.append(item)
+            self._mirror_queue.task_done()
+
+            # Flush if max batch reached or deadline exceeded
+            assert batch_first_enqueued_at is not None
+            if (
+                len(batch) >= _MIRROR_BATCH_MAX
+                or (time.monotonic() - batch_first_enqueued_at) >= _MIRROR_FLUSH_INTERVAL_S
+            ):
+                await self._flush_mirror_batch(batch)
+                batch_first_enqueued_at = None
+
+        await self._flush_mirror_batch(batch)
 
     async def _drain_mirror_queue(self) -> None:
         """Wait for all pending mirrored events to commit to DB and shut down the worker."""
@@ -1450,12 +1625,24 @@ class SessionOrchestrator:
 
         try:
             async with async_session_maker() as meta_db:
-                # Prune prior turn events for this session to prevent unbounded table growth
-                del_stmt = delete(SessionStreamEvent).where(
-                    SessionStreamEvent.session_id == self.session_id,
-                    SessionStreamEvent.turn_id != self.turn_id,
+                # Prune prior turn events only when they accumulate past the
+                # threshold, so the common case (a few hundred rows from the
+                # last turn) skips the negated DELETE entirely. Accumulation
+                # stays bounded: any skipped rows count toward the next check.
+                stale_count = await meta_db.scalar(
+                    select(func.count())
+                    .select_from(SessionStreamEvent)
+                    .where(
+                        SessionStreamEvent.session_id == self.session_id,
+                        SessionStreamEvent.turn_id != self.turn_id,
+                    )
                 )
-                await meta_db.execute(del_stmt)
+                if (stale_count or 0) > _STREAM_PRUNE_THRESHOLD:
+                    del_stmt = delete(SessionStreamEvent).where(
+                        SessionStreamEvent.session_id == self.session_id,
+                        SessionStreamEvent.turn_id != self.turn_id,
+                    )
+                    await meta_db.execute(del_stmt)
 
                 # Publish turn_start initialization event (event_id=0) so other workers immediately
                 # discover this active turn in session_stream_events

@@ -807,6 +807,9 @@ const associatedPrInflight = new Map<string, Promise<AssociatedPROut | null>>();
 export function clearAssociatedPrCache(): void {
   associatedPrCache.clear();
   associatedPrInflight.clear();
+  prRequestGeneration.clear();
+  batchQueue = [];
+  batchScheduled = false;
 }
 
 /**
@@ -818,14 +821,105 @@ export function clearAssociatedPrCache(): void {
  */
 export function clearFailedAssociatedPrCache(): void {
   for (const [key, value] of associatedPrCache) {
-    if (value == null) associatedPrCache.delete(key);
+    if (value == null) {
+      associatedPrCache.delete(key);
+      prRequestGeneration.delete(key);
+    }
   }
   associatedPrInflight.clear();
+  batchQueue = [];
+  batchScheduled = false;
 }
 
 /** Test-only reset for the module-level associated-PR cache (vitest). */
 export function __resetAssociatedPrCacheForTests(): void {
   clearAssociatedPrCache();
+}
+
+let batchQueue: Array<{
+  id: string;
+  resolve: (pr: AssociatedPROut | null) => void;
+  generation: number;
+}> = [];
+let batchScheduled = false;
+let currentGeneration = 0;
+const prRequestGeneration = new Map<string, number>();
+
+async function flushBatchPrLookups() {
+  const queue = batchQueue;
+  batchQueue = [];
+  batchScheduled = false;
+
+  if (queue.length === 0) return;
+
+  const ids = Array.from(new Set(queue.map((item) => item.id)));
+
+  let batchFailed = false;
+  const batchMap = new Map<string, AssociatedPROut | null>();
+  const hasBatchFn = typeof api.getAssociatedPrsBatch === "function";
+
+  if (hasBatchFn) {
+    try {
+      const res = await api.getAssociatedPrsBatch(ids);
+      if (res && Array.isArray(res.items)) {
+        for (const item of res.items) {
+          batchMap.set(item.review_id, item.associated_pr ?? null);
+        }
+      }
+    } catch {
+      batchFailed = true;
+    }
+  }
+
+  if (batchFailed) {
+    // When batch fails, do NOT fan out to individual requests (avoid amplifying backend load).
+    // Mark queued items as null without caching the transient failure so remount/revisit retries.
+    for (const item of queue) {
+      item.resolve(null);
+    }
+    return;
+  }
+
+  for (const item of queue) {
+    if (batchMap.has(item.id)) {
+      const pr = batchMap.get(item.id) ?? null;
+      if (prRequestGeneration.get(item.id) === item.generation) {
+        associatedPrCache.set(item.id, pr);
+      }
+      item.resolve(pr);
+    } else if (typeof api.getAssociatedPr === "function") {
+      api.getAssociatedPr(item.id).then(
+        (res) => {
+          const pr = res?.associated_pr ?? null;
+          if (prRequestGeneration.get(item.id) === item.generation) {
+            associatedPrCache.set(item.id, pr);
+          }
+          item.resolve(pr);
+        },
+        () => {
+          // Transient failure: leave uncached so revisiting or remounting can retry
+          item.resolve(null);
+        }
+      );
+    } else {
+      if (prRequestGeneration.get(item.id) === item.generation) {
+        associatedPrCache.set(item.id, null);
+      }
+      item.resolve(null);
+    }
+  }
+}
+
+function requestAssociatedPr(id: string): Promise<AssociatedPROut | null> {
+  const gen = ++currentGeneration;
+  prRequestGeneration.set(id, gen);
+  return new Promise((resolve) => {
+    batchQueue.push({ id, resolve, generation: gen });
+    if (!batchScheduled) {
+      batchScheduled = true;
+      queueMicrotask(flushBatchPrLookups);
+    }
+  });
 }
 
 function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
@@ -845,15 +939,7 @@ function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
     let cancelled = false;
     let pending = associatedPrInflight.get(key);
     if (!pending) {
-      const request = api.getAssociatedPr(review.id).then(
-        (res) => {
-          const pr = res?.associated_pr ?? null;
-          associatedPrCache.set(key, pr);
-          return pr;
-        },
-        () => null
-      );
-      pending = request.finally(() => {
+      pending = requestAssociatedPr(review.id).finally(() => {
         associatedPrInflight.delete(key);
       });
       associatedPrInflight.set(key, pending);

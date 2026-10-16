@@ -35,6 +35,7 @@ vi.mock("@/lib/api", () => ({
     getCodeReviews: vi.fn(),
     getReviewDetail: vi.fn(),
     getAssociatedPr: vi.fn(),
+    getAssociatedPrsBatch: vi.fn().mockResolvedValue({ items: [] }),
     getModelConfig: vi.fn().mockResolvedValue({
       id: "cfg_1",
       provider: "opencode_zen",
@@ -1726,6 +1727,65 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       // Mount effects flush inside the findBy act cycle, so any stray
       // refetch would already be recorded — assert the count directly.
       expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1);
+    });
+
+    it("batches multiple visible push rows into a single getAssociatedPrsBatch call", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [
+          pushRowForAssoc("rev_batch_1", "1111222233334444"),
+          pushRowForAssoc("rev_batch_2", "5555666677778888"),
+        ],
+        total: 2,
+      });
+      vi.mocked(api.getAssociatedPrsBatch).mockResolvedValue({
+        items: [
+          {
+            review_id: "rev_batch_1",
+            associated_pr: {
+              number: 101,
+              url: "https://github.com/acme/sentinel/pull/101",
+              title: null,
+            },
+          },
+          {
+            review_id: "rev_batch_2",
+            associated_pr: {
+              number: 102,
+              url: "https://github.com/acme/sentinel/pull/102",
+              title: null,
+            },
+          },
+        ],
+      });
+
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText("PR #101")).toBeInTheDocument();
+      expect(await screen.findByText("PR #102")).toBeInTheDocument();
+
+      expect(vi.mocked(api.getAssociatedPrsBatch)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(api.getAssociatedPrsBatch)).toHaveBeenCalledWith(["rev_batch_1", "rev_batch_2"]);
+      expect(vi.mocked(api.getAssociatedPr)).not.toHaveBeenCalled();
+    });
+
+    it("batch failure marks items as null without fanning out to getAssociatedPr", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [
+          pushRowForAssoc("rev_batch_fail_1", "1111222233334444"),
+          pushRowForAssoc("rev_batch_fail_2", "5555666677778888"),
+        ],
+        total: 2,
+      });
+      vi.mocked(api.getAssociatedPrsBatch).mockRejectedValue(new Error("500 Internal Server Error"));
+
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText(/Push @ 1111222/i)).toBeInTheDocument();
+      expect(await screen.findByText(/Push @ 5555666/i)).toBeInTheDocument();
+
+      expect(vi.mocked(api.getAssociatedPrsBatch)).toHaveBeenCalledTimes(1);
+      // Crucial: Must NOT fan out to individual getAssociatedPr calls on batch failure
+      expect(vi.mocked(api.getAssociatedPr)).not.toHaveBeenCalled();
     });
   });
 
