@@ -302,6 +302,19 @@ class FakeStore:
     Every :class:`FakeAsyncSession` handed out by :class:`FakeSessionMaker`
     shares one store, mirroring how separate pooled connections observe the same
     committed rows.
+
+    Single-threaded logic only. Reads happen against the in-process row
+    list directly, so they cannot model PostgreSQL's per-statement
+    snapshot semantics. In particular, a statement like
+
+        SELECT (SELECT count(*) FROM attempts WHERE run_id = X) AS n
+        FROM runs WHERE id = X FOR UPDATE
+
+    would in PostgreSQL see count(*)'s pre-lock snapshot when run
+    concurrently with another committer, letting the cap check reuse
+    attempt_number. The fake does not reproduce that race; the
+    corresponding concurrent-cap test against real PostgreSQL lives in
+    tests/test_fix_generator_concurrent_cap.py (@pytest.mark.db).
     """
 
     def __init__(self) -> None:
