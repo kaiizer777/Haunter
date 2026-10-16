@@ -46,9 +46,15 @@ def test_compact_text_keeps_head_and_tail() -> None:
     assert out.startswith("HEAD-")
     assert out.endswith("-TAIL")
     assert "compacted" in out
-    # Short text unchanged; already-compact text stable (idempotent).
+    # Short text unchanged.
     assert _compact_text("small", 1_000) == "small"
-    assert _compact_text(out, 1_000) == out
+    # Idempotence is now owned by the entry-level `_compacted` flag inside
+    # _compact_history_for_storage (see greptile#4296862877 / cubic#4296866375
+    # — pattern-matching the literal "[...compacted " in user/tool content
+    # would disable the storage cap for any legitimate tool result that
+    # happens to contain that string). _compact_text itself does NOT
+    # special-case the marker; re-compacting an already-compacted body
+    # produces a larger head+tail that preserves head/tail boundaries.
 
 
 def test_50_attempt_run_history_under_cap() -> None:

@@ -1183,16 +1183,16 @@ MAX_STAGED_TOTAL_BYTES = 2 * 1024 * 1024
 def _compact_text(text: str, max_chars: int) -> str:
     """Compact long text to head+tail, dropping the middle.
 
-    Short inputs are returned unchanged (idempotent for already-compacted
-    text). Non-string inputs are coerced via str().
+    Short inputs are returned unchanged. Non-string inputs are coerced via
+    str(). Idempotence is owned by the caller via the structured
+    ``_compacted`` entry flag (see ``_compact_history_for_storage``); this
+    function does NOT pattern-match the marker in user/tool content
+    because a legitimate tool result that happens to contain the literal
+    ``"[...compacted "`` would otherwise bypass the storage cap.
     """
     if not isinstance(text, str):
         text = str(text)
     if len(text) <= max_chars:
-        return text
-    if "[...compacted " in text:
-        # Already compacted by a previous persist pass — leave stable so
-        # repeated _persist calls are idempotent.
         return text
     head = max_chars * 3 // 4
     tail = max_chars - head
@@ -1262,7 +1262,14 @@ def _compact_history_for_storage(
                 if entry.get("role") == "tool"
                 else MAX_HISTORY_ENTRY_CHARS
             )
-            entry["content"] = _compact_text(content, cap)
+            # Idempotence via a structured metadata flag — never pattern-match
+            # the compaction marker in user/tool content (see greptile#4296862877
+            # and cubic#4296866375: a literal "[...compacted " in a tool result
+            # would otherwise disable the storage cap entirely).
+            if not entry.get("_compacted"):
+                entry["content"] = _compact_text(content, cap)
+                if len(content) > cap:
+                    entry["_compacted"] = True
         compacted.append(entry)
 
     # 2. Sliding window — keep the most recent MAX_HISTORY_ENTRIES entries,
@@ -1326,11 +1333,15 @@ def _check_staged_capacity(
             f"Error: staged file limit reached ({MAX_STAGED_FILES} files). "
             "Discard an obsolete patch with discard_patch before staging more."
         )
-    current_total = _staged_patches_size_bytes(patches)
-    replaced = _staged_patches_size_bytes({path: patches[path]}) if path in patches else 0
-    projected = (
-        current_total - replaced + len(path.encode("utf-8")) + len(diff.encode("utf-8")) + 16
-    )
+    # Issue #105 — measure the post-write size with the SAME serializer used
+    # by `_staged_patches_size_bytes` (json.dumps). The previous raw-UTF-8 +
+    # 16-byte padding projection undercounted multiline diffs and Unicode
+    # escapes, so near the cap we accepted patches whose serialized size
+    # exceeded MAX_STAGED_TOTAL_BYTES (see greptile#4296862870 /
+    # cubic#4296866371).
+    candidate: dict[str, str] = dict(patches)
+    candidate[path] = diff
+    projected = _staged_patches_size_bytes(candidate)
     if projected > MAX_STAGED_TOTAL_BYTES:
         return (
             "Error: staged changes exceed the session cap "
