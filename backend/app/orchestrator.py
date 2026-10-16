@@ -184,6 +184,16 @@ class InvalidTransitionError(Exception):
         self.to_status = to_status
 
 
+class RunClaimLost(InvalidTransitionError):
+    """Raised when a CAS UPDATE loses to a concurrent worker (#107).
+
+    Subclasses InvalidTransitionError so existing `except
+    InvalidTransitionError` clauses still catch it, but the global
+    handler treats it as already-claimed (quiet exit) instead of
+    forcing the winner's run into `error`.
+    """
+
+
 def _validate_transition(current: RunStatus, next_status: RunStatus) -> None:
     """Raise InvalidTransitionError if the transition is not allowed."""
     allowed = _ALLOWED_TRANSITIONS.get(current, set())
@@ -202,8 +212,8 @@ async def _transition(
     Uses an atomic compare-and-swap UPDATE (WHERE id + expected status)
     instead of a held SELECT ... FOR UPDATE (#107). The row lock is held
     for ms by the single UPDATE, committed immediately — never across an
-    LLM/sandbox await. On CAS conflict (rowcount 0) raises
-    InvalidTransitionError so the caller treats the run as already-claimed.
+    LLM/sandbox await. On CAS conflict (rowcount 0) raises RunClaimLost
+    so the caller treats the run as already-claimed and exits quietly.
     """
     current = RunStatus(run.status)
     _validate_transition(current, new_status)
@@ -217,11 +227,16 @@ async def _transition(
         .values(status=new_status.value, updated_at=now)
     )
     if result.rowcount == 0:
-        await db.rollback()
+        # No-op txn: commit (not rollback) so `run`/`repo` stay valid with
+        # expire_on_commit=False. Rollback would expire them and resumed
+        # attribute reads would raise MissingGreenlet on the winner's run.
+        await db.commit()
         try:
             fresh_status = await db.scalar(
                 select(Run.status).where(Run.id == run_id)
             )
+            # Close the read txn before returning to unbounded awaits.
+            await db.commit()
         except Exception:
             fresh_status = None
         if fresh_status is not None:
@@ -229,8 +244,8 @@ async def _transition(
                 actual = RunStatus(fresh_status)
             except ValueError:
                 actual = current
-            raise InvalidTransitionError(actual, new_status)
-        raise InvalidTransitionError(current, new_status)
+            raise RunClaimLost(actual, new_status)
+        raise RunClaimLost(current, new_status)
 
     await db.commit()
     run.status = new_status.value
@@ -238,7 +253,7 @@ async def _transition(
 
     logger.info(
         "orchestrator: run=%s %s → %s",
-        run.id,
+        run_id,
         current.value,
         new_status.value,
     )
@@ -631,6 +646,7 @@ async def _orchestrator_pipeline_body(
     from app.subagents.fix_generator import (
         generate_fix,
         AttemptCapExceeded,
+        AttemptClaimLost,
         LowConfidenceSkip,
         PatchFormatRetryExhausted,
         PatchRejected,
@@ -676,34 +692,29 @@ async def _orchestrator_pipeline_body(
     if run.status == RunStatus.pending.value:
         try:
             await _transition(run, RunStatus.context_gathering, db)
-        except InvalidTransitionError:
+        except RunClaimLost:
             # Lost the CAS race — another worker claimed first (#107).
-            # Re-read fresh status and resume instead of forcing error.
-            # The second worker never blocks and never corrupts the winner.
+            # Exit quietly in ALL cases: continuing would duplicate the
+            # winner's gather_context LLM call and force the winner's run
+            # to `error` on the next CAS conflict. No transaction is left
+            # open across the winner's unbounded awaits.
             fresh_status = await db.scalar(
                 select(Run.status).where(Run.id == run_id)
             )
+            await db.commit()
             if fresh_status is None:
                 logger.error(
                     "orchestrator: run=%s vanished during claim — aborting",
                     run_id,
                 )
                 return
-            if fresh_status in _TERMINAL_STATUSES:
-                logger.info(
-                    "orchestrator: run=%s already terminal (status=%s) "
-                    "— already-claimed, exiting",
-                    run_id,
-                    fresh_status,
-                )
-                return
-            run.status = fresh_status
             logger.info(
                 "orchestrator: run=%s claim lost (status=%s) "
-                "— already-claimed, resuming without blocking",
+                "— already-claimed, exiting",
                 run_id,
                 fresh_status,
             )
+            return
         state["step"] = run.status
     else:
         logger.info(
@@ -1044,6 +1055,19 @@ async def _orchestrator_pipeline_body(
                     await attempt_db.commit()
                     skip_to_fallback_reason = "format_exhausted"
                     break
+
+                except AttemptClaimLost as claim_err:
+                    # Concurrent worker won the attempt-number race (#107).
+                    # Exit quietly — the winner owns the run. Must NOT
+                    # persist failure_reason or force `error` on the
+                    # shared run.
+                    await attempt_db.commit()
+                    logger.info(
+                        "orchestrator: run=%s %s — already-claimed, exiting",
+                        run_id,
+                        claim_err,
+                    )
+                    return
 
                 except (
                     AttemptCapExceeded,
@@ -1772,6 +1796,18 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                     type(inner_exc).__name__,
                     inner_exc,
                 )
+            return
+
+        except RunClaimLost as cle:
+            # CAS lost to a concurrent worker (#107) — the winner owns the
+            # run. Exit quietly without forcing `error` on the shared run.
+            logger.info(
+                "orchestrator: run=%s claim lost (%s → %s) — "
+                "already-claimed, exiting",
+                run_id,
+                cle.from_status.value,
+                cle.to_status.value,
+            )
             return
 
         except InvalidTransitionError as ite:
