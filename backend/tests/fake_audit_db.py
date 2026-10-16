@@ -55,13 +55,14 @@ from sqlalchemy.sql.elements import (
     BindParameter,
     BooleanClauseList,
     Case,
+    ColumnClause,
     ColumnElement,
     Grouping,
     Null,
     UnaryExpression,
 )
 from sqlalchemy.sql.functions import Function
-from sqlalchemy.sql.selectable import Join, Select, TableClause
+from sqlalchemy.sql.selectable import Join, ScalarSelect, Select, TableClause
 
 from app.models import Base
 
@@ -301,6 +302,19 @@ class FakeStore:
     Every :class:`FakeAsyncSession` handed out by :class:`FakeSessionMaker`
     shares one store, mirroring how separate pooled connections observe the same
     committed rows.
+
+    Single-threaded logic only. Reads happen against the in-process row
+    list directly, so they cannot model PostgreSQL's per-statement
+    snapshot semantics. In particular, a statement like
+
+        SELECT (SELECT count(*) FROM attempts WHERE run_id = X) AS n
+        FROM runs WHERE id = X FOR UPDATE
+
+    would in PostgreSQL see count(*)'s pre-lock snapshot when run
+    concurrently with another committer, letting the cap check reuse
+    attempt_number. The fake does not reproduce that race; the
+    corresponding concurrent-cap test against real PostgreSQL lives in
+    tests/test_fix_generator_concurrent_cap.py (@pytest.mark.db).
     """
 
     def __init__(self) -> None:
@@ -473,8 +487,7 @@ class FakeStore:
                 reverse=reverse,
             )
 
-    @staticmethod
-    def _project(matched: list[dict[Any, Any]], statement: Select) -> list[Any]:
+    def _project(self, matched: list[dict[Any, Any]], statement: Select) -> list[Any]:
         """Build result rows, honouring entity vs column vs aggregate selects."""
         descriptions = statement.column_descriptions
         if not descriptions:
@@ -519,10 +532,60 @@ class FakeStore:
                     getattr(element, "key", str(index))
                     for index, element in enumerate(selected)
                 ],
-                [_eval_value(element, bound) for element in selected],
+                [self._eval_projection(element, bound) for element in selected],
             )
             for bound in matched
         ]
+
+    def _eval_projection(self, element: Any, bound: Mapping[Any, Any]) -> Any:
+        """Evaluate one projected column, including a scalar-subquery column."""
+        if isinstance(element, ScalarSelect):
+            return self._eval_scalar_select(element.element, bound)
+        return _eval_value(element, bound)
+
+    def _eval_scalar_select(self, subquery: Any, outer_bound: Mapping[Any, Any]) -> int:
+        """Evaluate `SELECT count(*) FROM <table> WHERE <pred>` as a scalar.
+
+        Only bare `count(*)` is supported. `count(DISTINCT ...)` and
+        `count(column)` have different semantics in PostgreSQL — they would
+        return different values than this in-process counter — so we reject
+        them rather than silently diverge. See Cubic#C-2 / Greptile#G-1.
+        """
+        if not isinstance(subquery, Select):
+            raise _unsupported(subquery)
+        froms = subquery.get_final_froms()
+        if len(froms) != 1:
+            raise UnsupportedStatementError(
+                "the fake audit store models a scalar subquery over exactly "
+                f"one FROM element, got {len(froms)}"
+            )
+        table = _require_table(froms[0])
+        entity = _require_entity(table)
+        projected = list(subquery.selected_columns)
+        if len(projected) != 1 or not (
+            isinstance(projected[0], Function) and projected[0].name == "count"
+        ):
+            raise _unsupported(subquery)
+        # Reject any count(...) form other than bare count(*). SQLAlchemy
+        # renders `func.count()` as a Function whose sole clause is a
+        # ColumnClause named "*"; any inner column expression (including
+        # DISTINCT) lives in that clause instead and we refuse to model it,
+        # because PostgreSQL would count differently than this fake does.
+        count_fn = projected[0]
+        clauses = list(count_fn.clauses.clauses)
+        if len(clauses) != 1 or not (
+            isinstance(clauses[0], ColumnClause) and clauses[0].name == "*"
+        ):
+            raise UnsupportedStatementError(
+                "the fake audit store only models bare count(*); other "
+                "count(...) forms have different PostgreSQL semantics"
+            )
+        total = 0
+        for row in self.rows(table):
+            inner_bound = {**outer_bound, entity: row}
+            if _eval_predicate(subquery.whereclause, inner_bound) is True:
+                total += 1
+        return total
 
     # -- ORM flush helpers -------------------------------------------------
 
