@@ -226,6 +226,18 @@ _ASSOCIATED_PR_TIMEOUT_SECONDS = 5.0
 _MINT_TIMEOUT_SECONDS = 3.0
 _BATCH_LOOKUP_CONCURRENCY = 10
 
+#: Max concurrent installation-token mints per batch call. Mints are
+#: I/O-bound (GitHub/SSM); bounding keeps a cold-cache page with many
+#: distinct repos from opening dozens of TLS sessions at once.
+_BATCH_MINT_CONCURRENCY = 5
+
+#: Shared time budget (seconds) across all token mints in one batch call.
+#: Per-mint timeouts bound each mint, but without an overall budget a page
+#: with many distinct slow-mint repos still stalls past the ~30s browser
+#: timeout before any commit lookup starts; when the budget trips the whole
+#: mint phase degrades to the PAT/null path instead.
+_BATCH_MINT_BUDGET_S = 10.0
+
 
 async def _lookup_commit_pr(
     owner: str, repo: str, sha: str, token: Optional[str] = None
@@ -633,21 +645,40 @@ async def get_reviews_associated_prs(
     if push_rows:
         unique_repos = {repo.id: repo for _, _, repo in push_rows}.values()
 
-        async def _mint(r: Repo) -> tuple[uuid.UUID, Optional[str]]:
-            try:
-                tok = await asyncio.wait_for(
-                    get_installation_token(r), timeout=_MINT_TIMEOUT_SECONDS
-                )
-                return r.id, tok
-            except Exception as exc:
-                logger.debug(
-                    "associated-prs batch mint token failed for repo %s: %s",
-                    r.id,
-                    type(exc).__name__,
-                )
-                return r.id, None
+        # Bounded concurrent mints: an unbounded gather opens one
+        # GitHub/SSM session per distinct repo at once, and without a shared
+        # budget many slow mints still stall past the ~30s browser timeout
+        # before any commit lookup starts. Per-mint timeout + None fallback
+        # preserved; a tripped budget degrades to the PAT/null path.
+        _mint_sem = asyncio.Semaphore(_BATCH_MINT_CONCURRENCY)
 
-        minted_tokens = await asyncio.gather(*[_mint(r) for r in unique_repos])
+        async def _mint(r: Repo) -> tuple[uuid.UUID, Optional[str]]:
+            async with _mint_sem:
+                try:
+                    tok = await asyncio.wait_for(
+                        get_installation_token(r), timeout=_MINT_TIMEOUT_SECONDS
+                    )
+                    return r.id, tok
+                except Exception as exc:
+                    logger.debug(
+                        "associated-prs batch mint token failed for repo %s: %s",
+                        r.id,
+                        type(exc).__name__,
+                    )
+                    return r.id, None
+
+        try:
+            minted_tokens = await asyncio.wait_for(
+                asyncio.gather(*[_mint(r) for r in unique_repos]),
+                timeout=_BATCH_MINT_BUDGET_S,
+            )
+        except asyncio.TimeoutError:
+            logger.debug(
+                "associated-prs batch mint budget (%.1fs) exceeded; "
+                "falling back to PAT/null tokens",
+                _BATCH_MINT_BUDGET_S,
+            )
+            minted_tokens = []
         tokens_by_repo_id: dict[uuid.UUID, Optional[str]] = dict(minted_tokens)
 
         sem = asyncio.Semaphore(_BATCH_LOOKUP_CONCURRENCY)

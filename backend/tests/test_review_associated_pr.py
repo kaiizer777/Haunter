@@ -847,3 +847,140 @@ async def test_batch_associated_prs_empty_list_returns_empty(
 
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"items": []}
+
+
+@pytest.mark.asyncio
+async def test_batch_associated_prs_mints_tokens_concurrently_bounded(
+    make_auth_client, install_db
+) -> None:
+    """Token mints run concurrently (not one-by-one) with a bounded fan-out."""
+    from app.routers import reviews as reviews_module
+
+    user = _user()
+    repos = [
+        Repo(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            owner="acme",
+            name=f"widgets-{i}",
+            default_branch="main",
+            created_at=_FIXED_NOW,
+        )
+        for i in range(8)
+    ]
+    push_reviews = [_review(repo) for repo in repos]
+    install_db(user, reviews=push_reviews)
+
+    active = 0
+    max_active = 0
+
+    async def _tracking_mint(repo: Repo) -> str:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.02)
+        finally:
+            active -= 1
+        return "ghs_test_token"
+
+    with (
+        patch.object(
+            reviews_module, "_lookup_commit_pr", new_callable=AsyncMock, return_value=None
+        ),
+        patch.object(reviews_module, "get_installation_token", new=_tracking_mint),
+    ):
+        async with make_auth_client(user.id) as ac:
+            resp = await ac.post(
+                "/reviews/associated-prs",
+                json={"review_ids": [str(r.id) for r in push_reviews]},
+            )
+
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["items"]) == 8
+    assert max_active > 1, "token mints must run concurrently, not sequentially"
+    assert max_active <= reviews_module._BATCH_MINT_CONCURRENCY, (
+        f"mint fan-out {max_active} exceeds bound "
+        f"{reviews_module._BATCH_MINT_CONCURRENCY}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_associated_prs_lookup_concurrency_bounded(
+    make_auth_client, install_db
+) -> None:
+    """Commit-SHA lookups are semaphore-bounded, not one-GitHub-client-per-row."""
+    from app.routers import reviews as reviews_module
+
+    user = _user()
+    repo = _repo(user)
+    push_reviews = [_review(repo) for _ in range(12)]
+    install_db(user, reviews=push_reviews)
+
+    active = 0
+    max_active = 0
+
+    async def _tracking_lookup(
+        owner: str, name: str, sha: str, token: object = None
+    ) -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.02)
+        finally:
+            active -= 1
+        return None
+
+    with (
+        patch.object(reviews_module, "_lookup_commit_pr", new=_tracking_lookup),
+        patch.object(
+            reviews_module,
+            "get_installation_token",
+            new_callable=AsyncMock,
+            return_value="ghs_test_token",
+        ) as mock_mint,
+    ):
+        async with make_auth_client(user.id) as ac:
+            resp = await ac.post(
+                "/reviews/associated-prs",
+                json={"review_ids": [str(r.id) for r in push_reviews]},
+            )
+
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["items"]) == 12
+    assert mock_mint.await_count == 1, "one mint per unique repo, not per row"
+    assert max_active > 1, "commit lookups must run concurrently"
+    assert max_active <= reviews_module._BATCH_LOOKUP_CONCURRENCY, (
+        f"lookup fan-out {max_active} exceeds bound "
+        f"{reviews_module._BATCH_LOOKUP_CONCURRENCY}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_associated_prs_mint_budget_falls_back_to_null(
+    make_auth_client, install_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled mint phase trips the shared budget: HTTP 200 with nulls, no stall."""
+    from app.routers import reviews as reviews_module
+
+    # Shrink the budget so the test proves the wait_for wiring, not the 10s value.
+    monkeypatch.setattr("app.routers.reviews._BATCH_MINT_BUDGET_S", 0.05)
+    user = _user()
+    repo = _repo(user)
+    push_review = _review(repo, pr_number=None)
+    install_db(user, reviews=[push_review])
+
+    async def _slow_mint(_repo: object) -> str:
+        await asyncio.sleep(5.0)
+        return "late-token"
+
+    with patch.object(reviews_module, "get_installation_token", new=_slow_mint):
+        async with make_auth_client(user.id) as ac:
+            resp = await ac.post(
+                "/reviews/associated-prs",
+                json={"review_ids": [str(push_review.id)]},
+            )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["items"][0]["associated_pr"] is None
