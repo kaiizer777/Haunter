@@ -199,16 +199,29 @@ async def _transition(
     """
     Validate and persist a status transition on `run`.
 
-    Updates runs.status and runs.updated_at atomically. Raises
-    InvalidTransitionError before touching the DB if the transition is invalid.
+    Lock-free CAS: validates against _ALLOWED_TRANSITIONS, then issues a
+    single atomic UPDATE ... WHERE id=:id AND status=:expected. No
+    SELECT ... FOR UPDATE is held — in particular no row lock is held
+    across the LLM/sandbox awaits in the retry loop. On rowcount==0 a
+    concurrent worker already moved the row (already-claimed).
     """
     current = RunStatus(run.status)
     _validate_transition(current, new_status)
 
-    run.status = new_status.value
-    run.updated_at = datetime.now(timezone.utc)
-    db.add(run)
+    from sqlalchemy import update as _sa_update
+
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        _sa_update(Run)
+        .where(Run.id == run.id, Run.status == current.value)
+        .values(status=new_status.value, updated_at=now)
+    )
     await db.commit()
+    if result.rowcount == 0:
+        # Lost CAS race — a concurrent worker already moved the row.
+        raise InvalidTransitionError(current, new_status)
+    run.status = new_status.value
+    run.updated_at = now
 
     logger.info(
         "orchestrator: run=%s %s → %s",
@@ -338,16 +351,21 @@ async def _persist_failure_reason(
     reason: str,
 ) -> None:
     """
-    Write the failure reason onto `run` and commit. Caller passes a session
-    that is still usable (i.e. not in a rolled-back / broken state). If the
-    commit fails we log and let the caller proceed — failure_reason is
-    best-effort observability, not a critical invariant.
+    Write the failure reason onto `run` via atomic UPDATE ... WHERE id.
+    No row lock held. Best-effort observability — failures are logged.
     """
-    run.failure_reason = reason
-    run.updated_at = datetime.now(timezone.utc)
-    db.add(run)
+    from sqlalchemy import update as _sa_update
+
+    now = datetime.now(timezone.utc)
     try:
+        await db.execute(
+            _sa_update(Run)
+            .where(Run.id == run.id)
+            .values(failure_reason=reason, updated_at=now)
+        )
         await db.commit()
+        run.failure_reason = reason
+        run.updated_at = now
     except Exception as commit_exc:  # pragma: no cover — defensive only
         logger.warning(
             "orchestrator: failed to persist failure_reason for run=%s (%s: %s)",
@@ -849,9 +867,11 @@ async def _orchestrator_pipeline_body(
         # next iteration opens a fresh session and the pipeline continues.
         try:
             async with async_session_maker() as attempt_db:
-                # Reload Run with row-lock (mirrors the outer-session lock).
+                # Lock-free read: plain SELECT, no FOR UPDATE. Mutations below
+                # use atomic UPDATE ... WHERE (see _transition CAS) so no row
+                # lock is ever held across the LLM/sandbox awaits.
                 run_result = await attempt_db.execute(
-                    select(Run).where(Run.id == run_id).with_for_update()
+                    select(Run).where(Run.id == run_id)
                 )
                 run = run_result.scalar_one_or_none()
                 if run is None:
@@ -910,6 +930,10 @@ async def _orchestrator_pipeline_body(
                         reason=cost_decision.reason,
                     )
                     break
+
+                # Close the read-only txn before the unbounded LLM/sandbox
+                # awaits below — no transaction is held during inference.
+                await attempt_db.commit()
 
                 # ---- Generate fix ----
                 try:
@@ -1589,15 +1613,13 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
     """
     async with async_session_maker() as db:
         # ----------------------------------------------------------------
-        # Load Run + Repo
+        # Load Run + Repo (lock-free)
         # ----------------------------------------------------------------
-        # Phase 1 O-09: row-lock the Run record. Mirrors the existing Repo
-        # lock below. The outer session commits before the per-iteration
-        # session opens, so the lock is released before any concurrent
-        # re-entrant select-for-update from the retry loop.
-        run_result = await db.execute(
-            select(Run).where(Run.id == run_id).with_for_update()
-        )
+        # No SELECT ... FOR UPDATE here: row locks must never be held across
+        # the LLM/sandbox awaits in the pipeline body. Concurrent workers
+        # coordinate via the atomic UPDATE ... WHERE status CAS in
+        # _transition (second worker sees rowcount==0 → already-claimed).
+        run_result = await db.execute(select(Run).where(Run.id == run_id))
         run = run_result.scalar_one_or_none()
         if run is None:
             logger.error("orchestrator: run %s not found — aborting", run_id)
@@ -1608,7 +1630,6 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
         repo_result = await db.execute(
             select(Repo)
             .where(Repo.id == run.repo_id)
-            .with_for_update()  # SELECT FOR UPDATE: prevent concurrent tenant cross-write
             .options(selectinload(Repo.user))
         )
         repo = repo_result.scalar_one_or_none()

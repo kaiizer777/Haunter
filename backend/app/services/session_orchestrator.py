@@ -99,6 +99,92 @@ from app.services.session_tools.audit import (
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
+# Persisted-state bounds (db-perf: cap JSONB growth, fixes #105/#106)
+# ------------------------------------------------------------------
+# conversation_history grows linearly with turns while only the tail is
+# read; staged_patches stores whole diffs per file. Both are TOAST columns
+# rewritten on every persist, so they are hard-bounded here at the single
+# persist choke point (_persist) regardless of attempt/turn count.
+_SESSION_HISTORY_MAX_ENTRIES = 200
+_SESSION_HISTORY_MAX_CHARS_PER_ENTRY = 20_000
+_SESSION_STAGED_MAX_BYTES = 512 * 1024
+_SESSION_STAGED_MAX_BYTES_PER_FILE = 100 * 1024
+_CHECKPOINTS_MAX_ENTRIES = 20
+
+
+def _truncate_text_middle(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 2 - 20
+    tail = max_chars - head - 40
+    return text[:head] + "\n...[TRUNCATED]...\n" + text[-tail:]
+
+
+def _bound_conversation_history(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    bounded = list(history or [])
+    # Compact oversized tool/assistant payloads (keep head+tail).
+    compacted: list[dict[str, Any]] = []
+    for entry in bounded:
+        if not isinstance(entry, dict):
+            continue
+        content = entry.get("content")
+        if isinstance(content, str) and len(content) > _SESSION_HISTORY_MAX_CHARS_PER_ENTRY:
+            entry = {
+                **entry,
+                "content": _truncate_text_middle(
+                    content, _SESSION_HISTORY_MAX_CHARS_PER_ENTRY
+                ),
+            }
+        compacted.append(entry)
+    # Sliding window: keep only the tail regardless of turn count.
+    if len(compacted) > _SESSION_HISTORY_MAX_ENTRIES:
+        compacted = compacted[-_SESSION_HISTORY_MAX_ENTRIES :]
+    return compacted
+
+
+def _bound_staged_patches(patches: dict[str, str]) -> dict[str, str]:
+    if not patches:
+        return {}
+    bounded: dict[str, str] = {}
+    for path, diff in (patches or {}).items():
+        if not isinstance(diff, str):
+            continue
+        if len(diff.encode("utf-8", "ignore")) > _SESSION_STAGED_MAX_BYTES_PER_FILE:
+            diff = _truncate_text_middle(diff, _SESSION_STAGED_MAX_BYTES_PER_FILE)
+        bounded[path] = diff
+    # Enforce total 512KB cap: drop oldest files first (dict preserves
+    # insertion order; tail = most recently staged).
+    total = sum(len(v.encode("utf-8", "ignore")) for v in bounded.values())
+    while total > _SESSION_STAGED_MAX_BYTES and bounded:
+        oldest = next(iter(bounded))
+        total -= len(bounded.pop(oldest).encode("utf-8", "ignore"))
+    return bounded
+
+
+def _dedup_checkpoints(
+    checkpoints: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not checkpoints:
+        return []
+    deduped: list[dict[str, Any]] = []
+    for cp in checkpoints:
+        if not isinstance(cp, dict):
+            continue
+        if deduped:
+            prev = deduped[-1]
+            if (
+                cp.get("staged_patches") == prev.get("staged_patches")
+                and cp.get("history_length") == prev.get("history_length")
+            ):
+                continue
+        deduped.append(cp)
+    if len(deduped) > _CHECKPOINTS_MAX_ENTRIES:
+        deduped = deduped[-_CHECKPOINTS_MAX_ENTRIES :]
+    return deduped
+
+# ------------------------------------------------------------------
 # LLM tool schema definitions
 # ------------------------------------------------------------------
 
@@ -3324,7 +3410,7 @@ class SessionOrchestrator:
         updated_history: list[dict[str, Any]],
         updated_patches: dict[str, str],
     ) -> None:
-        """Atomically persist conversation_history and staged_patches."""
+        """Atomically persist bounded conversation_history and staged_patches."""
         # Snapshot every ORM attribute the fallback path needs BEFORE the
         # commit attempt. rollback() expires all persistent state, so reading
         # session.id / status / ... after rollback can trigger refresh I/O on
@@ -3335,12 +3421,18 @@ class SessionOrchestrator:
         fallback_plan = session.plan
         fallback_waiting_input = session.waiting_input
         fallback_active_turn_id = getattr(session, "active_turn_id", None) or self.turn_id
+        # Bound JSONB growth at the single persist choke point: sliding
+        # window on history, 512KB total cap on patches, deduped checkpoints.
+        bounded_history = _bound_conversation_history(updated_history)
+        bounded_patches = _bound_staged_patches(updated_patches)
+        bounded_checkpoints = _dedup_checkpoints(list(fallback_checkpoints or []))
         try:
             session.active_turn_id = fallback_active_turn_id
         except Exception:
             pass
-        session.conversation_history = updated_history
-        session.staged_patches = updated_patches
+        session.conversation_history = bounded_history
+        session.staged_patches = bounded_patches
+        session.checkpoints = bounded_checkpoints
         session.updated_at = datetime.now(timezone.utc)
         try:
             if not getattr(self.db, "is_active", True):
@@ -3368,11 +3460,11 @@ class SessionOrchestrator:
                 db_session = res.scalars().first()
                 if db_session:
                     db_session.active_turn_id = fallback_active_turn_id
-                    db_session.conversation_history = updated_history
-                    db_session.staged_patches = updated_patches
+                    db_session.conversation_history = bounded_history
+                    db_session.staged_patches = bounded_patches
                     db_session.updated_at = datetime.now(timezone.utc)
                     db_session.status = fallback_status
-                    db_session.checkpoints = fallback_checkpoints
+                    db_session.checkpoints = bounded_checkpoints
                     db_session.plan = fallback_plan
                     db_session.waiting_input = fallback_waiting_input
                     await fallback_db.commit()

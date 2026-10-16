@@ -757,6 +757,10 @@ async def _call_with_format_retry(
 
     Path-traversal rejections (PatchRejected but not PatchFormatRejected)
     are NOT retried — they are security violations and must abort.
+
+    Token accounting: usage from ALL LLM calls (including format retries)
+    is summed into the returned response dict so RunStep cost matches the
+    bytes actually billed.
     """
     fix_output, response = await _call_and_parse(
         messages=messages,
@@ -767,6 +771,8 @@ async def _call_with_format_retry(
         repo_id=repo_id,
         review_feedback=review_feedback,
     )
+    total_in = int((response.get("usage") or {}).get("input_tokens", 0))
+    total_out = int((response.get("usage") or {}).get("output_tokens", 0))
 
     # If low confidence or empty patch, do not format-retry: return as-is
     # so generate_fix can raise LowConfidenceSkip before any DB insert.
@@ -801,6 +807,12 @@ async def _call_with_format_retry(
                 repo_id=repo_id,
                 review_feedback=review_feedback,
             )
+            total_in += int((response.get("usage") or {}).get("input_tokens", 0))
+            total_out += int((response.get("usage") or {}).get("output_tokens", 0))
+            response = {
+                **response,
+                "usage": {"input_tokens": total_in, "output_tokens": total_out},
+            }
             if (
                 fix_output.confidence < LOW_CONFIDENCE_THRESHOLD
                 or not fix_output.patch.strip()
@@ -810,6 +822,10 @@ async def _call_with_format_retry(
     # Final attempt: validate and raise exhausted if it still fails.
     try:
         _validate_patch(fix_output.patch)
+        response = {
+            **response,
+            "usage": {"input_tokens": total_in, "output_tokens": total_out},
+        }
         return fix_output, response
     except PatchFormatRejected as e:
         raise PatchFormatRetryExhausted(str(e)) from e
