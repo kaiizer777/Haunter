@@ -69,8 +69,19 @@ def _pg_index_valid(name: str) -> Optional[bool]:
     there) so the caller falls through to a plain CREATE INDEX. A failed
     CONCURRENTLY build leaves an INVALID index behind (indisvalid false)
     that the planner ignores and that blocks a same-name rebuild.
+
+    Skipped entirely in offline (--sql) mode because pg_catalog cannot be
+    queried there and the bound parameter :name would otherwise appear as
+    NULL in the generated SQL. The safe offline default is to fall through
+    to a fresh CREATE INDEX, which is exactly what alembic's op stack
+    would emit anyway.
     """
-    bind = op.get_bind()
+    ctx = op.get_context()
+    if ctx.as_sql:
+        return None
+    bind = ctx.bind
+    if bind is None:
+        return None
     if bind.dialect.name != "postgresql":
         return None
     row = bind.execute(
