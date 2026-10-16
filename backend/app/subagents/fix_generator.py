@@ -39,7 +39,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.llm import LLMClient
-from app.models import Attempt, Run, RunStep
+from app.models import Attempt, Run
+from app.services.token_accounting import make_run_step, normalize_usage
 from app.subagents.context_gatherer import _redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -56,9 +57,8 @@ def _max_attempts() -> int:
     return settings.max_attempts
 
 
-# Placeholder pricing — same as context_gatherer; replace with real figures.
-COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
-COST_PER_OUTPUT_TOKEN: float = 0.002 / 1_000
+# Canonical pricing lives in app.services.token_accounting (issue #106);
+# this module no longer defines its own COST_PER_* copy.
 
 # Paths that must never appear in a generated patch, even if explicitly requested.
 _BLOCKED_PATH_PREFIXES: tuple[str, ...] = (".git/", ".github/workflows/")
@@ -1009,9 +1009,9 @@ async def generate_fix(
     # -------------------------------------------------------------------------
     # 7. Persist RunStep trace — tokens + latency only, never raw content
     # -------------------------------------------------------------------------
-    usage = response.get("usage", {})
-    input_tokens: int = usage.get("input_tokens", 0)
-    output_tokens: int = usage.get("output_tokens", 0)
+    # Canonical usage parsing (issue #106): tolerates prompt/completion
+    # spellings, None, and numeric strings instead of silently recording 0.
+    input_tokens, output_tokens = normalize_usage(response.get("usage"))
 
     step_cost = await _persist_run_step(
         db=db,
@@ -1057,20 +1057,17 @@ async def _persist_run_step(
     """Insert a RunStep trace row. Never stores patch content.
 
     Returns the persisted cost_estimate so callers can maintain a running
-    cost total without re-SUMming the table (issue #113).
+    cost total without re-SUMming the table (issue #113). Cost is
+    recomputed by :func:`make_run_step` so the row is self-consistent
+    with the stored token counts (issue #106 — one formula, one place).
     """
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
-        output_tokens * COST_PER_OUTPUT_TOKEN
-    )
-    rounded = round(cost, 8)
-    step = RunStep(
+    step = make_run_step(
         run_id=run_id,
         step_name=step_name,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        cost_estimate=rounded,
     )
     db.add(step)
     await db.commit()
-    return float(rounded)
+    return step.cost_estimate

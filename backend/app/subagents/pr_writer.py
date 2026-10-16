@@ -26,7 +26,8 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import LLMClient
-from app.models import Attempt, Run, RunStep
+from app.models import Attempt, Run
+from app.services.token_accounting import make_run_step, normalize_usage
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
-COST_PER_OUTPUT_TOKEN: float = 0.002 / 1_000
+# Canonical pricing lives in app.services.token_accounting (issue #106);
+# this module no longer defines its own COST_PER_* copy.
 
 # Regex for validating the server-generated branch name.
 _BRANCH_SAFE_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9/_\-\.]+$")
@@ -287,21 +288,16 @@ async def generate_pr_text(
     )
 
     latency_ms = int((time.monotonic() - t0) * 1000)
-    usage = response.get("usage", {})
-    input_tokens: int = usage.get("input_tokens", 0)
-    output_tokens: int = usage.get("output_tokens", 0)
+    # Canonical usage parsing + cost (issue #106): one formula, one place.
+    input_tokens, output_tokens = normalize_usage(response.get("usage"))
 
     # Persist RunStep trace — tokens + latency only, never PR content
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
-        output_tokens * COST_PER_OUTPUT_TOKEN
-    )
-    step = RunStep(
+    step = make_run_step(
         run_id=run.id,
         step_name="pr_writer",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        cost_estimate=round(cost, 8),
     )
     db.add(step)
     await db.commit()

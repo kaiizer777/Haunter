@@ -2002,6 +2002,9 @@ class SessionOrchestrator:
             session.conversation_history or []
         )
         staged_patches: dict[str, str] = dict(session.staged_patches or {})
+        # Issue #106: pre-turn snapshot so the persist step can ship only the
+        # staged-patch delta (``||`` / ``jsonb_set``) instead of the full doc.
+        patches_before: dict[str, str] = dict(staged_patches)
 
         system_msg: dict[str, Any] = {
             "role": "system",
@@ -2022,6 +2025,10 @@ class SessionOrchestrator:
         new_entries: list[dict[str, Any]] = [user_msg]
         # Track the actual model that produced the final response (updated each LLM call).
         actual_model_used: str = model or ""
+        # Issue #106: accumulate normalized per-call usage so the turn's token
+        # spend is accounted with the canonical estimator (telemetry below).
+        turn_input_tokens: int = 0
+        turn_output_tokens: int = 0
 
         # 3. Tool-calling loop — max 10 iterations to prevent runaway loops.
         MAX_ITERATIONS = 10
@@ -2094,6 +2101,13 @@ class SessionOrchestrator:
             tool_calls: list[dict[str, Any]] | None = response.get("tool_calls")
             # Capture the actual model that responded (may differ from requested due to fallback).
             actual_model_used = response.get("model") or actual_model_used
+            # Issue #106: canonical per-call usage accounting
+            # (normalize_usage is total — never raises on odd payloads).
+            from app.services.token_accounting import normalize_usage as _norm_usage
+
+            _turn_in, _turn_out = _norm_usage(response.get("usage"))
+            turn_input_tokens += _turn_in
+            turn_output_tokens += _turn_out
 
             # Emit any assistant text as thought deltas.
             if content:
@@ -2273,11 +2287,20 @@ class SessionOrchestrator:
         # identity stays stable across compaction (otherwise the window
         # slides and `history_length` / `turn` drift off the real
         # conversation position — see greptile#4296862867 / cubic#4296866332).
+        # Issue #106: when the in-turn history was only appended (no checkpoint
+        # restore rewrote it), the persist step ships only the delta via
+        # ``||``/``jsonb_set`` instead of rebinding the full JSONB documents.
         uncompacted_history = conversation_history + new_entries
         uncompacted_history_length = len(uncompacted_history)
         updated_history = _compact_history_for_storage(uncompacted_history)
         session.conversation_history = updated_history
         session.staged_patches = staged_patches
+        from app.services.token_accounting import (
+            estimate_cost as _estimate_cost,
+            patch_delta as _patch_delta,
+        )
+
+        patch_upserts, patch_removed = _patch_delta(patches_before, staged_patches)
 
         # Auto-checkpoint after each turn if staged_patches were modified.
         # `turn_number` is the monotonic length of the uncompacted history —
@@ -2307,7 +2330,29 @@ class SessionOrchestrator:
                     cp_exc,
                 )
 
-        await self._persist(session, updated_history, staged_patches)
+        await self._persist(
+            session,
+            updated_history,
+            staged_patches,
+            base_history=conversation_history,
+            new_entries=new_entries,
+            patch_upserts=patch_upserts,
+            patch_removed=patch_removed,
+        )
+
+        # Canonical turn-level token accounting (issue #106): one estimator,
+        # computed from the same turn payload that was just persisted.
+        turn_cost = _estimate_cost(turn_input_tokens, turn_output_tokens)
+        logger.info(
+            "session_orchestrator: session=%s turn=%s input_tokens=%d "
+            "output_tokens=%d cost_estimate=%.8f model=%s",
+            self.session_id,
+            self.turn_id,
+            turn_input_tokens,
+            turn_output_tokens,
+            turn_cost,
+            actual_model_used,
+        )
 
         # 6. Signal stream end.
         await queue.put_done(
@@ -3862,17 +3907,80 @@ class SessionOrchestrator:
             fresh_db.expunge(row)
             return row
 
+    @staticmethod
+    def _plan_delta_statements(
+        session: AgentSession,
+        *,
+        base_history: list[dict[str, Any]] | None,
+        updated_history: list[dict[str, Any]],
+        new_entries: list[dict[str, Any]] | None,
+        patch_upserts: dict[str, str] | None,
+        patch_removed: list[str] | None,
+    ) -> list[Any]:
+        """Plan server-side JSONB delta UPDATEs for a pure-append turn.
+
+        Returns [] unless the update is exactly ``base + new_entries`` plus
+        staged-patch upserts/removals — history suffix via ``||``, a lone
+        patch key via ``jsonb_set``, multi-key changes via ``||`` merge,
+        removals via ``-``. Never raises: any anomaly means "not plannable"
+        and the caller takes the legacy full-document write.
+        """
+        try:
+            if (
+                base_history is None
+                or new_entries is None
+                or patch_upserts is None
+                or patch_removed is None
+            ):
+                return []
+            from app.services import token_accounting as _ta
+
+            suffix = _ta.history_suffix(base_history, updated_history)
+            if suffix is None or len(suffix) != len(new_entries):
+                # Not a pure append (e.g. checkpoint restore rewrote history
+                # mid-turn) — full write.
+                return []
+            if len(patch_upserts) == 1 and not patch_removed:
+                key = next(iter(patch_upserts))
+                patch_stmt = _ta.set_patch_key_stmt(
+                    session.id, key, patch_upserts[key]
+                )
+            else:
+                patch_stmt = _ta.merge_patches_stmt(session.id, patch_upserts)
+            stmts = [
+                _ta.append_history_stmt(session.id, suffix),
+                patch_stmt,
+                _ta.delete_patch_keys_stmt(session.id, patch_removed),
+            ]
+            return [stmt for stmt in stmts if stmt is not None]
+        except Exception:
+            return []
+
     async def _persist(
         self,
         session: AgentSession,
         updated_history: list[dict[str, Any]],
         updated_patches: dict[str, str],
+        *,
+        base_history: list[dict[str, Any]] | None = None,
+        new_entries: list[dict[str, Any]] | None = None,
+        patch_upserts: dict[str, str] | None = None,
+        patch_removed: list[str] | None = None,
     ) -> None:
         """Atomically persist conversation_history and staged_patches.
 
         Issue #105: `updated_history` is compacted (windowed + truncated) so
         the JSONB column stays bounded regardless of attempt count. This is
         the choke point — every persist path funnels through here.
+
+        Issue #106 fast path: when the caller supplies the turn's delta
+        (``base_history`` + ``new_entries`` + ``patch_upserts`` +
+        ``patch_removed``) and it describes a pure append, only the delta
+        ships — history suffix via ``||``, a lone patch key via
+        ``jsonb_set``, multi-key changes via ``||`` merge, removals via
+        ``-`` — instead of rebinding both full JSONB documents. Anything
+        else (no delta args, a mid-turn history rewrite, or any failure)
+        takes the legacy full-document write below — correctness first.
         """
         # Compact here as well (idempotent) so early-exit persist paths
         # (interrupt / LLM-error fallbacks) are bounded too.
@@ -3894,9 +4002,29 @@ class SessionOrchestrator:
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
+        delta_stmts = self._plan_delta_statements(
+            session,
+            base_history=base_history,
+            updated_history=updated_history,
+            new_entries=new_entries,
+            patch_upserts=patch_upserts,
+            patch_removed=patch_removed,
+        )
         try:
             if not getattr(self.db, "is_active", True):
                 raise RuntimeError("self.db is closed or inactive")
+            if delta_stmts:
+                # Expire the full-document attrs (assigned above for
+                # in-memory consistency): expired is not dirty, so the
+                # commit below flushes everything EXCEPT the full rewrites.
+                # The post-commit refresh() reloads server truth.
+                expired = self.db.expire(
+                    session, ["conversation_history", "staged_patches"]
+                )
+                if asyncio.iscoroutine(expired):
+                    await expired
+                for stmt in delta_stmts:
+                    await self.db.execute(stmt)
             await self.db.commit()
             await self.db.refresh(session)
         except Exception as exc:
