@@ -1155,6 +1155,131 @@ def _infer_provider(model: str) -> str | None:
     return None
 
 
+# ------------------------------------------------------------------
+# Issue #105 — JSONB growth caps for agent_sessions.
+#
+# conversation_history and staged_patches are rewritten on every turn.
+# _prune_conversation_history only trims the in-prompt LLM context, never
+# the DB write, so both columns grew linearly with attempt count
+# (multi-MB rows, TOAST churn). The caps below bound what is persisted:
+# history is windowed + per-entry truncated (lossy transcript is fine),
+# staged patches are gated at stage time with an explicit error (they are
+# authoritative user changes — never silently dropped).
+# ------------------------------------------------------------------
+
+# Sliding window: keep only the most recent N history entries in the DB.
+MAX_HISTORY_ENTRIES = 200
+# Per-entry content ceiling for persisted history entries.
+MAX_HISTORY_ENTRY_CHARS = 8_000
+# Verbatim tool outputs are compacted to head+tail at this size.
+MAX_TOOL_RESULT_CHARS = 8_000
+# Total serialized byte ceiling for the persisted conversation_history.
+MAX_HISTORY_BYTES = 256 * 1024
+# Staged-patch bounds: file count and total serialized bytes.
+MAX_STAGED_FILES = 100
+MAX_STAGED_TOTAL_BYTES = 2 * 1024 * 1024
+
+
+def _compact_text(text: str, max_chars: int) -> str:
+    """Compact long text to head+tail, dropping the middle.
+
+    Short inputs are returned unchanged (idempotent for already-compacted
+    text). Non-string inputs are coerced via str().
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    if len(text) <= max_chars:
+        return text
+    if "[...compacted " in text:
+        # Already compacted by a previous persist pass — leave stable so
+        # repeated _persist calls are idempotent.
+        return text
+    head = max_chars * 3 // 4
+    tail = max_chars - head
+    omitted = len(text) - max_chars
+    return (
+        text[:head]
+        + f"\n\n[...compacted {omitted} chars for storage; full output was sent to the model]\n\n"
+        + text[len(text) - tail :]
+    )
+
+
+def _history_size_bytes(history: list[dict[str, Any]]) -> int:
+    """Serialized size of a history list, mirroring the JSONB column cost."""
+    try:
+        return len(json.dumps(history, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return sum(len(str(m.get("content", ""))) for m in history)
+
+
+def _compact_history_for_storage(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bound a conversation history for DB persistence.
+
+    1. Truncate each entry's `content` (tool outputs via
+       MAX_TOOL_RESULT_CHARS, everything else via MAX_HISTORY_ENTRY_CHARS).
+    2. Keep only the most recent MAX_HISTORY_ENTRIES (sliding window).
+    3. Evict oldest-first until serialized size fits MAX_HISTORY_BYTES,
+       always retaining at least the newest entry.
+
+    Returns a new list; input entries are never mutated. Idempotent.
+    """
+    compacted: list[dict[str, Any]] = []
+    for entry in history:
+        entry = dict(entry)
+        content = entry.get("content", "")
+        if isinstance(content, str) and content:
+            cap = (
+                MAX_TOOL_RESULT_CHARS
+                if entry.get("role") == "tool"
+                else MAX_HISTORY_ENTRY_CHARS
+            )
+            entry["content"] = _compact_text(content, cap)
+        compacted.append(entry)
+    if len(compacted) > MAX_HISTORY_ENTRIES:
+        compacted = compacted[-MAX_HISTORY_ENTRIES:]
+    while len(compacted) > 1 and _history_size_bytes(compacted) > MAX_HISTORY_BYTES:
+        compacted = compacted[1:]
+    return compacted
+
+
+def _staged_patches_size_bytes(patches: dict[str, str]) -> int:
+    """Serialized size of the staged_patches dict."""
+    try:
+        return len(json.dumps(patches, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return sum(len(str(k)) + len(str(v)) for k, v in patches.items())
+
+
+def _check_staged_capacity(
+    patches: dict[str, str], path: str, diff: str
+) -> str | None:
+    """Enforce staged-patch caps before upserting a new/updated diff.
+
+    Returns an error string when the upsert would breach MAX_STAGED_FILES
+    or MAX_STAGED_TOTAL_BYTES, else None. Replacing an existing path does
+    not count as a new file.
+    """
+    if path not in patches and len(patches) >= MAX_STAGED_FILES:
+        return (
+            f"Error: staged file limit reached ({MAX_STAGED_FILES} files). "
+            "Discard an obsolete patch with discard_patch before staging more."
+        )
+    current_total = _staged_patches_size_bytes(patches)
+    replaced = _staged_patches_size_bytes({path: patches[path]}) if path in patches else 0
+    projected = (
+        current_total - replaced + len(path.encode("utf-8")) + len(diff.encode("utf-8")) + 16
+    )
+    if projected > MAX_STAGED_TOTAL_BYTES:
+        return (
+            "Error: staged changes exceed the session cap "
+            f"({MAX_STAGED_TOTAL_BYTES // 1024} KB total). "
+            "Discard an obsolete patch with discard_patch before staging more."
+        )
+    return None
+
+
 def _prune_conversation_history(
     history: list[dict[str, Any]],
     max_chars: int = 80_000,
@@ -1964,7 +2089,10 @@ class SessionOrchestrator:
             )
 
         # 5. Persist updated state to DB atomically.
-        updated_history = conversation_history + new_entries
+        # Issue #105 — window/truncate history before storage so the JSONB
+        # column stays bounded regardless of attempt count. In-turn `messages`
+        # above keep full fidelity for the LLM; only the DB copy is compacted.
+        updated_history = _compact_history_for_storage(conversation_history + new_entries)
         session.conversation_history = updated_history
         session.staged_patches = staged_patches
 
@@ -2392,6 +2520,12 @@ class SessionOrchestrator:
         MAX_PATCH_BYTES = 512 * 1024
         if len(diff.encode("utf-8")) > MAX_PATCH_BYTES:
             return "Error: diff exceeds maximum size (512 KB)."
+
+        # Issue #105 — bound staged_patches growth: reject (never silently
+        # drop) when the upsert would breach the session-wide caps.
+        capacity_error = _check_staged_capacity(staged_patches, path, diff)
+        if capacity_error is not None:
+            return capacity_error
 
         # Stage the patch (upsert).
         staged_patches[path] = diff
@@ -3511,7 +3645,15 @@ class SessionOrchestrator:
         updated_history: list[dict[str, Any]],
         updated_patches: dict[str, str],
     ) -> None:
-        """Atomically persist conversation_history and staged_patches."""
+        """Atomically persist conversation_history and staged_patches.
+
+        Issue #105: `updated_history` is compacted (windowed + truncated) so
+        the JSONB column stays bounded regardless of attempt count. This is
+        the choke point — every persist path funnels through here.
+        """
+        # Compact here as well (idempotent) so early-exit persist paths
+        # (interrupt / LLM-error fallbacks) are bounded too.
+        updated_history = _compact_history_for_storage(updated_history)
         # Snapshot every ORM attribute the fallback path needs BEFORE the
         # commit attempt. rollback() expires all persistent state, so reading
         # session.id / status / ... after rollback can trigger refresh I/O on
