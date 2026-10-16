@@ -32,7 +32,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.github_client import GitHubClientError
@@ -1240,6 +1240,19 @@ def _is_lock_conflict(exc: Exception) -> bool:
 # Main orchestrator
 # ------------------------------------------------------------------
 
+#: Max mirrored SSE events buffered before a single bulk commit. A turn emits
+#: at most a few hundred events (replay buffer is 256), so a full turn
+#: typically commits in a handful of batches instead of per-event commits.
+_MIRROR_BATCH_MAX = 50
+
+#: Seconds of mirror-queue idleness before a partial batch is flushed.
+_MIRROR_FLUSH_INTERVAL_S = 1.0
+
+#: Prior-turn stream events below this count are left in place at turn start;
+#: they are pruned once accumulation crosses the threshold. Bounds the
+#: session_stream_events table per session without a DELETE on every turn.
+_STREAM_PRUNE_THRESHOLD = 500
+
 
 def _with_interrupted_turn(
     history: list[dict[str, Any]], user_message: str
@@ -1293,38 +1306,61 @@ class SessionOrchestrator:
         self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
         self._mirror_worker_task: asyncio.Task | None = None
 
-    async def _mirror_worker(self) -> None:
-        """Background worker that serializes event mirroring in strict monotonic event_id order."""
+    async def _flush_mirror_batch(
+        self, batch: list[tuple[int, str, str]]
+    ) -> None:
+        """Persist one buffered batch of mirrored events in a single commit."""
+        if not batch:
+            return
         from app.db import async_session_maker
         from app.models import SessionStreamEvent
 
+        try:
+            async with async_session_maker() as mirror_db:
+                mirror_db.add_all(
+                    [
+                        SessionStreamEvent(
+                            session_id=self.session_id,
+                            turn_id=self.turn_id,
+                            event_id=event_id,
+                            event=event,
+                            chunk=chunk,
+                        )
+                        for event_id, event, chunk in batch
+                    ]
+                )
+                await mirror_db.commit()
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: failed to mirror batch of %d events for session=%s: %s",
+                len(batch),
+                self.session_id,
+                exc,
+            )
+        finally:
+            batch.clear()
+
+    async def _mirror_worker(self) -> None:
+        """Serialize event mirroring, flushing in batches: one commit per
+        _MIRROR_BATCH_MAX events or _MIRROR_FLUSH_INTERVAL_S idle seconds
+        instead of one INSERT+COMMIT per event."""
+        batch: list[tuple[int, str, str]] = []
         while True:
-            item = await self._mirror_queue.get()
+            try:
+                item = await asyncio.wait_for(
+                    self._mirror_queue.get(), timeout=_MIRROR_FLUSH_INTERVAL_S
+                )
+            except asyncio.TimeoutError:
+                await self._flush_mirror_batch(batch)
+                continue
             if item is None:
                 self._mirror_queue.task_done()
                 break
-            event_id, event, chunk = item
-            try:
-                async with async_session_maker() as mirror_db:
-                    stream_event = SessionStreamEvent(
-                        session_id=self.session_id,
-                        turn_id=self.turn_id,
-                        event_id=event_id,
-                        event=event,
-                        chunk=chunk,
-                    )
-                    mirror_db.add(stream_event)
-                    await mirror_db.commit()
-            except Exception as exc:
-                logger.warning(
-                    "session_orchestrator: failed to mirror event %s (id=%s) to DB for session=%s: %s",
-                    event,
-                    event_id,
-                    self.session_id,
-                    exc,
-                )
-            finally:
-                self._mirror_queue.task_done()
+            batch.append(item)
+            self._mirror_queue.task_done()
+            if len(batch) >= _MIRROR_BATCH_MAX:
+                await self._flush_mirror_batch(batch)
+        await self._flush_mirror_batch(batch)
 
     async def _drain_mirror_queue(self) -> None:
         """Wait for all pending mirrored events to commit to DB and shut down the worker."""
@@ -1450,12 +1486,24 @@ class SessionOrchestrator:
 
         try:
             async with async_session_maker() as meta_db:
-                # Prune prior turn events for this session to prevent unbounded table growth
-                del_stmt = delete(SessionStreamEvent).where(
-                    SessionStreamEvent.session_id == self.session_id,
-                    SessionStreamEvent.turn_id != self.turn_id,
+                # Prune prior turn events only when they accumulate past the
+                # threshold, so the common case (a few hundred rows from the
+                # last turn) skips the negated DELETE entirely. Accumulation
+                # stays bounded: any skipped rows count toward the next check.
+                stale_count = await meta_db.scalar(
+                    select(func.count())
+                    .select_from(SessionStreamEvent)
+                    .where(
+                        SessionStreamEvent.session_id == self.session_id,
+                        SessionStreamEvent.turn_id != self.turn_id,
+                    )
                 )
-                await meta_db.execute(del_stmt)
+                if (stale_count or 0) > _STREAM_PRUNE_THRESHOLD:
+                    del_stmt = delete(SessionStreamEvent).where(
+                        SessionStreamEvent.session_id == self.session_id,
+                        SessionStreamEvent.turn_id != self.turn_id,
+                    )
+                    await meta_db.execute(del_stmt)
 
                 # Publish turn_start initialization event (event_id=0) so other workers immediately
                 # discover this active turn in session_stream_events

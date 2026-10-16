@@ -433,53 +433,47 @@ async def get_user_eval_metrics(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UserEvalMetricsOut:
-    """Aggregate reliability and calibration metrics across the caller's runs."""
+    """Aggregate reliability and calibration metrics across the caller's runs.
+
+    Three round trips regardless of data size: one run-level rollup
+    (total/healed/avg-duration via conditional aggregates), one cost rollup,
+    and one GROUP BY for all four confidence buckets.
+    """
     user_filter = [Repo.user_id == current_user.id]
     healed_statuses = ["pr_opened", "completed"]
 
-    # --- total_runs (all runs across the user's repos) ---
-    total_runs: int = int(
-        (
-            await db.execute(
-                select(func.count())
-                .select_from(Run)
-                .join(Repo, Run.repo_id == Repo.id)
-                .where(*user_filter)
+    # --- run-level rollup in ONE query ---
+    # healed_runs counts via conditional SUM; avg duration averages the
+    # per-run wall-clock proxy only over healed runs (NULLs are ignored by
+    # AVG, so no healed runs yields NULL → 0.0, no separate guard needed).
+    duration_expr = func.extract("epoch", Run.updated_at - Run.created_at)
+    rollup_row = (
+        await db.execute(
+            select(
+                func.count(Run.id).label("total_runs"),
+                func.coalesce(
+                    func.sum(case((Run.status.in_(healed_statuses), 1), else_=0)),
+                    0,
+                ).label("healed_runs"),
+                func.avg(
+                    case(
+                        (Run.status.in_(healed_statuses), duration_expr),
+                        else_=None,
+                    )
+                ).label("avg_duration"),
             )
-        ).scalar_one()
-        or 0
-    )
+            .select_from(Run)
+            .join(Repo, Run.repo_id == Repo.id)
+            .where(*user_filter)
+        )
+    ).one()
 
-    # --- healed_runs (terminal success: pr_opened or completed) ---
-    healed_runs: int = int(
-        (
-            await db.execute(
-                select(func.count())
-                .select_from(Run)
-                .join(Repo, Run.repo_id == Repo.id)
-                .where(*user_filter, Run.status.in_(healed_statuses))
-            )
-        ).scalar_one()
-        or 0
-    )
-
+    total_runs: int = int(rollup_row.total_runs or 0)
+    healed_runs: int = int(rollup_row.healed_runs or 0)
     success_rate_pct: float = (
         round((healed_runs / total_runs) * 100, 1) if total_runs > 0 else 0.0
     )
-
-    # --- avg_duration_seconds (over healed runs only) ---
-    # Skip the query when no healed runs to avoid divide-by-zero / no rows.
-    avg_duration_seconds: float = 0.0
-    if healed_runs > 0:
-        avg_secs = (
-            await db.execute(
-                select(func.avg(func.extract("epoch", Run.updated_at - Run.created_at)))
-                .select_from(Run)
-                .join(Repo, Run.repo_id == Repo.id)
-                .where(*user_filter, Run.status.in_(healed_statuses))
-            )
-        ).scalar_one()
-        avg_duration_seconds = round(float(avg_secs or 0.0), 1)
+    avg_duration_seconds: float = round(float(rollup_row.avg_duration or 0.0), 1)
 
     # --- total_cost (sum of RunStep.cost_estimate across the user's runs) ---
     total_cost_raw = (
@@ -497,41 +491,53 @@ async def get_user_eval_metrics(
         round(total_cost / total_runs, 4) if total_runs > 0 else 0.0
     )
 
-    # --- confidence_calibration: 4 fixed buckets in the specified order ---
+    # --- confidence_calibration: 4 fixed buckets in ONE grouped query ---
     # (label, low_inclusive, high_exclusive) — scale is 0-100, so the
     # last bucket uses 101 as the exclusive upper bound to include score=100.
+    # The BETWEEN guard preserves the old per-bucket semantics exactly: NULL
+    # or out-of-range scores matched no bucket before and match none now.
     bucket_specs: list[tuple[str, int, int]] = [
         ("0-50%", 0, 50),
         ("50-75%", 50, 75),
         ("75-90%", 75, 90),
         ("90-100%", 90, 101),
     ]
+    bucket_expr = case(
+        (Attempt.confidence_score < 50, "0-50%"),
+        (Attempt.confidence_score < 75, "50-75%"),
+        (Attempt.confidence_score < 90, "75-90%"),
+        else_="90-100%",
+    )
+    bucket_rows = (
+        await db.execute(
+            select(
+                bucket_expr.label("bucket"),
+                func.count(Attempt.id).label("total"),
+                func.coalesce(
+                    func.sum(
+                        case((Attempt.verification_status == "pass", 1), else_=0)
+                    ),
+                    0,
+                ).label("passed"),
+            )
+            .select_from(Attempt)
+            .join(Run, Attempt.run_id == Run.id)
+            .join(Repo, Run.repo_id == Repo.id)
+            .where(
+                *user_filter,
+                Attempt.confidence_score.between(0, 100),
+            )
+            .group_by(bucket_expr)
+        )
+    ).all()
+    bucket_totals: dict[str, tuple[int, int]] = {
+        str(row.bucket): (int(row.total or 0), int(row.passed or 0))
+        for row in bucket_rows
+    }
 
     confidence_calibration: list[ConfidenceBucket] = []
-    for label, low, high in bucket_specs:
-        bucket_row = (
-            await db.execute(
-                select(
-                    func.count(Attempt.id).label("total"),
-                    func.coalesce(
-                        func.sum(
-                            case((Attempt.verification_status == "pass", 1), else_=0)
-                        ),
-                        0,
-                    ).label("passed"),
-                )
-                .select_from(Attempt)
-                .join(Run, Attempt.run_id == Run.id)
-                .join(Repo, Run.repo_id == Repo.id)
-                .where(
-                    *user_filter,
-                    Attempt.confidence_score >= low,
-                    Attempt.confidence_score < high,
-                )
-            )
-        ).one()
-        total_attempts = int(bucket_row.total or 0)
-        passed_attempts = int(bucket_row.passed or 0)
+    for label, _low, _high in bucket_specs:
+        total_attempts, passed_attempts = bucket_totals.get(label, (0, 0))
         accuracy_pct = (
             round((passed_attempts / total_attempts) * 100, 1)
             if total_attempts > 0

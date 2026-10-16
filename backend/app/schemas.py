@@ -345,7 +345,10 @@ class RunOut(BaseModel):
 
 
 class BatchDeleteRunsRequest(BaseModel):
-    run_ids: list[uuid.UUID] = Field(default_factory=list)
+    # Hard cap: each id fans out to RunStep/Attempt cascade deletes, so an
+    # unbounded list holds one long write transaction and blocks autovacuum.
+    # Clients with more ids page them into multiple calls.
+    run_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
 
 
 class BatchDeleteRunsResponse(BaseModel):

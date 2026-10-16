@@ -24,7 +24,7 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import ColumnElement, and_, case, cast, column, func, literal, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,6 +99,20 @@ class AssociatedPROut(BaseModel):
 
 class AssociatedPRResponse(BaseModel):
     associated_pr: Optional[AssociatedPROut] = None
+
+
+class AssociatedPRBatchRequest(BaseModel):
+    # Bounded: one page of dashboard rows per call, no per-row fan-out.
+    review_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
+
+
+class AssociatedPRBatchItem(BaseModel):
+    review_id: uuid.UUID
+    associated_pr: Optional[AssociatedPROut] = None
+
+
+class AssociatedPRBatchResponse(BaseModel):
+    items: list[AssociatedPRBatchItem]
 
 
 # ---------------------------------------------------------------------------
@@ -565,3 +579,54 @@ async def get_review_associated_pr(
         gh_token = None
     associated = await _lookup_commit_pr(owner, name, review.commit_sha, token=gh_token)
     return AssociatedPRResponse(associated_pr=associated)
+
+
+@router.post("/reviews/associated-prs", response_model=AssociatedPRBatchResponse)
+async def get_reviews_associated_prs(
+    body: AssociatedPRBatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AssociatedPRBatchResponse:
+    """
+    Batch associated-PR lookup for a page of dashboard rows.
+
+    One ownership-scoped SELECT answers the whole page (the per-row GET above
+    fans out to N calls plus up to N GitHub requests per render). Resolution
+    is DB-only: rows carrying their own ``pr_number`` answer directly, all
+    others answer ``null`` — no GitHub calls, no per-row queries. Unknown or
+    non-owned ids are omitted (no existence oracle).
+    """
+    if not body.review_ids:
+        return AssociatedPRBatchResponse(items=[])
+
+    stmt = (
+        select(CodeReview)
+        .join(Repo, CodeReview.repo_id == Repo.id)
+        .options(selectinload(CodeReview.repo))
+        .where(
+            CodeReview.id.in_(body.review_ids),
+            Repo.user_id == current_user.id,
+        )
+    )
+    res = await db.execute(stmt)
+    reviews = res.scalars().all()
+
+    items: list[AssociatedPRBatchItem] = []
+    for review in reviews:
+        repo = review.repo
+        owner = repo.owner if repo is not None else None
+        name = repo.name if repo is not None else None
+        pr: Optional[AssociatedPROut] = None
+        if review.pr_number is not None and owner and name:
+            pr = AssociatedPROut(
+                number=review.pr_number,
+                url=(
+                    f"https://github.com/{quote(owner, safe='')}"
+                    f"/{quote(name, safe='')}/pull/{review.pr_number}"
+                ),
+                title=None,
+            )
+        items.append(
+            AssociatedPRBatchItem(review_id=review.id, associated_pr=pr)
+        )
+    return AssociatedPRBatchResponse(items=items)
