@@ -1212,6 +1212,28 @@ def _history_size_bytes(history: list[dict[str, Any]]) -> int:
         return sum(len(str(m.get("content", ""))) for m in history)
 
 
+def _split_into_turns(
+    history: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Split a history list into per-user turns (each starts at a 'user' entry).
+
+    A "turn" is one user message plus every assistant/tool/system message that
+    follows it up to (but not including) the next user message. The first
+    element of the returned list is the leading fragment preceding the first
+    user message (may be empty); subsequent elements are complete turns.
+    """
+    turns: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for entry in history:
+        if entry.get("role") == "user" and current:
+            turns.append(current)
+            current = []
+        current.append(entry)
+    if current:
+        turns.append(current)
+    return turns
+
+
 def _compact_history_for_storage(
     history: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1220,8 +1242,13 @@ def _compact_history_for_storage(
     1. Truncate each entry's `content` (tool outputs via
        MAX_TOOL_RESULT_CHARS, everything else via MAX_HISTORY_ENTRY_CHARS).
     2. Keep only the most recent MAX_HISTORY_ENTRIES (sliding window).
-    3. Evict oldest-first until serialized size fits MAX_HISTORY_BYTES,
-       always retaining at least the newest entry.
+    3. Evict oldest complete turns until serialized size fits
+       MAX_HISTORY_BYTES, anchored on user-message boundaries so tool
+       calls and their results are never split. If the window leaves a
+       leading fragment with no user message, synthesize a minimal user
+       placeholder so the persisted tail always begins with a user entry
+       (LLM APIs reject orphan tool results). Always retain at least
+       the newest entry.
 
     Returns a new list; input entries are never mutated. Idempotent.
     """
@@ -1237,10 +1264,43 @@ def _compact_history_for_storage(
             )
             entry["content"] = _compact_text(content, cap)
         compacted.append(entry)
+
+    # 2. Sliding window — keep the most recent MAX_HISTORY_ENTRIES entries,
+    #    aligned on a user-message boundary so the persisted tail starts with
+    #    a user entry (LLM APIs reject orphan tool results). Walking forward
+    #    past any leading assistant/tool entry drops at most one partial
+    #    turn — well within the MAX_HISTORY_ENTRIES budget.
     if len(compacted) > MAX_HISTORY_ENTRIES:
         compacted = compacted[-MAX_HISTORY_ENTRIES:]
+        # Align the window on the next user entry. If the window happened to
+        # cut mid-turn, drop the partial leading turn entirely.
+        while compacted and compacted[0].get("role") != "user":
+            compacted = compacted[1:]
+
+    # 3. Byte-based eviction in whole turns. A "turn" is anchored on a user
+    #    message, so evicting the oldest turn never splits a tool_call from
+    #    its tool_results.
     while len(compacted) > 1 and _history_size_bytes(compacted) > MAX_HISTORY_BYTES:
-        compacted = compacted[1:]
+        turns = _split_into_turns(compacted)
+        if len(turns) <= 1:
+            # The window starts with a user message and contains a single
+            # turn — the turn is too large to fit. Drop it entirely except
+            # for the very last entry, which the spec mandates we keep.
+            last_entry = compacted[-1]
+            compacted = [last_entry]
+            break
+        # Drop the oldest turn; the remainder preserves user/tool integrity.
+        compacted = [item for turn in turns[1:] for item in turn]
+
+    # If compaction left a tail with no user message (only assistant/tool/
+    # system), the LLM API will reject it as orphan tool results. Synthesize
+    # a minimal user placeholder so the persisted history always begins with
+    # a user entry while keeping all real content intact.
+    if compacted and compacted[0].get("role") != "user":
+        compacted = [
+            {"role": "user", "content": "[earlier turns evicted by storage cap]"}
+        ] + compacted
+
     return compacted
 
 
@@ -1278,6 +1338,112 @@ def _check_staged_capacity(
             "Discard an obsolete patch with discard_patch before staging more."
         )
     return None
+
+
+class StagedPatchCapacityError(Exception):
+    """Raised when a staged-patch write would breach session caps.
+
+    Carries the human-readable error string returned by
+    ``_check_staged_capacity`` so editor wrappers can surface it to the
+    LLM as a normal tool error.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _stage_diff_into(patches: dict[str, str], path: str, diff: str) -> None:
+    """Single entry point for any write into ``staged_patches``.
+
+    Centralizes the capacity check so editor tools (create_file,
+    str_replace, delete_file, apply_multi_patch, stage_patch) cannot
+    bypass ``MAX_STAGED_FILES`` / ``MAX_STAGED_TOTAL_BYTES``. Raises
+    ``StagedPatchCapacityError`` (which carries the human-readable
+    error) on breach; callers are expected to catch and return the
+    message to the LLM as a normal tool error.
+    """
+    capacity_error = _check_staged_capacity(patches, path, diff)
+    if capacity_error is not None:
+        raise StagedPatchCapacityError(capacity_error)
+    patches[path] = diff
+
+
+class _GuardedStagedPatches:
+    """dict-like wrapper that routes every ``__setitem__`` through the
+    staged-patch capacity check.
+
+    Editor helpers (create_file, str_replace, delete_file,
+    apply_multi_patch) write into ``staged_patches`` directly inside
+    their own code paths. The orchestrator cannot intercept those
+    internal writes without modifying the helpers, so it wraps the
+    dict it passes in. Read access and ``__delitem__`` /
+    ``.update()`` / etc. fall through to the underlying dict; only
+    assignment goes through ``_stage_diff_into`` so a capacity breach
+    raises ``StagedPatchCapacityError`` before any disk write occurs.
+    """
+
+    __slots__ = ("_target",)
+
+    def __init__(self, target: dict[str, str]) -> None:
+        self._target = target
+
+    def __setitem__(self, path: str, diff: str) -> None:
+        _stage_diff_into(self._target, path, diff)
+
+    def __delitem__(self, path: str) -> None:
+        del self._target[path]
+
+    def __getitem__(self, path: str) -> str:
+        return self._target[path]
+
+    def __contains__(self, path: object) -> bool:
+        return path in self._target
+
+    def __iter__(self):
+        return iter(self._target)
+
+    def __len__(self) -> int:
+        return len(self._target)
+
+    def get(self, path: str, default: str | None = None) -> str | None:
+        return self._target.get(path, default)
+
+    def pop(self, path: str, *args: Any) -> Any:
+        return self._target.pop(path, *args)
+
+    def clear(self) -> None:
+        self._target.clear()
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        # Route each assignment through __setitem__ so the capacity
+        # check applies to bulk updates too.
+        merged: dict[str, str] = {}
+        if args:
+            for arg in args:
+                if isinstance(arg, dict):
+                    merged.update(arg)
+                else:
+                    merged.update(dict(arg))
+        if kwargs:
+            merged.update(kwargs)
+        for key, value in merged.items():
+            self.__setitem__(key, value)
+
+    def items(self):
+        return self._target.items()
+
+    def keys(self):
+        return self._target.keys()
+
+    def values(self):
+        return self._target.values()
+
+    def setdefault(self, path: str, default: str | None = None) -> str | None:
+        if path in self._target:
+            return self._target[path]
+        self.__setitem__(path, default if default is not None else "")
+        return self._target[path]
 
 
 def _prune_conversation_history(
@@ -2523,12 +2689,16 @@ class SessionOrchestrator:
 
         # Issue #105 — bound staged_patches growth: reject (never silently
         # drop) when the upsert would breach the session-wide caps.
-        capacity_error = _check_staged_capacity(staged_patches, path, diff)
-        if capacity_error is not None:
-            return capacity_error
+        # _stage_diff_into centralizes the check; every other editor tool
+        # path funnels through it via the guarded-dict wrapper, so this is
+        # the only place the write itself is gated for stage_patch.
+        try:
+            _stage_diff_into(staged_patches, path, diff)
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
-        # Stage the patch (upsert).
-        staged_patches[path] = diff
+        # Note: staged_patches[path] = diff has already happened inside
+        # _stage_diff_into (which ran the capacity check first).
 
         # If a local checkout exists, sync to disk immediately
         if repo_name:
@@ -2944,18 +3114,27 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_str_replace(
-            path=path,
-            old_str=old_str,
-            new_str=new_str,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            staged_patches=staged_patches,
-            queue=queue,
-            gh_token=self.gh_token,
-            session_id=effective_sid,
-        )
+        # Issue #105 — route every staged-patch write through the
+        # capacity gate so str_replace cannot bypass MAX_STAGED_FILES /
+        # MAX_STAGED_TOTAL_BYTES. tool_str_replace writes the diff inside
+        # the helper; the guard converts any breach into an error string
+        # returned to the LLM (no disk write, no DB write).
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_str_replace(
+                path=path,
+                old_str=old_str,
+                new_str=new_str,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=guarded,
+                queue=queue,
+                gh_token=self.gh_token,
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_create_file(
         self,
@@ -2975,15 +3154,20 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_create_file(
-            path=path,
-            content=content,
-            staged_patches=staged_patches,
-            queue=queue,
-            repo_owner=repo_owner or "",
-            repo_name=repo_name or "",
-            session_id=effective_sid,
-        )
+        # Issue #105 — capacity gate via guarded-dict wrapper. See _tool_str_replace.
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_create_file(
+                path=path,
+                content=content,
+                staged_patches=guarded,
+                queue=queue,
+                repo_owner=repo_owner or "",
+                repo_name=repo_name or "",
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_delete_file(
         self,
@@ -3002,16 +3186,21 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_delete_file(
-            path=path,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            staged_patches=staged_patches,
-            queue=queue,
-            gh_token=self.gh_token,
-            session_id=effective_sid,
-        )
+        # Issue #105 — capacity gate via guarded-dict wrapper. See _tool_str_replace.
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_delete_file(
+                path=path,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=guarded,
+                queue=queue,
+                gh_token=self.gh_token,
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_apply_multi_patch(
         self,
@@ -3032,16 +3221,21 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_apply_multi_patch(
-            patches=patches,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            staged_patches=staged_patches,
-            queue=queue,
-            gh_token=self.gh_token,
-            session_id=effective_sid,
-        )
+        # Issue #105 — capacity gate via guarded-dict wrapper. See _tool_str_replace.
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_apply_multi_patch(
+                patches=patches,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=guarded,
+                queue=queue,
+                gh_token=self.gh_token,
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_get_file_outline(
         self,
