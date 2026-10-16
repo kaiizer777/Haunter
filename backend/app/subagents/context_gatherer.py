@@ -27,7 +27,8 @@ import time
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import case, literal, select
+from sqlalchemy import any_, case, func, literal, select
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import github_client as gh
@@ -325,16 +326,18 @@ async def _empty_result() -> str:
     return ""
 
 
-# Maximum ancestry links fetched by resolve_workflow_run_id's single recursive
-# CTE. Retry chains have no application-level depth limit (the 5-children cap
-# bounds siblings, not depth — retrying a settled retry child is allowed), so
-# the CTE carries its own depth guard: without it a corrupt parent_run_id
-# cycle would recurse forever instead of returning None. The Python walk below
-# keeps the visited-set check, so a cycle that hits the guard still resolves
-# to None (skip the log fetch) rather than a wrong id. 200 links exceeds any
-# realistic retry chain by an order of magnitude while keeping the single
-# fetched rowset tiny.
-_PARENT_CHAIN_MAX_DEPTH = 200
+# Hard ceiling on the SQL recursive CTE. This is a backstop, NOT a real
+# cycle guard: it caps a runaway CTE at an absolute upper bound on
+# depth to prevent an unbounded allocation, but it is well above any
+# realistic retry chain so valid ancestry stays effectively unbounded.
+# The actual cycle detection happens in the recursive term's WHERE
+# clause via the visited-uuid path column (``NOT (Run.id = ANY(path))``).
+# 1,000,000 is six orders of magnitude beyond a realistic one-click
+# retry chain (the 5-children cap bounds siblings, not depth, and a
+# retrying a settled retry child is allowed in principle — but in
+# practice the depth stays under 100). Kept explicit so reviewers
+# notice if it ever needs adjusting.
+_PARENT_CHAIN_HARD_CAP = 1_000_000
 
 
 async def resolve_workflow_run_id(
@@ -355,24 +358,30 @@ async def resolve_workflow_run_id(
     instead of issuing a request against ``/actions/runs/None/logs``.
 
     The whole ancestry is fetched with ONE recursive CTE regardless of chain
-    depth (O(1) queries, not one per level), then walked in Python with a
-    visited set. A fixed hop count was wrong in both directions:
-    ``parent_run_id`` chains are not depth-limited (retrying a settled retry
-    child is allowed, so the cap on direct children does not bound total
-    depth), so any small fixed bound silently dropped the CI logs for a deep
-    chain. ``parent_run_id`` is a self-FK, so a cycle must not spin forever:
-    the CTE depth guard bounds the fetched rowset and the visited set
-    guarantees the walk terminates on any cycle, not just a self-reference.
+    depth (O(1) queries, not one per level), with cycle detection done in SQL
+    via a visited-uuid path column. The previous implementation clamped chain
+    depth at 200, which was wrong in both directions: ``parent_run_id``
+    chains have no application-level depth cap (the 5-child cap counts
+    siblings, not depth), so a fixed bound silently dropped the CI logs for
+    any retry ancestry >= 200. A corrupt cycle would also have recursed
+    forever if the guard were removed entirely. The CTE now keeps a path
+    array of visited ids and the recursive term carries
+    ``NOT (Run.id = ANY(path))`` — a real cycle guard — so valid chains
+    stay unbounded (up to the hard backstop) and corrupt cycles terminate
+    in SQL. The Python walk's visited set is the second tier of defense.
     """
     if run.github_run_id is not None:
         return run.github_run_id
 
+    # Seed: a 1-element array literal of the seed row's id. ``array(col)``
+    # collapses to a 1-element array on a single-row SELECT (i.e. the seed).
     chain = (
         select(
             Run.id,
             Run.parent_run_id,
             Run.github_run_id,
             literal(1).label("depth"),
+            func.array(Run.id, type_=PG_UUID).label("path"),
         )
         .where(Run.id == run.id)
         .cte(name="run_parent_chain", recursive=True)
@@ -383,9 +392,16 @@ async def resolve_workflow_run_id(
             Run.parent_run_id,
             Run.github_run_id,
             (chain.c.depth + 1).label("depth"),
+            func.array_append(chain.c.path, Run.id).label("path"),
         ).where(
             Run.id == chain.c.parent_run_id,
-            chain.c.depth < _PARENT_CHAIN_MAX_DEPTH,
+            # Real cycle guard: don't recurse into an id already in path.
+            # ``chain.c.path`` carries the visited ids in order; revisiting
+            # any of them is a cycle and the row is dropped.
+            ~(Run.id == any_(chain.c.path)),
+            # Hard backstop only — should never trigger in practice. See
+            # ``_PARENT_CHAIN_HARD_CAP`` for the rationale.
+            chain.c.depth < _PARENT_CHAIN_HARD_CAP,
         )
     )
     rows = (
