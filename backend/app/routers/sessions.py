@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import logging
+import random as _random
 import time
 import uuid
 from datetime import datetime, timezone
@@ -107,6 +108,23 @@ _TREE_IGNORE_PREFIXES = (
 
 # Maximum concurrent active sessions per user.
 _MAX_ACTIVE_SESSIONS = 2
+
+# Cross-environment turn-discovery retry budget (issue #117). A reconnect that
+# lands on a worker where the turn is still starting up re-reads the latest
+# turn_id; bound that to a few backoff+jitter retries under a total deadline
+# instead of a 25x fixed-sleep stampede, then surface 409 to the caller.
+#
+# Budget math: with `_TURN_DISCOVERY_BASE_DELAY_S = 0.1` and full-jitter
+# caps at `BASE * 2^(n-1)` clamped at `_TURN_DISCOVERY_MAX_DELAY_S`, the
+# worst-case ceiling across N attempts is sum of caps. Choosing
+# N = 5 gives caps [0.1, 0.2, 0.4, 0.8, 1.0] (the last clamped by
+# `_TURN_DISCOVERY_MAX_DELAY_S = 1.0`), summing to exactly
+# `_TURN_DISCOVERY_DEADLINE_S = 2.5s`. The remaining-time clamp below
+# prevents a single oversized jitter from blowing past the deadline.
+_TURN_DISCOVERY_MAX_ATTEMPTS = 5
+_TURN_DISCOVERY_BASE_DELAY_S = 0.1
+_TURN_DISCOVERY_MAX_DELAY_S = 1.0
+_TURN_DISCOVERY_DEADLINE_S = 2.5
 
 
 # ---------------------------------------------------------------------------
@@ -830,15 +848,51 @@ async def chat_session(
 
         # If turn is active elsewhere, the orchestrator might be in the middle of
         # turn startup (clearing old events and publishing turn_start). Retry turn
-        # discovery for up to 2.5s (25 x 0.1s) until events for the new turn appear.
+        # discovery with bounded exponential backoff + full jitter under a total
+        # deadline until events for the new turn appear. Resume is read-only
+        # (SELECTs only — no turn effects are applied), so a retry can never
+        # double-apply; on exhaustion surface 409 instead of looping silently.
         if await _is_turn_active_elsewhere(db, session_id):
             if active_turn_id is None:
-                for _ in range(25):
-                    await _asyncio.sleep(0.1)
+                deadline = time.monotonic() + _TURN_DISCOVERY_DEADLINE_S
+                for attempt in range(1, _TURN_DISCOVERY_MAX_ATTEMPTS + 1):
+                    # Cap the *planned* sleep by the remaining deadline budget so
+                    # one oversized jitter cannot push a single attempt past
+                    # `_TURN_DISCOVERY_DEADLINE_S`. A negative/zero remaining
+                    # budget means we are already past the deadline — exit
+                    # without sleeping so the caller sees 409 promptly.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    cap = min(
+                        _TURN_DISCOVERY_BASE_DELAY_S * (2 ** (attempt - 1)),
+                        _TURN_DISCOVERY_MAX_DELAY_S,
+                    )
+                    delay = _random.uniform(0, min(cap, remaining))
+                    await _asyncio.sleep(delay)
                     retry_res = await db.execute(latest_turn_stmt)
                     active_turn_id = retry_res.scalars().first()
                     if active_turn_id is not None:
                         break
+                    logger.warning(
+                        "chat resume: turn discovery attempt %d/%d found no turn "
+                        "for session %s; retrying",
+                        attempt,
+                        _TURN_DISCOVERY_MAX_ATTEMPTS,
+                        session_id,
+                    )
+                    # Re-check after the DB read too — a slow read may have
+                    # consumed the rest of the budget, in which case we exit
+                    # instead of returning a stale value on the next iteration.
+                    if time.monotonic() >= deadline:
+                        break
+                if active_turn_id is None:
+                    logger.error(
+                        "chat resume: turn discovery exhausted %d attempts for "
+                        "session %s; turn still active elsewhere",
+                        _TURN_DISCOVERY_MAX_ATTEMPTS,
+                        session_id,
+                    )
 
             # If still None or has no events after discovery retry
             if active_turn_id is None:
