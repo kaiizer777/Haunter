@@ -782,3 +782,163 @@ async def test_flush_mirror_batch_idempotent_fallback() -> None:
         compiled_sql = str(stmt.compile(dialect=postgresql.dialect()))
         assert "ON CONFLICT (session_id, turn_id, event_id) DO NOTHING" in compiled_sql
 
+
+# ---------------------------------------------------------------------------
+# Issue #117: bounded turn-discovery retries on chat resumption
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resume_discovery_bounded_attempts_on_persistent_failure() -> None:
+    """Persistent discovery failure retries at most MAX times, then surfaces 409."""
+    from app.routers.sessions import (
+        _TURN_DISCOVERY_BASE_DELAY_S,
+        _TURN_DISCOVERY_DEADLINE_S,
+        _TURN_DISCOVERY_MAX_ATTEMPTS,
+        _TURN_DISCOVERY_MAX_DELAY_S,
+    )
+
+    assert _TURN_DISCOVERY_MAX_ATTEMPTS <= 5
+    assert _TURN_DISCOVERY_DEADLINE_S <= 2.5
+
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+
+    mock_user = MagicMock(spec=User)
+    mock_user.id = user_id
+
+    mock_session = MagicMock(spec=AgentSession)
+    mock_session.id = session_id
+    mock_session.user_id = user_id
+    mock_session.status = "active"
+    mock_session.active_turn_id = None
+
+    _ACTIVE_TURNS.pop(str(session_id), None)
+
+    class _SessionResult:
+        def scalars(self):
+            class _S:
+                def first(self):
+                    return mock_session
+            return _S()
+
+    class _EmptyResult:
+        def scalars(self):
+            class _S:
+                def first(self):
+                    return None
+            return _S()
+
+    stream_reads = 0
+
+    class _MockDb:
+        async def execute(self, stmt):
+            nonlocal stream_reads
+            stmt_str = str(stmt).lower()
+            if "session_stream_events" in stmt_str:
+                stream_reads += 1
+                return _EmptyResult()
+            return _SessionResult()
+
+    jitter_caps: list[float] = []
+    real_uniform = __import__("random").uniform
+
+    def _recording_uniform(a: float, b: float) -> float:
+        jitter_caps.append(b)
+        return real_uniform(a, b)
+
+    body = SessionChatIn(message="Resume")
+    with (
+        patch("app.routers.sessions._is_turn_active_elsewhere", new_callable=AsyncMock, return_value=True),
+        patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        patch("app.routers.sessions._random.uniform", side_effect=_recording_uniform),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await chat_session(
+            session_id=session_id,
+            body=body,
+            current_user=mock_user,
+            db=_MockDb(),  # type: ignore[arg-type]
+            last_event_id_header="1",
+        )
+
+    # User-visible error surfaces on exhaustion.
+    assert exc_info.value.status_code == 409
+    assert "TURN_ACTIVE_ELSEWHERE" in exc_info.value.detail
+    # 1 initial read + at most MAX discovery retries (was 1 + 25).
+    assert stream_reads <= 1 + _TURN_DISCOVERY_MAX_ATTEMPTS
+    assert mock_sleep.await_count <= _TURN_DISCOVERY_MAX_ATTEMPTS
+    # Exponential backoff caps: base * 2^n, clamped at the max delay.
+    expected_caps = [
+        min(_TURN_DISCOVERY_BASE_DELAY_S * (2**n), _TURN_DISCOVERY_MAX_DELAY_S)
+        for n in range(_TURN_DISCOVERY_MAX_ATTEMPTS)
+    ]
+    assert jitter_caps == pytest.approx(expected_caps)
+
+
+@pytest.mark.asyncio
+async def test_double_resume_applies_no_turn_effects() -> None:
+    """Retried resume is read-only: two resumes issue zero writes (no double-apply)."""
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+
+    mock_user = MagicMock(spec=User)
+    mock_user.id = user_id
+
+    mock_session = MagicMock(spec=AgentSession)
+    mock_session.id = session_id
+    mock_session.user_id = user_id
+    mock_session.status = "active"
+    mock_session.active_turn_id = None
+
+    _ACTIVE_TURNS.pop(str(session_id), None)
+
+    class _SessionResult:
+        def scalars(self):
+            class _S:
+                def first(self):
+                    return mock_session
+            return _S()
+
+    class _EmptyResult:
+        def scalars(self):
+            class _S:
+                def first(self):
+                    return None
+            return _S()
+
+    class _MockDb:
+        def __init__(self) -> None:
+            self.add = MagicMock()
+            self.delete = MagicMock()
+            self.commit = AsyncMock()
+            self.flush = AsyncMock()
+
+        async def execute(self, stmt):
+            stmt_str = str(stmt).lower()
+            if "session_stream_events" in stmt_str:
+                return _EmptyResult()
+            return _SessionResult()
+
+    mock_db = _MockDb()
+    body = SessionChatIn(message="Resume")
+    with (
+        patch("app.routers.sessions._is_turn_active_elsewhere", new_callable=AsyncMock, return_value=True),
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        for _ in range(2):
+            with pytest.raises(HTTPException) as exc_info:
+                await chat_session(
+                    session_id=session_id,
+                    body=body,
+                    current_user=mock_user,
+                    db=mock_db,  # type: ignore[arg-type]
+                    last_event_id_header="1",
+                )
+            assert exc_info.value.status_code == 409
+
+    mock_db.add.assert_not_called()
+    mock_db.delete.assert_not_called()
+    mock_db.commit.assert_not_awaited()
+    mock_db.flush.assert_not_awaited()
+
