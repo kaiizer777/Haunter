@@ -66,7 +66,7 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
 ]
 
-_MAX_FAILURE_REASON_CHARS: int = 10_000_000
+_MAX_FAILURE_REASON_CHARS: int = 2_000
 
 _MAX_PATCH_BYTES: int = 512 * 1024  # 512 KB
 _MAX_REPO_REF_CHARS: int = 200

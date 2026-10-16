@@ -602,14 +602,33 @@ def test_format_failure_reason_handles_empty_message() -> None:
 
 def test_format_failure_reason_truncates_long_messages() -> None:
     """A very long message must be truncated to the cap to keep payloads bounded."""
-    from app.orchestrator import _format_failure_reason
+    from app.orchestrator import _FAILURE_REASON_MAX_CHARS, _format_failure_reason
 
-    huge = "x" * 10_000_005
+    huge = "x" * (_FAILURE_REASON_MAX_CHARS + 5)
     exc = ValueError(huge)
     out = _format_failure_reason("fix_generator", exc)
-    assert len(out) <= 10_000_000
+    assert len(out) <= _FAILURE_REASON_MAX_CHARS
     assert "fix_generator" in out
     assert "ValueError" in out
+
+
+def test_format_failure_reason_clips_100kb_input() -> None:
+    """Issue #104: a 100KB reason string is stored clipped, never whole (TOAST bloat)."""
+    from app.orchestrator import _FAILURE_REASON_MAX_CHARS, _format_failure_reason
+
+    exc = ValueError("y" * 100_000)
+    out = _format_failure_reason("fix_generator", exc)
+    assert len(out) <= _FAILURE_REASON_MAX_CHARS
+    assert len(out) <= 1024
+
+
+def test_sandbox_failure_reason_clips_100kb_input() -> None:
+    """Issue #104: sandbox _sanitize_failure_reason clips 100KB input to its cap."""
+    from app.sandbox.runner import _MAX_FAILURE_REASON_CHARS, _sanitize_failure_reason
+
+    out = _sanitize_failure_reason("z" * 100_000)
+    assert len(out) <= _MAX_FAILURE_REASON_CHARS
+    assert _MAX_FAILURE_REASON_CHARS <= 2048
 
 
 def test_format_failure_reason_html_escapes_message() -> None:

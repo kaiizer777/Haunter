@@ -39,8 +39,18 @@ from app.services.repo_settings import get_repo_settings
 from app.subagents.context_gatherer import gather_context
 from sqlalchemy.exc import InterfaceError, OperationalError
 
-# Truncation cap for failure_reason — set to 10M for full error trace persistence
-_FAILURE_REASON_MAX_CHARS = 10_000_000
+# Truncation cap for runs.failure_reason — short dashboard string, not an
+# error-trace archive. Matches the 500-char contract documented on the
+# column (models.py) and the sibling caps in review_orchestrator/webhooks.
+_FAILURE_REASON_MAX_CHARS = 500
+
+# Cap for the fallback diagnosis comment body (prefix/suffix excluded).
+# Matches the _sanitize_fallback docstring contract (3000 chars).
+_FALLBACK_BODY_MAX_CHARS = 3_000
+
+# Cap for runs.final_summary — first 1000 chars of the LLM PR body,
+# per the column contract documented in models.py.
+_FINAL_SUMMARY_MAX_CHARS = 1_000
 
 # Hard wall-clock timeout for the whole orchestrator body (Phase 1, O-06).
 # Leaves 100s of headroom under the Lambda 900s limit. Any pipeline still
@@ -259,7 +269,7 @@ def _sanitize_fallback(
             "\n\n*Note: Automated fixes were attempted but none passed the CI sandbox. "
             "Please review the diagnosis above to manually resolve the issue.*"
         )
-    max_body = 10_000_000 - len(prefix) - len(suffix)
+    max_body = _FALLBACK_BODY_MAX_CHARS - len(prefix) - len(suffix)
     body_content = escaped[:max_body]
     return f"{prefix}{body_content}{suffix}"
 
@@ -1282,7 +1292,7 @@ async def _orchestrator_pipeline_body(
                         run.pr_number = pr["number"]
                         run.pr_branch = branch
                         run.final_summary = html_module.escape(
-                            pr_text["body"][:10_000_000], quote=False
+                            pr_text["body"][:_FINAL_SUMMARY_MAX_CHARS], quote=False
                         )
                         run.updated_at = datetime.now(timezone.utc)
                         attempt_db.add(run)
