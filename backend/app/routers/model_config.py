@@ -226,8 +226,10 @@ async def update_model_config_endpoint(
             repo.active_model_config_id = config.id
 
         await db.commit()
-        await db.refresh(config)
+        # Invalidate before the refresh() await (#134-3): same stale-window
+        # rationale as the repo-settings write paths.
         invalidate_model_config_cache(body.repo_id)
+        await db.refresh(config)
         logger.info(
             "Repo model config updated: user=%s repo=%s provider=%s model=%s",
             current_user.id,
@@ -263,8 +265,9 @@ async def update_model_config_endpoint(
     db.add(new_config)
     await db.flush()
     await db.commit()
-    await db.refresh(new_config)
+    # Invalidate before the refresh() await (#134-3).
     invalidate_model_config_cache()
+    await db.refresh(new_config)
 
     logger.info(
         "Global model config switched: user=%s provider=%s model=%s",

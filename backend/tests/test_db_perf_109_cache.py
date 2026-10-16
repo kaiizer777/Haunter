@@ -98,8 +98,16 @@ async def test_repo_settings_repeated_reads_single_select():
     first = await get_repo_settings(mock_db, repo_id, auto_create=False)
     second = await get_repo_settings(mock_db, repo_id, auto_create=False)
 
+    # The initial miss returns the live row; the hit must serve a
+    # detached snapshot copy, never the session-bound instance (#134-1:
+    # caching the live row caused MissingGreenlet/DetachedInstanceError
+    # after a later rollback()/close, so `second is row` would re-pin
+    # the bug and is intentionally no longer asserted).
     assert first is row
-    assert second is row
+    assert second is not row
+    assert second.id == row.id
+    assert second.repo_id == repo_id
+    assert second.preset == row.preset
     assert mock_db.scalar.call_count == 1
 
 
