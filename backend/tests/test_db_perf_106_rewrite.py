@@ -361,3 +361,138 @@ def test_plan_delta_statements_selects_operators() -> None:
     assert not any("jsonb_set" in sql for sql in removal_sql)
     assert any(" - " in sql for sql in removal_sql)
 
+
+# ---------------------------------------------------------------------------
+# Canonical-usage retry normalization (cubic#4297090208, cubic#4297090217,
+# cubic#4297090228, cubic#4297090249)
+# ---------------------------------------------------------------------------
+
+
+async def test_fix_generator_format_retry_accumulates_usage() -> None:
+    """First-call tokens must not be dropped on a format retry (cubic#4297090208).
+
+    Previously the retry path overwrote ``response`` with the second call's
+    dict, so only the last call's usage was persisted to RunStep. After the
+    fix the two calls' usages are normalized and summed.
+    """
+    from unittest.mock import patch as _patch
+
+    from app.subagents import fix_generator as fg
+
+    valid_format_json = (
+        '{"patch":"--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-old\\n+new",'
+        '"confidence":80,"strategy_notes":""}'
+    )
+    invalid_format_json = (
+        '{"patch":"plain text no diff markers",'
+        '"confidence":80,"strategy_notes":""}'
+    )
+    valid_fix = SimpleNamespace(patch="--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new", confidence=80, strategy_notes="")
+    rejected_fix = SimpleNamespace(patch="plain text no diff markers", confidence=80, strategy_notes="")
+
+    call_log: list[dict[str, Any]] = []
+
+    async def fake_call_and_parse(**_kwargs: Any):
+        if not call_log:
+            call_log.append({"usage": {"input_tokens": 100, "output_tokens": 50}})
+            return rejected_fix, {"usage": {"input_tokens": 100, "output_tokens": 50}}
+        call_log.append({"usage": {"input_tokens": 30, "output_tokens": 20}})
+        return valid_fix, {"usage": {"input_tokens": 30, "output_tokens": 20}}
+
+    db = AsyncMock()
+    with _patch.object(fg, "_call_and_parse", side_effect=fake_call_and_parse):
+        _, response = await fg._call_with_format_retry(
+            messages=[],
+            diagnosis_summary="d",
+            prior_attempt=None,
+            db=db,
+            run_id=uuid.uuid4(),
+            repo_id=None,
+            review_feedback=None,
+        )
+
+    in_tokens, out_tokens = ta.normalize_usage(response.get("usage"))
+    assert in_tokens == 130
+    assert out_tokens == 70
+
+
+async def test_fix_generator_retry_normalizes_messy_usage() -> None:
+    """Retry-path ``+`` on raw dict.get crashed on ``None`` (cubic#4297090249)."""
+    from unittest.mock import patch as _patch
+
+    from app.subagents import fix_generator as fg
+
+    valid_fix_json = (
+        '{"patch":"--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-old\\n+new",'
+        '"confidence":80,"strategy_notes":""}'
+    )
+
+    async def fake_llm_complete(**_kwargs: Any):
+        if not getattr(fake_llm_complete, "_count", None):
+            fake_llm_complete._count = 1
+            return {
+                "content": "garbage no diff markers",
+                "usage": {"input_tokens": None, "output_tokens": 5},
+            }
+        return {
+            "content": valid_fix_json,
+            "usage": {"input_tokens": "7", "output_tokens": "3"},
+        }
+
+    db = AsyncMock()
+    db_path = "app.subagents.fix_generator.LLMClient"  # not used directly
+    with _patch.object(fg, "LLMClient") as _client_cls:
+        _client_cls.return_value.complete = AsyncMock(side_effect=fake_llm_complete)
+        _, response = await fg._call_and_parse(
+            messages=[],
+            diagnosis_summary="d",
+            prior_attempt=None,
+            db=db,
+            run_id=uuid.uuid4(),
+            repo_id=None,
+        )
+
+    in_tokens, out_tokens = ta.normalize_usage(response.get("usage"))
+    # None -> 0; "7" -> 7; "3" -> 3. The first call's bad patch was discarded
+    # but its usage is still summed in (via the retry-path normalize).
+    assert in_tokens == 7
+    assert out_tokens == 8
+
+
+async def test_pr_writer_retry_normalizes_messy_usage() -> None:
+    """pr_writer retry ``+`` must be replaced with normalized sum (cubic#4297090217)."""
+    from unittest.mock import patch as _patch
+
+    from app.subagents import pr_writer as pw
+
+    valid_pr_json = (
+        '{"title":"valid title here",'
+        '"body":"' + ("a" * 30) + '"}'
+    )
+
+    async def fake_llm_complete(**_kwargs: Any):
+        if not getattr(fake_llm_complete, "_count", None):
+            fake_llm_complete._count = 1
+            return {
+                "content": "not json",
+                "usage": {"input_tokens": None, "output_tokens": 5},
+            }
+        return {
+            "content": valid_pr_json,
+            "usage": {"input_tokens": "11", "output_tokens": "4"},
+        }
+
+    db = AsyncMock()
+    with _patch.object(pw, "LLMClient") as _client_cls:
+        _client_cls.return_value.complete = AsyncMock(side_effect=fake_llm_complete)
+        _, response = await pw._call_and_parse_pr(
+            diagnosis_summary="d",
+            patch_text="diff",
+            db=db,
+            run_id=uuid.uuid4(),
+            repo_id=None,
+        )
+
+    in_tokens, out_tokens = ta.normalize_usage(response.get("usage"))
+    assert in_tokens == 11
+    assert out_tokens == 9

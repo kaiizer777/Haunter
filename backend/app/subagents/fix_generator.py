@@ -735,14 +735,16 @@ async def _call_and_parse(
 
     try:
         fix_output = FixOutput.model_validate_json(retry_content)
-        # Accumulate token usage across both calls for the trace row
-        usage = retry_response.get("usage", {})
-        first_usage = response.get("usage", {})
+        # Accumulate token usage across both calls for the trace row.
+        # Each per-call usage is normalized first so a ``None`` count
+        # can't TypeError on ``+``, and a numeric-string count can't
+        # silently concatenate into the wrong total (cubic#4297090228
+        # and the canonical-usage rule this PR introduced).
+        retry_in, retry_out = normalize_usage(retry_response.get("usage"))
+        first_in, first_out = normalize_usage(response.get("usage"))
         combined_usage = {
-            "input_tokens": usage.get("input_tokens", 0)
-            + first_usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0)
-            + first_usage.get("output_tokens", 0),
+            "input_tokens": retry_in + first_in,
+            "output_tokens": retry_out + first_out,
         }
         retry_response = {**retry_response, "usage": combined_usage}
         return fix_output, retry_response
@@ -784,12 +786,23 @@ async def _call_with_format_retry(
     if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
         return fix_output, response
 
+    # Running totals across retries — normalize_usage each response before
+    # adding so a ``None`` count cannot TypeError and a numeric-string count
+    # cannot silently concatenate (cubic#4297090208 / cubic#4297090249).
+    # Previously the retry path overwrote ``response``, dropping the first
+    # call's tokens from the trace row.
+    total_in, total_out = normalize_usage(response.get("usage"))
+
     # Retry loop. _PATCH_FORMAT_RETRY_CAP=1 means: try once, retry once,
     # then give up. Path-traversal rejections (the base PatchRejected
     # class) are NOT caught here — they bubble up immediately.
     for _format_attempt in range(_PATCH_FORMAT_RETRY_CAP):
         try:
             _validate_patch(fix_output.patch)
+            response = {**response, "usage": {
+                "input_tokens": total_in,
+                "output_tokens": total_out,
+            }}
             return fix_output, response
         except PatchFormatRejected as e:
             logger.warning(
@@ -812,15 +825,27 @@ async def _call_with_format_retry(
                 repo_id=repo_id,
                 review_feedback=review_feedback,
             )
+            # Accumulate this retry's usage into the running totals.
+            new_in, new_out = normalize_usage(response.get("usage"))
+            total_in += new_in
+            total_out += new_out
             if (
                 fix_output.confidence < LOW_CONFIDENCE_THRESHOLD
                 or not fix_output.patch.strip()
             ):
+                response = {**response, "usage": {
+                    "input_tokens": total_in,
+                    "output_tokens": total_out,
+                }}
                 return fix_output, response
 
     # Final attempt: validate and raise exhausted if it still fails.
     try:
         _validate_patch(fix_output.patch)
+        response = {**response, "usage": {
+            "input_tokens": total_in,
+            "output_tokens": total_out,
+        }}
         return fix_output, response
     except PatchFormatRejected as e:
         raise PatchFormatRetryExhausted(str(e)) from e

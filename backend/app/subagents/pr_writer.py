@@ -233,12 +233,16 @@ async def _call_and_parse_pr(
 
     try:
         pr_output = PROutput.model_validate_json(retry_content)
-        # Combine token usage across both calls
-        u1 = response.get("usage", {})
-        u2 = retry_response.get("usage", {})
+        # Combine token usage across both calls. Normalize each
+        # per-call usage first so a ``None`` count cannot TypeError on
+        # ``+``, and a numeric-string count cannot silently concatenate
+        # into the wrong total (cubic#4297090217 — the canonical-usage
+        # rule this PR introduced must apply in the retry path too).
+        u1_in, u1_out = normalize_usage(response.get("usage"))
+        u2_in, u2_out = normalize_usage(retry_response.get("usage"))
         combined = {
-            "input_tokens": u1.get("input_tokens", 0) + u2.get("input_tokens", 0),
-            "output_tokens": u1.get("output_tokens", 0) + u2.get("output_tokens", 0),
+            "input_tokens": u1_in + u2_in,
+            "output_tokens": u1_out + u2_out,
         }
         return pr_output, {**retry_response, "usage": combined}
     except ValidationError as second_err:
