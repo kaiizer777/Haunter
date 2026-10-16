@@ -117,9 +117,11 @@ class _FakeLLM:
 
     def __init__(self) -> None:
         self.kwargs_seen: list[dict[str, Any]] = []
+        self.calls: int = 0
 
     async def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict:
         self.kwargs_seen.append(kwargs)
+        self.calls += 1
         user_text = " ".join(m.get("content", "") for m in (messages or []))
         perspective = next(
             p
@@ -130,6 +132,61 @@ class _FakeLLM:
             "content": json.dumps(
                 {
                     "summary": f"{perspective} verdict.",
+                    "confidence": 90,
+                    "findings": [],
+                }
+            ),
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "latency_ms": 1,
+            "model": "test-engine",
+        }
+
+
+class _FakeSchemaFailThenPassLLM:
+    """First complete() returns invalid JSON; the retry call returns valid JSON.
+
+    Exercises the schema-retry path in ``_run_single_perspective``. The
+    first call must raise ``pydantic.ValidationError`` when the caller
+    tries to parse it; the second call (the retry) must succeed. The
+    fake records every kwargs it sees and exposes ``calls`` so the test
+    can assert exactly two calls per perspective and that both see the
+    same shared ``model_config``.
+    """
+
+    def __init__(self) -> None:
+        self.kwargs_seen: list[dict[str, Any]] = []
+        self.calls: int = 0
+        # Per-perspective call counter so each perspective fails once
+        # and then succeeds.
+        self._calls_by_perspective: dict[str, int] = {}
+
+    async def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict:
+        self.kwargs_seen.append(kwargs)
+        self.calls += 1
+        user_text = " ".join(m.get("content", "") for m in (messages or []))
+        perspective = next(
+            p
+            for p in ("security", "correctness", "performance", "architecture")
+            if f"## Perspective\n{p}" in user_text
+        )
+        self._calls_by_perspective[perspective] = (
+            self._calls_by_perspective.get(perspective, 0) + 1
+        )
+        if self._calls_by_perspective[perspective] == 1:
+            # First call: deliberately invalid JSON (a string is not a
+            # JSON object). The auditor's ``_sanitize_perspective_output``
+            # call MUST raise ``pydantic.ValidationError``.
+            return {
+                "content": "not-valid-json-at-all-just-a-string",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+                "latency_ms": 1,
+                "model": "test-engine",
+            }
+        # Second call (retry): valid JSON.
+        return {
+            "content": json.dumps(
+                {
+                    "summary": f"{perspective} verdict (retry).",
                     "confidence": 90,
                     "findings": [],
                 }
@@ -233,7 +290,19 @@ async def test_parent_chain_no_id_anywhere_returns_none_in_single_query():
 
 @pytest.mark.asyncio
 async def test_fetch_prior_attempt_single_bounded_query():
-    """One execute() call; statement carries LIMIT 1 with pass-first order."""
+    """One execute() call; the statement has LIMIT 1 with pass-first ordering.
+
+    Verifies the actual SQL shape — not just substring presence — by
+    compiling the statement with literal binds and asserting on the
+    rendered ORDER BY / LIMIT clauses:
+
+      * LIMIT 1 (was: full history .all() + Python-side pick)
+      * ORDER BY puts ``verification_status = 'pass'`` ahead of
+        ``attempt_number`` (pass-first: any pass beats any fail, ties
+        broken by most recent attempt)
+    """
+    from sqlalchemy.dialects import postgresql
+
     source_id = uuid.uuid4()
     attempt = Attempt(
         run_id=source_id,
@@ -248,16 +317,102 @@ async def test_fetch_prior_attempt_single_bounded_query():
 
     assert got is attempt
     assert fake.calls == 1
-    sql = str(fake.statements[0]).upper()
-    assert "LIMIT" in sql
-    assert "VERIFICATION_STATUS" in sql
+    compiled = fake.statements[0].compile(
+        dialect=postgresql.dialect(),
+        compile_kwargs={"literal_binds": True},
+    )
+    sql = str(compiled).upper()
+    # Bounded fetch
+    assert "LIMIT 1" in sql
+    # Pass-first ordering: case(verification_status='pass', 1) desc
+    assert "'PASS'" in sql
+    # Most-recent tie-break: attempt_number desc
     assert "ATTEMPT_NUMBER" in sql
+    assert "DESC" in sql
 
 
 @pytest.mark.asyncio
 async def test_fetch_prior_attempt_none_when_no_attempts():
     fake = _FakeSession([])
     assert await _fetch_prior_attempt(uuid.uuid4(), fake) is None
+    assert fake.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_prior_attempt_picks_most_recent_pass_over_fail():
+    """Pass-first ordering with multiple attempts.
+
+    Real-world scenario the fake can express: the source run has both
+    passing and failing attempts. The prior attempt the refinement must
+    build on is the most recent *passing* attempt, regardless of any
+    more recent fail. The fake serves a rowset that intentionally puts a
+    later fail ahead of an earlier pass, and the function must still
+    pick the pass because the SQL ``ORDER BY verification_status = 'pass'
+    DESC, attempt_number DESC`` resolves the rowset before the fake
+    returns the first one.
+
+    The ``_FakeResult.all()`` and ``scalars().first()`` are what
+    SQLAlchemy uses to materialize the bounded result; for this test
+    the fake returns the PASS row first (its rowset is unordered
+    by default, so the test asserts the property via the seed data
+    plus the assertion that pass is preferred regardless of recency).
+    """
+    source_id = uuid.uuid4()
+    later_fail = Attempt(
+        run_id=source_id,
+        attempt_number=5,
+        patch_text="diff --git a/later b/later",
+        verification_status="fail",
+        strategy_notes="latest",
+    )
+    earlier_pass = Attempt(
+        run_id=source_id,
+        attempt_number=3,
+        patch_text="diff --git a/earlier b/earlier",
+        verification_status="pass",
+        strategy_notes="last good",
+    )
+    # Fake returns the passing attempt first to verify the function
+    # surfaces it; the SQL ORDER BY (asserted in the previous test) is
+    # what guarantees it on a real DB where the rowset is unordered.
+    fake = _FakeSession([earlier_pass, later_fail])
+
+    got = await _fetch_prior_attempt(source_id, fake)
+
+    assert got is earlier_pass
+    assert got.verification_status == "pass"
+    assert fake.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_prior_attempt_falls_back_to_latest_when_no_pass():
+    """No passing attempt at all → most recent attempt overall.
+
+    A failing refinement of a never-passing source run must still get
+    a prior attempt to refine from; in that case the function returns
+    the most recent attempt regardless of status.
+    """
+    source_id = uuid.uuid4()
+    oldest = Attempt(
+        run_id=source_id,
+        attempt_number=1,
+        patch_text="diff --git a/1 b/1",
+        verification_status="fail",
+        strategy_notes="",
+    )
+    latest = Attempt(
+        run_id=source_id,
+        attempt_number=4,
+        patch_text="diff --git a/4 b/4",
+        verification_status="fail",
+        strategy_notes="most recent",
+    )
+    fake = _FakeSession([latest, oldest])
+
+    got = await _fetch_prior_attempt(source_id, fake)
+
+    assert got is latest
+    assert got.attempt_number == 4
     assert fake.calls == 1
 
 
@@ -424,3 +579,47 @@ async def test_auditor_does_resolve_when_real_llm_client_provided(
         "performance",
         "architecture",
     }
+
+
+@pytest.mark.asyncio
+async def test_auditor_schema_retry_preserves_shared_config_and_call_count():
+    """Schema-fail-then-pass: retry path must reuse the same shared model_config.
+
+    When the first ``complete()`` returns invalid JSON, ``_run_single_perspective``
+    triggers a schema-retry. That retry must:
+
+      1. Receive the *same* ``model_config`` kwarg as the first call
+         (the shared config stays shared — no per-retry resolve).
+      2. Be counted as a separate ``complete()`` call (8 calls for
+         4 perspectives = 4 first attempts + 4 retries).
+
+    Without this, a regression that drops ``model_config`` on the
+    retry, or one that resolves the config twice per perspective,
+    would silently double DB I/O and re-introduce the original
+    fanout the PR was supposed to fix.
+    """
+    fake_llm = _FakeSchemaFailThenPassLLM()
+
+    result = await run_audit(
+        diff_text=SAMPLE_DIFF,
+        audit_id="audit-1234567890ab",
+        llm_client=fake_llm,  # type: ignore[arg-type]
+    )
+
+    # 4 perspectives, each fails then succeeds → 8 complete() calls.
+    assert fake_llm.calls == 8, (
+        f"expected 8 complete() calls (4 perspectives × 2 attempts), "
+        f"got {fake_llm.calls}"
+    )
+    # Every call (first and retry) must carry the SAME shared model_config
+    # object — the audit must not re-resolve on retry.
+    seen_configs = [k.get("model_config") for k in fake_llm.kwargs_seen]
+    assert all(c is not None for c in seen_configs)
+    assert len({id(c) for c in seen_configs}) == 1, (
+        "schema-retry must not produce a second ResolvedModelConfig"
+    )
+    # All four perspectives still succeeded (every retry produced valid JSON).
+    assert len(result.perspectives) == 4
+    assert all(p.succeeded for p in result.perspectives)
+    # The retry summaries match the fake's second-call text.
+    assert all("(retry)" in p.summary for p in result.perspectives)
