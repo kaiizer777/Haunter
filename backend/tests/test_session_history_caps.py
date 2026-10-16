@@ -140,3 +140,153 @@ async def test_persist_compacts_history_before_commit() -> None:
     assert _history_size_bytes(stored) < MAX_HISTORY_BYTES
     assert len(stored) <= MAX_HISTORY_ENTRIES
     mock_db.commit.assert_awaited()
+
+
+# ------------------------------------------------------------------
+# Issue #105 follow-up coverage — Commit 4 (cubic#4296866350, cubic#4296866356,
+# cubic#4296866384).
+# ------------------------------------------------------------------
+
+
+def test_window_truncates_to_newest_200_when_exceeded() -> None:
+    """MAX_HISTORY_ENTRIES sliding window actually truncates past 200.
+
+    cubic#4296866384 (P3): the prior 50-attempt run produced 150 entries,
+    so the 200-entry window was never exercised. Run 75 attempts × 3
+    entries (225 total) and assert the oldest turns are dropped while
+    the newest survive in order — bounded by MAX_HISTORY_ENTRIES.
+    """
+    history: list[dict[str, Any]] = []
+    for attempt in range(75):
+        history = _compact_history_for_storage(
+            history + _make_attempt_entries(attempt, output_size=500)
+        )
+    # Window trimmed past MAX_HISTORY_ENTRIES (turn-aligned: 198 = 66 turns).
+    assert len(history) <= MAX_HISTORY_ENTRIES
+    # The newest attempt (74) survived intact.
+    assert history[-1]["tool_call_id"] == "c74"
+    assert any(e.get("content") == "fix attempt 74" for e in history)
+    # The very first attempt (0) and earliest survivors (turns 0-8) were dropped.
+    assert all(
+        e.get("content") != "fix attempt 0" and e.get("tool_call_id") != "c0"
+        for e in history
+    )
+    assert all(
+        e.get("content") != "fix attempt 8" and e.get("tool_call_id") != "c8"
+        for e in history
+    )
+    # The first surviving turn is attempt 9 (entry 27 onwards).
+    assert history[0].get("role") == "user"
+    assert history[0].get("content") == "fix attempt 9"
+
+
+def test_staged_capacity_rejects_when_total_bytes_exceeded() -> None:
+    """MAX_STAGED_TOTAL_BYTES rejection branch is exercised.
+
+    cubic#4296866356 (P2): the prior loop used 6 KB diffs, so the file cap
+    tripped at roughly 600 KB and the byte-cap branch was never run. Stage
+    a few large diffs (well under MAX_STAGED_FILES but each close to 1 MB)
+    and assert the next upsert is rejected with the explicit byte-cap error.
+    """
+    # Each diff is ~1.4 MB of body content (well under MAX_STAGED_FILES but
+    # large enough that two of them exceed MAX_STAGED_TOTAL_BYTES once
+    # JSON-escaped). The candidate-dict serialization in _check_staged_capacity
+    # adds ~50 bytes of key/quoting overhead per entry.
+    big_diff = "+x\n" * 350_000  # ~1.4 MB of body
+    big_diff_path = "big.py"
+    assert _check_staged_capacity({}, big_diff_path, big_diff) is None
+
+    patches: dict[str, str] = {big_diff_path: big_diff}
+    # Adding a second equally-large diff must trip MAX_STAGED_TOTAL_BYTES.
+    overflow_err = _check_staged_capacity(patches, "second_big.py", big_diff)
+    assert overflow_err is not None
+    assert "exceed" in overflow_err.lower()
+    assert "KB" in overflow_err or "MB" in overflow_err
+    # The original patch is preserved (rejection is non-destructive).
+    assert big_diff_path in patches
+
+
+async def test_persist_fallback_path_compacts_history() -> None:
+    """Fallback persist (after self.db.commit raises) still writes compacted history.
+
+    cubic#4296866350 (P2): _persist has a fallback path through rollback()
+    + a second async_session_maker() session. The prior test only covered
+    the successful commit. Force self.db.commit() to raise, capture the
+    row assigned on the fallback session, and assert it received the
+    compacted body — not the unbounded input.
+    """
+    from contextlib import asynccontextmanager
+
+    # Patch the fallback session factory so _persist's `async with
+    # async_session_maker() as fallback_db` resolves to a MagicMock we can
+    # inspect. The patch is scoped to this test only via monkeypatch.
+    import app.db as app_db_mod
+
+    captured: dict[str, Any] = {}
+
+    fallback_row = MagicMock()
+    fallback_row.id = uuid.uuid4()
+    fallback_row.conversation_history = None
+    fallback_row.staged_patches = None
+
+    fallback_session = MagicMock()
+    fallback_session.execute = AsyncMock(
+        return_value=MagicMock(
+            scalars=MagicMock(
+                return_value=MagicMock(first=MagicMock(return_value=fallback_row))
+            )
+        )
+    )
+
+    async def _fallback_commit():
+        captured["fallback_committed"] = True
+
+    fallback_session.commit = _fallback_commit
+
+    @asynccontextmanager
+    async def _fake_session_maker():
+        yield fallback_session
+
+    original_factory = app_db_mod.async_session_maker
+    app_db_mod.async_session_maker = _fake_session_maker
+    try:
+        mock_db = AsyncMock()
+        mock_db.is_active = True
+        # Force the primary commit to raise so the fallback path runs.
+        mock_db.commit = AsyncMock(side_effect=RuntimeError("primary commit failed"))
+        mock_db.rollback = AsyncMock()
+        mock_db.refresh = AsyncMock()
+
+        orch = SessionOrchestrator(session_id=uuid.uuid4(), db=mock_db, gh_token=None)
+        orch._llm = AsyncMock()
+
+        session = MagicMock()
+        session.id = orch.session_id
+        session.status = "active"
+        session.checkpoints = []
+        session.plan = []
+        session.waiting_input = None
+
+        # Build a history that exceeds MAX_HISTORY_BYTES.
+        big_history: list[dict[str, Any]] = []
+        for attempt in range(80):
+            big_history = big_history + _make_attempt_entries(attempt)
+        assert _history_size_bytes(big_history) > MAX_HISTORY_BYTES
+
+        await orch._persist(session, big_history, {"a.py": "diff"})
+
+        # The primary commit raised (we asserted that via mock_db.commit).
+        mock_db.commit.assert_awaited()
+        # Rollback ran before the fallback.
+        mock_db.rollback.assert_awaited()
+        # Fallback session wrote the compacted history.
+        assert captured.get("fallback_committed") is True
+        stored_fallback = fallback_row.conversation_history
+        assert stored_fallback is not None
+        assert _history_size_bytes(stored_fallback) < MAX_HISTORY_BYTES
+        assert len(stored_fallback) <= MAX_HISTORY_ENTRIES
+        # The fallback body must start with a user message (no orphan
+        # tool results from turn-anchored eviction).
+        assert stored_fallback[0].get("role") == "user"
+    finally:
+        app_db_mod.async_session_maker = original_factory
