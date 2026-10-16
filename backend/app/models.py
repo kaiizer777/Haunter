@@ -780,6 +780,9 @@ class SessionStreamEvent(Base):
     session: Mapped["AgentSession"] = relationship("AgentSession", back_populates="stream_events")
 
     __table_args__ = (
+        UniqueConstraint(
+            "session_id", "turn_id", "event_id", name="uq_session_stream_events_session_turn_event"
+        ),
         Index("ix_session_stream_events_lookup", "session_id", "turn_id", "event_id"),
     )
 

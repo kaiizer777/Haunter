@@ -618,3 +618,161 @@ async def test_chat_session_cross_env_reconnect_retry_discovery_success() -> Non
         assert resp.status_code == 200
         assert mock_sleep.await_count >= 1
 
+
+@pytest.mark.asyncio
+async def test_stream_from_db_deduplicates_duplicate_event_ids() -> None:
+    """_stream_from_db guarantees monotonic event_id order and deduplicates identical event_ids."""
+    session_id = uuid.uuid4()
+    turn_id = str(uuid.uuid4())
+
+    events = [
+        SessionStreamEvent(
+            id=1,
+            session_id=session_id,
+            turn_id=turn_id,
+            event_id=1,
+            event="thought",
+            chunk='event: thought\nid: 1\ndata: {"delta":"first"}\n\n',
+        ),
+        SessionStreamEvent(
+            id=2,
+            session_id=session_id,
+            turn_id=turn_id,
+            event_id=1,  # Duplicate event_id from ambiguous commit retry
+            event="thought",
+            chunk='event: thought\nid: 1\ndata: {"delta":"duplicate"}\n\n',
+        ),
+        SessionStreamEvent(
+            id=3,
+            session_id=session_id,
+            turn_id=turn_id,
+            event_id=2,
+            event="done",
+            chunk='event: done\nid: 2\ndata: {"session_id":"..."}\n\n',
+        ),
+    ]
+
+    class _MockResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            class _Scalars:
+                def __init__(self, r):
+                    self._r = r
+
+                def all(self):
+                    return self._r
+
+            return _Scalars(self._rows)
+
+    class _MockSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def execute(self, stmt):
+            return _MockResult(events)
+
+    from app.routers.sessions import _stream_from_db
+
+    with patch("app.db.async_session_maker", return_value=_MockSession()):
+        chunks = [
+            chunk
+            async for chunk in _stream_from_db(
+                session_id=session_id,
+                turn_id=turn_id,
+                last_event_id=0,
+                request=None,
+            )
+        ]
+
+    # Only 2 events should be yielded (id: 1 and id: 2), duplicate id: 1 must be discarded
+    assert len(chunks) == 2
+    assert "id: 1" in chunks[0]
+    assert "first" in chunks[0]
+    assert "id: 2" in chunks[1]
+
+
+@pytest.mark.asyncio
+async def test_flush_mirror_batch_idempotent_fallback() -> None:
+    """_flush_mirror_batch handles ambiguous commit failures by falling back per-event with conflict handling."""
+    from app.services.session_orchestrator import SessionOrchestrator
+    from sqlalchemy.exc import IntegrityError
+
+    session_id = uuid.uuid4()
+    turn_id = str(uuid.uuid4())
+
+    orch = SessionOrchestrator(
+        session_id=session_id,
+        db=AsyncMock(),
+        gh_token="dummy",
+        turn_id=turn_id,
+    )
+
+    batch = [
+        (1, "thought", 'event: thought\nid: 1\ndata: {"delta":"hi"}\n\n'),
+        (2, "done", 'event: done\nid: 2\ndata: {"ok":true}\n\n'),
+    ]
+
+    # Simulate batch commit failure, followed by per-event fallback where event 1 triggers IntegrityError (already saved)
+    # and event 2 succeeds.
+    class _FailingBatchDb:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def add_all(self, items):
+            pass
+
+        async def execute(self, stmt):
+            pass
+
+        async def commit(self):
+            raise RuntimeError("Connection dropped right after commit")
+
+    class _FallbackDb:
+        def __init__(self):
+            self.committed = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def add(self, item):
+            self.item = item
+
+        async def execute(self, stmt):
+            pass
+
+        async def commit(self):
+            # If item event_id is 1, simulate duplicate conflict
+            if getattr(self, "item", None) and self.item.event_id == 1:
+                raise IntegrityError("unique constraint violated", params=None, orig=Exception())
+            self.committed.append(getattr(self, "item", None))
+
+    failing_db = _FailingBatchDb()
+    fallback_db = _FallbackDb()
+    call_count = 0
+
+    def _session_factory():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return failing_db
+        return fallback_db
+
+    with patch("app.db.async_session_maker", side_effect=_session_factory):
+        await orch._flush_mirror_batch(batch)
+
+    # Batch should be cleared and execution must succeed without raising
+    assert len(batch) == 0
+    assert len(fallback_db.committed) == 1
+    assert fallback_db.committed[0].event_id == 2
+

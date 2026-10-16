@@ -75,18 +75,55 @@ class _ScriptedSession:
         if entity is User:
             return FakeResult([self._user])
 
-        # Batch query selects (CodeReview.id, CodeReview.pr_number, Repo.owner, Repo.name)
+        # Batch query selects (CodeReview.id, CodeReview.pr_number, CodeReview.commit_sha, Repo)
         expr_names = [d.get("name") for d in col_descs]
-        if expr_names == ["id", "pr_number", "owner", "name"]:
-            rows = [
-                (
-                    r.id,
-                    r.pr_number,
-                    r.repo.owner if r.repo else None,
-                    r.repo.name if r.repo else None,
-                )
-                for r in self._reviews
-            ]
+        if expr_names == ["id", "pr_number", "commit_sha", "Repo"] or expr_names == ["id", "pr_number", "owner", "name"]:
+            allowed_ids: Optional[set[uuid.UUID]] = None
+            required_user_id: Optional[uuid.UUID] = None
+
+            if statement.whereclause is not None:
+                clauses = getattr(statement.whereclause, "clauses", [statement.whereclause])
+                for clause in clauses:
+                    col_name = getattr(getattr(clause, "left", None), "name", None)
+                    if col_name == "id":
+                        vals = getattr(getattr(clause, "right", None), "value", None)
+                        if vals is not None:
+                            allowed_ids = {uuid.UUID(str(v)) if not isinstance(v, uuid.UUID) else v for v in vals}
+                    elif col_name == "user_id":
+                        val = getattr(getattr(clause, "right", None), "value", None)
+                        if val is not None:
+                            required_user_id = uuid.UUID(str(val)) if not isinstance(val, uuid.UUID) else val
+
+            filtered_reviews = []
+            for r in self._reviews:
+                if required_user_id is not None:
+                    if not r.repo or r.repo.user_id != required_user_id:
+                        continue
+                if allowed_ids is not None:
+                    if r.id not in allowed_ids:
+                        continue
+                filtered_reviews.append(r)
+
+            if expr_names == ["id", "pr_number", "commit_sha", "Repo"]:
+                rows = [
+                    (
+                        r.id,
+                        r.pr_number,
+                        r.commit_sha,
+                        r.repo,
+                    )
+                    for r in filtered_reviews
+                ]
+            else:
+                rows = [
+                    (
+                        r.id,
+                        r.pr_number,
+                        r.repo.owner if r.repo else None,
+                        r.repo.name if r.repo else None,
+                    )
+                    for r in filtered_reviews
+                ]
             return FakeResult(rows)
 
         if entity is CodeReview:
@@ -637,15 +674,34 @@ async def test_batch_associated_prs_happy_path(
 async def test_batch_associated_prs_multi_tenant_and_unknown_isolation(
     make_auth_client, install_db
 ) -> None:
-    """Other users' review IDs and unknown review IDs are omitted (no oracle leak)."""
+    """Other users' review IDs, unrequested reviews, and unknown IDs are omitted,
+    and query filters on Repo.user_id and CodeReview.id are strictly asserted."""
     user = _user()
     repo = _repo(user)
     owned_review = _review(repo, pr_number=10)
+    unrequested_review = _review(repo, pr_number=20)
 
-    # In DB, only owned_review matches the query (Repo.user_id == current_user.id)
-    install_db(user, reviews=[owned_review])
+    other_user = User(
+        id=uuid.UUID("33333333-3333-4333-8333-333333333333"),
+        github_id=90002,
+        github_username="other-assoc-user",
+        access_token=None,
+        avatar_url=None,
+        role="user",
+    )
+    other_repo = Repo(
+        id=uuid.UUID("44444444-4444-4444-8444-444444444444"),
+        user_id=other_user.id,
+        owner="acme",
+        name="widgets",
+        default_branch="main",
+        created_at=_FIXED_NOW,
+    )
+    other_review = _review(other_repo, pr_number=30)
 
-    other_user_review_id = str(uuid.uuid4())
+    # Seed all three reviews in the database stand-in
+    session = install_db(user, reviews=[owned_review, unrequested_review, other_review])
+
     unknown_review_id = str(uuid.uuid4())
 
     async with make_auth_client(user.id) as ac:
@@ -654,7 +710,7 @@ async def test_batch_associated_prs_multi_tenant_and_unknown_isolation(
             json={
                 "review_ids": [
                     str(owned_review.id),
-                    other_user_review_id,
+                    str(other_review.id),
                     unknown_review_id,
                 ]
             },
@@ -662,10 +718,67 @@ async def test_batch_associated_prs_multi_tenant_and_unknown_isolation(
 
     assert resp.status_code == 200, resp.text
     items = resp.json()["items"]
-    # Only the owned review appears in the response
+    # Only the owned and requested review appears in the response
     assert len(items) == 1
     assert items[0]["review_id"] == str(owned_review.id)
     assert items[0]["associated_pr"]["number"] == 10
+
+    # Explicitly assert that the executed query enforced both query filters in SQL
+    batch_stmt = [
+        s for s in session.statements
+        if [d.get("name") for d in s.column_descriptions] in (
+            ["id", "pr_number", "commit_sha", "Repo"],
+            ["id", "pr_number", "owner", "name"],
+        )
+    ][0]
+    clauses = getattr(batch_stmt.whereclause, "clauses", [batch_stmt.whereclause])
+    where_cols = [getattr(getattr(c, "left", None), "name", None) for c in clauses]
+    assert "user_id" in where_cols, "Missing Repo.user_id ownership filter in SQL"
+    assert "id" in where_cols, "Missing CodeReview.id IN filter in SQL"
+
+
+@pytest.mark.asyncio
+async def test_batch_associated_prs_resolves_push_rows_via_github(
+    make_auth_client, install_db
+) -> None:
+    """Batch endpoint resolves push rows (pr_number=None) via GitHub commit-SHA lookup."""
+    user = _user()
+    repo = _repo(user)
+    push_review = _review(repo, pr_number=None)
+
+    install_db(user, reviews=[push_review])
+
+    from app.routers import reviews as reviews_module
+    from app.routers.reviews import AssociatedPROut
+
+    fake_pr = AssociatedPROut(
+        number=99,
+        url="https://github.com/acme/widgets/pull/99",
+        title="Associated feature PR",
+    )
+
+    with (
+        patch.object(reviews_module, "_lookup_commit_pr", new_callable=AsyncMock, return_value=fake_pr) as mock_lookup,
+        patch.object(reviews_module, "get_installation_token", new_callable=AsyncMock, return_value="ghs_test_token"),
+    ):
+        async with make_auth_client(user.id) as ac:
+            resp = await ac.post(
+                "/reviews/associated-prs",
+                json={"review_ids": [str(push_review.id)]},
+            )
+
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["review_id"] == str(push_review.id)
+    assert items[0]["associated_pr"] == {
+        "number": 99,
+        "url": "https://github.com/acme/widgets/pull/99",
+        "title": "Associated feature PR",
+    }
+    mock_lookup.assert_awaited_once_with(
+        repo.owner, repo.name, push_review.commit_sha, token="ghs_test_token"
+    )
 
 
 @pytest.mark.asyncio

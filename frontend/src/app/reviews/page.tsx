@@ -807,6 +807,8 @@ const associatedPrInflight = new Map<string, Promise<AssociatedPROut | null>>();
 export function clearAssociatedPrCache(): void {
   associatedPrCache.clear();
   associatedPrInflight.clear();
+  batchQueue = [];
+  batchScheduled = false;
 }
 
 /**
@@ -821,11 +823,87 @@ export function clearFailedAssociatedPrCache(): void {
     if (value == null) associatedPrCache.delete(key);
   }
   associatedPrInflight.clear();
+  batchQueue = [];
+  batchScheduled = false;
 }
 
 /** Test-only reset for the module-level associated-PR cache (vitest). */
 export function __resetAssociatedPrCacheForTests(): void {
   clearAssociatedPrCache();
+}
+
+let batchQueue: Array<{
+  id: string;
+  resolve: (pr: AssociatedPROut | null) => void;
+}> = [];
+let batchScheduled = false;
+
+function flushBatchPrLookups() {
+  const queue = batchQueue;
+  batchQueue = [];
+  batchScheduled = false;
+
+  if (queue.length === 0) return;
+
+  const ids = Array.from(new Set(queue.map((item) => item.id)));
+
+  let batchPromise: Promise<Map<string, AssociatedPROut | null>> = Promise.resolve(new Map());
+
+  if (typeof api.getAssociatedPrsBatch === "function") {
+    try {
+      const resPromise = api.getAssociatedPrsBatch(ids);
+      if (resPromise && typeof resPromise.then === "function") {
+        batchPromise = resPromise
+          .then((res) => {
+            const map = new Map<string, AssociatedPROut | null>();
+            if (res && Array.isArray(res.items)) {
+              for (const item of res.items) {
+                map.set(item.review_id, item.associated_pr ?? null);
+              }
+            }
+            return map;
+          })
+          .catch(() => new Map<string, AssociatedPROut | null>());
+      }
+    } catch {
+      // ignore sync errors
+    }
+  }
+
+  batchPromise.then((map) => {
+    for (const item of queue) {
+      if (map.has(item.id)) {
+        const pr = map.get(item.id) ?? null;
+        associatedPrCache.set(item.id, pr);
+        item.resolve(pr);
+      } else if (typeof api.getAssociatedPr === "function") {
+        api.getAssociatedPr(item.id).then(
+          (res) => {
+            const pr = res?.associated_pr ?? null;
+            associatedPrCache.set(item.id, pr);
+            item.resolve(pr);
+          },
+          () => {
+            associatedPrCache.set(item.id, null);
+            item.resolve(null);
+          }
+        );
+      } else {
+        associatedPrCache.set(item.id, null);
+        item.resolve(null);
+      }
+    }
+  });
+}
+
+function requestAssociatedPr(id: string): Promise<AssociatedPROut | null> {
+  return new Promise((resolve) => {
+    batchQueue.push({ id, resolve });
+    if (!batchScheduled) {
+      batchScheduled = true;
+      queueMicrotask(flushBatchPrLookups);
+    }
+  });
 }
 
 function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
@@ -845,15 +923,7 @@ function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
     let cancelled = false;
     let pending = associatedPrInflight.get(key);
     if (!pending) {
-      const request = api.getAssociatedPr(review.id).then(
-        (res) => {
-          const pr = res?.associated_pr ?? null;
-          associatedPrCache.set(key, pr);
-          return pr;
-        },
-        () => null
-      );
-      pending = request.finally(() => {
+      pending = requestAssociatedPr(review.id).finally(() => {
         associatedPrInflight.delete(key);
       });
       associatedPrInflight.set(key, pending);

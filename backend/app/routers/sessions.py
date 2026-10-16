@@ -616,11 +616,10 @@ async def _stream_from_db(
         initial_rows = res.scalars().all()
 
     for row in initial_rows:
-        if row.event_id <= 0 or row.event == "turn_start":
+        if row.event_id <= max_yielded_id or row.event == "turn_start":
             continue
         yield _format_chunk(row.event_id, row.event, row.chunk)
-        if row.event_id > max_yielded_id:
-            max_yielded_id = row.event_id
+        max_yielded_id = row.event_id
         if row.event in ("done", "error"):
             return
 
@@ -659,11 +658,10 @@ async def _stream_from_db(
         if rows:
             idle_ticks = 0
             for row in rows:
-                if row.event_id <= 0 or row.event == "turn_start":
+                if row.event_id <= max_yielded_id or row.event == "turn_start":
                     continue
                 yield _format_chunk(row.event_id, row.event, row.chunk)
-                if row.event_id > max_yielded_id:
-                    max_yielded_id = row.event_id
+                max_yielded_id = row.event_id
                 if row.event in ("done", "error"):
                     return
             continue
@@ -686,11 +684,10 @@ async def _stream_from_db(
                 drain_rows = final_res.scalars().all()
 
             for row in drain_rows:
-                if row.event_id <= 0 or row.event == "turn_start":
+                if row.event_id <= max_yielded_id or row.event == "turn_start":
                     continue
                 yield _format_chunk(row.event_id, row.event, row.chunk)
-                if row.event_id > max_yielded_id:
-                    max_yielded_id = row.event_id
+                max_yielded_id = row.event_id
                 if row.event in ("done", "error"):
                     return
             await _asyncio.sleep(_SSE_DRAIN_INTERVAL_S)

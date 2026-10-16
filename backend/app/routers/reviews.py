@@ -591,23 +591,21 @@ async def get_reviews_associated_prs(
     Batch associated-PR lookup for a page of dashboard rows.
 
     One ownership-scoped SELECT answers the whole page (the per-row GET above
-    fans out to N calls plus up to N GitHub requests per render). Resolution
-    is DB-only: rows carrying their own ``pr_number`` answer directly, all
-    others answer ``null`` — no GitHub calls, no per-row queries. Unknown or
-    non-owned ids are omitted (no existence oracle).
+    fans out to N calls plus up to N GitHub requests per render). Rows carrying
+    their own ``pr_number`` answer directly from DB without GitHub calls.
+    For push rows where ``pr_number`` is None, commit-SHA resolution is performed
+    concurrently via GitHub API with installation token minting batched per unique repo.
+    Unknown or non-owned ids are omitted (no existence oracle).
     """
     if not body.review_ids:
         return AssociatedPRBatchResponse(items=[])
 
-    # Select only the columns needed to resolve PR number & URL:
-    # id, pr_number, repo owner and repo name.
-    # Avoids loading heavy summary and findings JSONB bodies, and avoids extra SELECT queries.
     stmt = (
         select(
             CodeReview.id,
             CodeReview.pr_number,
-            Repo.owner,
-            Repo.name,
+            CodeReview.commit_sha,
+            Repo,
         )
         .join(Repo, CodeReview.repo_id == Repo.id)
         .where(
@@ -618,8 +616,51 @@ async def get_reviews_associated_prs(
     res = await db.execute(stmt)
     rows = res.all()
 
+    # Identify push rows needing commit-SHA lookup
+    push_rows: list[tuple[uuid.UUID, str, Repo]] = []
+    for review_id, pr_number, commit_sha, repo in rows:
+        if (
+            pr_number is None
+            and commit_sha
+            and repo is not None
+            and repo.owner
+            and repo.name
+        ):
+            push_rows.append((review_id, commit_sha, repo))
+
+    push_prs: dict[uuid.UUID, Optional[AssociatedPROut]] = {}
+    if push_rows:
+        tokens_by_repo_id: dict[uuid.UUID, Optional[str]] = {}
+        for _, _, repo in push_rows:
+            if repo.id not in tokens_by_repo_id:
+                try:
+                    tokens_by_repo_id[repo.id] = await asyncio.wait_for(
+                        get_installation_token(repo), timeout=_MINT_TIMEOUT_SECONDS
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "associated-prs batch mint token failed for repo %s: %s",
+                        repo.id,
+                        type(exc).__name__,
+                    )
+                    tokens_by_repo_id[repo.id] = None
+
+        async def _resolve_one(
+            rid: uuid.UUID, sha: str, r: Repo
+        ) -> tuple[uuid.UUID, Optional[AssociatedPROut]]:
+            tok = tokens_by_repo_id.get(r.id)
+            pr = await _lookup_commit_pr(r.owner, r.name, sha, token=tok)
+            return rid, pr
+
+        resolved = await asyncio.gather(
+            *[_resolve_one(rid, sha, r) for rid, sha, r in push_rows]
+        )
+        push_prs = dict(resolved)
+
     items: list[AssociatedPRBatchItem] = []
-    for review_id, pr_number, owner, name in rows:
+    for review_id, pr_number, commit_sha, repo in rows:
+        owner = repo.owner if repo is not None else None
+        name = repo.name if repo is not None else None
         pr: Optional[AssociatedPROut] = None
         if pr_number is not None and owner and name:
             pr = AssociatedPROut(
@@ -630,6 +671,9 @@ async def get_reviews_associated_prs(
                 ),
                 title=None,
             )
+        elif review_id in push_prs:
+            pr = push_prs[review_id]
+
         items.append(
             AssociatedPRBatchItem(review_id=review_id, associated_pr=pr)
         )

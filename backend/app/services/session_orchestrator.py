@@ -1321,18 +1321,66 @@ class SessionOrchestrator:
 
         try:
             async with async_session_maker() as mirror_db:
-                mirror_db.add_all(
-                    [
-                        SessionStreamEvent(
-                            session_id=self.session_id,
-                            turn_id=self.turn_id,
-                            event_id=event_id,
-                            event=event,
-                            chunk=chunk,
+                bind = getattr(mirror_db, "bind", None)
+                dialect = getattr(bind, "dialect", None)
+                dialect_name = getattr(dialect, "name", "")
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                    stmt = (
+                        pg_insert(SessionStreamEvent)
+                        .values(
+                            [
+                                {
+                                    "session_id": self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "event_id": event_id,
+                                    "event": event,
+                                    "chunk": chunk,
+                                }
+                                for event_id, event, chunk in items_to_persist
+                            ]
                         )
-                        for event_id, event, chunk in items_to_persist
-                    ]
-                )
+                        .on_conflict_do_nothing(
+                            index_elements=["session_id", "turn_id", "event_id"]
+                        )
+                    )
+                    await mirror_db.execute(stmt)
+                elif dialect_name == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                    stmt = (
+                        sqlite_insert(SessionStreamEvent)
+                        .values(
+                            [
+                                {
+                                    "session_id": self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "event_id": event_id,
+                                    "event": event,
+                                    "chunk": chunk,
+                                }
+                                for event_id, event, chunk in items_to_persist
+                            ]
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=["session_id", "turn_id", "event_id"]
+                        )
+                    )
+                    await mirror_db.execute(stmt)
+                else:
+                    mirror_db.add_all(
+                        [
+                            SessionStreamEvent(
+                                session_id=self.session_id,
+                                turn_id=self.turn_id,
+                                event_id=event_id,
+                                event=event,
+                                chunk=chunk,
+                            )
+                            for event_id, event, chunk in items_to_persist
+                        ]
+                    )
                 await mirror_db.commit()
         except Exception as exc:
             logger.warning(
@@ -1343,20 +1391,68 @@ class SessionOrchestrator:
                 exc,
             )
             # Fall back to per-event insert so one bad row or transient issue
-            # doesn't drop the entire batch of replay events.
+            # doesn't drop the entire batch of replay events. Handles duplicate
+            # collisions idempotently so retries after ambiguous commit failures
+            # never duplicate persisted events.
+            from sqlalchemy.exc import IntegrityError
+
             for event_id, event, chunk in items_to_persist:
                 try:
                     async with async_session_maker() as fallback_db:
-                        fallback_db.add(
-                            SessionStreamEvent(
-                                session_id=self.session_id,
-                                turn_id=self.turn_id,
-                                event_id=event_id,
-                                event=event,
-                                chunk=chunk,
+                        fb_bind = getattr(fallback_db, "bind", None)
+                        fb_dialect_obj = getattr(fb_bind, "dialect", None)
+                        fb_dialect = getattr(fb_dialect_obj, "name", "")
+                        if fb_dialect == "postgresql":
+                            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                            fb_stmt = (
+                                pg_insert(SessionStreamEvent)
+                                .values(
+                                    session_id=self.session_id,
+                                    turn_id=self.turn_id,
+                                    event_id=event_id,
+                                    event=event,
+                                    chunk=chunk,
+                                )
+                                .on_conflict_do_nothing(
+                                    index_elements=["session_id", "turn_id", "event_id"]
+                                )
                             )
-                        )
+                            await fallback_db.execute(fb_stmt)
+                        elif fb_dialect == "sqlite":
+                            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                            fb_stmt = (
+                                sqlite_insert(SessionStreamEvent)
+                                .values(
+                                    session_id=self.session_id,
+                                    turn_id=self.turn_id,
+                                    event_id=event_id,
+                                    event=event,
+                                    chunk=chunk,
+                                )
+                                .on_conflict_do_nothing(
+                                    index_elements=["session_id", "turn_id", "event_id"]
+                                )
+                            )
+                            await fallback_db.execute(fb_stmt)
+                        else:
+                            fallback_db.add(
+                                SessionStreamEvent(
+                                    session_id=self.session_id,
+                                    turn_id=self.turn_id,
+                                    event_id=event_id,
+                                    event=event,
+                                    chunk=chunk,
+                                )
+                            )
                         await fallback_db.commit()
+                except IntegrityError:
+                    logger.debug(
+                        "session_orchestrator: fallback mirror event_id=%d already committed for session=%s",
+                        event_id,
+                        self.session_id,
+                    )
                 except Exception as ind_exc:
                     logger.error(
                         "session_orchestrator: fallback mirror failed for event_id=%d session=%s: %s",
