@@ -73,25 +73,30 @@ async def test_repo_settings_cache_hit_is_detached_snapshot():
     usable with no session attached and serializable via the API schema.
     """
     from app.schemas import RepoSettingsOut
+    from app.services.repo_settings import create_default_repo_settings
 
     repo_id = uuid.uuid4()
-    row = _settings_row(repo_id, allowed_branches=["main"])
+    # A fully populated row, like the DB returns in production (every
+    # NOT NULL column set), so schema serialization is also covered.
+    row = create_default_repo_settings(repo_id)
+    row.allowed_branches = ["main"]
     mock_db = AsyncMock()
     mock_db.scalar.return_value = row
 
+    # The initial miss returns the live row for this caller's own session.
     first = await get_repo_settings(mock_db, repo_id, auto_create=False)
     assert mock_db.scalar.call_count == 1
+    assert first is row
 
-    # The read path must not expose the live session-bound instance.
-    assert first is not row
-    assert object_session(first) is None
-
-    # A later hit serves a snapshot that survives rollback + session close.
+    # A later hit must serve a detached snapshot — never the cached
+    # session-bound instance — surviving rollback + session close.
     mock_db.rollback = AsyncMock()
     await mock_db.rollback()
     second = await get_repo_settings(mock_db, repo_id, auto_create=False)
     assert mock_db.scalar.call_count == 1
+    assert second is not row
     assert second is not first
+    assert object_session(second) is None
     assert second.preset == "autonomous"
     assert second.settings_version == 1
     assert second.allowed_branches == ["main"]
