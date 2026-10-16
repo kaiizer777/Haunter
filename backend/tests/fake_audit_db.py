@@ -691,6 +691,16 @@ def fake_audit_db(audit_store: FakeStore, monkeypatch: pytest.MonkeyPatch):
     """
     from app import db as db_module
 
+    # Fresh store per test must start with empty config caches, or a cached
+    # row from the previous test would hide this test's store contents.
+    from app.adapters.hosting import invalidate_provider_cache
+    from app.llm.config import invalidate_model_config_cache
+    from app.services.repo_settings import invalidate_repo_settings_cache
+
+    invalidate_provider_cache()
+    invalidate_model_config_cache()
+    invalidate_repo_settings_cache()
+
     session = FakeAsyncSession(audit_store)
     fake_session_maker = FakeSessionMaker(audit_store)
     monkeypatch.setattr(db_module, "async_session_maker", fake_session_maker)
@@ -719,6 +729,9 @@ def fake_audit_db(audit_store: FakeStore, monkeypatch: pytest.MonkeyPatch):
             fastapi_app.dependency_overrides.pop(db_module.get_db, None)
         else:
             fastapi_app.dependency_overrides[db_module.get_db] = previous
+        invalidate_provider_cache()
+        invalidate_model_config_cache()
+        invalidate_repo_settings_cache()
 
 
 @pytest.fixture

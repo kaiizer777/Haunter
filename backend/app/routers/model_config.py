@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
+from app.llm.config import invalidate_model_config_cache
 from app.llm.discovery import get_dynamic_free_models
 from app.models import ModelConfig, ModelConfigScope, Repo, User
 from app.schemas import (
@@ -226,6 +227,7 @@ async def update_model_config_endpoint(
 
         await db.commit()
         await db.refresh(config)
+        invalidate_model_config_cache(body.repo_id)
         logger.info(
             "Repo model config updated: user=%s repo=%s provider=%s model=%s",
             current_user.id,
@@ -262,6 +264,7 @@ async def update_model_config_endpoint(
     await db.flush()
     await db.commit()
     await db.refresh(new_config)
+    invalidate_model_config_cache()
 
     logger.info(
         "Global model config switched: user=%s provider=%s model=%s",
