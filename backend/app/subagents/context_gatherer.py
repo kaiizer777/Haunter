@@ -28,7 +28,7 @@ import uuid
 from typing import Any, Optional
 
 from sqlalchemy import any_, case, func, literal, select
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import github_client as gh
@@ -373,15 +373,19 @@ async def resolve_workflow_run_id(
     if run.github_run_id is not None:
         return run.github_run_id
 
-    # Seed: a 1-element array literal of the seed row's id. ``array(col)``
-    # collapses to a 1-element array on a single-row SELECT (i.e. the seed).
+    # Seed: a 1-element array literal of the seed row's id. We use the PG
+    # ``ARRAY[col]`` literal (via ``postgresql.array([col])``) — NOT
+    # ``func.array(col)`` — because ``array(col)`` is parsed as a function
+    # call to ``array`` and PG emits "syntax error at or near col" since
+    # ``array`` is not a function name. ``ARRAY[col]`` is the proper literal
+    # constructor for a 1-element array in a SELECT list.
     chain = (
         select(
             Run.id,
             Run.parent_run_id,
             Run.github_run_id,
             literal(1).label("depth"),
-            func.array(Run.id, type_=PG_UUID).label("path"),
+            pg_array([Run.id]).label("path"),
         )
         .where(Run.id == run.id)
         .cte(name="run_parent_chain", recursive=True)
