@@ -263,6 +263,13 @@ class Run(Base):
         "EvalResult", back_populates="run", uselist=False, cascade="all, delete-orphan"
     )
 
+    __table_args__ = (
+        # Issue #110: composite for the traces list query
+        # (routers/traces.py: filters repo_id + status, range on created_at,
+        # ORDER BY created_at DESC). Equality columns first, range/order last.
+        Index("ix_runs_repo_status_created", "repo_id", "status", "created_at"),
+    )
+
 
 class RunStep(Base):
     __tablename__ = "run_steps"
@@ -447,6 +454,12 @@ class CodeReview(Base):
     )
 
     repo: Mapped["Repo"] = relationship("Repo", back_populates="code_reviews")
+
+    __table_args__ = (
+        # Issue #110: composite for the review dedup lookup
+        # (webhooks.py: repo_id + commit_sha + pr_number, all equality).
+        Index("ix_code_reviews_repo_commit_pr", "repo_id", "commit_sha", "pr_number"),
+    )
 
 
 class RepoSettings(Base):
@@ -859,4 +872,13 @@ class WebhookDelivery(Base):
         # uses; the single-column repo_id index above still serves FK cascades.
         Index("ix_webhook_deliveries_repo_created", "repo_id", "created_at"),
         Index("ix_webhook_deliveries_replay_of", "replay_of"),
+        # Issue #110: composite for the health list with event filter
+        # (webhooks.py list_webhook_deliveries: repo_id + event equality,
+        # created_at DESC ordering). Equality columns first, order column last.
+        Index(
+            "ix_webhook_deliveries_repo_event_created",
+            "repo_id",
+            "event",
+            "created_at",
+        ),
     )
