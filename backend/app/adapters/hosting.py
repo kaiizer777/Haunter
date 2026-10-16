@@ -53,13 +53,19 @@ async def _get_provider_config(key: str, env_default: str) -> str:
     Read provider config from DB system_configs table (TTL-cached 60s).
     Falls back to env default if DB is unavailable or key not set.
     Always validates against allowlist — returns env_default on invalid value.
+
+    Keys are normalized to lowercase: system_configs rows are written in
+    lowercase (``hosting_provider``/``sandbox_provider``) but one caller
+    historically passed ``HOSTING_PROVIDER``, splitting the cache and the
+    DB lookup. Normalizing here closes that class of bug.
     """
     from app.db import async_session_maker
     from app.models import SystemConfig
     from sqlalchemy import select
 
+    normalized = key.strip().lower()
     now = time.monotonic()
-    cached_val, cached_at = _cfg_cache.get(key, ("", -_CACHE_TTL - 1))
+    cached_val, cached_at = _cfg_cache.get(normalized, ("", -_CACHE_TTL - 1))
     if now - cached_at < _CACHE_TTL and cached_val:
         return cached_val
 
@@ -67,7 +73,7 @@ async def _get_provider_config(key: str, env_default: str) -> str:
     try:
         async with async_session_maker() as session:
             result = await session.execute(
-                select(SystemConfig).where(SystemConfig.key == key)
+                select(SystemConfig).where(SystemConfig.key == normalized)
             )
             row = result.scalar_one_or_none()
             if row:
@@ -75,7 +81,7 @@ async def _get_provider_config(key: str, env_default: str) -> str:
     except Exception as exc:
         logger.warning(
             "hosting: failed to read system_configs.%s from DB (%s), using env default %r",
-            key,
+            normalized,
             exc,
             env_default,
         )
@@ -84,12 +90,12 @@ async def _get_provider_config(key: str, env_default: str) -> str:
         logger.error(
             "hosting: invalid provider %r for key=%s, falling back to %r",
             value,
-            key,
+            normalized,
             env_default,
         )
         value = env_default
 
-    _cfg_cache[key] = (value, now)
+    _cfg_cache[normalized] = (value, now)
     return value
 
 
@@ -351,5 +357,5 @@ async def get_hosting_adapter(provider: str | None = None) -> AWSHostingAdapter:
     Provider value is hot-switchable via DB (60s TTL cache).
     """
     if provider is None:
-        await _get_provider_config("HOSTING_PROVIDER", "aws")
+        await _get_provider_config("hosting_provider", "aws")
     return AWSHostingAdapter()

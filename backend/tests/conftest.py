@@ -200,6 +200,18 @@ async def truncate_all(db: AsyncSession) -> None:
     from app.adapters.hosting import invalidate_provider_cache
 
     invalidate_provider_cache()
+    try:
+        from app.llm.config import invalidate_model_config_cache
+
+        invalidate_model_config_cache()
+    except Exception:
+        pass
+    try:
+        from app.services.repo_settings import invalidate_repo_settings_cache
+
+        invalidate_repo_settings_cache()
+    except Exception:
+        pass
 
 
 _schema_checked = False

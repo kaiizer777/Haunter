@@ -39,6 +39,7 @@ from app.services.repo_settings import (
     apply_preset,
     create_default_repo_settings,
     get_repo_settings,
+    invalidate_repo_settings_cache,
     normalize_preset_name,
     update_repo_settings,
 )
@@ -141,6 +142,7 @@ async def post_preset(
     apply_preset(settings, body.preset)
     await db.commit()
     await db.refresh(settings)
+    invalidate_repo_settings_cache(repo_id)
     logger.info(
         "Applied preset '%s' to repo_id=%s by user=%s",
         body.preset,
@@ -180,6 +182,7 @@ async def post_preset_path(
     apply_preset(settings, canonical)
     await db.commit()
     await db.refresh(settings)
+    invalidate_repo_settings_cache(repo_id)
     logger.info(
         "Applied preset '%s' via path to repo_id=%s by user=%s",
         canonical,

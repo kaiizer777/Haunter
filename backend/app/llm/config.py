@@ -6,6 +6,7 @@ or per-repo overrides, falling back gracefully to environment variable defaults.
 """
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -24,6 +25,35 @@ class ResolvedModelConfig:
     provider: str
     model_name: str
     base_url: str
+
+
+# Short-TTL read cache for near-static model config (db-perf #109).
+# ResolvedModelConfig is a frozen dataclass — safe to share across callers.
+# Env-default fallbacks are never cached: caching "DB empty" would hide a
+# row created seconds later for up to TTL.
+_MODEL_CONFIG_TTL: float = 60.0
+_model_config_cache: dict[str, tuple[ResolvedModelConfig, float]] = {}
+
+
+def _model_config_cache_key(repo_id: uuid.UUID | None) -> str:
+    return f"repo:{repo_id}" if repo_id is not None else "global"
+
+
+def invalidate_model_config_cache(repo_id: uuid.UUID | None = None) -> None:
+    """Drop cached model config — one repo entry, or everything.
+
+    Called after every model-config write (PUT /config/model global and
+    per-repo updates) and by test isolation helpers after truncate/fake
+    store reset, so the next ``complete()`` re-queries instead of serving
+    a stale model for up to TTL.
+    """
+    if repo_id is None:
+        _model_config_cache.clear()
+    else:
+        _model_config_cache.pop(_model_config_cache_key(repo_id), None)
+        # A repo write can also change which global row is "latest" for
+        # legacy linkage rows — drop the global entry as well.
+        _model_config_cache.pop(_model_config_cache_key(None), None)
 
 
 def default_base_url_for_provider(provider: str | None = None) -> str:
@@ -123,16 +153,29 @@ async def get_active_model_config(
     2. Global active model config from DB (model_configs where is_active=true)
     3. Environment variable defaults (DEFAULT_PROVIDER, DEFAULT_MODEL, and the
        provider-matched base URL via default_base_url_for_provider).
+
+    DB resolutions are served from a 60s in-process TTL cache keyed by
+    repo_id, so hot per-``complete()`` lookups cost at most one SELECT per
+    minute per key instead of 2-3 SELECTs per call.
     """
+    cache_key = _model_config_cache_key(repo_id)
+    cached = _model_config_cache.get(cache_key)
+    if cached is not None:
+        resolved_cached, cached_at = cached
+        if time.monotonic() - cached_at < _MODEL_CONFIG_TTL:
+            return resolved_cached
+
     try:
         if db is not None:
             config = await _resolve_from_db(db, repo_id=repo_id)
             if config:
+                _model_config_cache[cache_key] = (config, time.monotonic())
                 return config
         else:
             async with async_session_maker() as session:
                 config = await _resolve_from_db(session, repo_id=repo_id)
                 if config:
+                    _model_config_cache[cache_key] = (config, time.monotonic())
                     return config
     except Exception as exc:
         logger.warning(
