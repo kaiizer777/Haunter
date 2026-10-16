@@ -2258,18 +2258,36 @@ class SessionOrchestrator:
         # Issue #105 — window/truncate history before storage so the JSONB
         # column stays bounded regardless of attempt count. In-turn `messages`
         # above keep full fidelity for the LLM; only the DB copy is compacted.
-        updated_history = _compact_history_for_storage(conversation_history + new_entries)
+        # Compute the uncompacted length BEFORE compaction so checkpoint
+        # identity stays stable across compaction (otherwise the window
+        # slides and `history_length` / `turn` drift off the real
+        # conversation position — see greptile#4296862867 / cubic#4296866332).
+        uncompacted_history = conversation_history + new_entries
+        uncompacted_history_length = len(uncompacted_history)
+        updated_history = _compact_history_for_storage(uncompacted_history)
         session.conversation_history = updated_history
         session.staged_patches = staged_patches
 
         # Auto-checkpoint after each turn if staged_patches were modified.
-        turn_number = len(updated_history)
+        # `turn_number` is the monotonic length of the uncompacted history —
+        # it grows by exactly one user turn regardless of compaction, so
+        # restore-by-turn picks the unique matching snapshot.
+        turn_number = uncompacted_history_length
         if staged_patches:
-            cp = create_checkpoint(
-                session=session,
-                description=f"Turn {turn_number}: {user_message[:80]}",
-                turn=turn_number,
-            )
+            # Briefly expose the uncompacted history on the session so
+            # create_checkpoint records the uncompacted `history_length`.
+            # create_checkpoint only reads `len(session.conversation_history)`
+            # and stores the value, so the swap is safe and is undone
+            # immediately after the call.
+            session.conversation_history = uncompacted_history
+            try:
+                cp = create_checkpoint(
+                    session=session,
+                    description=f"Turn {turn_number}: {user_message[:80]}",
+                    turn=turn_number,
+                )
+            finally:
+                session.conversation_history = updated_history
             try:
                 await queue.put_checkpoint_created(cp)
             except Exception as cp_exc:
