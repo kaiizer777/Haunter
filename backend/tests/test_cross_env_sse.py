@@ -700,7 +700,8 @@ async def test_stream_from_db_deduplicates_duplicate_event_ids() -> None:
 async def test_flush_mirror_batch_idempotent_fallback() -> None:
     """_flush_mirror_batch handles ambiguous commit failures by falling back per-event with conflict handling."""
     from app.services.session_orchestrator import SessionOrchestrator
-    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.dialects.postgresql import Insert as PGInsert
 
     session_id = uuid.uuid4()
     turn_id = str(uuid.uuid4())
@@ -717,8 +718,8 @@ async def test_flush_mirror_batch_idempotent_fallback() -> None:
         (2, "done", 'event: done\nid: 2\ndata: {"ok":true}\n\n'),
     ]
 
-    # Simulate batch commit failure, followed by per-event fallback where event 1 triggers IntegrityError (already saved)
-    # and event 2 succeeds.
+    # Simulate batch commit failure, followed by per-event fallback where events are
+    # inserted with PostgreSQL on_conflict_do_nothing.
     class _FailingBatchDb:
         async def __aenter__(self):
             return self
@@ -737,7 +738,11 @@ async def test_flush_mirror_batch_idempotent_fallback() -> None:
 
     class _FallbackDb:
         def __init__(self):
-            self.committed = []
+            self.executed = []
+            self.commit_count = 0
+            bind_mock = MagicMock()
+            bind_mock.dialect.name = "postgresql"
+            self.bind = bind_mock
 
         async def __aenter__(self):
             return self
@@ -749,13 +754,10 @@ async def test_flush_mirror_batch_idempotent_fallback() -> None:
             self.item = item
 
         async def execute(self, stmt):
-            pass
+            self.executed.append(stmt)
 
         async def commit(self):
-            # If item event_id is 1, simulate duplicate conflict
-            if getattr(self, "item", None) and self.item.event_id == 1:
-                raise IntegrityError("unique constraint violated", params=None, orig=Exception())
-            self.committed.append(getattr(self, "item", None))
+            self.commit_count += 1
 
     failing_db = _FailingBatchDb()
     fallback_db = _FallbackDb()
@@ -773,6 +775,10 @@ async def test_flush_mirror_batch_idempotent_fallback() -> None:
 
     # Batch should be cleared and execution must succeed without raising
     assert len(batch) == 0
-    assert len(fallback_db.committed) == 1
-    assert fallback_db.committed[0].event_id == 2
+    assert len(fallback_db.executed) == 2
+    assert fallback_db.commit_count == 2
+    for stmt in fallback_db.executed:
+        assert isinstance(stmt, PGInsert)
+        compiled_sql = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "ON CONFLICT (session_id, turn_id, event_id) DO NOTHING" in compiled_sql
 

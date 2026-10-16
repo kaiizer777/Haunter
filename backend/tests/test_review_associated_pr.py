@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import operator
 import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
@@ -30,6 +31,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import respx
+from sqlalchemy.sql.operators import eq, in_op
 
 from app.config import settings
 from app.db import get_db
@@ -85,14 +87,23 @@ class _ScriptedSession:
                 clauses = getattr(statement.whereclause, "clauses", [statement.whereclause])
                 for clause in clauses:
                     col_name = getattr(getattr(clause, "left", None), "name", None)
+                    op = getattr(clause, "operator", None)
                     if col_name == "id":
                         vals = getattr(getattr(clause, "right", None), "value", None)
                         if vals is not None:
-                            allowed_ids = {uuid.UUID(str(v)) if not isinstance(v, uuid.UUID) else v for v in vals}
+                            ids_set = {uuid.UUID(str(v)) if not isinstance(v, uuid.UUID) else v for v in vals}
+                            if op is in_op:
+                                allowed_ids = ids_set
+                            else:
+                                allowed_ids = set()
                     elif col_name == "user_id":
                         val = getattr(getattr(clause, "right", None), "value", None)
                         if val is not None:
-                            required_user_id = uuid.UUID(str(val)) if not isinstance(val, uuid.UUID) else val
+                            uid = uuid.UUID(str(val)) if not isinstance(val, uuid.UUID) else val
+                            if op is operator.eq or op is eq:
+                                required_user_id = uid
+                            else:
+                                required_user_id = uuid.uuid4()
 
             filtered_reviews = []
             for r in self._reviews:
@@ -732,9 +743,29 @@ async def test_batch_associated_prs_multi_tenant_and_unknown_isolation(
         )
     ][0]
     clauses = getattr(batch_stmt.whereclause, "clauses", [batch_stmt.whereclause])
-    where_cols = [getattr(getattr(c, "left", None), "name", None) for c in clauses]
-    assert "user_id" in where_cols, "Missing Repo.user_id ownership filter in SQL"
-    assert "id" in where_cols, "Missing CodeReview.id IN filter in SQL"
+    user_id_clause = next(
+        (c for c in clauses if getattr(getattr(c, "left", None), "name", None) == "user_id"),
+        None,
+    )
+    assert user_id_clause is not None, "Missing Repo.user_id ownership filter in SQL"
+    assert user_id_clause.operator is operator.eq or user_id_clause.operator is eq, (
+        f"Repo.user_id filter must use == operator, got {user_id_clause.operator}"
+    )
+    assert getattr(getattr(user_id_clause, "right", None), "value", None) == user.id
+
+    id_clause = next(
+        (c for c in clauses if getattr(getattr(c, "left", None), "name", None) == "id"),
+        None,
+    )
+    assert id_clause is not None, "Missing CodeReview.id IN filter in SQL"
+    assert id_clause.operator is in_op, (
+        f"CodeReview.id filter must use IN operator, got {id_clause.operator}"
+    )
+    id_vals = {
+        uuid.UUID(str(v))
+        for v in getattr(getattr(id_clause, "right", None), "value", [])
+    }
+    assert id_vals == {owned_review.id, other_review.id, uuid.UUID(unknown_review_id)}
 
 
 @pytest.mark.asyncio

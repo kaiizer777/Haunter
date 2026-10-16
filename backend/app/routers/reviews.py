@@ -224,6 +224,7 @@ _ASSOCIATED_PR_TIMEOUT_SECONDS = 5.0
 #: budget above on a cold cache + slow GitHub/SSM; a slow mint answers
 #: ``None`` so the caller falls through to the server PAT / null path.
 _MINT_TIMEOUT_SECONDS = 3.0
+_BATCH_LOOKUP_CONCURRENCY = 10
 
 
 async def _lookup_commit_pr(
@@ -630,27 +631,34 @@ async def get_reviews_associated_prs(
 
     push_prs: dict[uuid.UUID, Optional[AssociatedPROut]] = {}
     if push_rows:
-        tokens_by_repo_id: dict[uuid.UUID, Optional[str]] = {}
-        for _, _, repo in push_rows:
-            if repo.id not in tokens_by_repo_id:
-                try:
-                    tokens_by_repo_id[repo.id] = await asyncio.wait_for(
-                        get_installation_token(repo), timeout=_MINT_TIMEOUT_SECONDS
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "associated-prs batch mint token failed for repo %s: %s",
-                        repo.id,
-                        type(exc).__name__,
-                    )
-                    tokens_by_repo_id[repo.id] = None
+        unique_repos = {repo.id: repo for _, _, repo in push_rows}.values()
+
+        async def _mint(r: Repo) -> tuple[uuid.UUID, Optional[str]]:
+            try:
+                tok = await asyncio.wait_for(
+                    get_installation_token(r), timeout=_MINT_TIMEOUT_SECONDS
+                )
+                return r.id, tok
+            except Exception as exc:
+                logger.debug(
+                    "associated-prs batch mint token failed for repo %s: %s",
+                    r.id,
+                    type(exc).__name__,
+                )
+                return r.id, None
+
+        minted_tokens = await asyncio.gather(*[_mint(r) for r in unique_repos])
+        tokens_by_repo_id: dict[uuid.UUID, Optional[str]] = dict(minted_tokens)
+
+        sem = asyncio.Semaphore(_BATCH_LOOKUP_CONCURRENCY)
 
         async def _resolve_one(
             rid: uuid.UUID, sha: str, r: Repo
         ) -> tuple[uuid.UUID, Optional[AssociatedPROut]]:
-            tok = tokens_by_repo_id.get(r.id)
-            pr = await _lookup_commit_pr(r.owner, r.name, sha, token=tok)
-            return rid, pr
+            async with sem:
+                tok = tokens_by_repo_id.get(r.id)
+                pr = await _lookup_commit_pr(r.owner, r.name, sha, token=tok)
+                return rid, pr
 
         resolved = await asyncio.gather(
             *[_resolve_one(rid, sha, r) for rid, sha, r in push_rows]
@@ -658,7 +666,7 @@ async def get_reviews_associated_prs(
         push_prs = dict(resolved)
 
     items: list[AssociatedPRBatchItem] = []
-    for review_id, pr_number, commit_sha, repo in rows:
+    for review_id, pr_number, _commit_sha, repo in rows:
         owner = repo.owner if repo is not None else None
         name = repo.name if repo is not None else None
         pr: Optional[AssociatedPROut] = None

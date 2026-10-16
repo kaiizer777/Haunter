@@ -1393,9 +1393,6 @@ class SessionOrchestrator:
             # Fall back to per-event insert so one bad row or transient issue
             # doesn't drop the entire batch of replay events. Handles duplicate
             # collisions idempotently so retries after ambiguous commit failures
-            # never duplicate persisted events.
-            from sqlalchemy.exc import IntegrityError
-
             for event_id, event, chunk in items_to_persist:
                 try:
                     async with async_session_maker() as fallback_db:
@@ -1447,12 +1444,6 @@ class SessionOrchestrator:
                                 )
                             )
                         await fallback_db.commit()
-                except IntegrityError:
-                    logger.debug(
-                        "session_orchestrator: fallback mirror event_id=%d already committed for session=%s",
-                        event_id,
-                        self.session_id,
-                    )
                 except Exception as ind_exc:
                     logger.error(
                         "session_orchestrator: fallback mirror failed for event_id=%d session=%s: %s",

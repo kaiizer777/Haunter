@@ -807,6 +807,7 @@ const associatedPrInflight = new Map<string, Promise<AssociatedPROut | null>>();
 export function clearAssociatedPrCache(): void {
   associatedPrCache.clear();
   associatedPrInflight.clear();
+  prRequestGeneration.clear();
   batchQueue = [];
   batchScheduled = false;
 }
@@ -820,7 +821,10 @@ export function clearAssociatedPrCache(): void {
  */
 export function clearFailedAssociatedPrCache(): void {
   for (const [key, value] of associatedPrCache) {
-    if (value == null) associatedPrCache.delete(key);
+    if (value == null) {
+      associatedPrCache.delete(key);
+      prRequestGeneration.delete(key);
+    }
   }
   associatedPrInflight.clear();
   batchQueue = [];
@@ -835,10 +839,13 @@ export function __resetAssociatedPrCacheForTests(): void {
 let batchQueue: Array<{
   id: string;
   resolve: (pr: AssociatedPROut | null) => void;
+  generation: number;
 }> = [];
 let batchScheduled = false;
+let currentGeneration = 0;
+const prRequestGeneration = new Map<string, number>();
 
-function flushBatchPrLookups() {
+async function flushBatchPrLookups() {
   const queue = batchQueue;
   batchQueue = [];
   batchScheduled = false;
@@ -847,58 +854,67 @@ function flushBatchPrLookups() {
 
   const ids = Array.from(new Set(queue.map((item) => item.id)));
 
-  let batchPromise: Promise<Map<string, AssociatedPROut | null>> = Promise.resolve(new Map());
+  let batchFailed = false;
+  const batchMap = new Map<string, AssociatedPROut | null>();
+  const hasBatchFn = typeof api.getAssociatedPrsBatch === "function";
 
-  if (typeof api.getAssociatedPrsBatch === "function") {
+  if (hasBatchFn) {
     try {
-      const resPromise = api.getAssociatedPrsBatch(ids);
-      if (resPromise && typeof resPromise.then === "function") {
-        batchPromise = resPromise
-          .then((res) => {
-            const map = new Map<string, AssociatedPROut | null>();
-            if (res && Array.isArray(res.items)) {
-              for (const item of res.items) {
-                map.set(item.review_id, item.associated_pr ?? null);
-              }
-            }
-            return map;
-          })
-          .catch(() => new Map<string, AssociatedPROut | null>());
+      const res = await api.getAssociatedPrsBatch(ids);
+      if (res && Array.isArray(res.items)) {
+        for (const item of res.items) {
+          batchMap.set(item.review_id, item.associated_pr ?? null);
+        }
       }
     } catch {
-      // ignore sync errors
+      batchFailed = true;
     }
   }
 
-  batchPromise.then((map) => {
+  if (batchFailed) {
+    // When batch fails, do NOT fan out to individual requests (avoid amplifying backend load).
+    // Mark queued items as null without caching the transient failure so remount/revisit retries.
     for (const item of queue) {
-      if (map.has(item.id)) {
-        const pr = map.get(item.id) ?? null;
-        associatedPrCache.set(item.id, pr);
-        item.resolve(pr);
-      } else if (typeof api.getAssociatedPr === "function") {
-        api.getAssociatedPr(item.id).then(
-          (res) => {
-            const pr = res?.associated_pr ?? null;
-            associatedPrCache.set(item.id, pr);
-            item.resolve(pr);
-          },
-          () => {
-            associatedPrCache.set(item.id, null);
-            item.resolve(null);
-          }
-        );
-      } else {
-        associatedPrCache.set(item.id, null);
-        item.resolve(null);
-      }
+      item.resolve(null);
     }
-  });
+    return;
+  }
+
+  for (const item of queue) {
+    if (batchMap.has(item.id)) {
+      const pr = batchMap.get(item.id) ?? null;
+      if (prRequestGeneration.get(item.id) === item.generation) {
+        associatedPrCache.set(item.id, pr);
+      }
+      item.resolve(pr);
+    } else if (typeof api.getAssociatedPr === "function") {
+      api.getAssociatedPr(item.id).then(
+        (res) => {
+          const pr = res?.associated_pr ?? null;
+          if (prRequestGeneration.get(item.id) === item.generation) {
+            associatedPrCache.set(item.id, pr);
+          }
+          item.resolve(pr);
+        },
+        () => {
+          // Transient failure: leave uncached so revisiting or remounting can retry
+          item.resolve(null);
+        }
+      );
+    } else {
+      if (prRequestGeneration.get(item.id) === item.generation) {
+        associatedPrCache.set(item.id, null);
+      }
+      item.resolve(null);
+    }
+  }
 }
 
 function requestAssociatedPr(id: string): Promise<AssociatedPROut | null> {
+  const gen = ++currentGeneration;
+  prRequestGeneration.set(id, gen);
   return new Promise((resolve) => {
-    batchQueue.push({ id, resolve });
+    batchQueue.push({ id, resolve, generation: gen });
     if (!batchScheduled) {
       batchScheduled = true;
       queueMicrotask(flushBatchPrLookups);

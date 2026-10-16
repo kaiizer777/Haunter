@@ -1767,6 +1767,26 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(vi.mocked(api.getAssociatedPrsBatch)).toHaveBeenCalledWith(["rev_batch_1", "rev_batch_2"]);
       expect(vi.mocked(api.getAssociatedPr)).not.toHaveBeenCalled();
     });
+
+    it("batch failure marks items as null without fanning out to getAssociatedPr", async () => {
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [
+          pushRowForAssoc("rev_batch_fail_1", "1111222233334444"),
+          pushRowForAssoc("rev_batch_fail_2", "5555666677778888"),
+        ],
+        total: 2,
+      });
+      vi.mocked(api.getAssociatedPrsBatch).mockRejectedValue(new Error("500 Internal Server Error"));
+
+      render(<ReviewsPage />);
+
+      expect(await screen.findByText(/Push @ 1111222/i)).toBeInTheDocument();
+      expect(await screen.findByText(/Push @ 5555666/i)).toBeInTheDocument();
+
+      expect(vi.mocked(api.getAssociatedPrsBatch)).toHaveBeenCalledTimes(1);
+      // Crucial: Must NOT fan out to individual getAssociatedPr calls on batch failure
+      expect(vi.mocked(api.getAssociatedPr)).not.toHaveBeenCalled();
+    });
   });
 
   /**
