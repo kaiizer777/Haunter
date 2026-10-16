@@ -52,7 +52,7 @@ from app.failure_signature import (
     MAX_SIGNATURE_INPUT_CHARS,
     normalize_failure_signature,
 )
-from app.models import Attempt, Repo, Run, RunStep, User
+from app.models import Attempt, EvalResult, Repo, Run, RunStep, User
 from app.schemas import BatchDeleteRunsRequest, BatchDeleteRunsResponse, RunOut
 from app.services.followup_commands import FEEDBACK_CONCLUSION, TEST_FIX_CONCLUSION
 from app.traces.classify import classify_failure
@@ -846,8 +846,10 @@ async def batch_delete_runs(
     if not matching_run_ids:
         return BatchDeleteRunsResponse(deleted_count=0)
 
-    # Explicit cascade cleanup for RunStep and Attempt (RunAttempt) records
-    # in case DB-level foreign key cascade is not handled.
+    # Explicit cascade cleanup for RunStep, Attempt, and EvalResult records.
+    # Note: eval_results.run_id FK is ON DELETE SET NULL, so without explicit
+    # deletion here, bulk deleting Run would leave orphaned EvalResult rows.
+    await db.execute(delete(EvalResult).where(EvalResult.run_id.in_(matching_run_ids)))
     await db.execute(delete(RunStep).where(RunStep.run_id.in_(matching_run_ids)))
     await db.execute(delete(Attempt).where(Attempt.run_id.in_(matching_run_ids)))
 

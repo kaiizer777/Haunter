@@ -47,28 +47,53 @@ _PULLS_URL = f"https://api.github.com/repos/acme/widgets/commits/{_SHA}/pulls"
 
 
 class _ScriptedSession:
-    """AsyncSession stand-in dispatching on the selected entity.
+    """AsyncSession stand-in dispatching on the selected entity or columns.
 
-    The associated-pr route emits exactly two SELECT shapes: the auth lookup
-    (``select(User)`` via ``get_current_user``) and the ownership-scoped
-    detail lookup (``select(CodeReview)`` joined to repos). Anything else
-    raises loudly instead of answering from a stale script.
+    The associated-pr routes emit:
+    - Auth lookup (``select(User)`` via ``get_current_user``)
+    - Detail lookup (``select(CodeReview)`` joined to repos)
+    - Batch lookup (``select(CodeReview.id, CodeReview.pr_number, Repo.owner, Repo.name)``)
+    Anything else raises loudly instead of answering from a stale script.
     """
 
-    def __init__(self, user: User, review: Optional[CodeReview]) -> None:
+    def __init__(
+        self,
+        user: User,
+        review: Optional[CodeReview] = None,
+        reviews: Optional[list[CodeReview]] = None,
+    ) -> None:
         self._user = user
-        self._review = review
+        self._reviews = list(reviews) if reviews is not None else ([review] if review is not None else [])
         self.statements: list[Any] = []
 
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> FakeResult:
         self.statements.append(statement)
-        entity = statement.column_descriptions[0].get("entity")
+        col_descs = statement.column_descriptions
+        first_desc = col_descs[0]
+        entity = first_desc.get("entity")
+
         if entity is User:
             return FakeResult([self._user])
+
+        # Batch query selects (CodeReview.id, CodeReview.pr_number, Repo.owner, Repo.name)
+        expr_names = [d.get("name") for d in col_descs]
+        if expr_names == ["id", "pr_number", "owner", "name"]:
+            rows = [
+                (
+                    r.id,
+                    r.pr_number,
+                    r.repo.owner if r.repo else None,
+                    r.repo.name if r.repo else None,
+                )
+                for r in self._reviews
+            ]
+            return FakeResult(rows)
+
         if entity is CodeReview:
-            return FakeResult([self._review] if self._review is not None else [])
+            return FakeResult(self._reviews)
+
         raise AssertionError(
-            f"scripted session received a statement selecting {entity!r}"
+            f"scripted session received a statement selecting {entity!r} or {expr_names!r}"
         )
 
     async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
@@ -85,8 +110,12 @@ def install_db():
 
     previous = app.dependency_overrides.get(get_db)
 
-    def _install(user: User, review: Optional[CodeReview]) -> _ScriptedSession:
-        session = _ScriptedSession(user, review)
+    def _install(
+        user: User,
+        review: Optional[CodeReview] = None,
+        reviews: Optional[list[CodeReview]] = None,
+    ) -> _ScriptedSession:
+        session = _ScriptedSession(user, review=review, reviews=reviews)
 
         async def _get_db() -> AsyncIterator[_ScriptedSession]:
             try:
@@ -566,3 +595,111 @@ async def test_github_status_log_levels_warning_for_auth_debug_for_missing(
     }
     assert by_status["403"].levelno == logging.WARNING
     assert by_status["404"].levelno == logging.DEBUG
+
+
+# ---------------------------------------------------------------------------
+# Batch associated-PR tests: POST /reviews/associated-prs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_batch_associated_prs_happy_path(
+    make_auth_client, install_db
+) -> None:
+    """Batch endpoint returns associated PRs for user's owned reviews with pr_number."""
+    user = _user()
+    repo = _repo(user)
+    r1 = _review(repo, pr_number=42)
+    r2 = _review(repo, pr_number=None)  # Push row -> null associated_pr in DB batch
+
+    install_db(user, reviews=[r1, r2])
+
+    async with make_auth_client(user.id) as ac:
+        resp = await ac.post(
+            "/reviews/associated-prs",
+            json={"review_ids": [str(r1.id), str(r2.id)]},
+        )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "items" in data
+    items_by_id = {item["review_id"]: item["associated_pr"] for item in data["items"]}
+
+    assert items_by_id[str(r1.id)] == {
+        "number": 42,
+        "url": "https://github.com/acme/widgets/pull/42",
+        "title": None,
+    }
+    assert items_by_id[str(r2.id)] is None
+
+
+@pytest.mark.asyncio
+async def test_batch_associated_prs_multi_tenant_and_unknown_isolation(
+    make_auth_client, install_db
+) -> None:
+    """Other users' review IDs and unknown review IDs are omitted (no oracle leak)."""
+    user = _user()
+    repo = _repo(user)
+    owned_review = _review(repo, pr_number=10)
+
+    # In DB, only owned_review matches the query (Repo.user_id == current_user.id)
+    install_db(user, reviews=[owned_review])
+
+    other_user_review_id = str(uuid.uuid4())
+    unknown_review_id = str(uuid.uuid4())
+
+    async with make_auth_client(user.id) as ac:
+        resp = await ac.post(
+            "/reviews/associated-prs",
+            json={
+                "review_ids": [
+                    str(owned_review.id),
+                    other_user_review_id,
+                    unknown_review_id,
+                ]
+            },
+        )
+
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["items"]
+    # Only the owned review appears in the response
+    assert len(items) == 1
+    assert items[0]["review_id"] == str(owned_review.id)
+    assert items[0]["associated_pr"]["number"] == 10
+
+
+@pytest.mark.asyncio
+async def test_batch_associated_prs_over_100_ids_rejected(
+    make_auth_client, install_db
+) -> None:
+    """Requesting more than 100 review IDs triggers a 422 validation error."""
+    user = _user()
+    install_db(user, reviews=[])
+
+    too_many_ids = [str(uuid.uuid4()) for _ in range(101)]
+
+    async with make_auth_client(user.id) as ac:
+        resp = await ac.post(
+            "/reviews/associated-prs",
+            json={"review_ids": too_many_ids},
+        )
+
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_batch_associated_prs_empty_list_returns_empty(
+    make_auth_client, install_db
+) -> None:
+    """Empty review_ids list returns empty items list immediately without query."""
+    user = _user()
+    install_db(user, reviews=[])
+
+    async with make_auth_client(user.id) as ac:
+        resp = await ac.post(
+            "/reviews/associated-prs",
+            json={"review_ids": []},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"items": []}

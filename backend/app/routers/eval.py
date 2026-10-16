@@ -492,10 +492,10 @@ async def get_user_eval_metrics(
     )
 
     # --- confidence_calibration: 4 fixed buckets in ONE grouped query ---
-    # (label, low_inclusive, high_exclusive) — scale is 0-100, so the
-    # last bucket uses 101 as the exclusive upper bound to include score=100.
+    # (label, low_inclusive, high_exclusive) — scale is 0-100.
     # The BETWEEN guard preserves the old per-bucket semantics exactly: NULL
     # or out-of-range scores matched no bucket before and match none now.
+    # bucket_expr is derived directly from bucket_specs as the single source of truth.
     bucket_specs: list[tuple[str, int, int]] = [
         ("0-50%", 0, 50),
         ("50-75%", 50, 75),
@@ -503,10 +503,11 @@ async def get_user_eval_metrics(
         ("90-100%", 90, 101),
     ]
     bucket_expr = case(
-        (Attempt.confidence_score < 50, "0-50%"),
-        (Attempt.confidence_score < 75, "50-75%"),
-        (Attempt.confidence_score < 90, "75-90%"),
-        else_="90-100%",
+        *[
+            (Attempt.confidence_score < high, label)
+            for label, _low, high in bucket_specs[:-1]
+        ],
+        else_=bucket_specs[-1][0],
     )
     bucket_rows = (
         await db.execute(

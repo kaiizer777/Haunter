@@ -599,34 +599,38 @@ async def get_reviews_associated_prs(
     if not body.review_ids:
         return AssociatedPRBatchResponse(items=[])
 
+    # Select only the columns needed to resolve PR number & URL:
+    # id, pr_number, repo owner and repo name.
+    # Avoids loading heavy summary and findings JSONB bodies, and avoids extra SELECT queries.
     stmt = (
-        select(CodeReview)
+        select(
+            CodeReview.id,
+            CodeReview.pr_number,
+            Repo.owner,
+            Repo.name,
+        )
         .join(Repo, CodeReview.repo_id == Repo.id)
-        .options(selectinload(CodeReview.repo))
         .where(
             CodeReview.id.in_(body.review_ids),
             Repo.user_id == current_user.id,
         )
     )
     res = await db.execute(stmt)
-    reviews = res.scalars().all()
+    rows = res.all()
 
     items: list[AssociatedPRBatchItem] = []
-    for review in reviews:
-        repo = review.repo
-        owner = repo.owner if repo is not None else None
-        name = repo.name if repo is not None else None
+    for review_id, pr_number, owner, name in rows:
         pr: Optional[AssociatedPROut] = None
-        if review.pr_number is not None and owner and name:
+        if pr_number is not None and owner and name:
             pr = AssociatedPROut(
-                number=review.pr_number,
+                number=pr_number,
                 url=(
                     f"https://github.com/{quote(owner, safe='')}"
-                    f"/{quote(name, safe='')}/pull/{review.pr_number}"
+                    f"/{quote(name, safe='')}/pull/{pr_number}"
                 ),
                 title=None,
             )
         items.append(
-            AssociatedPRBatchItem(review_id=review.id, associated_pr=pr)
+            AssociatedPRBatchItem(review_id=review_id, associated_pr=pr)
         )
     return AssociatedPRBatchResponse(items=items)

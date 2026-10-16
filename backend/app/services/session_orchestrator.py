@@ -1240,12 +1240,12 @@ def _is_lock_conflict(exc: Exception) -> bool:
 # Main orchestrator
 # ------------------------------------------------------------------
 
-#: Max mirrored SSE events buffered before a single bulk commit. A turn emits
-#: at most a few hundred events (replay buffer is 256), so a full turn
-#: typically commits in a handful of batches instead of per-event commits.
+#: Max mirrored SSE events buffered before a single bulk commit. Batching
+#: commits avoids a high-frequency INSERT+COMMIT per streaming SSE token.
 _MIRROR_BATCH_MAX = 50
 
-#: Seconds of mirror-queue idleness before a partial batch is flushed.
+#: Max seconds before a partial batch of mirrored events is flushed to DB,
+#: ensuring bounded replay latency even under continuous rapid streaming.
 _MIRROR_FLUSH_INTERVAL_S = 1.0
 
 #: Prior-turn stream events below this count are left in place at turn start;
@@ -1309,11 +1309,15 @@ class SessionOrchestrator:
     async def _flush_mirror_batch(
         self, batch: list[tuple[int, str, str]]
     ) -> None:
-        """Persist one buffered batch of mirrored events in a single commit."""
+        """Persist one buffered batch of mirrored events in a single commit,
+        with per-event fallback on error to prevent dropping up to 50 replay events."""
         if not batch:
             return
         from app.db import async_session_maker
         from app.models import SessionStreamEvent
+
+        items_to_persist = list(batch)
+        batch.clear()
 
         try:
             async with async_session_maker() as mirror_db:
@@ -1326,40 +1330,88 @@ class SessionOrchestrator:
                             event=event,
                             chunk=chunk,
                         )
-                        for event_id, event, chunk in batch
+                        for event_id, event, chunk in items_to_persist
                     ]
                 )
                 await mirror_db.commit()
         except Exception as exc:
             logger.warning(
-                "session_orchestrator: failed to mirror batch of %d events for session=%s: %s",
-                len(batch),
+                "session_orchestrator: batch commit of %d mirror events failed for session=%s (%s); "
+                "attempting per-event fallback insert",
+                len(items_to_persist),
                 self.session_id,
                 exc,
             )
-        finally:
-            batch.clear()
+            # Fall back to per-event insert so one bad row or transient issue
+            # doesn't drop the entire batch of replay events.
+            for event_id, event, chunk in items_to_persist:
+                try:
+                    async with async_session_maker() as fallback_db:
+                        fallback_db.add(
+                            SessionStreamEvent(
+                                session_id=self.session_id,
+                                turn_id=self.turn_id,
+                                event_id=event_id,
+                                event=event,
+                                chunk=chunk,
+                            )
+                        )
+                        await fallback_db.commit()
+                except Exception as ind_exc:
+                    logger.error(
+                        "session_orchestrator: fallback mirror failed for event_id=%d session=%s: %s",
+                        event_id,
+                        self.session_id,
+                        ind_exc,
+                    )
 
     async def _mirror_worker(self) -> None:
-        """Serialize event mirroring, flushing in batches: one commit per
-        _MIRROR_BATCH_MAX events or _MIRROR_FLUSH_INTERVAL_S idle seconds
-        instead of one INSERT+COMMIT per event."""
+        """Serialize event mirroring, flushing in batches.
+        Enforces a hard deadline (_MIRROR_FLUSH_INTERVAL_S from the first event
+        enqueued in the current batch) so continuous rapid events (<1s apart)
+        cannot defer committing partial batches until 50 events accumulate or turn ends."""
+        import time
+
         batch: list[tuple[int, str, str]] = []
+        batch_first_enqueued_at: float | None = None
+
         while True:
+            timeout: float
+            if batch and batch_first_enqueued_at is not None:
+                elapsed = time.monotonic() - batch_first_enqueued_at
+                timeout = max(0.0, _MIRROR_FLUSH_INTERVAL_S - elapsed)
+            else:
+                timeout = _MIRROR_FLUSH_INTERVAL_S
+
             try:
                 item = await asyncio.wait_for(
-                    self._mirror_queue.get(), timeout=_MIRROR_FLUSH_INTERVAL_S
+                    self._mirror_queue.get(), timeout=timeout
                 )
             except asyncio.TimeoutError:
-                await self._flush_mirror_batch(batch)
+                if batch:
+                    await self._flush_mirror_batch(batch)
+                    batch_first_enqueued_at = None
                 continue
+
             if item is None:
                 self._mirror_queue.task_done()
                 break
+
+            if not batch:
+                batch_first_enqueued_at = time.monotonic()
+
             batch.append(item)
             self._mirror_queue.task_done()
-            if len(batch) >= _MIRROR_BATCH_MAX:
+
+            # Flush if max batch reached or deadline exceeded
+            assert batch_first_enqueued_at is not None
+            if (
+                len(batch) >= _MIRROR_BATCH_MAX
+                or (time.monotonic() - batch_first_enqueued_at) >= _MIRROR_FLUSH_INTERVAL_S
+            ):
                 await self._flush_mirror_batch(batch)
+                batch_first_enqueued_at = None
+
         await self._flush_mirror_batch(batch)
 
     async def _drain_mirror_queue(self) -> None:
