@@ -98,13 +98,21 @@ async def test_two_concurrent_generate_fix_calls_do_not_exceed_cap(
     Auto-marked @pytest.mark.db via the db fixture (see conftest.py).
     Skipped when TEST_DATABASE_URL is unset.
     """
-    from tests.conftest import async_session_maker, truncate_all
+    from tests.conftest import async_session_maker
 
-    # Seed a User+Repo (runs.repo_id is NOT NULL) and a Run with zero priors.
+    # Seed a User+Repo and a Run with zero priors. runs.repo_id,
+    # runs.head_sha, runs.head_branch, runs.status are all NOT NULL on
+    # PostgreSQL, so seed plausible values that mirror what the webhook
+    # handler would set. generate_fix only reads run.diagnosis_summary
+    # and run.repo_id, so the other columns are irrelevant to it.
     user, repo = await _seed_user_repo(db)
     run = Run(
         id=uuid.uuid4(),
         repo_id=repo.id,
+        head_sha="a" * 40,
+        head_branch="main",
+        status="error",
+        conclusion="failure",
         diagnosis_summary=_DIAGNOSIS,
     )
     db.add(run)
@@ -114,7 +122,10 @@ async def test_two_concurrent_generate_fix_calls_do_not_exceed_cap(
 
     async def call_generate_fix() -> object:
         # Each concurrent call gets its own session so both can be in
-        # flight at the same time and race the INSERT.
+        # flight at the same time and race the INSERT. We do NOT call
+        # truncate_all on these sessions — the db fixture truncates at
+        # teardown, and a mid-test truncate would wipe the seeded Run
+        # before the verify step at the bottom of this test runs.
         async with async_session_maker() as session:
             try:
                 # Re-load the Run in this session so the Insert targets
@@ -134,10 +145,6 @@ async def test_two_concurrent_generate_fix_calls_do_not_exceed_cap(
                         db=session,
                     )
             finally:
-                try:
-                    await truncate_all(session)
-                except Exception:
-                    pass
                 await session.rollback()
                 await session.close()
 
