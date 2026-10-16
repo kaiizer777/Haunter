@@ -12,8 +12,10 @@ Security invariants:
     extraction, no eval, no coercion of out-of-bounds values.
   - Patch is validated for path traversal before any DB insert:
     PurePosixPath rejects absolute paths, '..' components, .git/, .github/workflows/.
-  - Attempt cap of 3 is enforced atomically via SELECT FOR UPDATE before any
-    LLM call — a Phase 7 retry loop bug cannot create unbounded attempts.
+  - Attempt cap is enforced via a plain count read before any LLM call
+    (no row lock held across inference, #107) — a Phase 7 retry loop bug
+    cannot create unbounded attempts. Concurrent over-cap races are fenced
+    by the uq_attempt_run_number unique constraint on insert.
     The cap is now driven by app.config.settings.max_attempts (env: HAUNTER_MAX_ATTEMPTS),
     not a hard-coded constant, so Phase 1 could de-duplicate it with the
     orchestrator.
@@ -857,10 +859,11 @@ async def generate_fix(
     t0 = time.monotonic()
 
     # -------------------------------------------------------------------------
-    # 1. Atomic attempt cap check — lock the Run row to prevent race conditions
+    # 1. Attempt cap check — plain read, no row lock held across the LLM
+    # call below (#107). A SELECT ... FOR UPDATE here would serialize
+    # concurrent workers behind model inference; over-cap races are fenced
+    # by the uq_attempt_run_number unique constraint on insert instead.
     # -------------------------------------------------------------------------
-    await db.execute(select(Run.id).where(Run.id == run.id).with_for_update())
-
     count_result = await db.execute(
         select(func.count()).select_from(Attempt).where(Attempt.run_id == run.id)
     )
@@ -868,12 +871,15 @@ async def generate_fix(
 
     cap = _max_attempts()
     if existing_count >= cap:
+        await db.rollback()
         raise AttemptCapExceeded(
             f"run {run.id} already has {existing_count} attempt(s); "
             f"cap is {cap}. No LLM call made."
         )
 
     attempt_number = existing_count + 1
+    # Close the read txn before the unbounded LLM await below.
+    await db.commit()
 
     # -------------------------------------------------------------------------
     # 2. Deterministic ModuleNotFoundError fast-path.
