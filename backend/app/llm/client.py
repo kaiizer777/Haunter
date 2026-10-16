@@ -23,7 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import DEFAULT_GROQ_MODEL, settings
 from app.llm.anthropic import AnthropicAdapter
-from app.llm.config import default_base_url_for_provider, get_active_model_config
+from app.llm.config import (
+    ResolvedModelConfig,
+    default_base_url_for_provider,
+    get_active_model_config,
+)
 from app.llm.discovery import BOOTSTRAP_FREE_MODELS, get_dynamic_free_models
 from app.llm.exceptions import (
     LLMAuthenticationError,
@@ -62,6 +66,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         db: AsyncSession | None = None,
         repo_id: uuid.UUID | None = None,
+        model_config: ResolvedModelConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """
@@ -84,6 +89,10 @@ class LLMClient:
             tools: Optional tool definitions for tool-calling agents.
             db: Optional database session to resolve active model config.
             repo_id: Optional repo UUID to apply per-repo model overrides.
+            model_config: Pre-resolved active model config. When provided, the
+              DB lookup is skipped entirely — fan-out callers (e.g. the
+              4-perspective audit) resolve once and share it so N concurrent
+              completions cost one lookup instead of N sessions.
             **kwargs: Extra parameters (temperature, max_tokens, tool_choice, response_format, …)
 
         Returns:
@@ -103,7 +112,7 @@ class LLMClient:
                   against the ``max_tokens`` they requested — a response truncated at
                   the budget is otherwise indistinguishable from a complete one.
         """
-        config = await get_active_model_config(db=db, repo_id=repo_id)
+        config = model_config or await get_active_model_config(db=db, repo_id=repo_id)
         target_provider = kwargs.pop("provider", config.provider)
         explicit_model = kwargs.pop("model", None)
         response_format = kwargs.get("response_format")

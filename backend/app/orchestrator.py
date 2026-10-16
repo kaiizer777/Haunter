@@ -670,7 +670,6 @@ async def _orchestrator_pipeline_body(
     )
     from app.sandbox import verify as sandbox_verify
     from app.models import RunStep, Attempt
-    from sqlalchemy.orm import selectinload as _selectinload
 
     repo_settings = await get_repo_settings(db, repo.id)
 
@@ -963,11 +962,11 @@ async def _orchestrator_pipeline_body(
                     )
                     return
 
-                # Reload Repo (selectinload for tenant integrity check).
+                # Reload Repo (plain columns only: the tenant check below reads
+                # repo.user_id / repo.id — the eager Repo.user load was an
+                # extra SELECT per iteration that nothing consumed).
                 repo_result = await attempt_db.execute(
-                    select(Repo)
-                    .where(Repo.id == run.repo_id)
-                    .options(_selectinload(Repo.user))
+                    select(Repo).where(Repo.id == run.repo_id)
                 )
                 repo = repo_result.scalar_one_or_none()
                 if repo is None:
@@ -1553,9 +1552,7 @@ async def _orchestrator_pipeline_body(
                 return
 
             repo_result = await fb_db.execute(
-                select(Repo)
-                .where(Repo.id == run.repo_id)
-                .options(_selectinload(Repo.user))
+                select(Repo).where(Repo.id == run.repo_id)
             )
             repo = repo_result.scalar_one_or_none()
             if repo is None:
@@ -1754,9 +1751,11 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
 
         from sqlalchemy.orm import selectinload
 
+        # Repo columns only (repo.user_id / repo.id below) — no eager loads.
         repo_result = await db.execute(
             select(Repo)
             .where(Repo.id == run.repo_id)
+            .with_for_update()  # SELECT FOR UPDATE: prevent concurrent tenant cross-write
             .options(selectinload(Repo.user))
         )
         repo = repo_result.scalar_one_or_none()
