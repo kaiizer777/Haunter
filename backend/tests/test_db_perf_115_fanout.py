@@ -270,7 +270,13 @@ async def test_fetch_prior_attempt_none_when_no_attempts():
 async def test_auditor_shares_single_model_config_across_perspectives(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """4 perspectives → 1 config resolution; every complete() gets it."""
+    """4 perspectives, one shared model_config, zero DB I/O when the LLM is faked.
+
+    With a mock ``llm_client`` injected, the resolver is skipped entirely
+    (no DB lookup, no env-default probe); the same ``ResolvedModelConfig``
+    flows to every perspective's ``complete()`` call. A monkey-patched
+    ``auditor.get_active_model_config`` therefore MUST NOT fire here.
+    """
     resolve_calls = {"n": 0}
     shared = ResolvedModelConfig(
         provider="opencode_zen",
@@ -291,9 +297,127 @@ async def test_auditor_shares_single_model_config_across_perspectives(
         llm_client=fake_llm,  # type: ignore[arg-type]
     )
 
-    assert resolve_calls["n"] == 1
+    # Resolver is bypassed for an injected non-LLMClient — hermetic guarantee.
+    assert resolve_calls["n"] == 0
     assert len(fake_llm.kwargs_seen) == 4
-    assert all(k.get("model_config") is shared for k in fake_llm.kwargs_seen)
+    # Every complete() sees the SAME object — shared across perspectives.
+    seen_configs = {id(k.get("model_config")) for k in fake_llm.kwargs_seen}
+    assert len(seen_configs) == 1
+    assert all(
+        isinstance(k.get("model_config"), ResolvedModelConfig)
+        for k in fake_llm.kwargs_seen
+    )
+    assert {p.perspective for p in result.perspectives} == {
+        "security",
+        "correctness",
+        "performance",
+        "architecture",
+    }
+
+
+@pytest.mark.asyncio
+async def test_auditor_config_resolve_timeout_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A slow DB resolve surfaces as env defaults, never blocks the audit.
+
+    Without the wait_for bound, a stuck DB would prevent any perspective
+    from starting — the bot-flagged gap. With it, the timeout falls
+    through to the same env-default shape ``get_active_model_config``
+    itself uses on DB errors, and the audit proceeds.
+    """
+    import asyncio as _asyncio
+    from app.config import settings
+    from app.llm.config import default_base_url_for_provider
+
+    async def _hanging_resolve(db=None, repo_id=None) -> ResolvedModelConfig:
+        await _asyncio.sleep(60.0)  # far longer than the budget
+        return ResolvedModelConfig(provider="never", model_name="never", base_url="x")
+
+    monkeypatch.setattr(auditor, "get_active_model_config", _hanging_resolve)
+
+    # Use a real LLMClient so the skip-when-mocked guard does NOT short-circuit;
+    # this exercises the timeout + env-default fallback path.
+    import app.llm as _llm_pkg
+
+    class _StubClient(_llm_pkg.LLMClient):
+        async def complete(self, *args, **kwargs):
+            # Return a valid perspective response without touching the network.
+            return {
+                "content": json.dumps(
+                    {"summary": "ok", "confidence": 90, "findings": []}
+                ),
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "latency_ms": 1,
+                "model": "stub",
+            }
+
+    started = _asyncio.get_event_loop().time()
+    result = await run_audit(
+        diff_text=SAMPLE_DIFF,
+        audit_id="audit-dead0000beef",
+        llm_client=_StubClient(),
+    )
+    elapsed = _asyncio.get_event_loop().time() - started
+    assert elapsed < 10.0, f"audit stalled after {elapsed:.1f}s on slow DB"
+    assert len(result.perspectives) == 4
+    assert all(p.succeeded for p in result.perspectives)
+
+
+@pytest.mark.asyncio
+async def test_auditor_does_resolve_when_real_llm_client_provided(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The resolve path stays in place when a *real* LLMClient is injected.
+
+    Guards against an over-broad skip that would silently turn every
+    production caller into a fake-resolver codepath. Real
+    ``LLMClient`` → resolve runs; resolver monkey-patch MUST be seen.
+    """
+    from app.llm import LLMClient as _RealLLMClient
+
+    resolve_calls = {"n": 0}
+    shared = ResolvedModelConfig(
+        provider="opencode_zen",
+        model_name="shared-test-model",
+        base_url="http://shared-config.invalid",
+    )
+
+    async def _counting_resolve(db=None, repo_id=None) -> ResolvedModelConfig:
+        resolve_calls["n"] += 1
+        return shared
+
+    monkeypatch.setattr(auditor, "get_active_model_config", _counting_resolve)
+
+    class _StubReal(_RealLLMClient):
+        async def complete(self, *args, **kwargs):
+            messages = kwargs.get("messages") or (args[0] if args else [])
+            user_text = " ".join(m.get("content", "") for m in (messages or []))
+            perspective = next(
+                p
+                for p in ("security", "correctness", "performance", "architecture")
+                if f"## Perspective\n{p}" in user_text
+            )
+            return {
+                "content": json.dumps(
+                    {
+                        "summary": f"{perspective} verdict.",
+                        "confidence": 90,
+                        "findings": [],
+                    }
+                ),
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+                "latency_ms": 1,
+                "model": "test-engine",
+            }
+
+    result = await run_audit(
+        diff_text=SAMPLE_DIFF,
+        audit_id="audit-deadbee00000",
+        llm_client=_StubReal(timeout=1.0),
+    )
+
+    assert resolve_calls["n"] == 1
     assert {p.perspective for p in result.perspectives} == {
         "security",
         "correctness",
