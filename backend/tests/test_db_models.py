@@ -17,12 +17,14 @@ from app.db import engine, engine_unpooled
 from app.models import (
     Attempt,
     AuditJob,
+    CodeReview,
     ModelConfig,
     Repo,
     RepoSettings,
     Run,
     RunStep,
     User,
+    WebhookDelivery,
 )
 from app.routers.traces import build_retry_child
 from tests.conftest import truncate_all
@@ -50,6 +52,40 @@ async def test_alembic_head_and_migration_check():
     assert script.get_revision("b8c9d0e1f2a3").down_revision == "a5c6d7e8f9b0"
     assert script.get_revision("e1f2a3b4c5d6").down_revision == "b8c9d0e1f2a3"
     assert script.get_revision("d1e2f3a4b5c6").down_revision == "e1f2a3b4c5d6"
+
+
+def test_issue_110_composite_indexes_match_models():
+    """Issue #110: composites exist with equality-first order; migration builds them CONCURRENTLY."""
+    from pathlib import Path
+
+    expected = {
+        "ix_runs_repo_status_created": ["repo_id", "status", "created_at"],
+        "ix_code_reviews_repo_commit_pr": ["repo_id", "commit_sha", "pr_number"],
+        "ix_webhook_deliveries_repo_event_created": [
+            "repo_id",
+            "event",
+            "created_at",
+        ],
+    }
+    actual: dict[str, list[str]] = {}
+    for model in (Run, CodeReview, WebhookDelivery):
+        for idx in model.__table__.indexes:
+            if idx.name in expected:
+                actual[idx.name] = list(idx.columns.keys())
+    assert actual == expected
+
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "d1e2f3a4b5c6_add_issue_110_composite_indexes.py"
+    )
+    src = migration.read_text(encoding="utf-8")
+    for name in expected:
+        assert name in src, f"migration missing index {name}"
+    assert "autocommit_block" in src, "CONCURRENTLY builds must run outside a transaction"
+    # 3 creates + 3 drops, all concurrent so webhook writes are never blocked.
+    assert src.count("postgresql_concurrently=True") >= 6
 
 
 def test_to_asyncpg_url_variants():

@@ -21,9 +21,10 @@ Deliberately additive-only: the three UNIQUE idempotency guards on runs
 uniqueness domains (workflow-run ids vs comment ids vs delivery ids) and
 are asserted by test_db_models.py + the double-delivery webhook tests, so
 consolidating them into one column would conflate namespaces and allow
-duplicates. Expand-only, no table rewrite, no long exclusive lock — plain
-CREATE INDEX (no CONCURRENTLY), matching every prior migration in
-alembic/versions/; brief SHARE lock only, safe to apply online.
+duplicates. Expand-only, no table rewrite. Each index is built with
+CREATE INDEX CONCURRENTLY outside any transaction block
+(autocommit_block), so live webhook writes are not blocked while the
+builds run.
 """
 
 from __future__ import annotations
@@ -39,32 +40,47 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_index(
-        "ix_runs_repo_status_created",
-        "runs",
-        ["repo_id", "status", "created_at"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_code_reviews_repo_commit_pr",
-        "code_reviews",
-        ["repo_id", "commit_sha", "pr_number"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_webhook_deliveries_repo_event_created",
-        "webhook_deliveries",
-        ["repo_id", "event", "created_at"],
-        unique=False,
-    )
+    # CONCURRENTLY cannot run inside a transaction block: env.py wraps
+    # migrations in begin_transaction(), so each build runs in an
+    # autocommit block instead. Non-blocking for live webhook writes.
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "ix_runs_repo_status_created",
+            "runs",
+            ["repo_id", "status", "created_at"],
+            unique=False,
+            postgresql_concurrently=True,
+        )
+        op.create_index(
+            "ix_code_reviews_repo_commit_pr",
+            "code_reviews",
+            ["repo_id", "commit_sha", "pr_number"],
+            unique=False,
+            postgresql_concurrently=True,
+        )
+        op.create_index(
+            "ix_webhook_deliveries_repo_event_created",
+            "webhook_deliveries",
+            ["repo_id", "event", "created_at"],
+            unique=False,
+            postgresql_concurrently=True,
+        )
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_webhook_deliveries_repo_event_created",
-        table_name="webhook_deliveries",
-    )
-    op.drop_index(
-        "ix_code_reviews_repo_commit_pr", table_name="code_reviews"
-    )
-    op.drop_index("ix_runs_repo_status_created", table_name="runs")
+    with op.get_context().autocommit_block():
+        op.drop_index(
+            "ix_webhook_deliveries_repo_event_created",
+            table_name="webhook_deliveries",
+            postgresql_concurrently=True,
+        )
+        op.drop_index(
+            "ix_code_reviews_repo_commit_pr",
+            table_name="code_reviews",
+            postgresql_concurrently=True,
+        )
+        op.drop_index(
+            "ix_runs_repo_status_created",
+            table_name="runs",
+            postgresql_concurrently=True,
+        )
