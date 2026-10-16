@@ -39,7 +39,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.llm import LLMClient
-from app.models import Attempt, Run, RunStep
+from app.models import Attempt, Run
+from app.services.token_accounting import make_run_step, normalize_usage
 from app.subagents.context_gatherer import _redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -56,9 +57,8 @@ def _max_attempts() -> int:
     return settings.max_attempts
 
 
-# Placeholder pricing — same as context_gatherer; replace with real figures.
-COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
-COST_PER_OUTPUT_TOKEN: float = 0.002 / 1_000
+# Canonical pricing lives in app.services.token_accounting (issue #106);
+# this module no longer defines its own COST_PER_* copy.
 
 # Paths that must never appear in a generated patch, even if explicitly requested.
 _BLOCKED_PATH_PREFIXES: tuple[str, ...] = (".git/", ".github/workflows/")
@@ -735,14 +735,16 @@ async def _call_and_parse(
 
     try:
         fix_output = FixOutput.model_validate_json(retry_content)
-        # Accumulate token usage across both calls for the trace row
-        usage = retry_response.get("usage", {})
-        first_usage = response.get("usage", {})
+        # Accumulate token usage across both calls for the trace row.
+        # Each per-call usage is normalized first so a ``None`` count
+        # can't TypeError on ``+``, and a numeric-string count can't
+        # silently concatenate into the wrong total (cubic#4297090228
+        # and the canonical-usage rule this PR introduced).
+        retry_in, retry_out = normalize_usage(retry_response.get("usage"))
+        first_in, first_out = normalize_usage(response.get("usage"))
         combined_usage = {
-            "input_tokens": usage.get("input_tokens", 0)
-            + first_usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0)
-            + first_usage.get("output_tokens", 0),
+            "input_tokens": retry_in + first_in,
+            "output_tokens": retry_out + first_out,
         }
         retry_response = {**retry_response, "usage": combined_usage}
         return fix_output, retry_response
@@ -784,12 +786,23 @@ async def _call_with_format_retry(
     if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
         return fix_output, response
 
+    # Running totals across retries — normalize_usage each response before
+    # adding so a ``None`` count cannot TypeError and a numeric-string count
+    # cannot silently concatenate (cubic#4297090208 / cubic#4297090249).
+    # Previously the retry path overwrote ``response``, dropping the first
+    # call's tokens from the trace row.
+    total_in, total_out = normalize_usage(response.get("usage"))
+
     # Retry loop. _PATCH_FORMAT_RETRY_CAP=1 means: try once, retry once,
     # then give up. Path-traversal rejections (the base PatchRejected
     # class) are NOT caught here — they bubble up immediately.
     for _format_attempt in range(_PATCH_FORMAT_RETRY_CAP):
         try:
             _validate_patch(fix_output.patch)
+            response = {**response, "usage": {
+                "input_tokens": total_in,
+                "output_tokens": total_out,
+            }}
             return fix_output, response
         except PatchFormatRejected as e:
             logger.warning(
@@ -812,15 +825,27 @@ async def _call_with_format_retry(
                 repo_id=repo_id,
                 review_feedback=review_feedback,
             )
+            # Accumulate this retry's usage into the running totals.
+            new_in, new_out = normalize_usage(response.get("usage"))
+            total_in += new_in
+            total_out += new_out
             if (
                 fix_output.confidence < LOW_CONFIDENCE_THRESHOLD
                 or not fix_output.patch.strip()
             ):
+                response = {**response, "usage": {
+                    "input_tokens": total_in,
+                    "output_tokens": total_out,
+                }}
                 return fix_output, response
 
     # Final attempt: validate and raise exhausted if it still fails.
     try:
         _validate_patch(fix_output.patch)
+        response = {**response, "usage": {
+            "input_tokens": total_in,
+            "output_tokens": total_out,
+        }}
         return fix_output, response
     except PatchFormatRejected as e:
         raise PatchFormatRetryExhausted(str(e)) from e
@@ -1009,9 +1034,9 @@ async def generate_fix(
     # -------------------------------------------------------------------------
     # 7. Persist RunStep trace — tokens + latency only, never raw content
     # -------------------------------------------------------------------------
-    usage = response.get("usage", {})
-    input_tokens: int = usage.get("input_tokens", 0)
-    output_tokens: int = usage.get("output_tokens", 0)
+    # Canonical usage parsing (issue #106): tolerates prompt/completion
+    # spellings, None, and numeric strings instead of silently recording 0.
+    input_tokens, output_tokens = normalize_usage(response.get("usage"))
 
     step_cost = await _persist_run_step(
         db=db,
@@ -1057,20 +1082,17 @@ async def _persist_run_step(
     """Insert a RunStep trace row. Never stores patch content.
 
     Returns the persisted cost_estimate so callers can maintain a running
-    cost total without re-SUMming the table (issue #113).
+    cost total without re-SUMming the table (issue #113). Cost is
+    recomputed by :func:`make_run_step` so the row is self-consistent
+    with the stored token counts (issue #106 — one formula, one place).
     """
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
-        output_tokens * COST_PER_OUTPUT_TOKEN
-    )
-    rounded = round(cost, 8)
-    step = RunStep(
+    step = make_run_step(
         run_id=run_id,
         step_name=step_name,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        cost_estimate=rounded,
     )
     db.add(step)
     await db.commit()
-    return float(rounded)
+    return step.cost_estimate

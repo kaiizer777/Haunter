@@ -33,7 +33,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import github_client as gh
 from app.llm import LLMClient
-from app.models import Attempt, Repo, Run, RunStep
+from app.models import Attempt, Repo, Run
+from app.services.token_accounting import make_run_step, normalize_usage
 from app.subagents.ast_analyzer import (
     extract_generic_symbol_context,
     extract_python_ast_context,
@@ -56,10 +57,8 @@ CAP_CHARS: int = 10_000_000
 # kill the LLM call mid-stream. Tighten once we have a stable success path.
 FETCH_TIMEOUT_S: float = 120.0
 
-# Placeholder pricing: $0.001 / 1k input tokens, $0.002 / 1k output tokens.
-# Replace with real provider pricing once known.
-COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
-COST_PER_OUTPUT_TOKEN: float = 0.002 / 1_000
+# Canonical pricing lives in app.services.token_accounting (issue #106);
+# this module no longer defines its own COST_PER_* copy.
 
 # ---------------------------------------------------------------------------
 # Secret redaction
@@ -1163,9 +1162,9 @@ async def _call_with_empty_retry(
         else (time.monotonic() - t0) * 1000
     )
     first_content = (response.get("content") or "").strip()
-    first_usage = response.get("usage", {}) or {}
-    first_in = int(first_usage.get("input_tokens", 0))
-    first_out = int(first_usage.get("output_tokens", 0))
+    # Canonical usage parsing (issue #106): tolerates prompt/completion
+    # spellings, None, and numeric strings instead of raising on int(None).
+    first_in, first_out = normalize_usage(response.get("usage"))
 
     if not _is_empty_summary(first_content):
         return first_content, response, first_latency_ms, first_in, first_out
@@ -1210,9 +1209,7 @@ async def _call_with_empty_retry(
         else (time.monotonic() - t1) * 1000
     )
     retry_content = (retry_response.get("content") or "").strip()
-    retry_usage = retry_response.get("usage", {}) or {}
-    retry_in = int(retry_usage.get("input_tokens", 0))
-    retry_out = int(retry_usage.get("output_tokens", 0))
+    retry_in, retry_out = normalize_usage(retry_response.get("usage"))
 
     if not _is_empty_summary(retry_content):
         # Retry succeeded. Aggregate the token counts so the dashboard shows
@@ -1268,19 +1265,16 @@ async def _persist_run_step(
     """
     Insert a RunStep trace row.
 
-    Cost is a placeholder estimate; replace with real pricing from provider docs.
+    Cost is the canonical placeholder estimate from
+    app.services.token_accounting (issue #106).
     Raw inputs are NEVER stored here — only token counts and latency.
     """
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
-        output_tokens * COST_PER_OUTPUT_TOKEN
-    )
-    step = RunStep(
+    step = make_run_step(
         run_id=run_id,
         step_name=step_name if not error else f"{step_name}_error",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        cost_estimate=round(cost, 8),
     )
     db.add(step)
     await db.commit()

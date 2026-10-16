@@ -26,7 +26,8 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import LLMClient
-from app.models import Attempt, Run, RunStep
+from app.models import Attempt, Run
+from app.services.token_accounting import make_run_step, normalize_usage
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
-COST_PER_OUTPUT_TOKEN: float = 0.002 / 1_000
+# Canonical pricing lives in app.services.token_accounting (issue #106);
+# this module no longer defines its own COST_PER_* copy.
 
 # Regex for validating the server-generated branch name.
 _BRANCH_SAFE_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9/_\-\.]+$")
@@ -232,12 +233,16 @@ async def _call_and_parse_pr(
 
     try:
         pr_output = PROutput.model_validate_json(retry_content)
-        # Combine token usage across both calls
-        u1 = response.get("usage", {})
-        u2 = retry_response.get("usage", {})
+        # Combine token usage across both calls. Normalize each
+        # per-call usage first so a ``None`` count cannot TypeError on
+        # ``+``, and a numeric-string count cannot silently concatenate
+        # into the wrong total (cubic#4297090217 — the canonical-usage
+        # rule this PR introduced must apply in the retry path too).
+        u1_in, u1_out = normalize_usage(response.get("usage"))
+        u2_in, u2_out = normalize_usage(retry_response.get("usage"))
         combined = {
-            "input_tokens": u1.get("input_tokens", 0) + u2.get("input_tokens", 0),
-            "output_tokens": u1.get("output_tokens", 0) + u2.get("output_tokens", 0),
+            "input_tokens": u1_in + u2_in,
+            "output_tokens": u1_out + u2_out,
         }
         return pr_output, {**retry_response, "usage": combined}
     except ValidationError as second_err:
@@ -287,21 +292,16 @@ async def generate_pr_text(
     )
 
     latency_ms = int((time.monotonic() - t0) * 1000)
-    usage = response.get("usage", {})
-    input_tokens: int = usage.get("input_tokens", 0)
-    output_tokens: int = usage.get("output_tokens", 0)
+    # Canonical usage parsing + cost (issue #106): one formula, one place.
+    input_tokens, output_tokens = normalize_usage(response.get("usage"))
 
     # Persist RunStep trace — tokens + latency only, never PR content
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
-        output_tokens * COST_PER_OUTPUT_TOKEN
-    )
-    step = RunStep(
+    step = make_run_step(
         run_id=run.id,
         step_name="pr_writer",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        cost_estimate=round(cost, 8),
     )
     db.add(step)
     await db.commit()
