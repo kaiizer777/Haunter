@@ -34,7 +34,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Attempt, Run
+from app.models import Attempt, Repo, Run, User
 from app.subagents.fix_generator import AttemptClaimLost, generate_fix
 
 # Patch _max_attempts so the cap is independent of HAUNTER_MAX_ATTEMPTS.
@@ -68,8 +68,23 @@ _VALID_LLM_RESPONSE = {
 _DIAGNOSIS = "ImportError: cannot import foo in app/models.py:10"
 
 
-def _new_run() -> Run:
-    return Run(id=uuid.uuid4(), diagnosis_summary=_DIAGNOSIS)
+async def _seed_user_repo(db: AsyncSession) -> tuple[User, Repo]:
+    """Seed a User owning a Repo. Required because runs.repo_id is NOT NULL."""
+    user = User(
+        id=uuid.uuid4(),
+        github_id=int(uuid.uuid4().int % 1_000_000_000 + 100_000_000),
+        github_username="concurrent_cap_user",
+        access_token=None,
+        role="user",
+    )
+    db.add(user)
+    await db.commit()
+
+    repo = Repo(user_id=user.id, owner="concurrent-cap-org", name="app")
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+    return user, repo
 
 
 @patch("app.subagents.fix_generator._max_attempts", return_value=_PINNED_CAP)
@@ -85,8 +100,13 @@ async def test_two_concurrent_generate_fix_calls_do_not_exceed_cap(
     """
     from tests.conftest import async_session_maker, truncate_all
 
-    # Seed one Run with zero priors, both calls will use this id.
-    run = _new_run()
+    # Seed a User+Repo (runs.repo_id is NOT NULL) and a Run with zero priors.
+    user, repo = await _seed_user_repo(db)
+    run = Run(
+        id=uuid.uuid4(),
+        repo_id=repo.id,
+        diagnosis_summary=_DIAGNOSIS,
+    )
     db.add(run)
     await db.commit()
     await db.refresh(run)
