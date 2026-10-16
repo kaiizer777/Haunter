@@ -9,6 +9,7 @@ import json
 import logging
 import random
 import re
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -187,11 +188,50 @@ AUDIT_RETRY_MAX_S = 300.0
 AUDIT_DISPATCH_BATCH_SIZE = 10
 AUDIT_DISPATCH_WORKER_COUNT = 2
 AUDIT_DISPATCH_POLL_S = 1.0
+#: Max idle delay between dispatch polls when the queue stays empty.
+#: The worker backs off exponentially from AUDIT_DISPATCH_POLL_S up to this
+#: cap, so an idle worker issues ~0 queries/sec instead of 1/sec.
+AUDIT_DISPATCH_IDLE_BACKOFF_S = 30.0
+#: Minimum interval between expired-lease recovery sweeps inside the worker
+#: loop. Leases are 30s; sweeping every minute is ample and avoids two
+#: UPDATEs per idle poll.
+AUDIT_DISPATCH_RECOVERY_INTERVAL_S = 60.0
 #: `audit_jobs.last_error` recorded when the per-repo kill switch refuses a job.
 #: Bounded by the column width and never carries attacker-controlled text.
 AUDITOR_DISABLED_ERROR = "AuditorDisabled"
 
 _audit_dispatch_workers: set[asyncio.Task[None]] = set()
+
+#: Event-driven wakeup for dispatch workers. Set whenever a new audit job is
+#: enqueued in-process so an idly-backed-off worker wakes in milliseconds
+#: (<2s) instead of sleeping through its full backoff. Cross-process wakeup
+#: (Lambda scheduled dispatcher) needs no event — it invokes
+#: dispatch_audit_jobs directly once per schedule.
+_audit_dispatch_wakeup: asyncio.Event = asyncio.Event()
+
+#: Monotonic timestamp (time.monotonic) of the last lease-recovery sweep
+#: performed by any worker. Throttles recover_expired_audit_leases so idle
+#: polls don't burn two UPDATEs per second.
+_audit_dispatch_last_recovery_monotonic: float = 0.0
+
+
+def notify_audit_dispatch() -> None:
+    """Wake dispatch workers blocked in idle backoff (best-effort, never raises)."""
+    try:
+        _audit_dispatch_wakeup.set()
+    except Exception:
+        pass
+
+
+def _audit_dispatch_idle_delay_s(empty_streak: int) -> float:
+    """Exponential idle backoff: 1s, 2s, 4s, … capped at IDLE_BACKOFF_S."""
+    if empty_streak <= 0:
+        return AUDIT_DISPATCH_POLL_S
+    try:
+        delay = float(AUDIT_DISPATCH_POLL_S) * (2.0 ** (empty_streak - 1))
+    except OverflowError:
+        return float(AUDIT_DISPATCH_IDLE_BACKOFF_S)
+    return min(delay, float(AUDIT_DISPATCH_IDLE_BACKOFF_S))
 
 
 @dataclass(frozen=True)
@@ -870,6 +910,7 @@ async def claim_audit_delivery(
         inserted_audit_id = result.scalar_one_or_none()
         if inserted_audit_id is not None:
             await db.commit()
+            notify_audit_dispatch()
             return AuditDeliveryClaim(audit_id=inserted_audit_id, claimed=True)
         existing = (
             await db.execute(
@@ -1766,11 +1807,15 @@ async def dispatch_audit_jobs(
     *,
     batch_size: int = AUDIT_DISPATCH_BATCH_SIZE,
     local_execute: bool = False,
+    recover_leases: bool = True,
 ) -> AuditDispatchSummary:
     if isinstance(batch_size, bool) or not 1 <= batch_size <= 100:
         raise ValueError("audit dispatch batch size is invalid")
-    running_recovered, dispatch_recovered = await recover_expired_audit_leases()
-    recovered = running_recovered + dispatch_recovered
+    if recover_leases:
+        running_recovered, dispatch_recovered = await recover_expired_audit_leases()
+        recovered = running_recovered + dispatch_recovered
+    else:
+        recovered = 0
     adapter = None
     if not local_execute:
         try:
@@ -1848,13 +1893,24 @@ async def _audit_dispatch_worker(
     local_execute: bool,
     max_cycles: Optional[int] = None,
 ) -> None:
+    global _audit_dispatch_last_recovery_monotonic
     cycles = 0
+    empty_streak = 0
     while max_cycles is None or cycles < max_cycles:
+        now = time.monotonic()
+        should_recover = (
+            cycles == 0
+            or (now - _audit_dispatch_last_recovery_monotonic)
+            >= AUDIT_DISPATCH_RECOVERY_INTERVAL_S
+        )
         try:
             summary = await dispatch_audit_jobs(
                 batch_size=AUDIT_DISPATCH_BATCH_SIZE,
                 local_execute=local_execute,
+                recover_leases=should_recover,
             )
+            if should_recover:
+                _audit_dispatch_last_recovery_monotonic = time.monotonic()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1866,12 +1922,26 @@ async def _audit_dispatch_worker(
         cycles += 1
         if max_cycles is not None and cycles >= max_cycles:
             return
-        delay = (
-            0.0
-            if summary.claimed == AUDIT_DISPATCH_BATCH_SIZE
-            else AUDIT_DISPATCH_POLL_S
-        )
-        await asyncio.sleep(delay)
+        if summary.claimed >= AUDIT_DISPATCH_BATCH_SIZE:
+            empty_streak = 0
+            delay = 0.0
+        elif summary.claimed > 0 or summary.recovered > 0:
+            empty_streak = 0
+            delay = AUDIT_DISPATCH_POLL_S
+        else:
+            empty_streak += 1
+            delay = _audit_dispatch_idle_delay_s(empty_streak)
+        if delay <= 0:
+            continue
+        try:
+            await asyncio.wait_for(_audit_dispatch_wakeup.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            try:
+                _audit_dispatch_wakeup.clear()
+            except Exception:
+                pass
 
 
 def start_audit_dispatch_workers() -> int:

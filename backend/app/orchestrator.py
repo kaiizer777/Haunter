@@ -835,6 +835,23 @@ async def _orchestrator_pipeline_body(
     skip_to_fallback_reason: Optional[str] = None
     cost_ceiling_failure_reason: Optional[str] = None
 
+    # Issue #113: single baseline SUM before the loop; iterations below use
+    # the in-memory running total (no aggregate query per iteration).
+    try:
+        _baseline_cost = await db.scalar(
+            select(func.coalesce(func.sum(RunStep.cost_estimate), 0.0)).where(
+                RunStep.run_id == run_id
+            )
+        )
+        running_cost_dollars = float(_baseline_cost or 0.0)
+    except Exception as baseline_exc:
+        logger.warning(
+            "orchestrator: run=%s baseline cost SUM failed (%s) — starting at 0.0",
+            run_id,
+            type(baseline_exc).__name__,
+        )
+        running_cost_dollars = 0.0
+
     for iteration in range(max_attempts):
         # ---- Per-iteration session (BLOCKER-1 fix) ----
         # After ~5 min of idle, Neon's pooled connection drops and the
@@ -886,10 +903,30 @@ async def _orchestrator_pipeline_body(
                     return
 
                 # Phase 6.3 Feature Enforcement: Cost Ceiling Check
-                cost_stmt = select(
-                    func.coalesce(func.sum(RunStep.cost_estimate), 0.0)
-                ).where(RunStep.run_id == run.id)
-                total_cost_dollars = (await attempt_db.scalar(cost_stmt)) or 0.0
+                # Issue #113: use the in-memory running total instead of a
+                # per-iteration SUM. Re-sync from the DB only when close to
+                # the ceiling (>=80%) so concurrent writers can't slip past.
+                total_cost_dollars = running_cost_dollars
+                try:
+                    _ceiling = repo_settings.max_cost_per_run_cents
+                    if _ceiling and _ceiling > 0 and (
+                        total_cost_dollars * 100.0
+                    ) >= (0.8 * float(_ceiling)):
+                        _resynced = await attempt_db.scalar(
+                            select(
+                                func.coalesce(func.sum(RunStep.cost_estimate), 0.0)
+                            ).where(RunStep.run_id == run.id)
+                        )
+                        if _resynced is not None:
+                            total_cost_dollars = float(_resynced or 0.0)
+                            running_cost_dollars = total_cost_dollars
+                except Exception as resync_exc:
+                    logger.warning(
+                        "orchestrator: run=%s cost resync failed (%s) — using running total",
+                        run_id,
+                        type(resync_exc).__name__,
+                    )
+                    total_cost_dollars = running_cost_dollars
                 total_cost_cents = total_cost_dollars * 100.0
 
                 cost_decision = feature_enforcement.check_cost_ceiling(
@@ -930,6 +967,17 @@ async def _orchestrator_pipeline_body(
                         db=attempt_db,
                         review_feedback=review_feedback,
                     )
+                    # Issue #113: accumulate the just-persisted step cost into
+                    # the running total (no re-SUM). Tolerates mocked
+                    # generate_fix in tests (non-numeric attr ignored).
+                    try:
+                        _step_cost = getattr(attempt, "_haunter_step_cost", 0.0)
+                        if isinstance(_step_cost, bool):
+                            pass
+                        elif isinstance(_step_cost, (int, float)):
+                            running_cost_dollars += float(_step_cost)
+                    except Exception:
+                        pass
                     state["decisions"].append(
                         f"fix_generated_attempt_{attempt.attempt_number}"
                     )

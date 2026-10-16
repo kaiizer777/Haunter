@@ -970,7 +970,7 @@ async def generate_fix(
     input_tokens: int = usage.get("input_tokens", 0)
     output_tokens: int = usage.get("output_tokens", 0)
 
-    await _persist_run_step(
+    step_cost = await _persist_run_step(
         db=db,
         run_id=run.id,
         step_name="fix_generator_deterministic"
@@ -980,6 +980,10 @@ async def generate_fix(
         output_tokens=output_tokens,
         latency_ms=latency_ms,
     )
+    try:
+        object.__setattr__(attempt, "_haunter_step_cost", step_cost)
+    except Exception:
+        pass
 
     logger.info(
         "fix_generator: run=%s attempt=%d confidence=%d latency_ms=%d path=%s",
@@ -1006,18 +1010,24 @@ async def _persist_run_step(
     input_tokens: int,
     output_tokens: int,
     latency_ms: int,
-) -> None:
-    """Insert a RunStep trace row. Never stores patch content."""
+) -> float:
+    """Insert a RunStep trace row. Never stores patch content.
+
+    Returns the persisted cost_estimate so callers can maintain a running
+    cost total without re-SUMming the table (issue #113).
+    """
     cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
         output_tokens * COST_PER_OUTPUT_TOKEN
     )
+    rounded = round(cost, 8)
     step = RunStep(
         run_id=run_id,
         step_name=step_name,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        cost_estimate=round(cost, 8),
+        cost_estimate=rounded,
     )
     db.add(step)
     await db.commit()
+    return float(rounded)
