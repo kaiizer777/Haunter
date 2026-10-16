@@ -27,12 +27,19 @@ class ResolvedModelConfig:
     base_url: str
 
 
-# Short-TTL read cache for near-static model config (db-perf #109).
+# Short-TTL read cache for near-static model config (db-perf #109,
+# hardened by #134).
 # ResolvedModelConfig is a frozen dataclass — safe to share across callers.
 # Env-default fallbacks are never cached: caching "DB empty" would hide a
 # row created seconds later for up to TTL.
+# The cache is bounded: expired entries are pruned on every store and the
+# size is capped (#134-4). Stores are guarded by an invalidation
+# generation counter so an in-flight resolve cannot restore stale data
+# after a concurrent write (#134-2).
 _MODEL_CONFIG_TTL: float = 60.0
+_MODEL_CONFIG_MAXSIZE: int = 512
 _model_config_cache: dict[str, tuple[ResolvedModelConfig, float]] = {}
+_model_config_gen: int = 0
 
 
 def _model_config_cache_key(repo_id: uuid.UUID | None) -> str:
@@ -45,8 +52,12 @@ def invalidate_model_config_cache(repo_id: uuid.UUID | None = None) -> None:
     Called after every model-config write (PUT /config/model global and
     per-repo updates) and by test isolation helpers after truncate/fake
     store reset, so the next ``complete()`` re-queries instead of serving
-    a stale model for up to TTL.
+    a stale model for up to TTL. Bumps the invalidation generation so
+    in-flight resolves that started before this call do not repopulate
+    the cache with stale data.
     """
+    global _model_config_gen
+    _model_config_gen += 1
     if repo_id is None:
         _model_config_cache.clear()
     else:
@@ -54,6 +65,27 @@ def invalidate_model_config_cache(repo_id: uuid.UUID | None = None) -> None:
         # A repo write can also change which global row is "latest" for
         # legacy linkage rows — drop the global entry as well.
         _model_config_cache.pop(_model_config_cache_key(None), None)
+
+
+def _store_model_config(
+    cache_key: str,
+    config: ResolvedModelConfig,
+    generation: int,
+    now: float,
+) -> None:
+    """Cache a resolution unless an invalidation landed mid-resolve."""
+    if generation != _model_config_gen:
+        return
+    expired = [
+        key
+        for key, (_, cached_at) in _model_config_cache.items()
+        if now - cached_at >= _MODEL_CONFIG_TTL
+    ]
+    for key in expired:
+        del _model_config_cache[key]
+    while len(_model_config_cache) >= _MODEL_CONFIG_MAXSIZE:
+        _model_config_cache.pop(next(iter(_model_config_cache)))
+    _model_config_cache[cache_key] = (config, now)
 
 
 def default_base_url_for_provider(provider: str | None = None) -> str:
@@ -165,17 +197,22 @@ async def get_active_model_config(
         if time.monotonic() - cached_at < _MODEL_CONFIG_TTL:
             return resolved_cached
 
+    generation = _model_config_gen
     try:
         if db is not None:
             config = await _resolve_from_db(db, repo_id=repo_id)
             if config:
-                _model_config_cache[cache_key] = (config, time.monotonic())
+                _store_model_config(
+                    cache_key, config, generation, time.monotonic()
+                )
                 return config
         else:
             async with async_session_maker() as session:
                 config = await _resolve_from_db(session, repo_id=repo_id)
                 if config:
-                    _model_config_cache[cache_key] = (config, time.monotonic())
+                    _store_model_config(
+                        cache_key, config, generation, time.monotonic()
+                    )
                     return config
     except Exception as exc:
         logger.warning(
