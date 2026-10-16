@@ -27,7 +27,7 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.llm import LLMClient
+from app.llm import LLMClient, ResolvedModelConfig, get_active_model_config
 from app.llm.prompts.audit_prompts import (
     AUDIT_STATUS_LABELS,
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
@@ -1394,6 +1394,7 @@ async def _run_single_perspective(
     repo_context: str,
     llm: LLMClient,
     repo_id: Optional[uuid.UUID],
+    model_config: Optional[ResolvedModelConfig] = None,
 ) -> PerspectiveResult:
     started = time.monotonic()
     messages: list[dict[str, Any]] = [
@@ -1409,6 +1410,7 @@ async def _run_single_perspective(
         messages=messages,
         db=None,
         repo_id=repo_id,
+        model_config=model_config,
         max_tokens=4_096,
     )
     input_tokens = _usage_value(response, "input_tokens")
@@ -1443,6 +1445,7 @@ async def _run_single_perspective(
             messages=retry_messages,
             db=None,
             repo_id=repo_id,
+            model_config=model_config,
             max_tokens=4_096,
         )
         response = retry_response
@@ -2061,6 +2064,15 @@ async def run_audit(
     llm = llm_client or LLMClient(timeout=PERSPECTIVE_TIMEOUT_S)
     semaphore = asyncio.Semaphore(PERSPECTIVE_CONCURRENCY_LIMIT)
 
+    # Resolve the active model config ONCE and share it across all
+    # perspectives. Each llm.complete() with db=None opens its own DB session
+    # to resolve this, so without sharing, one audit fans out to 4-8
+    # sessions (one per perspective, doubled on schema-retry). A single
+    # shared session across the concurrent perspectives would be unsafe
+    # (AsyncSession is not concurrency-safe), so instead one pre-resolved
+    # config feeds all four — zero per-perspective sessions.
+    shared_config = await get_active_model_config(db=db, repo_id=repo_id)
+
     async def run_one(
         perspective: PerspectiveName,
     ) -> tuple[PerspectiveResult, Optional[BaseException]]:
@@ -2074,6 +2086,7 @@ async def run_audit(
                         repo_context=clean_repo_context,
                         llm=llm,
                         repo_id=repo_id,
+                        model_config=shared_config,
                     ),
                     timeout=PERSPECTIVE_DEADLINE_S,
                 )

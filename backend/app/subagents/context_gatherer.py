@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import case, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import github_client as gh
@@ -325,6 +325,18 @@ async def _empty_result() -> str:
     return ""
 
 
+# Maximum ancestry links fetched by resolve_workflow_run_id's single recursive
+# CTE. Retry chains have no application-level depth limit (the 5-children cap
+# bounds siblings, not depth — retrying a settled retry child is allowed), so
+# the CTE carries its own depth guard: without it a corrupt parent_run_id
+# cycle would recurse forever instead of returning None. The Python walk below
+# keeps the visited-set check, so a cycle that hits the guard still resolves
+# to None (skip the log fetch) rather than a wrong id. 200 links exceeds any
+# realistic retry chain by an order of magnitude while keeping the single
+# fetched rowset tiny.
+_PARENT_CHAIN_MAX_DEPTH = 200
+
+
 async def resolve_workflow_run_id(
     run: Run,
     db: AsyncSession,
@@ -342,32 +354,58 @@ async def resolve_workflow_run_id(
     one, in which case callers must degrade gracefully (skip the log fetch)
     instead of issuing a request against ``/actions/runs/None/logs``.
 
-    The walk is bounded by a *visited set* rather than a fixed hop count. A
-    fixed count was wrong in both directions: ``parent_run_id`` chains are not
-    depth-limited (retrying a settled retry child is allowed, so the cap on
-    direct children does not bound total depth), so any fixed bound silently
-    dropped the CI logs for a deep chain. ``parent_run_id`` is a self-FK, so a
-    cycle must not spin forever, and the visited set is what guarantees
-    termination — it terminates on any cycle, not just a self-reference.
+    The whole ancestry is fetched with ONE recursive CTE regardless of chain
+    depth (O(1) queries, not one per level), then walked in Python with a
+    visited set. A fixed hop count was wrong in both directions:
+    ``parent_run_id`` chains are not depth-limited (retrying a settled retry
+    child is allowed, so the cap on direct children does not bound total
+    depth), so any small fixed bound silently dropped the CI logs for a deep
+    chain. ``parent_run_id`` is a self-FK, so a cycle must not spin forever:
+    the CTE depth guard bounds the fetched rowset and the visited set
+    guarantees the walk terminates on any cycle, not just a self-reference.
     """
     if run.github_run_id is not None:
         return run.github_run_id
 
+    chain = (
+        select(
+            Run.id,
+            Run.parent_run_id,
+            Run.github_run_id,
+            literal(1).label("depth"),
+        )
+        .where(Run.id == run.id)
+        .cte(name="run_parent_chain", recursive=True)
+    )
+    chain = chain.union_all(
+        select(
+            Run.id,
+            Run.parent_run_id,
+            Run.github_run_id,
+            (chain.c.depth + 1).label("depth"),
+        ).where(
+            Run.id == chain.c.parent_run_id,
+            chain.c.depth < _PARENT_CHAIN_MAX_DEPTH,
+        )
+    )
+    rows = (
+        await db.execute(
+            select(chain.c.id, chain.c.parent_run_id, chain.c.github_run_id)
+        )
+    ).all()
+
+    by_id = {row[0]: (row[1], row[2]) for row in rows}
     seen: set[uuid.UUID] = {run.id}
-    cursor: Optional[Run] = run
-    while cursor is not None:
-        parent_id = cursor.parent_run_id
-        if parent_id is None or parent_id in seen:
-            return None
+    parent_id: Optional[uuid.UUID] = run.parent_run_id
+    while parent_id is not None and parent_id not in seen:
         seen.add(parent_id)
-        parent = (
-            await db.scalars(select(Run).where(Run.id == parent_id))
-        ).first()
-        if parent is None:
+        entry = by_id.get(parent_id)
+        if entry is None:
             return None
-        if parent.github_run_id is not None:
-            return parent.github_run_id
-        cursor = parent
+        next_parent_id, github_run_id = entry
+        if github_run_id is not None:
+            return github_run_id
+        parent_id = next_parent_id
     return None
 
 
@@ -397,6 +435,30 @@ async def _resolve_pr_opening_run_id(run: Run, db: AsyncSession) -> Optional[uui
         if owner is not None:
             return owner.id
     return run.parent_run_id
+
+
+async def _fetch_prior_attempt(
+    prior_source_id: uuid.UUID,
+    db: AsyncSession,
+) -> Optional[Attempt]:
+    """
+    Return the single attempt whose patch the refinement must build on.
+
+    Prefer the latest passing attempt; fall back to the latest attempt
+    overall. A single bounded row (``LIMIT 1``) regardless of how many
+    attempts the source run accumulated — the previous implementation
+    fetched the full history with ``.all()`` and picked in Python.
+    """
+    stmt = (
+        select(Attempt)
+        .where(Attempt.run_id == prior_source_id)
+        .order_by(
+            case((Attempt.verification_status == "pass", 1), else_=0).desc(),
+            Attempt.attempt_number.desc(),
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalars().first()
 
 
 async def gather_pr_feedback_context(
@@ -450,16 +512,7 @@ async def gather_pr_feedback_context(
     prior_attempt_num = 1
     prior_source_id = await _resolve_pr_opening_run_id(run, db)
     if prior_source_id is not None:
-        stmt = (
-            select(Attempt)
-            .where(Attempt.run_id == prior_source_id)
-            .order_by(Attempt.attempt_number.desc())
-        )
-        source_attempts = (await db.scalars(stmt)).all()
-        prior_attempt = next(
-            (a for a in source_attempts if a.verification_status == "pass"),
-            source_attempts[0] if source_attempts else None,
-        )
+        prior_attempt = await _fetch_prior_attempt(prior_source_id, db)
         if prior_attempt:
             prior_patch = prior_attempt.patch_text or ""
             prior_strategy_notes = prior_attempt.strategy_notes or ""
