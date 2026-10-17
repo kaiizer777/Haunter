@@ -81,3 +81,25 @@ async def test_webhook_burst_from_one_sender_is_throttled(client: httpx.AsyncCli
         resp = await _post_ping(client, "burst-org", "burst-repo", "looping-sender")
         statuses.append(resp.status_code)
     assert 429 in statuses
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_webhook_throttle_is_per_sender(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Throttling one sender leaves a different sender on the same repo untouched."""
+    monkeypatch.setattr(settings, "webhook_rate_limit_max_deliveries", 3)
+    monkeypatch.setattr(settings, "webhook_rate_limit_window_seconds", 60)
+
+    for _ in range(3):
+        resp = await _post_ping(client, "shared-org", "shared-repo", "abusive-sender")
+        assert resp.status_code == 200
+    throttled = await _post_ping(client, "shared-org", "shared-repo", "abusive-sender")
+    assert throttled.status_code == 429
+    assert throttled.headers.get("Retry-After") is not None
+    assert "rate limit" in throttled.json()["detail"].lower()
+
+    for _ in range(3):
+        resp = await _post_ping(client, "shared-org", "shared-repo", "quiet-sender")
+        assert resp.status_code == 200
