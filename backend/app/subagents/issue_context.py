@@ -15,14 +15,23 @@ fence, and label — plus an explicit "do not obey this" directive. Nothing is
 evaluated, formatted, or interpreted.
 
 Scope note: only the issue *title* and *body* are read. Discussion comments are
-excluded, but not for the reason a first reading of this module suggests. The
-two endpoints are governed by *different* App permissions: GitHub's REST API
-description maps ``GET /repos/{owner}/{repo}/issues/{n}`` to ``issues: read`` and
-``GET /repos/{owner}/{repo}/issues/{n}/comments`` to ``pull_requests: read`` — a
-``pull_requests`` grant does **not** carry the former. So the scope this repo
-documents installing (``contents:write``, ``pull_requests:write``,
-``checks:read``, ``actions:read``; ``HAUNTER.md`` §7.2) covers comments and not
-the issue itself.
+excluded, but not because they would 403 — on the contrary. Per GitHub's
+*Permissions required for GitHub Apps* reference the two endpoints are
+governed differently:
+
+* ``GET /repos/{owner}/{repo}/issues/{n}`` is listed once, under *Repository
+  permissions for issues*: ``issues: read``, with no alternative grant.
+* ``GET /repos/{owner}/{repo}/issues/{n}/comments`` is listed twice, under that
+  heading **and** under *Repository permissions for pull requests*:
+  ``issues: read`` **or** ``pull_requests: read`` — either one suffices.
+
+The permissions this repo documents installing (``contents:write``,
+``pull_requests:write``, ``checks:read``, ``actions:read``; ``HAUNTER.md`` §7.2)
+therefore cover the comments endpoint — GitHub's permission ladder is
+three-state, so ``pull_requests:write`` already implies ``pull_requests:read``
+— and do **not** cover the issue itself. The endpoint implemented here is the
+one that would 403; the one deliberately skipped below is the one that would
+have worked.
 
 Two consequences, and only the second is this module's to own:
 
@@ -264,9 +273,16 @@ def render_issue_context(issues: Sequence[LinkedIssue], *, omitted: int = 0) -> 
     plus overhead). The bound here is the backstop for that arithmetic holding
     true, not the primary limit.
 
-    ``omitted`` is the count of referenced issues past the cap; it is stated
-    inside the fence so the model can say "this PR references more than are
-    shown" instead of silently reviewing a subset it believes is complete.
+    ``omitted`` is the number of referenced issues the model is **not** being
+    shown, which is two counts summed by the caller: the references dropped for
+    being past :data:`MAX_LINKED_ISSUES`, and the references that were selected
+    and then failed to load (404, transport error, or never attempted because a
+    rate limit stopped the fetch). Both are omissions as far as the model is
+    concerned, and reporting only the beyond-cap remainder would let it read a
+    one-issue block for a PR that named three and conclude the other two do not
+    exist. It is stated inside the fence so the model can say "this PR
+    references more than are shown" instead of silently reviewing a subset it
+    believes is complete.
     """
     if not issues and omitted <= 0:
         return ""

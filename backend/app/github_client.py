@@ -1251,20 +1251,34 @@ async def fetch_issue(
     Reads only.
 
     **Permission prerequisite — read before trusting this in production.**
-    ``GET /repos/{owner}/{repo}/issues/{n}`` is governed by the repository
-    ``issues`` permission, *not* ``pull_requests``. GitHub's own REST API
-    description maps this endpoint to ``issues: read`` and the sibling
-    ``/issues/{n}/comments`` to ``pull_requests: read`` — the two are not
-    interchangeable, and a ``pull_requests`` grant does not carry this one.
-    The scopes Haunter documents installing (``contents:write``,
+    Per GitHub's *Permissions required for GitHub Apps* reference, the two
+    endpoints in this area are governed differently:
+
+    * ``GET /repos/{owner}/{repo}/issues/{n}`` appears exactly once, under
+      *Repository permissions for issues*: ``issues: read``, with no
+      alternative grant that would satisfy it.
+    * ``GET /repos/{owner}/{repo}/issues/{n}/comments`` appears twice, under
+      that heading **and** under *Repository permissions for pull requests*:
+      ``issues: read`` **or** ``pull_requests: read`` — either one suffices.
+
+    So a ``pull_requests`` grant carries the comments endpoint and not this
+    one. The permissions Haunter documents installing (``contents:write``,
     ``pull_requests:write``, ``checks:read``, ``actions:read``; see
-    ``HAUNTER.md`` §7.2 "GitHub Credential Segregation") do **not** include
-    ``issues: read``, so on an installation that has not been granted it this
-    call answers 403 and the caller degrades to a review with no issue
-    context. Enabling the feature is therefore an operational step — grant the
-    App ``issues: read`` and re-install it — not something this function can
-    decide. It is spelled out here because the failure is a silent no-op: a
-    review still publishes, just without the context.
+    ``HAUNTER.md`` §7.2 "GitHub Credential Segregation") satisfy
+    ``pull_requests: read`` — GitHub's permission ladder is three-state (No
+    access / Read-only / Read & write), so ``write`` implies ``read`` — but do
+    **not** include ``issues: read``. On an installation that has not been
+    granted it this call answers 403 and the caller degrades to a review with
+    no issue context. Enabling the feature is therefore an operational step —
+    grant the App ``issues: read`` and re-install it — not something this
+    function can decide. It is spelled out here because the failure is a
+    silent no-op: a review still publishes, just without the context.
+
+    The non-obvious half, stated because it is what a reader debugging that
+    403 gets wrong: this is the endpoint that does not work. The comments
+    endpoint above — deliberately not implemented, see
+    :mod:`app.subagents.issue_context` for why — was authorized under the
+    permissions this repo already documents.
 
     Mirrors :func:`fetch_pull_request` exactly — same bounded read, same error
     ladder, same header construction — because a caller that handles one of
