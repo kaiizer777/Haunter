@@ -587,9 +587,34 @@ _SSE_POLL_INTERVAL_S = 1.0
 #: window instead of once per tick.
 _SSE_LIVENESS_PROBE_EVERY_TICKS = 5
 
+#: Upper bound on the idle backoff applied to the poll sleep. Consecutive empty
+#: ticks back off exponentially from _SSE_POLL_INTERVAL_S (1s, 2s, 4s, 8s, ...)
+#: up to this cap, mirroring the audit dispatch worker's idle backoff, so an idle
+#: open tab issues ~0.07 queries/sec instead of 1/sec. Every tick opens a fresh
+#: DB session (NullPool), so the tick rate is the connection-churn rate. The
+#: cost is bounded event latency: an event committed while the stream is fully
+#: backed off can wait up to this cap before it is observed.
+_SSE_IDLE_BACKOFF_MAX_S: float = 15.0
+
 #: Bounded terminal-event drain attempts after the turn lock releases.
 _SSE_DRAIN_ATTEMPTS = 3
 _SSE_DRAIN_INTERVAL_S = 0.5
+
+
+def _sse_idle_delay_s(empty_streak: int) -> float:
+    """Exponential idle backoff: 1s, 2s, 4s, ... capped at
+    ``_SSE_IDLE_BACKOFF_MAX_S``.
+
+    Mirrors ``_audit_dispatch_idle_delay_s`` (audit_pipeline) so both idle
+    pollers share one backoff shape.
+    """
+    if empty_streak <= 0:
+        return _SSE_POLL_INTERVAL_S
+    try:
+        delay = float(_SSE_POLL_INTERVAL_S) * (2.0 ** (empty_streak - 1))
+    except OverflowError:
+        return float(_SSE_IDLE_BACKOFF_MAX_S)
+    return min(delay, float(_SSE_IDLE_BACKOFF_MAX_S))
 
 
 async def _stream_from_db(
