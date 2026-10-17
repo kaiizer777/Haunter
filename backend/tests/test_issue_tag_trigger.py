@@ -778,7 +778,7 @@ async def test_ack_failure_still_queues_the_run(
 
 
 @pytest.mark.asyncio
-async def test_missing_token_is_a_loud_error_with_no_run(
+async def test_missing_token_skips_gracefully_with_no_run(
     client: httpx.AsyncClient,
     fake_audit_db: FakeAsyncSession,
     fake_audit_user_factory,
@@ -796,7 +796,7 @@ async def test_missing_token_is_a_loud_error_with_no_run(
     )
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "error", "reason": "github token unavailable"}
+    assert resp.json() == {"status": "skipped", "reason": "github token unavailable"}
     assert root_runs(audit_store, repo) == []
 
 

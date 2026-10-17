@@ -2197,8 +2197,9 @@ async def _handle_issue_trigger(
 
     # 7. Resolve the default-branch head SHA best-effort (R2): an issue event
     # carries no SHA for the NOT NULL column, and the sandbox clones fresh
-    # anyway, so the read's TOCTOU is accepted. Any GitHub/token failure is a
-    # loud `error` — never a fabricated SHA in the row.
+    # anyway, so the read's TOCTOU is accepted. A missing token is a graceful
+    # `skipped` (nothing minted, redelivery stays safe); only an unresolvable
+    # head SHA is a loud `error` — never a fabricated SHA in the row.
     from app.github.pr import get_installation_token
     from app import github_client
 
@@ -2210,7 +2211,7 @@ async def _handle_issue_trigger(
             log_repo,
             type(exc).__name__,
         )
-        return {"status": "error", "reason": "github token unavailable"}
+        return {"status": "skipped", "reason": "github token unavailable"}
     base_branch = repo.default_branch or "main"
     try:
         head_sha = await github_client.fetch_branch_sha(
