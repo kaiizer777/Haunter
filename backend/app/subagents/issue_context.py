@@ -54,6 +54,7 @@ import re
 from typing import Mapping, Optional, Sequence
 
 from app.llm.prompts.audit_prompts import (
+    MAX_ISSUE_AUTHOR_CHARS,
     MAX_ISSUE_BODY_CHARS,
     MAX_ISSUE_CONTEXT_CHARS,
     MAX_ISSUE_TITLE_CHARS,
@@ -192,8 +193,97 @@ def select_local_issue_numbers(
 
 
 # ---------------------------------------------------------------------------
+# Author attribution
+# ---------------------------------------------------------------------------
+#
+# GitHub's ``author_association`` is the one piece of this feature that costs
+# nothing: it is already a field on the issue and on every comment payload, so
+# attributing a statement to a maintainer is free in both requests and
+# permissions. It is also the difference between evidence and noise — "the owner
+# said this is fine" and "someone said this is fine" lead a reviewer to opposite
+# conclusions about the same sentence.
+
+#: Every value GitHub documents for ``author_association``. ``OWNER``,
+#: ``MEMBER`` and ``COLLABORATOR`` are the ones that can *direct* a change;
+#: ``CONTRIBUTOR`` has commit history but no authority over this one;
+#: ``FIRST_TIMER``/``FIRST_TIME_CONTRIBUTOR`` are newcomers; ``NONE`` is anyone
+#: else, including any account at all; ``MANNEQUIN`` is GitHub's own
+#: placeholder user. Enumerated rather than pattern-matched because the whole
+#: feature is the claim "this person is a maintainer", and that claim must
+#: never be made from a value nobody checked.
+_AUTHOR_ASSOCIATION_LABELS: Mapping[str, str] = {
+    "OWNER": "repository owner",
+    "MEMBER": "organisation member",
+    "COLLABORATOR": "collaborator",
+    "CONTRIBUTOR": "past contributor",
+    "FIRST_TIMER": "first-time commenter",
+    "FIRST_TIME_CONTRIBUTOR": "first-time contributor",
+    "MANNEQUIN": "GitHub placeholder user",
+    "NONE": "no repository association",
+}
+
+#: A payload that carried no association at all. Distinct on purpose from every
+#: label above: an absent field is not evidence of *no* association, and saying
+#: "no repository association" about a payload that never said so would turn a
+#: missing field into an accusation.
+_AUTHOR_ASSOCIATION_UNREPORTED = "association not reported"
+
+#: Same reasoning for a value outside the documented set: the raw string is not
+#: echoed into a prompt, because whatever produced it is upstream text.
+_AUTHOR_ASSOCIATION_UNRECOGNISED = "unrecognised association"
+
+
+def author_association_label(value: object) -> str:
+    """Render GitHub's ``author_association`` as a phrase a model can weigh.
+
+    Normalises case and surrounding whitespace, so ``"member"`` and ``"MEMBER"``
+    cannot mean different things to the model. Anything that is not a
+    documented value — absent, null, or a value this module does not know —
+    renders as a phrase saying exactly that, never as a guess and never by
+    echoing the input back into a prompt.
+    """
+    if not isinstance(value, str):
+        return _AUTHOR_ASSOCIATION_UNREPORTED
+    normalized = value.strip().upper()
+    if not normalized:
+        return _AUTHOR_ASSOCIATION_UNREPORTED
+    return _AUTHOR_ASSOCIATION_LABELS.get(normalized, _AUTHOR_ASSOCIATION_UNRECOGNISED)
+
+
+# ---------------------------------------------------------------------------
 # Issue payloads
 # ---------------------------------------------------------------------------
+
+
+def _bounded_login(payload: Mapping[str, object]) -> str:
+    """``payload["user"]["login"]``, bounded — or ``""`` when there isn't one.
+
+    A deleted user, a malformed payload and a comment from a suspended account
+    all present as "no login". The statement is still rendered, just without an
+    author: an unattributed maintainer statement is worth less than a named one
+    and still worth more than nothing.
+    """
+    user = payload.get("user")
+    if not isinstance(user, Mapping):
+        return ""
+    login = user.get("login")
+    if not isinstance(login, str):
+        return ""
+    return _safe_model_text(login, MAX_ISSUE_AUTHOR_CHARS).strip()
+
+
+def _bounded_text_field(value: object, maximum: int) -> str:
+    """``value`` as bounded, redacted model text, with ``None`` and junk coerced.
+
+    ``None`` is a first-class state for every GitHub body field (an issue or a
+    comment with no text), so it becomes ``""`` rather than ``"None"``. The
+    coercion is here, at the boundary, because the alternative is a
+    ``str(payload["body"])`` at some call site that turns a ``None`` into the
+    literal word "None" inside a prompt.
+    """
+    if value is None:
+        return ""
+    return _safe_model_text(str(value), maximum).strip()
 
 
 @dataclass(frozen=True)
@@ -203,6 +293,13 @@ class LinkedIssue:
     number: int
     title: str
     body: str
+    #: Login of whoever opened the issue, so the requester is identifiable in
+    #: the discussion that follows. Empty when the payload carried no user.
+    opener: str = ""
+    #: Rendered attribution for the opener, from the issue payload's own
+    #: ``author_association`` — free, and the anchor for "the issue raiser said
+    #: X" as distinct from "a maintainer said Y".
+    opener_association: str = ""
 
 
 def linked_issue_from_payload(payload: object) -> Optional[LinkedIssue]:
@@ -216,21 +313,25 @@ def linked_issue_from_payload(payload: object) -> Optional[LinkedIssue]:
     in this repo follows, so a caller cannot forget it. ``body`` is ``null`` for
     an issue with no description: it is coerced to ``""``, never stripped as a
     ``None``.
+
+    The opener is captured here for the same reason: ``user.login`` and
+    ``author_association`` are already in this payload, so attributing the
+    issue to its raiser costs no request and no permission.
     """
     if not isinstance(payload, Mapping):
         return None
     number = payload.get("number")
     if not isinstance(number, int) or isinstance(number, bool) or number < 1:
         return None
-    title = _safe_model_text(
-        "" if payload.get("title") is None else str(payload["title"]),
-        MAX_ISSUE_TITLE_CHARS,
+    title = _bounded_text_field(payload.get("title"), MAX_ISSUE_TITLE_CHARS)
+    body = _bounded_text_field(payload.get("body"), MAX_ISSUE_BODY_CHARS)
+    return LinkedIssue(
+        number=number,
+        title=title,
+        body=body,
+        opener=_bounded_login(payload),
+        opener_association=author_association_label(payload.get("author_association")),
     )
-    body = _safe_model_text(
-        "" if payload.get("body") is None else str(payload["body"]),
-        MAX_ISSUE_BODY_CHARS,
-    )
-    return LinkedIssue(number=number, title=title.strip(), body=body.strip())
 
 
 # ---------------------------------------------------------------------------
