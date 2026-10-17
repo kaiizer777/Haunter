@@ -397,7 +397,8 @@ class PostgresRateLimitBackend:
 
 #: Backend used when nothing selects one. A module constant so a freshly
 #: imported process has a working limiter with no configuration and no database
-#: in the picture.
+#: in the picture; deployments select explicitly via
+#: settings.webhook_rate_limit_backend.
 DEFAULT_RATE_LIMIT_BACKEND = "memory"
 
 #: Every backend this module can build, keyed by the name a deployment selects
@@ -409,6 +410,7 @@ _BACKENDS: dict[str, type[RateLimitBackend]] = {
 
 _unknown_name_logged = False
 
+_resolved_name: Optional[str] = None
 _resolved: Optional[RateLimitBackend] = None
 
 
@@ -441,19 +443,67 @@ def build_rate_limit_backend(name: str) -> RateLimitBackend:
     return backend_cls()
 
 
-def get_rate_limit_backend() -> RateLimitBackend:
-    """Return the process-wide limiter, building it on first use."""
-    global _resolved
+def get_rate_limit_backend(name: str) -> RateLimitBackend:
+    """Return the process-wide limiter for ``name``, rebuilding on a change.
 
-    if _resolved is None:
-        _resolved = build_rate_limit_backend(DEFAULT_RATE_LIMIT_BACKEND)
+    Cached per name rather than built once, so the hot path is a string compare
+    instead of a construction, and so a deployment (or a test) that changes the
+    setting gets the backend it asked for rather than whichever one happened to
+    be resolved first.
+    """
+    global _resolved_name, _resolved
+
+    if _resolved is None or _resolved_name != name:
+        _resolved = build_rate_limit_backend(name)
+        _resolved_name = name
     return _resolved
+
+
+#: Store used when the configured one raises. Resolved once and REUSED: handing
+#: out a fresh instance per failed call would reset the bucket every time, which
+#: is no limit at all — the opposite of what degraded mode is for.
+_degraded: Optional[RateLimitBackend] = None
+
+
+async def consume_rate_limit(
+    name: str, key: str, *, maximum: int, window: int, now: Optional[float] = None
+) -> int:
+    """Resolve the backend named by ``name`` and consume one delivery from it.
+
+    Degrades to the process-local store if the configured one raises. The
+    throttler is a guard rail, not the product: a store outage must not turn
+    every webhook delivery into a 5xx. But the failure is logged at ERROR
+    rather than swallowed, because a limiter that is down is silently weaker
+    than the operator believes it is and that has to be alertable.
+
+    The caller owns the "disabled" check (``maximum <= 0 or window <= 0``), so
+    it costs nothing and cannot be bypassed by whichever store is deployed.
+    """
+    global _degraded
+
+    backend = get_rate_limit_backend(name)
+    try:
+        return await backend.consume(key, maximum=maximum, window=window, now=now)
+    except Exception as exc:
+        logger.error(
+            "Webhook rate limit backend %r unavailable (%s); throttling with the "
+            "in-process limiter for this delivery",
+            name,
+            type(exc).__name__,
+        )
+        if _degraded is None:
+            _degraded = InMemoryRateLimitBackend()
+        return await _degraded.consume(key, maximum=maximum, window=window, now=now)
 
 
 def reset_rate_limit_backend() -> None:
     """Drop the cached backend and its process-local state. Test hook only."""
-    global _resolved
+    global _degraded, _resolved_name, _resolved
 
     if _resolved is not None:
         _resolved.reset()
+    if _degraded is not None:
+        _degraded.reset()
     _resolved = None
+    _resolved_name = None
+    _degraded = None

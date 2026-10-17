@@ -83,6 +83,25 @@ class Settings(BaseSettings):
     # tighten per environment via WEBHOOK_RATE_LIMIT_MAX_DELIVERIES.
     webhook_rate_limit_max_deliveries: int = 120
     webhook_rate_limit_window_seconds: int = 60
+    # Where the sliding-window buckets above are kept: "memory" (process-local,
+    # the behaviour before issue #161 was fixed) or "postgres" (rows in
+    # webhook_rate_limit_hits, shared by every process that can see the DB).
+    #
+    # Defaults to "memory" because it needs no database round trip, and because
+    # local dev and the hermetic test suite must work with no database at all.
+    # It is NOT the right default for the Lambda deployment: the orchestrator is
+    # served with reserved_concurrent_executions = 10, so ten execution
+    # environments would each enforce their own copy of the budget above - ten
+    # times the documented ceiling - and every cold start would reset all
+    # buckets. infra/aws sets WEBHOOK_RATE_LIMIT_BACKEND=postgres on the
+    # orchestrator function for exactly that reason.
+    #
+    # Postgres needs no new IAM permissions: the function role's inline policy
+    # grants only self-invoke plus one SSM read and explicitly denies every other
+    # service, and reaching Postgres adds none. An unrecognised value logs at
+    # ERROR and falls back to "memory" rather than refusing deliveries - see
+    # app.services.rate_limit.build_rate_limit_backend.
+    webhook_rate_limit_backend: str = "memory"
 
     # LLM Provider Configuration (Phase 4)
     # OpenCode Zen API key (Secret Manager / .env only). Injected at request time, never logged.
