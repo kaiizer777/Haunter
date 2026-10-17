@@ -29,7 +29,9 @@ from app.models import Attempt, Repo, Run, User
 from tests.conftest import truncate_all
 
 
-async def _seed_user_repo(db: AsyncSession, github_id: int, username: str) -> tuple[User, Repo]:
+async def _seed_user_repo(
+    db: AsyncSession, github_id: int, username: str
+) -> tuple[User, Repo]:
     user = User(
         id=uuid.uuid4(),
         github_id=github_id,
