@@ -128,6 +128,7 @@ def _base_settings(monkeypatch: pytest.MonkeyPatch, pool: str) -> None:
     monkeypatch.setattr(settings, "github_sandbox_poll_interval_seconds", 0.01)
     monkeypatch.setattr(settings, "github_sandbox_poll_timeout_seconds", 1.0)
 
+
 @pytest.mark.asyncio
 async def test_verify_targets_pool_selected_mirror(
     monkeypatch: pytest.MonkeyPatch,
@@ -161,6 +162,7 @@ async def test_verify_targets_pool_selected_mirror(
         assert not primary_tree.called, (
             "primary mirror must see no traffic for this run"
         )
+
 
 @pytest.mark.asyncio
 async def test_verify_defaults_to_universal_mirror_without_pool(
