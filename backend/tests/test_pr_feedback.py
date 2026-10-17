@@ -356,7 +356,15 @@ async def test_rejection_of_comments_on_plain_issues(
     db: AsyncSession,
     user_factory,
 ):
-    """Comments on plain issues (not PRs) are dropped with 200 ignored."""
+    """Mention-bearing comments on plain issues enter the issue-trigger path.
+
+    Feat-125 reroutes pure-issue comments (no pull_request ref) into the
+    shared issue handler before the old PR-only drop: a comment WITHOUT a
+    trigger mention is still ignored there ("no issue trigger"), while one
+    WITH a mention ("@haunter fix this issue" below) proceeds down the
+    trigger path and — with no GitHub token available in this suite — skips
+    gracefully instead of erroring.
+    """
     await truncate_all(db)
     user = await user_factory(github_id=905, username="collab_user_5")
     repo = Repo(user_id=user.id, owner="acme-corp", name="app-repo")
@@ -386,8 +394,8 @@ async def test_rejection_of_comments_on_plain_issues(
     )
     assert resp.status_code == 200
     assert resp.json() == {
-        "status": "ignored",
-        "reason": "comment on issue, not pull request",
+        "status": "skipped",
+        "reason": "github token unavailable",
     }
 
 

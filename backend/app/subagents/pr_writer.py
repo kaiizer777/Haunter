@@ -20,7 +20,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Optional, Sequence, TypedDict
+from typing import Any, Optional, Sequence, TypedDict
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,6 +69,21 @@ class PROutput(BaseModel):
 # ---------------------------------------------------------------------------
 # Branch name — server-side only, never from LLM
 # ---------------------------------------------------------------------------
+
+
+def _is_issue_triggered_run(run: Run) -> bool:
+    """True for autonomous issue-triggered root runs (feat-125, D6).
+
+    Lazy import: app.orchestrator owns the predicate and this module is
+    imported lazily by the orchestrator pipeline body, so a module-level
+    import would cycle.
+    """
+    from app.orchestrator import is_issue_run
+
+    try:
+        return bool(is_issue_run(run))
+    except Exception:
+        return False
 
 
 def pr_branch_name(
@@ -257,6 +272,24 @@ async def _call_and_parse_pr(
 # ---------------------------------------------------------------------------
 
 
+def append_issue_closing_line(body: str, issue_number: Any) -> str:
+    """Append a deterministic `Fixes #<issue>` trailer (feat-125 D6).
+
+    Pure: the LLM prompt does not reliably emit the closing keyword and D6
+    acceptance is exact ("Opened PR references Fixes #n"), so the trailer is
+    appended deterministically rather than prompted for. No-op when the body
+    already carries the keyword or the number is not a positive int.
+    """
+    if (
+        isinstance(issue_number, int)
+        and not isinstance(issue_number, bool)
+        and issue_number > 0
+    ):
+        if f"fixes #{issue_number}" not in body.lower():
+            return body.rstrip() + f"\n\nFixes #{issue_number}"
+    return body
+
+
 async def generate_pr_text(
     run: Run,
     verified_attempt: Attempt,
@@ -315,7 +348,11 @@ async def generate_pr_text(
         len(pr_output.title),
     )
 
-    return {"title": pr_output.title, "body": pr_output.body}
+    pr_body = pr_output.body
+    if _is_issue_triggered_run(run):
+        pr_body = append_issue_closing_line(pr_body, run.reply_to_comment_id)
+
+    return {"title": pr_output.title, "body": pr_body}
 
 
 # ---------------------------------------------------------------------------
