@@ -128,3 +128,37 @@ def _base_settings(monkeypatch: pytest.MonkeyPatch, pool: str) -> None:
     monkeypatch.setattr(settings, "github_sandbox_poll_interval_seconds", 0.01)
     monkeypatch.setattr(settings, "github_sandbox_poll_timeout_seconds", 1.0)
 
+@pytest.mark.asyncio
+async def test_verify_targets_pool_selected_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """verify() pushes to the pool-selected mirror, not always the primary."""
+    _base_settings(monkeypatch, "mirror-b, mirror-c")
+    monkeypatch.setattr(
+        "app.sandbox.github_actions_runner.mint_installation_token",
+        AsyncMock(return_value="mock_inst_token"),
+    )
+
+    # Find a run id that routes off-primary so the test proves spreading.
+    run_id = next(
+        candidate
+        for candidate in (uuid.uuid4() for _ in range(50))
+        if select_sandbox_mirror("test-org", str(candidate))
+        != "test-org/mirror-a"
+    )
+    expected = select_sandbox_mirror("test-org", str(run_id))
+    branch = f"sandbox/run-{run_id}-att-1"
+
+    with respx.mock(
+        base_url="https://api.github.com", assert_all_called=False
+    ) as rx:
+        expected_tree = _mock_mirror_run(rx, expected, branch)
+        primary_tree = _mock_mirror_run(rx, "test-org/mirror-a", branch)
+        result = await _run_verify(run_id)
+
+        assert result["passed"] is True
+        assert expected_tree.called, f"expected tree writes on {expected}"
+        assert not primary_tree.called, (
+            "primary mirror must see no traffic for this run"
+        )
+
