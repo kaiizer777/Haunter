@@ -111,6 +111,22 @@ async def test_query_active_run_ages_never_raises(
     assert await main._query_active_run_ages() is None
 
 
+def test_active_run_statuses_match_orchestrator_non_terminal():
+    """_ACTIVE_RUN_STATUSES tracks RunStatus minus terminal states (no drift)."""
+    import main
+    from app.orchestrator import RunStatus
+
+    terminal = {
+        "pr_opened",
+        "fallback_commented",
+        "flaky_detected",
+        "completed",
+        "error",
+    }
+    expected = {s.value for s in RunStatus} - terminal
+    assert main._ACTIVE_RUN_STATUSES == expected
+
+
 async def test_sandbox_health_default_github_actions(client: httpx.AsyncClient):
     """GET /health/sandbox returns 200 with github_actions provider details."""
     response = await client.get("/health/sandbox")
