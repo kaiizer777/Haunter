@@ -28,6 +28,7 @@ code-reviewer module. No network, no real Postgres, no real LLM.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any, Optional
@@ -1070,3 +1071,214 @@ async def test_unexpected_issue_failure_does_not_take_down_the_review(
 
     mock_pr_review.assert_awaited_once()
     assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
+
+
+# ---------------------------------------------------------------------------
+# Failures that are NOT the issue's fault: what the block is allowed to claim
+# ---------------------------------------------------------------------------
+#
+# Everything above asserts the review survives. These assert the block that
+# survives does not overstate what it saw — a 429 that kept the loop running, a
+# timeout that ate the pipeline budget, or a disclosure that counted only the
+# references past the cap while a referenced issue was quietly missing.
+
+
+async def test_issue_429_stops_fetching_like_any_other_rate_limit(
+    pending_review: CodeReview,
+) -> None:
+    """A 429 is a rate limit, and a rate limit stops the loop.
+
+    ``GitHubRateLimitError`` is documented as covering 429, and the
+    orchestrator's stop-fetching branch keys on that type. A 429 that fell
+    through to the generic error branch would be swallowed as "skip this one"
+    and the loop would keep issuing requests into a limit that is already
+    rejecting them. Asserted at both layers: the client raises the rate-limit
+    type, and the pipeline stops after one request.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12, fixes #13, fixes #14\n",
+        issues={
+            12: httpx.Response(429, text="You have exceeded a secondary rate limit"),
+            13: httpx.Response(200, json=_issue_payload(13)),
+            14: httpx.Response(200, json=_issue_payload(14)),
+        },
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9009})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    assert len(_issue_requests(recorded)) == 1, (
+        "a 429 must stop the fetch loop the same way a rate-limited 403 does; "
+        f"{len(_issue_requests(recorded))} issue requests were made"
+    )
+    assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
+
+
+async def test_issue_without_a_title_is_skipped_rather_than_rendered_empty(
+    pending_review: CodeReview,
+) -> None:
+    """A 200 with no title is a broken payload, not a title-less issue.
+
+    ``title`` is a required string in GitHub's own Issue schema (``body`` is
+    explicitly ``string or null``, which is why a null body still renders).
+    Accepting a titleless 200 would put a bare ``### Issue #12`` heading in
+    front of the model as though the issue had been read.
+    """
+    payload = _issue_payload(12)
+    payload.pop("title")
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={12: httpx.Response(200, json=payload)},
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9010})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    content = _user_content(captured[-1])
+    assert "### Issue #12" not in content
+    assert "Linked GitHub Issue Context" not in content
+
+
+async def test_skipped_issue_is_disclosed_as_not_shown(
+    pending_review: CodeReview,
+) -> None:
+    """The omission count covers every referenced issue the model cannot see.
+
+    A PR naming two issues where one 404s must render the survivor *and* say one
+    was omitted. Reporting only the references dropped for being past the cap
+    would leave the model reading a one-issue block for a two-issue PR.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12 and fixes #13\n",
+        issues={
+            12: httpx.Response(404, text="Not Found"),
+            13: httpx.Response(200, json=_issue_payload(13)),
+        },
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9011})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    content = _user_content(captured[-1])
+    assert "### Issue #13" in content
+    assert "(+1 more linked issue(s) not shown)" in content, (
+        "issue #12 was referenced and not shown; the block has to say so rather "
+        "than let the model read the surviving issue as the only one"
+    )
+
+
+async def test_issue_resolution_is_wall_clock_bounded(
+    pending_review: CodeReview,
+) -> None:
+    """A GitHub that never answers costs the hint its budget, not the review.
+
+    Up to ``MAX_LINKED_ISSUES`` sequential reads at the 30s client timeout is
+    90s of a 300s pipeline budget spent on context. The bound is what stops a
+    slow GitHub from having the timeout handler mark an otherwise publishable
+    review as errored, so it is pinned here with a shrunken budget rather than
+    left to a 30-second test. The fetch is hung at the client boundary: a
+    transport that stalls would prove httpx's timeout instead of this bound.
+    """
+
+    async def _never_answers(**_kwargs: Any) -> Any:
+        await asyncio.sleep(3600)
+
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={12: httpx.Response(200, json=_issue_payload(12))},
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9012})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch(
+            "app.services.review_orchestrator.fetch_issue",
+            new=AsyncMock(side_effect=_never_answers),
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch.object(review_orch, "LINKED_ISSUE_CONTEXT_TIMEOUT_S", 0.05),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
+
+
+def test_issue_context_budget_is_a_fraction_of_the_pipeline_timeout() -> None:
+    """The hint's ceiling must stay well inside the review's wall-clock bound.
+
+    Not a runtime test: this is the arithmetic that makes the bound above the
+    right one. ``MAX_LINKED_ISSUES`` sequential reads at the client's own
+    timeout is the worst case the bound has to beat, and it is already close to
+    a third of the pipeline budget -- which is why the bound exists at all.
+    """
+    worst_case = MAX_LINKED_ISSUES * 30.0
+    assert worst_case > review_orch.LINKED_ISSUE_CONTEXT_TIMEOUT_S
+    assert review_orch.LINKED_ISSUE_CONTEXT_TIMEOUT_S < review_orch.REVIEW_TIMEOUT_S / 4

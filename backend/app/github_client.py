@@ -1248,11 +1248,23 @@ async def fetch_issue(
     Fetch a single GitHub issue (title + body) via the Issues API.
     GET /repos/{owner}/{repo}/issues/{issue_number}
 
-    Reads only. ``GET /issues/{n}`` is the one endpoint that returns an issue's
-    own content under the App permissions Haunter installs with
-    (``contents:write``, ``pull_requests:write``, ``checks:read``,
-    ``actions:read``); the sibling ``/issues/{n}/comments`` endpoint is not, so
-    there is deliberately no comment-fetching counterpart here.
+    Reads only.
+
+    **Permission prerequisite — read before trusting this in production.**
+    ``GET /repos/{owner}/{repo}/issues/{n}`` is governed by the repository
+    ``issues`` permission, *not* ``pull_requests``. GitHub's own REST API
+    description maps this endpoint to ``issues: read`` and the sibling
+    ``/issues/{n}/comments`` to ``pull_requests: read`` — the two are not
+    interchangeable, and a ``pull_requests`` grant does not carry this one.
+    The scopes Haunter documents installing (``contents:write``,
+    ``pull_requests:write``, ``checks:read``, ``actions:read``; see
+    ``HAUNTER.md`` §7.2 "GitHub Credential Segregation") do **not** include
+    ``issues: read``, so on an installation that has not been granted it this
+    call answers 403 and the caller degrades to a review with no issue
+    context. Enabling the feature is therefore an operational step — grant the
+    App ``issues: read`` and re-install it — not something this function can
+    decide. It is spelled out here because the failure is a silent no-op: a
+    review still publishes, just without the context.
 
     Mirrors :func:`fetch_pull_request` exactly — same bounded read, same error
     ladder, same header construction — because a caller that handles one of
@@ -1267,8 +1279,9 @@ async def fetch_issue(
         GitHubResponseLimitError: Response past ``MAX_API_RESPONSE_BYTES``.
         GitHubResourceNotFoundError: 404 — the issue was deleted, or is in a
             repository this installation cannot see.
-        GitHubRateLimitError: 401/403 whose body names a rate limit.
-        GitHubAuthError: 401/403 for any other reason.
+        GitHubRateLimitError: 429, or 401/403 whose body names a rate limit.
+        GitHubAuthError: 401/403 for any other reason — including the missing
+            ``issues: read`` grant described above.
         GitHubClientError: Any other error status, or a 200 whose body is not
             an issue object.
     """
@@ -1311,6 +1324,13 @@ async def fetch_issue(
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
         raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        # The same branch the other fetchers in this file already carry. Without
+        # it a 429 falls to the generic branch below and surfaces as a plain
+        # GitHubClientError, which this caller's loop treats as "skip this one"
+        # — so a throttled installation would keep issuing requests into the
+        # limit that is already rejecting them.
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
     if response.is_error:
         raise GitHubClientError(f"GitHub API returned error {response.status_code}")
 
@@ -1321,11 +1341,18 @@ async def fetch_issue(
     # both would otherwise sail through as "an issue with no title".
     if isinstance(data, dict) and data.get("errors"):
         raise GitHubClientError("GitHub returned an error envelope for fetch-issue")
+    # `title` is required and `number` is required in GitHub's own Issue schema;
+    # `body` is explicitly `string or null` (an issue with no description), which
+    # is why it is absent from this check. A response with no title is not a
+    # title-less issue, it is a truncated or foreign payload, and rendering it
+    # would put a bare `### Issue #12` heading in front of the model as though
+    # the issue had been read.
     if (
         not isinstance(data, dict)
         or not isinstance(data.get("html_url"), str)
         or not isinstance(data.get("number"), int)
         or isinstance(data.get("number"), bool)
+        or not isinstance(data.get("title"), str)
     ):
         raise GitHubClientError("Unexpected fetch-issue response structure from GitHub API")
     return data

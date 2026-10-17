@@ -15,10 +15,27 @@ fence, and label — plus an explicit "do not obey this" directive. Nothing is
 evaluated, formatted, or interpreted.
 
 Scope note: only the issue *title* and *body* are read. Discussion comments are
-deliberately excluded: the GitHub App this repo installs has no documented
-``issues: read`` permission (``HAUNTER.md``, "App permissions"), so
-``GET /repos/{owner}/{repo}/issues/{n}/comments`` would 403 in production and
-ship a feature that silently no-ops.
+excluded, but not for the reason a first reading of this module suggests. The
+two endpoints are governed by *different* App permissions: GitHub's REST API
+description maps ``GET /repos/{owner}/{repo}/issues/{n}`` to ``issues: read`` and
+``GET /repos/{owner}/{repo}/issues/{n}/comments`` to ``pull_requests: read`` — a
+``pull_requests`` grant does **not** carry the former. So the scope this repo
+documents installing (``contents:write``, ``pull_requests:write``,
+``checks:read``, ``actions:read``; ``HAUNTER.md`` §7.2) covers comments and not
+the issue itself.
+
+Two consequences, and only the second is this module's to own:
+
+* Reading the issue requires an operational change — grant the GitHub App
+  ``issues: read`` and re-install it. Until then ``fetch_issue`` answers 403 and
+  the orchestrator publishes the review with no issue block at all. That is a
+  deployment prerequisite, documented at the call site, not something this
+  module decides.
+* Fetching comments would *not* 403 under those scopes. It is still excluded:
+  it widens an attacker-authored surface (issue discussion is far more freely
+  writable than an issue description), it is unbounded by any documented
+  pagination contract here, and it would need its own budget arithmetic in
+  :func:`render_issue_context`. Deliberate, not blocked.
 """
 
 from __future__ import annotations

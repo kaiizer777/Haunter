@@ -655,6 +655,50 @@ async def _resolve_linked_issue_context(
     Failure values reaching a log line are passed through ``sanitize_log_value``
     like every other message in this module — a PR body is attacker-influenced
     text and can end up inside an exception message.
+
+    Wall-clock bounded to :data:`LINKED_ISSUE_CONTEXT_TIMEOUT_S`; see there.
+    """
+    try:
+        return await asyncio.wait_for(
+            _collect_linked_issue_context(
+                owner=owner,
+                repo=repo,
+                pr_number=pr_number,
+                pr_payload=pr_payload,
+                token=token,
+            ),
+            timeout=LINKED_ISSUE_CONTEXT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        # Cancelling mid-flight abandons the remaining requests, which is the
+        # point: this step is a hint, and the 300s the pipeline owes the LLM and
+        # the publish call is worth more than whatever the next issue would have
+        # said. Anything already fetched is discarded rather than half-rendered.
+        logger.warning(
+            "review_orchestrator: issue_context_unavailable repo=%s/%s pr=%s "
+            "reason=timeout budget_s=%s",
+            sanitize_log_value(owner, 128),
+            sanitize_log_value(repo, 128),
+            pr_number,
+            LINKED_ISSUE_CONTEXT_TIMEOUT_S,
+        )
+        return ""
+
+
+async def _collect_linked_issue_context(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: Optional[int],
+    pr_payload: Optional[dict[str, Any]],
+    token: Any,
+) -> str:
+    """Fetch and render the linked issues; always bounded by its caller.
+
+    Split out of :func:`_resolve_linked_issue_context` only so the
+    ``asyncio.wait_for`` that bounds it wraps the whole fetch loop rather than
+    each request — a per-request bound would still let three sequential reads
+    add up to the client timeout three times over.
     """
     if not pr_number or not token or not isinstance(pr_payload, dict):
         return ""
@@ -741,7 +785,22 @@ async def _resolve_linked_issue_context(
                 continue
             issues.append(issue)
 
-        return render_issue_context(issues, omitted=omitted)
+        # Nothing was read at all: no block. A block whose entire content is
+        # "(+N linked issue(s) not shown)" describes an absence, not context,
+        # and it would be the one thing the model is told to reason about.
+        if not issues:
+            return ""
+
+        # `omitted` from `select_local_issue_numbers` counts only what never
+        # reached the fetch because it was past the cap. Anything selected that
+        # did not make it into `issues` — 404'd, errored, or left unattempted by
+        # a rate-limit `break` — is a referenced issue the model is not being
+        # shown, so it belongs in the same disclosure. Reporting only the
+        # beyond-cap remainder would let the model read a one-issue block for a
+        # PR that named three and conclude the other two do not exist.
+        return render_issue_context(
+            issues, omitted=omitted + (len(numbers) - len(issues))
+        )
     except Exception:
         logger.exception(
             "review_orchestrator: issue_context_unavailable repo=%s/%s pr=%s",
@@ -759,6 +818,16 @@ async def _resolve_linked_issue_context(
 #: the timeout handler overwrite a review that already published successfully.
 #: The step is a courtesy to the reviewer, so it yields rather than the row.
 REVIEW_THREAD_RESOLUTION_TIMEOUT_S: float = 30.0
+
+#: Wall-clock ceiling for resolving linked-issue context (issue #123). Same
+#: reasoning as ``REVIEW_THREAD_RESOLUTION_TIMEOUT_S`` above, one step earlier:
+#: up to ``MAX_LINKED_ISSUES`` sequential reads at the 30s client timeout is 90s
+#: of a ``REVIEW_TIMEOUT_S`` (300s) budget spent on an optional hint, and a
+#: GitHub slow to answer would have the timeout handler mark an otherwise
+#: publishable review as errored. 30s buys the common case — GitHub answers this
+#: endpoint in well under a second — and gives up rather than competing with the
+#: LLM call and the publish for the rest of the budget.
+LINKED_ISSUE_CONTEXT_TIMEOUT_S: float = 30.0
 
 
 def _thread_author_login(thread: dict[str, Any]) -> str:
