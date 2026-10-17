@@ -63,7 +63,9 @@ async def test_queued_verification_resolves_with_backoff(
     queued: list[list[dict[str, str]]] = [[], []]
     done = [{"status": "completed", "conclusion": "success"}]
 
-    async def fake_runs(client: object, repo_full: str, head_sha: str, *, token: str) -> list[dict[str, str]]:
+    async def fake_runs(
+        client: object, repo_full: str, head_sha: str, *, token: str
+    ) -> list[dict[str, str]]:
         return queued.pop(0) if queued else done
 
     with (
