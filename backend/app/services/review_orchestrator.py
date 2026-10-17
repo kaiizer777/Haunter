@@ -560,8 +560,13 @@ async def _resolve_publish_sha(
     description — the only place in the pipeline that mentions *what the change
     was supposed to do*. The caller used to keep the SHA and discard the rest,
     which made linked-issue context (issue #123) look like it needed its own
-    API call. It does not. ``None`` whenever the response was unusable, which is
-    every path that also returns the unverified enqueue SHA.
+    API call. It does not.
+
+    The payload is independent of the SHA verdict: a response missing
+    ``head.sha`` still describes the pull request perfectly well, so it is
+    returned there too. ``None`` means the request itself failed, or GitHub
+    answered with something that is not an object — the paths where there is
+    nothing to read a PR body out of.
 
     Returns ``(commit_sha, live_head_verified, pull_request_payload)``.
     """

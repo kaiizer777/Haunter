@@ -506,6 +506,8 @@ def test_unusable_issue_payload_is_rejected_instead_of_guessed() -> None:
         ),
         pytest.param("", (), id="empty"),
         pytest.param("closes #", (), id="no-number"),
+        pytest.param("fixes #12345678901", (), id="implausibly-long-number"),
+        pytest.param("fixes #1234567890", (1234567890,), id="ten-digit-number-ok"),
     ],
 )
 def test_closing_keyword_parser(body: str, expected: tuple[int, ...]) -> None:

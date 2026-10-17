@@ -40,31 +40,45 @@ from app.llm.prompts.audit_prompts import (
 # Closing-keyword parsing
 # ---------------------------------------------------------------------------
 
-#: The keywords GitHub itself honours for auto-closing a referenced issue, in
-#: the past-tense forms the docs use. The ``-ed`` variants (``fixed #12``) are
-#: the same closure signal and are accepted alongside them.
+#: Verb stems GitHub itself honours for auto-closing a referenced issue. The
+#: regex below is built from these, so this is the single place the accepted
+#: vocabulary is defined.
 #:
-#: The bare imperatives (``fix #12``) are deliberately NOT accepted: they are a
-#: superset nobody asked for, and widening what a prompt treats as "what this
-#: change was supposed to do" is a scope decision, not a detail.
-CLOSING_KEYWORDS: tuple[str, ...] = ("fixes", "closes", "resolves")
+#: The ``-es``/``-ed`` endings cover ``fixes``/``fixed``, ``closes``/``closed``
+#: and ``resolves``/``resolved`` — the same closure signal in the forms a PR
+#: body actually uses.
+#:
+#: The bare imperatives (``fix #12``, ``close #12``) are deliberately NOT
+#: accepted. GitHub honours them, but widening what a prompt treats as "what
+#: this change was supposed to do" is a scope decision rather than a detail,
+#: and both are common enough as ordinary English to deserve that second look.
+_CLOSING_VERB_STEMS: tuple[str, ...] = ("fix", "clos", "resolv")
+
+_CLOSING_VERBS_PATTERN = "|".join(
+    rf"{stem}(?:es|ed)" for stem in _CLOSING_VERB_STEMS
+)
 
 #: One closing reference: a keyword, an optional ``owner/repo`` qualifier, and
 #: the issue number. ``repo`` is ``None`` for the unqualified ``#12`` form,
 #: which means "an issue of this repository".
+#:
+#: The number group is deliberately unbounded here and length-checked in
+#: :func:`parse_closing_issue_refs` instead. A ``{1,10}`` quantifier would
+#: silently truncate a longer run — ``fixes #12345678901`` would parse as issue
+#: 1234567890 — which is worse than rejecting it outright.
 _CLOSING_REF_RE = re.compile(
-    r"\b(?:fix(?:es|ed)|clos(?:es|ed)|resolv(?:es|ed))\b"
+    rf"\b(?:{_CLOSING_VERBS_PATTERN})\b"
     # `Fixes: #12`, `Fixes #12` and `fixes:#12` are all GitHub-accepted.
     r"[ \t]*:?[ \t]*"
     # `Fixes owner/repo#12` — qualified, and only meaningful when it names this
     # repository (see :func:`select_local_issue_numbers`).
     r"(?:(?P<owner>[A-Za-z0-9][A-Za-z0-9._-]*)/(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*)[ \t]*)?"
-    r"#[ \t]*(?P<number>[0-9]{1,10})",
+    r"#[ \t]*(?P<number>[0-9]+)",
     re.IGNORECASE,
 )
 
 #: Longest issue number GitHub accepts. Anything longer is not a reference this
-#: module will act on; without a bound, a six-hundred-digit "#" in a comment is
+#: module will act on; without the bound, a six-hundred-digit "#" in a body is
 #: matched, stored and compared like any other number.
 _MAX_ISSUE_NUMBER_DIGITS = 10
 
