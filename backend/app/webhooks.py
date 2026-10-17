@@ -43,7 +43,9 @@ import hmac
 import json
 import logging
 import re
+import time
 import uuid
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Optional
 
@@ -120,6 +122,24 @@ _WEBHOOK_PAYLOAD_MAX_BYTES = 128 * 1024
 # runs.github_run_id / github_delivery_id, audit_jobs delivery fingerprints);
 # this closes the window before those constraints are even consulted.
 _REPLAY_COOLDOWN_SECONDS = 30
+
+# Webhook ingress throttling (issue #161). Per-repository + per-sender
+# sliding-window budgets enforced in github_webhook() with a 429 path, so a
+# misconfigured repo or malicious sender flooding deliveries cannot saturate
+# the orchestrator while legitimate deliveries pass through.
+#
+# In-memory and therefore per-process: each Lambda execution environment (or
+# dev server worker) tracks its own buckets. That is sufficient for loop
+# protection — a looping sender hits every instance it talks to — without a
+# new dependency (no Redis) or a hot DB write on every delivery. Buckets are
+# keyed `repo-full-name|sender-login` (lowercased, length-bounded) and hold
+# monotonic timestamps of recent accepted deliveries; empty buckets are
+# pruned on touch and the table is capped so distinct attacker-chosen keys
+# cannot grow memory without bound (oldest bucket evicted first).
+_WEBHOOK_RATE_MAX_BUCKETS = 10_000
+_WEBHOOK_RATE_KEY_MAX_CHARS = 200
+_WEBHOOK_RATE_BUCKETS: dict[str, deque[float]] = {}
+_WEBHOOK_RATE_LOCK = asyncio.Lock()
 
 # Decision reasons for a delivery that does not resolve to exactly one repos row.
 # Kept as two distinct strings because they are two different operational
