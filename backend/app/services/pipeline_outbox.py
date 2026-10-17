@@ -57,7 +57,7 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def _default_session_factory():
+def _default_session_factory():
     from app.db import async_session_maker
 
     return async_session_maker()
