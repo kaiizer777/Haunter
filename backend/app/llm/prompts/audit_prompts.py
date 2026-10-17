@@ -63,6 +63,18 @@ MAX_DIFF_LINES = 30_000
 #:   block). Leave all three untouched when changing the review ceilings.
 MAX_AST_CONTEXT_CHARS = 10_000
 MAX_REPO_CONTEXT_CHARS = 10_000
+#: Linked-issue context for the push-level code reviewer (issue #123). Read
+#: together with ``MAX_USER_PROMPT_CHARS``: this block is *reserved out of* that
+#: budget before the diff is composed, so the total stays under the cap and the
+#: cost is paid in diff coverage (~8k of ~80k, i.e. ~10%), not in overflow.
+#: Per-issue bounds are what make ``MAX_LINKED_ISSUES`` self-limiting —
+#: 3 x (300 + 2_000) is well inside ``MAX_ISSUE_CONTEXT_CHARS``, so the outer
+#: bound is a backstop rather than the primary limit. See
+#: ``code_reviewer._build_review_messages`` for the reserve arithmetic.
+MAX_LINKED_ISSUES = 3
+MAX_ISSUE_CONTEXT_CHARS = 8_000
+MAX_ISSUE_TITLE_CHARS = 300
+MAX_ISSUE_BODY_CHARS = 2_000
 MAX_SYSTEM_PROMPT_CHARS = 12_000
 MAX_USER_PROMPT_CHARS = 90_000
 MAX_REPORT_CHARS = 100_000
