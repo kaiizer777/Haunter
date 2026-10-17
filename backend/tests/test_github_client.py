@@ -9,7 +9,8 @@ Covers:
   auth error, and network error.
 - fetch_commit_metadata: 200 parsed dict, 404, rate limit, auth error, 5xx, and network error.
 - fetch_issue: 200 verbatim (incl. null body), token header, 404, rate limit (401/403),
-  auth error (401/403), 5xx, ConnectError, error envelope on 200, unusable 200 shape.
+  auth error (401/403), 5xx, ConnectError, error envelope on 200, unusable 200 shape,
+  and absent `body` key on an otherwise well-formed issue object.
 - post_commit_comment: 201 response JSON, 404, network error, rate limit, auth error, and 5xx.
 """
 
@@ -786,6 +787,40 @@ async def test_fetch_issue_rejects_unusable_200_shape():
     """A 200 whose body is not an issue object raises rather than returning junk."""
     url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
     respx.get(url).respond(status_code=200, json={})
+
+    with pytest.raises(GitHubClientError) as exc_info:
+        await fetch_issue(owner="owner", repo="repo", issue_number=5)
+
+    assert "Unexpected fetch-issue response structure" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_rejects_payload_with_absent_body_key():
+    """An issue object with no `body` key at all is rejected, not returned.
+
+    `body` is `string or null` and `null` is a first-class state for an issue
+    with no description -- `test_fetch_issue_returns_payload_verbatim` covers
+    that and it must keep passing. An *absent* key is a different thing: no real
+    `GET /issues/{n}` response omits it, so a payload without one is truncated
+    or foreign. Returning it would hand the caller a "description-less issue"
+    it never received and put a bare `### Issue #12` in front of the model as
+    though the issue had been read.
+
+    Directly targeted because it is the one guard condition no other shape
+    reaches: `{}` fails on `html_url` first, and a payload carrying a `number`,
+    `title` and `html_url` but a `body` of the wrong *type* fails on the
+    `isinstance` check that follows. Only the absent-key case isolates the
+    `"body" not in data` clause.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
+    truncated = {
+        "html_url": "https://github.com/owner/repo/issues/5",
+        "number": 5,
+        "title": "Session cookie is not cleared on logout",
+    }
+    assert "body" not in truncated  # the absent-key precondition, stated
+    respx.get(url).respond(status_code=200, json=truncated)
 
     with pytest.raises(GitHubClientError) as exc_info:
         await fetch_issue(owner="owner", repo="repo", issue_number=5)

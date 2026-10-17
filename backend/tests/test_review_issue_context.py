@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1268,51 +1269,101 @@ async def test_skipped_issue_is_disclosed_as_not_shown(
 async def test_issue_resolution_is_wall_clock_bounded(
     pending_review: CodeReview,
 ) -> None:
-    """A GitHub that never answers costs the hint its budget, not the review.
+    """A GitHub that barely answers costs the hint its budget, not the review.
 
-    Up to ``MAX_LINKED_ISSUES`` sequential reads at the 30s client timeout is
-    90s of a 300s pipeline budget spent on context. The bound is what stops a
-    slow GitHub from having the timeout handler mark an otherwise publishable
-    review as errored, so it is pinned here with a shrunken budget rather than
-    left to a 30-second test. The fetch is hung at the client boundary: a
-    transport that stalls would prove httpx's timeout instead of this bound.
+    Three linked issues, each read sleeping :data:`PER_READ_S` of a shared
+    :data:`BUDGET_S`. The bound wraps the *whole* loop, so the third read is
+    started and then cancelled before it can return, and whatever the first two
+    collected is discarded. A per-request ``wait_for`` of the same size would
+    instead give every read its own full budget: all three would complete
+    (``3 x PER_READ_S`` against a budget of ``2.67 x PER_READ_S``) and the block
+    would publish.
+
+    Asserting *completions* is what makes the test discriminating -- not
+    attempts, which are ``MAX_LINKED_ISSUES`` under either implementation,
+    because the third read is entered before the budget expires and only
+    cancelled while it is in flight. With a single linked issue both
+    implementations produce an identical outcome, so a one-issue version of this
+    test cannot tell a whole-loop bound from a per-request one no matter what it
+    asserts. That is why it names ``MAX_LINKED_ISSUES`` references.
+
+    The wall-clock figure is asserted directly rather than leaning on the
+    suite-wide 120s timeout: an unbounded implementation would have to be
+    stopped by something, and pytest stopping it is not a statement about this
+    bound.
+
+    The fetch is delayed at the client boundary, not on the wire: a stalled
+    transport would prove httpx's own timeout instead of this bound.
     """
+    per_read_s = 0.15
+    budget_s = 0.4
+    numbers = (12, 13, 14)
+    assert len(numbers) == MAX_LINKED_ISSUES, "the loop needs its full cap to discriminate"
 
-    async def _never_answers(**_kwargs: Any) -> Any:
-        await asyncio.sleep(3600)
+    completed: list[int] = []
 
+    async def _slow_read(**kwargs: Any) -> dict[str, Any]:
+        await asyncio.sleep(per_read_s)
+        completed.append(kwargs["issue_number"])
+        return _issue_payload(kwargs["issue_number"])
+
+    fetch_read = AsyncMock(side_effect=_slow_read)
     recorded: list[httpx.Request] = []
     transport = _github_transport(
         recorded,
-        pr_body="Fixes #12\n",
-        issues={12: httpx.Response(200, json=_issue_payload(12))},
+        pr_body="".join(f"Fixes #{number}\n" for number in numbers),
+        issues={n: httpx.Response(200, json=_issue_payload(n)) for n in numbers},
     )
     stub, captured = _prompt_capture()
     mock_pr_review = AsyncMock(return_value={"id": 9012})
 
+    started = time.monotonic()
     with (
         patch(
             "app.services.review_orchestrator.fetch_pull_request_diff",
             new_callable=AsyncMock,
             return_value=_SAMPLE_DIFF,
         ),
-        patch(
-            "app.services.review_orchestrator.fetch_issue",
-            new=AsyncMock(side_effect=_never_answers),
-        ),
+        patch("app.services.review_orchestrator.fetch_issue", new=fetch_read),
         patch("app.subagents.code_reviewer.LLMClient", stub),
         patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
         _install_token_patch(),
-        patch.object(review_orch, "LINKED_ISSUE_CONTEXT_TIMEOUT_S", 0.05),
+        patch.object(review_orch, "LINKED_ISSUE_CONTEXT_TIMEOUT_S", budget_s),
         patch(
             "app.github_client.httpx.AsyncClient",
             side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
         ),
     ):
         await run_code_review_pipeline(pending_review.id)
+    elapsed = time.monotonic() - started
 
+    # The bound is on the hint, never on the review: it still published.
     mock_pr_review.assert_awaited_once()
-    assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
+
+    # The discriminator. One budget spent across every read means the last read
+    # never finishes; a per-request budget means every read does.
+    assert len(completed) < len(numbers), (
+        f"all {len(numbers)} reads completed inside a {budget_s}s budget "
+        f"(completed={completed}) -- a per-request wait_for, not the whole-loop "
+        "bound this step claims to have"
+    )
+    assert completed, f"no read completed at all inside a {budget_s}s budget: {completed}"
+
+    # Nothing fetched before the timeout may be half-rendered. Under a
+    # per-request bound every read completes and this assertion is the one that
+    # fails, so it is a second, independent signal rather than a restatement.
+    assert "Linked GitHub Issue Context" not in _user_content(captured[-1]), (
+        "the budget ran out, so the issues that did answer must be discarded "
+        "rather than shown as though the block were complete"
+    )
+
+    # A real bound, asserted rather than waited out. Generous enough to absorb
+    # event-loop scheduling on a loaded runner, tight enough that an
+    # unbounded read (one that sleeps forever) fails here instead of hanging
+    # until the suite-wide timeout.
+    assert elapsed < budget_s * 2, (
+        f"issue resolution took {elapsed:.3f}s against a {budget_s}s bound"
+    )
 
 
 def test_issue_context_budget_is_a_fraction_of_the_pipeline_timeout() -> None:
