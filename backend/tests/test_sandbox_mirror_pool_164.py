@@ -14,14 +14,20 @@ This file is **sync** and **DB-free**: routing is a pure function of
 
 from __future__ import annotations
 
+import uuid
+from unittest.mock import AsyncMock
+
 import pytest
+import respx
 
 from app.config import settings
+from app.sandbox.github_actions_runner import GitHubActionsSandboxRunner
 from app.sandbox.mirror import (
     get_sandbox_mirror_pool,
     get_universal_sandbox_repo,
     select_sandbox_mirror,
 )
+from app.sandbox.runner import SandboxInput
 
 
 def _set_pool(monkeypatch: pytest.MonkeyPatch, primary: str, pool: str) -> None:
@@ -74,3 +80,51 @@ def test_pool_single_mirror_matches_universal(
     assert select_sandbox_mirror("my-org", "run-9") == get_universal_sandbox_repo(
         "my-org"
     )
+
+
+def _mock_mirror_run(rx: respx.MockRouter, repo_full: str, branch: str):
+    """Mock the GitHub API surface verify() touches for one mirror repo."""
+    rx.get(f"/repos/{repo_full}").respond(200, json={"full_name": repo_full})
+    tree_route = rx.post(f"/repos/{repo_full}/git/trees").respond(
+        201, json={"sha": "tree_sha_pool"}
+    )
+    rx.post(f"/repos/{repo_full}/git/commits").respond(
+        201, json={"sha": "commit_sha_pool"}
+    )
+    rx.post(f"/repos/{repo_full}/git/refs").respond(
+        201, json={"ref": f"refs/heads/{branch}", "sha": "commit_sha_pool"}
+    )
+    rx.get(f"/repos/{repo_full}/actions/runs").respond(
+        200,
+        json={
+            "workflow_runs": [
+                {"id": 999, "status": "completed", "conclusion": "success"}
+            ]
+        },
+    )
+    rx.delete(f"/repos/{repo_full}/git/refs/heads/{branch}").respond(204)
+    return tree_route
+
+
+async def _run_verify(run_id: uuid.UUID, attempt: int = 1):
+    """Run verify() for one attempt with a minimal patch (no seed tree)."""
+    runner = GitHubActionsSandboxRunner()
+    inp = SandboxInput(
+        run_id=run_id,
+        repo_ref="owner/repo",
+        patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-a\n+b\n",
+        attempt_number=attempt,
+        user_github_id=123,
+    )
+    return await runner.verify(inp)
+
+
+def _base_settings(monkeypatch: pytest.MonkeyPatch, pool: str) -> None:
+    monkeypatch.setattr(settings, "github_sandbox_app_id", "app_123")
+    monkeypatch.setattr(settings, "github_sandbox_installation_id", "inst_123")
+    monkeypatch.setattr(settings, "github_sandbox_org", "test-org")
+    monkeypatch.setattr(settings, "github_sandbox_repo", "mirror-a")
+    monkeypatch.setattr(settings, "github_sandbox_repo_pool", pool)
+    monkeypatch.setattr(settings, "github_sandbox_poll_interval_seconds", 0.01)
+    monkeypatch.setattr(settings, "github_sandbox_poll_timeout_seconds", 1.0)
+
