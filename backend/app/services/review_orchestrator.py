@@ -64,7 +64,10 @@ from app.subagents.code_reviewer import (
     ReviewFinding,
     analyze_diff,
     bound_github_body,
+    bound_repo_context_with_prefs,
+    build_applied_review_prefs,
     format_github_suggestion,
+    format_review_prefs_block,
 )
 from app.subagents.issue_context import (
     IssueEnrichment,
@@ -1718,6 +1721,29 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
             token=token,
         )
 
+        # Team review prefs (issue #131): read at analyze time so the traced
+        # version is the one the prompt actually used (R2/R5). Never-raising
+        # like the issue context above: a settings failure reviews with
+        # defaults rather than failing the review. Stamped on the row now so
+        # every exit below — empty-diff short-circuit, LLM error (R11) —
+        # carries the trace via its own commit.
+        try:
+            analyze_settings = await get_repo_settings(session, repo.id)
+        except Exception as prefs_err:
+            logger.warning(
+                "review_orchestrator: repo_settings read failed at analyze time"
+                " for %s/%s (%s) - reviewing with default prefs",
+                sanitize_log_value(repo.owner, 128),
+                sanitize_log_value(repo.name, 128),
+                sanitize_log_value(prefs_err),
+            )
+            analyze_settings = None
+        prefs_block = format_review_prefs_block(analyze_settings)
+        _, prefs_truncated = bound_repo_context_with_prefs(repo_context, prefs_block)
+        review.applied_review_prefs = build_applied_review_prefs(
+            analyze_settings, truncated=prefs_truncated
+        )
+
         try:
             result = await analyze_diff(
                 diff_text=diff_text,
@@ -1725,6 +1751,7 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
                 db=session,
                 repo_id=repo.id,
                 issue_context=issue_context,
+                review_prefs_block=prefs_block,
             )
         except Exception as llm_err:
             logger.exception(
@@ -1767,6 +1794,11 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
         # while keeping findings/summary so the dashboard stays truthful.
         try:
             repo_settings = await get_repo_settings(session, repo.id)
+            if isinstance(review.applied_review_prefs, dict):
+                review.applied_review_prefs = {
+                    **review.applied_review_prefs,
+                    "publish_settings_version": repo_settings.settings_version,
+                }
         except Exception as settings_err:
             logger.error(
                 "review_orchestrator: repo_settings_unavailable repo=%s/%s "
