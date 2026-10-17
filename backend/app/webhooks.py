@@ -32,6 +32,11 @@ dispatched through a durable, independent audit queue (never git push / PR creat
    guessed at (see _resolve_repo_for_delivery). That refusal is recorded with
    repo_id=NULL, which keeps it visible to an operator without asserting a
    tenancy the delivery does not have — so it appears in no tenant's history.
+9. Per-repo/per-sender ingress throttling (issue #161): after HMAC
+   verification, each delivery consumes one budget unit from a sliding-window
+   bucket keyed `repo-full-name|sender-login`; over-budget senders get 429 +
+   Retry-After before any routing or pipeline work, while legitimate
+   deliveries pass through. In-memory per process (see _WEBHOOK_RATE_BUCKETS).
 """
 
 import asyncio
