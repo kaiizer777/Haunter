@@ -28,6 +28,10 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
     ignore_draft_prs: true,
     max_cost_per_run_cents: 100,
     model_override_scope: "inherit",
+    review_guidelines_text: "Follow team idioms.",
+    review_strictness: "high",
+    review_focus_areas: ["security", "performance"],
+    review_checklist: ["tests pass", "no console.log"],
     settings_version: 1,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -272,5 +276,170 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
 
     // Status banner should be cleared on repo switch
     expect(screen.queryByText(/applied 'conservative' governance preset profile/i)).not.toBeInTheDocument();
+  });
+
+  it("renders review preference controls with server values", () => {
+    render(
+      <RepoSettingsCard
+        settings={mockSettings}
+        repoFullName="kaiizer777/Haunter"
+        repoId="repo_123"
+        onSave={onSave}
+        onApplyPreset={onApplyPreset}
+      />
+    );
+
+    expect(screen.getByText("PR Review Preferences")).toBeInTheDocument();
+    expect(screen.getByLabelText(/team review guidelines/i)).toHaveValue("Follow team idioms.");
+    expect(screen.getByRole("button", { name: "Review strictness" })).toHaveTextContent("High");
+    expect(screen.getByLabelText(/review focus areas/i)).toHaveValue("security, performance");
+    expect(screen.getByLabelText(/review checklist/i)).toHaveValue("tests pass, no console.log");
+  });
+
+  it("changing strictness marks the form dirty and flips the preset to custom", async () => {
+    render(
+      <RepoSettingsCard
+        settings={mockSettings}
+        repoFullName="kaiizer777/Haunter"
+        repoId="repo_123"
+        onSave={onSave}
+        onApplyPreset={onApplyPreset}
+      />
+    );
+
+    const strictnessBtn = screen.getByRole("button", { name: "Review strictness" });
+    fireEvent.click(strictnessBtn);
+
+    const lowOption = await screen.findByRole("option", { name: /^low/i });
+    fireEvent.click(lowOption);
+
+    expect(screen.getByText("Unsaved policy changes")).toBeInTheDocument();
+    expect(screen.getByText("custom")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Review strictness" })).toHaveTextContent("Low");
+    expect(screen.getByRole("button", { name: /save governance policy/i })).not.toBeDisabled();
+  });
+
+  it("blocks save when guidelines exceed 4000 characters", () => {
+    render(
+      <RepoSettingsCard
+        settings={mockSettings}
+        repoFullName="kaiizer777/Haunter"
+        repoId="repo_123"
+        onSave={onSave}
+        onApplyPreset={onApplyPreset}
+      />
+    );
+
+    const guidelines = screen.getByLabelText(/team review guidelines/i);
+    fireEvent.change(guidelines, { target: { value: "x".repeat(4001) } });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/exceed maximum length of 4000/);
+    const saveBtn = screen.getByRole("button", { name: /save governance policy/i });
+    expect(saveBtn).toBeDisabled();
+    fireEvent.click(saveBtn);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("blocks save when focus-area list exceeds item caps", () => {
+    render(
+      <RepoSettingsCard
+        settings={mockSettings}
+        repoFullName="kaiizer777/Haunter"
+        repoId="repo_123"
+        onSave={onSave}
+        onApplyPreset={onApplyPreset}
+      />
+    );
+
+    const focus = screen.getByLabelText(/review focus areas/i);
+    const saveBtn = screen.getByRole("button", { name: /save governance policy/i });
+
+    const tooMany = Array.from({ length: 21 }, (_, i) => `topic-${i}`).join(", ");
+    fireEvent.change(focus, { target: { value: tooMany } });
+    expect(screen.getByRole("alert")).toHaveTextContent(/at most 20 items/);
+    expect(saveBtn).toBeDisabled();
+
+    fireEvent.change(focus, { target: { value: `ok, ${"y".repeat(201)}` } });
+    expect(screen.getByRole("alert")).toHaveTextContent(/at most 200 characters/);
+    expect(saveBtn).toBeDisabled();
+    fireEvent.click(saveBtn);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("submits review prefs in the save payload", async () => {
+    onSave.mockResolvedValueOnce({ ...mockSettings, settings_version: 2 });
+
+    render(
+      <RepoSettingsCard
+        settings={mockSettings}
+        repoFullName="kaiizer777/Haunter"
+        repoId="repo_123"
+        onSave={onSave}
+        onApplyPreset={onApplyPreset}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText(/team review guidelines/i), {
+      target: { value: "  Ship small diffs.  " },
+    });
+    fireEvent.change(screen.getByLabelText(/review focus areas/i), {
+      target: { value: "security, reliability" },
+    });
+    fireEvent.change(screen.getByLabelText(/review checklist/i), {
+      target: { value: "tests pass" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Review strictness" }));
+    fireEvent.click(await screen.findByRole("option", { name: /^medium/i }));
+
+    fireEvent.click(screen.getByRole("button", { name: /save governance policy/i }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        review_guidelines_text: "Ship small diffs.",
+        review_strictness: "medium",
+        review_focus_areas: ["security", "reliability"],
+        review_checklist: ["tests pass"],
+      })
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/repository governance settings saved \(v2\)/i)).toBeInTheDocument();
+    });
+  });
+
+  it("sends null guidelines when cleared and restores prefs on reset", async () => {
+    onSave.mockResolvedValueOnce({ ...mockSettings, settings_version: 2 });
+
+    render(
+      <RepoSettingsCard
+        settings={mockSettings}
+        repoFullName="kaiizer777/Haunter"
+        repoId="repo_123"
+        onSave={onSave}
+        onApplyPreset={onApplyPreset}
+      />
+    );
+
+    const guidelines = screen.getByLabelText(/team review guidelines/i);
+    fireEvent.change(guidelines, { target: { value: "   " } });
+
+    fireEvent.click(screen.getByRole("button", { name: /save governance policy/i }));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ review_guidelines_text: null })
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/repository governance settings saved \(v2\)/i)).toBeInTheDocument();
+    });
+
+    // Unsaveable edits are still restorable via Reset.
+    fireEvent.change(screen.getByLabelText(/review focus areas/i), { target: { value: "oops" } });
+    fireEvent.click(screen.getByRole("button", { name: /reset/i }));
+
+    expect(screen.getByLabelText(/team review guidelines/i)).toHaveValue("Follow team idioms.");
+    expect(screen.getByLabelText(/review focus areas/i)).toHaveValue("security, performance");
+    expect(screen.getByLabelText(/review checklist/i)).toHaveValue("tests pass, no console.log");
+    expect(screen.getByRole("button", { name: "Review strictness" })).toHaveTextContent("High");
+    expect(screen.getByText("All policies in sync")).toBeInTheDocument();
   });
 });
