@@ -37,7 +37,7 @@ async def test_alembic_head_and_migration_check():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"Expected exactly 1 migration head, found {heads}"
-    assert heads[0] == "d1e2f3a4b5c6"
+    assert heads[0] == "a2b3c4d5e6f7"
     assert script.get_revision("a4b7c9d2e6f1").down_revision == "f2a9c4e7b1d3"
     assert script.get_revision("b6d8f0a2c4e6").down_revision == "a4b7c9d2e6f1"
     assert script.get_revision("c7a1b2c3d4e5").down_revision == "b6d8f0a2c4e6"
@@ -52,6 +52,7 @@ async def test_alembic_head_and_migration_check():
     assert script.get_revision("b8c9d0e1f2a3").down_revision == "a5c6d7e8f9b0"
     assert script.get_revision("e1f2a3b4c5d6").down_revision == "b8c9d0e1f2a3"
     assert script.get_revision("d1e2f3a4b5c6").down_revision == "e1f2a3b4c5d6"
+    assert script.get_revision("a2b3c4d5e6f7").down_revision == "d1e2f3a4b5c6"
 
 
 def test_issue_110_composite_indexes_match_models():
