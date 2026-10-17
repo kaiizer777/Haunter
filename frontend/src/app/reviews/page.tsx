@@ -785,16 +785,20 @@ function PushPill({ commitSha, commitUrl, repoName }: { commitSha: string; commi
  * so the card can show `PR #n` instead of `Push @ sha`.
  *
  * Module-level cache keyed by review id: back/forward + re-renders never
- * refetch, and simultaneous mounts for one review share a single in-flight
- * request. Keyed by id — NOT by commit sha — because the lookup itself is
- * review-scoped (`GET /reviews/{id}/associated-pr`): the same sha can appear
- * in two repos/forks and must never share one entry. Resolves null (no PR /
- * token-missing / error) silently — the row keeps rendering `Push @ sha`
- * with no skeleton and no layout shift beyond the pill text swap. Only the
- * rendered page window fetches (~PAGE_SIZE calls max); rows that already
- * carry `pr_number` never fetch. List Refresh / detail Retry evict only the
- * failed (null) entries (see clearFailedAssociatedPrCache) so misses
- * genuinely retry while resolved PRs are kept, not refetched.
+ * refetch, and one page render resolves every row with a SINGLE
+ * `POST /reviews/associated-prs` call (issue #116) — never one GET
+ * per row. Row hooks queue into `batchQueue` and one microtask flush sends
+ * every queued id at once (see `flushBatchPrLookups`). Keyed by id — NOT by
+ * commit sha — because the lookup itself is review-scoped: the same sha can
+ * appear in two repos/forks and must never share one entry. Resolves null
+ * (no PR / token-missing / error) silently — the row keeps rendering
+ * `Push @ sha` with no skeleton and no layout shift beyond the pill text
+ * swap. Only rendered rows fetch; rows that already carry `pr_number` never
+ * fetch. A failed batch leaves the cache untouched so a remount retries;
+ * list Refresh / detail Retry evict only the failed (null) entries (see
+ * clearFailedAssociatedPrCache) so misses genuinely retry while resolved
+ * PRs are kept, not refetched. A per-id request generation keeps a stale
+ * (pre-Refresh) completion from overwriting a newer result.
  */
 const associatedPrCache = new Map<string, AssociatedPROut | null>();
 const associatedPrInflight = new Map<string, Promise<AssociatedPROut | null>>();
@@ -815,8 +819,8 @@ export function clearAssociatedPrCache(): void {
 /**
  * Drop only failed (null) cached entries + in-flight lookups. Called by the
  * list Refresh and detail Retry paths: null misses genuinely retry on the
- * fresh row objects, while success entries are kept so resolved `PR #n`
- * pills never refetch (a full clear would re-fire ~PAGE_SIZE GitHub-backed
+ * fresh rows' batch fetch, while success entries are kept so resolved
+ * `PR #n` pills never refetch (a full clear would re-fire GitHub-backed
  * lookups on every Refresh, defeating the cache above).
  */
 export function clearFailedAssociatedPrCache(): void {
@@ -923,7 +927,9 @@ function requestAssociatedPr(id: string): Promise<AssociatedPROut | null> {
 }
 
 function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
-  const [resolved, setResolved] = useState<AssociatedPROut | null>(
+  // Setter-only state: flipping it re-renders so the cache read below sees
+  // the freshly written entry (a stale completion must never display).
+  const [, setResolved] = useState<AssociatedPROut | null>(
     () => associatedPrCache.get(review.id) ?? null
   );
   useEffect(() => {
@@ -939,8 +945,12 @@ function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
     let cancelled = false;
     let pending = associatedPrInflight.get(key);
     if (!pending) {
-      pending = requestAssociatedPr(review.id).finally(() => {
-        associatedPrInflight.delete(key);
+      const task = requestAssociatedPr(review.id);
+      pending = task.finally(() => {
+        // Only clear our own entry: a Refresh/retry may have replaced it.
+        if (associatedPrInflight.get(key) === pending) {
+          associatedPrInflight.delete(key);
+        }
       });
       associatedPrInflight.set(key, pending);
     }
@@ -956,7 +966,7 @@ function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
     // back-nav reuse the same refs, so success caching still holds.
   }, [review]);
   if (review.pr_number != null) return null;
-  return resolved;
+  return associatedPrCache.get(review.id) ?? null;
 }
 
 /**
@@ -2464,6 +2474,12 @@ export default function ReviewsPage() {
   useEffect(() => {
     fetchReviews();
   }, [fetchReviews]);
+  // Associated-PR lookups ride the per-row `useAssociatedPr` hooks above:
+  // each rendered push row queues into `batchQueue` and one microtask flush
+  // sends every queued id in a single POST (issue #116) — never one GET per
+  // row. Rows carrying `pr_number`, rows without a sha, and cached ids never
+  // queue, so resolved PRs survive Refresh without refetching, while null
+  // misses evicted by handleRefresh / handleDetailRetry genuinely retry.
 
   // Clamp the page index when the server-side result set shrinks beneath it.
   // The server filters by repo / high-risk / severity, and a Refresh can also
@@ -2589,6 +2605,8 @@ export default function ReviewsPage() {
         if (!cancelled) {
           setDetailReview(r);
           setDetailLoading(false);
+          // No direct associated-PR GET here: the detail header renders
+          // through useAssociatedPr, which already batches deep-link rows.
         }
       },
       () => {
