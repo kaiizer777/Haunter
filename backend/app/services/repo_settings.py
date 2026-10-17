@@ -272,6 +272,65 @@ def validate_test_command(value: str | None) -> str | None:
     return clean
 
 
+# Issue #131: bounds for team review preferences (R10).
+# review_guidelines_text rides the 512-entry settings cache as TEXT, so it
+# is capped at 4000 chars; focus/checklist lists are capped at 20 items of
+# 200 chars each. Enforced on every write path via the normalizers below.
+REVIEW_STRICTNESS_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+_MAX_REVIEW_GUIDELINES_CHARS: int = 4000
+_MAX_REVIEW_LIST_ITEMS: int = 20
+_MAX_REVIEW_LIST_ITEM_CHARS: int = 200
+
+
+def normalize_review_strictness(value: object) -> str:
+    """Normalize a review strictness level to its canonical form."""
+    if not isinstance(value, str):
+        raise ValueError("review_strictness must be one of low, medium, high.")
+    clean = value.strip().lower()
+    if clean not in REVIEW_STRICTNESS_LEVELS:
+        raise ValueError("review_strictness must be one of low, medium, high.")
+    return clean
+
+
+def normalize_review_guidelines(value: object) -> str | None:
+    """Normalize guidelines text; blank clears the override (None)."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("review_guidelines_text must be a string.")
+    clean = value.strip()
+    if not clean:
+        return None
+    if len(clean) > _MAX_REVIEW_GUIDELINES_CHARS:
+        raise ValueError(
+            f"review_guidelines_text exceeds maximum length of {_MAX_REVIEW_GUIDELINES_CHARS} characters."
+        )
+    return clean
+
+
+def normalize_review_string_list(value: object, field_name: str) -> list[str]:
+    """Normalize a focus-area/checklist list: strip, drop blanks, cap."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field_name} must be a list of strings.")
+    cleaned: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field_name} must be a list of strings.")
+        stripped = item.strip()
+        if stripped:
+            cleaned.append(stripped)
+    if len(cleaned) > _MAX_REVIEW_LIST_ITEMS:
+        raise ValueError(
+            f"{field_name} accepts at most {_MAX_REVIEW_LIST_ITEMS} items."
+        )
+    for item in cleaned:
+        if len(item) > _MAX_REVIEW_LIST_ITEM_CHARS:
+            raise ValueError(
+                f"{field_name} items accept at most {_MAX_REVIEW_LIST_ITEM_CHARS} characters each."
+            )
+    return cleaned
+
+
 # ---------------------------------------------------------------------------
 # Short-TTL read cache for near-static governance config (db-perf #109,
 # hardened by #134).
@@ -348,6 +407,10 @@ def _detached_settings_copy(row: RepoSettings) -> RepoSettings:
     branches = values.get("allowed_branches")
     if isinstance(branches, list):
         values["allowed_branches"] = list(branches)
+    for _list_key in ("review_focus_areas", "review_checklist"):
+        _items = values.get(_list_key)
+        if isinstance(_items, list):
+            values[_list_key] = list(_items)
     return RepoSettings(**values)
 
 
@@ -395,6 +458,10 @@ def create_default_repo_settings(
         model_override_scope=cfg.get("model_override_scope", "inherit"),
         working_dir=None,
         test_command=None,
+        review_guidelines_text=None,
+        review_strictness="medium",
+        review_focus_areas=[],
+        review_checklist=[],
         settings_version=1,
         created_at=now,
         updated_at=now,
@@ -510,6 +577,10 @@ async def update_repo_settings(
         "audit_trigger_on_ci_success",
         "audit_trigger_on_manual_mention",
         "preset",
+        "review_guidelines_text",
+        "review_strictness",
+        "review_focus_areas",
+        "review_checklist",
     }
     bump_version = False
     preset_applied = False
@@ -529,6 +600,28 @@ async def update_repo_settings(
                 bump_version = True
 
     for key, value in updates.items():
+        if key == "review_guidelines_text":
+            normalized_guidelines = normalize_review_guidelines(value)
+            if settings.review_guidelines_text != normalized_guidelines:
+                settings.review_guidelines_text = normalized_guidelines
+                bump_version = True
+            continue
+        if key == "review_strictness":
+            normalized_strictness = (
+                "medium" if value is None else normalize_review_strictness(value)
+            )
+            if settings.review_strictness != normalized_strictness:
+                settings.review_strictness = normalized_strictness
+                bump_version = True
+            continue
+        if key in ("review_focus_areas", "review_checklist"):
+            normalized_items = (
+                [] if value is None else normalize_review_string_list(value, key)
+            )
+            if list(getattr(settings, key) or []) != normalized_items:
+                setattr(settings, key, normalized_items)
+                bump_version = True
+            continue
         if key in ("working_dir", "test_command"):
             # Handled before the None-skip below: these two are optional
             # overrides, so an explicit null is how a caller *clears* one.
@@ -607,6 +700,9 @@ __all__ = [
     "is_sandbox_verification_allowed",
     "match_branch",
     "normalize_preset_name",
+    "normalize_review_guidelines",
+    "normalize_review_strictness",
+    "normalize_review_string_list",
     "update_repo_settings",
     "validate_branch_name",
     "validate_branches",

@@ -760,6 +760,10 @@ class RepoSettingsOut(BaseModel):
     model_override_scope: str = "inherit"
     working_dir: Optional[str] = None
     test_command: Optional[str] = None
+    review_guidelines_text: Optional[str] = None
+    review_strictness: str = "medium"
+    review_focus_areas: list[str] = Field(default_factory=list)
+    review_checklist: list[str] = Field(default_factory=list)
     settings_version: int = 1
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -821,6 +825,10 @@ class RepoSettingsUpdate(BaseModel):
     model_override_scope: Optional[str] = None
     working_dir: Optional[str] = None
     test_command: Optional[str] = None
+    review_guidelines_text: Optional[str] = None
+    review_strictness: Optional[str] = None
+    review_focus_areas: Optional[list[str]] = None
+    review_checklist: Optional[list[str]] = None
 
     # Nested structures for future02.md payload compatibility
     features: Optional[dict[str, bool]] = None
@@ -906,6 +914,37 @@ class RepoSettingsUpdate(BaseModel):
                 out["allowed_branches"] = validate_branches(out["allowed_branches"])
             except ValueError as exc:
                 raise ValueError(str(exc)) from exc
+
+        if "review_strictness" in out and out["review_strictness"] is not None:
+            from app.services.repo_settings import normalize_review_strictness
+
+            try:
+                out["review_strictness"] = normalize_review_strictness(
+                    out["review_strictness"]
+                )
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+
+        if "review_guidelines_text" in out and out["review_guidelines_text"] is not None:
+            from app.services.repo_settings import normalize_review_guidelines
+
+            try:
+                out["review_guidelines_text"] = normalize_review_guidelines(
+                    out["review_guidelines_text"]
+                )
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+
+        for _prefs_key in ("review_focus_areas", "review_checklist"):
+            if _prefs_key in out and out[_prefs_key] is not None:
+                from app.services.repo_settings import normalize_review_string_list
+
+                try:
+                    out[_prefs_key] = normalize_review_string_list(
+                        out[_prefs_key], _prefs_key
+                    )
+                except ValueError as exc:
+                    raise ValueError(str(exc)) from exc
 
         return out
 

@@ -413,6 +413,10 @@ export interface RepoSettingsOut {
   ignore_draft_prs: boolean;
   max_cost_per_run_cents: number;
   model_override_scope: string;
+  review_guidelines_text?: string | null;
+  review_strictness?: string;
+  review_focus_areas?: string[];
+  review_checklist?: string[];
   settings_version: number;
   created_at?: string | null;
   updated_at?: string | null;
@@ -439,6 +443,10 @@ export interface RepoSettingsUpdate {
   ignore_draft_prs?: boolean;
   max_cost_per_run_cents?: number;
   model_override_scope?: string;
+  review_guidelines_text?: string | null;
+  review_strictness?: string;
+  review_focus_areas?: string[];
+  review_checklist?: string[];
   features?: Record<string, boolean>;
   audit_triggers?: Record<string, boolean>;
 }

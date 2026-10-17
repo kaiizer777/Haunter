@@ -18,6 +18,10 @@ import {
   GitBranch,
   DollarSign,
   Workflow,
+  ScrollText,
+  Gauge,
+  Crosshair,
+  ListChecks,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
@@ -118,6 +122,57 @@ const SCOPE_OPTIONS: SelectOption[] = [
 
 const ILLEGAL_BRANCH_REGEX = /[\s~^:\\]|@{|\.\./;
 
+const REVIEW_STRICTNESS_LEVELS = ["low", "medium", "high"] as const;
+const MAX_REVIEW_GUIDELINES_CHARS = 4000;
+const MAX_REVIEW_LIST_ITEMS = 20;
+const MAX_REVIEW_LIST_ITEM_CHARS = 200;
+
+const REVIEW_STRICTNESS_OPTIONS: SelectOption[] = [
+  {
+    value: "low",
+    label: "Low",
+    description: "Light-touch reviews \u2014 only high-signal findings surface.",
+  },
+  {
+    value: "medium",
+    label: "Medium",
+    description: "Balanced depth and noise (default review posture).",
+  },
+  {
+    value: "high",
+    label: "High",
+    description: "Strict, exhaustive reviews with full checklist enforcement.",
+  },
+];
+
+/**
+ * Parse a free-text prefs field into the string list the settings API
+ * expects. Mirrors backend normalize_review_string_list: split entries,
+ * strip whitespace, drop blanks.
+ */
+function parseReviewListInput(raw: string): string[] {
+  return raw
+    .split(/[,\n]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function formatReviewList(values: string[] | undefined | null): string {
+  return (values ?? []).join(", ");
+}
+
+function reviewListValidationError(values: string[], fieldName: string): string | null {
+  if (values.length > MAX_REVIEW_LIST_ITEMS) {
+    return `${fieldName} accepts at most ${MAX_REVIEW_LIST_ITEMS} items.`;
+  }
+  for (const item of values) {
+    if (item.length > MAX_REVIEW_LIST_ITEM_CHARS) {
+      return `${fieldName} items accept at most ${MAX_REVIEW_LIST_ITEM_CHARS} characters each.`;
+    }
+  }
+  return null;
+}
+
 export function RepoSettingsCard({
   settings: initialSettings,
   // `repoFullName` + `repoId` are part of the public props for future
@@ -153,6 +208,16 @@ export function RepoSettingsCard({
   const [ignoreDraftPrs, setIgnoreDraftPrs] = useState<boolean>(initialSettings.ignore_draft_prs);
   const [maxCostCents, setMaxCostCents] = useState<number>(initialSettings.max_cost_per_run_cents ?? 100);
   const [modelScope, setModelScope] = useState<string>(initialSettings.model_override_scope || "inherit");
+  const [guidelinesText, setGuidelinesText] = useState<string>(
+    initialSettings.review_guidelines_text ?? ""
+  );
+  const [strictness, setStrictness] = useState<string>(initialSettings.review_strictness ?? "medium");
+  const [focusAreasStr, setFocusAreasStr] = useState<string>(
+    formatReviewList(initialSettings.review_focus_areas)
+  );
+  const [checklistStr, setChecklistStr] = useState<string>(
+    formatReviewList(initialSettings.review_checklist)
+  );
 
   // Feedback banner state
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -180,6 +245,10 @@ export function RepoSettingsCard({
     setIgnoreDraftPrs(initialSettings.ignore_draft_prs);
     setMaxCostCents(initialSettings.max_cost_per_run_cents ?? 100);
     setModelScope(initialSettings.model_override_scope || "inherit");
+    setGuidelinesText(initialSettings.review_guidelines_text ?? "");
+    setStrictness(initialSettings.review_strictness ?? "medium");
+    setFocusAreasStr(formatReviewList(initialSettings.review_focus_areas));
+    setChecklistStr(formatReviewList(initialSettings.review_checklist));
 
     if (prevRepoId.current !== initialSettings.repo_id) {
       setStatusMessage(null);
@@ -223,6 +292,41 @@ export function RepoSettingsCard({
     return null;
   }, [maxCostCents]);
 
+  // Review prefs parsing (mirrors backend strip/drop-blank normalization)
+  const parsedFocusAreas = useMemo(() => parseReviewListInput(focusAreasStr), [focusAreasStr]);
+  const parsedChecklist = useMemo(() => parseReviewListInput(checklistStr), [checklistStr]);
+
+  // Review prefs validation (mirrors backend caps: 4000 chars; 20 x 200)
+  const guidelinesValidationError = useMemo(() => {
+    if (guidelinesText.trim().length > MAX_REVIEW_GUIDELINES_CHARS) {
+      return `Review guidelines exceed maximum length of ${MAX_REVIEW_GUIDELINES_CHARS} characters.`;
+    }
+    return null;
+  }, [guidelinesText]);
+
+  const strictnessValidationError = useMemo(() => {
+    if (!(REVIEW_STRICTNESS_LEVELS as readonly string[]).includes(strictness)) {
+      return "Review strictness must be one of low, medium, high.";
+    }
+    return null;
+  }, [strictness]);
+
+  const focusAreasValidationError = useMemo(
+    () => reviewListValidationError(parsedFocusAreas, "review_focus_areas"),
+    [parsedFocusAreas]
+  );
+
+  const checklistValidationError = useMemo(
+    () => reviewListValidationError(parsedChecklist, "review_checklist"),
+    [parsedChecklist]
+  );
+
+  const reviewPrefsValidationError =
+    guidelinesValidationError ||
+    strictnessValidationError ||
+    focusAreasValidationError ||
+    checklistValidationError;
+
   // Check dirty state
   const isDirty = useMemo(() => {
     const initialBranches = (initialSettings.allowed_branches || ["main", "master"]).join(", ");
@@ -241,7 +345,13 @@ export function RepoSettingsCard({
       branchesStr !== initialBranches ||
       ignoreDraftPrs !== initialSettings.ignore_draft_prs ||
       maxCostCents !== (initialSettings.max_cost_per_run_cents ?? 100) ||
-      modelScope !== (initialSettings.model_override_scope || "inherit")
+      modelScope !== (initialSettings.model_override_scope || "inherit") ||
+      guidelinesText.trim() !== (initialSettings.review_guidelines_text ?? "").trim() ||
+      strictness !== (initialSettings.review_strictness ?? "medium") ||
+      JSON.stringify(parsedFocusAreas) !==
+        JSON.stringify(initialSettings.review_focus_areas ?? []) ||
+      JSON.stringify(parsedChecklist) !==
+        JSON.stringify(initialSettings.review_checklist ?? [])
     );
   }, [
     preset,
@@ -259,6 +369,10 @@ export function RepoSettingsCard({
     ignoreDraftPrs,
     maxCostCents,
     modelScope,
+    guidelinesText,
+    strictness,
+    parsedFocusAreas,
+    parsedChecklist,
     initialSettings,
   ]);
 
@@ -301,7 +415,7 @@ export function RepoSettingsCard({
 
   // Handle Save
   const handleSave = useCallback(async () => {
-    if (branchValidationError || costValidationError) return;
+    if (branchValidationError || costValidationError || reviewPrefsValidationError) return;
     setStatusMessage(null);
 
     const payload: RepoSettingsUpdate = {
@@ -320,6 +434,10 @@ export function RepoSettingsCard({
       ignore_draft_prs: ignoreDraftPrs,
       max_cost_per_run_cents: maxCostCents,
       model_override_scope: modelScope,
+      review_guidelines_text: guidelinesText.trim() ? guidelinesText.trim() : null,
+      review_strictness: strictness,
+      review_focus_areas: parsedFocusAreas,
+      review_checklist: parsedChecklist,
     };
 
     try {
@@ -335,6 +453,7 @@ export function RepoSettingsCard({
   }, [
     branchValidationError,
     costValidationError,
+    reviewPrefsValidationError,
     preset,
     enableAutoFix,
     enableAuditorMode,
@@ -350,6 +469,10 @@ export function RepoSettingsCard({
     ignoreDraftPrs,
     maxCostCents,
     modelScope,
+    guidelinesText,
+    strictness,
+    parsedFocusAreas,
+    parsedChecklist,
     onSave,
   ]);
 
@@ -372,6 +495,10 @@ export function RepoSettingsCard({
     setIgnoreDraftPrs(initialSettings.ignore_draft_prs);
     setMaxCostCents(initialSettings.max_cost_per_run_cents ?? 100);
     setModelScope(initialSettings.model_override_scope || "inherit");
+    setGuidelinesText(initialSettings.review_guidelines_text ?? "");
+    setStrictness(initialSettings.review_strictness ?? "medium");
+    setFocusAreasStr(formatReviewList(initialSettings.review_focus_areas));
+    setChecklistStr(formatReviewList(initialSettings.review_checklist));
     setStatusMessage(null);
   }, [initialSettings]);
 
@@ -862,6 +989,160 @@ export function RepoSettingsCard({
         </div>
       </div>
 
+      {/* SECTION 5: PR Review Preferences */}
+      <div className="rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#121216]/95 via-[#0e0e12]/95 to-[#0a0a0d]/95 p-4 sm:p-5 shadow-sm space-y-4">
+        <div>
+          <h3 className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-300">
+            PR Review Preferences
+          </h3>
+          <p className="text-xs text-zinc-500 mt-0.5">
+            Team instructions injected into the automated review prompt. Empty preferences leave the review prompt unchanged.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+          {/* Team guidelines */}
+          <div className="space-y-1.5 md:col-span-2">
+            <div className="flex items-center justify-between">
+              <label htmlFor="input-review-guidelines" className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                <ScrollText className="h-3.5 w-3.5 text-zinc-400" />
+                Team review guidelines
+              </label>
+              <span className="text-[10px] font-mono text-zinc-500">
+                {guidelinesText.trim().length}/{MAX_REVIEW_GUIDELINES_CHARS}
+              </span>
+            </div>
+            <textarea
+              id="input-review-guidelines"
+              value={guidelinesText}
+              onChange={(e) => {
+                setGuidelinesText(e.target.value);
+                if (preset !== "custom") setPreset("custom");
+              }}
+              rows={4}
+              placeholder="e.g. Prefer composition over inheritance. Flag N+1 queries. No new lodash imports."
+              aria-invalid={!!guidelinesValidationError}
+              aria-describedby={guidelinesValidationError ? "input-review-guidelines-error" : "input-review-guidelines-hint"}
+              className={cn(
+                "flex min-h-[96px] w-full rounded-[6px] border border-zinc-800 bg-[#121215] px-2.5 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-400/25 focus:border-amber-400/80 disabled:cursor-not-allowed disabled:opacity-50 transition-all resize-y font-mono",
+                guidelinesValidationError && "border-red-500/80 focus-visible:ring-red-400"
+              )}
+            />
+            {guidelinesValidationError ? (
+              <p id="input-review-guidelines-error" role="alert" className="text-[11px] text-red-400 font-mono flex items-center gap-1">
+                <AlertCircle className="h-3 w-3 shrink-0" />
+                {guidelinesValidationError}
+              </p>
+            ) : (
+              <p id="input-review-guidelines-hint" className="text-[10px] font-mono text-zinc-500">
+                Free-text team instructions (idioms, prohibited patterns). Blank clears the override.
+              </p>
+            )}
+          </div>
+
+          {/* Strictness */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+              <Gauge className="h-3.5 w-3.5 text-zinc-400" />
+              Review strictness
+            </label>
+            <SelectDropdown
+              value={strictness}
+              onChange={(val) => {
+                setStrictness(val);
+                if (preset !== "custom") setPreset("custom");
+              }}
+              options={REVIEW_STRICTNESS_OPTIONS}
+              aria-label="Review strictness"
+            />
+            {strictnessValidationError ? (
+              <p role="alert" className="text-[11px] text-red-400 font-mono">
+                {strictnessValidationError}
+              </p>
+            ) : (
+              <p className="text-[10px] font-mono text-zinc-500">
+                Depth of automated findings. Default is Medium.
+              </p>
+            )}
+          </div>
+
+          {/* Focus areas */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label htmlFor="input-review-focus-areas" className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                <Crosshair className="h-3.5 w-3.5 text-zinc-400" />
+                Review focus areas
+              </label>
+              <span className="text-[10px] font-mono text-zinc-500">
+                {parsedFocusAreas.length}/{MAX_REVIEW_LIST_ITEMS}
+              </span>
+            </div>
+            <Input
+              id="input-review-focus-areas"
+              value={focusAreasStr}
+              onChange={(e) => {
+                setFocusAreasStr(e.target.value);
+                if (preset !== "custom") setPreset("custom");
+              }}
+              placeholder="security, performance, accessibility"
+              aria-invalid={!!focusAreasValidationError}
+              aria-describedby={focusAreasValidationError ? "input-review-focus-areas-error" : "input-review-focus-areas-hint"}
+              className={cn(
+                "font-mono text-xs",
+                focusAreasValidationError && "border-red-500/80 focus-visible:ring-red-400"
+              )}
+            />
+            {focusAreasValidationError ? (
+              <p id="input-review-focus-areas-error" role="alert" className="text-[11px] text-red-400 font-mono flex items-center gap-1">
+                <AlertCircle className="h-3 w-3 shrink-0" />
+                {focusAreasValidationError}
+              </p>
+            ) : (
+              <p id="input-review-focus-areas-hint" className="text-[10px] font-mono text-zinc-500">
+                Comma- or newline-separated topics (max {MAX_REVIEW_LIST_ITEMS} items, {MAX_REVIEW_LIST_ITEM_CHARS} chars each).
+              </p>
+            )}
+          </div>
+
+          {/* Checklist */}
+          <div className="space-y-1.5 md:col-span-2">
+            <div className="flex items-center justify-between">
+              <label htmlFor="input-review-checklist" className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                <ListChecks className="h-3.5 w-3.5 text-zinc-400" />
+                Review checklist
+              </label>
+              <span className="text-[10px] font-mono text-zinc-500">
+                {parsedChecklist.length}/{MAX_REVIEW_LIST_ITEMS}
+              </span>
+            </div>
+            <Input
+              id="input-review-checklist"
+              value={checklistStr}
+              onChange={(e) => {
+                setChecklistStr(e.target.value);
+                if (preset !== "custom") setPreset("custom");
+              }}
+              placeholder="tests pass, no console.log, migration reviewed"
+              aria-invalid={!!checklistValidationError}
+              aria-describedby={checklistValidationError ? "input-review-checklist-error" : "input-review-checklist-hint"}
+              className={cn(
+                "font-mono text-xs",
+                checklistValidationError && "border-red-500/80 focus-visible:ring-red-400"
+              )}
+            />
+            {checklistValidationError ? (
+              <p id="input-review-checklist-error" role="alert" className="text-[11px] text-red-400 font-mono flex items-center gap-1">
+                <AlertCircle className="h-3 w-3 shrink-0" />
+                {checklistValidationError}
+              </p>
+            ) : (
+              <p id="input-review-checklist-hint" className="text-[10px] font-mono text-zinc-500">
+                Per-review assertions the bot must verify (max {MAX_REVIEW_LIST_ITEMS} items, {MAX_REVIEW_LIST_ITEM_CHARS} chars each).
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
       {/* ACTION BAR: Save & Feedback */}
       <div className="sticky bottom-4 z-20 flex items-center justify-between rounded-xl border border-zinc-700/60 bg-[#0d0d10]/95 backdrop-blur-md p-3.5 shadow-[0_8px_32px_rgba(0,0,0,0.6)]">
         <div className="flex items-center gap-3">
@@ -899,7 +1180,7 @@ export function RepoSettingsCard({
             type="button"
             size="sm"
             onClick={handleSave}
-            disabled={!isDirty || isSaving || !!branchValidationError || !!costValidationError}
+            disabled={!isDirty || isSaving || !!branchValidationError || !!costValidationError || !!reviewPrefsValidationError}
             className={cn(
               "text-xs font-semibold px-4 transition-all duration-150",
               "bg-gradient-to-b from-amber-400 via-amber-500 to-amber-600 text-zinc-950",

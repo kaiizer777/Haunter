@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 import asyncio
 import logging
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 from urllib.parse import quote
 import uuid
 
@@ -71,6 +71,7 @@ class CodeReviewOut(BaseModel):
     failure_reason: Optional[str] = None
     input_tokens: int
     output_tokens: int
+    applied_review_prefs: Optional[dict[str, Any]] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -214,6 +215,7 @@ def _map_review_to_out(
         failure_reason=getattr(review, "failure_reason", None),
         input_tokens=review.input_tokens,
         output_tokens=review.output_tokens,
+        applied_review_prefs=getattr(review, "applied_review_prefs", None),
         created_at=review.created_at,
     )
 
