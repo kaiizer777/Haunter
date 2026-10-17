@@ -115,10 +115,16 @@ async def test_provider_config_cache_is_bounded():
 
 @pytest.mark.asyncio
 async def test_provider_config_overwrite_keeps_other_live_entries():
-    """Overwriting a live key must not evict an unrelated live entry.
+    """A fresh cache hit must not disturb other live entries.
 
-    The cap is enforced only when the stored key is new — otherwise a routine
-    refresh of one key would silently drop a different key still within TTL.
+    Scope note: this pins the *hit* path only. The seeded "hosting_provider"
+    entry is fresh and non-empty, so the call returns at the TTL check and
+    never reaches the store — ``_prune_cfg_cache`` is not called here, and
+    these assertions hold no matter what the cap logic does. The store-path
+    guarantee this docstring previously claimed ("the cap is enforced only when
+    the stored key is new") is pinned by
+    test_provider_config_overwrite_at_cap_does_not_evict_live_entries, and both
+    real keys coexisting by test_cap_allows_both_real_keys_to_coexist.
     """
     invalidate_provider_cache()
     now = time.monotonic()
@@ -144,6 +150,62 @@ async def test_provider_config_overwrite_keeps_other_live_entries():
 
 
 @pytest.mark.asyncio
+async def test_provider_config_overwrite_at_cap_does_not_evict_live_entries():
+    """Overwriting a live key while the cache is full must evict nothing.
+
+    ``_prune_cfg_cache`` enforces the cap only when the stored key is new, so
+    a routine refresh at a full cache must be a no-op for every other entry.
+    The cache is filled to exactly the cap first, otherwise the cap would not
+    bite and the assertions below would hold regardless of the guard.
+
+    Reaching the branch needs a store for a key that is already live, which the
+    normal "aws" path cannot do: a fresh hit returns early on the TTL check,
+    and an expired entry is deleted by the expiry prune before the guard runs,
+    which makes the key new again. The way in is a falsy ``env_default`` — an
+    empty ``HOSTING_PROVIDER`` plus a non-allowlisted DB row stores ``""``,
+    which is falsy and so never satisfies the cache-hit check, forcing the
+    store path to re-run. Degenerate, but reachable via configuration, and it
+    is the only route to a documented guarantee that would otherwise go
+    untested.
+    """
+    invalidate_provider_cache()
+    now = time.monotonic()
+    # Fresh (unexpired) filler so this exercises the cap and not the expiry
+    # prune; same synthetic-key idiom as test_provider_config_cache_is_bounded.
+    # CFG_MAXSIZE - 1 entries leave room for the first store to fill the cache
+    # to exactly the cap without evicting anything.
+    _cfg_cache["sandbox_provider"] = ("aws", now)
+    for i in range(CFG_MAXSIZE - 2):
+        _cfg_cache[f"synthetic_key_{i}"] = ("aws", now)
+
+    # Allowlist miss -> value falls back to env_default, which is "" here, so
+    # the cached value is falsy.
+    mock_row = MagicMock()
+    mock_row.value = "not-a-provider"
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_row
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = mock_result
+
+    with patch(
+        "app.db.async_session_maker",
+        return_value=_mock_session_ctx(mock_session),
+    ):
+        # First store: "hosting_provider" is new, so the cap applies and the
+        # cache fills to exactly the cap.
+        await _get_provider_config("hosting_provider", "")
+        assert len(_cfg_cache) == CFG_MAXSIZE
+
+        # Second store: the key is now live, so the cap guard is False and the
+        # overwrite must not evict anything.
+        await _get_provider_config("hosting_provider", "")
+
+    assert len(_cfg_cache) == CFG_MAXSIZE
+    assert "sandbox_provider" in _cfg_cache
+    assert all(f"synthetic_key_{i}" in _cfg_cache for i in range(CFG_MAXSIZE - 2))
+
+
+@pytest.mark.asyncio
 async def test_cap_allows_both_real_keys_to_coexist():
     """The cap must never be the reason a live key disappears.
 
@@ -153,9 +215,13 @@ async def test_cap_allows_both_real_keys_to_coexist():
     then never hit. Driving both real keys through the store path (rather than
     seeding ``_cfg_cache`` directly) is what makes this a test of the cap: a
     seed-and-assert-length check would pass even with the cap at 1.
-    """
-    assert CFG_MAXSIZE >= 2
 
+    The ``>= 2`` floor is deliberately *not* asserted against the constant
+    here: that is a restatement of ``_CFG_CACHE_MAXSIZE``, and it would fail
+    the test before the behavioural check below ever ran. The floor is instead
+    demonstrated — lower the cap to 1 and the second store evicts the first
+    key, failing on ``len(_cfg_cache) == 2``.
+    """
     invalidate_provider_cache()
     mock_row = MagicMock()
     mock_row.value = "aws"
