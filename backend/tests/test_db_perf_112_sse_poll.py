@@ -12,7 +12,8 @@ these cover the two acceptance criteria that were still open:
      tick (mandatory under ``NullPool``), so the tick rate *is* the connection
      churn rate. The poll sleep now backs off exponentially (1s → 2s → 4s →
      8s → 15s cap) and resets as soon as events arrive, taking a 900s idle
-     window from ~1082 sessions to ~77.
+     window from ~1082 sessions to ~366 (#148 rebalanced the probe cadence to a
+     steady ~5s, so the floor is one poll plus one probe per 5s).
   2. **AC3** — the turn-start prune issues its ``DELETE`` only above
      ``_STREAM_PRUNE_THRESHOLD``; at or below the threshold no ``DELETE`` is
      issued at all, while the ``turn_start`` event is still published.
@@ -30,7 +31,7 @@ from app.llm.exceptions import LLMError
 from app.models import SessionStreamEvent
 from app.routers.sessions import (
     _SSE_IDLE_BACKOFF_MAX_S,
-    _SSE_LIVENESS_PROBE_EVERY_TICKS,
+    _SSE_LIVENESS_PROBE_INTERVAL_S,
     _SSE_POLL_INTERVAL_S,
     _stream_from_db,
     _sse_idle_delay_s,
@@ -330,25 +331,29 @@ async def test_idle_stream_sessions_do_not_scale_with_wall_clock() -> None:
     # The defect being pinned: ~1.2 sessions/sec while idle.
     assert sessions_flat > _IDLE_WINDOW_S / _SSE_POLL_INTERVAL_S
 
-    # Bounded now: ~77 sessions (~14x fewer) and ~0.09 sessions/sec.
-    assert sessions_backoff <= sessions_flat // 10
-    assert sessions_backoff <= 100
-    assert sessions_backoff / _IDLE_WINDOW_S <= 0.1
+    # Bounded now: ~366 sessions (~3x fewer) and ~0.4 sessions/sec. The floor
+    # is the probe cadence itself — one poll plus one probe per 5s — which is
+    # what buys the ~5s dead-worker recovery (#148) instead of ~75s.
+    assert sessions_backoff <= sessions_flat // 2
+    assert sessions_backoff <= 400
+    assert sessions_backoff / _IDLE_WINDOW_S <= 0.5
 
-    # The reduction comes from real backoff, not from a smaller constant sleep.
+    # The reduction still comes from real backoff, not from a smaller constant
+    # sleep: the ramp is intact, then the probe cap takes over.
     mean_delay = sum(delays_backoff) / len(delays_backoff)
-    assert mean_delay >= 5 * _SSE_POLL_INTERVAL_S
-    assert delays_backoff[:6] == [
+    assert mean_delay >= 4 * _SSE_POLL_INTERVAL_S
+    assert delays_backoff[:4] == [
         _SSE_POLL_INTERVAL_S,
         _SSE_POLL_INTERVAL_S,
         2 * _SSE_POLL_INTERVAL_S,
-        4 * _SSE_POLL_INTERVAL_S,
-        8 * _SSE_POLL_INTERVAL_S,
-        _SSE_IDLE_BACKOFF_MAX_S,
+        # Backoff wants 4s here; the probe is due in 1s, so the sleep is cut
+        # short — this is the cap that holds the ~5s probe cadence.
+        _SSE_POLL_INTERVAL_S,
     ]
-    # Once saturated every subsequent tick sleeps exactly the cap, so the worst
-    # case added event latency on an idle stream is the cap.
-    assert set(delays_backoff[5:]) == {_SSE_IDLE_BACKOFF_MAX_S}
+    # At steady state every wake is probe-driven at the probe interval, so the
+    # worst-case added event latency on an idle stream stays ~5s, not the 15s
+    # backoff cap.
+    assert set(delays_backoff[4:]) == {_SSE_LIVENESS_PROBE_INTERVAL_S}
 
 
 @pytest.mark.asyncio
@@ -377,9 +382,10 @@ async def test_idle_delay_resets_when_events_arrive() -> None:
         2 * _SSE_POLL_INTERVAL_S,
     ]
     # One session per read (initial read + 6 polls) — the liveliness probe never
-    # fired: the probe cadence is measured in ticks and resets on rows too.
+    # fired: rows reset its wall-clock timer too, and the stream ends before
+    # the 5s interval elapses after the last reset.
     assert reads == 7
-    assert reads - 1 < _SSE_LIVENESS_PROBE_EVERY_TICKS * 2
+    assert reads - 1 < _SSE_LIVENESS_PROBE_INTERVAL_S * 2
 
     # The reset was driven by rows the *scoped* query actually returned: both
     # chunks the stream owns reached the client, in event_id order.
