@@ -502,6 +502,8 @@ async def test_comment_redelivery_with_new_delivery_id_resolves_existing_run(
         trigger_comment_id=TRIGGER_COMMENT_ID,
         reply_to_comment_id=ISSUE_NUMBER + 1000,
         github_delivery_id="seeded-old-delivery",
+        pr_number=4242,
+        pr_url="https://github.com/issue-org/issue-repo/pull/4242",
     )
     fake_audit_db.add(seeded)
     await fake_audit_db.commit()
@@ -535,6 +537,8 @@ async def test_comment_redelivery_with_new_delivery_id_resolves_existing_run(
     assert data["status"] == "duplicate"
     assert data["run_id"] == str(seeded.id)
     assert data["issue_number"] == ISSUE_NUMBER
+    assert data["pr_url"] == "https://github.com/issue-org/issue-repo/pull/4242"
+    assert data["pr_number"] == 4242
 
 
 # ---------------------------------------------------------------------------
