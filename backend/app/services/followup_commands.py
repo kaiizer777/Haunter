@@ -73,6 +73,46 @@ FEEDBACK_CONCLUSION: str = "feedback"
 #: The mention itself. ``\b`` keeps it from firing on ``@haunterbot``.
 _MENTION_RE: re.Pattern[str] = re.compile(r"@haunter\b", re.IGNORECASE)
 
+#: Fenced code blocks (```...```), stripped before issue-trigger matching so
+#: a pasted log or code sample that mentions the bot cannot fire the pipeline.
+_FENCED_CODE_RE: re.Pattern[str] = re.compile(r"```.*?```", re.DOTALL)
+
+#: Issue trigger mention (feat-125): ``@haunter`` or ``@haunter-bot``. The
+#: leading boundary excludes emails (``user@haunter...``); the trailing
+#: boundary excludes ``@haunterbot``.
+_ISSUE_MENTION_RE: re.Pattern[str] = re.compile(
+    r"(?<![A-Za-z0-9_])@haunter(?:-bot)?(?![A-Za-z0-9_-])", re.IGNORECASE
+)
+
+#: Bare ``/fix`` trigger (feat-125). The lookbehind excludes URL paths
+#: (``/a/fix/b``) and the trailing boundary excludes ``/fixup``, ``/fixed``
+#: and ``/fix-2``.
+_FIX_TOKEN_RE: re.Pattern[str] = re.compile(
+    r"(?<![A-Za-z0-9_/-])/fix(?![A-Za-z0-9_-])", re.IGNORECASE
+)
+
+
+def _strip_fenced_code(body: str) -> str:
+    """Remove triple-backtick blocks so triggers inside them never fire."""
+    return _FENCED_CODE_RE.sub(" ", body)
+
+
+def has_issue_trigger(body: Union[str, None]) -> bool:
+    """True when an issue title/body or comment asks Haunter to act (feat-125).
+
+    Fires on ``@haunter``, ``@haunter-bot`` or a bare ``/fix`` outside fenced
+    code blocks. Pure and total: never raises, False for non-string input.
+    Lexical only — auditor ownership (``@haunter-auditor``) is decided by the
+    webhook router before fix routing, not here.
+    """
+    if not isinstance(body, str) or not body:
+        return False
+    text = _strip_fenced_code(body)
+    return (
+        _ISSUE_MENTION_RE.search(text) is not None
+        or _FIX_TOKEN_RE.search(text) is not None
+    )
+
 #: The first word following the mention. Separators (whitespace, ``:``,
 #: ``,``) are tolerated so ``"@haunter, fix this"`` parses like
 #: ``"@haunter fix this"``.
