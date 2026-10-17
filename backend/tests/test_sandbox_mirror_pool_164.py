@@ -162,3 +162,24 @@ async def test_verify_targets_pool_selected_mirror(
             "primary mirror must see no traffic for this run"
         )
 
+@pytest.mark.asyncio
+async def test_verify_defaults_to_universal_mirror_without_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty pool keeps today's behavior: verify() hits the universal mirror."""
+    _base_settings(monkeypatch, "")
+    monkeypatch.setattr(
+        "app.sandbox.github_actions_runner.mint_installation_token",
+        AsyncMock(return_value="mock_inst_token"),
+    )
+
+    run_id = uuid.uuid4()
+    repo_full = "test-org/mirror-a"
+    branch = f"sandbox/run-{run_id}-att-1"
+
+    with respx.mock(base_url="https://api.github.com") as rx:
+        tree_route = _mock_mirror_run(rx, repo_full, branch)
+        result = await _run_verify(run_id)
+
+        assert result["passed"] is True
+        assert tree_route.called
