@@ -1989,6 +1989,29 @@ async def github_webhook(
         )
 
     # 5. Filter event type — accept workflow_run, issue_comment, pull_request_review_comment
+    # 4b. Per-repo/per-sender throttling (issue #161). Placed after HMAC
+    # verification and the delivery-id check, before any routing or pipeline
+    # work, so a looping or malicious sender is refused cheaply with 429 +
+    # Retry-After instead of scheduling orchestrator work. Applies to every
+    # event type, including unsupported ones: the key is derived best-effort
+    # from the raw body and never raises.
+    rate_limit_key = _webhook_rate_limit_key(x_github_event, raw_body)
+    rate_limit_retry_after = await _consume_webhook_rate_limit(rate_limit_key)
+    if rate_limit_retry_after > 0:
+        _log_webhook_decision(
+            event=x_github_event,
+            delivery_id=x_github_delivery,
+            status="throttled",
+            reason="webhook rate limit exceeded",
+            repo=rate_limit_key,
+            level="warning",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Webhook rate limit exceeded for this repository/sender",
+            headers={"Retry-After": str(rate_limit_retry_after)},
+        )
+
     if x_github_event not in ALLOWED_WEBHOOK_EVENTS:
         logger.info(
             "Ignored webhook event: %s (delivery_id=%s)",
