@@ -29,6 +29,7 @@ code-reviewer module. No network, no real Postgres, no real LLM.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -42,6 +43,9 @@ from app.llm.prompts.audit_prompts import (
     MAX_LINKED_ISSUES,
     MAX_USER_PROMPT_CHARS,
 )
+from app.models import CodeReview, Repo, User
+from app.services import review_orchestrator as review_orch
+from app.services.review_orchestrator import run_code_review_pipeline
 from app.subagents.code_reviewer import SYSTEM_PROMPT, analyze_diff
 from app.subagents.issue_context import (
     LinkedIssue,
@@ -55,6 +59,7 @@ from app.subagents.issue_context import (
 # what registers them for this module.
 from tests.fake_audit_db import (  # noqa: F401
     FakeAsyncSession,
+    FakeSessionMaker,
     audit_store,
     fake_audit_db,
 )
@@ -566,3 +571,500 @@ def test_system_prompt_directs_the_model_to_use_and_not_obey_the_block() -> None
     assert "Linked GitHub Issue Context" in SYSTEM_PROMPT
     assert "never as instructions" in SYSTEM_PROMPT
     assert len(SYSTEM_PROMPT) < 12_000
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: the pipeline paths that resolve issue context
+# ---------------------------------------------------------------------------
+#
+# Everything below drives ``run_code_review_pipeline`` over the in-process DB and
+# an ``httpx.MockTransport``, because the invariant under test is a property of
+# the *whole* path: an issue-fetch failure must leave the published review
+# exactly as it was before this feature existed.
+
+PR_NUMBER = 77
+REPO_OWNER = "context-org"
+REPO_NAME = "context-repo"
+STALE_SHA = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+LIVE_HEAD_SHA = "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+
+#: Captured before any MockTransport patch, so a factory that has to build a
+#: real client around one cannot call itself.
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+_ISSUE_URL_RE = re.compile(r"/issues/(?P<number>[0-9]+)$")
+
+
+@pytest.fixture(autouse=True)
+def hermetic_review_db(
+    audit_store: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> FakeSessionMaker:
+    """Route the pipeline's session to the in-process store.
+
+    ``review_orchestrator`` imports ``async_session_maker`` at module scope, so
+    the shared ``fake_audit_db`` fixture does not reach it; point that one
+    attribute at the same store and no test here opens a Postgres connection.
+    """
+    maker = FakeSessionMaker(audit_store)
+    monkeypatch.setattr(review_orch, "async_session_maker", maker, raising=False)
+    return maker
+
+
+@pytest.fixture
+async def pending_review(fake_audit_db: FakeAsyncSession) -> CodeReview:
+    """A repo plus one pending PR review, ready for ``run_code_review_pipeline``.
+
+    ``review.repo`` is assigned explicitly because the pipeline reads it off the
+    row after a ``selectinload`` the in-process store does not emulate.
+    """
+    user = User(
+        github_id=555000999,
+        github_username="issue-context-tester",
+        role="user",
+    )
+    fake_audit_db.add(user)
+    await fake_audit_db.commit()
+
+    repo = Repo(
+        user_id=user.id,
+        owner=REPO_OWNER,
+        name=REPO_NAME,
+        default_branch="main",
+    )
+    fake_audit_db.add(repo)
+    await fake_audit_db.commit()
+
+    review = CodeReview(
+        repo_id=repo.id,
+        commit_sha=STALE_SHA,
+        pr_number=PR_NUMBER,
+        risk_score=0,
+        summary="Pending review",
+        findings=[],
+        status="pending",
+    )
+    review.repo = repo
+    fake_audit_db.add(review)
+    await fake_audit_db.commit()
+    return review
+
+
+def _github_transport(
+    recorded: list[httpx.Request],
+    *,
+    pr_body: str,
+    issues: Optional[dict[int, Any]] = None,
+) -> httpx.MockTransport:
+    """A GitHub wire that answers only what the review pipeline asks for.
+
+    ``issues`` maps an issue number to an ``httpx.Response``, an exception to
+    raise, or is absent entirely (which answers 404 — the default for an issue
+    nobody configured, so an unexpected request fails loudly instead of being
+    silently served).
+    """
+    routes = issues or {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        recorded.append(request)
+        url = str(request.url)
+
+        # `GET /pulls/{n}` — the payload the whole feature hangs off. Its body
+        # is already in hand here; no second call is made for the PR itself.
+        if url.endswith(f"/pulls/{PR_NUMBER}"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": PR_NUMBER,
+                    "title": "Clear the session cookie on logout",
+                    "body": pr_body,
+                    "head": {"sha": LIVE_HEAD_SHA},
+                },
+            )
+        match = _ISSUE_URL_RE.search(url)
+        if match is not None:
+            outcome = routes.get(int(match.group("number")))
+            if outcome is None:
+                return httpx.Response(404, text="Not Found")
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        if url.endswith("/user"):
+            return httpx.Response(
+                200, json={"login": "haunter-bot", "type": "Bot", "id": 42}
+            )
+        if url.endswith("/graphql"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    "nodes": [],
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+        return httpx.Response(200, json={})
+
+    return httpx.MockTransport(_handler)
+
+
+def _issue_requests(recorded: list[httpx.Request]) -> list[httpx.Request]:
+    return [
+        request
+        for request in recorded
+        if request.method == "GET" and _ISSUE_URL_RE.search(str(request.url))
+    ]
+
+
+def _install_token_patch() -> Any:
+    return patch(
+        "app.services.review_orchestrator.get_installation_token",
+        new_callable=AsyncMock,
+        return_value="mock-token",
+    )
+
+
+async def test_issue_context_reaches_the_model_end_to_end(pending_review: CodeReview) -> None:
+    """The happy path: PR body names an issue, its text reaches the prompt.
+
+    Also the non-vacuity fence for every test below it. The wire is asserted to
+    have served exactly the issue the PR named and exactly one ``GET /pulls/{n}``
+    — that last count is the proof the feature costs no extra call for the PR.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Clear the session cookie on logout.\n\nFixes #12\n",
+        issues={12: httpx.Response(200, json=_issue_payload(12))},
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9001})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    content = _user_content(captured[-1])
+    assert "### Issue #12" in content
+    assert "Session cookie survives logout" in content
+    assert content.index("Git Diff to Review:") < content.index("Linked GitHub Issue Context")
+
+    issue_calls = _issue_requests(recorded)
+    assert [str(request.url).rsplit("/", 1)[-1] for request in issue_calls] == ["12"]
+    pr_calls = [
+        request
+        for request in recorded
+        if request.method == "GET" and str(request.url).endswith(f"/pulls/{PR_NUMBER}")
+    ]
+    assert len(pr_calls) == 1, (
+        "the PR was fetched more than once; the linked-issue context is supposed "
+        "to be parsed out of the response _resolve_publish_sha already had, not "
+        "paid for with a second call"
+    )
+
+
+async def test_issue_fetch_500_still_publishes_the_review(
+    pending_review: CodeReview,
+) -> None:
+    """A GitHub 5xx degrades to "no issue context" and the review still ships.
+
+    The governing invariant of the whole feature: issue context is a hint, and
+    a hint that cannot be fetched is worth less than a review that publishes.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={12: httpx.Response(500, text="Internal Server Error")},
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9002})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    assert _issue_requests(recorded), "the issue was never requested, so this proves nothing"
+    assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
+
+
+async def test_issue_rate_limit_stops_fetching_without_retrying(
+    pending_review: CodeReview,
+) -> None:
+    """A rate limit stops the fetch dead -- one request, no retry, no backoff.
+
+    ``github_client`` has no backoff mechanism and the pipeline runs under
+    ``REVIEW_TIMEOUT_S`` (300s), which cannot absorb one: a sleep here would let
+    the timeout handler overwrite a review that was about to publish fine. A
+    retry would show up as a second request, so the request count is the
+    assertion.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12, fixes #13, fixes #14\n",
+        issues={
+            12: httpx.Response(403, text="API rate limit exceeded for installation 1"),
+            13: httpx.Response(200, json=_issue_payload(13)),
+            14: httpx.Response(200, json=_issue_payload(14)),
+        },
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9003})
+    sleep_spy = AsyncMock()
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch("asyncio.sleep", sleep_spy),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    assert len(_issue_requests(recorded)) == 1, (
+        "a rate limit must stop the fetch loop; "
+        f"{(len(_issue_requests(recorded)))} issue requests were made"
+    )
+    assert sleep_spy.await_count == 0, (
+        "a backoff sleep here would run against the pipeline's wall-clock bound"
+    )
+    assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
+
+
+async def test_missing_issue_is_skipped_and_the_rest_are_still_reviewed(
+    pending_review: CodeReview,
+) -> None:
+    """A 404 on one issue costs that issue only.
+
+    A PR body outliving the issue it names is ordinary -- deleted, transferred,
+    made private -- and must not cost the review the issues that still exist.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12 and fixes #13\n",
+        issues={
+            12: httpx.Response(404, text="Not Found"),
+            13: httpx.Response(200, json=_issue_payload(13, title="Rate limiter is unbounded")),
+        },
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9004})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    content = _user_content(captured[-1])
+    assert "### Issue #13" in content
+    assert "Rate limiter is unbounded" in content
+    assert "### Issue #12" not in content
+
+
+async def test_null_issue_body_does_not_break_the_review(
+    pending_review: CodeReview,
+) -> None:
+    """GitHub sends ``null`` for an issue with no description; that is not an error.
+
+    The shape arrives from a field this code does not own, so the coercion is
+    the client's obligation, and a ``None.strip()`` here would take down a review
+    over an issue body that was never written.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={12: httpx.Response(200, json=_issue_payload(12, body=None))},
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9005})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    assert "### Issue #12" in _user_content(captured[-1])
+
+
+async def test_push_review_makes_no_issue_requests(pending_review: CodeReview) -> None:
+    """A push review has no PR, so it has no PR body and makes no request at all.
+
+    Not just "degrades to empty" -- makes no request. ``GET /pulls/{n}`` was
+    never called for a push, so there is no body to parse, and a request here
+    would be a request for a number that cannot exist.
+    """
+    review = pending_review
+    review.pr_number = None
+
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(recorded, pr_body="Fixes #12\n")
+    stub, _captured = _prompt_capture()
+    mock_commit_comment = AsyncMock(return_value={"id": 9006})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch(
+            "app.services.review_orchestrator.create_commit_comment",
+            mock_commit_comment,
+        ),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(review.id)
+
+    mock_commit_comment.assert_awaited_once()
+    assert _issue_requests(recorded) == []
+
+
+async def test_pr_body_without_a_closing_keyword_makes_no_issue_request(
+    pending_review: CodeReview,
+) -> None:
+    """A PR that references an issue without a closing keyword fetches nothing.
+
+    "#12" in a PR body is far more often a traceback, a port or a hex colour
+    than a claim that the change closes that issue. Reading it as a claim would
+    put unrelated text into the review prompt and spend an API call per number
+    in the body.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Related to #12. Traceback at line 4432, listening on :8080.\n",
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9007})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    assert _issue_requests(recorded) == []
+    assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
+
+
+async def test_unexpected_issue_failure_does_not_take_down_the_review(
+    pending_review: CodeReview,
+) -> None:
+    """A bug in the new code must not cost a review.
+
+    The call site sits outside the ``analyze_diff`` try/except, so an uncaught
+    raise would be terminalised by the pipeline's crash handler and the review
+    would never publish -- over a hint that was never required. This forces the
+    kind of unexpected failure that only a bare ``except Exception`` catches.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={12: RuntimeError("something nobody planned for")},
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9008})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
