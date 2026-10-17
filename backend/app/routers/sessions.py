@@ -586,8 +586,7 @@ _SSE_POLL_INTERVAL_S = 1.0
 #: elsewhere. Wall-clock cadence, not ticks: the poll sleep below is capped so
 #: the loop always wakes when a probe is due, holding ~5s even under full idle
 #: backoff (tick-counted before #148, stretching to ~75s). The NOWAIT probe
-#: opens a lock attempt plus a rollback, so it still runs far less often than
-#: once per tick once events flow.
+#: opens a lock attempt plus a rollback, so it still runs far less often than once per tick while events flow.
 _SSE_LIVENESS_PROBE_INTERVAL_S = 5.0
 
 #: Upper bound on the idle backoff applied to the poll sleep. Consecutive empty
