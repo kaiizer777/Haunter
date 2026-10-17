@@ -40,12 +40,52 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # System config helpers — 60s TTL cache for hot-switch without redeploy
+#
+# The cache stores only detached scalars: an allowlisted provider name plus a
+# ``time.monotonic()`` stamp. No ORM row, session or connection is retained,
+# so a cache hit cannot outlive the ``async with async_session_maker()`` block
+# that produced it.
+#
+# The cache is bounded: expired entries are pruned on every store and the
+# size is capped (#136). TTL being checked on read alone left expired keys
+# resident with no eviction path — the only removal primitive was a blanket
+# ``invalidate_provider_cache()`` .clear(). That is a shape defect, not a live
+# leak: every production call site passes a hardcoded literal
+# ("hosting_provider" / "sandbox_provider"), so after normalization
+# (``key.strip().lower()``) the keyspace has cardinality 2 and
+# ``len(_cfg_cache) <= 2`` regardless. The cap exists purely as
+# defense-in-depth, so a future caller passing a dynamic key cannot turn this
+# into a per-worker leak. Hence a small cap, not a large one.
 # ---------------------------------------------------------------------------
 
 _cfg_cache: dict[str, tuple[str, float]] = {}
 _CACHE_TTL: float = 60.0
+# Keyspace is 2 (hosting_provider / sandbox_provider), so 8 leaves room for
+# new literal config keys without implying a cardinality that cannot exist.
+# Must stay >= 2: get_active_hosting_provider() and get_active_sandbox_provider()
+# read their respective keys independently, so a cap of 1 would make each read
+# evict the key the other one just cached and the cache could never hit.
+_CFG_CACHE_MAXSIZE: int = 8
 
 _ALLOWED_PROVIDERS: frozenset[str] = frozenset({"aws"})
+
+
+def _prune_cfg_cache(now: float, stored_key: str) -> None:
+    """Evict expired entries, then oldest-inserted ones past the cap.
+
+    The size cap is only enforced when storing a new key: overwriting
+    an existing entry must not evict an unrelated live entry.
+    """
+    expired = [
+        key
+        for key, (_, cached_at) in _cfg_cache.items()
+        if now - cached_at >= _CACHE_TTL
+    ]
+    for key in expired:
+        del _cfg_cache[key]
+    if stored_key not in _cfg_cache:
+        while len(_cfg_cache) >= _CFG_CACHE_MAXSIZE:
+            _cfg_cache.pop(next(iter(_cfg_cache)))
 
 
 async def _get_provider_config(key: str, env_default: str) -> str:
@@ -95,6 +135,7 @@ async def _get_provider_config(key: str, env_default: str) -> str:
         )
         value = env_default
 
+    _prune_cfg_cache(now, normalized)
     _cfg_cache[normalized] = (value, now)
     return value
 
