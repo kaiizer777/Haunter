@@ -106,6 +106,25 @@ def is_pr_refinement(run: Run) -> bool:
     return run.parent_run_id is not None and run.pr_number is not None
 
 
+def is_issue_run(run: Run) -> bool:
+    """
+    True for autonomous issue-triggered root runs (feat-125).
+
+    These rows carry no CI workflow (`github_run_id` NULL) and no parent, and
+    their `reply_to_comment_id` holds the SOURCE ISSUE number - the thread to
+    answer in - rather than a review comment id. The PR writer never
+    overwrites that column (unlike `pr_number`), so the predicate stays true
+    for the run's whole life, including after its fix PR opens.
+    """
+    if getattr(run, "is_retry_child", False):
+        return False
+    return (
+        run.parent_run_id is None
+        and run.github_run_id is None
+        and run.reply_to_comment_id is not None
+    )
+
+
 # ---------------------------------------------------------------------------
 # State machine
 # ---------------------------------------------------------------------------
