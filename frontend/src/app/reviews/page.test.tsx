@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ReviewsPage, { __resetAssociatedPrCacheForTests } from "./page";
-import { api, CodeReviewOut, RepoOut } from "@/lib/api";
+import { api, AssociatedPROut, CodeReviewOut, RepoOut } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 
 vi.mock("next/navigation", () => ({
@@ -35,6 +35,7 @@ vi.mock("@/lib/api", () => ({
     getCodeReviews: vi.fn(),
     getReviewDetail: vi.fn(),
     getAssociatedPr: vi.fn(),
+    getAssociatedPrs: vi.fn(),
     getModelConfig: vi.fn().mockResolvedValue({
       id: "cfg_1",
       provider: "opencode_zen",
@@ -155,6 +156,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     // Default: no associated PR — push rows keep the Push pill unless a test
     // overrides this per-case below.
     vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
+    vi.mocked(api.getAssociatedPrs).mockResolvedValue({ associated_prs: {} });
 
     const writeTextMock = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -1565,7 +1567,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
   describe("associated-PR pill swap (push rows that belong to a PR)", () => {
     // Completed push row: pr_number NULL at rest, so the card renders the
-    // Push pill until the associated-PR lookup resolves.
+    // Push pill until the batched associated-PR lookup resolves.
     const pushRowForAssoc = (id: string, sha: string): CodeReviewOut => ({
       ...mockReviews[1],
       id,
@@ -1579,13 +1581,16 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       pr_url: null,
     });
 
+    const batchResolving = (prs: Record<string, AssociatedPROut | null>) =>
+      vi.mocked(api.getAssociatedPrs).mockResolvedValue({ associated_prs: prs });
+
     it("resolved PR swaps the Push pill to an amber PR #n pill linking the PR URL", async () => {
       vi.mocked(api.getCodeReviews).mockResolvedValue({
         reviews: [pushRowForAssoc("rev_assoc_82", "aaaabbbbccccdddd")],
         total: 1,
       });
-      vi.mocked(api.getAssociatedPr).mockResolvedValue({
-        associated_pr: {
+      batchResolving({
+        rev_assoc_82: {
           number: 82,
           url: "https://github.com/acme/sentinel/pull/82",
           title: null,
@@ -1599,7 +1604,10 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         "https://github.com/acme/sentinel/pull/82"
       );
       expect(screen.queryByText(/Push @/)).not.toBeInTheDocument();
-      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_82");
+      // One batch call carrying the row — never a per-row GET.
+      expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledWith(["rev_assoc_82"]);
+      expect(vi.mocked(api.getAssociatedPr)).not.toHaveBeenCalled();
     });
 
     it("null resolution keeps the Push pill (direct-to-main push)", async () => {
@@ -1607,12 +1615,12 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         reviews: [pushRowForAssoc("rev_assoc_null", "eeeffff00001111")],
         total: 1,
       });
-      vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
+      batchResolving({ rev_assoc_null: null });
       render(<ReviewsPage />);
 
       expect(await screen.findByText(/Push @ eeeffff/i)).toBeInTheDocument();
       await waitFor(() =>
-        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_null")
+        expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledWith(["rev_assoc_null"])
       );
       expect(screen.queryByText(/PR #\d+/)).not.toBeInTheDocument();
     });
@@ -1622,32 +1630,37 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         reviews: [pushRowForAssoc("rev_assoc_err", "2222333344445555")],
         total: 1,
       });
-      vi.mocked(api.getAssociatedPr).mockRejectedValue(new Error("backend down"));
+      vi.mocked(api.getAssociatedPrs).mockRejectedValue(new Error("backend down"));
       render(<ReviewsPage />);
 
       expect(await screen.findByText(/Push @ 2222333/i)).toBeInTheDocument();
       await waitFor(() =>
-        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_err")
+        expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledWith(["rev_assoc_err"])
       );
       expect(screen.queryByText(/PR #\d+/)).not.toBeInTheDocument();
     });
 
-    it("keys by review id: different reviews sharing one sha fetch independently (no cross-contamination)", async () => {
+    it("one page render fires ONE batch call for every push row (no per-row fan-out)", async () => {
       const sharedSha = "7777888899990000";
       vi.mocked(api.getCodeReviews).mockResolvedValue({
         reviews: [pushRowForAssoc("rev_assoc_a", sharedSha), pushRowForAssoc("rev_assoc_b", sharedSha)],
         total: 2,
       });
-      vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
+      batchResolving({ rev_assoc_a: null, rev_assoc_b: null });
       render(<ReviewsPage />);
 
       expect(await screen.findAllByText(/Push @ 7777888/i)).toHaveLength(2);
-      // One fetch per review — a sha-keyed cache would dedupe these into 1.
+      // The whole page resolves with a single batch carrying both ids — even
+      // though the rows share one sha, the batch stays id-keyed (no
+      // cross-contamination), and no per-row GET fires.
       await waitFor(() =>
-        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(2)
+        expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledTimes(1)
       );
-      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_a");
-      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledWith("rev_assoc_b");
+      expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledWith([
+        "rev_assoc_a",
+        "rev_assoc_b",
+      ]);
+      expect(vi.mocked(api.getAssociatedPr)).not.toHaveBeenCalled();
     });
 
     it("caches by review id: re-render fetches once, never refetches", async () => {
@@ -1655,12 +1668,12 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         reviews: [pushRowForAssoc("rev_assoc_cache", "6666777788889999")],
         total: 1,
       });
-      vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
+      batchResolving({ rev_assoc_cache: null });
       const first = render(<ReviewsPage />);
 
       expect(await screen.findByText(/Push @ 6666777/i)).toBeInTheDocument();
       await waitFor(() =>
-        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledTimes(1)
       );
       first.unmount();
 
@@ -1668,7 +1681,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(await screen.findByText(/Push @ 6666777/i)).toBeInTheDocument();
       // Mount effects flush inside the findBy act cycle, so any stray
       // refetch would already be recorded — assert the count directly.
-      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledTimes(1);
     });
 
     it("list Refresh retries a failed (null) lookup instead of serving the stale miss", async () => {
@@ -1677,17 +1690,17 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         reviews: [{ ...pushRowForAssoc("rev_assoc_retry", "abcd1234abcd1234") }],
         total: 1,
       }));
-      vi.mocked(api.getAssociatedPr).mockResolvedValue({ associated_pr: null });
+      batchResolving({ rev_assoc_retry: null });
       render(<ReviewsPage />);
 
       expect(await screen.findByText(/Push @ abcd123/i)).toBeInTheDocument();
       await waitFor(() =>
-        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledTimes(1)
       );
 
       // Backend can resolve the PR now — Refresh must retry, not serve cache.
-      vi.mocked(api.getAssociatedPr).mockResolvedValue({
-        associated_pr: {
+      batchResolving({
+        rev_assoc_retry: {
           number: 77,
           url: "https://github.com/acme/sentinel/pull/77",
           title: null,
@@ -1696,7 +1709,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
       expect(await screen.findByText("PR #77")).toBeInTheDocument();
-      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledTimes(2);
     });
 
     it("list Refresh keeps a resolved (success) lookup instead of refetching it", async () => {
@@ -1705,8 +1718,8 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         reviews: [{ ...pushRowForAssoc("rev_assoc_keep", "1234abcd1234abcd") }],
         total: 1,
       }));
-      vi.mocked(api.getAssociatedPr).mockResolvedValue({
-        associated_pr: {
+      batchResolving({
+        rev_assoc_keep: {
           number: 42,
           url: "https://github.com/acme/sentinel/pull/42",
           title: "Kept PR",
@@ -1716,7 +1729,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
       expect(await screen.findByText("PR #42")).toBeInTheDocument();
       await waitFor(() =>
-        expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledTimes(1)
       );
 
       // Refresh delivers fresh rows but must not refetch the resolved PR.
@@ -1725,10 +1738,9 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(await screen.findByText("PR #42")).toBeInTheDocument();
       // Mount effects flush inside the findBy act cycle, so any stray
       // refetch would already be recorded — assert the count directly.
-      expect(vi.mocked(api.getAssociatedPr)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(api.getAssociatedPrs)).toHaveBeenCalledTimes(1);
     });
   });
-
   /**
    * Coverage for the triage-first surfaces added by the redesign. The strip,
    * the cluster banner and the sort control are ~200 lines of new UI; before
