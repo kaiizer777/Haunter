@@ -32,6 +32,11 @@ dispatched through a durable, independent audit queue (never git push / PR creat
    guessed at (see _resolve_repo_for_delivery). That refusal is recorded with
    repo_id=NULL, which keeps it visible to an operator without asserting a
    tenancy the delivery does not have — so it appears in no tenant's history.
+9. Per-repo/per-sender ingress throttling (issue #161): after HMAC
+   verification, each delivery consumes one budget unit from a sliding-window
+   bucket keyed `repo-full-name|sender-login`; over-budget senders get 429 +
+   Retry-After before any routing or pipeline work, while legitimate
+   deliveries pass through. In-memory per process (see _WEBHOOK_RATE_BUCKETS).
 """
 
 import asyncio
@@ -43,7 +48,9 @@ import hmac
 import json
 import logging
 import re
+import time
 import uuid
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Optional
 
@@ -120,6 +127,24 @@ _WEBHOOK_PAYLOAD_MAX_BYTES = 128 * 1024
 # runs.github_run_id / github_delivery_id, audit_jobs delivery fingerprints);
 # this closes the window before those constraints are even consulted.
 _REPLAY_COOLDOWN_SECONDS = 30
+
+# Webhook ingress throttling (issue #161). Per-repository + per-sender
+# sliding-window budgets enforced in github_webhook() with a 429 path, so a
+# misconfigured repo or malicious sender flooding deliveries cannot saturate
+# the orchestrator while legitimate deliveries pass through.
+#
+# In-memory and therefore per-process: each Lambda execution environment (or
+# dev server worker) tracks its own buckets. That is sufficient for loop
+# protection — a looping sender hits every instance it talks to — without a
+# new dependency (no Redis) or a hot DB write on every delivery. Buckets are
+# keyed `repo-full-name|sender-login` (lowercased, length-bounded) and hold
+# monotonic timestamps of recent accepted deliveries; empty buckets are
+# pruned on touch and the table is capped so distinct attacker-chosen keys
+# cannot grow memory without bound (oldest bucket evicted first).
+_WEBHOOK_RATE_MAX_BUCKETS = 10_000
+_WEBHOOK_RATE_KEY_MAX_CHARS = 200
+_WEBHOOK_RATE_BUCKETS: dict[str, deque[float]] = {}
+_WEBHOOK_RATE_LOCK = asyncio.Lock()
 
 # Decision reasons for a delivery that does not resolve to exactly one repos row.
 # Kept as two distinct strings because they are two different operational
@@ -821,6 +846,90 @@ def _log_webhook_decision(
         logger.warning(msg)
     else:
         logger.info(msg)
+
+
+def _webhook_rate_limit_key(event: Any, raw_body: bytes) -> str:
+    """Bucket key `repo-full-name|sender-login` for webhook ingress throttling.
+
+    Pure and total: never raises — an unparseable body maps to the
+    `unknown-repo|unknown-sender` bucket so malformed floods are still
+    throttled instead of bypassing the limiter. Values are lowercased and
+    length-bounded so attacker-chosen keys cannot grow memory without bound
+    (truncation may merge buckets, which fails closed toward throttling).
+    The `event` is accepted for log context only; throttling is strictly
+    per-repo/per-sender per issue #161.
+    """
+    repo_full = "unknown-repo"
+    sender = "unknown-sender"
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        repo = data.get("repository")
+        if isinstance(repo, dict):
+            full = repo.get("full_name")
+            if isinstance(full, str) and full.strip():
+                repo_full = full.strip()
+            else:
+                owner = repo.get("owner")
+                owner_login = owner.get("login") if isinstance(owner, dict) else None
+                name = repo.get("name")
+                if (
+                    isinstance(owner_login, str)
+                    and isinstance(name, str)
+                    and owner_login.strip()
+                    and name.strip()
+                ):
+                    repo_full = f"{owner_login.strip()}/{name.strip()}"
+        snd = data.get("sender")
+        if isinstance(snd, dict):
+            login = snd.get("login")
+            if isinstance(login, str) and login.strip():
+                sender = login.strip()
+    key = f"{repo_full}|{sender}".lower()
+    if len(key) > _WEBHOOK_RATE_KEY_MAX_CHARS:
+        key = key[:_WEBHOOK_RATE_KEY_MAX_CHARS]
+    return key
+
+
+async def _consume_webhook_rate_limit(
+    key: str, *, now: Optional[float] = None
+) -> int:
+    """Consume one delivery from the bucket; return retry-after seconds.
+
+    Sliding window of `settings.webhook_rate_limit_window_seconds` holding at
+    most `settings.webhook_rate_limit_max_deliveries` accepted deliveries.
+    Returns 0 when the delivery is allowed (and records it), otherwise the
+    seconds until the oldest entry leaves the window — the caller's
+    `Retry-After`. A non-positive budget or window disables throttling (fail
+    open for misconfiguration, never fail closed on legitimate traffic).
+    `now` is a monotonic timestamp override for deterministic tests only.
+    """
+    maximum = settings.webhook_rate_limit_max_deliveries
+    window = settings.webhook_rate_limit_window_seconds
+    if maximum <= 0 or window <= 0:
+        return 0
+    current = now if now is not None else time.monotonic()
+    async with _WEBHOOK_RATE_LOCK:
+        bucket = _WEBHOOK_RATE_BUCKETS.get(key)
+        if bucket is None:
+            if len(_WEBHOOK_RATE_BUCKETS) >= _WEBHOOK_RATE_MAX_BUCKETS:
+                _WEBHOOK_RATE_BUCKETS.pop(next(iter(_WEBHOOK_RATE_BUCKETS)))
+            bucket = _WEBHOOK_RATE_BUCKETS[key] = deque()
+        cutoff = current - window
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if len(bucket) >= maximum:
+            retry_after = int(bucket[0] + window - current) + 1
+            return max(1, retry_after)
+        bucket.append(current)
+        return 0
+
+
+def _reset_webhook_rate_limiter() -> None:
+    """Clear all throttle buckets. Test hook only — production paths never call it."""
+    _WEBHOOK_RATE_BUCKETS.clear()
 
 
 def _truncate_reason(reason: Any) -> Optional[str]:
@@ -1885,6 +1994,29 @@ async def github_webhook(
         )
 
     # 5. Filter event type — accept workflow_run, issue_comment, pull_request_review_comment
+    # 4b. Per-repo/per-sender throttling (issue #161). Placed after HMAC
+    # verification and the delivery-id check, before any routing or pipeline
+    # work, so a looping or malicious sender is refused cheaply with 429 +
+    # Retry-After instead of scheduling orchestrator work. Applies to every
+    # event type, including unsupported ones: the key is derived best-effort
+    # from the raw body and never raises.
+    rate_limit_key = _webhook_rate_limit_key(x_github_event, raw_body)
+    rate_limit_retry_after = await _consume_webhook_rate_limit(rate_limit_key)
+    if rate_limit_retry_after > 0:
+        _log_webhook_decision(
+            event=x_github_event,
+            delivery_id=x_github_delivery,
+            status="throttled",
+            reason="webhook rate limit exceeded",
+            repo=rate_limit_key,
+            level="warning",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Webhook rate limit exceeded for this repository/sender",
+            headers={"Retry-After": str(rate_limit_retry_after)},
+        )
+
     if x_github_event not in ALLOWED_WEBHOOK_EVENTS:
         logger.info(
             "Ignored webhook event: %s (delivery_id=%s)",
