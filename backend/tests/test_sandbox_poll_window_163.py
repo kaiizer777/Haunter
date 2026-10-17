@@ -32,3 +32,10 @@ def test_poll_delay_grows_then_caps() -> None:
     assert _poll_delay_seconds(1, 10.0) == 15.0
     assert _poll_delay_seconds(2, 10.0) == 22.5
     assert _poll_delay_seconds(100, 10.0) == 60.0
+
+
+@pytest.mark.fast
+def test_poll_delay_rejects_bad_base_interval() -> None:
+    assert _poll_delay_seconds(0, 0.0) == 10.0
+    assert _poll_delay_seconds(0, -5.0) == 10.0
+    assert _poll_delay_seconds(3, 0.0) <= 60.0
