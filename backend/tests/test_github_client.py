@@ -8,6 +8,8 @@ Covers:
 - fetch_diff: single commit vs compare base_sha, 200 verbatim, 404, 5xx, rate limit,
   auth error, and network error.
 - fetch_commit_metadata: 200 parsed dict, 404, rate limit, auth error, 5xx, and network error.
+- fetch_issue: 200 verbatim (incl. null body), token header, 404, rate limit (401/403),
+  auth error (401/403), 5xx, ConnectError, error envelope on 200, unusable 200 shape.
 - post_commit_comment: 201 response JSON, 404, network error, rate limit, auth error, and 5xx.
 """
 
@@ -27,12 +29,14 @@ from app.github_client import (
     GitHubArchiveError,
     GitHubAuthError,
     GitHubClientError,
+    GitHubNetworkError,
     GitHubRateLimitError,
     GitHubResourceNotFoundError,
     GitHubResponseLimitError,
     _build_headers,
     fetch_commit_metadata,
     fetch_diff,
+    fetch_issue,
     fetch_workflow_run_logs,
     post_commit_comment,
     update_branch_ref,
@@ -601,6 +605,192 @@ async def test_fetch_commit_metadata_errors():
     with pytest.raises(GitHubClientError) as exc_info:
         await fetch_commit_metadata(owner="owner", repo="repo", sha=sha)
     assert "ReadTimeout" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# fetch_issue tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_returns_payload_verbatim():
+    """A 200 issue object is returned as-is, including a null body.
+
+    `body` is null for an issue with no description, and the caller coerces it —
+    so the client must not "helpfully" replace it with an empty string or a
+    placeholder before the caller sees the shape GitHub actually sent.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/42"
+    payload = {
+        "number": 42,
+        "title": "Session cookie is not cleared on logout",
+        "body": None,
+        "html_url": "https://github.com/owner/repo/issues/42",
+        "state": "open",
+    }
+    route = respx.get(url).respond(status_code=200, json=payload)
+
+    result = await fetch_issue(owner="owner", repo="repo", issue_number=42)
+
+    assert route.called
+    assert result == payload
+    assert result["body"] is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_sends_installation_token():
+    """The caller's token is used verbatim; no global-token fallback is implied."""
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/7"
+    respx.get(url).respond(
+        status_code=200,
+        json={"number": 7, "title": "t", "body": "b", "html_url": "https://x/7"},
+    )
+
+    await fetch_issue(
+        owner="owner", repo="repo", issue_number=7, token="installation-token"
+    )
+
+    request = respx.calls.last.request
+    assert request.headers["Authorization"] == "Bearer installation-token"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_404_raises_not_found():
+    """404 raises GitHubResourceNotFoundError naming the issue.
+
+    The caller treats this as "skip this issue, keep the rest": a PR body
+    outliving the issue it names is ordinary, not an error.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/404"
+    respx.get(url).respond(status_code=404, text="Not Found")
+
+    with pytest.raises(GitHubResourceNotFoundError) as exc_info:
+        await fetch_issue(owner="owner", repo="repo", issue_number=404)
+
+    assert "Issue not found" in str(exc_info.value)
+    assert "owner/repo" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_rate_limit_401_raises_rate_limit():
+    """401 naming a rate limit raises GitHubRateLimitError, not an auth error.
+
+    The distinction is the whole reason the ladder is ordered the way it is:
+    the caller stops fetching on a rate limit and merely skips on bad auth.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
+    respx.get(url).respond(status_code=401, text="API rate limit exceeded for user 9")
+
+    with pytest.raises(GitHubRateLimitError) as exc_info:
+        await fetch_issue(owner="owner", repo="repo", issue_number=5)
+
+    assert "rate limit exceeded" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_rate_limit_403_raises_rate_limit():
+    """403 naming a rate limit raises GitHubRateLimitError."""
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
+    respx.get(url).respond(status_code=403, text="Primary rate limit reached.")
+
+    with pytest.raises(GitHubRateLimitError):
+        await fetch_issue(owner="owner", repo="repo", issue_number=5)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_auth_error_401():
+    """401 without a rate-limit phrase raises GitHubAuthError."""
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
+    respx.get(url).respond(status_code=401, text="Bad credentials")
+
+    with pytest.raises(GitHubAuthError) as exc_info:
+        await fetch_issue(owner="owner", repo="repo", issue_number=5)
+
+    assert "authentication failure (401)" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_auth_error_403():
+    """403 without a rate-limit phrase raises GitHubAuthError.
+
+    This is the path the App's undocumented `issues` permission would take in
+    production, which is why comment fetching was left out of the feature
+    rather than shipped as a silent no-op.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
+    respx.get(url).respond(status_code=403, text="Resource not accessible by integration")
+
+    with pytest.raises(GitHubAuthError) as exc_info:
+        await fetch_issue(owner="owner", repo="repo", issue_number=5)
+
+    assert "authentication failure (403)" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_500_raises_client_error():
+    """5xx raises GitHubClientError carrying the status."""
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
+    respx.get(url).respond(status_code=500, text="Internal Server Error")
+
+    with pytest.raises(GitHubClientError) as exc_info:
+        await fetch_issue(owner="owner", repo="repo", issue_number=5)
+
+    assert "GitHub API returned error 500" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_connect_error_raises_network_error():
+    """httpx.ConnectError surfaces as GitHubNetworkError with its class name."""
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
+    respx.get(url).mock(side_effect=httpx.ConnectError("Failed to resolve host"))
+
+    with pytest.raises(GitHubNetworkError) as exc_info:
+        await fetch_issue(owner="owner", repo="repo", issue_number=5)
+
+    assert "ConnectError" in str(exc_info.value)
+    assert isinstance(exc_info.value, GitHubClientError)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_rejects_error_envelope_on_200():
+    """A 200 carrying an `errors` array is a failure, not an empty issue.
+
+    GitHub (and any gateway in front of it) answers some failures with 200 and
+    an error envelope. Returning that as an issue would render an issue with no
+    number and no title and teach the model that the PR closes nothing.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
+    respx.get(url).respond(
+        status_code=200, json={"errors": [{"message": "Not Found"}]}
+    )
+
+    with pytest.raises(GitHubClientError) as exc_info:
+        await fetch_issue(owner="owner", repo="repo", issue_number=5)
+
+    assert "error envelope" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_rejects_unusable_200_shape():
+    """A 200 whose body is not an issue object raises rather than returning junk."""
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/5"
+    respx.get(url).respond(status_code=200, json={})
+
+    with pytest.raises(GitHubClientError) as exc_info:
+        await fetch_issue(owner="owner", repo="repo", issue_number=5)
+
+    assert "Unexpected fetch-issue response structure" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
