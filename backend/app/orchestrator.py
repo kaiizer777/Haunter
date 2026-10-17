@@ -1610,8 +1610,25 @@ async def _orchestrator_pipeline_body(
                 github_token = await get_installation_token(repo)
 
                 if repo_settings.enable_pr_comments:
-                    # Feature 1: If interactive PR refinement, post diagnostic comment to PR
-                    if is_pr_refinement(run):
+                    # Feat-125: issue-triggered roots answer in the issue
+                    # thread that asked - a commit comment on the base head
+                    # would reach nobody watching the issue (R10 fallback).
+                    if is_issue_run(run):
+                        from app.github_client import create_issue_comment
+
+                        issue_fallback_body = (
+                            "🚨 Haunter could not verify a fix in sandbox CI "
+                            f"for issue #{run.reply_to_comment_id}:\n\n"
+                            f"{fallback_body}"
+                        )
+                        await create_issue_comment(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            issue_number=int(run.reply_to_comment_id),
+                            body=issue_fallback_body,
+                            token=github_token,
+                        )
+                    elif is_pr_refinement(run):
                         from app.github_client import post_pr_comment
 
                         pr_fallback_body = (
