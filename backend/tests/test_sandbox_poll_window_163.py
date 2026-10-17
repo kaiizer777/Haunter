@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from app.config import settings
+from app.sandbox.github_actions_runner import _poll_delay_seconds
 
 
 @pytest.mark.fast
@@ -18,3 +19,9 @@ def test_default_poll_timeout_covers_github_queue_times() -> None:
         f"poll timeout default {settings.github_sandbox_poll_timeout_seconds}s "
         "is shorter than real GitHub Actions queue times (>= 600s required)"
     )
+
+
+@pytest.mark.fast
+def test_first_poll_uses_base_interval() -> None:
+    assert _poll_delay_seconds(0, 10.0) == 10.0
+    assert _poll_delay_seconds(-1, 10.0) == 10.0
