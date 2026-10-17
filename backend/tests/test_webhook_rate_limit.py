@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from app.config import settings
+from app.webhooks import _reset_webhook_rate_limiter
 
 TEST_SECRET = settings.github_webhook_secret or "test_webhook_secret_key_12345"
 
@@ -52,6 +53,23 @@ async def _post_ping(
         },
         content=raw_body,
     )
+
+
+@pytest.fixture(autouse=True)
+def _clean_rate_limiter():
+    _reset_webhook_rate_limiter()
+    yield
+    _reset_webhook_rate_limiter()
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_webhook_legitimate_deliveries_pass_through(client: httpx.AsyncClient):
+    """A handful of deliveries under budget all succeed with 200."""
+    for _ in range(5):
+        resp = await _post_ping(client, "calm-org", "calm-repo", "normal-sender")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ignored"
 
 
 @pytest.mark.fast
