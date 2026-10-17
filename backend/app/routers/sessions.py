@@ -582,10 +582,13 @@ def _format_chunk(event_id: int, event: str, chunk: str) -> str:
 #: to 1s of resumed-stream latency for reduced database query load.
 _SSE_POLL_INTERVAL_S = 1.0
 
-#: Consecutive empty polls before probing the session row lock. The NOWAIT
-#: probe opens a lock attempt plus a rollback, so it runs once per idle
-#: window instead of once per tick.
-_SSE_LIVENESS_PROBE_EVERY_TICKS = 5
+#: Seconds between liveliness probes of the session row lock while a turn runs
+#: elsewhere. Wall-clock cadence, not ticks: the poll sleep below is capped so
+#: the loop always wakes when a probe is due, holding ~5s even under full idle
+#: backoff (tick-counted before #148, stretching to ~75s). The NOWAIT probe
+#: opens a lock attempt plus a rollback, so it still runs far less often than
+#: once per tick once events flow.
+_SSE_LIVENESS_PROBE_INTERVAL_S = 5.0
 
 #: Upper bound on the idle backoff applied to the poll sleep. Consecutive empty
 #: ticks back off exponentially from _SSE_POLL_INTERVAL_S (1s, 2s, 4s, 8s, ...)
@@ -671,12 +674,12 @@ async def _stream_from_db(
     # 2. Poll for emerging events if the turn is in-flight elsewhere.
     timeout_s = 900.0  # Max Lambda execution time
     start_time = time.monotonic()
-    idle_ticks = 0
-    # Deliberately NOT the same counter as `idle_ticks`: the liveliness probe
-    # zeroes `idle_ticks` every _SSE_LIVENESS_PROBE_EVERY_TICKS, so reusing it
-    # would cap the backoff at 8s and give up most of the connection-churn
-    # reduction this counter exists for. `idle_streak` only resets on real rows.
+    # Wall-clock liveliness probe (#148): `idle_streak` drives the poll backoff
+    # and resets only on real rows; `last_probe_at` drives the probe and resets
+    # on rows and on every probe, so backoff can never stretch the probe
+    # cadence past _SSE_LIVENESS_PROBE_INTERVAL_S.
     idle_streak = 0
+    last_probe_at = start_time
 
     while True:
         if time.monotonic() - start_time > timeout_s:
@@ -699,15 +702,23 @@ async def _stream_from_db(
             except Exception:
                 pass
 
-        await _asyncio.sleep(_sse_idle_delay_s(idle_streak))
+        # Cap the backoff sleep so the loop always wakes when a probe is due;
+        # without this the time-based gate below could only fire once per
+        # (up to 15s) tick and the cadence would still stretch under backoff.
+        probe_due_in = _SSE_LIVENESS_PROBE_INTERVAL_S - (
+            time.monotonic() - last_probe_at
+        )
+        await _asyncio.sleep(
+            min(_sse_idle_delay_s(idle_streak), max(0.0, probe_due_in))
+        )
 
         async with async_session_maker() as poll_db:
             res = await poll_db.execute(_pending_stmt(max_yielded_id))
             rows = res.scalars().all()
 
         if rows:
-            idle_ticks = 0
             idle_streak = 0
+            last_probe_at = time.monotonic()
             for row in rows:
                 if row.event_id <= max_yielded_id or row.event == "turn_start":
                     continue
@@ -717,11 +728,11 @@ async def _stream_from_db(
                     return
             continue
 
-        idle_ticks += 1
         idle_streak += 1
-        if idle_ticks < _SSE_LIVENESS_PROBE_EVERY_TICKS:
+        now = time.monotonic()
+        if now - last_probe_at < _SSE_LIVENESS_PROBE_INTERVAL_S:
             continue
-        idle_ticks = 0
+        last_probe_at = now
 
         async with async_session_maker() as probe_db:
             is_active = await _is_turn_active_elsewhere(probe_db, session_id)
