@@ -369,7 +369,7 @@ async def test_chat_session_cross_env_replays_completed_turn() -> None:
             return False
 
     body = SessionChatIn(message="Resume")
-    with patch("app.db.async_session_maker", return_value=_ReplayDb()):
+    with patch("app.db.engine", _FakeEngine(_ReplayDb())):
         resp = await chat_session(
             session_id=session_id,
             body=body,
@@ -549,7 +549,7 @@ async def test_stream_from_db_filters_out_turn_start_events() -> None:
         async def __aexit__(self, *args):
             return False
 
-    with patch("app.db.async_session_maker", return_value=_MockDb()):
+    with patch("app.db.engine", _FakeEngine(_MockDb())):
         yielded: list[str] = []
         async for chunk in _stream_from_db(session_id, turn_id, last_event_id=0):
             yielded.append(chunk)
@@ -698,7 +698,7 @@ async def test_stream_from_db_deduplicates_duplicate_event_ids() -> None:
 
     from app.routers.sessions import _stream_from_db
 
-    with patch("app.db.async_session_maker", return_value=_MockSession()):
+    with patch("app.db.engine", _FakeEngine(_MockSession())):
         chunks = [
             chunk
             async for chunk in _stream_from_db(
