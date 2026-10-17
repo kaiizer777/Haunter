@@ -40,6 +40,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -477,6 +478,63 @@ async def test_second_trigger_on_the_same_issue_is_a_duplicate_pointer(
     # The duplicate still acks, pointing at the existing run (R1).
     assert mock_ack.call_count == 1
     assert first_run_id in mock_ack.call_args.kwargs["body"]
+
+
+@pytest.mark.asyncio
+async def test_comment_redelivery_with_new_delivery_id_resolves_existing_run(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """IntegrityError fallback OR-matches trigger_comment_id (Phase-3 nit a).
+
+    A redelivered comment trigger carries a NEW delivery id for the SAME
+    comment, so the insert collides on trigger_comment_id rather than
+    github_delivery_id (race documented at webhooks 6b). The per-(repo,
+    issue) guard misses here — the owning run answers a different issue
+    thread — so only the fallback lookup can return the pointer (R8).
+    """
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    seeded = make_run(
+        repo_id=repo.id,
+        trigger_comment_id=TRIGGER_COMMENT_ID,
+        reply_to_comment_id=ISSUE_NUMBER + 1000,
+        github_delivery_id="seeded-old-delivery",
+    )
+    fake_audit_db.add(seeded)
+    await fake_audit_db.commit()
+
+    async def commit_with_unique_trigger_comment_id(self: FakeAsyncSession) -> None:
+        seen: set[int] = set()
+        for row in audit_store.rows(Run.__table__):
+            key = getattr(row, "trigger_comment_id", None)
+            if key is not None:
+                if key in seen:
+                    raise IntegrityError(
+                        "INSERT INTO runs",
+                        {},
+                        Exception("duplicate key violates trigger_comment_id"),
+                    )
+                seen.add(key)
+
+    monkeypatch.setattr(
+        FakeAsyncSession, "commit", commit_with_unique_trigger_comment_id
+    )
+
+    payload = pure_issue_comment_payload(
+        body="@haunter fix the crash", comment_id=TRIGGER_COMMENT_ID
+    )
+    resp, _, _, _ = await post_issue(
+        client, "issue_comment", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "duplicate"
+    assert data["run_id"] == str(seeded.id)
+    assert data["issue_number"] == ISSUE_NUMBER
 
 
 # ---------------------------------------------------------------------------

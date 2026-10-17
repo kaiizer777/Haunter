@@ -65,7 +65,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2247,9 +2247,19 @@ async def _handle_issue_trigger(
         await db.refresh(new_run)
     except IntegrityError:
         await db.rollback()
+        # The colliding UNIQUE key is not always the delivery id: a redelivered
+        # comment trigger carries a NEW delivery id for the SAME comment, so
+        # the insert collides on trigger_comment_id instead (race at 6b). Match
+        # both keys so the duplicate still points at the existing Run (R8).
+        duplicate_filter = Run.github_delivery_id == str(delivery_id)
+        if trigger_comment_id is not None:
+            duplicate_filter = or_(
+                duplicate_filter,
+                Run.trigger_comment_id == trigger_comment_id,
+            )
         existing = (
             await db.execute(
-                select(Run).where(Run.github_delivery_id == str(delivery_id))
+                select(Run).where(duplicate_filter)
             )
         ).scalars().first()
         logger.info(
