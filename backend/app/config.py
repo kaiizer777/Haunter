@@ -75,6 +75,15 @@ class Settings(BaseSettings):
     # the dashboard is in a steady state.
     rate_limit_per_minute: int = 1000
 
+    # Webhook ingress throttling (issue #161): max deliveries accepted per
+    # sliding window, tracked per repository + sender bucket. A looping or
+    # malicious sender past this budget gets 429 + Retry-After instead of
+    # scheduling more pipeline work. Generous default so legitimate GitHub
+    # delivery bursts (redeliveries, multi-workflow fan-out) pass through;
+    # tighten per environment via WEBHOOK_RATE_LIMIT_MAX_DELIVERIES.
+    webhook_rate_limit_max_deliveries: int = 120
+    webhook_rate_limit_window_seconds: int = 60
+
     # LLM Provider Configuration (Phase 4)
     # OpenCode Zen API key (Secret Manager / .env only). Injected at request time, never logged.
     opencode_zen_api_key: Optional[str] = None
