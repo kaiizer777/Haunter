@@ -547,9 +547,9 @@ def format_review_prefs_block(settings: object) -> str:
         return ""
     sections = [f"Strictness: {strictness}"]
     if focus:
-        sections.append("Focus areas: " + "; ".join(str(item) for item in focus))
+        sections.append("Focus areas:\n" + _fenced_block("text", "; ".join(str(item) for item in focus)))
     if checklist:
-        sections.append("Checklist:\n" + "\n".join(f"- {item}" for item in checklist))
+        sections.append("Checklist:\n" + _fenced_block("text", "\n".join(f"- {item}" for item in checklist)))
     if guidelines:
         sections.append("Team instructions:\n" + _fenced_block("text", guidelines))
     return (
