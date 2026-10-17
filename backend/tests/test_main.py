@@ -55,6 +55,30 @@ async def test_health_exposes_stranded_run_metrics(
     assert response.status_code == 200
     runs = response.json()["runs"]
     assert runs["active_count"] == 2
+    assert runs["oldest_active_age_seconds"] == 5 * 3600.0
+    assert runs["stuck_count"] == 1
+    assert runs["stuck_threshold_seconds"] == 1800
+    assert runs["degraded"] is True
+
+
+@pytest.mark.asyncio
+async def test_health_no_stuck_runs_not_degraded(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Fresh active runs report degraded=False so alerts stay quiet."""
+    import main
+
+    async def _fresh_ages() -> list:
+        return [10.0, 120.0]
+
+    monkeypatch.setattr(main, "_query_active_run_ages", _fresh_ages)
+    response = await client.get("/health")
+    assert response.status_code == 200
+    runs = response.json()["runs"]
+    assert runs["active_count"] == 2
+    assert runs["oldest_active_age_seconds"] == 120.0
+    assert runs["stuck_count"] == 0
+    assert runs["degraded"] is False
 
 
 async def test_sandbox_health_default_github_actions(client: httpx.AsyncClient):
