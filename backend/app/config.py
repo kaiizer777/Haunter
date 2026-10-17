@@ -157,6 +157,11 @@ class Settings(BaseSettings):
     # so the private key never enters Terraform state, .env, or lambda.zip.
     github_sandbox_org: str = "haunter-sandboxes"
     github_sandbox_repo: str = "haunter-sandbox-runner"
+    # Issue #164 — extra sandbox mirror repos (comma-separated bare names).
+    # The effective pool is [github_sandbox_repo] + these extras; runs spread
+    # across the pool so parallel verifications stop contending on one repo's
+    # rate-limit budget. Empty (default) = today's single mirror.
+    github_sandbox_repo_pool: str = ""
     github_sandbox_app_id: Optional[str] = None
     github_sandbox_installation_id: Optional[str] = None
     github_sandbox_app_private_key_ssm_path: str = (

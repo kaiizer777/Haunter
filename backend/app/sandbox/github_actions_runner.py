@@ -64,8 +64,8 @@ from app.log_hygiene import sanitize_log_value
 from app.sandbox.mirror import (
     detect_language,
     get_or_create_test_mirror,
-    get_universal_sandbox_repo,
     push_patch_to_mirror,
+    select_sandbox_mirror,
 )
 from app.sandbox.runner import (
     DeterminismResult,
@@ -1133,10 +1133,10 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             )
 
         # ----------------------------------------------------------------
-        # 5. Get or create the universal test mirror
+        # 5. Get or create the pool-selected test mirror (#164)
         # ----------------------------------------------------------------
         fallback_token: Optional[str] = getattr(settings, "github_token", None)
-        repo_full = get_universal_sandbox_repo(org)
+        repo_full = select_sandbox_mirror(org, str(inp.run_id))
         branch = f"sandbox/run-{inp.run_id}-att-{inp.attempt_number}"
 
         try:
@@ -1144,6 +1144,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                 repo_full = await get_or_create_test_mirror(
                     client,
                     org,
+                    repo_name=repo_full.rsplit("/", 1)[-1],
                     token=token,
                     fallback_token=fallback_token,
                 )
@@ -1436,7 +1437,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             )
 
         fallback_token: Optional[str] = getattr(settings, "github_token", None)
-        repo_full = get_universal_sandbox_repo(org)
+        repo_full = select_sandbox_mirror(org, str(getattr(run, "id", "")))
         user_repo_full = f"{repo.owner}/{repo.name}"
         head_sha = getattr(run, "head_sha", None) or getattr(
             repo, "default_branch", "main"
@@ -1447,6 +1448,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                 repo_full = await get_or_create_test_mirror(
                     client,
                     org,
+                    repo_name=repo_full.rsplit("/", 1)[-1],
                     token=token,
                     fallback_token=fallback_token,
                 )
