@@ -1,64 +1,41 @@
-"""Linked-issue context for the push-level code reviewer (issue #123).
+"""Scope: the issue *title* and *body*, and the issue's **discussion comments**.
 
-Pure and I/O-free on purpose. It turns a pull-request body into a bounded,
-fenced, explicitly-untrusted prompt block and nothing else — no HTTP, no
-database, no LLM. That keeps the parsing rules and the rendering budget
-directly testable without a GitHub connection, and keeps ``code_reviewer``
-(which already owns the review contract) from growing a second concern.
+Comments are the same kind of input as a title and a body — written by
+whoever typed them — and they get the same treatment here for the same
+reason. What makes them worth the extra budget is *attribution*: every
+comment carries GitHub's ``author_association``, so the block can tell the
+model that "the repository owner asked for X" apart from "a first-time
+commenter claims Y". An unattributed wall of issue discussion is close to
+useless as review evidence precisely because that distinction cannot be
+recovered from the text.
 
-Everything here treats its inputs as **hostile**. A PR body and an issue body
-are written by whoever opened them, which is not necessarily the owner of the
-repository, and both end up inside a prompt that instructs a model to emit
-findings. So the only things done to that text are the ones this repo already
-does everywhere else it lets untrusted data reach a model — redact, bound,
-fence, and label — plus an explicit "do not obey this" directive. Nothing is
-evaluated, formatted, or interpreted.
-
-Scope note: only the issue *title* and *body* are read. Discussion comments are
-excluded, but not because they would 403 — on the contrary. Per GitHub's
-*Permissions required for GitHub Apps* reference the two endpoints are
-governed differently:
-
-* ``GET /repos/{owner}/{repo}/issues/{n}`` is listed once, under *Repository
-  permissions for issues*: ``issues: read``, with no alternative grant.
-* ``GET /repos/{owner}/{repo}/issues/{n}/comments`` is listed twice, under that
-  heading **and** under *Repository permissions for pull requests*:
-  ``issues: read`` **or** ``pull_requests: read`` — either one suffices.
-
-The permissions this repo documents installing (``contents:write``,
-``pull_requests:write``, ``checks:read``, ``actions:read``; ``HAUNTER.md`` §7.2)
-therefore cover the comments endpoint — GitHub's permission ladder is
-three-state, so ``pull_requests:write`` already implies ``pull_requests:read``
-— and do **not** cover the issue itself. The endpoint implemented here is the
-one that would 403; the one deliberately skipped below is the one that would
-have worked.
-
-Two consequences, and only the second is this module's to own:
-
-* Reading the issue requires an operational change — grant the GitHub App
-  ``issues: read`` and re-install it. Until then ``fetch_issue`` answers 403 and
-  the orchestrator publishes the review with no issue block at all. That is a
-  deployment prerequisite, documented at the call site, not something this
-  module decides.
-* Fetching comments would *not* 403 under those scopes. It is still excluded:
-  it widens an attacker-authored surface (issue discussion is far more freely
-  writable than an issue description), it is unbounded by any documented
-  pagination contract here, and it would need its own budget arithmetic in
-  :func:`render_issue_context`. Deliberate, not blocked.
+Permission note, unchanged and still the deployment prerequisite: reading the
+issue *body* requires the GitHub App ``issues: read`` and has no alternative
+grant. The comments endpoint is additionally satisfied by
+``pull_requests: read``, which the permissions this repo documents installing
+already carry (``HAUNTER.md`` §7.2). So on a default install the one endpoint
+that 403s is still the issue body, and enabling this is the same operational
+step #123 already documented: grant ``issues: read`` and re-install.
 """
+
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
-from typing import Mapping, Optional, Sequence
+from typing import Literal, Mapping, Optional, Sequence
 
 from app.llm.prompts.audit_prompts import (
     MAX_ISSUE_AUTHOR_CHARS,
     MAX_ISSUE_BODY_CHARS,
+    MAX_ISSUE_COMMENT_BODY_CHARS,
+    MAX_ISSUE_COMMENTS_PER_ISSUE,
     MAX_ISSUE_CONTEXT_CHARS,
+    MAX_ISSUE_CROSS_REFS,
+    MAX_ISSUE_CROSS_REF_TITLE_CHARS,
     MAX_ISSUE_TITLE_CHARS,
     MAX_LINKED_ISSUES,
+    MAX_REPO_FULL_NAME_CHARS,
     _fenced_block,
     _safe_model_text,
 )
@@ -287,6 +264,177 @@ def _bounded_text_field(value: object, maximum: int) -> str:
 
 
 @dataclass(frozen=True)
+class IssueComment:
+    """One issue comment, redacted and bounded, with its author attributed.
+
+    ``association`` is the rendered phrase from :func:`author_association_label`,
+    not GitHub's raw token: the prompt should read ``(repository owner)``, and
+    keeping the raw value here would mean every renderer had to know the
+    vocabulary.
+    """
+
+    author: str
+    association: str
+    body: str
+
+
+def issue_comments_from_payloads(
+    payloads: Sequence[object],
+    *,
+    limit: int = MAX_ISSUE_COMMENTS_PER_ISSUE,
+) -> tuple[tuple[IssueComment, ...], int]:
+    """Convert comment payloads into bounded, attributed :class:`IssueComment`.
+
+    Returns ``(comments, dropped)`` where ``dropped`` is an **exact** count of
+    comments the caller fetched but this module did not render. That is the
+    difference from the timeline's pagination cutoff, which is unknown in
+    magnitude; keeping the two apart is what lets the prompt disclose one as a
+    number and the other as "more exist".
+
+    A comment with neither an author nor a body is skipped rather than rendered
+    as an empty bullet — it carries no evidence, and rendering it would spend
+    budget to say nothing.
+    """
+    comments: list[IssueComment] = []
+    for payload in payloads:
+        if not isinstance(payload, Mapping):
+            continue
+        author = _bounded_login(payload)
+        body = _bounded_text_field(payload.get("body"), MAX_ISSUE_COMMENT_BODY_CHARS)
+        if not author and not body:
+            continue
+        comments.append(
+            IssueComment(
+                author=author,
+                association=author_association_label(
+                    payload.get("author_association")
+                ),
+                body=body,
+            )
+        )
+    return tuple(comments[:limit]), max(0, len(comments) - limit)
+
+
+#: Which kind of thing a cross-reference points at. There is deliberately no
+#: ``"unknown"`` member: the timeline states the type, and the ambiguous path
+#: (a number typed in prose) is carried by :class:`IssueMention` instead, which
+#: cannot be mistaken for a resolved link.
+CrossReferenceKind = Literal["issue", "pull_request"]
+
+
+@dataclass(frozen=True)
+class IssueCrossReference:
+    """A link GitHub itself recorded against an issue, with its type."""
+
+    number: int
+    title: str
+    kind: CrossReferenceKind
+    #: ``owner/name`` when the link points at another repository, else ``""``.
+    repo: str = ""
+
+
+def cross_references_from_timeline(
+    events: Sequence[object],
+    *,
+    limit: int = MAX_ISSUE_CROSS_REFS,
+) -> tuple[tuple[IssueCrossReference, ...], int]:
+    """Pull the ``cross-referenced`` events out of an issue timeline.
+
+    This is the **authoritative** half of the cross-reference strategy: the
+    timeline is GitHub's own record of the links it recognises, so it does not
+    have the failure mode that makes the regex pass necessary at all — prose
+    that reads like a reference and is not one. It also states the *type* of
+    every link, which is why :class:`IssueCrossReference` has no ambiguous state
+    to express.
+
+    The type is read from which ``source`` key GitHub populated, with one
+    subtlety that is easy to get backwards: ``source.issue`` does **not** mean
+    "not a pull request". GitHub's issues endpoint serves pull requests as
+    issues, so a PR cross-reference arrives as ``source.issue`` carrying a
+    nested ``pull_request`` object. Reading only the key would label every
+    cross-referenced pull request as an issue.
+
+    Returns ``(references, dropped)``; ``dropped`` is exact, because it is
+    counted here. Events that are not cross-references are ignored without being
+    counted — the timeline is mostly labels, assignments and ``commented``
+    markers, and reporting those as hidden cross-references would be a lie.
+    """
+    references: list[IssueCrossReference] = []
+    seen: set[tuple[str, int, str]] = set()
+    for event in events:
+        if not isinstance(event, Mapping) or event.get("event") != "cross-referenced":
+            continue
+        source = event.get("source")
+        if not isinstance(source, Mapping):
+            continue
+        candidate = source.get("pull_request")
+        if isinstance(candidate, Mapping):
+            kind: CrossReferenceKind = "pull_request"
+        else:
+            candidate = source.get("issue")
+            if not isinstance(candidate, Mapping):
+                continue
+            kind = (
+                "pull_request"
+                if isinstance(candidate.get("pull_request"), Mapping)
+                else "issue"
+            )
+        number = candidate.get("number")
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            continue
+        repository = candidate.get("repository")
+        full_name = ""
+        if isinstance(repository, Mapping) and isinstance(
+            repository.get("full_name"), str
+        ):
+            full_name = _bounded_text_field(
+                repository["full_name"], MAX_REPO_FULL_NAME_CHARS
+            )
+        key = (full_name.lower(), number, kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        references.append(
+            IssueCrossReference(
+                number=number,
+                title=_bounded_text_field(
+                    candidate.get("title"), MAX_ISSUE_CROSS_REF_TITLE_CHARS
+                ),
+                kind=kind,
+                repo=full_name,
+            )
+        )
+    return tuple(references[:limit]), max(0, len(references) - limit)
+
+
+@dataclass(frozen=True)
+class IssueEnrichment:
+    """Everything read for an issue beyond its title and body.
+
+    Grouped rather than spread across :class:`LinkedIssue` because the group
+    has one property the rest of the module reasons about: it is all optional,
+    and every field of it is paired with the disclosure of what is missing from
+    it. A caller that fetched only the body holds exactly one
+    :class:`IssueEnrichment` to think about, and :attr:`is_empty` is what tells
+    it there is nothing to render.
+
+    Every ``*_omitted`` count is exact — this module counted them. Every
+    ``*_truncated`` flag is the opposite: it means "the endpoint said there was
+    more and we did not spend requests to learn how much more", and it is
+    rendered as a statement that more exist, never as a number.
+    """
+
+    comments: tuple[IssueComment, ...] = ()
+    comments_omitted: int = 0
+    discussion_truncated: bool = False
+
+    @property
+    def is_empty(self) -> bool:
+        """True when there is nothing to render and nothing to disclose."""
+        return not self.comments and not self.discussion_truncated
+
+
+@dataclass(frozen=True)
 class LinkedIssue:
     """One resolved issue, already redacted and bounded for model input."""
 
@@ -300,6 +448,7 @@ class LinkedIssue:
     #: ``author_association`` — free, and the anchor for "the issue raiser said
     #: X" as distinct from "a maintainer said Y".
     opener_association: str = ""
+    enrichment: IssueEnrichment = field(default_factory=IssueEnrichment)
 
 
 def linked_issue_from_payload(payload: object) -> Optional[LinkedIssue]:
@@ -381,8 +530,35 @@ def _attribution(author: str, association: str) -> str:
     return f"`{author}`" if author else f"({association})" if association else ""
 
 
+def _truncation_disclosure(
+    noun: str, dropped: int, *, beyond_window: bool = False
+) -> str:
+    """One line stating exactly what the model is **not** being shown, or ``""``.
+
+    Two kinds of omission are kept apart because they support different
+    sentences and only one of them is a number:
+
+    * ``dropped`` is exact — this module counted the items it did not render,
+      so it can say ``(+5 comments not shown)``.
+    * ``beyond_window`` is not a count at all. The endpoint advertised another
+      page and this module deliberately does not spend the requests to learn how
+      many comments sit behind it, so the honest wording is that more exist.
+      Rendering ``(+N comments not shown)`` with a guessed ``N`` would put a
+      number in the prompt that nothing computed.
+    """
+    if dropped > 0 and beyond_window:
+        return (
+            f"(+{dropped} {noun} not shown; more exist beyond the window fetched)"
+        )
+    if dropped > 0:
+        return f"(+{dropped} {noun} not shown)"
+    if beyond_window:
+        return f"(more {noun} exist beyond the window fetched)"
+    return ""
+
+
 def _render_issue(issue: LinkedIssue) -> str:
-    """Render one issue: heading, who opened it, and what it says."""
+    """Render one issue: heading, attribution, body, discussion, links."""
     lines: list[str] = []
     header = f"### Issue #{issue.number}"
     if issue.title:
@@ -394,6 +570,31 @@ def _render_issue(issue: LinkedIssue) -> str:
         lines.append(f"Opened by {opener}.")
     if issue.body:
         lines.extend(("", issue.body))
+
+    enrichment = issue.enrichment
+    if enrichment.comments:
+        lines.extend(
+            (
+                "",
+                (
+                    f"Discussion (first {len(enrichment.comments)} of more "
+                    "comments):"
+                    if enrichment.discussion_truncated
+                    else f"Discussion ({len(enrichment.comments)} comments):"
+                ),
+            )
+        )
+        for comment in enrichment.comments:
+            attribution = _attribution(comment.author, comment.association)
+            prefix = f"- {attribution}: " if attribution else "- "
+            lines.append(f"{prefix}{comment.body}".rstrip())
+        disclosure = _truncation_disclosure(
+            "comments",
+            enrichment.comments_omitted,
+            beyond_window=enrichment.discussion_truncated,
+        )
+        if disclosure:
+            lines.append(disclosure)
 
     return "\n".join(lines)
 
