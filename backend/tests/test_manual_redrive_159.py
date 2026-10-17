@@ -62,3 +62,58 @@ def _exhausted_source_run(repo: Repo) -> Run:
         fallback_issue_url="https://github.com/o/r/issues/9",
         fallback_issue_number=9,
     )
+
+
+@pytest.mark.asyncio
+async def test_exhausted_run_replays_into_clean_pending_child(
+    db: AsyncSession, make_auth_client
+):
+    """Issue #159: a run that exhausted its fix attempts can be replayed.
+
+    The source carries three failed attempts, a fallback verdict and a
+    tracking issue. POST /runs/{id}/retry must answer 201 with a pending
+    child linked to the source and dispatch it through the hosting adapter
+    — the operator re-queues the failure without pushing a dummy commit.
+    """
+    await truncate_all(db)
+    user, repo = await _seed_user_repo(db, 15901, "redrive_user")
+
+    source = _exhausted_source_run(repo)
+    db.add(source)
+    await db.commit()
+    await db.refresh(source)
+    source_id = source.id
+
+    for n in (1, 2, 3):
+        db.add(
+            Attempt(
+                run_id=source_id,
+                attempt_number=n,
+                patch_text=f"diff --git attempt {n}",
+                verification_status="failed",
+                failure_reason=f"attempt {n} failed sandbox CI",
+            )
+        )
+    await db.commit()
+
+    mock_adapter = AsyncMock()
+    async with make_auth_client(user.id) as client:
+        with patch(
+            "app.adapters.hosting.get_hosting_adapter",
+            new=AsyncMock(return_value=mock_adapter),
+        ):
+            resp = await client.post(f"/runs/{source_id}/retry")
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["status"] == "pending"
+    assert data["parent_run_id"] == str(source_id)
+
+    child_id = uuid.UUID(data["id"])
+    child = (await db.execute(select(Run).where(Run.id == child_id))).scalar_one()
+    assert child.parent_run_id == source_id
+    assert child.is_retry_child is True
+    assert child.status == "pending"
+
+    mock_adapter.schedule_pipeline.assert_awaited_once()
+    assert mock_adapter.schedule_pipeline.await_args.args[0] == child_id
