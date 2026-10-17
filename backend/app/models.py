@@ -447,6 +447,13 @@ class CodeReview(Base):
     )
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="completed")
     failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Issue #131: snapshot of the team review preferences that shaped this
+    # review - {prefs, settings_version, truncated}. Nullable so rows written
+    # before the c2d3e4f5a6b7 migration stay valid; populated by the review
+    # orchestrator at analyze time.
+    applied_review_prefs: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
@@ -470,6 +477,10 @@ class RepoSettings(Base):
         CheckConstraint(
             "max_cost_per_run_cents >= 0",
             name="ck_repo_settings_cost_bounds",
+        ),
+        CheckConstraint(
+            "review_strictness IN ('low', 'medium', 'high')",
+            name="ck_repo_settings_review_strictness",
         ),
     )
 
@@ -548,6 +559,22 @@ class RepoSettings(Base):
     # validate_test_command on every write; NULL/empty clears the override.
     working_dir: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     test_command: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Issue #131: configurable team review preferences. Source of truth for
+    # the PR review bot; injected into the review prompt at analyze time and
+    # snapshotted per review onto CodeReview.applied_review_prefs.
+    review_guidelines_text: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    review_strictness: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="medium", server_default="medium"
+    )
+    review_focus_areas: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
+    )
+    review_checklist: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
+    )
 
     # Monotonic counter bumped whenever trigger semantics change. Persisted on
     # each audit job so a replayed delivery under changed settings is detected
