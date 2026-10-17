@@ -31,6 +31,12 @@ from app.subagents.context_gatherer import extract_reviewer_feedback, gather_con
 from app.subagents.fix_generator import _build_messages, generate_fix
 from tests.conftest import truncate_all
 
+# `patch("app.llm.LLMClient.complete", ...)` below targets the package
+# re-export, which *is* the process-wide client class, so a subagent-scoped
+# subclass cannot intercept it on its own. `scoped_llm_client` rebinds
+# `app.llm` as well - see tests/conftest.py and issue #146.
+pytestmark = pytest.mark.usefixtures("scoped_llm_client")
+
 TEST_SECRET = settings.github_webhook_secret or "test_webhook_secret_key_12345"
 
 

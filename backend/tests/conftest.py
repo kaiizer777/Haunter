@@ -8,6 +8,7 @@ Shared fixtures and test configuration for Haunter backend tests.
 
 import os
 import uuid
+import warnings
 from typing import AsyncGenerator, Callable
 
 import httpx
@@ -397,6 +398,105 @@ def _restore_settings_singleton():
                     and s.__class__.__module__ == "app.config"
                 ):
                     mod.settings = _ORIGINAL_SETTINGS
+
+
+@pytest.fixture(autouse=True)
+def _restore_shared_llm_client_complete(request):
+    """Guarantee no test can leave ``LLMClient.complete`` stubbed for the next one.
+
+    ``app.llm.client.LLMClient`` is a single class object shared by every
+    module in the process, so ``patch("<module>.LLMClient.complete", ...)``
+    resolves that module's global and writes the stub onto the shared class
+    itself. A patch whose ``with`` block is never unwound — an abandoned
+    coroutine, a helper that forgets to ``stop()`` — therefore survives the
+    test that installed it and is then handed to every later test that drives
+    the real client. That is how ``test_fix_generator.py``'s
+    ``_VALID_LLM_RESPONSE`` blob reached ``tests/test_llm.py`` and turned its
+    assertions into "DID NOT RAISE LLMExhaustedFreeTierError" (#146).
+
+    ``scoped_llm_client`` stops the audited writers from mutating the shared
+    class in the first place. This fixture is the backstop for the writers
+    nobody has audited yet: it repairs the attribute after each test and names
+    the offender, so a leak is contained and diagnosable instead of silently
+    poisoning an unrelated module.
+    """
+    from app.llm.client import LLMClient
+
+    original = LLMClient.__dict__["complete"]
+    yield
+    if LLMClient.__dict__["complete"] is not original:
+        LLMClient.complete = original
+        warnings.warn(
+            f"{request.node.nodeid} left a stub installed on the shared "
+            "app.llm.client.LLMClient.complete; restored it so later tests are "
+            "not affected (#146). Patch the module global "
+            "(patch('<module>.LLMClient')) instead of the shared attribute.",
+            RuntimeWarning,
+            stacklevel=1,
+        )
+
+
+# Every module under ``app`` that does ``from app.llm... import LLMClient``.
+# ``scoped_llm_client`` rebinds each of these globals to a private subclass so
+# that ``patch("<module>.LLMClient...")`` lands there instead of on the shared
+# class. Regenerate after adding an LLM consumer:
+#   grep -rn "import.*\bLLMClient\b" app --include=*.py
+# ``app.llm.client`` is deliberately absent: it *defines* the class.
+# ``app.llm`` is included on purpose - it re-exports the same class object, so
+# ``patch("app.llm.LLMClient.complete", ...)`` hits the shared attribute directly
+# and no subagent-scoped subclass can intercept it.
+_SCOPED_LLM_MODULES = (
+    "app.llm",
+    "app.services.session_orchestrator",
+    "app.services.session_tools.audit",
+    "app.services.session_tools.subagents",
+    "app.subagents.auditor",
+    "app.subagents.code_reviewer",
+    "app.subagents.context_gatherer",
+    "app.subagents.fix_generator",
+    "app.subagents.pr_writer",
+    "app.webhooks",
+)
+
+
+@pytest.fixture
+def scoped_llm_client():
+    """Confine ``patch("<module>.LLMClient...", ...)`` to the module under test.
+
+    Ten modules under ``app`` do ``from app.llm... import LLMClient``, so
+    ``LLMClient`` is one process-wide class object held by every test module.
+    Patching ``.complete`` (or the whole name) through any of them therefore
+    writes onto that shared class. Any such patch whose ``with`` block is
+    abandoned — a coroutine the runner never resumes after the 120s timeout in
+    pytest.ini, for instance — leaves the stub installed for the rest of the
+    session, and every later test that drives the real client gets this suite's
+    canned payload back instead of doing HTTP. That is how the fix generator's
+    diff blob reached ``tests/test_llm.py`` and turned its assertions into
+    "DID NOT RAISE LLMExhaustedFreeTierError" (#146).
+
+    Rebinding the module globals to a private subclass first makes those patch
+    calls land on the subclass, which ``patch`` restores by deleting the
+    attribute it added. ``app.llm.client.LLMClient`` is never written to, so a
+    leak can no longer escape into an unrelated module — the isolation no
+    longer depends on the patch unwinding in time.
+    """
+    import importlib
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    from app.llm.client import LLMClient
+
+    class _ScopedLLMClient(LLMClient):
+        """Private per-test subclass, existing only to own the patched attribute."""
+
+    with ExitStack() as stack:
+        for dotted in _SCOPED_LLM_MODULES:
+            module = importlib.import_module(dotted)
+            if module.LLMClient is LLMClient:
+                stack.enter_context(
+                    patch.object(module, "LLMClient", _ScopedLLMClient)
+                )
+        yield
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

@@ -45,6 +45,12 @@ from app.subagents.fix_generator import (
 from app.sandbox.mirror import _parse_patch_files
 from tests.conftest import truncate_all
 
+# Every `patch("app.subagents.<mod>.LLMClient.complete", ...)` below resolves
+# the module global and writes onto the process-wide `app.llm.client.LLMClient`
+# class. Pin the target to a private subclass so these stubs can never reach
+# another module's client — see `scoped_llm_client` and issue #146.
+pytestmark = pytest.mark.usefixtures("scoped_llm_client")
+
 
 # ---------------------------------------------------------------------------
 # Helpers

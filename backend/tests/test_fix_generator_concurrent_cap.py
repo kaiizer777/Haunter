@@ -37,6 +37,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Attempt, Repo, Run, User
 from app.subagents.fix_generator import AttemptClaimLost, generate_fix
 
+# Keep the `LLMClient.complete` stub below off the process-wide client class
+# so it cannot leak into another test module — see `scoped_llm_client`, #146.
+pytestmark = pytest.mark.usefixtures("scoped_llm_client")
+
 # Patch _max_attempts so the cap is independent of HAUNTER_MAX_ATTEMPTS.
 # 3 is the production default. With zero priors seeded, both concurrent
 # calls see existing_count=0 (< cap) and proceed to INSERT. Exactly one
