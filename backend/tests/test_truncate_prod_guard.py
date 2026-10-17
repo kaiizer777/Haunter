@@ -146,7 +146,7 @@ async def test_truncate_all_permits_the_ci_loopback_container() -> None:
 
     # Every table was actually cleared — the exemption permits the DELETEs
     # rather than silently skipping them.
-    assert len(session.executed) == 13
+    assert len(session.executed) == 14
     assert any("DELETE FROM users" in stmt for stmt in session.executed)
 
 
