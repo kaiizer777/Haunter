@@ -382,7 +382,7 @@ async def test_idle_stream_sessions_do_not_scale_with_wall_clock() -> None:
 async def test_idle_delay_resets_when_events_arrive() -> None:
     """An active stream keeps the 1s cadence: the backoff resets on real rows."""
     session_id = uuid.uuid4()
-    reads, delays, chunks = await _drive_idle_stream(
+    connects, reads, delays, chunks = await _drive_idle_stream(
         [
             [],  # initial replay read — nothing yet
             [],  # empty poll
@@ -403,9 +403,11 @@ async def test_idle_delay_resets_when_events_arrive() -> None:
         _SSE_POLL_INTERVAL_S,
         2 * _SSE_POLL_INTERVAL_S,
     ]
-    # One session per read (initial read + 6 polls) — the liveliness probe never
-    # fired: rows reset its wall-clock timer too, and the stream ends before
-    # the 5s interval elapses after the last reset.
+    # One query per read (initial read + 6 polls) on the single held
+    # connection — the liveliness probe never fired: rows reset its
+    # wall-clock timer too, and the stream ends before the 5s interval
+    # elapses after the last reset.
+    assert connects == 1
     assert reads == 7
     assert reads - 1 < _SSE_LIVENESS_PROBE_INTERVAL_S * 2
 
@@ -431,7 +433,7 @@ async def test_poll_rows_are_scoped_to_the_streamed_session() -> None:
     stream_session_id = uuid.uuid4()
     foreign_session_id = uuid.uuid4()
 
-    reads, delays, chunks = await _drive_idle_stream(
+    connects, reads, delays, chunks = await _drive_idle_stream(
         [
             [_thought(foreign_session_id, 1)],  # wrong session — filtered out
             [],  # empty poll
@@ -461,7 +463,9 @@ async def test_poll_rows_are_scoped_to_the_streamed_session() -> None:
         _SSE_POLL_INTERVAL_S,
     ]
 
-    # 1 initial read + 4 polls, then the terminal event returned.
+    # 1 initial read + 4 polls on the single held connection, then the
+    # terminal event returned.
+    assert connects == 1
     assert reads == 5
 
 
