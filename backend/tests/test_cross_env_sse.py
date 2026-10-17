@@ -1082,6 +1082,9 @@ async def test_resume_replay_drains_streams_with_zero_writes() -> None:
         replay_dbs.append(db)
         return db
 
+    mock_engine = MagicMock()
+    mock_engine.connect.side_effect = _replay_factory
+
     body = SessionChatIn(message="Resume")
 
     # Drive two resumes back-to-back; each should succeed once the second
@@ -1090,7 +1093,7 @@ async def test_resume_replay_drains_streams_with_zero_writes() -> None:
     with (
         patch("app.routers.sessions._is_turn_active_elsewhere", new_callable=AsyncMock, return_value=True),
         patch("asyncio.sleep", new_callable=AsyncMock),
-        patch("app.db.async_session_maker", side_effect=_replay_factory),
+        patch("app.db.engine", mock_engine),
     ):
         for _ in range(2):
             resp = await chat_session(
