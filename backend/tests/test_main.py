@@ -20,11 +20,26 @@ from app.limiter import limiter
 
 
 @pytest.mark.asyncio
-async def test_health_check(client: httpx.AsyncClient):
-    """GET /health returns 200 with {'status': 'ok'}."""
+async def test_health_check(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """GET /health returns 200 with status ok plus empty runs metrics."""
+    async def _no_active_runs() -> list:
+        return []
+
+    monkeypatch.setattr("main._query_active_run_ages", _no_active_runs)
     response = await client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "ok",
+        "runs": {
+            "active_count": 0,
+            "oldest_active_age_seconds": None,
+            "stuck_count": 0,
+            "stuck_threshold_seconds": 1800,
+            "degraded": False,
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -32,8 +47,6 @@ async def test_health_exposes_stranded_run_metrics(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ):
     """#158 repro: /health must expose pending-run age/count for alerts."""
-    from datetime import datetime, timezone
-
     async def _fake_ages() -> list:
         return [60.0, 5 * 3600.0]
 
