@@ -516,8 +516,10 @@ async def test_reviews_total_counts_only_severity_matched_reviews(
             (Repo, False, 1, frozenset({"repos.user_id"})): [repo.id],
             # reviews.py:204-220 — SELECT count(*) over code_reviews
             (None, False, 1, _ANY_WHERE): [1],
-            # reviews.py:222-229 — the page of rows
-            (CodeReview, True, _n_columns(CodeReview), _ANY_WHERE): [high, low],
+            # The page of rows. Only the matching row: with the severity
+            # predicate in SQL (#116, no Python post-filter), a real database
+            # never returns the non-matching row for this filter.
+            (CodeReview, True, _n_columns(CodeReview), _ANY_WHERE): [high],
         }
     )
 
@@ -567,8 +569,9 @@ async def test_repo_reviews_total_counts_only_severity_matched_reviews(
             ],
             # reviews.py:148-158 — SELECT count(*) for this repo
             (None, False, 1, _ANY_WHERE): [1],
-            # reviews.py:160-167 — the page of rows
-            (CodeReview, True, _n_columns(CodeReview), _ANY_WHERE): [critical, medium],
+            # Same #116 contract as C3a: the scripted page contains only the
+            # row a real SQL-filtered database would return.
+            (CodeReview, True, _n_columns(CodeReview), _ANY_WHERE): [critical],
         }
     )
 

@@ -382,15 +382,10 @@ async def get_repo_reviews(
     res = await db.execute(query)
     reviews = res.scalars().all()
 
+    # The severity predicate lives in SQL (``_severity_predicate`` on both the
+    # page and COUNT queries above): it is the single source of truth, so every
+    # row the database returned already matches and must reach the client.
     mapped_reviews = [_map_review_to_out(r, repo=repo) for r in reviews]
-
-    if severity:
-        sev_lower = severity.lower()
-        mapped_reviews = [
-            r
-            for r in mapped_reviews
-            if any(f.severity.lower() == sev_lower for f in r.findings)
-        ]
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
 
@@ -452,15 +447,9 @@ async def list_all_reviews(
     res = await db.execute(query)
     reviews = res.scalars().all()
 
+    # Same single-source-of-truth contract as get_repo_reviews: the SQL
+    # severity predicate already decided which rows match.
     mapped_reviews = [_map_review_to_out(r) for r in reviews]
-
-    if severity:
-        sev_lower = severity.lower()
-        mapped_reviews = [
-            r
-            for r in mapped_reviews
-            if any(f.severity.lower() == sev_lower for f in r.findings)
-        ]
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
 

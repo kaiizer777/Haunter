@@ -232,7 +232,9 @@ async def test_repo_reviews_total_is_zero_when_severity_matches_nothing(
                 repo
             ],
             (None, False, 1, _ANY_WHERE): [0],
-            (CodeReview, True, _n_columns(CodeReview), _ANY_WHERE): [only_low],
+            # #116: the SQL predicate filters in the database, so a real
+            # database returns an empty page here (never [only_low]).
+            (CodeReview, True, _n_columns(CodeReview), _ANY_WHERE): [],
         }
     )
 
