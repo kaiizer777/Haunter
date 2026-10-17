@@ -132,11 +132,24 @@ class _RowsDb:
 
         return _Result()
 
+    async def rollback(self) -> None:
+        pass
+
     async def __aenter__(self) -> "_RowsDb":
         return self
 
     async def __aexit__(self, *args: Any) -> bool:
         return False
+
+
+class _FakeEngine:
+    """One held connection replaying fixed rows for the whole stream (#165)."""
+
+    def __init__(self, rows: list[SessionStreamEvent]) -> None:
+        self._conn = _RowsDb(rows)
+
+    def connect(self) -> _RowsDb:
+        return self._conn
 
 
 async def test_stream_breaks_on_lambda_anchored_budget(caplog: Any) -> None:
@@ -146,7 +159,7 @@ async def test_stream_breaks_on_lambda_anchored_budget(caplog: Any) -> None:
 
     with (
         _stashed_context(_FakeLambdaContext(50)),
-        patch("app.db.async_session_maker", return_value=_RowsDb([_thought_row(session_id, turn_id)])),
+        patch("app.db.engine", _FakeEngine([_thought_row(session_id, turn_id)])),
     ):
         with caplog.at_level(logging.WARNING, logger="app.routers.sessions"):
             yielded = [chunk async for chunk in _stream_from_db(session_id, turn_id, last_event_id=0)]
@@ -163,7 +176,7 @@ async def test_stream_uses_resolver_when_timeout_not_given(caplog: Any) -> None:
     turn_id = str(uuid.uuid4())
 
     with (
-        patch("app.db.async_session_maker", return_value=_RowsDb([_thought_row(session_id, turn_id)])),
+        patch("app.db.engine", _FakeEngine([_thought_row(session_id, turn_id)])),
         patch("app.routers.sessions.resolve_lambda_timeout_s", return_value=0.0),
     ):
         with caplog.at_level(logging.WARNING, logger="app.routers.sessions"):
@@ -180,7 +193,7 @@ async def test_stream_explicit_timeout_overrides_lambda_budget(caplog: Any) -> N
 
     with (
         _stashed_context(_FakeLambdaContext(600_000)),
-        patch("app.db.async_session_maker", return_value=_RowsDb([_thought_row(session_id, turn_id)])),
+        patch("app.db.engine", _FakeEngine([_thought_row(session_id, turn_id)])),
     ):
         with caplog.at_level(logging.WARNING, logger="app.routers.sessions"):
             yielded = [

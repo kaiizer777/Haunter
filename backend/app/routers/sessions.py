@@ -32,7 +32,7 @@ from typing import Annotated, Any, AsyncGenerator, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth import get_current_user
@@ -337,7 +337,9 @@ async def list_sessions(
     return SessionListOut(sessions=out, total=total)
 
 
-async def _is_turn_active_elsewhere(db: AsyncSession, session_id: uuid.UUID) -> bool:
+async def _is_turn_active_elsewhere(
+    db: AsyncSession | AsyncConnection, session_id: uuid.UUID
+) -> bool:
     """
     Probe whether another backend worker currently holds this session's row lock.
 
@@ -593,8 +595,9 @@ _SSE_LIVENESS_PROBE_INTERVAL_S = 5.0
 #: Upper bound on the idle backoff applied to the poll sleep. Consecutive empty
 #: ticks back off exponentially from _SSE_POLL_INTERVAL_S (1s, 2s, 4s, 8s, ...)
 #: up to this cap, mirroring the audit dispatch worker's idle backoff, so an idle
-#: open tab issues ~0.07 queries/sec instead of 1/sec. Every tick opens a fresh
-#: DB session (NullPool), so the tick rate is the connection-churn rate. The
+#: open tab issues ~0.07 queries/sec instead of 1/sec. Every tick reuses the
+#: one held stream connection (#165: no fresh session per tick under NullPool),
+#: so the tick rate is only the query rate, not the connection-churn rate. The
 #: cost is bounded event latency: an event committed while the stream is fully
 #: backed off can wait up to this cap before it is observed.
 _SSE_IDLE_BACKOFF_MAX_S: float = 15.0
@@ -642,10 +645,15 @@ async def _stream_from_db(
        (explicit ``timeout_s`` wins; otherwise the invoke's remaining
        time minus a safety margin, 900s fallback outside Lambda).
 
-    Each poll/probe/drain iteration uses a short-lived session, ensuring database
-    connections are never held idle across sleeps or stream yields (vital under NullPool).
+    The whole stream holds a single shared engine connection (issue #165).
+    Under ``NullPool`` every fresh session checkout is a brand-new physical
+    connection, so the old session-per-tick pattern churned one TCP/TLS
+    handshake per poll. One held connection keeps the steady-state count flat
+    at 1; a rollback after every read batch keeps it out of
+    idle-in-transaction across sleeps and client yields, while READ COMMITTED
+    still observes rows committed after the stream started.
     """
-    from app.db import async_session_maker
+    from app.db import engine as _poll_engine
     from app.models import SessionStreamEvent
 
     def _pending_stmt(after_id: int):
@@ -661,108 +669,110 @@ async def _stream_from_db(
 
     max_yielded_id = last_event_id
 
-    # 1. Yield any events already persisted.
-    async with async_session_maker() as poll_db:
+    # 1. Yield any events already persisted. The connection below is the one
+    # held for the whole stream: every poll, probe, and drain further down
+    # reuses it instead of opening a fresh session per tick (issue #165).
+    async with _poll_engine.connect() as poll_db:
         res = await poll_db.execute(_pending_stmt(max_yielded_id))
         initial_rows = res.scalars().all()
+        await poll_db.rollback()
 
-    for row in initial_rows:
-        if row.event_id <= max_yielded_id or row.event == "turn_start":
-            continue
-        yield _format_chunk(row.event_id, row.event, row.chunk)
-        max_yielded_id = row.event_id
-        if row.event in ("done", "error"):
-            return
+        for row in initial_rows:
+            if row.event_id <= max_yielded_id or row.event == "turn_start":
+                continue
+            yield _format_chunk(row.event_id, row.event, row.chunk)
+            max_yielded_id = row.event_id
+            if row.event in ("done", "error"):
+                return
 
-    # 2. Poll for emerging events if the turn is in-flight elsewhere.
-    if timeout_s is None:
-        # Anchor to the real Lambda remaining budget (900s fallback outside
-        # Lambda) so the guard below fires before the hard kill. The deadline
-        # is measured from here, but remaining time already excludes the
-        # pre-stream work above plus a safety margin.
-        timeout_s = resolve_lambda_timeout_s()
-    start_time = time.monotonic()
-    # Wall-clock liveliness probe (#148): `idle_streak` drives the poll backoff
-    # and resets only on real rows; `last_probe_at` drives the probe and resets
-    # on rows and on every probe, so backoff can never stretch the probe
-    # cadence past _SSE_LIVENESS_PROBE_INTERVAL_S.
-    idle_streak = 0
-    last_probe_at = start_time
+        # 2. Poll for emerging events if the turn is in-flight elsewhere.
+        if timeout_s is None:
+            # Anchor to the real Lambda remaining budget (900s fallback outside
+            # Lambda) so the guard below fires before the hard kill. The deadline
+            # is measured from here, but remaining time already excludes the
+            # pre-stream work above plus a safety margin.
+            timeout_s = resolve_lambda_timeout_s()
+        start_time = time.monotonic()
+        # Wall-clock liveliness probe (#148): `idle_streak` drives the poll backoff
+        # and resets only on real rows; `last_probe_at` drives the probe and resets
+        # on rows and on every probe, so backoff can never stretch the probe
+        # cadence past _SSE_LIVENESS_PROBE_INTERVAL_S.
+        idle_streak = 0
+        last_probe_at = start_time
 
-    while True:
-        if time.monotonic() - start_time > timeout_s:
-            logger.warning(
-                "_stream_from_db: reached timeout (%.1fs) for session %s turn %s",
-                timeout_s,
-                session_id,
-                turn_id,
+        while True:
+            if time.monotonic() - start_time > timeout_s:
+                logger.warning(
+                    "_stream_from_db: reached timeout (%.1fs) for session %s turn %s",
+                    timeout_s,
+                    session_id,
+                    turn_id,
+                )
+                break
+
+            if request is not None:
+                try:
+                    if await request.is_disconnected():
+                        logger.info(
+                            "_stream_from_db: client disconnected for session %s",
+                            session_id,
+                        )
+                        break
+                except Exception:
+                    pass
+
+            # Cap the backoff sleep so the loop always wakes when a probe is due;
+            # without this the time-based gate below could only fire once per
+            # (up to 15s) tick and the cadence would still stretch under backoff.
+            probe_due_in = _SSE_LIVENESS_PROBE_INTERVAL_S - (
+                time.monotonic() - last_probe_at
             )
-            break
+            await _asyncio.sleep(
+                min(_sse_idle_delay_s(idle_streak), max(0.0, probe_due_in))
+            )
 
-        if request is not None:
-            try:
-                if await request.is_disconnected():
-                    logger.info(
-                        "_stream_from_db: client disconnected for session %s",
-                        session_id,
-                    )
-                    break
-            except Exception:
-                pass
-
-        # Cap the backoff sleep so the loop always wakes when a probe is due;
-        # without this the time-based gate below could only fire once per
-        # (up to 15s) tick and the cadence would still stretch under backoff.
-        probe_due_in = _SSE_LIVENESS_PROBE_INTERVAL_S - (
-            time.monotonic() - last_probe_at
-        )
-        await _asyncio.sleep(
-            min(_sse_idle_delay_s(idle_streak), max(0.0, probe_due_in))
-        )
-
-        async with async_session_maker() as poll_db:
             res = await poll_db.execute(_pending_stmt(max_yielded_id))
             rows = res.scalars().all()
+            await poll_db.rollback()
 
-        if rows:
-            idle_streak = 0
-            last_probe_at = time.monotonic()
-            for row in rows:
-                if row.event_id <= max_yielded_id or row.event == "turn_start":
-                    continue
-                yield _format_chunk(row.event_id, row.event, row.chunk)
-                max_yielded_id = row.event_id
-                if row.event in ("done", "error"):
-                    return
-            continue
+            if rows:
+                idle_streak = 0
+                last_probe_at = time.monotonic()
+                for row in rows:
+                    if row.event_id <= max_yielded_id or row.event == "turn_start":
+                        continue
+                    yield _format_chunk(row.event_id, row.event, row.chunk)
+                    max_yielded_id = row.event_id
+                    if row.event in ("done", "error"):
+                        return
+                continue
 
-        idle_streak += 1
-        now = time.monotonic()
-        if now - last_probe_at < _SSE_LIVENESS_PROBE_INTERVAL_S:
-            continue
-        last_probe_at = now
+            idle_streak += 1
+            now = time.monotonic()
+            if now - last_probe_at < _SSE_LIVENESS_PROBE_INTERVAL_S:
+                continue
+            last_probe_at = now
 
-        async with async_session_maker() as probe_db:
-            is_active = await _is_turn_active_elsewhere(probe_db, session_id)
-        if is_active:
-            continue
+            is_active = await _is_turn_active_elsewhere(poll_db, session_id)
+            if is_active:
+                continue
 
-        # Turn lock released: drain any final event committed right before
-        # lock release, then close. Bounded attempts.
-        for _ in range(_SSE_DRAIN_ATTEMPTS):
-            async with async_session_maker() as drain_db:
-                final_res = await drain_db.execute(_pending_stmt(max_yielded_id))
+            # Turn lock released: drain any final event committed right before
+            # lock release, then close. Bounded attempts.
+            for _ in range(_SSE_DRAIN_ATTEMPTS):
+                final_res = await poll_db.execute(_pending_stmt(max_yielded_id))
                 drain_rows = final_res.scalars().all()
+                await poll_db.rollback()
 
-            for row in drain_rows:
-                if row.event_id <= max_yielded_id or row.event == "turn_start":
-                    continue
-                yield _format_chunk(row.event_id, row.event, row.chunk)
-                max_yielded_id = row.event_id
-                if row.event in ("done", "error"):
-                    return
-            await _asyncio.sleep(_SSE_DRAIN_INTERVAL_S)
-        break
+                for row in drain_rows:
+                    if row.event_id <= max_yielded_id or row.event == "turn_start":
+                        continue
+                    yield _format_chunk(row.event_id, row.event, row.chunk)
+                    max_yielded_id = row.event_id
+                    if row.event in ("done", "error"):
+                        return
+                await _asyncio.sleep(_SSE_DRAIN_INTERVAL_S)
+            break
 
 
 @router.post("/sessions/{session_id}/chat")
