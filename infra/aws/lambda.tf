@@ -516,3 +516,27 @@ resource "aws_lambda_permission" "allow_eventbridge_audit_dispatch" {
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.audit_dispatch.arn
 }
+# ---------------------------------------------------------------------------
+# Backpressure alarms (Issue #160)
+#
+# Reserved concurrency turns a storm into throttles instead of an outage.
+# These alarms make the shed load visible: Throttles above zero means overflow
+# is being dropped; ConcurrentExecutions near the cap means the next burst sheds.
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_metric_alarm" "lambda_throttles" {
+  alarm_name          = "${var.project_name}-lambda-throttles"
+  alarm_description   = "Orchestrator Lambda is shedding load (throttled invocations). Storm overflow path is active."
+  namespace           = "AWS/Lambda"
+  metric_name         = "Throttles"
+  dimensions          = { FunctionName = aws_lambda_function.haunter.function_name }
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  tags = { Project = var.project_name }
+}
+
