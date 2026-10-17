@@ -5300,12 +5300,21 @@ def _settings_with_function_name_env(environment: dict[str, str]):
     """
     from app.config import Settings
 
-    with patch.dict("os.environ", environment):
+    simulated = dict(environment)
+    if any(key.casefold() == "aws_lambda_function_name" for key in simulated):
+        # The reserved key's presence is what Settings treats as "this process
+        # IS Lambda", and Lambda refuses to boot with the "memory" rate-limit
+        # backend (_require_shared_store_on_lambda). Real wiring always pairs
+        # the key with WEBHOOK_RATE_LIMIT_BACKEND=postgres (infra/aws), so the
+        # simulation must too - otherwise construction raises before the name
+        # assertion is reached.
+        simulated.setdefault("WEBHOOK_RATE_LIMIT_BACKEND", "postgres")
+    with patch.dict("os.environ", simulated):
         # os.environ is case-insensitive on Windows, where a lowercase spelling
         # is stored upper-cased, so the "absent" check has to fold case too —
         # otherwise the cleanup below deletes the value just set for the case that
         # spells the key the way pydantic would.
-        wanted = {key.casefold() for key in environment}
+        wanted = {key.casefold() for key in simulated}
         for key in _LAMBDA_FUNCTION_NAME_ENV_KEYS:
             if key.casefold() not in wanted:
                 os.environ.pop(key, None)
