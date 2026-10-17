@@ -761,7 +761,10 @@ def _render_issue(issue: LinkedIssue) -> str:
 
 
 def render_issue_context(
-    issues: Sequence[LinkedIssue], *, omitted: int = 0
+    issues: Sequence[LinkedIssue],
+    *,
+    omitted: int = 0,
+    budget_exhausted: bool = False,
 ) -> str:
     """Render resolved issues into one bounded, fenced, untrusted prompt block.
 
@@ -787,13 +790,26 @@ def render_issue_context(
     exist. It is stated inside the fence so the model can say "this PR
     references more than are shown" instead of silently reviewing a subset it
     believes is complete.
+
+    ``budget_exhausted`` is the third disclosure, and the only one that is not a
+    count. The request budget ran out mid-pass, so at least one issue above is
+    being shown with fields nobody read — and a model handed "here is issue #12"
+    has no way to know its discussion was never fetched, so it would read the
+    silence as "issue #12 had no discussion". That is a claim this integration
+    has no evidence for, and it is the one most likely to change a review's
+    conclusions.
     """
-    if not issues and omitted <= 0:
+    if not issues and omitted <= 0 and not budget_exhausted:
         return ""
 
     sections: list[str] = [_render_issue(issue) for issue in issues]
     if omitted > 0:
         sections.append(f"(+{omitted} more linked issue(s) not shown)")
+    if budget_exhausted:
+        sections.append(
+            "(the GitHub request budget for this review ran out; detail on at "
+            "least one of the issues above was never fetched)"
+        )
 
     fenced = _fenced_block("text", "\n\n".join(sections))
     block = (
