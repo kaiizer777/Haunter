@@ -69,6 +69,24 @@ _CFG_CACHE_MAXSIZE: int = 8
 _ALLOWED_PROVIDERS: frozenset[str] = frozenset({"aws"})
 
 
+def _prune_cfg_cache(now: float, stored_key: str) -> None:
+    """Evict expired entries, then oldest-inserted ones past the cap.
+
+    The size cap is only enforced when storing a new key: overwriting
+    an existing entry must not evict an unrelated live entry.
+    """
+    expired = [
+        key
+        for key, (_, cached_at) in _cfg_cache.items()
+        if now - cached_at >= _CACHE_TTL
+    ]
+    for key in expired:
+        del _cfg_cache[key]
+    if stored_key not in _cfg_cache:
+        while len(_cfg_cache) >= _CFG_CACHE_MAXSIZE:
+            _cfg_cache.pop(next(iter(_cfg_cache)))
+
+
 async def _get_provider_config(key: str, env_default: str) -> str:
     """
     Read provider config from DB system_configs table (TTL-cached 60s).
