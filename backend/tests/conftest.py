@@ -399,6 +399,42 @@ def _restore_settings_singleton():
                     mod.settings = _ORIGINAL_SETTINGS
 
 
+@pytest.fixture
+def scoped_llm_client():
+    """Confine ``patch("<subagent module>.LLMClient.complete")`` to that module.
+
+    ``app.subagents.fix_generator`` and ``app.subagents.context_gatherer`` both
+    do ``from app.llm import LLMClient``, so ``LLMClient`` is one process-wide
+    class object held by every test module. Patching ``.complete`` through a
+    subagent module therefore writes onto that shared class. Any such patch
+    whose ``with`` block is abandoned — a coroutine the runner never resumes
+    after a timeout, for instance — leaves the stub installed for the rest of
+    the session, and every later test that drives the real client gets this
+    suite's canned payload back instead of doing HTTP. That is how the fix
+    generator's diff blob reached ``tests/test_llm.py`` and turned ten of its
+    assertions into "DID NOT RAISE LLMExhaustedFreeTierError" (#146).
+
+    Rebinding the module globals to a private subclass first makes those patch
+    calls land on the subclass, which ``patch`` restores by deleting the
+    attribute it added. ``app.llm.client.LLMClient`` is never written to, so a
+    leak can no longer escape into an unrelated module — the isolation no
+    longer depends on the patch unwinding in time.
+    """
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    from app.llm.client import LLMClient
+    from app.subagents import context_gatherer, fix_generator
+
+    class _ScopedLLMClient(LLMClient):
+        """Private per-test subclass, existing only to own the patched attribute."""
+
+    with ExitStack() as stack:
+        for module in (fix_generator, context_gatherer):
+            stack.enter_context(patch.object(module, "LLMClient", _ScopedLLMClient))
+        yield
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add --all CLI option to pytest."""
     parser.addoption(
