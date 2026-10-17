@@ -111,3 +111,51 @@ async def test_provider_config_cache_is_bounded():
     assert res == "aws"
     assert len(_cfg_cache) <= CFG_MAXSIZE
     assert "hosting_provider" in _cfg_cache
+
+
+@pytest.mark.asyncio
+async def test_provider_config_overwrite_keeps_other_live_entries():
+    """Overwriting a live key must not evict an unrelated live entry.
+
+    The cap is enforced only when the stored key is new — otherwise a routine
+    refresh of one key would silently drop a different key still within TTL.
+    """
+    invalidate_provider_cache()
+    now = time.monotonic()
+    _cfg_cache["sandbox_provider"] = ("aws", now)
+    _cfg_cache["hosting_provider"] = ("aws", now)
+
+    mock_row = MagicMock()
+    mock_row.value = "aws"
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_row
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = mock_result
+
+    with patch(
+        "app.db.async_session_maker",
+        return_value=_mock_session_ctx(mock_session),
+    ):
+        await _get_provider_config("hosting_provider", "aws")
+
+    assert len(_cfg_cache) == 2
+    assert "sandbox_provider" in _cfg_cache
+    assert "hosting_provider" in _cfg_cache
+
+
+def test_invalidate_provider_cache_still_holds_both_live_keys():
+    """The cap must never be the reason a live key disappears.
+
+    ``invalidate_provider_cache()`` must be able to hold both real config
+    keys simultaneously (test_hosting.py seeds exactly 2 and asserts
+    len == 2), which breaks if the cap drops below the keyspace size.
+    """
+    assert CFG_MAXSIZE >= 2
+
+    invalidate_provider_cache()
+    _cfg_cache["hosting_provider"] = ("aws", 9999.0)
+    _cfg_cache["sandbox_provider"] = ("aws", 9999.0)
+    assert len(_cfg_cache) == 2
+
+    invalidate_provider_cache()
+    assert len(_cfg_cache) == 0
