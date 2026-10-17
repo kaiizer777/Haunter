@@ -2313,9 +2313,12 @@ async def test_enrichment_request_count_is_capped_at_the_documented_total(
     """An endless timeline stops at ``MAX_LINKED_ISSUE_REQUESTS``. Exactly.
 
     Adversarial wire: three linked issues whose timelines promise another page
-    forever, and comments that fit in one page. Without a shared counter this is
-    an unbounded loop, so the assertion is not "<= cap" but "== cap": it has to
-    be the budget that stopped it, not the fixture running out of pages.
+    forever, and comments that fit in one page. Without the per-issue page caps
+    this is an unbounded loop, so the assertion is not "<= cap" but "== cap":
+    it has to be the caps that stopped the walk, not the fixture running out
+    of pages. And because the caps sum exactly to the limit, no reservation
+    is ever refused here -- so the budget disclosure must stay silent while
+    the per-issue beyond-window disclosure speaks.
     """
     recorded: list[httpx.Request] = []
     transport = _github_transport(
@@ -2333,13 +2336,14 @@ async def test_enrichment_request_count_is_capped_at_the_documented_total(
     publish.assert_awaited_once()
     made = _enrichment_requests(recorded)
     assert len(made) == review_orch.MAX_LINKED_ISSUE_REQUESTS, (
-        f"expected the budget to stop the walk at "
+        "expected the per-issue caps to stop the walk at "
         f"{review_orch.MAX_LINKED_ISSUE_REQUESTS} requests, made {len(made)}"
     )
     content = _user_content(captured[-1])
-    assert "the GitHub request budget for this review ran out" in content, (
-        "the pass was cut short; saying so is the difference between 'this issue "
-        "had no discussion' and 'we stopped reading'"
+    assert "the GitHub request budget for this review ran out" not in content
+    assert "(more cross-references exist beyond the window fetched)" in content, (
+        "every timeline promised another page the caps refused to read; the "
+        "model must learn that from the block, not from a count nobody computed"
     )
 
 
