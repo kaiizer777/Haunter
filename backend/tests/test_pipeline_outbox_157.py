@@ -272,6 +272,66 @@ async def test_exhaust_race_with_starting_child_is_skipped():
     assert summary.skipped == 1
 
 
+def test_handler_success_shape():
+    """The EventBridge handler returns sweep counts on success."""
+    import pipeline_outbox_handler as poh
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.pipeline_outbox import PipelineOutboxSummary
+
+    summary = PipelineOutboxSummary(
+        scanned=2, redriven=["run-1"], exhausted=["run-2"], skipped=0
+    )
+    with patch(
+        "app.services.pipeline_outbox.sweep_stale_pending_runs",
+        AsyncMock(return_value=summary),
+    ):
+        result = poh.handler({"operation": "sweep_pipeline_outbox"})
+
+    assert result["status"] == "completed"
+    assert result["scanned"] == 2
+    assert result["redriven"] == ["run-1"]
+    assert result["exhausted"] == ["run-2"]
+    assert result["skipped"] == 0
+
+
+def test_handler_rejects_untrusted_invocations():
+    """Non-dict, HTTP, and unknown-operation events are refused."""
+    import pipeline_outbox_handler as poh
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.pipeline_outbox import PipelineOutboxSummary
+
+    assert poh.handler("nope") == {"error": "invalid invocation"}
+    with patch(
+        "app.services.pipeline_outbox.sweep_stale_pending_runs",
+        AsyncMock(return_value=PipelineOutboxSummary()),
+    ):
+        assert poh.handler({"operation": "sweep_pipeline_outbox"})["status"] == (
+            "completed"
+        )
+    assert poh.handler({"requestContext": {}, "operation": "sweep_pipeline_outbox"}) == {
+        "error": "unsupported invocation"
+    }
+    assert poh.handler({"operation": "dispatch_audits"}) == {
+        "error": "unsupported invocation"
+    }
+
+
+def test_handler_reports_sweep_failure_without_raising():
+    """A throwing sweep surfaces as an error dict, never an exception."""
+    import pipeline_outbox_handler as poh
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "app.services.pipeline_outbox.sweep_stale_pending_runs",
+        AsyncMock(side_effect=RuntimeError("db down")),
+    ):
+        assert poh.handler({"operation": "sweep_pipeline_outbox"}) == {
+            "error": "pipeline outbox sweep failed"
+        }
+
+
 @pytest.mark.asyncio
 async def test_race_with_starting_child_is_skipped():
     """If the child claimed the run first (CAS rowcount 0), skip quietly."""
