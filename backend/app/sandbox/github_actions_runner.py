@@ -1278,9 +1278,13 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                     # --------------------------------------------------------
                     # 8. Poll Actions workflow runs
                     # --------------------------------------------------------
+                    poll_attempt = 0
                     deadline = time.monotonic() + poll_timeout
                     while time.monotonic() < deadline:
-                        await asyncio.sleep(poll_interval)
+                        await asyncio.sleep(
+                            _poll_delay_seconds(poll_attempt, poll_interval),
+                        )
+                        poll_attempt += 1
                         runs = await _list_workflow_runs(
                             client, repo_full, head_sha, token=token
                         )
