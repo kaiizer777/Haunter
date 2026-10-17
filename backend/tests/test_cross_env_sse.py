@@ -201,7 +201,7 @@ async def test_stream_from_db_completed_turn() -> None:
         async def __aexit__(self, *args):
             return False
 
-    with patch("app.db.async_session_maker", return_value=_MockDb()):
+    with patch("app.db.engine", _FakeEngine(_MockDb())):
         yielded: list[str] = []
         async for chunk in _stream_from_db(session_id, turn_id, last_event_id=1):
             yielded.append(chunk)
@@ -268,7 +268,7 @@ async def test_stream_from_db_inflight_polling() -> None:
             return False
 
     with (
-        patch("app.db.async_session_maker", return_value=_MockDb()),
+        patch("app.db.engine", _FakeEngine(_MockDb())),
         patch("app.routers.sessions._is_turn_active_elsewhere", new_callable=AsyncMock, return_value=True),
     ):
         yielded: list[str] = []
