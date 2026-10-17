@@ -276,6 +276,48 @@ def test_trigger_grammar_never_raises(body):
     assert has_issue_trigger(body) is False
 
 
+FENCED_QUIET_CASES = [
+    # Four-backtick blocks: an inner triple run never closes the outer fence.
+    "````\n```\n@haunter fix this\n```\n````",
+    "````\ncode\n```\n@haunter fix this\n````",
+    # Tilde fences strip exactly like backtick fences.
+    "~~~\n@haunter fix this\n~~~",
+    "~~~python\n@haunter-bot please help\n~~~",
+    # Info strings keep the opener a fence.
+    "```python\n@haunter fix this\n```",
+    "```js\n@haunter-bot hi\n```",
+    # An over-indented closer (4 spaces) never closes: the fence runs to EOF.
+    "```\n@haunter fix this\n    ```",
+    # Trailing prose after the marker is not a closer either.
+    "```\n@haunter fix this\n``` not a closer",
+    # A longer closer still closes — with no trigger after it.
+    "```\n@haunter fix this\n````",
+]
+
+
+@pytest.mark.parametrize("body", FENCED_QUIET_CASES)
+def test_fenced_triggers_stay_quiet(body: str):
+    assert has_issue_trigger(body) is False
+
+
+FENCED_FIRES_CASES = [
+    # A closer indented up to 3 spaces still closes; the trigger after fires.
+    "```\ncode\n   ```\n@haunter fix this",
+    # A backtick in a backtick fence's info string rejects the opener.
+    "``` `note`\n@haunter fix this",
+    # A trigger after a properly closed fence fires.
+    "```\ncode\n```\n@haunter fix this",
+    # Same for tilde and four-backtick fences.
+    "~~~\ncode\n~~~\n/fix this",
+    "````\n```\ncode\n```\n````\n@haunter fix this",
+]
+
+
+@pytest.mark.parametrize("body", FENCED_FIRES_CASES)
+def test_trigger_after_closed_fence_fires(body: str):
+    assert has_issue_trigger(body) is True
+
+
 def test_auditor_mention_is_lexically_a_trigger():
     """The regex is lexical only; the router owns auditor exclusivity (R5)."""
     assert has_issue_trigger("@haunter-auditor audit this") is True

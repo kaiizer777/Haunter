@@ -73,9 +73,17 @@ FEEDBACK_CONCLUSION: str = "feedback"
 #: The mention itself. ``\b`` keeps it from firing on ``@haunterbot``.
 _MENTION_RE: re.Pattern[str] = re.compile(r"@haunter\b", re.IGNORECASE)
 
-#: Fenced code blocks (```...```), stripped before issue-trigger matching so
-#: a pasted log or code sample that mentions the bot cannot fire the pipeline.
-_FENCED_CODE_RE: re.Pattern[str] = re.compile(r"```.*?```", re.DOTALL)
+#: Fenced code blocks, stripped before issue-trigger matching so a pasted
+#: log or code sample that mentions the bot cannot fire the pipeline.
+#: Line-oriented (CommonMark-style): an opener is up to 3 leading spaces
+#: followed by a run of 3+ backticks or tildes, except a backtick opener
+#: whose info string itself contains a backtick is not a fence. A closer
+#: uses the opener's character, is at least as long, allows at most 3
+#: leading spaces, and permits only whitespace after the marker — so an
+#: inner triple-backtick run never closes a four-backtick block.
+
+_FENCE_LINE_RE: re.Pattern[str] = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_FENCE_RUN_RE: re.Pattern[str] = re.compile(r"`{3,}|~{3,}")
 
 #: Issue trigger mention (feat-125): ``@haunter`` plus any hyphenated
 #: subsystem suffix (``@haunter-bot``, ``@haunter-auditor``). The leading
@@ -96,9 +104,61 @@ _FIX_TOKEN_RE: re.Pattern[str] = re.compile(
 )
 
 
+def _strip_inline_fence_span(line: str) -> str:
+    """Strip same-line fence spans such as "```/fix```" from one line."""
+    while True:
+        runs = [(m.start(), m.end(), m.group(0)) for m in _FENCE_RUN_RE.finditer(line)]
+        stripped = False
+        for i, (start, end, opener) in enumerate(runs):
+            for close_start, close_end, closer in runs[i + 1 :]:
+                if closer[0] != opener[0] or len(closer) < len(opener):
+                    continue
+                if opener.startswith("`") and "`" in line[end:close_start]:
+                    break
+                line = line[:start] + " " + line[close_end:]
+                stripped = True
+                break
+            if stripped:
+                break
+        if not stripped:
+            return line
+
+
 def _strip_fenced_code(body: str) -> str:
-    """Remove triple-backtick blocks so triggers inside them never fire."""
-    return _FENCED_CODE_RE.sub(" ", body)
+    """Remove fenced code blocks so triggers inside them never fire.
+    Line-oriented CommonMark-style parse: a fence opens on a line with at
+    most 3 leading spaces followed by 3+ backticks/tildes (a backtick
+    opener whose info string holds a backtick is literal text, not a
+    fence), and closes only on the opener's character with at least the
+    opener's length, at most 3 leading spaces, and nothing but whitespace
+    after the marker. An unclosed fence runs to the end of the body, and a
+    fence that opens and closes on one line (e.g. "```/fix```") strips
+    just that span so existing single-line code stays quiet.
+    """
+    kept: list[str] = []
+    fence_char = ""
+    fence_len = 0
+    for line in body.split("\n"):
+        marker = _FENCE_LINE_RE.match(line)
+        if fence_char:
+            if (
+                marker is not None
+                and marker.group(1)[0] == fence_char
+                and len(marker.group(1)) >= fence_len
+                and marker.group(2).strip() == ""
+            ):
+                fence_char = ""
+                fence_len = 0
+            continue
+        if (
+            marker is not None
+            and not (marker.group(1).startswith("`") and "`" in marker.group(2))
+        ):
+            fence_char = marker.group(1)[0]
+            fence_len = len(marker.group(1))
+            continue
+        kept.append(_strip_inline_fence_span(line))
+    return "\n".join(kept)
 
 
 def has_issue_trigger(body: Union[str, None]) -> bool:
