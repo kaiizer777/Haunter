@@ -8,6 +8,7 @@ Shared fixtures and test configuration for Haunter backend tests.
 
 import os
 import uuid
+import warnings
 from typing import AsyncGenerator, Callable
 
 import httpx
@@ -397,6 +398,42 @@ def _restore_settings_singleton():
                     and s.__class__.__module__ == "app.config"
                 ):
                     mod.settings = _ORIGINAL_SETTINGS
+
+
+@pytest.fixture(autouse=True)
+def _restore_shared_llm_client_complete(request):
+    """Guarantee no test can leave ``LLMClient.complete`` stubbed for the next one.
+
+    ``app.llm.client.LLMClient`` is a single class object shared by every
+    module in the process, so ``patch("<module>.LLMClient.complete", ...)``
+    resolves that module's global and writes the stub onto the shared class
+    itself. A patch whose ``with`` block is never unwound — an abandoned
+    coroutine, a helper that forgets to ``stop()`` — therefore survives the
+    test that installed it and is then handed to every later test that drives
+    the real client. That is how ``test_fix_generator.py``'s
+    ``_VALID_LLM_RESPONSE`` blob reached ``tests/test_llm.py`` and turned its
+    assertions into "DID NOT RAISE LLMExhaustedFreeTierError" (#146).
+
+    ``scoped_llm_client`` stops the audited writers from mutating the shared
+    class in the first place. This fixture is the backstop for the writers
+    nobody has audited yet: it repairs the attribute after each test and names
+    the offender, so a leak is contained and diagnosable instead of silently
+    poisoning an unrelated module.
+    """
+    from app.llm.client import LLMClient
+
+    original = LLMClient.__dict__["complete"]
+    yield
+    if LLMClient.__dict__["complete"] is not original:
+        setattr(LLMClient, "complete", original)
+        warnings.warn(
+            f"{request.node.nodeid} left a stub installed on the shared "
+            "app.llm.client.LLMClient.complete; restored it so later tests are "
+            "not affected (#146). Patch the module global "
+            "(patch('<module>.LLMClient')) instead of the shared attribute.",
+            RuntimeWarning,
+            stacklevel=1,
+        )
 
 
 @pytest.fixture
