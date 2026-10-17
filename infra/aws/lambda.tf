@@ -180,6 +180,10 @@ resource "aws_lambda_function" "haunter" {
 
   timeout     = 900   # 15 minutes — covers sandbox poll loop
   memory_size = 512   # MB
+  # Issue #160: cap concurrent executions so a CI-failure storm throttles
+  # instead of exhausting the account limit (sync callers get HTTP 429 and
+  # GitHub retries webhook delivery; async self-invokes queue, bounded below).
+  reserved_concurrent_executions = var.lambda_reserved_concurrent_executions
 
   environment {
     variables = {
