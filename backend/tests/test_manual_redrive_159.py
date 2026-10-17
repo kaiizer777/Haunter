@@ -117,3 +117,33 @@ async def test_exhausted_run_replays_into_clean_pending_child(
 
     mock_adapter.schedule_pipeline.assert_awaited_once()
     assert mock_adapter.schedule_pipeline.await_args.args[0] == child_id
+
+    # The child starts clean: no verdict, artefact, PR coordinate, tracking
+    # issue, or fabricated GitHub identity is carried from the exhaust path.
+    for reset in (
+        "diagnosis_summary",
+        "failure_reason",
+        "pr_url",
+        "pr_number",
+        "pr_branch",
+        "final_summary",
+        "fallback_issue_url",
+        "fallback_issue_number",
+        "github_run_id",
+        "github_delivery_id",
+    ):
+        assert getattr(child, reset) is None, f"{reset} leaked into replay child"
+    child_attempts = await db.scalar(
+        select(func.count(Attempt.id)).where(Attempt.run_id == child_id)
+    )
+    assert child_attempts == 0
+
+    # The failed source run is untouched: still settled, still carrying its
+    # own three attempts and its GitHub identity.
+    src = (await db.execute(select(Run).where(Run.id == source_id))).scalar_one()
+    assert src.status == "fallback_commented"
+    assert src.github_run_id == 159000111
+    src_attempts = await db.scalar(
+        select(func.count(Attempt.id)).where(Attempt.run_id == source_id)
+    )
+    assert src_attempts == 3
