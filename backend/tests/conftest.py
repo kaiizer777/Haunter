@@ -425,7 +425,7 @@ def _restore_shared_llm_client_complete(request):
     original = LLMClient.__dict__["complete"]
     yield
     if LLMClient.__dict__["complete"] is not original:
-        setattr(LLMClient, "complete", original)
+        LLMClient.complete = original
         warnings.warn(
             f"{request.node.nodeid} left a stub installed on the shared "
             "app.llm.client.LLMClient.complete; restored it so later tests are "
