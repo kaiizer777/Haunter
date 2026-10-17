@@ -125,11 +125,17 @@ async def _sweep_one(db, run, make_adapter, summary, current, exhaust_after_s) -
     exhaust_cutoff = current - timedelta(seconds=exhaust_after_s)
 
     if created_at is not None and created_at <= exhaust_cutoff:
-        await _fail_run(db, run_id, FAILURE_REASON_EXHAUSTED)
-        summary.exhausted.append(str(run_id))
-        logger.warning(
-            "pipeline_outbox: run=%s exhausted (pending past horizon)", run_id
-        )
+        if await _fail_run(db, run_id, FAILURE_REASON_EXHAUSTED):
+            summary.exhausted.append(str(run_id))
+            logger.warning(
+                "pipeline_outbox: run=%s exhausted (pending past horizon)", run_id
+            )
+        else:
+            summary.skipped += 1
+            logger.info(
+                "pipeline_outbox: run=%s left pending at exhaust time, skipping",
+                run_id,
+            )
         return
 
     # CAS claim: only the sweeper (or nobody) owns this run. A rowcount of 0
@@ -155,24 +161,27 @@ async def _sweep_one(db, run, make_adapter, summary, current, exhaust_after_s) -
             run_id,
             type(exc).__name__,
         )
-        await _fail_run(db, run_id, FAILURE_REASON_REDRIVE_FAILED)
-        summary.exhausted.append(str(run_id))
+        if await _fail_run(db, run_id, FAILURE_REASON_REDRIVE_FAILED):
+            summary.exhausted.append(str(run_id))
+        else:
+            summary.skipped += 1
         return
     summary.redriven.append(str(run_id))
     logger.info("pipeline_outbox: run=%s redriven", run_id)
 
 
-async def _fail_run(db, run_id: UUID, reason: str) -> None:
+async def _fail_run(db, run_id: UUID, reason: str) -> bool:
     """CAS-transition a still-``pending`` run to ``error`` with a reason.
 
-    Never raises on a lost race: rowcount 0 means someone else moved the run
-    (the child started, or another sweep exhausted it) — that outcome is
-    already terminal-or-executing, which is exactly what the sweeper wants.
+    Returns True when this call moved the run. Rowcount 0 means someone else
+    moved it first (the child started, or another sweep exhausted it) — that
+    outcome is already terminal-or-executing, which is what the sweeper wants,
+    so the caller counts it as skipped, never as exhausted.
     """
     from app.models import Run
     from sqlalchemy import update
 
-    await db.execute(
+    result = await db.execute(
         update(Run)
         .where(Run.id == run_id, Run.status == "pending")
         .values(
@@ -181,3 +190,4 @@ async def _fail_run(db, run_id: UUID, reason: str) -> None:
             updated_at=_utcnow(),
         )
     )
+    return result.rowcount > 0
