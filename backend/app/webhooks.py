@@ -85,6 +85,7 @@ from app.log_hygiene import sanitize_log_value
 from app.models import AuditJob, CodeReview, Repo, Run, User, WebhookDelivery
 from app.schemas import (
     IssueCommentWebhookPayload,
+    IssuesOpenedWebhookPayload,
     PullRequestReviewCommentWebhookPayload,
     WorkflowRunWebhookPayload,
 )
@@ -92,6 +93,7 @@ from app.services import audit_pipeline, feature_enforcement
 from app.services.followup_commands import (
     FEEDBACK_CONCLUSION,
     TEST_FIX_CONCLUSION,
+    has_issue_trigger,
     parse_followup_command,
 )
 from app.services.repo_settings import get_repo_settings
@@ -183,6 +185,7 @@ ALLOWED_WEBHOOK_EVENTS = frozenset(
     {
         "workflow_run",
         "issue_comment",
+        "issues",
         "pull_request_review_comment",
         "pull_request",
         "push",
@@ -1929,6 +1932,239 @@ async def _handle_review_auto_fix_command(
         return {"status": "error", "reason": str(exc)}
 
 
+async def _handle_issue_trigger(
+    db: AsyncSession,
+    background_tasks: BackgroundTasks,
+    *,
+    event: str,
+    delivery_id: str,
+    repo_owner: str,
+    repo_name: str,
+    issue_number: int,
+    trigger_text: str,
+    trigger_comment_id: Optional[int],
+    author_association: str,
+    author_login: str,
+    sender: Any,
+    raw_body: bytes,
+    replay_repo_id: Optional[uuid.UUID],
+) -> dict[str, Any]:
+    """Mint an autonomous root Run for a tagged issue (feat-125).
+
+    Shared by `issues.opened` (trigger text = title + body, no comment id)
+    and `issue_comment.created` on a pure issue (trigger text = comment body).
+    Every attribute is snapshotted by the caller: `db.rollback()` expires ORM
+    state, so this function only receives primitives plus the session.
+
+    The source issue number rides on `Run.reply_to_comment_id`: for an issue
+    root the issue thread IS the thread to answer in (ack, fallback
+    diagnosis), the PR writer never overwrites that column (unlike
+    `pr_number`, which it must overwrite with the opened PR's number), and
+    root issue runs are the only rows with parent NULL + `github_run_id`
+    NULL — so the per-(repo, issue) lookup is exact with no migration.
+    """
+    log_repo = f"{repo_owner}/{repo_name}"
+
+    # 1. Trigger gate: @haunter / @haunter-bot / bare /fix outside fences.
+    if not has_issue_trigger(trigger_text):
+        logger.info(
+            "Ignored %s (delivery_id=%s): no issue trigger in %s#%d",
+            event,
+            delivery_id,
+            log_repo,
+            issue_number,
+        )
+        return {"status": "ignored", "reason": "no issue trigger"}
+
+    # 2. Auditor exclusivity (R5): auditor mentions belong to the read-only
+    # auditor, which cannot act on issues (no PR endpoints) — they must never
+    # mint a fix Run. Checked before any fix routing.
+    if has_auditor_mention(trigger_text) or audit_pipeline.is_manual_audit_comment(
+        trigger_text
+    ):
+        logger.info(
+            "Ignored %s (delivery_id=%s): auditor mention, not a fix request",
+            event,
+            delivery_id,
+        )
+        return {"status": "ignored", "reason": "auditor mention, not a fix request"}
+
+    # 3. Collaborator Authority: same allowlist as the PR-comment flow.
+    if (author_association or "").upper() not in ALLOWED_AUTHOR_ASSOCIATIONS:
+        logger.warning(
+            "Ignored issue trigger (delivery_id=%s) from untrusted user %r with author_association=%r",
+            delivery_id,
+            sanitize_log_value(author_login or "unknown", 100),
+            sanitize_log_value(author_association, 32),
+        )
+        return {"status": "ignored", "reason": "unauthorized commenter"}
+
+    # 4. Bot/self-loop guard: never answer our own replies or any bot.
+    sender = sender if isinstance(sender, dict) else {}
+    sender_login = sender.get("login") or ""
+    sender_type = sender.get("type") or ""
+    if (
+        sender_type == "Bot"
+        or (isinstance(sender_login, str) and sender_login.endswith("[bot]"))
+        or (isinstance(author_login, str) and author_login.endswith("[bot]"))
+        or _is_auditor_self_login(author_login)
+    ):
+        logger.info(
+            "Ignored %s (delivery_id=%s): bot/self issue trigger by %s",
+            event,
+            delivery_id,
+            sanitize_log_value(author_login or sender_login, 100),
+        )
+        return {"status": "ignored", "reason": "bot comment"}
+
+    # 5. Check repository registration in DB.
+    repo, rejection_reason = await _resolve_repo_for_delivery(
+        db,
+        event=event,
+        delivery_id=delivery_id,
+        owner=repo_owner,
+        name=repo_name,
+        replay_repo_id=replay_repo_id,
+    )
+    if repo is None:
+        return {"status": "ignored", "reason": rejection_reason}
+
+    # 6. Pre-Run kill-switch + cost gate (R7): nothing is inserted while the
+    # repo disabled autonomous fixes. The spend gate is evaluated at zero
+    # accumulated cost here; the orchestrator re-enforces it with real spend.
+    repo_settings = await get_repo_settings(db, repo.id)
+    auto_fix_decision = feature_enforcement.is_auto_fix_allowed(
+        repo_settings.enable_auto_fix
+    )
+    if not auto_fix_decision.allowed:
+        logger.info(
+            "Ignored %s (delivery_id=%s): %s",
+            event,
+            delivery_id,
+            auto_fix_decision.reason,
+        )
+        return {"status": "skipped", "reason": auto_fix_decision.reason}
+    cost_decision = feature_enforcement.check_cost_ceiling(
+        0.0, repo_settings.max_cost_per_run_cents
+    )
+    if not cost_decision.allowed:
+        logger.info(
+            "Ignored %s (delivery_id=%s): %s",
+            event,
+            delivery_id,
+            cost_decision.reason,
+        )
+        return {"status": "skipped", "reason": cost_decision.reason}
+
+    # 7. Resolve the default-branch head SHA best-effort (R2): an issue event
+    # carries no SHA for the NOT NULL column, and the sandbox clones fresh
+    # anyway, so the read's TOCTOU is accepted. Any GitHub/token failure is a
+    # loud `error` — never a fabricated SHA in the row.
+    from app.github.pr import get_installation_token
+    from app import github_client
+
+    try:
+        token = await get_installation_token(repo)
+    except Exception as exc:
+        logger.warning(
+            "Issue trigger skipped: unable to obtain GitHub token for %s: %s",
+            log_repo,
+            type(exc).__name__,
+        )
+        return {"status": "error", "reason": "github token unavailable"}
+    base_branch = repo.default_branch or "main"
+    try:
+        head_sha = await github_client.fetch_branch_sha(
+            repo_owner, repo_name, base_branch, token=token
+        )
+    except Exception as exc:
+        logger.warning(
+            "Issue trigger skipped: could not resolve head of %s %s for %s: %s",
+            log_repo,
+            base_branch,
+            delivery_id,
+            type(exc).__name__,
+        )
+        return {"status": "error", "reason": "could not resolve base branch head"}
+
+    # 8. Idempotent root Run creation (D2 keys: trigger_comment_id for comment
+    # triggers, github_delivery_id for issues-opened triggers — both UNIQUE).
+    # Read before the commit: rollback expires ORM state (MissingGreenlet).
+    repo_id = repo.id
+    new_run = Run(
+        repo_id=repo_id,
+        parent_run_id=None,
+        github_run_id=None,
+        trigger_comment_id=trigger_comment_id,
+        reply_to_comment_id=issue_number,
+        github_delivery_id=delivery_id,
+        head_sha=head_sha,
+        head_branch=base_branch,
+        status="pending",
+    )
+    db.add(new_run)
+    try:
+        await db.commit()
+        await db.refresh(new_run)
+    except IntegrityError:
+        await db.rollback()
+        existing = (
+            await db.execute(
+                select(Run).where(Run.github_delivery_id == str(delivery_id))
+            )
+        ).scalars().first()
+        logger.info(
+            "Duplicate webhook delivery %s for %s#%d dropped idempotently",
+            delivery_id,
+            log_repo,
+            issue_number,
+        )
+        await _record_webhook_delivery(
+            db,
+            event=event,
+            delivery_id=delivery_id,
+            status_value="duplicate",
+            reason=f"issue={issue_number}",
+            repo=log_repo,
+            repo_id=repo_id,
+            payload=raw_body,
+        )
+        return {
+            "status": "duplicate",
+            "delivery_id": delivery_id,
+            "issue_number": issue_number,
+            "run_id": str(existing.id) if existing is not None else None,
+            "pr_url": getattr(existing, "pr_url", None),
+        }
+
+    # 9. Schedule pipeline asynchronously.
+    from app.adapters.hosting import get_hosting_adapter
+
+    adapter = await get_hosting_adapter()
+    await adapter.schedule_pipeline(new_run.id, background_tasks)
+
+    # Snapshot before the recorder: its failure path rolls the session back.
+    queued_run_id = str(new_run.id)
+
+    await _record_webhook_delivery(
+        db,
+        event=event,
+        delivery_id=delivery_id,
+        status_value="queued",
+        reason=f"issue={issue_number} run_id={new_run.id}",
+        repo=log_repo,
+        repo_id=repo_id,
+        payload=raw_body,
+    )
+
+    return {
+        "status": "queued",
+        "run_id": queued_run_id,
+        "issue_number": issue_number,
+        "delivery_id": delivery_id,
+    }
+
+
 @router.post("/github")
 async def github_webhook(
     request: Request,
@@ -2777,17 +3013,64 @@ async def github_webhook(
 
     # -----------------------------------------------------------------------
     # Branch B: Interactive PR Feedback (issue_comment / pull_request_review_comment)
+    # Branch D: Autonomous issue trigger (issues.opened with mention — feat-125)
     # -----------------------------------------------------------------------
-    # 1. Action filtering: must be 'created'
+    # 1. Action filtering: comment events require 'created', issues requires
+    # 'opened' (R3) — a shared gate would drop issues(opened) outright.
+    # Edited/reopened/labeled triggers stay OUT by design (documented
+    # limitation: a mention added by edit never fires).
     action = data.get("action")
-    if action != "created":
+    expected_action = "opened" if x_github_event == "issues" else "created"
+    if action != expected_action:
         logger.info(
-            "Ignored %s (delivery_id=%s): action=%s (expected 'created')",
+            "Ignored %s (delivery_id=%s): action=%s (expected %r)",
             x_github_event,
             x_github_delivery,
             action,
+            expected_action,
         )
         return {"status": "ignored", "reason": f"unsupported action: {action}"}
+
+    # 1b. issues.opened: validate, exclude PR-shaped events (a PR is an issue
+    # with a pull_request ref — those own a separate pipeline), then dispatch
+    # to the shared issue handler with title+body as the trigger text.
+    if x_github_event == "issues":
+        try:
+            issues_payload = IssuesOpenedWebhookPayload.model_validate(data)
+        except ValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=e.errors(),
+            )
+        if issues_payload.issue.pull_request:
+            logger.info(
+                "Ignored issues (delivery_id=%s): event is a pull request, not a pure issue",
+                x_github_delivery,
+            )
+            return {"status": "ignored", "reason": "pull request event, not a pure issue"}
+        issue_obj = issues_payload.issue
+        issue_user = issue_obj.user
+        trigger_text = "\n\n".join(
+            part
+            for part in (issue_obj.title or "", issue_obj.body or "")
+            if part
+        )
+        return await _handle_issue_trigger(
+            db,
+            background_tasks,
+            event=x_github_event,
+            delivery_id=x_github_delivery,
+            repo_owner=issues_payload.repository.owner.login,
+            repo_name=issues_payload.repository.name,
+            issue_number=issue_obj.number,
+            trigger_text=trigger_text,
+            trigger_comment_id=None,
+            author_association=issue_obj.author_association or "",
+            author_login=(getattr(issue_user, "login", "") or ""),
+            sender=data.get("sender") or {},
+            raw_body=raw_body,
+            replay_repo_id=replay_repo_id,
+        )
 
     # 2. Schema validation
     pr_head_branch: Optional[str] = None
@@ -2802,13 +3085,27 @@ async def github_webhook(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=e.errors(),
             )
-        # Verify comment is on a Pull Request (not a pure issue)
+        # Feat-125 reroute (R9): a mention on a pure issue goes to the issue
+        # handler BEFORE the PR-only drop below. Scoped so the PR-comment
+        # guard is unaffected: only payloads without a pull_request ref enter.
         if not comment_payload.issue.pull_request:
-            logger.info(
-                "Ignored issue_comment (delivery_id=%s): comment is on an issue, not a pull request",
-                x_github_delivery,
+            comment_user = comment_payload.comment.user
+            return await _handle_issue_trigger(
+                db,
+                background_tasks,
+                event=x_github_event,
+                delivery_id=x_github_delivery,
+                repo_owner=comment_payload.repository.owner.login,
+                repo_name=comment_payload.repository.name,
+                issue_number=comment_payload.issue.number,
+                trigger_text=comment_payload.comment.body or "",
+                trigger_comment_id=comment_payload.comment.id,
+                author_association=comment_payload.comment.author_association or "",
+                author_login=(getattr(comment_user, "login", "") or ""),
+                sender=data.get("sender") or {},
+                raw_body=raw_body,
+                replay_repo_id=replay_repo_id,
             )
-            return {"status": "ignored", "reason": "comment on issue, not pull request"}
         pr_number = comment_payload.issue.number
         comment_obj = comment_payload.comment
         repo_owner = comment_payload.repository.owner.login
