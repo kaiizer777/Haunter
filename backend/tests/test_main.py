@@ -28,6 +28,22 @@ async def test_health_check(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_health_exposes_stranded_run_metrics(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """#158 repro: /health must expose pending-run age/count for alerts."""
+    from datetime import datetime, timezone
+
+    async def _fake_ages() -> list:
+        return [60.0, 5 * 3600.0]
+
+    monkeypatch.setattr("main._query_active_run_ages", _fake_ages, raising=False)
+    response = await client.get("/health")
+    assert response.status_code == 200
+    runs = response.json()["runs"]
+    assert runs["active_count"] == 2
+
+
 async def test_sandbox_health_default_github_actions(client: httpx.AsyncClient):
     """GET /health/sandbox returns 200 with github_actions provider details."""
     response = await client.get("/health/sandbox")
