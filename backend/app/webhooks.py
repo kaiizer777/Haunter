@@ -36,7 +36,10 @@ dispatched through a durable, independent audit queue (never git push / PR creat
    verification, each delivery consumes one budget unit from a sliding-window
    bucket keyed `repo-full-name|sender-login`; over-budget senders get 429 +
    Retry-After before any routing or pipeline work, while legitimate
-   deliveries pass through. In-memory per process (see _WEBHOOK_RATE_BUCKETS).
+   deliveries pass through. The buckets live in the pluggable store in
+   app.services.rate_limit, selected by settings.webhook_rate_limit_backend —
+   module-level state here would be per Lambda execution environment, which is
+   what made the control ~10x weaker than configured.
 """
 
 import asyncio
@@ -48,9 +51,7 @@ import hmac
 import json
 import logging
 import re
-import time
 import uuid
-from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Optional
 
@@ -95,6 +96,7 @@ from app.services.followup_commands import (
     parse_followup_command,
 )
 from app.services.repo_settings import get_repo_settings
+from app.services.rate_limit import consume_rate_limit, reset_rate_limit_backend
 from app.services.review_orchestrator import (
     REVIEW_STATUS_COMPLETED,
     REVIEW_STATUS_SUPPRESSED,
@@ -133,18 +135,17 @@ _REPLAY_COOLDOWN_SECONDS = 30
 # misconfigured repo or malicious sender flooding deliveries cannot saturate
 # the orchestrator while legitimate deliveries pass through.
 #
-# In-memory and therefore per-process: each Lambda execution environment (or
-# dev server worker) tracks its own buckets. That is sufficient for loop
-# protection — a looping sender hits every instance it talks to — without a
-# new dependency (no Redis) or a hot DB write on every delivery. Buckets are
-# keyed `repo-full-name|sender-login` (lowercased, length-bounded) and hold
-# monotonic timestamps of recent accepted deliveries; empty buckets are
-# pruned on touch and the table is capped so distinct attacker-chosen keys
-# cannot grow memory without bound (oldest bucket evicted first).
-_WEBHOOK_RATE_MAX_BUCKETS = 10_000
+# The buckets themselves live behind the pluggable store in
+# app.services.rate_limit, NOT in module state: under Lambda every execution
+# environment gets its own module globals, so a module-level limiter enforced
+# `reserved_concurrent_executions` times the configured budget (10x on the
+# current 10-concurrency deployment) and a cold start reset every bucket.
+# settings.webhook_rate_limit_backend picks the store; infra/aws sets it to the
+# shared one on the orchestrator function.
+#
+# What stays here is the key builder, which must stay pure and synchronous: it
+# runs on the raw body before any JSON parse and must never raise.
 _WEBHOOK_RATE_KEY_MAX_CHARS = 200
-_WEBHOOK_RATE_BUCKETS: dict[str, deque[float]] = {}
-_WEBHOOK_RATE_LOCK = asyncio.Lock()
 
 # Decision reasons for a delivery that does not resolve to exactly one repos row.
 # Kept as two distinct strings because they are two different operational
@@ -903,33 +904,27 @@ async def _consume_webhook_rate_limit(
     Returns 0 when the delivery is allowed (and records it), otherwise the
     seconds until the oldest entry leaves the window — the caller's
     `Retry-After`. A non-positive budget or window disables throttling (fail
-    open for misconfiguration, never fail closed on legitimate traffic).
-    `now` is a monotonic timestamp override for deterministic tests only.
+    open for misconfiguration, never fail closed on legitimate traffic), and
+    that check happens HERE rather than inside a backend so it costs nothing
+    and cannot be bypassed by whichever store is deployed.
+    `now` is a clock override for deterministic tests only.
     """
     maximum = settings.webhook_rate_limit_max_deliveries
     window = settings.webhook_rate_limit_window_seconds
     if maximum <= 0 or window <= 0:
         return 0
-    current = now if now is not None else time.monotonic()
-    async with _WEBHOOK_RATE_LOCK:
-        bucket = _WEBHOOK_RATE_BUCKETS.get(key)
-        if bucket is None:
-            if len(_WEBHOOK_RATE_BUCKETS) >= _WEBHOOK_RATE_MAX_BUCKETS:
-                _WEBHOOK_RATE_BUCKETS.pop(next(iter(_WEBHOOK_RATE_BUCKETS)))
-            bucket = _WEBHOOK_RATE_BUCKETS[key] = deque()
-        cutoff = current - window
-        while bucket and bucket[0] <= cutoff:
-            bucket.popleft()
-        if len(bucket) >= maximum:
-            retry_after = int(bucket[0] + window - current) + 1
-            return max(1, retry_after)
-        bucket.append(current)
-        return 0
+    return await consume_rate_limit(
+        settings.webhook_rate_limit_backend,
+        key,
+        maximum=maximum,
+        window=window,
+        now=now,
+    )
 
 
 def _reset_webhook_rate_limiter() -> None:
     """Clear all throttle buckets. Test hook only — production paths never call it."""
-    _WEBHOOK_RATE_BUCKETS.clear()
+    reset_rate_limit_backend()
 
 
 def _truncate_reason(reason: Any) -> Optional[str]:
