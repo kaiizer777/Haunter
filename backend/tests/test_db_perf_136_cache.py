@@ -143,19 +143,35 @@ async def test_provider_config_overwrite_keeps_other_live_entries():
     assert "hosting_provider" in _cfg_cache
 
 
-def test_invalidate_provider_cache_still_holds_both_live_keys():
+@pytest.mark.asyncio
+async def test_cap_allows_both_real_keys_to_coexist():
     """The cap must never be the reason a live key disappears.
 
-    ``invalidate_provider_cache()`` must be able to hold both real config
-    keys simultaneously (test_hosting.py seeds exactly 2 and asserts
-    len == 2), which breaks if the cap drops below the keyspace size.
+    ``get_active_hosting_provider()`` and ``get_active_sandbox_provider()``
+    read their keys independently, so a cap below the 2-key keyspace would
+    make each read evict the key the other one just cached — the cache could
+    then never hit. Driving both real keys through the store path (rather than
+    seeding ``_cfg_cache`` directly) is what makes this a test of the cap: a
+    seed-and-assert-length check would pass even with the cap at 1.
     """
     assert CFG_MAXSIZE >= 2
 
     invalidate_provider_cache()
-    _cfg_cache["hosting_provider"] = ("aws", 9999.0)
-    _cfg_cache["sandbox_provider"] = ("aws", 9999.0)
-    assert len(_cfg_cache) == 2
+    mock_row = MagicMock()
+    mock_row.value = "aws"
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_row
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = mock_result
 
-    invalidate_provider_cache()
-    assert len(_cfg_cache) == 0
+    with patch(
+        "app.db.async_session_maker",
+        return_value=_mock_session_ctx(mock_session),
+    ):
+        await _get_provider_config("sandbox_provider", "aws")
+        await _get_provider_config("hosting_provider", "aws")
+
+    # The second store must not have evicted the first key.
+    assert len(_cfg_cache) == 2
+    assert "sandbox_provider" in _cfg_cache
+    assert "hosting_provider" in _cfg_cache

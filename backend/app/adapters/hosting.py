@@ -62,8 +62,9 @@ _cfg_cache: dict[str, tuple[str, float]] = {}
 _CACHE_TTL: float = 60.0
 # Keyspace is 2 (hosting_provider / sandbox_provider), so 8 leaves room for
 # new literal config keys without implying a cardinality that cannot exist.
-# Must stay >= 2: invalidate_provider_cache() must still be able to hold both
-# live keys at once.
+# Must stay >= 2: get_active_hosting_provider() and get_active_sandbox_provider()
+# read their respective keys independently, so a cap of 1 would make each read
+# evict the key the other one just cached and the cache could never hit.
 _CFG_CACHE_MAXSIZE: int = 8
 
 _ALLOWED_PROVIDERS: frozenset[str] = frozenset({"aws"})
