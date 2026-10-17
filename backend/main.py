@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from app.auth import router as auth_router
 from app.config import settings
-from app.db import async_session_maker
+from app import db as db_module
 from app.models import Run
 from app.limiter import limiter
 from app.repos import router as repos_router
@@ -90,7 +90,7 @@ async def _query_active_run_ages() -> Optional[list]:
     """
     try:
         async with asyncio.timeout(_HEALTH_DB_TIMEOUT_SECONDS):
-            async with async_session_maker() as session:
+            async with db_module.async_session_maker() as session:
                 result = await session.execute(
                     select(Run.created_at).where(
                         Run.status.in_(_ACTIVE_RUN_STATUSES)

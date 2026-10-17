@@ -107,7 +107,7 @@ async def test_query_active_run_ages_never_raises(
     def _raising_factory(*args: object, **kwargs: object) -> object:
         raise TimeoutError("database unreachable")
 
-    monkeypatch.setattr(main, "async_session_maker", _raising_factory)
+    monkeypatch.setattr("app.db.async_session_maker", _raising_factory)
     assert await main._query_active_run_ages() is None
 
 
