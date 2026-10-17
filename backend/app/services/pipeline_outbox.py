@@ -1,0 +1,107 @@
+"""Pipeline-outbox sweeper (#157).
+
+Root cause it closes: the webhook commits the ``Run`` row as ``pending``
+*before* the fire-and-forget async self-invoke (``AWSHostingAdapter`` →
+``boto3.lambda.invoke(InvocationType='Event')``). A refused/crashed
+self-invoke leaves the run accepted-but-never-executed: still ``pending``,
+with no recovery path and nothing that ever re-scans for it.
+
+This module is that re-scan. A periodic EventBridge trigger (see
+``backend/pipeline_outbox_handler.py`` + ``infra/aws/lambda.tf``) calls
+:func:`sweep_stale_pending_runs`, which:
+
+* redrives ``pending`` runs older than ``stale_after_s`` via the hosting
+  adapter (CAS-claimed first, so a concurrently starting child wins);
+* marks ``pending`` runs older than ``exhaust_after_s`` as ``error`` with a
+  ``failure_reason`` (exhausted — bounds redrives when the child keeps
+  crashing post-accept);
+* marks a run ``error`` when its redrive raises instead of leaving it
+  ``pending``.
+
+Guarantee: no run stays ``pending`` past ``exhaust_after_s`` without either
+executing (child moves it past ``pending``) or being explicitly failed here.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable, Optional
+from uuid import UUID
+
+logger = logging.getLogger(__name__)
+
+#: Default: a pending run older than this never started and is redriven.
+DEFAULT_STALE_AFTER_S: float = 300.0
+#: Default: a pending run older than this is exhausted (failed, not redriven).
+DEFAULT_EXHAUST_AFTER_S: float = 3600.0
+#: Upper bound on rows claimed per sweep so one tick cannot stampede Lambda.
+DEFAULT_SWEEP_LIMIT: int = 100
+
+FAILURE_REASON_EXHAUSTED = "pipeline outbox exhausted: accepted but never executed"
+FAILURE_REASON_REDRIVE_FAILED = "pipeline outbox redrive failed"
+
+
+@dataclass
+class PipelineOutboxSummary:
+    """Outcome of one :func:`sweep_stale_pending_runs` tick."""
+
+    scanned: int = 0
+    redriven: list[str] = field(default_factory=list)
+    exhausted: list[str] = field(default_factory=list)
+    skipped: int = 0
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+async def _default_session_factory():
+    from app.db import async_session_maker
+
+    return async_session_maker()
+
+
+async def _default_adapter_factory():
+    from app.adapters.hosting import get_hosting_adapter
+
+    return await get_hosting_adapter()
+
+
+async def sweep_stale_pending_runs(
+    session_factory: Optional[Callable[[], Any]] = None,
+    adapter_factory: Optional[Callable[[], Awaitable[Any]]] = None,
+    *,
+    stale_after_s: float = DEFAULT_STALE_AFTER_S,
+    exhaust_after_s: float = DEFAULT_EXHAUST_AFTER_S,
+    limit: int = DEFAULT_SWEEP_LIMIT,
+    now: Optional[datetime] = None,
+) -> PipelineOutboxSummary:
+    """Scan for stale ``pending`` runs; redrive them or mark them exhausted.
+
+    ``session_factory`` / ``adapter_factory`` are seams for hermetic tests;
+    production passes nothing and the real DB session + hosting adapter are
+    resolved lazily (mirrors ``app.services.audit_pipeline``).
+    """
+    from app.models import Run
+    from sqlalchemy import select
+
+    current = now or _utcnow()
+    stale_cutoff = current - timedelta(seconds=stale_after_s)
+
+    make_session = session_factory or _default_session_factory
+    summary = PipelineOutboxSummary()
+    async with make_session() as db:
+        result = await db.execute(
+            select(Run)
+            .where(Run.status == "pending", Run.created_at <= stale_cutoff)
+            .order_by(Run.created_at)
+            .limit(limit)
+        )
+        stale_runs = list(result.scalars().all())
+        summary.scanned = len(stale_runs)
+        logger.info(
+            "pipeline_outbox: sweep found %d stale pending runs", summary.scanned
+        )
+    return summary
