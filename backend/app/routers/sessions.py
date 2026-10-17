@@ -32,7 +32,7 @@ from typing import Annotated, Any, AsyncGenerator, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth import get_current_user
@@ -337,7 +337,9 @@ async def list_sessions(
     return SessionListOut(sessions=out, total=total)
 
 
-async def _is_turn_active_elsewhere(db: AsyncSession, session_id: uuid.UUID) -> bool:
+async def _is_turn_active_elsewhere(
+    db: AsyncSession | AsyncConnection, session_id: uuid.UUID
+) -> bool:
     """
     Probe whether another backend worker currently holds this session's row lock.
 
@@ -593,8 +595,9 @@ _SSE_LIVENESS_PROBE_INTERVAL_S = 5.0
 #: Upper bound on the idle backoff applied to the poll sleep. Consecutive empty
 #: ticks back off exponentially from _SSE_POLL_INTERVAL_S (1s, 2s, 4s, 8s, ...)
 #: up to this cap, mirroring the audit dispatch worker's idle backoff, so an idle
-#: open tab issues ~0.07 queries/sec instead of 1/sec. Every tick opens a fresh
-#: DB session (NullPool), so the tick rate is the connection-churn rate. The
+#: open tab issues ~0.07 queries/sec instead of 1/sec. Every tick reuses the
+#: one held stream connection (#165: no fresh session per tick under NullPool),
+#: so the tick rate is only the query rate, not the connection-churn rate. The
 #: cost is bounded event latency: an event committed while the stream is fully
 #: backed off can wait up to this cap before it is observed.
 _SSE_IDLE_BACKOFF_MAX_S: float = 15.0
@@ -642,8 +645,13 @@ async def _stream_from_db(
        (explicit ``timeout_s`` wins; otherwise the invoke's remaining
        time minus a safety margin, 900s fallback outside Lambda).
 
-    Each poll/probe/drain iteration uses a short-lived session, ensuring database
-    connections are never held idle across sleeps or stream yields (vital under NullPool).
+    The whole stream holds a single shared engine connection (issue #165).
+    Under ``NullPool`` every fresh session checkout is a brand-new physical
+    connection, so the old session-per-tick pattern churned one TCP/TLS
+    handshake per poll. One held connection keeps the steady-state count flat
+    at 1; a rollback after every read batch keeps it out of
+    idle-in-transaction across sleeps and client yields, while READ COMMITTED
+    still observes rows committed after the stream started.
     """
     from app.db import engine as _poll_engine
     from app.models import SessionStreamEvent
