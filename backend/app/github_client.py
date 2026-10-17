@@ -1237,6 +1237,100 @@ async def fetch_pull_request(
     return response.json()
 
 
+async def fetch_issue(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    token: Optional[str] = None,
+    allow_global_token: bool = True,
+) -> dict[str, Any]:
+    """
+    Fetch a single GitHub issue (title + body) via the Issues API.
+    GET /repos/{owner}/{repo}/issues/{issue_number}
+
+    Reads only. ``GET /issues/{n}`` is the one endpoint that returns an issue's
+    own content under the App permissions Haunter installs with
+    (``contents:write``, ``pull_requests:write``, ``checks:read``,
+    ``actions:read``); the sibling ``/issues/{n}/comments`` endpoint is not, so
+    there is deliberately no comment-fetching counterpart here.
+
+    Mirrors :func:`fetch_pull_request` exactly — same bounded read, same error
+    ladder, same header construction — because a caller that handles one of
+    those failures must handle these identically, and a second shape would be a
+    second thing to get wrong. A rate limit is surfaced as
+    :class:`GitHubRateLimitError` rather than slept through, so the caller can
+    decide: the review pipeline runs under a 300s wall-clock bound it cannot
+    afford to spend on a backoff.
+
+    Raises:
+        GitHubNetworkError: Connection failure / timeout.
+        GitHubResponseLimitError: Response past ``MAX_API_RESPONSE_BYTES``.
+        GitHubResourceNotFoundError: 404 — the issue was deleted, or is in a
+            repository this installation cannot see.
+        GitHubRateLimitError: 401/403 whose body names a rate limit.
+        GitHubAuthError: 401/403 for any other reason.
+        GitHubClientError: Any other error status, or a 200 whose body is not
+            an issue object.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/issues/{quote(str(issue_number), safe='')}"
+    )
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await _bounded_get(
+                client,
+                url,
+                headers=headers,
+                max_bytes=MAX_API_RESPONSE_BYTES,
+            )
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error fetching issue %s/%s #%s",
+                owner,
+                repo,
+                issue_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Issue not found for {owner}/{repo} #{issue_number}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    data = response.json()
+    # A 200 is not proof of a payload. GitHub answers a GraphQL-shaped
+    # `{"errors": [...]}` body with 200 on some proxies and gateways, and a
+    # bare `{}` is what a truncated or wrong-content-type response decodes to;
+    # both would otherwise sail through as "an issue with no title".
+    if isinstance(data, dict) and data.get("errors"):
+        raise GitHubClientError("GitHub returned an error envelope for fetch-issue")
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("html_url"), str)
+        or not isinstance(data.get("number"), int)
+        or isinstance(data.get("number"), bool)
+    ):
+        raise GitHubClientError("Unexpected fetch-issue response structure from GitHub API")
+    return data
+
+
 async def create_pr_review(
     owner: str,
     repo: str,
