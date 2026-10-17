@@ -73,8 +73,8 @@ async def sweep_stale_pending_runs(
     session_factory: Optional[Callable[[], Any]] = None,
     adapter_factory: Optional[Callable[[], Awaitable[Any]]] = None,
     *,
-    stale_after_s: float = DEFAULT_STALE_AFTER_S,
-    exhaust_after_s: float = DEFAULT_EXHAUST_AFTER_S,
+    stale_after_s: Optional[float] = None,
+    exhaust_after_s: Optional[float] = None,
     limit: int = DEFAULT_SWEEP_LIMIT,
     now: Optional[datetime] = None,
 ) -> PipelineOutboxSummary:
@@ -82,10 +82,20 @@ async def sweep_stale_pending_runs(
 
     ``session_factory`` / ``adapter_factory`` are seams for hermetic tests;
     production passes nothing and the real DB session + hosting adapter are
-    resolved lazily (mirrors ``app.services.audit_pipeline``).
+    resolved lazily (mirrors ``app.services.audit_pipeline``). ``None``
+    horizons resolve from ``app.config.settings`` so operators tune them via
+    ``PIPELINE_PENDING_TIMEOUT_S`` / ``PIPELINE_PENDING_EXHAUST_AFTER_S``.
     """
     from app.models import Run
     from sqlalchemy import select
+
+    if stale_after_s is None or exhaust_after_s is None:
+        from app.config import settings
+
+        if stale_after_s is None:
+            stale_after_s = settings.pipeline_pending_timeout_s
+        if exhaust_after_s is None:
+            exhaust_after_s = settings.pipeline_pending_exhaust_after_s
 
     current = now or _utcnow()
     stale_cutoff = current - timedelta(seconds=stale_after_s)
