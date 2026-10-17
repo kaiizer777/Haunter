@@ -404,9 +404,15 @@ def _invoke_lambda_async(function_name: str, payload: bytes) -> None:
 
 async def get_hosting_adapter(provider: str | None = None) -> AWSHostingAdapter:
     """
-    Return the appropriate HostingAdapter for the current HOSTING_PROVIDER.
-    Provider value is hot-switchable via DB (60s TTL cache).
+    Return the adapter for `provider`, or the active HOSTING_PROVIDER when omitted.
+
+    When omitted, the provider is read live (DB ``hosting_provider`` key with
+    60s TTL cache, falling back to ``settings.hosting_provider``), so a DB
+    switch takes effect without redeploy. Only "aws" is supported today;
+    any other resolved value raises ValueError.
     """
     if provider is None:
-        await _get_provider_config("hosting_provider", "aws")
+        provider = await get_active_hosting_provider()
+    if provider.strip().lower() not in _ALLOWED_PROVIDERS:
+        raise ValueError(f"unsupported hosting provider: {provider!r}")
     return AWSHostingAdapter()
