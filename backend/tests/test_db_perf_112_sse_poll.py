@@ -326,29 +326,39 @@ def test_idle_delay_doubles_then_clamps_to_cap() -> None:
 
 @pytest.mark.asyncio
 async def test_idle_stream_sessions_do_not_scale_with_wall_clock() -> None:
-    """A 900s idle resume opens a bounded number of sessions, not one per second.
+    """A 900s idle resume holds one connection and bounds its queries.
 
     This is AC1. Pre-#112 the loop slept a flat `_SSE_POLL_INTERVAL_S` and
-    opened a session per tick, so an idle tab cost >1 session/sec for the whole
-    15-minute Lambda window. The backoff must keep that cost proportional to
-    `_SSE_IDLE_BACKOFF_MAX_S` instead, which is what makes it bounded.
+    queried once per tick, so an idle tab cost >1 query/sec for the whole
+    15-minute Lambda window — and pre-#165 every tick also opened a fresh
+    session, churning a physical connection per poll under ``NullPool``.
+    The backoff keeps the query cost proportional to
+    `_SSE_IDLE_BACKOFF_MAX_S` instead, and the held connection keeps the
+    connection cost flat at 1, which is what makes both bounded.
     """
-    sessions_backoff, delays_backoff, _ = await _drive_idle_stream([])
-    sessions_flat, delays_flat, _ = await _drive_idle_stream([], flat_cadence=True)
+    connects_backoff, queries_backoff, delays_backoff, _ = await _drive_idle_stream([])
+    connects_flat, queries_flat, delays_flat, _ = await _drive_idle_stream(
+        [], flat_cadence=True
+    )
 
     # Both runs really did idle for the whole 900s window.
     assert sum(delays_flat) >= _IDLE_WINDOW_S
     assert sum(delays_backoff) >= _IDLE_WINDOW_S
 
-    # The defect being pinned: ~1.2 sessions/sec while idle.
-    assert sessions_flat > _IDLE_WINDOW_S / _SSE_POLL_INTERVAL_S
+    # #165: one held connection per stream no matter the cadence — the tick
+    # rate is the query rate, never the connection-churn rate.
+    assert connects_flat == 1
+    assert connects_backoff == 1
 
-    # Bounded now: ~366 sessions (~3x fewer) and ~0.4 sessions/sec. The floor
+    # The defect being pinned: ~1.2 queries/sec while idle on a flat cadence.
+    assert queries_flat > _IDLE_WINDOW_S / _SSE_POLL_INTERVAL_S
+
+    # Bounded now: ~366 queries (~3x fewer) and ~0.4 queries/sec. The floor
     # is the probe cadence itself — one poll plus one probe per 5s — which is
     # what buys the ~5s dead-worker recovery (#148) instead of ~75s.
-    assert sessions_backoff <= sessions_flat // 2
-    assert sessions_backoff <= 400
-    assert sessions_backoff / _IDLE_WINDOW_S <= 0.5
+    assert queries_backoff <= queries_flat // 2
+    assert queries_backoff <= 400
+    assert queries_backoff / _IDLE_WINDOW_S <= 0.5
 
     # The reduction still comes from real backoff, not from a smaller constant
     # sleep: the ramp is intact, then the probe cap takes over.
