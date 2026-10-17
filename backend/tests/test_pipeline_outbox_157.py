@@ -107,7 +107,7 @@ def _session_factory(session):
     return _factory
 
 
-async def _adapter_factory(adapter):
+def _adapter_factory(adapter):
     async def _factory():
         return adapter
 
