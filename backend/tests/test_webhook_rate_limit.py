@@ -123,3 +123,19 @@ async def test_webhook_throttle_is_per_repo(
     for _ in range(2):
         resp = await _post_ping(client, "other-org", "other-repo", "same-sender")
         assert resp.status_code == 200
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_webhook_rate_window_expiry(monkeypatch: pytest.MonkeyPatch):
+    """Budget refills once the oldest entry slides out of the window."""
+    from app.webhooks import _consume_webhook_rate_limit
+
+    monkeypatch.setattr(settings, "webhook_rate_limit_max_deliveries", 2)
+    monkeypatch.setattr(settings, "webhook_rate_limit_window_seconds", 10)
+
+    assert await _consume_webhook_rate_limit("exp-org/exp-repo|s", now=1000.0) == 0
+    assert await _consume_webhook_rate_limit("exp-org/exp-repo|s", now=1001.0) == 0
+    retry_after = await _consume_webhook_rate_limit("exp-org/exp-repo|s", now=1002.0)
+    assert retry_after == 9
+    assert await _consume_webhook_rate_limit("exp-org/exp-repo|s", now=1011.0) == 0
