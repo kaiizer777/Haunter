@@ -127,6 +127,32 @@ _RETRY_MAX_ATTEMPTS: int = 3
 _RETRY_BACKOFF_BASE_SECONDS: float = 1.0
 _RETRY_BACKOFF_CAP_SECONDS: float = 10.0
 
+# Poll backoff between check-runs polls (issue #163). The base interval comes
+# from settings.github_sandbox_poll_interval_seconds; the delay grows
+# geometrically per poll and is capped so a long window stays responsive
+# without hammering the Actions API while a run sits queued.
+_POLL_BACKOFF_FACTOR: float = 1.5
+_POLL_MAX_INTERVAL_SECONDS: float = 60.0
+
+
+def _poll_delay_seconds(attempt: int, base_interval: float) -> float:
+    """Delay before poll ``attempt`` (0-based) with exponential backoff.
+
+    Returns ``base_interval`` for the first poll, growing by
+    ``_POLL_BACKOFF_FACTOR`` per attempt up to ``_POLL_MAX_INTERVAL_SECONDS``.
+    Non-positive bases fall back to 10s so a misconfigured interval can
+    never busy-loop the Actions API.
+    """
+    try:
+        base = float(base_interval)
+    except (TypeError, ValueError):
+        base = 10.0
+    if base <= 0:
+        base = 10.0
+    if attempt <= 0:
+        return base
+    return min(base * (_POLL_BACKOFF_FACTOR**attempt), _POLL_MAX_INTERVAL_SECONDS)
+
 # File path extractor for the patch-fallback language detection.
 _FILE_PATH_RE: re.Pattern[str] = re.compile(r"^\+\+\+\s+(?:[ab]/)?(\S+)")
 
