@@ -108,6 +108,12 @@ sequenceDiagram
 
 ---
 
+### 2.3 Manual Replay / Operator Redrive (Issue #159)
+
+A run that fails or exhausts its fix attempts never needs a dummy commit to run again. `POST /runs/{run_id}/retry` (`backend/app/routers/traces.py`) clones a settled run into a fresh `pending` child linked by `parent_run_id` + `is_retry_child`, then re-dispatches the pipeline through the hosting adapter (async self-invoke on Lambda, `BackgroundTasks` locally) and returns the child with HTTP 201.
+
+The child copies only the tenant scope (`repo_id`) and failure coordinates (`head_sha`/`head_branch`). Every pipeline-owned field resets: diagnosis summary, PR coordinates, final summary, failure reason, and any fallback tracking issue. `github_run_id`/`github_delivery_id` stay NULL — the child corresponds to no new GitHub delivery, so a fabricated id can never collide with a real delivery's UNIQUE idempotency key. The source run is never mutated, preserving its audit history.
+
 ## 3. Orchestrator Engine & State Machine
 
 The orchestrator (`backend/app/orchestrator.py`) enforces a forward-only, deterministic state machine over `RunStatus`. Skipping states or reverting backwards triggers an immediate `InvalidTransitionError`.
