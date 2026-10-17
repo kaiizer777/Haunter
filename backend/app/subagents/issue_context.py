@@ -49,6 +49,7 @@ from app.llm.prompts.audit_prompts import (
     MAX_ISSUE_CONTEXT_CHARS,
     MAX_ISSUE_CROSS_REFS,
     MAX_ISSUE_CROSS_REF_TITLE_CHARS,
+    MAX_ISSUE_MENTIONS,
     MAX_ISSUE_TITLE_CHARS,
     MAX_LINKED_ISSUES,
     MAX_REPO_FULL_NAME_CHARS,
@@ -424,6 +425,100 @@ def cross_references_from_timeline(
 
 
 @dataclass(frozen=True)
+class IssueMention:
+    """A number typed in the issue's own text, with no type attached.
+
+    The honest shape for the regex path. A bare ``#12`` in prose may be an
+    issue, a pull request, a line of a stack trace or nothing at all, and this
+    module has no requests left to find out — the cross-reference budget is
+    already spent on the timeline, which is the authoritative source. So the
+    mention is rendered as a bare number and labelled unresolved, rather than
+    resolved by a guess: a wrong type in the prompt is worse than a missing one,
+    because nothing downstream can tell which it was handed.
+    """
+
+    number: int
+    #: ``owner/name`` for a qualified mention, else ``""`` (this repository).
+    repo: str = ""
+
+
+#: A textual mention: an optional ``owner/repo`` qualifier and a ``#N``.
+#:
+#: The lookbehind rejects a ``#`` that continues an existing token — inside a
+#: word (``foo#12``), after a path separator (``/issues#12``, a URL fragment),
+#: or straight after another ``#`` (``## 12``, a Markdown heading). Without it a
+#: numbered heading is a reference, which is exactly the false positive this
+#: pass is documented to have.
+#:
+#: The trailing lookahead is the other half: without it ``#1234`` inside a
+#: longer token is truncated to ``#123`` and reported as a reference to the
+#: wrong number, which is worse than not reporting it at all.
+_MENTION_RE = re.compile(
+    r"(?<![\w/#])"
+    r"(?:(?P<owner>[A-Za-z0-9][A-Za-z0-9._-]*)/(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*))?"
+    r"#[ \t]*(?P<number>[0-9]+)"
+    r"(?![\w])"
+)
+
+
+def extract_textual_mentions(
+    texts: Sequence[object],
+    *,
+    limit: int = MAX_ISSUE_MENTIONS,
+    exclude: Sequence[int] = (),
+) -> tuple[tuple[IssueMention, ...], int]:
+    """Find ``#N`` / ``owner/repo#N`` mentions in issue text and comments.
+
+    The **supplementary** half of the cross-reference strategy. It exists
+    because the timeline is not exhaustive: GitHub records a link as a
+    cross-reference event only when it can attribute one, so a plain sentence
+    naming another issue by number never appears there, and a review that read
+    only the timeline would miss it entirely.
+
+    It is also the half that produces false positives, and that is accepted
+    rather than engineered away. ``#1234`` in prose is a reference more often
+    than not, but it can be a port, a line number or a hex literal. The bounds
+    here are the whole mitigation: a cap on how many are rendered, a label
+    saying the type was not resolved, and no attempt to be clever about what
+    ``#N`` might mean.
+
+    ``exclude`` drops numbers already accounted for — the issue's own number,
+    the pull request under review, and every number the timeline resolved — so
+    one reference is never shown twice under two different confidences.
+    Excluded numbers are **not** counted as dropped: they are represented, by
+    something better, not withheld.
+
+    Returns ``(mentions, dropped)``.
+    """
+    excluded = {number for number in exclude if isinstance(number, int)}
+    mentions: list[IssueMention] = []
+    seen: set[tuple[str, int]] = set()
+    for text in texts:
+        if not isinstance(text, str) or not text:
+            continue
+        for match in _MENTION_RE.finditer(text):
+            digits = match.group("number")
+            if not digits or len(digits) > _MAX_ISSUE_NUMBER_DIGITS:
+                continue
+            number = int(digits)
+            repo_qualifier = match.group("repo")
+            repo = (
+                f"{match.group('owner')}/{repo_qualifier}" if repo_qualifier else ""
+            )
+            # Only *this* repository's numbers can collide with `exclude`: a
+            # qualified mention names a different repository, where the same
+            # number is a different thing entirely.
+            if not repo and number in excluded:
+                continue
+            key = (repo.lower(), number)
+            if key in seen:
+                continue
+            seen.add(key)
+            mentions.append(IssueMention(number=number, repo=repo))
+    return tuple(mentions[:limit]), max(0, len(mentions) - limit)
+
+
+@dataclass(frozen=True)
 class IssueEnrichment:
     """Everything read for an issue beyond its title and body.
 
@@ -446,6 +541,8 @@ class IssueEnrichment:
     cross_references: tuple[IssueCrossReference, ...] = ()
     cross_references_omitted: int = 0
     timeline_truncated: bool = False
+    mentions: tuple[IssueMention, ...] = ()
+    mentions_omitted: int = 0
 
     @property
     def is_empty(self) -> bool:
@@ -455,6 +552,7 @@ class IssueEnrichment:
             and not self.discussion_truncated
             and not self.cross_references
             and not self.timeline_truncated
+            and not self.mentions
         )
 
 
@@ -638,6 +736,24 @@ def _render_issue(issue: LinkedIssue) -> str:
             enrichment.cross_references_omitted,
             beyond_window=enrichment.timeline_truncated,
         )
+        if disclosure:
+            lines.append(disclosure)
+
+    if enrichment.mentions:
+        lines.extend(
+            (
+                "",
+                "Also mentioned in this issue's text. Whether each number is an "
+                "issue or a pull request was not resolved, and a bare #N in "
+                "prose may be unrelated:",
+            )
+        )
+        for mention in enrichment.mentions:
+            target = (
+                f"{mention.repo}#{mention.number}" if mention.repo else f"#{mention.number}"
+            )
+            lines.append(f"- {target}")
+        disclosure = _truncation_disclosure("mentions", enrichment.mentions_omitted)
         if disclosure:
             lines.append(disclosure)
 
