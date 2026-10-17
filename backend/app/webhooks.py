@@ -37,9 +37,9 @@ dispatched through a durable, independent audit queue (never git push / PR creat
    bucket keyed `repo-full-name|sender-login`; over-budget senders get 429 +
    Retry-After before any routing or pipeline work, while legitimate
    deliveries pass through. The buckets live in the pluggable store in
-   app.services.rate_limit — module-level state here would be per Lambda
-   execution environment, which is what made the control ~10x weaker than
-   configured.
+   app.services.rate_limit, selected by settings.webhook_rate_limit_backend —
+   module-level state here would be per Lambda execution environment, which is
+   what made the control ~10x weaker than configured.
 """
 
 import asyncio
@@ -96,7 +96,7 @@ from app.services.followup_commands import (
     parse_followup_command,
 )
 from app.services.repo_settings import get_repo_settings
-from app.services.rate_limit import get_rate_limit_backend, reset_rate_limit_backend
+from app.services.rate_limit import consume_rate_limit, reset_rate_limit_backend
 from app.services.review_orchestrator import (
     REVIEW_STATUS_COMPLETED,
     REVIEW_STATUS_SUPPRESSED,
@@ -140,6 +140,8 @@ _REPLAY_COOLDOWN_SECONDS = 30
 # environment gets its own module globals, so a module-level limiter enforced
 # `reserved_concurrent_executions` times the configured budget (10x on the
 # current 10-concurrency deployment) and a cold start reset every bucket.
+# settings.webhook_rate_limit_backend picks the store; infra/aws sets it to the
+# shared one on the orchestrator function.
 #
 # What stays here is the key builder, which must stay pure and synchronous: it
 # runs on the raw body before any JSON parse and must never raise.
@@ -911,8 +913,12 @@ async def _consume_webhook_rate_limit(
     window = settings.webhook_rate_limit_window_seconds
     if maximum <= 0 or window <= 0:
         return 0
-    return await get_rate_limit_backend().consume(
-        key, maximum=maximum, window=window, now=now
+    return await consume_rate_limit(
+        settings.webhook_rate_limit_backend,
+        key,
+        maximum=maximum,
+        window=window,
+        now=now,
     )
 
 
