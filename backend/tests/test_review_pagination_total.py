@@ -459,7 +459,7 @@ async def test_route_does_not_drop_rows_the_database_returned(
     data = resp.json()
 
     # Issue #116: the severity predicate lives in SQL alone (single source
-    # of truth) — there is no Python post-filter. The scripted session
+    # of truth) â€” there is no Python post-filter. The scripted session
     # returns rows verbatim without evaluating the SQL predicate, so all 15
     # rows it was handed reach the client. Against real Postgres the SQL
     # predicate (asserted textually in tests 1, 2 and 4) decides membership.

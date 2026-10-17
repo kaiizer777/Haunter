@@ -26,6 +26,7 @@ The eval/batch tests below FAIL against the pre-fix code (fan-out raises
 
 from __future__ import annotations
 
+import operator
 import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
@@ -33,6 +34,7 @@ from typing import Any, AsyncIterator, Optional
 import pytest
 import respx
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.operators import eq, in_op
 from sqlalchemy.sql.selectable import Select
 
 from app.config import settings
@@ -105,6 +107,44 @@ def _review(
     )
 
 
+def _batch_scope(statement: Any) -> tuple[set[uuid.UUID] | None, uuid.UUID | None]:
+    """Extract the route's own predicates: requested ids + required owner.
+
+    The fake applies ONLY the predicates the statement actually carries. A
+    route regression that drops the ownership scoping therefore surfaces the
+    cross-tenant row (and the test below fails) instead of being masked by
+    the fixture pre-filtering it away.
+    """
+    allowed: set[uuid.UUID] | None = None
+    owner: uuid.UUID | None = None
+
+    def _visit(clause: Any) -> None:
+        nonlocal allowed, owner
+        for sub in getattr(clause, "clauses", ()):
+            _visit(sub)
+        name = getattr(getattr(clause, "left", None), "name", None)
+        op = getattr(clause, "operator", None)
+        right = getattr(clause, "right", None)
+        if name == "id" and op is in_op:
+            vals = getattr(right, "value", None)
+            if vals is not None:
+                allowed = {
+                    v if isinstance(v, uuid.UUID) else uuid.UUID(str(v))
+                    for v in vals
+                }
+        elif name == "user_id" and (op is operator.eq or op is eq):
+            val = getattr(right, "value", None)
+            if val is not None:
+                owner = (
+                    val if isinstance(val, uuid.UUID) else uuid.UUID(str(val))
+                )
+
+    whereclause = getattr(statement, "whereclause", None)
+    if whereclause is not None:
+        _visit(whereclause)
+    return allowed, owner
+
+
 class UnsupportedStatementError(AssertionError):
     """The scripted session was handed a statement shape it does not model."""
 
@@ -144,9 +184,20 @@ class _FanoutSession:
                 return FakeResult([_repo()])
             return FakeResult([_REPO_ID])
         if entity is CodeReview:
-            return FakeResult(list(self._reviews))
+            allowed_ids, required_owner = _batch_scope(statement)
+            rows = list(self._reviews)
+            if allowed_ids is not None:
+                rows = [r for r in rows if r.id in allowed_ids]
+            if required_owner is not None:
+                rows = [
+                    r
+                    for r in rows
+                    if getattr(getattr(r, "repo", None), "user_id", None)
+                    == required_owner
+                ]
+            return FakeResult(rows)
         if isinstance(statement, Select) and self._aggregate_row is not None:
-            if len(statement.selected_columns) >= 10:
+            if len(statement.selected_columns) == 12:
                 return FakeResult([self._aggregate_row])
         if (
             isinstance(statement, Select)
@@ -467,13 +518,36 @@ async def test_batch_unowned_id_answers_null_not_404(
     make_auth_client, fanout_db
 ) -> None:
     """Unknown / other-tenant ids resolve to null so the page keeps rendering."""
-    fanout_db(_user(), reviews=[])
+    owned = _review(10, sha=_SHA_A, pr_number=77)
+    owned.repo = _repo()
+    stranger_repo = Repo(
+        id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        owner="acme",
+        name="widgets",
+        default_branch="main",
+        created_at=_FIXED_NOW,
+    )
+    # pr_number set: answered straight from the DB row with no GitHub call, so
+    # an ownership regression surfaces as PR #9 instead of hiding behind a
+    # null-from-network-failure.
+    foreign = _review(11, sha=_SHA_B, pr_number=9)
+    foreign.repo = stranger_repo
+    fanout_db(_user(), reviews=[owned, foreign])
 
+    unknown_id = uuid.uuid4()
     async with make_auth_client(_USER_ID) as ac:
-        resp = await ac.post(_BATCH_URL, json={"review_ids": [str(uuid.uuid4())]})
+        resp = await ac.post(
+            _BATCH_URL,
+            json={"review_ids": [str(owned.id), str(foreign.id), str(unknown_id)]},
+        )
 
     assert resp.status_code == 200, resp.text
-    assert list(resp.json()["associated_prs"].values()) == [None]
+    data = resp.json()["associated_prs"]
+    assert data[str(owned.id)]["number"] == 77
+    # An existing but other-tenant row must not leak: null, never its PR.
+    assert data[str(foreign.id)] is None
+    assert data[str(unknown_id)] is None
 
 
 @pytest.mark.asyncio

@@ -62,6 +62,7 @@ from typing import Any, AsyncIterator, Optional
 
 import pytest
 from sqlalchemy import Column, Select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.selectable import SelectStatementGrouping
 
 from app.db import get_db
@@ -177,6 +178,42 @@ def _matches(shape: tuple, key: tuple) -> bool:
     return shape == (entity, whole, count, where)
 
 
+def _render(statement: Any) -> str:
+    compiled = statement.compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+    )
+    return " ".join(str(compiled).split())
+
+
+def _assert_severity_in_sql(
+    session: _ScriptedSession, severity: str, *, endpoint: str
+) -> None:
+    """Both code_reviews statements (COUNT + page) must carry the predicate.
+
+    The scripted page fixture is deliberately pre-filtered, so without this
+    assertion a regression to count-all or to Python-only filtering still
+    passes: the rows look right while the SQL no longer filters. Failing
+    closed on the emitted SQL keeps the #116 single-source-of-truth contract.
+    """
+    sqls = [
+        _render(s)
+        for s in session.statements
+        if isinstance(s, Select) and "code_reviews" in _render(s)
+    ]
+    assert len(sqls) >= 2, (
+        f"{endpoint}: expected COUNT + page statements over code_reviews, "
+        f"got {len(sqls)}"
+    )
+    missing = [
+        sql for sql in sqls if "severity" not in sql or severity not in sql
+    ]
+    assert not missing, (
+        f"{endpoint}: the severity predicate is not in SQL — "
+        "filtering happens in Python (or not at all) while the fixture "
+        f"pre-filters the rows. Offending SQL: {missing[0][:400]}"
+    )
+
+
 class _ScriptedSession:
     """
     AsyncSession stand-in that answers from a shape-keyed script.
@@ -191,12 +228,14 @@ class _ScriptedSession:
     def __init__(self, script: dict[tuple, list[Any]]) -> None:
         self._script = script
         self.seen: list[tuple] = []
+        self.statements: list[Any] = []
 
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> FakeResult:
         shape = _shape(statement)
         for key, rows in self._script.items():
             if shape is not None and _matches(shape, key):
                 self.seen.append(shape)
+                self.statements.append(statement)
                 return FakeResult(list(rows))
         raise UnsupportedStatementError(
             "scripted session received a statement shape it does not model.\n"
@@ -509,7 +548,7 @@ async def test_reviews_total_counts_only_severity_matched_reviews(
     high = _code_review(repo, severity="high", risk_score=80)
     low = _code_review(repo, severity="low", risk_score=10, offset_hours=1)
 
-    use_scripted_db(
+    session = use_scripted_db(
         {
             _auth_select(): [user],
             # reviews.py:196-198 — the caller's repo ids
@@ -527,6 +566,7 @@ async def test_reviews_total_counts_only_severity_matched_reviews(
         resp = await ac.get("/reviews", params={"severity": "high"})
 
     assert resp.status_code == 200, resp.text
+    _assert_severity_in_sql(session, "high", endpoint="GET /reviews")
     data = resp.json()
 
     # Guard against the cheap fix (return no rows and a matching zero): the
@@ -560,7 +600,7 @@ async def test_repo_reviews_total_counts_only_severity_matched_reviews(
     critical = _code_review(repo, severity="critical", risk_score=95)
     medium = _code_review(repo, severity="medium", risk_score=55, offset_hours=1)
 
-    use_scripted_db(
+    session = use_scripted_db(
         {
             _auth_select(): [user],
             # reviews.py:139-141 — ownership-checked repo lookup
@@ -581,6 +621,9 @@ async def test_repo_reviews_total_counts_only_severity_matched_reviews(
         )
 
     assert resp.status_code == 200, resp.text
+    _assert_severity_in_sql(
+        session, "critical", endpoint="GET /repos/{repo_id}/reviews"
+    )
     data = resp.json()
 
     assert [r["id"] for r in data["reviews"]] == [str(critical.id)], (
