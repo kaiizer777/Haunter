@@ -843,6 +843,51 @@ def _log_webhook_decision(
         logger.info(msg)
 
 
+def _webhook_rate_limit_key(event: Any, raw_body: bytes) -> str:
+    """Bucket key `repo-full-name|sender-login` for webhook ingress throttling.
+
+    Pure and total: never raises — an unparseable body maps to the
+    `unknown-repo|unknown-sender` bucket so malformed floods are still
+    throttled instead of bypassing the limiter. Values are lowercased and
+    length-bounded so attacker-chosen keys cannot grow memory without bound
+    (truncation may merge buckets, which fails closed toward throttling).
+    The `event` is accepted for log context only; throttling is strictly
+    per-repo/per-sender per issue #161.
+    """
+    repo_full = "unknown-repo"
+    sender = "unknown-sender"
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        repo = data.get("repository")
+        if isinstance(repo, dict):
+            full = repo.get("full_name")
+            if isinstance(full, str) and full.strip():
+                repo_full = full.strip()
+            else:
+                owner = repo.get("owner")
+                owner_login = owner.get("login") if isinstance(owner, dict) else None
+                name = repo.get("name")
+                if (
+                    isinstance(owner_login, str)
+                    and isinstance(name, str)
+                    and owner_login.strip()
+                    and name.strip()
+                ):
+                    repo_full = f"{owner_login.strip()}/{name.strip()}"
+        snd = data.get("sender")
+        if isinstance(snd, dict):
+            login = snd.get("login")
+            if isinstance(login, str) and login.strip():
+                sender = login.strip()
+    key = f"{repo_full}|{sender}".lower()
+    if len(key) > _WEBHOOK_RATE_KEY_MAX_CHARS:
+        key = key[:_WEBHOOK_RATE_KEY_MAX_CHARS]
+    return key
+
+
 def _truncate_reason(reason: Any) -> Optional[str]:
     """Bound persisted reason length; attacker-influenced, never stored raw unbounded."""
     if reason is None:
