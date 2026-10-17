@@ -453,10 +453,14 @@ class IssueMention:
 #: The trailing lookahead is the other half: without it ``#1234`` inside a
 #: longer token is truncated to ``#123`` and reported as a reference to the
 #: wrong number, which is worse than not reporting it at all.
+#:
+#: No space is allowed between ``#`` and the number: GitHub autolinks ``#26``
+#: with no space, while ``# 12`` and a ``# 1 Steps`` heading are not
+#: references.
 _MENTION_RE = re.compile(
     r"(?<![\w/#])"
     r"(?:(?P<owner>[A-Za-z0-9][A-Za-z0-9._-]*)/(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]*))?"
-    r"#[ \t]*(?P<number>[0-9]+)"
+    r"#(?P<number>[0-9]+)"
     r"(?![\w])"
 )
 
