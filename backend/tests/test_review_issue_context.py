@@ -654,6 +654,22 @@ LIVE_HEAD_SHA = "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 _ISSUE_URL_RE = re.compile(r"/issues/(?P<number>[0-9]+)$")
+#: The two enrichment sub-resources. Matched before ``_ISSUE_URL_RE`` so an
+#: issue number is never read out of ``/issues/12/comments``.
+_ISSUE_COMMENTS_URL_RE = re.compile(r"/issues/(?P<number>[0-9]+)/comments$")
+_ISSUE_TIMELINE_URL_RE = re.compile(r"/issues/(?P<number>[0-9]+)/timeline$")
+
+
+def _path_of(url: str) -> str:
+    """A request URL without its query string.
+
+    Both enrichment endpoints are called with ``per_page``, so the sub-resource
+    patterns above have to be matched against the path rather than the full URL —
+    otherwise ``/issues/12/comments?per_page=15`` matches neither pattern and the
+    wire silently answers every enrichment request with an empty body, which
+    would make the whole feature look inert.
+    """
+    return url.split("?", 1)[0]
 
 
 @pytest.fixture(autouse=True)
@@ -716,6 +732,9 @@ def _github_transport(
     *,
     pr_body: str,
     issues: Optional[dict[int, Any]] = None,
+    comments: Optional[dict[int, Any]] = None,
+    timeline: Optional[dict[int, Any]] = None,
+    endless_timeline: bool = False,
 ) -> httpx.MockTransport:
     """A GitHub wire that answers only what the review pipeline asks for.
 
@@ -723,12 +742,23 @@ def _github_transport(
     raise, or is absent entirely (which answers 404 — the default for an issue
     nobody configured, so an unexpected request fails loudly instead of being
     silently served).
+
+    ``comments`` and ``timeline`` do the same for the two enrichment
+    sub-resources, defaulting to an empty 200 so a test that does not care about
+    enrichment still exercises the fetch path rather than skipping it.
+
+    ``endless_timeline`` answers every timeline page with another ``Link:
+    rel="next"`` that never terminates. It is the adversarial input for the
+    request budget: without a shared counter this is an unbounded loop.
     """
     routes = issues or {}
+    comment_routes = comments or {}
+    timeline_routes = timeline or {}
 
     def _handler(request: httpx.Request) -> httpx.Response:
         recorded.append(request)
         url = str(request.url)
+        path = _path_of(url)
 
         # `GET /pulls/{n}` — the payload the whole feature hangs off. Its body
         # is already in hand here; no second call is made for the PR itself.
@@ -742,7 +772,31 @@ def _github_transport(
                     "head": {"sha": LIVE_HEAD_SHA},
                 },
             )
-        match = _ISSUE_URL_RE.search(url)
+        comment_match = _ISSUE_COMMENTS_URL_RE.search(path)
+        if comment_match is not None:
+            outcome = comment_routes.get(int(comment_match.group("number")))
+            if outcome is None:
+                return httpx.Response(200, json=[])
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        timeline_match = _ISSUE_TIMELINE_URL_RE.search(path)
+        if timeline_match is not None:
+            outcome = timeline_routes.get(int(timeline_match.group("number")))
+            if outcome is None:
+                if not endless_timeline:
+                    return httpx.Response(200, json=[])
+                # Follow the same URL with a higher page number, forever.
+                page = int(request.url.params.get("page", 1)) + 1
+                return httpx.Response(
+                    200,
+                    json=[_cross_reference_event(number=100 + page)],
+                    headers={"link": f'<{path}?page={page}>; rel="next"'},
+                )
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        match = _ISSUE_URL_RE.search(path)
         if match is not None:
             outcome = routes.get(int(match.group("number")))
             if outcome is None:
@@ -780,6 +834,26 @@ def _issue_requests(recorded: list[httpx.Request]) -> list[httpx.Request]:
         request
         for request in recorded
         if request.method == "GET" and _ISSUE_URL_RE.search(str(request.url))
+    ]
+
+
+def _enrichment_requests(recorded: list[httpx.Request]) -> list[httpx.Request]:
+    """Every GitHub request this feature makes, across all three endpoints.
+
+    The request-count assertions use *this* filter rather than the issue-only
+    one: the cap exists precisely because the enrichment endpoints are where the
+    unbounded growth is, and counting only ``/issues/{n}`` would let comments
+    and timeline requests grow without the assertion noticing.
+    """
+    return [
+        request
+        for request in recorded
+        if request.method == "GET"
+        and (
+            _ISSUE_URL_RE.search(_path_of(str(request.url)))
+            or _ISSUE_COMMENTS_URL_RE.search(_path_of(str(request.url)))
+            or _ISSUE_TIMELINE_URL_RE.search(_path_of(str(request.url)))
+        )
     ]
 
 
@@ -2116,3 +2190,301 @@ def test_issue_context_budget_is_a_fraction_of_the_pipeline_timeout() -> None:
     worst_case = MAX_LINKED_ISSUES * 30.0
     assert worst_case > review_orch.LINKED_ISSUE_CONTEXT_TIMEOUT_S
     assert review_orch.LINKED_ISSUE_CONTEXT_TIMEOUT_S < review_orch.REVIEW_TIMEOUT_S / 4
+
+
+# ---------------------------------------------------------------------------
+# Enrichment end-to-end
+# ---------------------------------------------------------------------------
+#
+# The invariant is the same one the body-fetch tests above protect -- the review
+# always publishes -- with two additions that only exist once there are more
+# endpoints to fail: each field degrades on its own, and the total request count
+# is capped.
+
+
+async def _run_review(
+    review: CodeReview,
+    *,
+    transport: httpx.MockTransport,
+    publish: Any,
+) -> list[list[dict[str, str]]]:
+    """Drive the pipeline over ``transport`` and return the captured prompts.
+
+    The LLM stub is built *here* rather than injected: the capture list is
+    per-stub state, and handing a caller one stub while reading its capture from
+    another produces an empty list and an ``IndexError`` that looks like "the
+    review never called the model".
+    """
+    stub, captured = _prompt_capture()
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", publish),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(review.id)
+    return captured
+
+
+async def test_issue_discussion_and_cross_references_reach_the_prompt_end_to_end(
+    pending_review: CodeReview,
+) -> None:
+    """The whole feature, end to end: attribution, discussion, cross-references.
+
+    The non-vacuity fence for the enrichment assertions below. Everything the
+    model is told about a linked issue has to come from one of the three
+    endpoints, and this asserts all three of them landed in the prompt with the
+    right kind of label attached to the right piece of text.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={
+            12: httpx.Response(
+                200,
+                json=_issue_payload(
+                    12, opener="reporter", association="NONE"
+                ),
+            )
+        },
+        comments={
+            12: httpx.Response(
+                200,
+                json=[
+                    _comment_payload(
+                        author="maintainer",
+                        association="OWNER",
+                        body="keep the CSRF check",
+                    ),
+                    _comment_payload(
+                        author="drive-by",
+                        association="NONE",
+                        body="still broken for me, see #51",
+                    ),
+                ],
+            )
+        },
+        timeline={
+            12: httpx.Response(
+                200,
+                json=[
+                    {"event": "labeled", "label": {"name": "bug"}},
+                    _cross_reference_event(number=44),
+                    _cross_reference_event(number=50, kind="pull_request"),
+                ],
+            )
+        },
+    )
+    stub, _ = _prompt_capture()
+    publish = AsyncMock(return_value={"id": 9101})
+
+    captured = await _run_review(
+        pending_review, transport=transport, publish=publish
+    )
+
+    publish.assert_awaited_once()
+    content = _user_content(captured[-1])
+    assert "Opened by `reporter` (no repository association)." in content
+    assert "- `maintainer` (repository owner): keep the CSRF check" in content
+    assert "- `drive-by` (no repository association): still broken for me" in content
+    assert "#44 (issue) — Rate limiter is unbounded" in content
+    assert "#50 (pull request) — Rate limiter is unbounded" in content
+    # The two evidence kinds stay in separate sections: #51 was typed in a
+    # comment and its type was never resolved, so it may not appear under the
+    # cross-reference heading where the model would read it as a typed link.
+    assert content.index("Cross-referenced") < content.index("Also mentioned")
+    cross_section = content.split("Cross-referenced")[1].split("Also mentioned")[0]
+    assert "#51" not in cross_section
+    assert "- #51" in content.split("Also mentioned")[1]
+
+
+async def test_enrichment_request_count_is_capped_at_the_documented_total(
+    pending_review: CodeReview,
+) -> None:
+    """An endless timeline stops at ``MAX_LINKED_ISSUE_REQUESTS``. Exactly.
+
+    Adversarial wire: three linked issues whose timelines promise another page
+    forever, and comments that fit in one page. Without a shared counter this is
+    an unbounded loop, so the assertion is not "<= cap" but "== cap": it has to
+    be the budget that stopped it, not the fixture running out of pages.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12, fixes #13, fixes #14\n",
+        issues={n: httpx.Response(200, json=_issue_payload(n)) for n in (12, 13, 14)},
+        endless_timeline=True,
+    )
+    publish = AsyncMock(return_value={"id": 9102})
+
+    captured = await _run_review(
+        pending_review, transport=transport, publish=publish
+    )
+
+    publish.assert_awaited_once()
+    made = _enrichment_requests(recorded)
+    assert len(made) == review_orch.MAX_LINKED_ISSUE_REQUESTS, (
+        f"expected the budget to stop the walk at "
+        f"{review_orch.MAX_LINKED_ISSUE_REQUESTS} requests, made {len(made)}"
+    )
+    content = _user_content(captured[-1])
+    assert "the GitHub request budget for this review ran out" in content, (
+        "the pass was cut short; saying so is the difference between 'this issue "
+        "had no discussion' and 'we stopped reading'"
+    )
+
+
+async def test_a_comments_failure_costs_the_discussion_and_nothing_else(
+    pending_review: CodeReview,
+) -> None:
+    """Each endpoint degrades independently of the other two.
+
+    A flaky comments endpoint must not cost the cross-references, and the issue
+    body that was already read must survive. Coupling the three would mean any
+    one of them being unavailable silently removes the evidence the other two
+    provided.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={12: httpx.Response(200, json=_issue_payload(12, opener="reporter"))},
+        comments={12: httpx.Response(500, text="Internal Server Error")},
+        timeline={12: httpx.Response(200, json=[_cross_reference_event(number=44)])},
+    )
+    publish = AsyncMock(return_value={"id": 9103})
+
+    captured = await _run_review(
+        pending_review, transport=transport, publish=publish
+    )
+
+    publish.assert_awaited_once()
+    content = _user_content(captured[-1])
+    assert "### Issue #12" in content
+    assert "#44 (issue) — Rate limiter is unbounded" in content
+    assert "Discussion" not in content
+
+
+async def test_a_timeline_failure_costs_the_cross_references_and_nothing_else(
+    pending_review: CodeReview,
+) -> None:
+    """The mirror of the comments case: the discussion still reaches the model."""
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={12: httpx.Response(200, json=_issue_payload(12))},
+        comments={12: httpx.Response(200, json=[_comment_payload()])},
+        timeline={12: httpx.Response(500, text="Internal Server Error")},
+    )
+    publish = AsyncMock(return_value={"id": 9104})
+
+    captured = await _run_review(
+        pending_review, transport=transport, publish=publish
+    )
+
+    publish.assert_awaited_once()
+    content = _user_content(captured[-1])
+    assert "please also cover the CSRF token" in content
+    assert "Cross-referenced" not in content
+
+
+async def test_unexpected_enrichment_failure_does_not_take_down_the_review(
+    pending_review: CodeReview,
+) -> None:
+    """A bug in the new code must not cost a review.
+
+    Forced through the transport, so the failure happens inside
+    ``fetch_issue_comments`` rather than at a patched call site -- which is where
+    a real bug would land, and the point of the bare ``except Exception`` at the
+    new call sites.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={12: httpx.Response(200, json=_issue_payload(12))},
+        comments={12: RuntimeError("something nobody planned for")},
+        timeline={12: httpx.Response(200, json=[_cross_reference_event()])},
+    )
+    publish = AsyncMock(return_value={"id": 9105})
+
+    captured = await _run_review(
+        pending_review, transport=transport, publish=publish
+    )
+
+    publish.assert_awaited_once()
+    content = _user_content(captured[-1])
+    assert "### Issue #12" in content
+    assert "#44 (issue)" in content
+
+
+async def test_a_rate_limit_during_enrichment_stops_the_remaining_requests(
+    pending_review: CodeReview,
+) -> None:
+    """A 429 on the first issue's comments stops the whole pass.
+
+    Not just "the review survives": the request count is the assertion. Every
+    further request would be another request into a limit that is already
+    rejecting them, which is the specific failure the typed-error ladder exists
+    to prevent.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12, fixes #13, fixes #14\n",
+        issues={n: httpx.Response(200, json=_issue_payload(n)) for n in (12, 13, 14)},
+        comments={
+            12: httpx.Response(429, text="You have exceeded a secondary rate limit"),
+            13: httpx.Response(200, json=[_comment_payload()]),
+            14: httpx.Response(200, json=[_comment_payload()]),
+        },
+    )
+    publish = AsyncMock(return_value={"id": 9106})
+    sleep_spy = AsyncMock()
+
+    with patch("asyncio.sleep", sleep_spy):
+        captured = await _run_review(
+            pending_review, transport=transport, publish=publish
+        )
+
+    publish.assert_awaited_once()
+    made = _enrichment_requests(recorded)
+    assert len(made) == 2, (
+        "issue #12 body then its comments, and nothing else; "
+        f"made {len(made)} requests: {[str(r.url) for r in made]}"
+    )
+    assert sleep_spy.await_count == 0, "a backoff here would fight the pipeline timeout"
+    content = _user_content(captured[-1])
+    assert "### Issue #12" in content
+    assert "(+2 more linked issue(s) not shown)" in content
+
+
+async def test_a_pr_closing_no_issue_makes_no_enrichment_request(
+    pending_review: CodeReview,
+) -> None:
+    """The cheapest case is also the one with no endpoints to call.
+
+    Asserted on the enrichment-inclusive filter, so the absence covers comments
+    and the timeline as well as the issue body.
+    """
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(recorded, pr_body="Just a typo fix.\n")
+    publish = AsyncMock(return_value={"id": 9107})
+
+    captured = await _run_review(
+        pending_review, transport=transport, publish=publish
+    )
+
+    publish.assert_awaited_once()
+    assert _enrichment_requests(recorded) == []
+    assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
