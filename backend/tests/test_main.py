@@ -14,6 +14,7 @@ from __future__ import annotations
 import httpx
 import limits
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.limiter import limiter
@@ -137,8 +138,6 @@ async def test_health_reports_real_stranded_run(
     """
     import uuid
     from datetime import datetime, timedelta, timezone
-
-    from sqlalchemy.ext.asyncio import AsyncSession
 
     from app.models import Repo, Run, User
 
