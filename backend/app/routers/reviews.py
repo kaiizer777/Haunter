@@ -24,7 +24,7 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import ColumnElement, and_, case, cast, column, func, literal, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,6 +99,18 @@ class AssociatedPROut(BaseModel):
 
 class AssociatedPRResponse(BaseModel):
     associated_pr: Optional[AssociatedPROut] = None
+
+
+class AssociatedPRBatchRequest(BaseModel):
+    """One dashboard page worth of associated-PR lookups (issue #116)."""
+
+    review_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
+
+
+class AssociatedPRBatchResponse(BaseModel):
+    """Map of requested review id to its PR (null when none can be established)."""
+
+    associated_prs: dict[uuid.UUID, Optional[AssociatedPROut]]
 
 
 # ---------------------------------------------------------------------------
@@ -554,3 +566,103 @@ async def get_review_associated_pr(
         gh_token = None
     associated = await _lookup_commit_pr(owner, name, review.commit_sha, token=gh_token)
     return AssociatedPRResponse(associated_pr=associated)
+
+
+async def _batch_installation_tokens(
+    pending: list[tuple[uuid.UUID, CodeReview, str, str]],
+) -> dict[uuid.UUID, Optional[str]]:
+    """Mint one repo-scoped token per distinct repo (issue #116 batch)."""
+    tokens: dict[uuid.UUID, Optional[str]] = {}
+    seen: dict[uuid.UUID, CodeReview] = {}
+    for _, review, _, _ in pending:
+        if review.repo_id not in seen:
+            seen[review.repo_id] = review
+    for repo_id, review in seen.items():
+        repo = review.repo
+        if repo is None:
+            tokens[repo_id] = None
+            continue
+        try:
+            tokens[repo_id] = await asyncio.wait_for(
+                get_installation_token(repo), timeout=_MINT_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.debug(
+                "batch associated-pr installation-token mint timed out after %.1fs",
+                _MINT_TIMEOUT_SECONDS,
+            )
+            tokens[repo_id] = None
+        except Exception as exc:
+            logger.debug(
+                "batch associated-pr installation-token mint failed: %s",
+                type(exc).__name__,
+            )
+            tokens[repo_id] = None
+    return tokens
+
+
+@router.post("/reviews/associated-pr/batch", response_model=AssociatedPRBatchResponse)
+async def batch_review_associated_pr(
+    payload: AssociatedPRBatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AssociatedPRBatchResponse:
+    """
+    Batched associated-PR lookup for a dashboard page (issue #116).
+
+    One ownership-scoped ``SELECT ... WHERE id IN (...)`` answers every row
+    the database can (``pr_number`` set resolves directly, no GitHub call);
+    the rest resolve concurrently through the same commit-pulls lookup the
+    single-row endpoint uses. Unknown or unowned ids answer ``null`` (never
+    404) so one bad id cannot fail the page. Read-only: no DB writes.
+    """
+    ordered_ids: list[uuid.UUID] = list(dict.fromkeys(payload.review_ids))
+    resolved: dict[uuid.UUID, Optional[AssociatedPROut]] = {}
+    if not ordered_ids:
+        return AssociatedPRBatchResponse(associated_prs=resolved)
+
+    stmt = (
+        select(CodeReview)
+        .join(Repo, CodeReview.repo_id == Repo.id)
+        .options(selectinload(CodeReview.repo))
+        .where(CodeReview.id.in_(ordered_ids), Repo.user_id == current_user.id)
+    )
+    res = await db.execute(stmt)
+    rows = res.scalars().all()
+    by_id = {row.id: row for row in rows}
+
+    pending: list[tuple[uuid.UUID, CodeReview, str, str]] = []
+    for rid in ordered_ids:
+        review = by_id.get(rid)
+        if review is None:
+            resolved[rid] = None
+            continue
+        repo = review.repo
+        owner = repo.owner if repo is not None else None
+        name = repo.name if repo is not None else None
+        if review.pr_number is not None and owner and name:
+            resolved[rid] = AssociatedPROut(
+                number=review.pr_number,
+                url=(
+                    f"https://github.com/{quote(owner, safe='')}"
+                    f"/{quote(name, safe='')}/pull/{review.pr_number}"
+                ),
+                title=None,
+            )
+        elif not owner or not name or not review.commit_sha:
+            resolved[rid] = None
+        else:
+            pending.append((rid, review, owner, name))
+
+    if pending:
+        tokens = await _batch_installation_tokens(pending)
+        lookups = [
+            _lookup_commit_pr(
+                owner, name, review.commit_sha, token=tokens.get(review.repo_id)
+            )
+            for _, review, owner, name in pending
+        ]
+        for (rid, _, _, _), associated in zip(pending, await asyncio.gather(*lookups)):
+            resolved[rid] = associated
+
+    return AssociatedPRBatchResponse(associated_prs=resolved)
