@@ -172,6 +172,14 @@ app.include_router(eval_router)
 
 @app.get("/health")
 async def health_check() -> dict:
+    """Liveness probe plus stranded-run metrics (issue #158).
+
+    "status" stays "ok" while the process serves — it never flaps for
+    pipeline or database reasons, so load balancers keep routing.
+    "runs" carries the alert signal instead: active-run count, oldest
+    active-run age, stuck count past the threshold, and a degraded flag.
+    "runs" is null when the database is unreachable.
+    """
     ages = await _query_active_run_ages()
     return {
         "status": "ok",
