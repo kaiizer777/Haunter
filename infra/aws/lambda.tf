@@ -541,7 +541,6 @@ resource "aws_cloudwatch_metric_alarm" "lambda_throttles" {
   tags = { Project = var.project_name }
 }
 
-
 resource "aws_cloudwatch_metric_alarm" "lambda_concurrency_high" {
   alarm_name          = "${var.project_name}-lambda-concurrency-high"
   alarm_description   = "Orchestrator Lambda concurrent executions near the reserved cap. Next burst will throttle."
