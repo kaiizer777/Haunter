@@ -39,6 +39,50 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Issue #158 — stranded-run signal on /health.
+# Runs sitting in a non-terminal pipeline state are "active". Past
+# _HEALTH_STUCK_AFTER_SECONDS they are reported as "stuck" so dashboards and
+# alerts can detect a wedged pipeline without manual DB queries.
+# Mirrors app.orchestrator.RunStatus minus its terminal states (pr_opened,
+# fallback_commented, flaky_detected, completed, error).
+# ---------------------------------------------------------------------------
+_ACTIVE_RUN_STATUSES: frozenset = frozenset(
+    {
+        "pending",
+        "context_gathering",
+        "flake_verification",
+        "fix_generation",
+        "verification",
+        "pending_pr",
+        "fallback",
+    }
+)
+
+# An active run older than this is counted as stuck. Pipeline runs normally
+# settle in minutes; 30 minutes is a conservative wedge signal.
+_HEALTH_STUCK_AFTER_SECONDS = 1800
+
+# Upper bound on the runs-metrics lookup so a slow database can never make
+# the liveness probe hang or flap. On timeout the probe still returns 200
+# with "runs": null (see health_check).
+_HEALTH_DB_TIMEOUT_SECONDS = 3.0
+
+
+def _summarize_active_runs(
+    ages_seconds: list, stuck_after_seconds: int = _HEALTH_STUCK_AFTER_SECONDS
+) -> dict:
+    """Build the runs-metrics payload from active-run ages. Pure: no I/O."""
+    stuck_count = sum(1 for age in ages_seconds if age >= stuck_after_seconds)
+    return {
+        "active_count": len(ages_seconds),
+        "oldest_active_age_seconds": max(ages_seconds) if ages_seconds else None,
+        "stuck_count": stuck_count,
+        "stuck_threshold_seconds": stuck_after_seconds,
+        "degraded": stuck_count > 0,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Rate limiter (slowapi = express-rate-limit equivalent for FastAPI)
 # Per-IP limiting applied to auth endpoints in auth.py via @limiter.limit().
 # The limiter instance lives in app.limiter to avoid circular imports.
