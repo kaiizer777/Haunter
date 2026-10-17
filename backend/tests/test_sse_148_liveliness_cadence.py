@@ -49,7 +49,7 @@ class _Result:
 
 
 class _FakeDb:
-    """Short-lived session stand-in: every poll reads empty (fully idle)."""
+    """Held-connection stand-in: every poll reads empty (fully idle)."""
 
     async def execute(self, stmt):
         return _Result([])
@@ -62,6 +62,16 @@ class _FakeDb:
 
     async def __aexit__(self, *exc: object) -> bool:
         return False
+
+
+class _FakeEngine:
+    """One held connection for the whole idle stream (#165)."""
+
+    def __init__(self) -> None:
+        self.conn = _FakeDb()
+
+    def connect(self) -> _FakeDb:
+        return self.conn
 
 
 async def _run_idle_stream(
@@ -95,9 +105,7 @@ async def _run_idle_stream(
             patch("app.routers.sessions.time.monotonic", side_effect=_monotonic)
         )
         stack.enter_context(patch("asyncio.sleep", new=_sleep))
-        stack.enter_context(
-            patch("app.db.async_session_maker", side_effect=lambda: _FakeDb())
-        )
+        stack.enter_context(patch("app.db.engine", _FakeEngine()))
         stack.enter_context(
             patch("app.routers.sessions._is_turn_active_elsewhere", new=_probe)
         )
