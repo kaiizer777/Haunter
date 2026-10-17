@@ -122,6 +122,44 @@ def get_universal_sandbox_repo(org: str) -> str:
     return f"{org}/{settings.github_sandbox_repo}"
 
 
+def get_sandbox_mirror_pool() -> list[str]:
+    """
+    Return the ordered sandbox mirror repo names (bare, without org).
+
+    The pool is ``[settings.github_sandbox_repo]`` plus the comma-separated
+    extras in ``settings.github_sandbox_repo_pool``. Blank entries are
+    dropped; the primary and duplicates appear exactly once. Empty pool
+    setting (the default) yields just the primary — today's single mirror.
+    """
+    from app.config import settings
+
+    primary = (
+        getattr(settings, "github_sandbox_repo", "") or ""
+    ).strip() or "haunter-sandbox-runner"
+    pool = [primary]
+    raw = getattr(settings, "github_sandbox_repo_pool", "") or ""
+    for entry in raw.split(","):
+        name = entry.strip()
+        if name and name not in pool:
+            pool.append(name)
+    return pool
+
+
+def select_sandbox_mirror(org: str, key: str) -> str:
+    """
+    Return the full ``'{org}/{mirror}'`` a verification run should use.
+
+    Routing is deterministic: the same ``key`` (a run id) always maps to the
+    same mirror, so a run's attempts stay together, while distinct keys
+    spread across the pool — parallel verifications no longer contend on one
+    repo's GitHub API rate-limit budget. A single-mirror pool (the default)
+    returns exactly :func:`get_universal_sandbox_repo`.
+    """
+    pool = get_sandbox_mirror_pool()
+    digest = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+    return f"{org}/{pool[int(digest, 16) % len(pool)]}"
+
+
 def test_repo_name(user_github_id: int) -> str:
     """
     Deprecated: Haunter uses a single universal sandbox mirror repository
