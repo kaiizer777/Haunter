@@ -189,16 +189,17 @@ async def test_transient_error_run_replays_and_child_trace_resolves(
         child_id = resp.json()["id"]
 
         trace = await client.get(f"/runs/{child_id}/trace")
+        assert trace.status_code == 200
 
-    assert trace.status_code == 200
+        # The source trace exposes the replay thread, so the dashboard can
+        # render the redrive lineage on the original failed run.
+        parent_trace = await client.get(f"/runs/{source_id}/trace")
+        assert parent_trace.status_code == 200
+        parent_children = [c["id"] for c in parent_trace.json()["children"]]
+
     body = trace.json()
     assert body["run"]["status"] == "pending"
     assert body["run"]["parent_run_id"] == str(source_id)
     assert body["parent"]["id"] == str(source_id)
+    assert parent_children == [child_id]
     mock_adapter.schedule_pipeline.assert_awaited_once()
-
-    # The source trace exposes the replay thread, so the dashboard can
-    # render the redrive lineage on the original failed run.
-    parent_trace = await client.get(f"/runs/{source_id}/trace")
-    assert parent_trace.status_code == 200
-    assert [c["id"] for c in parent_trace.json()["children"]] == [child_id]
