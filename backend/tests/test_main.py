@@ -2,7 +2,7 @@
 Tests for main FastAPI application entrypoint (backend/main.py).
 
 Covers:
-- GET /health -> {"status": "ok"}
+- GET /health -> {"status": "ok", "runs": {...stranded-run metrics...}}
 - GET /health/sandbox -> default github_actions shape and non-github_actions shape
 - CORS preflight OPTIONS /repos with allowed Origin vs unauthorized origin
 - Rate-limit middleware on /auth/login: lowering limit via monkeypatch to 3,
@@ -125,6 +125,72 @@ def test_active_run_statuses_match_orchestrator_non_terminal():
     }
     expected = {s.value for s in RunStatus} - terminal
     assert main._ACTIVE_RUN_STATUSES == expected
+
+
+@pytest.mark.asyncio
+async def test_health_reports_real_stranded_run(
+    db: AsyncSession, client: httpx.AsyncClient
+):
+    """Integration (#158): a stale active run surfaces as stuck from real rows.
+
+    Skips without TEST_DATABASE_URL like every other DB-mutating test.
+    """
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.models import Repo, Run, User
+
+    user = User(
+        id=uuid.uuid4(),
+        github_id=987654321,
+        github_username="health_158_user",
+        access_token=None,
+        role="user",
+    )
+    db.add(user)
+    await db.commit()
+    repo = Repo(user_id=user.id, owner="health-158-org", name="app")
+    db.add(repo)
+    await db.commit()
+    await db.refresh(repo)
+
+    now = datetime.now(timezone.utc)
+    db.add_all(
+        [
+            Run(
+                repo_id=repo.id,
+                head_sha="a" * 40,
+                head_branch="main",
+                status="pending",
+                created_at=now - timedelta(hours=5),
+            ),
+            Run(
+                repo_id=repo.id,
+                head_sha="b" * 40,
+                head_branch="main",
+                status="fix_generation",
+                created_at=now - timedelta(minutes=2),
+            ),
+            Run(
+                repo_id=repo.id,
+                head_sha="c" * 40,
+                head_branch="main",
+                status="pr_opened",
+                created_at=now - timedelta(days=9),
+            ),
+        ]
+    )
+    await db.commit()
+
+    response = await client.get("/health")
+    assert response.status_code == 200
+    runs = response.json()["runs"]
+    assert runs["active_count"] == 2
+    assert runs["stuck_count"] == 1
+    assert runs["degraded"] is True
+    assert runs["oldest_active_age_seconds"] >= 5 * 3600
 
 
 async def test_sandbox_health_default_github_actions(client: httpx.AsyncClient):
