@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { API_BASE } from "@/lib/api";
 import {
-  TerminalSquare,
   ArrowRight,
   ShieldCheck,
   CheckCircle2,
@@ -17,6 +16,7 @@ import {
   Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { HaunterMark } from "@/components/HaunterMark";
 
 function GitHubIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
@@ -71,9 +71,7 @@ export default function LoginPage() {
       {/* Top minimal header navigation */}
       <header className="relative z-20 flex h-12 shrink-0 w-full items-center justify-between border-b border-zinc-800/80 bg-zinc-950/50 px-6 backdrop-blur-md lg:px-12">
         <div className="flex items-center gap-2.5 ml-2 sm:ml-6 lg:ml-8">
-          <div className="relative flex h-7.5 w-7.5 items-center justify-center rounded-lg bg-gradient-to-b from-amber-400/20 via-amber-500/10 to-transparent border border-amber-500/30 text-amber-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_8px_rgba(0,0,0,0.5)]">
-            <TerminalSquare className="h-4 w-4 text-amber-400" />
-          </div>
+          <HaunterMark size={30} />
           <div className="flex items-center gap-2">
             <span className="font-mono text-[13px] font-bold tracking-[0.16em] text-zinc-100 uppercase">
               HAUNTER
@@ -214,13 +212,7 @@ export default function LoginPage() {
 
                 {/* Header & Beveled Logo Coin */}
                 <div className="space-y-2 text-center relative z-10">
-                  <div className="relative mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-b from-amber-400/20 via-amber-500/10 to-amber-600/5 border-t border-t-amber-400/60 border-x border-x-amber-500/30 border-b border-b-amber-600/20 text-amber-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_4px_12px_rgba(0,0,0,0.6),0_0_20px_rgba(245,158,11,0.2)] group transition-transform duration-200 hover:scale-[1.03]">
-                    <TerminalSquare className="h-5.5 w-5.5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.6)] transition-transform duration-200 group-hover:scale-105" />
-                    <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60" />
-                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.9)]" />
-                    </span>
-                  </div>
+                  <HaunterMark size={44} className="mx-auto" />
 
                   <div>
                     <h1 className="text-base font-bold tracking-[0.16em] text-zinc-100 uppercase font-mono">

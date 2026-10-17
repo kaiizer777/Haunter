@@ -1,0 +1,59 @@
+/* Haunter brand mark — component-scoped animation.
+   Keyframes live here (not in globals.css) so the mark stays self-contained.
+
+   ── MASTER LOOP = 11s ────────────────────────────────────────────────────────
+   Three motions share one master period so everything realigns exactly at
+   t = 11s:
+
+     haunterDrift  5.5s  scanline field, one 12.8-unit brightness cycle
+     haunterSway   11s   non-uniform lean of the whole ghost form
+     (SMIL morph)  11s   silhouette path A -> B -> A, driven in HaunterMark.tsx
+
+   5.5s divides 11s (x2) and the SMIL morph is 11s with A as both endpoints,
+   so every one of the three is at its exact start frame at t = 11s, t = 22s,
+   ... No snap, no reset, no drift/morph phase mismatch. */
+
+/* One full brightness cycle of the line stack: 4 lines x 3.2 units = 12.8 user
+   units (see DRIFT in HaunterMark.tsx). The field is periodic with period 12.8,
+   so translating by 12.8 maps every line onto an identical line — same y, same
+   opacity. */
+@keyframes haunterDrift {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-12.8px);
+  }
+}
+
+.drift {
+  animation: haunterDrift 5.5s linear infinite;
+}
+
+/* Non-uniform lean: the form tips one way, then the other. Deliberately NOT a
+   uniform scale — a plain scale reads as a rubber-stamp zoom. A rotation about
+   a point above centre makes the tail swing further than the crown. */
+@keyframes haunterSway {
+  0%,
+  100% {
+    transform: rotate(-7deg);
+  }
+  50% {
+    transform: rotate(7deg);
+  }
+}
+
+.sway {
+  transform-box: view-box;
+  /* Pivot above and right of centre so the tail swings further than the
+     crown — a non-uniform lean, not a rubber-stamp zoom. */
+  transform-origin: 58% 26%;
+  animation: haunterSway 11s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drift,
+  .sway {
+    animation: none;
+  }
+}
