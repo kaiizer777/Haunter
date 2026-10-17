@@ -731,6 +731,13 @@ async def _collect_linked_issue_context(
         # caps rather than the sum.
         budget = GitHubRequestBudget(limit=MAX_LINKED_ISSUE_REQUESTS)
         issues: list[LinkedIssue] = []
+        # Whether the block must disclose unfetched detail. This is NOT
+        # `budget.exhausted`: the per-issue caps sum exactly to the limit
+        # (3 x (1 + 1 + 5) = 21), so a full pass spends the whole budget
+        # without a single refusal, while a rate limit can cut enrichment
+        # short with room to spare. Set below on an actual refused
+        # reservation and on a rate-limit-shortened enrichment.
+        detail_incomplete = False
         for number in numbers:
             # `fetch_issue` predates the budget, so its reservation is claimed
             # here rather than inside the fetcher. Adding a parameter to a
@@ -746,6 +753,7 @@ async def _collect_linked_issue_context(
                     number,
                     MAX_LINKED_ISSUE_REQUESTS,
                 )
+                detail_incomplete = True
                 break
             try:
                 issue_payload = await fetch_issue(
@@ -827,7 +835,9 @@ async def _collect_linked_issue_context(
                 # swallowed there: a throttled installation must stop issuing
                 # enrichment requests, not fall through to the next issue. The
                 # body already read is kept — only fields nobody fetched are
-                # missing, and the budget disclosure below covers that.
+                # missing, and the incomplete-detail flag below discloses that:
+                # the budget may still have room here, so `budget.exhausted`
+                # alone would stay silent.
                 logger.warning(
                     "review_orchestrator: issue_context_truncated repo=%s/%s "
                     "pr=%s issue=%s reason=rate_limit_during_enrichment "
@@ -838,6 +848,7 @@ async def _collect_linked_issue_context(
                     number,
                     sanitize_log_value(limited_err),
                 )
+                detail_incomplete = True
                 issues.append(issue)
                 break
             except Exception:
@@ -876,7 +887,9 @@ async def _collect_linked_issue_context(
         return render_issue_context(
             issues,
             omitted=omitted + (len(numbers) - len(issues)),
-            budget_exhausted=budget.exhausted,
+            # `detail_incomplete`, not `budget.exhausted`: the caps sum exactly
+            # to the limit, so a spent budget refused nothing.
+            budget_exhausted=detail_incomplete,
         )
     except Exception:
         logger.exception(
@@ -1072,9 +1085,12 @@ LINKED_ISSUE_CONTEXT_TIMEOUT_S: float = 30.0
 #:
 #: Every call site charges a :class:`~app.github_client.GitHubRequestBudget`
 #: reservation *before* issuing its request, and a refused reservation stops
-#: that fetch instead of falling through to a best-effort one. When the cap is
-#: reached the block says so, because the alternative is a review that reads a
-#: comment-less issue as a comment-less issue.
+#: that fetch instead of falling through to a best-effort one. The block says
+#: so only when detail was actually withheld -- a refused reservation or a
+#: rate-limit-shortened enrichment -- because the alternative is a review that
+#: reads a comment-less issue as a comment-less issue. Merely spending the
+#: whole budget says nothing: the per-issue caps above sum exactly to this
+#: limit, so a full pass ends at the cap with nothing refused.
 MAX_LINKED_ISSUE_REQUESTS: int = MAX_LINKED_ISSUES * (
     1 + MAX_ISSUE_COMMENT_PAGES + MAX_ISSUE_TIMELINE_PAGES
 )

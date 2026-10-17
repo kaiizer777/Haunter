@@ -796,8 +796,9 @@ def render_issue_context(
     believes is complete.
 
     ``budget_exhausted`` is the third disclosure, and the only one that is not a
-    count. The request budget ran out mid-pass, so at least one issue above is
-    being shown with fields nobody read — and a model handed "here is issue #12"
+    count. The caller sets it when the pass knows detail was never fetched --
+    a refused budget reservation or a rate-limit-shortened enrichment -- so at
+    least one issue above is being shown with fields nobody read — and a model handed "here is issue #12"
     has no way to know its discussion was never fetched, so it would read the
     silence as "issue #12 had no discussion". That is a claim this integration
     has no evidence for, and it is the one most likely to change a review's
