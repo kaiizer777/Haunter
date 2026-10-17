@@ -496,3 +496,158 @@ resource "aws_lambda_permission" "allow_eventbridge_audit_dispatch" {
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.audit_dispatch.arn
 }
+
+# ---------------------------------------------------------------------------
+# Pipeline-outbox sweeper (#157) — separate function, IAM-only
+#
+# Same shape as the audit dispatcher above: no Function URL, EventBridge is
+# the only invoke principal, the schedule payload is not a trust boundary.
+# Redrives go out as signed pipeline self-invocations via the hosting
+# adapter, so the unauthenticated-invocation protection is unchanged.
+#
+# rate(5 minutes) matches the 300s stale horizon: every tick, runs pending
+# longer than one interval become eligible for redrive. Env mirrors the
+# audit dispatcher (DB + self-invoke secret + target-function alias); no LLM
+# keys, no SSM access, secretsmanager denied like the audit dispatcher.
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_event_rule" "pipeline_outbox_sweep" {
+  name                = "${var.project_name}-pipeline-outbox-sweep"
+  description         = "Redrive accepted-but-never-executed pending runs or mark them exhausted"
+  schedule_expression = "rate(5 minutes)"
+  tags = {
+    Project = var.project_name
+  }
+}
+
+resource "aws_cloudwatch_log_group" "pipeline_outbox_sweeper" {
+  name              = "/aws/lambda/${var.project_name}-pipeline-outbox-sweeper"
+  retention_in_days = var.log_retention_days
+
+  tags = {
+    Project = var.project_name
+  }
+}
+
+resource "aws_iam_role" "pipeline_outbox_sweeper" {
+  name = "${var.project_name}-pipeline-outbox-sweeper-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "lambda.amazonaws.com" }
+        Action    = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = {
+    Project = var.project_name
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "pipeline_outbox_sweeper_basic" {
+  role       = aws_iam_role.pipeline_outbox_sweeper.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "pipeline_outbox_sweeper_inline" {
+  name = "${var.project_name}-pipeline-outbox-sweeper-inline-policy"
+  role = aws_iam_role.pipeline_outbox_sweeper.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowInvokeMainFunction"
+        Effect    = "Allow"
+        Action    = ["lambda:InvokeFunction"]
+        Resource  = aws_lambda_function.haunter.arn
+      },
+      {
+        Sid    = "DenySecretsManagerAndHighPrivilege"
+        Effect = "Deny"
+        Action = [
+          "secretsmanager:*",
+          "iam:*",
+          "ec2:*",
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_lambda_function" "pipeline_outbox_sweeper" {
+  function_name = "${var.project_name}-pipeline-outbox-sweeper"
+  description   = "IAM-only pipeline-outbox sweeper: redrive or exhaust stale pending runs"
+  role          = aws_iam_role.pipeline_outbox_sweeper.arn
+
+  package_type     = "Zip"
+  filename         = var.lambda_zip_path
+  source_code_hash = filebase64sha256(var.lambda_zip_path)
+  handler          = "pipeline_outbox_handler.handler"
+  runtime          = "python3.11"
+  architectures    = ["x86_64"]
+
+  timeout     = 60
+  memory_size = 256
+
+  environment {
+    variables = {
+      DATABASE_URL          = var.database_url
+      DATABASE_URL_UNPOOLED = var.database_url_unpooled
+
+      GITHUB_CLIENT_ID     = var.github_client_id
+      GITHUB_CLIENT_SECRET = var.github_client_secret
+      CALLBACK_URL         = var.callback_url
+      SESSION_SECRET_KEY   = var.session_secret_key
+      FRONTEND_URL         = var.frontend_url
+
+      GITHUB_WEBHOOK_SECRET    = var.github_webhook_secret
+      AUDIT_SELF_INVOKE_SECRET = var.audit_self_invoke_secret
+
+      HOSTING_PROVIDER = "aws"
+      SANDBOX_PROVIDER = var.sandbox_provider
+
+      TOKEN_ENCRYPTION_KEY = var.token_encryption_key
+
+      # The sweeper redrives pipeline children on the main function, not on
+      # itself — same alias rule as the audit dispatcher. Must stay
+      # HAUNTER_LAMBDA_FUNCTION_NAME (AWS_LAMBDA_FUNCTION_NAME is reserved).
+      HAUNTER_LAMBDA_FUNCTION_NAME = aws_lambda_function.haunter.function_name
+    }
+  }
+
+  logging_config {
+    log_format = "Text"
+    log_group  = aws_cloudwatch_log_group.pipeline_outbox_sweeper.name
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.pipeline_outbox_sweeper_basic,
+    aws_iam_role_policy.pipeline_outbox_sweeper_inline,
+    aws_cloudwatch_log_group.pipeline_outbox_sweeper,
+  ]
+
+  tags = {
+    Project = var.project_name
+  }
+}
+
+resource "aws_cloudwatch_event_target" "pipeline_outbox_sweep" {
+  rule      = aws_cloudwatch_event_rule.pipeline_outbox_sweep.name
+  target_id = "pipeline-outbox-sweep"
+  arn       = aws_lambda_function.pipeline_outbox_sweeper.arn
+  input     = jsonencode({ operation = "sweep_pipeline_outbox" })
+}
+
+resource "aws_lambda_permission" "allow_eventbridge_pipeline_outbox_sweep" {
+  statement_id  = "AllowEventBridgePipelineOutboxSweep"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.pipeline_outbox_sweeper.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.pipeline_outbox_sweep.arn
+}
