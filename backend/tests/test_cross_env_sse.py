@@ -37,6 +37,16 @@ from app.services.session_orchestrator import SessionOrchestrator
 from app.services.session_streamer import SseQueue
 
 
+class _FakeEngine:
+    """Presents a connection fake as the shared `app.db.engine` seam (#165)."""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def connect(self) -> Any:
+        return self._conn
+
+
 # ---------------------------------------------------------------------------
 # 1. SseQueue mirror_sink tests
 # ---------------------------------------------------------------------------
@@ -181,6 +191,9 @@ async def test_stream_from_db_completed_turn() -> None:
     class _MockDb:
         async def execute(self, stmt):
             return _MockResult()
+
+        async def rollback(self):
+            pass
 
         async def __aenter__(self):
             return self
@@ -527,6 +540,9 @@ async def test_stream_from_db_filters_out_turn_start_events() -> None:
         async def execute(self, stmt):
             return _MockResult([init_event, thought_event, done_event])
 
+        async def rollback(self):
+            pass
+
         async def __aenter__(self):
             return self
 
@@ -676,6 +692,9 @@ async def test_stream_from_db_deduplicates_duplicate_event_ids() -> None:
 
         async def execute(self, stmt):
             return _MockResult(events)
+
+        async def rollback(self):
+            pass
 
     from app.routers.sessions import _stream_from_db
 
