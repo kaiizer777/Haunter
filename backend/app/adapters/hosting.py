@@ -60,6 +60,11 @@ logger = logging.getLogger(__name__)
 
 _cfg_cache: dict[str, tuple[str, float]] = {}
 _CACHE_TTL: float = 60.0
+# Invalidation generation (#141): bumped by invalidate_provider_cache().
+# _get_provider_config captures it before the DB await and skips the
+# write-back when it changed, so an invalidation landing mid-read (e.g.
+# PUT /config/hosting) is never undone by a stale in-flight read.
+_CFG_GEN: int = 0
 # Keyspace is 2 (hosting_provider / sandbox_provider), so 8 leaves room for
 # new literal config keys without implying a cardinality that cannot exist.
 # Must stay >= 2: get_active_hosting_provider() and get_active_sandbox_provider()
@@ -105,6 +110,7 @@ async def _get_provider_config(key: str, env_default: str) -> str:
 
     normalized = key.strip().lower()
     now = time.monotonic()
+    generation = _CFG_GEN
     cached_val, cached_at = _cfg_cache.get(normalized, ("", -_CACHE_TTL - 1))
     if now - cached_at < _CACHE_TTL and cached_val:
         return cached_val
@@ -135,6 +141,8 @@ async def _get_provider_config(key: str, env_default: str) -> str:
         )
         value = env_default
 
+    if generation != _CFG_GEN:
+        return value
     _prune_cfg_cache(now, normalized)
     _cfg_cache[normalized] = (value, now)
     return value
@@ -156,6 +164,8 @@ async def get_active_sandbox_provider() -> str:
 
 def invalidate_provider_cache() -> None:
     """Clear the TTL cache — call after PUT /config/hosting writes to DB."""
+    global _CFG_GEN
+    _CFG_GEN += 1
     _cfg_cache.clear()
 
 
