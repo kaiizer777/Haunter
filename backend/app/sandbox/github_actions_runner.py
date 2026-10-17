@@ -1133,7 +1133,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             )
 
         # ----------------------------------------------------------------
-        # 5. Get or create the universal test mirror
+        # 5. Get or create the pool-selected test mirror (#164)
         # ----------------------------------------------------------------
         fallback_token: Optional[str] = getattr(settings, "github_token", None)
         repo_full = select_sandbox_mirror(org, str(inp.run_id))
