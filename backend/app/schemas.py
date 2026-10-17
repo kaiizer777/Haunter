@@ -464,6 +464,35 @@ class IssueCommentWebhookPayload(BaseModel):
     model_config = {"extra": "ignore"}
 
 
+class IssueTriggerObj(BaseModel):
+    """The `issue` object on an `issues` webhook event (feat-125).
+
+    `title`/`body` carry the trigger text so intake needs no extra GitHub
+    read. `pull_request` is present when the event is really a PR lifecycle
+    event (a PR is an issue) — the router must ignore those, since PRs have
+    their own pipeline.
+    """
+
+    number: int
+    title: Optional[str] = Field(default=None, max_length=5000)
+    body: Optional[str] = None
+    author_association: str = Field(default="NONE", max_length=50)
+    user: Optional[IssueCommentUser] = None
+    pull_request: Optional[IssuePullRequestRef] = None
+
+    model_config = {"extra": "ignore"}
+
+
+class IssuesOpenedWebhookPayload(BaseModel):
+    """Validated `issues` webhook payload (feat-125, `opened` only)."""
+
+    action: str
+    issue: IssueTriggerObj
+    repository: WorkflowRunRepo
+
+    model_config = {"extra": "ignore"}
+
+
 class PullRequestReviewCommentWebhookPayload(BaseModel):
     action: str
     comment: IssueCommentObj
