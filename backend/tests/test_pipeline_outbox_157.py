@@ -310,9 +310,9 @@ def test_handler_rejects_untrusted_invocations():
         assert poh.handler({"operation": "sweep_pipeline_outbox"})["status"] == (
             "completed"
         )
-    assert poh.handler({"requestContext": {}, "operation": "sweep_pipeline_outbox"}) == {
-        "error": "unsupported invocation"
-    }
+    assert poh.handler(
+        {"requestContext": {}, "operation": "sweep_pipeline_outbox"}
+    ) == {"error": "unsupported invocation"}
     assert poh.handler({"operation": "dispatch_audits"}) == {
         "error": "unsupported invocation"
     }
