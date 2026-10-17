@@ -8,12 +8,14 @@ PR #119 already shipped the mirror batching and the threshold-gated prune, so
 these cover the two acceptance criteria that were still open:
 
   1. **AC1** — an idle SSE resume no longer scales its database cost 1:1 with
-     wall-clock time. ``_stream_from_db`` opens one short-lived session per poll
-     tick (mandatory under ``NullPool``), so the tick rate *is* the connection
-     churn rate. The poll sleep now backs off exponentially (1s → 2s → 4s →
+     wall-clock time. ``_stream_from_db`` holds one shared engine connection
+     for the whole stream (#165: a fresh session per tick churned one physical
+     connection per poll under ``NullPool``), so the tick rate is only the
+     query rate. The poll sleep backs off exponentially (1s → 2s → 4s →
      8s → 15s cap) and resets as soon as events arrive, taking a 900s idle
-     window from ~1082 sessions to ~366 (#148 rebalanced the probe cadence to a
-     steady ~5s, so the floor is one poll plus one probe per 5s).
+     window from ~1082 queries to ~366 (#148 rebalanced the probe cadence to a
+     steady ~5s, so the floor is one poll plus one probe per 5s) on a single
+     held connection.
   2. **AC3** — the turn-start prune issues its ``DELETE`` only above
      ``_STREAM_PRUNE_THRESHOLD``; at or below the threshold no ``DELETE`` is
      issued at all, while the ``turn_start`` event is still published.
@@ -70,27 +72,33 @@ class _Result:
 
 
 class _FakePollDb:
-    """The short-lived session `_stream_from_db` opens per poll/probe/drain.
+    """The one held connection `_stream_from_db` polls on (#165).
 
-    Enforces the `session_id`/`turn_id` scope that `_pending_stmt` applies in
-    production, and asserts that scope is still present in the rendered SQL. A
-    fake that just returned `rows` would hide a dropped predicate entirely: the
-    event-reset test would still pass on rows the real query could never
-    return, so the scoping would be pinned by nothing.
+    Serves one `rows_plan` entry per `execute` (the initial replay read
+    included) and enforces the `session_id`/`turn_id` scope that
+    `_pending_stmt` applies in production, asserting that scope is still
+    present in the rendered SQL. A fake that just returned `rows` would hide
+    a dropped predicate entirely: the event-reset test would still pass on
+    rows the real query could never return, so the scoping would be pinned
+    by nothing.
     """
 
     def __init__(
         self,
-        rows: list[SessionStreamEvent],
+        plan: list[list[SessionStreamEvent]],
         *,
         session_id: uuid.UUID,
         turn_id: str,
     ) -> None:
-        self.rows = rows
+        self._plan = list(plan)
         self.session_id = session_id
         self.turn_id = turn_id
+        self.executes = 0
+        self.rollbacks = 0
 
     async def execute(self, stmt):
+        self.executes += 1
+        rows = self._plan.pop(0) if self._plan else []
         sql = str(stmt).lower()
         assert "session_stream_events.session_id =" in sql, (
             "poll query lost its session_id scope: " + sql
@@ -101,19 +109,31 @@ class _FakePollDb:
         return _Result(
             [
                 r
-                for r in self.rows
+                for r in rows
                 if r.session_id == self.session_id and r.turn_id == self.turn_id
             ]
         )
 
     async def rollback(self) -> None:
-        pass
+        self.rollbacks += 1
 
     async def __aenter__(self) -> _FakePollDb:
         return self
 
     async def __aexit__(self, *exc: object) -> bool:
         return False
+
+
+class _FakeEngine:
+    """Counts physical checkouts: one `connect()` per stream, not per tick."""
+
+    def __init__(self, conn: _FakePollDb) -> None:
+        self._conn = conn
+        self.connects = 0
+
+    def connect(self) -> _FakePollDb:
+        self.connects += 1
+        return self._conn
 
 
 async def _drive_idle_stream(
@@ -124,13 +144,13 @@ async def _drive_idle_stream(
 ) -> tuple[int, list[float], list[str]]:
     """Run `_stream_from_db` to completion on a virtual clock.
 
-    Returns ``(sessions_opened, sleep_delays, yielded_chunks)``. Every
-    `async_session_maker` call is counted through a factory (`return_value`
-    would hand back the same object and hide the churn entirely —
-    `app.db.async_session_maker` is imported *inside* the function, which is
-    what makes the patch visible). `time.monotonic` and `asyncio.sleep` are
-    virtual, so the full 900s idle window is reached in ~80 iterations with
-    zero real waiting.
+    Returns ``(connects, executes, sleep_delays, yielded_chunks)``. The fake
+    engine counts `connect()` checkouts — 1:1 with physical connections under
+    ``NullPool`` — while the one held connection serves one `rows_plan` entry
+    per `execute` (the initial replay read included). `app.db.engine` is
+    imported *inside* the function, which is what makes the patch visible.
+    `time.monotonic` and `asyncio.sleep` are virtual, so the full 900s idle
+    window is reached in ~80 iterations with zero real waiting.
 
     `rows_plan` is consumed one entry per poll read (the initial replay read
     included); an exhausted plan yields zero rows, i.e. a fully idle stream.
@@ -142,9 +162,9 @@ async def _drive_idle_stream(
     clock = {"t": 1_000.0}
     delays: list[float] = []
     chunks: list[str] = []
-    sessions: list[_FakePollDb] = []
-    plan = list(rows_plan)
     stream_session_id = session_id if session_id is not None else uuid.uuid4()
+    conn = _FakePollDb(rows_plan, session_id=stream_session_id, turn_id="turn-1")
+    engine = _FakeEngine(conn)
 
     def _monotonic() -> float:
         return clock["t"]
@@ -153,20 +173,12 @@ async def _drive_idle_stream(
         delays.append(delay)
         clock["t"] += delay
 
-    def _factory() -> _FakePollDb:
-        rows = plan.pop(0) if plan else []
-        db = _FakePollDb(rows, session_id=stream_session_id, turn_id="turn-1")
-        sessions.append(db)
-        return db
-
     with ExitStack() as stack:
         stack.enter_context(
             patch("app.routers.sessions.time.monotonic", side_effect=_monotonic)
         )
         stack.enter_context(patch("asyncio.sleep", new=_sleep))
-        stack.enter_context(
-            patch("app.db.async_session_maker", side_effect=_factory)
-        )
+        stack.enter_context(patch("app.db.engine", engine))
         # Turn never releases its row lock: the stream idles until the timeout.
         stack.enter_context(
             patch(
@@ -191,7 +203,7 @@ async def _drive_idle_stream(
         ):
             chunks.append(chunk)
 
-    return len(sessions), delays, chunks
+    return engine.connects, conn.executes, delays, chunks
 
 
 class _FakeMetaDb:
