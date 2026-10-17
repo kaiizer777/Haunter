@@ -23,9 +23,7 @@
 
 <br/>
 
-## 🔍 PR Review & Fix
-
-> Haunter doesn't just leave comments. It opens fixes.
+## 🔍 PR & Devops Agent
 
 Connect any GitHub repository and Haunter becomes an always-on code intelligence layer. Every pull request gets reviewed across four dimensions — and every finding it's confident about gets a verified, sandbox-tested fix PR attached to it.
 
