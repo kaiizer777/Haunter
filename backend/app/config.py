@@ -163,7 +163,7 @@ class Settings(BaseSettings):
         "/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY"
     )
     github_sandbox_poll_interval_seconds: float = 10.0
-    github_sandbox_poll_timeout_seconds: float = 120.0
+    github_sandbox_poll_timeout_seconds: float = 600.0
     github_sandbox_workflow_filename_py: str = "haunter-test-py.yml"
     github_sandbox_workflow_filename_ts: str = "haunter-test-ts.yml"
     # Language packs. One template per detect_language() key; the key set is
