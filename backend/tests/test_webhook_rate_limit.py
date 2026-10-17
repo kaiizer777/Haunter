@@ -103,3 +103,23 @@ async def test_webhook_throttle_is_per_sender(
     for _ in range(3):
         resp = await _post_ping(client, "shared-org", "shared-repo", "quiet-sender")
         assert resp.status_code == 200
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_webhook_throttle_is_per_repo(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Throttling one repo leaves the same sender's other repo untouched."""
+    monkeypatch.setattr(settings, "webhook_rate_limit_max_deliveries", 2)
+    monkeypatch.setattr(settings, "webhook_rate_limit_window_seconds", 60)
+
+    for _ in range(2):
+        resp = await _post_ping(client, "noisy-org", "noisy-repo", "same-sender")
+        assert resp.status_code == 200
+    throttled = await _post_ping(client, "noisy-org", "noisy-repo", "same-sender")
+    assert throttled.status_code == 429
+
+    for _ in range(2):
+        resp = await _post_ping(client, "other-org", "other-repo", "same-sender")
+        assert resp.status_code == 200
