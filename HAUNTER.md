@@ -114,6 +114,8 @@ A run that fails or exhausts its fix attempts never needs a dummy commit to run 
 
 The child copies only the tenant scope (`repo_id`) and failure coordinates (`head_sha`/`head_branch`). Every pipeline-owned field resets: diagnosis summary, PR coordinates, final summary, failure reason, and any fallback tracking issue. `github_run_id`/`github_delivery_id` stay NULL — the child corresponds to no new GitHub delivery, so a fabricated id can never collide with a real delivery's UNIQUE idempotency key. The source run is never mutated, preserving its audit history.
 
+Only settled (terminal-state) runs replay: retryability is read from the orchestrator's own `_TERMINAL_STATUSES` (`pr_opened`, `fallback_commented`, `flaky_detected`, `completed`, `error`), so a newly added terminal status cannot drift out of the allowlist. Guards: 404 on non-owned runs (no existence oracle), 409 while the source or any child is still in flight, 429 past 5 children per run, and 503 with the child marked `error` when dispatch itself fails. The dashboard offers the action per row on the runs list and on the run detail page (`RetryRunButton`), lands on the dispatched child, and the trace endpoint exposes the parent/children thread for the retry lineage.
+
 ## 3. Orchestrator Engine & State Machine
 
 The orchestrator (`backend/app/orchestrator.py`) enforces a forward-only, deterministic state machine over `RunStatus`. Skipping states or reverting backwards triggers an immediate `InvalidTransitionError`.
