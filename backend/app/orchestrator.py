@@ -32,11 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import async_session_maker
-from app.models import Repo, Run, RunStep
+from app.models import Attempt, Repo, Run, RunStep
 from app.services import feature_enforcement
 from app.services.followup_commands import TEST_FIX_CONCLUSION
 from app.services.repo_settings import get_repo_settings
-from app.subagents.context_gatherer import gather_context
+from app.subagents.context_gatherer import build_issue_repro, gather_context
 from sqlalchemy.exc import InterfaceError, OperationalError
 
 # Truncation cap for runs.failure_reason — short dashboard string, not an
@@ -123,6 +123,55 @@ def is_issue_run(run: Run) -> bool:
         and run.github_run_id is None
         and run.reply_to_comment_id is not None
     )
+
+
+def record_issue_repro(
+    *,
+    run: Run,
+    attempt: Attempt,
+    db: AsyncSession,
+    state: dict[str, Any],
+) -> str:
+    """Derive and persist the sandbox verification target for an issue run.
+
+    Feat-125 R10: an issue run owns no CI logs, so the sandbox check would
+    verify the patch against nothing. The reported behaviour — distilled
+    from the issue title/body/comments into ``run.diagnosis_summary`` by
+    ``gather_issue_context`` — is recorded on the attempt as the
+    verification target, plus one zero-cost ``issue_repro_derived`` trace
+    row. The caller still runs the normal sandbox check afterwards. When
+    no repro is derivable the run keeps the diagnosis-comment fallback via
+    the exhaust path; the decision is recorded either way so the dashboard
+    trace shows which branch was taken. Returns the decision string.
+    """
+    repro = build_issue_repro(run.diagnosis_summary)
+    if repro is None:
+        decision = "issue_repro_unavailable_using_diagnosis_fallback"
+        state["decisions"].append(decision)
+        logger.info(
+            "orchestrator: run=%s no issue repro derivable — keeping diagnosis fallback",
+            run.id,
+        )
+        return decision
+    attempt.strategy_notes = ((attempt.strategy_notes or "") + f"\n\n{repro}").strip()
+    db.add(
+        RunStep(
+            run_id=run.id,
+            step_name="issue_repro_derived",
+            input_tokens=0,
+            output_tokens=0,
+            latency_ms=0,
+            cost_estimate=0.0,
+        )
+    )
+    decision = "issue_repro_derived"
+    state["decisions"].append(decision)
+    logger.info(
+        "orchestrator: run=%s issue repro recorded (%d chars) as sandbox target",
+        run.id,
+        len(repro),
+    )
+    return decision
 
 
 # ---------------------------------------------------------------------------
@@ -688,7 +737,7 @@ async def _orchestrator_pipeline_body(
         FixGenerationError,
     )
     from app.sandbox import verify as sandbox_verify
-    from app.models import RunStep, Attempt
+    from app.models import RunStep
 
     repo_settings = await get_repo_settings(db, repo.id)
 
@@ -1226,6 +1275,18 @@ async def _orchestrator_pipeline_body(
                     ) + " [sandbox verification bypassed by repo settings]"
                     state["decisions"].append("sandbox_verification_skipped")
                 else:
+                    # Feat-125 R10: issue runs own no CI failure, so the
+                    # sandbox check needs an explicit verification target.
+                    # Derive it from the issue context and record it; runs
+                    # with no derivable repro keep the diagnosis-comment
+                    # fallback via the exhaust path below.
+                    if is_issue_run(run):
+                        record_issue_repro(
+                            run=run,
+                            attempt=attempt,
+                            db=attempt_db,
+                            state=state,
+                        )
                     # ---- Verify in sandbox (provider selected via SANDBOX_PROVIDER env) ----
                     verify_result = await sandbox_verify(
                         attempt=attempt,

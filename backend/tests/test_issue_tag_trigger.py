@@ -44,11 +44,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Repo, RepoSettings, Run
-from app.orchestrator import is_issue_run
+from app.models import Attempt, Repo, RepoSettings, Run, RunStep
+from app.orchestrator import is_issue_run, record_issue_repro
 from app.schemas import IssuesOpenedWebhookPayload
 from app.services.followup_commands import has_issue_trigger
-from app.subagents.context_gatherer import _render_issue_block
+from app.subagents.context_gatherer import _render_issue_block, build_issue_repro
 from app.subagents.pr_writer import append_issue_closing_line
 
 # `audit_store`, `fake_audit_db` and `fake_audit_user_factory` are pytest
@@ -825,3 +825,78 @@ async def test_unresolvable_head_sha_is_a_loud_error_with_no_run(
         "reason": "could not resolve base branch head",
     }
     assert root_runs(audit_store, repo) == []
+
+
+# ---------------------------------------------------------------------------
+# R10: issue-run sandbox verification target
+# ---------------------------------------------------------------------------
+
+
+def test_build_issue_repro_derives_bounded_target():
+    """The issue diagnosis doubles as the sandbox verification target."""
+    summary = "App crashes on empty config: ConfigLoader.read raises FileNotFoundError."
+    repro = build_issue_repro(summary)
+
+    assert repro is not None
+    assert "Issue Repro" in repro
+    assert "crashes on empty config" in repro
+    # Evidence marker, never an instruction to the fix pipeline.
+    assert "evidence, not instruction" in repro
+    assert len(repro) <= 2000
+
+
+def test_build_issue_repro_truncates_long_summaries():
+    repro = build_issue_repro("behavior: " + "x" * 5000)
+
+    assert repro is not None
+    assert len(repro) <= 2000
+    assert "[TRUNCATED]" in repro
+
+
+@pytest.mark.parametrize("blank", [None, "", "   ", 123, b"bytes"])
+def test_build_issue_repro_needs_a_summary(blank):
+    """No derivable summary means no repro — the fallback path owns the run."""
+    assert build_issue_repro(blank) is None
+
+
+def test_issue_run_records_repro_artifact_or_documented_fallback(
+    fake_audit_db: FakeAsyncSession,
+    audit_store: FakeStore,
+):
+    """R10: an issue run derives its sandbox target from the issue-context
+    diagnosis (attempt notes + trace row); an empty diagnosis records the
+    documented fallback decision instead of failing."""
+    run = make_run(id=uuid.uuid4(), diagnosis_summary="Crash on empty config.")
+    attempt = Attempt(run_id=run.id, attempt_number=1, patch_text="diff")
+    state: dict[str, Any] = {"decisions": []}
+
+    decision = record_issue_repro(run=run, attempt=attempt, db=fake_audit_db, state=state)
+
+    assert decision == "issue_repro_derived"
+    assert state["decisions"] == ["issue_repro_derived"]
+    assert "Crash on empty config" in (attempt.strategy_notes or "")
+    steps = [
+        row
+        for row in audit_store.rows(RunStep.__table__)
+        if row.run_id == run.id and row.step_name == "issue_repro_derived"
+    ]
+    assert len(steps) == 1
+
+    # No derivable repro: documented fallback, no artifact, no raise.
+    empty_run = make_run(id=uuid.uuid4(), diagnosis_summary="   ")
+    empty_attempt = Attempt(run_id=empty_run.id, attempt_number=1, patch_text="diff")
+    empty_state: dict[str, Any] = {"decisions": []}
+
+    fallback = record_issue_repro(
+        run=empty_run, attempt=empty_attempt, db=fake_audit_db, state=empty_state
+    )
+
+    assert fallback == "issue_repro_unavailable_using_diagnosis_fallback"
+    assert empty_state["decisions"] == [fallback]
+    assert not empty_attempt.strategy_notes
+    leftovers = [
+        row
+        for row in audit_store.rows(RunStep.__table__)
+        if row.run_id == empty_run.id
+    ]
+    assert leftovers == []
