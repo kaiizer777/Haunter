@@ -40,10 +40,31 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # System config helpers — 60s TTL cache for hot-switch without redeploy
+#
+# The cache stores only detached scalars: an allowlisted provider name plus a
+# ``time.monotonic()`` stamp. No ORM row, session or connection is retained,
+# so a cache hit cannot outlive the ``async with async_session_maker()`` block
+# that produced it.
+#
+# The cache is bounded: expired entries are pruned on every store and the
+# size is capped (#136). TTL being checked on read alone left expired keys
+# resident with no eviction path — the only removal primitive was a blanket
+# ``invalidate_provider_cache()`` .clear(). That is a shape defect, not a live
+# leak: every production call site passes a hardcoded literal
+# ("hosting_provider" / "sandbox_provider"), so after normalization
+# (``key.strip().lower()``) the keyspace has cardinality 2 and
+# ``len(_cfg_cache) <= 2`` regardless. The cap exists purely as
+# defense-in-depth, so a future caller passing a dynamic key cannot turn this
+# into a per-worker leak. Hence a small cap, not a large one.
 # ---------------------------------------------------------------------------
 
 _cfg_cache: dict[str, tuple[str, float]] = {}
 _CACHE_TTL: float = 60.0
+# Keyspace is 2 (hosting_provider / sandbox_provider), so 8 leaves room for
+# new literal config keys without implying a cardinality that cannot exist.
+# Must stay >= 2: invalidate_provider_cache() must still be able to hold both
+# live keys at once.
+_CFG_CACHE_MAXSIZE: int = 8
 
 _ALLOWED_PROVIDERS: frozenset[str] = frozenset({"aws"})
 
