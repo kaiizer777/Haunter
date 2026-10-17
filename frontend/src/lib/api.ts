@@ -195,6 +195,10 @@ export interface AssociatedPROut {
 export interface AssociatedPRResponse {
   associated_pr: AssociatedPROut | null;
 }
+/** Batched associated-PR lookup, via POST /reviews/associated-pr/batch (issue #116). */
+export interface AssociatedPRBatchResponse {
+  associated_prs: Record<string, AssociatedPROut | null>;
+}
 
 
 export interface FixtureScoreItem {
@@ -825,6 +829,10 @@ export const api = {
 
   getAssociatedPr: (reviewId: string) =>
     api.get<AssociatedPRResponse>(`/reviews/${reviewId}/associated-pr`),
+  getAssociatedPrs: (reviewIds: string[]) =>
+    api.post<AssociatedPRBatchResponse>(`/reviews/associated-pr/batch`, {
+      review_ids: reviewIds,
+    }),
 
   // Session endpoints (Phase 3 -- Cloud Agentic Live Session)
   listSessions: (params?: { status?: string; limit?: number; offset?: number }) => {
