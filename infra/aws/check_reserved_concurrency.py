@@ -37,6 +37,23 @@ def main() -> int:
         "lambda_reserved_concurrent_executions variable defined",
         'variable "lambda_reserved_concurrent_executions"' in vars_src,
     )
+    ok &= check(
+        "async self-invoke queue bounded (event invoke config)",
+        'resource "aws_lambda_function_event_invoke_config"' in lambda_src
+        and "maximum_event_age_in_seconds" in lambda_src
+        and "maximum_retry_attempts" in lambda_src,
+    )
+    ok &= check(
+        "throttle + concurrency alarms present",
+        'resource "aws_cloudwatch_metric_alarm" "lambda_throttles"' in lambda_src
+        and 'resource "aws_cloudwatch_metric_alarm" "lambda_concurrency_high"'
+        in lambda_src,
+    )
+    outputs_src = (ROOT / "outputs.tf").read_text(encoding="utf-8")
+    ok &= check(
+        "reserved concurrency exposed as output",
+        'output "lambda_reserved_concurrent_executions"' in outputs_src,
+    )
 
     print("OK: Lambda concurrency is capped" if ok else "OPEN #160: Lambda concurrency uncapped")
     return 0 if ok else 1
