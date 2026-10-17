@@ -816,21 +816,30 @@ async def test_session_orchestrator_disconnect_persists_turn() -> None:
     queue = SseQueue(maxsize=2)
     gen = queue.stream()
 
-    task = asyncio.create_task(
-        orch.run(
-            user_message="Please refactor auth",
-            queue=queue,
+    fake_db = MagicMock()
+    fake_db.__aenter__ = AsyncMock(return_value=fake_db)
+    fake_db.__aexit__ = AsyncMock(return_value=None)
+    fake_db.commit = AsyncMock()
+    fake_db.execute = AsyncMock()
+    fake_db.scalar = AsyncMock()
+    fake_db.add_all = MagicMock()
+    fake_db.add = MagicMock()
+    with patch("app.db.async_session_maker", return_value=fake_db):
+        task = asyncio.create_task(
+            orch.run(
+                user_message="Please refactor auth",
+                queue=queue,
+            )
         )
-    )
 
-    # Consumer reads 1 event (e.g. heartbeat) then disconnects
-    first_chunk = await anext(gen)
-    assert "thought" in first_chunk
-    await gen.aclose()
-    assert queue.is_disconnected is True
+        # Consumer reads 1 event (e.g. heartbeat) then disconnects
+        first_chunk = await anext(gen)
+        assert "thought" in first_chunk
+        await gen.aclose()
+        assert queue.is_disconnected is True
 
-    # Producer must finish execution and persist without deadlocking
-    await asyncio.wait_for(task, timeout=2.0)
+        # Producer must finish execution and persist without deadlocking
+        await asyncio.wait_for(task, timeout=2.0)
 
     orch._persist.assert_awaited_once()
     assert mock_session.conversation_history[0]["content"] == "Please refactor auth"

@@ -39,6 +39,7 @@ from app.services.repo_settings import (
     apply_preset,
     create_default_repo_settings,
     get_repo_settings,
+    invalidate_repo_settings_cache,
     normalize_preset_name,
     update_repo_settings,
 )
@@ -140,6 +141,12 @@ async def post_preset(
     settings = await get_repo_settings(db, repo_id, auto_create=True)
     apply_preset(settings, body.preset)
     await db.commit()
+    # Invalidate before the refresh() await (#134-3): the commit is
+    # already durable, and a concurrent read during refresh must not see
+    # the stale cache. A commit failure propagates before this line, and
+    # the cache still holds the (still-accurate) pre-write snapshot since
+    # cached entries are detached copies, never this attached instance.
+    invalidate_repo_settings_cache(repo_id)
     await db.refresh(settings)
     logger.info(
         "Applied preset '%s' to repo_id=%s by user=%s",
@@ -179,6 +186,9 @@ async def post_preset_path(
     settings = await get_repo_settings(db, repo_id, auto_create=True)
     apply_preset(settings, canonical)
     await db.commit()
+    # Same commit-then-invalidate-before-refresh ordering as post_preset
+    # (#134-3); see the comment there.
+    invalidate_repo_settings_cache(repo_id)
     await db.refresh(settings)
     logger.info(
         "Applied preset '%s' via path to repo_id=%s by user=%s",

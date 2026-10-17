@@ -786,78 +786,22 @@ function PushPill({ commitSha, commitUrl, repoName }: { commitSha: string; commi
  *
  * Module-level cache keyed by review id: back/forward + re-renders never
  * refetch, and one page render resolves every row with a SINGLE
- * `POST /reviews/associated-pr/batch` call (issue #116) — never one GET
- * per row. Keyed by id — NOT by commit sha — because the lookup itself is
- * review-scoped: the same sha can appear in two repos/forks and must never
- * share one entry. Resolves null (no PR / token-missing / error) silently —
- * the row keeps rendering `Push @ sha` with no skeleton and no layout shift
- * beyond the pill text swap. Only the rendered page window fetches (one
- * batch max); rows that already carry `pr_number` never fetch. List Refresh
- * / detail Retry evict only the failed (null) entries (see
- * clearFailedAssociatedPrCache) so misses genuinely retry while resolved PRs
- * are kept, not refetched.
+ * `POST /reviews/associated-prs` call (issue #116) — never one GET
+ * per row. Row hooks queue into `batchQueue` and one microtask flush sends
+ * every queued id at once (see `flushBatchPrLookups`). Keyed by id — NOT by
+ * commit sha — because the lookup itself is review-scoped: the same sha can
+ * appear in two repos/forks and must never share one entry. Resolves null
+ * (no PR / token-missing / error) silently — the row keeps rendering
+ * `Push @ sha` with no skeleton and no layout shift beyond the pill text
+ * swap. Only rendered rows fetch; rows that already carry `pr_number` never
+ * fetch. A failed batch leaves the cache untouched so a remount retries;
+ * list Refresh / detail Retry evict only the failed (null) entries (see
+ * clearFailedAssociatedPrCache) so misses genuinely retry while resolved
+ * PRs are kept, not refetched. A per-id request generation keeps a stale
+ * (pre-Refresh) completion from overwriting a newer result.
  */
 const associatedPrCache = new Map<string, AssociatedPROut | null>();
-const associatedPrBatchInflight = new Map<string, Promise<void>>();
-let associatedPrVersion = 0;
-const associatedPrListeners = new Set<() => void>();
-
-function notifyAssociatedPrUpdated(): void {
-  associatedPrVersion += 1;
-  for (const listener of Array.from(associatedPrListeners)) listener();
-}
-
-/** Re-render when the batched page fetch writes the cache above. */
-function useAssociatedPrVersion(): number {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const listener = () => setTick((n) => n + 1);
-    associatedPrListeners.add(listener);
-    return () => {
-      associatedPrListeners.delete(listener);
-    };
-  }, []);
-  return associatedPrVersion;
-}
-
-/**
- * Fetch one page worth of associated-PR lookups in a single batch call
- * (`POST /reviews/associated-pr/batch`, issue #116). Every id — resolved
- * or miss — is written to `associatedPrCache`, then subscribers
- * re-render via notify. Same-id-set calls share one in-flight request.
- * Never throws: a batch failure resolves its ids to null so rows keep
- * rendering `Push @ sha` instead of failing the page.
- */
-export function fetchAssociatedPrBatch(reviewIds: string[]): Promise<void> {
-  const fresh = Array.from(new Set(reviewIds)).filter(
-    (id) => !associatedPrCache.has(id)
-  );
-  if (fresh.length === 0) return Promise.resolve();
-  const key = fresh.slice().sort().join(",");
-  const inflight = associatedPrBatchInflight.get(key);
-  if (inflight) return inflight;
-  const task = api
-    .getAssociatedPrs(fresh)
-    .then(
-      (res) => {
-        const prs = res?.associated_prs ?? {};
-        for (const id of fresh) {
-          associatedPrCache.set(id, prs[id] ?? null);
-        }
-      },
-      () => {
-        for (const id of fresh) {
-          if (!associatedPrCache.has(id)) associatedPrCache.set(id, null);
-        }
-      }
-    )
-    .then(() => {
-      associatedPrBatchInflight.delete(key);
-      notifyAssociatedPrUpdated();
-    });
-  associatedPrBatchInflight.set(key, task);
-  return task;
-}
+const associatedPrInflight = new Map<string, Promise<AssociatedPROut | null>>();
 
 /**
  * Drop every cached + in-flight associated-PR entry. Only the test reset
@@ -866,7 +810,10 @@ export function fetchAssociatedPrBatch(reviewIds: string[]): Promise<void> {
  */
 export function clearAssociatedPrCache(): void {
   associatedPrCache.clear();
-  associatedPrBatchInflight.clear();
+  associatedPrInflight.clear();
+  prRequestGeneration.clear();
+  batchQueue = [];
+  batchScheduled = false;
 }
 
 /**
@@ -878,9 +825,14 @@ export function clearAssociatedPrCache(): void {
  */
 export function clearFailedAssociatedPrCache(): void {
   for (const [key, value] of associatedPrCache) {
-    if (value == null) associatedPrCache.delete(key);
+    if (value == null) {
+      associatedPrCache.delete(key);
+      prRequestGeneration.delete(key);
+    }
   }
-  associatedPrBatchInflight.clear();
+  associatedPrInflight.clear();
+  batchQueue = [];
+  batchScheduled = false;
 }
 
 /** Test-only reset for the module-level associated-PR cache (vitest). */
@@ -888,12 +840,131 @@ export function __resetAssociatedPrCacheForTests(): void {
   clearAssociatedPrCache();
 }
 
+let batchQueue: Array<{
+  id: string;
+  resolve: (pr: AssociatedPROut | null) => void;
+  generation: number;
+}> = [];
+let batchScheduled = false;
+let currentGeneration = 0;
+const prRequestGeneration = new Map<string, number>();
+
+async function flushBatchPrLookups() {
+  const queue = batchQueue;
+  batchQueue = [];
+  batchScheduled = false;
+
+  if (queue.length === 0) return;
+
+  const ids = Array.from(new Set(queue.map((item) => item.id)));
+
+  let batchFailed = false;
+  const batchMap = new Map<string, AssociatedPROut | null>();
+  const hasBatchFn = typeof api.getAssociatedPrsBatch === "function";
+
+  if (hasBatchFn) {
+    try {
+      const res = await api.getAssociatedPrsBatch(ids);
+      if (res && Array.isArray(res.items)) {
+        for (const item of res.items) {
+          batchMap.set(item.review_id, item.associated_pr ?? null);
+        }
+      }
+    } catch {
+      batchFailed = true;
+    }
+  }
+
+  if (batchFailed) {
+    // When batch fails, do NOT fan out to individual requests (avoid amplifying backend load).
+    // Mark queued items as null without caching the transient failure so remount/revisit retries.
+    for (const item of queue) {
+      item.resolve(null);
+    }
+    return;
+  }
+
+  for (const item of queue) {
+    if (batchMap.has(item.id)) {
+      const pr = batchMap.get(item.id) ?? null;
+      if (prRequestGeneration.get(item.id) === item.generation) {
+        associatedPrCache.set(item.id, pr);
+      }
+      item.resolve(pr);
+    } else if (typeof api.getAssociatedPr === "function") {
+      api.getAssociatedPr(item.id).then(
+        (res) => {
+          const pr = res?.associated_pr ?? null;
+          if (prRequestGeneration.get(item.id) === item.generation) {
+            associatedPrCache.set(item.id, pr);
+          }
+          item.resolve(pr);
+        },
+        () => {
+          // Transient failure: leave uncached so revisiting or remounting can retry
+          item.resolve(null);
+        }
+      );
+    } else {
+      if (prRequestGeneration.get(item.id) === item.generation) {
+        associatedPrCache.set(item.id, null);
+      }
+      item.resolve(null);
+    }
+  }
+}
+
+function requestAssociatedPr(id: string): Promise<AssociatedPROut | null> {
+  const gen = ++currentGeneration;
+  prRequestGeneration.set(id, gen);
+  return new Promise((resolve) => {
+    batchQueue.push({ id, resolve, generation: gen });
+    if (!batchScheduled) {
+      batchScheduled = true;
+      queueMicrotask(flushBatchPrLookups);
+    }
+  });
+}
+
 function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
-  // Pure cache read: the page-level batch effect in ReviewsPage resolves
-  // every rendered row with ONE `POST /reviews/associated-pr/batch` call,
-  // and the detail effect below covers off-page deep links with a single
-  // GET. No per-row fetch here — that was the O(N) fan-out (issue #116).
-  useAssociatedPrVersion();
+  // Setter-only state: flipping it re-renders so the cache read below sees
+  // the freshly written entry (a stale completion must never display).
+  const [, setResolved] = useState<AssociatedPROut | null>(
+    () => associatedPrCache.get(review.id) ?? null
+  );
+  useEffect(() => {
+    if (review.pr_number != null) return;
+    const sha = review.commit_sha;
+    if (!sha) return;
+    const key = review.id;
+    const cached = associatedPrCache.get(key);
+    if (cached !== undefined) {
+      setResolved(cached);
+      return;
+    }
+    let cancelled = false;
+    let pending = associatedPrInflight.get(key);
+    if (!pending) {
+      const task = requestAssociatedPr(review.id);
+      pending = task.finally(() => {
+        // Only clear our own entry: a Refresh/retry may have replaced it.
+        if (associatedPrInflight.get(key) === pending) {
+          associatedPrInflight.delete(key);
+        }
+      });
+      associatedPrInflight.set(key, pending);
+    }
+    pending.then((pr) => {
+      if (!cancelled) setResolved(pr);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Identity dep on purpose: a list Refresh / detail Retry delivers fresh
+    // row objects, which re-runs the lookup (cache cleared by the handler →
+    // genuine retry; cache intact → hit, no refetch). Plain re-renders and
+    // back-nav reuse the same refs, so success caching still holds.
+  }, [review]);
   if (review.pr_number != null) return null;
   return associatedPrCache.get(review.id) ?? null;
 }
@@ -2403,18 +2474,12 @@ export default function ReviewsPage() {
   useEffect(() => {
     fetchReviews();
   }, [fetchReviews]);
-  // Batch associated-PR lookup for the rendered page (issue #116): one POST
-  // per page render instead of one GET per push row. Skips rows that carry
-  // `pr_number`, rows without a sha, and ids already cached — resolved PRs
-  // survive Refresh without refetching, while null misses were evicted by
-  // handleRefresh / handleDetailRetry so they genuinely retry here.
-  useEffect(() => {
-    const ids = reviews
-      .filter((r) => r.pr_number == null && r.commit_sha && !associatedPrCache.has(r.id))
-      .map((r) => r.id);
-    if (ids.length === 0) return;
-    fetchAssociatedPrBatch(ids);
-  }, [reviews]);
+  // Associated-PR lookups ride the per-row `useAssociatedPr` hooks above:
+  // each rendered push row queues into `batchQueue` and one microtask flush
+  // sends every queued id in a single POST (issue #116) — never one GET per
+  // row. Rows carrying `pr_number`, rows without a sha, and cached ids never
+  // queue, so resolved PRs survive Refresh without refetching, while null
+  // misses evicted by handleRefresh / handleDetailRetry genuinely retry.
 
   // Clamp the page index when the server-side result set shrinks beneath it.
   // The server filters by repo / high-risk / severity, and a Refresh can also
@@ -2540,21 +2605,8 @@ export default function ReviewsPage() {
         if (!cancelled) {
           setDetailReview(r);
           setDetailLoading(false);
-          // Off-page deep links never pass through the page batch above, so a
-          // push row opened directly gets one single-row lookup (issue #116:
-          // one call for one row, not one call per rendered row).
-          if (r.pr_number == null && r.commit_sha && !associatedPrCache.has(r.id)) {
-            api.getAssociatedPr(r.id).then(
-              (res) => {
-                associatedPrCache.set(r.id, res?.associated_pr ?? null);
-                notifyAssociatedPrUpdated();
-              },
-              () => {
-                associatedPrCache.set(r.id, null);
-                notifyAssociatedPrUpdated();
-              }
-            );
-          }
+          // No direct associated-PR GET here: the detail header renders
+          // through useAssociatedPr, which already batches deep-link rows.
         }
       },
       () => {

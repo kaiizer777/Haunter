@@ -43,7 +43,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
@@ -52,7 +52,7 @@ from app.failure_signature import (
     MAX_SIGNATURE_INPUT_CHARS,
     normalize_failure_signature,
 )
-from app.models import Attempt, Repo, Run, RunStep, User
+from app.models import Attempt, EvalResult, Repo, Run, RunStep, User
 from app.schemas import BatchDeleteRunsRequest, BatchDeleteRunsResponse, RunOut
 from app.services.followup_commands import FEEDBACK_CONCLUSION, TEST_FIX_CONCLUSION
 from app.traces.classify import classify_failure
@@ -264,18 +264,25 @@ async def get_run_trace(
         )
 
     # Fetch steps ordered ASC by created_at (chronological pipeline timeline).
+    # Bounded: a run's step count is fixed by the pipeline stage list, the
+    # LIMIT is a backstop against pathological rows, not pagination.
     steps_result = await db.execute(
         select(RunStep)
         .where(RunStep.run_id == run_id)
         .order_by(RunStep.created_at.asc())
+        .limit(500)
     )
     steps: list[RunStep] = list(steps_result.scalars().all())
 
-    # Fetch attempts ordered ASC by attempt_number.
+    # Fetch attempts ordered ASC by attempt_number. Bounded for the same
+    # reason (orchestrator max_attempts is single-digit); patch_text stays
+    # inline because the C1 wire contract requires attempts[].patch_text on
+    # this response for the dashboard diff viewer.
     attempts_result = await db.execute(
         select(Attempt)
         .where(Attempt.run_id == run_id)
         .order_by(Attempt.attempt_number.asc())
+        .limit(100)
     )
     attempts: list[Attempt] = list(attempts_result.scalars().all())
 
@@ -308,6 +315,9 @@ async def get_run_trace(
             Repo.user_id == current_user.id,
         )
         .order_by(Run.created_at.asc())
+        # Bounded: retry creation caps children at _MAX_RUN_CHILDREN, so this
+        # LIMIT is a backstop against races, not a truncation of live data.
+        .limit(_MAX_TRACE_CHILDREN)
     )
     children_out = [
         RunSummaryOut.model_validate(child)
@@ -334,6 +344,11 @@ async def get_run_trace(
 # run. Matches the interactive refinement cap in app/webhooks.py so a single
 # run can never fan out into an unbounded pipeline storm.
 _MAX_RUN_CHILDREN = 5
+
+# Backstop LIMIT for the retry-thread children lookup in get_run_trace.
+# Creation is capped at _MAX_RUN_CHILDREN above, so this never truncates live
+# data — it bounds the SELECT against check-then-act races at the cap.
+_MAX_TRACE_CHILDREN = 50
 
 # Conclusions the pipeline writes onto `Run.conclusion` as its own
 # classification, overwriting the GitHub conclusion the run was created with.
@@ -708,61 +723,58 @@ async def get_repo_stats(
             status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
         )
 
-    # Aggregate run-level stats.
-    run_agg_result = await db.execute(
-        select(
-            func.count(Run.id).label("total_runs"),
-            func.sum(
-                func.cast(Run.status == "completed", type_=func.count(Run.id).type)
-            ).label("completed_count"),
-        ).where(Run.repo_id == repo_id)
-    )
-    run_row = run_agg_result.one()
-    total_runs: int = run_row.total_runs or 0
-    # COUNT(status == completed) via a FILTER aggregate.
-    # Re-query more explicitly for cross-DB compatibility:
-    completed_result = await db.execute(
-        select(func.count(Run.id)).where(
-            Run.repo_id == repo_id, Run.status == "completed"
+    # Aggregate run-level stats in ONE round trip: total rows plus the
+    # completed subset via a conditional SUM. (The previous code ran this
+    # aggregate and then re-queried the completed count separately.)
+    stats_row = (
+        await db.execute(
+            select(
+                func.count(Run.id).label("total_runs"),
+                func.coalesce(
+                    func.sum(case((Run.status == "completed", 1), else_=0)),
+                    0,
+                ).label("completed_count"),
+            ).where(Run.repo_id == repo_id)
         )
-    )
-    completed_count: int = completed_result.scalar_one() or 0
+    ).one()
+    total_runs: int = int(stats_row.total_runs or 0)
+    completed_count: int = int(stats_row.completed_count or 0)
 
     success_rate: float = (completed_count / total_runs) if total_runs > 0 else 0.0
 
-    # Average attempts per run.
-    avg_attempts_result = await db.execute(
-        select(
-            func.avg(
-                select(func.count(Attempt.id))
-                .where(Attempt.run_id == Run.id)
-                .correlate(Run)
-                .scalar_subquery()
-            )
-        ).where(Run.repo_id == repo_id)
+    # Per-run attempt/cost/latency averages in a SECOND single round trip.
+    # Each average is over a correlated per-run scalar subquery; combining the
+    # three into one SELECT halves the statements without changing the math.
+    attempt_count_subq = (
+        select(func.count(Attempt.id))
+        .where(Attempt.run_id == Run.id)
+        .correlate(Run)
+        .scalar_subquery()
     )
-    avg_attempts: float = float(avg_attempts_result.scalar_one() or 0.0)
-
-    # Average cost and latency per run (summed per run, then averaged).
-    cost_lat_result = await db.execute(
-        select(
-            func.avg(
-                select(func.coalesce(func.sum(RunStep.cost_estimate), 0))
-                .where(RunStep.run_id == Run.id)
-                .correlate(Run)
-                .scalar_subquery()
-            ),
-            func.avg(
-                select(func.coalesce(func.sum(RunStep.latency_ms), 0))
-                .where(RunStep.run_id == Run.id)
-                .correlate(Run)
-                .scalar_subquery()
-            ),
-        ).where(Run.repo_id == repo_id)
+    cost_sum_subq = (
+        select(func.coalesce(func.sum(RunStep.cost_estimate), 0))
+        .where(RunStep.run_id == Run.id)
+        .correlate(Run)
+        .scalar_subquery()
     )
-    cost_lat_row = cost_lat_result.one()
-    avg_cost: float = float(cost_lat_row[0] or 0.0)
-    avg_latency_ms: float = float(cost_lat_row[1] or 0.0)
+    latency_sum_subq = (
+        select(func.coalesce(func.sum(RunStep.latency_ms), 0))
+        .where(RunStep.run_id == Run.id)
+        .correlate(Run)
+        .scalar_subquery()
+    )
+    avg_row = (
+        await db.execute(
+            select(
+                func.avg(attempt_count_subq),
+                func.avg(cost_sum_subq),
+                func.avg(latency_sum_subq),
+            ).where(Run.repo_id == repo_id)
+        )
+    ).one()
+    avg_attempts: float = float(avg_row[0] or 0.0)
+    avg_cost: float = float(avg_row[1] or 0.0)
+    avg_latency_ms: float = float(avg_row[2] or 0.0)
 
     return RepoStatsOut(
         success_rate=round(success_rate, 4),
@@ -824,25 +836,26 @@ async def batch_delete_runs(
 
     user_repo_ids = select(Repo.id).where(Repo.user_id == current_user.id)
     result = await db.execute(
-        select(Run).where(
+        select(Run.id).where(
             Run.id.in_(payload.run_ids),
             Run.repo_id.in_(user_repo_ids),
         )
     )
-    matching_runs = list(result.scalars().all())
+    matching_run_ids = list(result.scalars().all())
 
-    if not matching_runs:
+    if not matching_run_ids:
         return BatchDeleteRunsResponse(deleted_count=0)
 
-    matching_run_ids = [r.id for r in matching_runs]
-
-    # Explicit cascade cleanup for RunStep and Attempt (RunAttempt) records
-    # in case DB-level foreign key cascade is not handled.
+    # Explicit cascade cleanup for RunStep, Attempt, and EvalResult records.
+    # Note: eval_results.run_id FK is ON DELETE SET NULL, so without explicit
+    # deletion here, bulk deleting Run would leave orphaned EvalResult rows.
+    await db.execute(delete(EvalResult).where(EvalResult.run_id.in_(matching_run_ids)))
     await db.execute(delete(RunStep).where(RunStep.run_id.in_(matching_run_ids)))
     await db.execute(delete(Attempt).where(Attempt.run_id.in_(matching_run_ids)))
 
-    for run in matching_runs:
-        await db.delete(run)
+    # Single bulk DELETE: the previous per-row db.delete() loop emitted one
+    # statement per run inside the same long transaction.
+    await db.execute(delete(Run).where(Run.id.in_(matching_run_ids)))
     await db.commit()
 
-    return BatchDeleteRunsResponse(deleted_count=len(matching_runs))
+    return BatchDeleteRunsResponse(deleted_count=len(matching_run_ids))

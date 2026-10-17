@@ -27,7 +27,7 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.llm import LLMClient
+from app.llm import LLMClient, ResolvedModelConfig, get_active_model_config
 from app.llm.prompts.audit_prompts import (
     AUDIT_STATUS_LABELS,
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
@@ -70,6 +70,14 @@ PERSPECTIVE_TIMEOUT_S = 75.0
 PERSPECTIVE_DEADLINE_S = 100.0
 PERSPECTIVE_CONCURRENCY_LIMIT = 4
 AUDIT_FETCH_TIMEOUT_S = 35.0
+# Budget for resolving the shared model config BEFORE any perspective starts.
+# The per-perspective ``PERSPECTIVE_DEADLINE_S`` wraps ``_run_single_perspective``
+# only; an unbounded ``get_active_model_config`` call on a stuck DB would stall
+# the audit before any deadline can fire. Kept well under
+# ``PERSPECTIVE_DEADLINE_S`` so a slow resolve still leaves room for the four
+# perspectives to run. ``None`` falls back to ``get_active_model_config``'s own
+# no-timeout behavior.
+AUDIT_CONFIG_RESOLVE_TIMEOUT_S = 5.0
 MAX_LLM_RESPONSE_CHARS = 32_000
 MAX_FINDINGS_PER_PERSPECTIVE = 20
 MAX_LINE_NUMBER = 10_000_000
@@ -1394,6 +1402,7 @@ async def _run_single_perspective(
     repo_context: str,
     llm: LLMClient,
     repo_id: Optional[uuid.UUID],
+    model_config: Optional[ResolvedModelConfig] = None,
 ) -> PerspectiveResult:
     started = time.monotonic()
     messages: list[dict[str, Any]] = [
@@ -1409,6 +1418,7 @@ async def _run_single_perspective(
         messages=messages,
         db=None,
         repo_id=repo_id,
+        model_config=model_config,
         max_tokens=4_096,
     )
     input_tokens = _usage_value(response, "input_tokens")
@@ -1443,6 +1453,7 @@ async def _run_single_perspective(
             messages=retry_messages,
             db=None,
             repo_id=repo_id,
+            model_config=model_config,
             max_tokens=4_096,
         )
         response = retry_response
@@ -2061,6 +2072,54 @@ async def run_audit(
     llm = llm_client or LLMClient(timeout=PERSPECTIVE_TIMEOUT_S)
     semaphore = asyncio.Semaphore(PERSPECTIVE_CONCURRENCY_LIMIT)
 
+    # Resolve the active model config ONCE and share it across all
+    # perspectives. Each llm.complete() with db=None opens its own DB session
+    # to resolve this, so without sharing, one audit fans out to 4-8
+    # sessions (one per perspective, doubled on schema-retry). A single
+    # shared session across the concurrent perspectives would be unsafe
+    # (AsyncSession is not concurrency-safe), so instead one pre-resolved
+    # config feeds all four — zero per-perspective sessions.
+    #
+    # Two bot-flagged gaps close here:
+    #   1. A stuck DB lookup cannot stall an audit before perspectives
+    #      start. The resolution is bounded by ``AUDIT_CONFIG_RESOLVE_TIMEOUT_S``
+    #      and, on timeout, falls through to env defaults — the same shape
+    #      ``get_active_model_config`` itself uses for DB failures.
+    #   2. Tests/mocks that inject a non-``LLMClient`` (e.g. ``_FakeLLM``)
+    #      never needed the DB resolve at all: the fake owns its responses
+    #      and forwards ``model_config`` straight through. Skipping the
+    #      call when the client is not a real LLMClient keeps the path
+    #      hermetic (zero external I/O in unit tests).
+    if llm_client is not None and not isinstance(llm_client, LLMClient):
+        shared_config = ResolvedModelConfig(
+            provider="passthrough",
+            model_name="injected-test-client",
+            base_url="http://test.invalid",
+        )
+    else:
+        try:
+            shared_config = await asyncio.wait_for(
+                get_active_model_config(db=db, repo_id=repo_id),
+                timeout=AUDIT_CONFIG_RESOLVE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "auditor: model-config resolve exceeded %.1fs — using env defaults",
+                AUDIT_CONFIG_RESOLVE_TIMEOUT_S,
+            )
+            # Fall back to env defaults directly so we never issue a
+            # second DB call here: the DB is exactly what was slow.
+            # ``get_active_model_config`` itself uses the same
+            # shape when its DB query raises.
+            from app.config import settings
+            from app.llm.config import default_base_url_for_provider
+
+            shared_config = ResolvedModelConfig(
+                provider=settings.default_provider,
+                model_name=settings.default_model,
+                base_url=default_base_url_for_provider(settings.default_provider),
+            )
+
     async def run_one(
         perspective: PerspectiveName,
     ) -> tuple[PerspectiveResult, Optional[BaseException]]:
@@ -2074,6 +2133,7 @@ async def run_audit(
                         repo_context=clean_repo_context,
                         llm=llm,
                         repo_id=repo_id,
+                        model_config=shared_config,
                     ),
                     timeout=PERSPECTIVE_DEADLINE_S,
                 )

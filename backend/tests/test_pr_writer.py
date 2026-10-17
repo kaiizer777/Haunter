@@ -478,11 +478,20 @@ def test_sanitize_fallback_redacts_secrets() -> None:
     assert "[REDACTED]" in result
 
 
-def test_sanitize_fallback_caps_at_10m() -> None:
-    """Total result length must not exceed 10M chars."""
-    long_diagnosis = "a" * 10_000_005
-    result = _sanitize_fallback(long_diagnosis, [])
-    assert len(result) <= 10_000_000
+def test_sanitize_fallback_caps_body() -> None:
+    """Issue #104: a 100KB diagnosis is clipped to the body cap, never stored whole."""
+    from app.orchestrator import _FALLBACK_BODY_MAX_CHARS
+
+    result = _sanitize_fallback("a" * 100_000, [])
+    prefix = "**Haunter AI Diagnosis:**\n\n"
+    longest_suffix = (
+        "\n\n*Note: Sandbox verification is disabled by repository settings. "
+        "Automated fixes were generated but could not be verified in sandbox CI. "
+        "Please review the diagnosis above to manually resolve the issue.*"
+    )
+    assert result.startswith(prefix)
+    assert len(result) - len(prefix) <= _FALLBACK_BODY_MAX_CHARS + len(longest_suffix)
+    assert "a" * (_FALLBACK_BODY_MAX_CHARS + 1) not in result
 
 
 # ---------------------------------------------------------------------------

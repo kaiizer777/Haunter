@@ -17,12 +17,14 @@ from app.db import engine, engine_unpooled
 from app.models import (
     Attempt,
     AuditJob,
+    CodeReview,
     ModelConfig,
     Repo,
     RepoSettings,
     Run,
     RunStep,
     User,
+    WebhookDelivery,
 )
 from app.routers.traces import build_retry_child
 from tests.conftest import truncate_all
@@ -35,7 +37,7 @@ async def test_alembic_head_and_migration_check():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"Expected exactly 1 migration head, found {heads}"
-    assert heads[0] == "b8c9d0e1f2a3"
+    assert heads[0] == "d1e2f3a4b5c6"
     assert script.get_revision("a4b7c9d2e6f1").down_revision == "f2a9c4e7b1d3"
     assert script.get_revision("b6d8f0a2c4e6").down_revision == "a4b7c9d2e6f1"
     assert script.get_revision("c7a1b2c3d4e5").down_revision == "b6d8f0a2c4e6"
@@ -48,6 +50,312 @@ async def test_alembic_head_and_migration_check():
     assert script.get_revision("b7c8d9e0f1a2").down_revision == "e8f9a0b1c2d3"
     assert script.get_revision("a5c6d7e8f9b0").down_revision == "b7c8d9e0f1a2"
     assert script.get_revision("b8c9d0e1f2a3").down_revision == "a5c6d7e8f9b0"
+    assert script.get_revision("e1f2a3b4c5d6").down_revision == "b8c9d0e1f2a3"
+    assert script.get_revision("d1e2f3a4b5c6").down_revision == "e1f2a3b4c5d6"
+
+
+def test_issue_110_composite_indexes_match_models():
+    """Issue #110: composite indexes exist on Run / CodeReview / WebhookDelivery
+    with equality-first column order, AND the migration that creates them
+    declares each index operation with the same (name, table, columns) plus
+    CONCURRENTLY so webhook writes are not blocked while the build runs.
+
+    This inspects both the SQLAlchemy models (single source of truth at runtime)
+    and the actual migration source (single source of truth at upgrade time) so
+    that drift between the two surfaces immediately. A migration with the right
+    string content but the wrong op.create_index arguments cannot satisfy it.
+    """
+    import ast
+    from pathlib import Path
+
+    from sqlalchemy import Index as SAIndex
+
+    expected = {
+        "ix_runs_repo_status_created": (
+            "runs",
+            ["repo_id", "status", "created_at"],
+        ),
+        "ix_code_reviews_repo_commit_pr": (
+            "code_reviews",
+            ["repo_id", "commit_sha", "pr_number"],
+        ),
+        "ix_webhook_deliveries_repo_event_created": (
+            "webhook_deliveries",
+            ["repo_id", "event", "created_at"],
+        ),
+    }
+
+    # ----- Model side: each expected composite Index on Run / CodeReview /
+    # WebhookDelivery must exist, be non-unique, and carry the equality-first
+    # columns the migration declares. We iterate only the expected names so
+    # the deliberate UNIQUE idempotency guards on runs (trigger_comment_id /
+    # github_run_id / github_delivery_id) are not false-positives. -----
+    by_name: dict[str, SAIndex] = {}
+    for model in (Run, CodeReview, WebhookDelivery):
+        for idx in model.__table__.indexes:
+            if idx.name in expected:
+                by_name[idx.name] = idx
+
+    actual: dict[str, tuple[str, list[str]]] = {}
+    for name, (exp_table, exp_cols) in expected.items():
+        idx = by_name.get(name)
+        assert idx is not None, (
+            f"model is missing Index {name!r}; the issue-110 composite must "
+            f"exist on {exp_table}"
+        )
+        assert isinstance(idx, SAIndex), (
+            f"{name!r} must be an Index, got {type(idx).__name__}"
+        )
+        assert not idx.unique, (
+            f"{name!r} must be non-unique; the deliberate UNIQUE idempotency "
+            "guards on runs are github_run_id / trigger_comment_id / "
+            "github_delivery_id and live on separate indexes."
+        )
+        cols = list(idx.columns.keys())
+        assert cols == exp_cols, (
+            f"{name!r} columns drift: model has {cols}, "
+            f"migration declares {exp_cols}"
+        )
+        assert idx.table.name == exp_table, (
+            f"{name!r} lives on {idx.table.name}, expected {exp_table}"
+        )
+        actual[name] = (idx.table.name, cols)
+
+    assert actual == expected, (
+        f"model/migration drift: expected {expected}, got {actual}"
+    )
+
+    # ----- Migration side: AST-walk the migration file and assert every
+    # op.create_index / op.drop_index operation matches the expected set.
+    # Because the migration iterates a module-level _INDEXES tuple through a
+    # for-loop, the call-site Name refs cannot be resolved statically — but
+    # the *source data* in _INDEXES is a literal tuple that ast.literal_eval
+    # can pull apart. We therefore assert two things separately: (a) the
+    # source data matches the models, and (b) the call sites reference that
+    # data correctly with CONCURRENT + IF EXISTS kwargs. -----
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "d1e2f3a4b5c6_add_issue_110_composite_indexes.py"
+    )
+    src = migration.read_text(encoding="utf-8")
+    assert "autocommit_block" in src, (
+        "CONCURRENTLY builds must run outside the env.py transaction; "
+        "missing op.get_context().autocommit_block()"
+    )
+
+    tree = ast.parse(src)
+
+    def _str(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    def _const(node: ast.AST) -> object | None:
+        if isinstance(node, ast.Constant):
+            return node.value
+        return None
+
+    def _kw(call: ast.Call, name: str) -> ast.AST | None:
+        for kw in call.keywords:
+            if kw.arg == name:
+                return kw.value
+        return None
+
+    # Extract the module-level _INDEXES tuple literal — that is the source of
+    # truth for what the migration actually creates at upgrade time.
+    index_table: dict[str, tuple[str, tuple[str, ...]]] = {}
+    found_indexes_const = False
+    for stmt in tree.body:
+        value_node: ast.AST | None = None
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            tgt = stmt.targets[0]
+            if isinstance(tgt, ast.Name):
+                value_node = stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            value_node = stmt.value
+        if value_node is None:
+            continue
+        # Find the name we assigned to (handles both plain Assign and AnnAssign).
+        if isinstance(stmt, ast.Assign):
+            name_id = stmt.targets[0].id  # type: ignore[union-attr]
+        else:
+            name_id = stmt.target.id  # type: ignore[union-attr]
+        if name_id != "_INDEXES":
+            continue
+        try:
+            data = ast.literal_eval(value_node)
+        except (ValueError, SyntaxError) as e:
+            raise AssertionError(
+                f"_INDEXES must be a literal tuple-of-tuples so the migration "
+                f"reads as data, not magic: {e}"
+            )
+        assert isinstance(data, (list, tuple)), (
+            f"_INDEXES must be a tuple/list of (name, table, columns) triples; "
+            f"got {type(data).__name__}"
+        )
+        found_indexes_const = True
+        for triple in data:
+            assert (
+                isinstance(triple, (list, tuple)) and len(triple) == 3
+            ), f"_INDEXES entry must be a 3-tuple; got {triple!r}"
+            name, table, cols = triple
+            assert isinstance(name, str) and isinstance(table, str) and isinstance(
+                cols, (list, tuple)
+            ), f"_INDEXES entry must be (str, str, list[str]); got {triple!r}"
+            index_table[name] = (table, tuple(cols))
+
+    assert found_indexes_const, (
+        "migration must declare a module-level _INDEXES constant with the "
+        "(name, table, columns) triples it builds"
+    )
+
+    # Each expected index triple must be present in _INDEXES exactly as declared.
+    expected_index_table: dict[str, tuple[str, tuple[str, ...]]] = {
+        name: (table, tuple(cols)) for name, (table, cols) in expected.items()
+    }
+    assert index_table == expected_index_table, (
+        f"_INDEXES drift: expected {expected_index_table}, got {index_table}"
+    )
+
+    # Collect every op.create_index / op.drop_index call scoped to the upgrade()
+    # and downgrade() function definitions only. The recovery path inside
+    # upgrade() also drops invalid indexes via op.drop_index, so we must
+    # scope by enclosing function to avoid double-counting.
+    def _calls_in(func_name: str, attr: str) -> list[ast.Call]:
+        for stmt in tree.body:
+            if not isinstance(stmt, ast.FunctionDef) or stmt.name != func_name:
+                continue
+            out: list[ast.Call] = []
+            for node in ast.walk(stmt):
+                if not isinstance(node, ast.Call):
+                    continue
+                f = node.func
+                if (
+                    isinstance(f, ast.Attribute)
+                    and isinstance(f.value, ast.Name)
+                    and f.value.id == "op"
+                    and f.attr == attr
+                ):
+                    out.append(node)
+            return out
+        return []
+
+    upgrade_creates = _calls_in("upgrade", "create_index")
+    upgrade_drops = _calls_in("upgrade", "drop_index")
+    downgrade_drops = _calls_in("downgrade", "drop_index")
+
+    # All op.create_index calls in the module are inside upgrade(); assert
+    # we found at least one and that there are no stray op.create_index calls
+    # outside upgrade/downgrade.
+    all_create_calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "op"
+            and func.attr == "create_index"
+        ):
+            all_create_calls.append(node)
+    assert all_create_calls == upgrade_creates, (
+        "op.create_index calls outside upgrade(); migration should only "
+        "create indexes from upgrade()."
+    )
+    create_calls = upgrade_creates
+    drop_calls = downgrade_drops
+    upgrade_drop_calls = upgrade_drops
+
+    assert create_calls, "migration must call op.create_index at least once"
+    assert drop_calls, "migration must call op.drop_index at least once"
+
+    # Every op.create_index call must be wired to the _INDEXES tuple via Name
+    # references AND carry concurrent+non-unique kwargs. This closes the gap
+    # the original test had, where a docstring + import block would pass the
+    # assertion while the actual call wired the wrong table or columns.
+    for call in create_calls:
+        # Positional args must be Name nodes (i.e. for-loop variables). Any
+        # literal Name that isn't a known module constant is a for-loop local.
+        assert len(call.args) >= 3, (
+            f"op.create_index must pass (name, table, columns); got {len(call.args)} args"
+        )
+        for idx, arg in enumerate(call.args[:3]):
+            assert isinstance(arg, ast.Name), (
+                f"op.create_index positional[{idx}] must be a Name reference to "
+                f"a for-loop variable bound from _INDEXES; got {ast.dump(arg)}"
+            )
+        unique_kw = _kw(call, "unique")
+        assert unique_kw is not None and _const(unique_kw) is False, (
+            f"op.create_index must set unique=False; got {ast.dump(unique_kw)}"
+        )
+        concurrent_kw = _kw(call, "postgresql_concurrently")
+        assert (
+            concurrent_kw is not None and _const(concurrent_kw) is True
+        ), (
+            f"op.create_index must set postgresql_concurrently=True; "
+            f"got {ast.dump(concurrent_kw)}"
+        )
+
+    # Every op.drop_index call must declare CONCURRENTLY + IF EXISTS so a
+    # partial retry does not error out, and table_name= must reference the
+    # table the migration drops from. The migration iterates _INDEXES in a
+    # for-loop, so the AST sees one op.drop_index call inside downgrade() that
+    # is invoked once per triple in _INDEXES (already asserted above) and
+    # again in reverse for downgrade.
+    assert drop_calls, (
+        "downgrade must declare at least one op.drop_index call iterating _INDEXES"
+    )
+    for i, call in enumerate(drop_calls):
+        assert call.args, (
+            f"op.drop_index call #{i} requires a positional[0] (name); got {ast.dump(call)}"
+        )
+        name_arg = call.args[0]
+        assert isinstance(name_arg, (ast.Constant, ast.Name)), (
+            f"op.drop_index call #{i} positional[0] must be a literal or Name; "
+            f"got {ast.dump(name_arg)}"
+        )
+        table_kw = _kw(call, "table_name")
+        assert table_kw is not None, (
+            f"op.drop_index call #{i} must declare table_name="
+        )
+        assert isinstance(table_kw, (ast.Constant, ast.Name)), (
+            f"op.drop_index call #{i} table_name must be a literal string or Name; "
+            f"got {ast.dump(table_kw)}"
+        )
+        if_exists = _kw(call, "if_exists")
+        assert (
+            if_exists is not None and _const(if_exists) is True
+        ), (
+            f"op.drop_index call #{i} must set if_exists=True so a partial "
+            "retry does not error out"
+        )
+        concurrent_kw = _kw(call, "postgresql_concurrently")
+        assert (
+            concurrent_kw is not None and _const(concurrent_kw) is True
+        ), (
+            f"op.drop_index call #{i} must set postgresql_concurrently=True"
+        )
+
+    # Recovery drop(s) inside upgrade() (for INVALID leftover indexes) must
+    # also be CONCURRENT + Name-ref the index — non-blocking for live writes.
+    for i, call in enumerate(upgrade_drop_calls):
+        assert call.args, (
+            f"upgrade-recovery op.drop_index call #{i} requires positional[0]"
+        )
+        assert isinstance(call.args[0], ast.Name), (
+            f"upgrade-recovery op.drop_index call #{i} positional[0] must be a "
+            f"Name bound from _INDEXES; got {ast.dump(call.args[0])}"
+        )
+        concurrent_kw = _kw(call, "postgresql_concurrently")
+        assert (
+            concurrent_kw is not None and _const(concurrent_kw) is True
+        ), (
+            f"upgrade-recovery op.drop_index call #{i} must set "
+            "postgresql_concurrently=True"
+        )
 
 
 def test_to_asyncpg_url_variants():

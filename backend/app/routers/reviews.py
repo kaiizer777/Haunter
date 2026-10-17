@@ -104,10 +104,22 @@ class AssociatedPRResponse(BaseModel):
 class AssociatedPRBatchRequest(BaseModel):
     """One dashboard page worth of associated-PR lookups (issue #116)."""
 
+    # Bounded: one page of dashboard rows per call, no per-row fan-out.
     review_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
 
 
+class AssociatedPRBatchItem(BaseModel):
+    review_id: uuid.UUID
+    associated_pr: Optional[AssociatedPROut] = None
+
+
 class AssociatedPRBatchResponse(BaseModel):
+    """Batch response as a list; unknown/unowned ids are omitted (no oracle)."""
+
+    items: list[AssociatedPRBatchItem]
+
+
+class AssociatedPRBatchDictResponse(BaseModel):
     """Map of requested review id to its PR (null when none can be established)."""
 
     associated_prs: dict[uuid.UUID, Optional[AssociatedPROut]]
@@ -222,6 +234,19 @@ _ASSOCIATED_PR_TIMEOUT_SECONDS = 5.0
 #: budget above on a cold cache + slow GitHub/SSM; a slow mint answers
 #: ``None`` so the caller falls through to the server PAT / null path.
 _MINT_TIMEOUT_SECONDS = 3.0
+_BATCH_LOOKUP_CONCURRENCY = 10
+
+#: Max concurrent installation-token mints per batch call. Mints are
+#: I/O-bound (GitHub/SSM); bounding keeps a cold-cache page with many
+#: distinct repos from opening dozens of TLS sessions at once.
+_BATCH_MINT_CONCURRENCY = 5
+
+#: Shared time budget (seconds) across all token mints in one batch call.
+#: Per-mint timeouts bound each mint, but without an overall budget a page
+#: with many distinct slow-mint repos still stalls past the ~30s browser
+#: timeout before any commit lookup starts; when the budget trips the whole
+#: mint phase degrades to the PAT/null path instead.
+_BATCH_MINT_BUDGET_S = 10.0
 
 
 async def _lookup_commit_pr(
@@ -568,45 +593,100 @@ async def get_review_associated_pr(
     return AssociatedPRResponse(associated_pr=associated)
 
 
-async def _batch_installation_tokens(
-    pending: list[tuple[uuid.UUID, CodeReview, str, str]],
-) -> dict[uuid.UUID, Optional[str]]:
-    """Mint one repo-scoped token per distinct repo (issue #116 batch)."""
-    tokens: dict[uuid.UUID, Optional[str]] = {}
-    seen: dict[uuid.UUID, CodeReview] = {}
-    for _, review, _, _ in pending:
-        if review.repo_id not in seen:
-            seen[review.repo_id] = review
-    for repo_id, review in seen.items():
-        repo = review.repo
-        if repo is None:
-            tokens[repo_id] = None
-            continue
-        try:
-            tokens[repo_id] = await asyncio.wait_for(
-                get_installation_token(repo), timeout=_MINT_TIMEOUT_SECONDS
-            )
-        except asyncio.TimeoutError:
-            logger.debug(
-                "batch associated-pr installation-token mint timed out after %.1fs",
-                _MINT_TIMEOUT_SECONDS,
-            )
-            tokens[repo_id] = None
-        except Exception as exc:
-            logger.debug(
-                "batch associated-pr installation-token mint failed: %s",
-                type(exc).__name__,
-            )
-            tokens[repo_id] = None
-    return tokens
+async def _mint_repo_tokens(repos: list[Repo]) -> dict[uuid.UUID, Optional[str]]:
+    """Mint one repo-scoped token per distinct repo, concurrently (issue #116).
+
+    Bounded: at most ``_BATCH_MINT_CONCURRENCY`` mints in flight and
+    ``_BATCH_MINT_BUDGET_S`` overall. A cold token cache over N repos therefore
+    waits at most about one mint timeout instead of 3s x N. Per-mint timeout
+    with ``None`` fallback is preserved; a tripped budget degrades the whole
+    mint phase to the PAT/null path instead of stalling the page past the
+    ~30s browser timeout.
+    """
+    if not repos:
+        return {}
+    _mint_sem = asyncio.Semaphore(_BATCH_MINT_CONCURRENCY)
+
+    async def _mint(r: Repo) -> tuple[uuid.UUID, Optional[str]]:
+        async with _mint_sem:
+            try:
+                tok = await asyncio.wait_for(
+                    get_installation_token(r), timeout=_MINT_TIMEOUT_SECONDS
+                )
+                return r.id, tok
+            except Exception as exc:
+                logger.debug(
+                    "associated-prs batch mint token failed for repo %s: %s",
+                    r.id,
+                    type(exc).__name__,
+                )
+                return r.id, None
+
+    try:
+        minted_tokens = await asyncio.wait_for(
+            asyncio.gather(*[_mint(r) for r in repos]),
+            timeout=_BATCH_MINT_BUDGET_S,
+        )
+    except asyncio.TimeoutError:
+        logger.debug(
+            "associated-prs batch mint budget (%.1fs) exceeded; "
+            "falling back to PAT/null tokens",
+            _BATCH_MINT_BUDGET_S,
+        )
+        minted_tokens = []
+    return dict(minted_tokens)
 
 
-@router.post("/reviews/associated-pr/batch", response_model=AssociatedPRBatchResponse)
+async def _resolve_push_prs(
+    push_rows: list[tuple[uuid.UUID, str, Repo]],
+) -> dict[uuid.UUID, Optional[AssociatedPROut]]:
+    """Resolve push rows concurrently through the commit-pulls lookup.
+
+    Shares one bounded mint phase per distinct repo, then ``_lookup_commit_pr``
+    per row under ``_BATCH_LOOKUP_CONCURRENCY`` — the same lookup the
+    single-row endpoint uses.
+    """
+    if not push_rows:
+        return {}
+    unique_repos = list({repo.id: repo for _, _, repo in push_rows}.values())
+    tokens_by_repo_id = await _mint_repo_tokens(unique_repos)
+    sem = asyncio.Semaphore(_BATCH_LOOKUP_CONCURRENCY)
+
+    async def _resolve_one(
+        rid: uuid.UUID, sha: str, r: Repo
+    ) -> tuple[uuid.UUID, Optional[AssociatedPROut]]:
+        async with sem:
+            tok = tokens_by_repo_id.get(r.id)
+            pr = await _lookup_commit_pr(r.owner, r.name, sha, token=tok)
+            return rid, pr
+
+    return dict(
+        await asyncio.gather(
+            *[_resolve_one(rid, sha, r) for rid, sha, r in push_rows]
+        )
+    )
+
+
+def _direct_pr_out(owner: str, name: str, pr_number: int) -> AssociatedPROut:
+    """PR pill for a row carrying its own ``pr_number`` (no GitHub call)."""
+    return AssociatedPROut(
+        number=pr_number,
+        url=(
+            f"https://github.com/{quote(owner, safe='')}"
+            f"/{quote(name, safe='')}/pull/{pr_number}"
+        ),
+        title=None,
+    )
+
+
+@router.post(
+    "/reviews/associated-pr/batch", response_model=AssociatedPRBatchDictResponse
+)
 async def batch_review_associated_pr(
     payload: AssociatedPRBatchRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> AssociatedPRBatchResponse:
+) -> AssociatedPRBatchDictResponse:
     """
     Batched associated-PR lookup for a dashboard page (issue #116).
 
@@ -619,7 +699,7 @@ async def batch_review_associated_pr(
     ordered_ids: list[uuid.UUID] = list(dict.fromkeys(payload.review_ids))
     resolved: dict[uuid.UUID, Optional[AssociatedPROut]] = {}
     if not ordered_ids:
-        return AssociatedPRBatchResponse(associated_prs=resolved)
+        return AssociatedPRBatchDictResponse(associated_prs=resolved)
 
     stmt = (
         select(CodeReview)
@@ -631,7 +711,7 @@ async def batch_review_associated_pr(
     rows = res.scalars().all()
     by_id = {row.id: row for row in rows}
 
-    pending: list[tuple[uuid.UUID, CodeReview, str, str]] = []
+    pending: list[tuple[uuid.UUID, str, Repo]] = []
     for rid in ordered_ids:
         review = by_id.get(rid)
         if review is None:
@@ -641,28 +721,82 @@ async def batch_review_associated_pr(
         owner = repo.owner if repo is not None else None
         name = repo.name if repo is not None else None
         if review.pr_number is not None and owner and name:
-            resolved[rid] = AssociatedPROut(
-                number=review.pr_number,
-                url=(
-                    f"https://github.com/{quote(owner, safe='')}"
-                    f"/{quote(name, safe='')}/pull/{review.pr_number}"
-                ),
-                title=None,
-            )
+            resolved[rid] = _direct_pr_out(owner, name, review.pr_number)
         elif not owner or not name or not review.commit_sha:
             resolved[rid] = None
         else:
-            pending.append((rid, review, owner, name))
+            pending.append((rid, review.commit_sha, repo))
 
-    if pending:
-        tokens = await _batch_installation_tokens(pending)
-        lookups = [
-            _lookup_commit_pr(
-                owner, name, review.commit_sha, token=tokens.get(review.repo_id)
-            )
-            for _, review, owner, name in pending
-        ]
-        for (rid, _, _, _), associated in zip(pending, await asyncio.gather(*lookups)):
-            resolved[rid] = associated
+    for rid, pr in (await _resolve_push_prs(pending)).items():
+        resolved[rid] = pr
+    for rid, _, _ in pending:
+        resolved.setdefault(rid, None)
 
-    return AssociatedPRBatchResponse(associated_prs=resolved)
+    return AssociatedPRBatchDictResponse(associated_prs=resolved)
+
+
+@router.post("/reviews/associated-prs", response_model=AssociatedPRBatchResponse)
+async def get_reviews_associated_prs(
+    body: AssociatedPRBatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AssociatedPRBatchResponse:
+    """
+    Batch associated-PR lookup for a page of dashboard rows.
+
+    One ownership-scoped SELECT answers the whole page (the per-row GET above
+    fans out to N calls plus up to N GitHub requests per render). Rows carrying
+    their own ``pr_number`` answer directly from DB without GitHub calls.
+    For push rows where ``pr_number`` is None, commit-SHA resolution is performed
+    concurrently via GitHub API with installation token minting batched per unique repo.
+    Unknown or non-owned ids are omitted (no existence oracle).
+    """
+    if not body.review_ids:
+        return AssociatedPRBatchResponse(items=[])
+
+    stmt = (
+        select(
+            CodeReview.id,
+            CodeReview.pr_number,
+            CodeReview.commit_sha,
+            Repo,
+        )
+        .join(Repo, CodeReview.repo_id == Repo.id)
+        .where(
+            CodeReview.id.in_(body.review_ids),
+            Repo.user_id == current_user.id,
+        )
+    )
+    res = await db.execute(stmt)
+    rows = res.all()
+
+    # Identify push rows needing commit-SHA lookup
+    push_rows: list[tuple[uuid.UUID, str, Repo]] = []
+    for review_id, pr_number, commit_sha, repo in rows:
+        if (
+            pr_number is None
+            and commit_sha
+            and repo is not None
+            and repo.owner
+            and repo.name
+        ):
+            push_rows.append((review_id, commit_sha, repo))
+
+    # Bounded concurrent mint + lookup shared with the dict-shaped batch route
+    # above (one helper, one behavior, no parallel implementations).
+    push_prs = await _resolve_push_prs(push_rows)
+
+    items: list[AssociatedPRBatchItem] = []
+    for review_id, pr_number, _commit_sha, repo in rows:
+        owner = repo.owner if repo is not None else None
+        name = repo.name if repo is not None else None
+        pr: Optional[AssociatedPROut] = None
+        if pr_number is not None and owner and name:
+            pr = _direct_pr_out(owner, name, pr_number)
+        elif review_id in push_prs:
+            pr = push_prs[review_id]
+
+        items.append(
+            AssociatedPRBatchItem(review_id=review_id, associated_pr=pr)
+        )
+    return AssociatedPRBatchResponse(items=items)

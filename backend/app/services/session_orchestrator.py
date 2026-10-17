@@ -32,7 +32,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.github_client import GitHubClientError
@@ -1155,6 +1155,308 @@ def _infer_provider(model: str) -> str | None:
     return None
 
 
+# ------------------------------------------------------------------
+# Issue #105 — JSONB growth caps for agent_sessions.
+#
+# conversation_history and staged_patches are rewritten on every turn.
+# _prune_conversation_history only trims the in-prompt LLM context, never
+# the DB write, so both columns grew linearly with attempt count
+# (multi-MB rows, TOAST churn). The caps below bound what is persisted:
+# history is windowed + per-entry truncated (lossy transcript is fine),
+# staged patches are gated at stage time with an explicit error (they are
+# authoritative user changes — never silently dropped).
+# ------------------------------------------------------------------
+
+# Sliding window: keep only the most recent N history entries in the DB.
+MAX_HISTORY_ENTRIES = 200
+# Per-entry content ceiling for persisted history entries.
+MAX_HISTORY_ENTRY_CHARS = 8_000
+# Verbatim tool outputs are compacted to head+tail at this size.
+MAX_TOOL_RESULT_CHARS = 8_000
+# Total serialized byte ceiling for the persisted conversation_history.
+MAX_HISTORY_BYTES = 256 * 1024
+# Staged-patch bounds: file count and total serialized bytes.
+MAX_STAGED_FILES = 100
+MAX_STAGED_TOTAL_BYTES = 2 * 1024 * 1024
+
+
+def _compact_text(text: str, max_chars: int) -> str:
+    """Compact long text to head+tail, dropping the middle.
+
+    Short inputs are returned unchanged. Non-string inputs are coerced via
+    str(). Idempotence is owned by the caller via the structured
+    ``_compacted`` entry flag (see ``_compact_history_for_storage``); this
+    function does NOT pattern-match the marker in user/tool content
+    because a legitimate tool result that happens to contain the literal
+    ``"[...compacted "`` would otherwise bypass the storage cap.
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    if len(text) <= max_chars:
+        return text
+    head = max_chars * 3 // 4
+    tail = max_chars - head
+    omitted = len(text) - max_chars
+    return (
+        text[:head]
+        + f"\n\n[...compacted {omitted} chars for storage; full output was sent to the model]\n\n"
+        + text[len(text) - tail :]
+    )
+
+
+def _history_size_bytes(history: list[dict[str, Any]]) -> int:
+    """Serialized size of a history list, mirroring the JSONB column cost."""
+    try:
+        return len(json.dumps(history, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return sum(len(str(m.get("content", ""))) for m in history)
+
+
+def _split_into_turns(
+    history: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Split a history list into per-user turns (each starts at a 'user' entry).
+
+    A "turn" is one user message plus every assistant/tool/system message that
+    follows it up to (but not including) the next user message. The first
+    element of the returned list is the leading fragment preceding the first
+    user message (may be empty); subsequent elements are complete turns.
+    """
+    turns: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for entry in history:
+        if entry.get("role") == "user" and current:
+            turns.append(current)
+            current = []
+        current.append(entry)
+    if current:
+        turns.append(current)
+    return turns
+
+
+def _compact_history_for_storage(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bound a conversation history for DB persistence.
+
+    1. Truncate each entry's `content` (tool outputs via
+       MAX_TOOL_RESULT_CHARS, everything else via MAX_HISTORY_ENTRY_CHARS).
+    2. Keep only the most recent MAX_HISTORY_ENTRIES (sliding window).
+    3. Evict oldest complete turns until serialized size fits
+       MAX_HISTORY_BYTES, anchored on user-message boundaries so tool
+       calls and their results are never split. If the window leaves a
+       leading fragment with no user message, synthesize a minimal user
+       placeholder so the persisted tail always begins with a user entry
+       (LLM APIs reject orphan tool results). Always retain at least
+       the newest entry.
+
+    Returns a new list; input entries are never mutated. Idempotent.
+    """
+    compacted: list[dict[str, Any]] = []
+    for entry in history:
+        entry = dict(entry)
+        content = entry.get("content", "")
+        if isinstance(content, str) and content:
+            cap = (
+                MAX_TOOL_RESULT_CHARS
+                if entry.get("role") == "tool"
+                else MAX_HISTORY_ENTRY_CHARS
+            )
+            # Idempotence via a structured metadata flag — never pattern-match
+            # the compaction marker in user/tool content (see greptile#4296862877
+            # and cubic#4296866375: a literal "[...compacted " in a tool result
+            # would otherwise disable the storage cap entirely).
+            if not entry.get("_compacted"):
+                entry["content"] = _compact_text(content, cap)
+                if len(content) > cap:
+                    entry["_compacted"] = True
+        compacted.append(entry)
+
+    # 2. Sliding window — keep the most recent MAX_HISTORY_ENTRIES entries,
+    #    aligned on a user-message boundary so the persisted tail starts with
+    #    a user entry (LLM APIs reject orphan tool results). Walking forward
+    #    past any leading assistant/tool entry drops at most one partial
+    #    turn — well within the MAX_HISTORY_ENTRIES budget.
+    if len(compacted) > MAX_HISTORY_ENTRIES:
+        compacted = compacted[-MAX_HISTORY_ENTRIES:]
+        # Align the window on the next user entry. If the window happened to
+        # cut mid-turn, drop the partial leading turn entirely.
+        while compacted and compacted[0].get("role") != "user":
+            compacted = compacted[1:]
+
+    # 3. Byte-based eviction in whole turns. A "turn" is anchored on a user
+    #    message, so evicting the oldest turn never splits a tool_call from
+    #    its tool_results.
+    while len(compacted) > 1 and _history_size_bytes(compacted) > MAX_HISTORY_BYTES:
+        turns = _split_into_turns(compacted)
+        if len(turns) <= 1:
+            # The window starts with a user message and contains a single
+            # turn — the turn is too large to fit. Drop it entirely except
+            # for the very last entry, which the spec mandates we keep.
+            last_entry = compacted[-1]
+            compacted = [last_entry]
+            break
+        # Drop the oldest turn; the remainder preserves user/tool integrity.
+        compacted = [item for turn in turns[1:] for item in turn]
+
+    # If compaction left a tail with no user message (only assistant/tool/
+    # system), the LLM API will reject it as orphan tool results. Synthesize
+    # a minimal user placeholder so the persisted history always begins with
+    # a user entry while keeping all real content intact.
+    if compacted and compacted[0].get("role") != "user":
+        compacted = [
+            {"role": "user", "content": "[earlier turns evicted by storage cap]"}
+        ] + compacted
+
+    return compacted
+
+
+def _staged_patches_size_bytes(patches: dict[str, str]) -> int:
+    """Serialized size of the staged_patches dict."""
+    try:
+        return len(json.dumps(patches, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return sum(len(str(k)) + len(str(v)) for k, v in patches.items())
+
+
+def _check_staged_capacity(
+    patches: dict[str, str], path: str, diff: str
+) -> str | None:
+    """Enforce staged-patch caps before upserting a new/updated diff.
+
+    Returns an error string when the upsert would breach MAX_STAGED_FILES
+    or MAX_STAGED_TOTAL_BYTES, else None. Replacing an existing path does
+    not count as a new file.
+    """
+    if path not in patches and len(patches) >= MAX_STAGED_FILES:
+        return (
+            f"Error: staged file limit reached ({MAX_STAGED_FILES} files). "
+            "Discard an obsolete patch with discard_patch before staging more."
+        )
+    # Issue #105 — measure the post-write size with the SAME serializer used
+    # by `_staged_patches_size_bytes` (json.dumps). The previous raw-UTF-8 +
+    # 16-byte padding projection undercounted multiline diffs and Unicode
+    # escapes, so near the cap we accepted patches whose serialized size
+    # exceeded MAX_STAGED_TOTAL_BYTES (see greptile#4296862870 /
+    # cubic#4296866371).
+    candidate: dict[str, str] = dict(patches)
+    candidate[path] = diff
+    projected = _staged_patches_size_bytes(candidate)
+    if projected > MAX_STAGED_TOTAL_BYTES:
+        return (
+            "Error: staged changes exceed the session cap "
+            f"({MAX_STAGED_TOTAL_BYTES // 1024} KB total). "
+            "Discard an obsolete patch with discard_patch before staging more."
+        )
+    return None
+
+
+class StagedPatchCapacityError(Exception):
+    """Raised when a staged-patch write would breach session caps.
+
+    Carries the human-readable error string returned by
+    ``_check_staged_capacity`` so editor wrappers can surface it to the
+    LLM as a normal tool error.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _stage_diff_into(patches: dict[str, str], path: str, diff: str) -> None:
+    """Single entry point for any write into ``staged_patches``.
+
+    Centralizes the capacity check so editor tools (create_file,
+    str_replace, delete_file, apply_multi_patch, stage_patch) cannot
+    bypass ``MAX_STAGED_FILES`` / ``MAX_STAGED_TOTAL_BYTES``. Raises
+    ``StagedPatchCapacityError`` (which carries the human-readable
+    error) on breach; callers are expected to catch and return the
+    message to the LLM as a normal tool error.
+    """
+    capacity_error = _check_staged_capacity(patches, path, diff)
+    if capacity_error is not None:
+        raise StagedPatchCapacityError(capacity_error)
+    patches[path] = diff
+
+
+class _GuardedStagedPatches:
+    """dict-like wrapper that routes every ``__setitem__`` through the
+    staged-patch capacity check.
+
+    Editor helpers (create_file, str_replace, delete_file,
+    apply_multi_patch) write into ``staged_patches`` directly inside
+    their own code paths. The orchestrator cannot intercept those
+    internal writes without modifying the helpers, so it wraps the
+    dict it passes in. Read access and ``__delitem__`` /
+    ``.update()`` / etc. fall through to the underlying dict; only
+    assignment goes through ``_stage_diff_into`` so a capacity breach
+    raises ``StagedPatchCapacityError`` before any disk write occurs.
+    """
+
+    __slots__ = ("_target",)
+
+    def __init__(self, target: dict[str, str]) -> None:
+        self._target = target
+
+    def __setitem__(self, path: str, diff: str) -> None:
+        _stage_diff_into(self._target, path, diff)
+
+    def __delitem__(self, path: str) -> None:
+        del self._target[path]
+
+    def __getitem__(self, path: str) -> str:
+        return self._target[path]
+
+    def __contains__(self, path: object) -> bool:
+        return path in self._target
+
+    def __iter__(self):
+        return iter(self._target)
+
+    def __len__(self) -> int:
+        return len(self._target)
+
+    def get(self, path: str, default: str | None = None) -> str | None:
+        return self._target.get(path, default)
+
+    def pop(self, path: str, *args: Any) -> Any:
+        return self._target.pop(path, *args)
+
+    def clear(self) -> None:
+        self._target.clear()
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        # Route each assignment through __setitem__ so the capacity
+        # check applies to bulk updates too.
+        merged: dict[str, str] = {}
+        if args:
+            for arg in args:
+                if isinstance(arg, dict):
+                    merged.update(arg)
+                else:
+                    merged.update(dict(arg))
+        if kwargs:
+            merged.update(kwargs)
+        for key, value in merged.items():
+            self.__setitem__(key, value)
+
+    def items(self):
+        return self._target.items()
+
+    def keys(self):
+        return self._target.keys()
+
+    def values(self):
+        return self._target.values()
+
+    def setdefault(self, path: str, default: str | None = None) -> str | None:
+        if path in self._target:
+            return self._target[path]
+        self.__setitem__(path, default if default is not None else "")
+        return self._target[path]
+
+
 def _prune_conversation_history(
     history: list[dict[str, Any]],
     max_chars: int = 80_000,
@@ -1240,6 +1542,19 @@ def _is_lock_conflict(exc: Exception) -> bool:
 # Main orchestrator
 # ------------------------------------------------------------------
 
+#: Max mirrored SSE events buffered before a single bulk commit. Batching
+#: commits avoids a high-frequency INSERT+COMMIT per streaming SSE token.
+_MIRROR_BATCH_MAX = 50
+
+#: Max seconds before a partial batch of mirrored events is flushed to DB,
+#: ensuring bounded replay latency even under continuous rapid streaming.
+_MIRROR_FLUSH_INTERVAL_S = 1.0
+
+#: Prior-turn stream events below this count are left in place at turn start;
+#: they are pruned once accumulation crosses the threshold. Bounds the
+#: session_stream_events table per session without a DELETE on every turn.
+_STREAM_PRUNE_THRESHOLD = 500
+
 
 def _with_interrupted_turn(
     history: list[dict[str, Any]], user_message: str
@@ -1293,38 +1608,200 @@ class SessionOrchestrator:
         self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
         self._mirror_worker_task: asyncio.Task | None = None
 
-    async def _mirror_worker(self) -> None:
-        """Background worker that serializes event mirroring in strict monotonic event_id order."""
+    async def _flush_mirror_batch(
+        self, batch: list[tuple[int, str, str]]
+    ) -> None:
+        """Persist one buffered batch of mirrored events in a single commit,
+        with per-event fallback on error to prevent dropping up to 50 replay events."""
+        if not batch:
+            return
         from app.db import async_session_maker
         from app.models import SessionStreamEvent
 
+        items_to_persist = list(batch)
+        batch.clear()
+
+        try:
+            async with async_session_maker() as mirror_db:
+                bind = getattr(mirror_db, "bind", None)
+                dialect = getattr(bind, "dialect", None)
+                dialect_name = getattr(dialect, "name", "")
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                    stmt = (
+                        pg_insert(SessionStreamEvent)
+                        .values(
+                            [
+                                {
+                                    "session_id": self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "event_id": event_id,
+                                    "event": event,
+                                    "chunk": chunk,
+                                }
+                                for event_id, event, chunk in items_to_persist
+                            ]
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=["session_id", "turn_id", "event_id"]
+                        )
+                    )
+                    await mirror_db.execute(stmt)
+                elif dialect_name == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                    stmt = (
+                        sqlite_insert(SessionStreamEvent)
+                        .values(
+                            [
+                                {
+                                    "session_id": self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "event_id": event_id,
+                                    "event": event,
+                                    "chunk": chunk,
+                                }
+                                for event_id, event, chunk in items_to_persist
+                            ]
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=["session_id", "turn_id", "event_id"]
+                        )
+                    )
+                    await mirror_db.execute(stmt)
+                else:
+                    mirror_db.add_all(
+                        [
+                            SessionStreamEvent(
+                                session_id=self.session_id,
+                                turn_id=self.turn_id,
+                                event_id=event_id,
+                                event=event,
+                                chunk=chunk,
+                            )
+                            for event_id, event, chunk in items_to_persist
+                        ]
+                    )
+                await mirror_db.commit()
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: batch commit of %d mirror events failed for session=%s (%s); "
+                "attempting per-event fallback insert",
+                len(items_to_persist),
+                self.session_id,
+                exc,
+            )
+            # Fall back to per-event insert so one bad row or transient issue
+            # doesn't drop the entire batch of replay events. Handles duplicate
+            # collisions idempotently so retries after ambiguous commit failures
+            for event_id, event, chunk in items_to_persist:
+                try:
+                    async with async_session_maker() as fallback_db:
+                        fb_bind = getattr(fallback_db, "bind", None)
+                        fb_dialect_obj = getattr(fb_bind, "dialect", None)
+                        fb_dialect = getattr(fb_dialect_obj, "name", "")
+                        if fb_dialect == "postgresql":
+                            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                            fb_stmt = (
+                                pg_insert(SessionStreamEvent)
+                                .values(
+                                    session_id=self.session_id,
+                                    turn_id=self.turn_id,
+                                    event_id=event_id,
+                                    event=event,
+                                    chunk=chunk,
+                                )
+                                .on_conflict_do_nothing(
+                                    index_elements=["session_id", "turn_id", "event_id"]
+                                )
+                            )
+                            await fallback_db.execute(fb_stmt)
+                        elif fb_dialect == "sqlite":
+                            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                            fb_stmt = (
+                                sqlite_insert(SessionStreamEvent)
+                                .values(
+                                    session_id=self.session_id,
+                                    turn_id=self.turn_id,
+                                    event_id=event_id,
+                                    event=event,
+                                    chunk=chunk,
+                                )
+                                .on_conflict_do_nothing(
+                                    index_elements=["session_id", "turn_id", "event_id"]
+                                )
+                            )
+                            await fallback_db.execute(fb_stmt)
+                        else:
+                            fallback_db.add(
+                                SessionStreamEvent(
+                                    session_id=self.session_id,
+                                    turn_id=self.turn_id,
+                                    event_id=event_id,
+                                    event=event,
+                                    chunk=chunk,
+                                )
+                            )
+                        await fallback_db.commit()
+                except Exception as ind_exc:
+                    logger.error(
+                        "session_orchestrator: fallback mirror failed for event_id=%d session=%s: %s",
+                        event_id,
+                        self.session_id,
+                        ind_exc,
+                    )
+
+    async def _mirror_worker(self) -> None:
+        """Serialize event mirroring, flushing in batches.
+        Enforces a hard deadline (_MIRROR_FLUSH_INTERVAL_S from the first event
+        enqueued in the current batch) so continuous rapid events (<1s apart)
+        cannot defer committing partial batches until 50 events accumulate or turn ends."""
+        import time
+
+        batch: list[tuple[int, str, str]] = []
+        batch_first_enqueued_at: float | None = None
+
         while True:
-            item = await self._mirror_queue.get()
+            timeout: float
+            if batch and batch_first_enqueued_at is not None:
+                elapsed = time.monotonic() - batch_first_enqueued_at
+                timeout = max(0.0, _MIRROR_FLUSH_INTERVAL_S - elapsed)
+            else:
+                timeout = _MIRROR_FLUSH_INTERVAL_S
+
+            try:
+                item = await asyncio.wait_for(
+                    self._mirror_queue.get(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                if batch:
+                    await self._flush_mirror_batch(batch)
+                    batch_first_enqueued_at = None
+                continue
+
             if item is None:
                 self._mirror_queue.task_done()
                 break
-            event_id, event, chunk = item
-            try:
-                async with async_session_maker() as mirror_db:
-                    stream_event = SessionStreamEvent(
-                        session_id=self.session_id,
-                        turn_id=self.turn_id,
-                        event_id=event_id,
-                        event=event,
-                        chunk=chunk,
-                    )
-                    mirror_db.add(stream_event)
-                    await mirror_db.commit()
-            except Exception as exc:
-                logger.warning(
-                    "session_orchestrator: failed to mirror event %s (id=%s) to DB for session=%s: %s",
-                    event,
-                    event_id,
-                    self.session_id,
-                    exc,
-                )
-            finally:
-                self._mirror_queue.task_done()
+
+            if not batch:
+                batch_first_enqueued_at = time.monotonic()
+
+            batch.append(item)
+            self._mirror_queue.task_done()
+
+            # Flush if max batch reached or deadline exceeded
+            assert batch_first_enqueued_at is not None
+            if (
+                len(batch) >= _MIRROR_BATCH_MAX
+                or (time.monotonic() - batch_first_enqueued_at) >= _MIRROR_FLUSH_INTERVAL_S
+            ):
+                await self._flush_mirror_batch(batch)
+                batch_first_enqueued_at = None
+
+        await self._flush_mirror_batch(batch)
 
     async def _drain_mirror_queue(self) -> None:
         """Wait for all pending mirrored events to commit to DB and shut down the worker."""
@@ -1450,12 +1927,24 @@ class SessionOrchestrator:
 
         try:
             async with async_session_maker() as meta_db:
-                # Prune prior turn events for this session to prevent unbounded table growth
-                del_stmt = delete(SessionStreamEvent).where(
-                    SessionStreamEvent.session_id == self.session_id,
-                    SessionStreamEvent.turn_id != self.turn_id,
+                # Prune prior turn events only when they accumulate past the
+                # threshold, so the common case (a few hundred rows from the
+                # last turn) skips the negated DELETE entirely. Accumulation
+                # stays bounded: any skipped rows count toward the next check.
+                stale_count = await meta_db.scalar(
+                    select(func.count())
+                    .select_from(SessionStreamEvent)
+                    .where(
+                        SessionStreamEvent.session_id == self.session_id,
+                        SessionStreamEvent.turn_id != self.turn_id,
+                    )
                 )
-                await meta_db.execute(del_stmt)
+                if (stale_count or 0) > _STREAM_PRUNE_THRESHOLD:
+                    del_stmt = delete(SessionStreamEvent).where(
+                        SessionStreamEvent.session_id == self.session_id,
+                        SessionStreamEvent.turn_id != self.turn_id,
+                    )
+                    await meta_db.execute(del_stmt)
 
                 # Publish turn_start initialization event (event_id=0) so other workers immediately
                 # discover this active turn in session_stream_events
@@ -1513,6 +2002,9 @@ class SessionOrchestrator:
             session.conversation_history or []
         )
         staged_patches: dict[str, str] = dict(session.staged_patches or {})
+        # Issue #106: pre-turn snapshot so the persist step can ship only the
+        # staged-patch delta (``||`` / ``jsonb_set``) instead of the full doc.
+        patches_before: dict[str, str] = dict(staged_patches)
 
         system_msg: dict[str, Any] = {
             "role": "system",
@@ -1533,6 +2025,10 @@ class SessionOrchestrator:
         new_entries: list[dict[str, Any]] = [user_msg]
         # Track the actual model that produced the final response (updated each LLM call).
         actual_model_used: str = model or ""
+        # Issue #106: accumulate normalized per-call usage so the turn's token
+        # spend is accounted with the canonical estimator (telemetry below).
+        turn_input_tokens: int = 0
+        turn_output_tokens: int = 0
 
         # 3. Tool-calling loop — max 10 iterations to prevent runaway loops.
         MAX_ITERATIONS = 10
@@ -1605,6 +2101,13 @@ class SessionOrchestrator:
             tool_calls: list[dict[str, Any]] | None = response.get("tool_calls")
             # Capture the actual model that responded (may differ from requested due to fallback).
             actual_model_used = response.get("model") or actual_model_used
+            # Issue #106: canonical per-call usage accounting
+            # (normalize_usage is total — never raises on odd payloads).
+            from app.services.token_accounting import normalize_usage as _norm_usage
+
+            _turn_in, _turn_out = _norm_usage(response.get("usage"))
+            turn_input_tokens += _turn_in
+            turn_output_tokens += _turn_out
 
             # Emit any assistant text as thought deltas.
             if content:
@@ -1655,6 +2158,15 @@ class SessionOrchestrator:
                         staged_patches.clear()
                         staged_patches.update(dict(session.staged_patches or {}))
                         conversation_history = list(session.conversation_history or [])
+
+                        # Reset the patch baseline to the post-restore snapshot so
+                        # subsequent in-turn mutations (e.g. discard_patch) compare
+                        # against what is actually in the DB right now — otherwise
+                        # a discard back to the pre-turn value would compute an
+                        # empty delta, the hot-path UPDATE would emit no removal,
+                        # and the restored patch would silently remain saved
+                        # (greptile#4297093156 / cubic#4297090237).
+                        patches_before = dict(staged_patches)
 
                         # Truncate current-turn intermediate tool entries in new_entries
                         # (retaining only the user message and the checkpoint restore tool interaction)
@@ -1777,18 +2289,48 @@ class SessionOrchestrator:
             )
 
         # 5. Persist updated state to DB atomically.
-        updated_history = conversation_history + new_entries
+        # Issue #105 — window/truncate history before storage so the JSONB
+        # column stays bounded regardless of attempt count. In-turn `messages`
+        # above keep full fidelity for the LLM; only the DB copy is compacted.
+        # Compute the uncompacted length BEFORE compaction so checkpoint
+        # identity stays stable across compaction (otherwise the window
+        # slides and `history_length` / `turn` drift off the real
+        # conversation position — see greptile#4296862867 / cubic#4296866332).
+        # Issue #106: when the in-turn history was only appended (no checkpoint
+        # restore rewrote it), the persist step ships only the delta via
+        # ``||``/``jsonb_set`` instead of rebinding the full JSONB documents.
+        uncompacted_history = conversation_history + new_entries
+        uncompacted_history_length = len(uncompacted_history)
+        updated_history = _compact_history_for_storage(uncompacted_history)
         session.conversation_history = updated_history
         session.staged_patches = staged_patches
+        from app.services.token_accounting import (
+            estimate_cost as _estimate_cost,
+            patch_delta as _patch_delta,
+        )
+
+        patch_upserts, patch_removed = _patch_delta(patches_before, staged_patches)
 
         # Auto-checkpoint after each turn if staged_patches were modified.
-        turn_number = len(updated_history)
+        # `turn_number` is the monotonic length of the uncompacted history —
+        # it grows by exactly one user turn regardless of compaction, so
+        # restore-by-turn picks the unique matching snapshot.
+        turn_number = uncompacted_history_length
         if staged_patches:
-            cp = create_checkpoint(
-                session=session,
-                description=f"Turn {turn_number}: {user_message[:80]}",
-                turn=turn_number,
-            )
+            # Briefly expose the uncompacted history on the session so
+            # create_checkpoint records the uncompacted `history_length`.
+            # create_checkpoint only reads `len(session.conversation_history)`
+            # and stores the value, so the swap is safe and is undone
+            # immediately after the call.
+            session.conversation_history = uncompacted_history
+            try:
+                cp = create_checkpoint(
+                    session=session,
+                    description=f"Turn {turn_number}: {user_message[:80]}",
+                    turn=turn_number,
+                )
+            finally:
+                session.conversation_history = updated_history
             try:
                 await queue.put_checkpoint_created(cp)
             except Exception as cp_exc:
@@ -1797,7 +2339,29 @@ class SessionOrchestrator:
                     cp_exc,
                 )
 
-        await self._persist(session, updated_history, staged_patches)
+        await self._persist(
+            session,
+            updated_history,
+            staged_patches,
+            base_history=conversation_history,
+            new_entries=new_entries,
+            patch_upserts=patch_upserts,
+            patch_removed=patch_removed,
+        )
+
+        # Canonical turn-level token accounting (issue #106): one estimator,
+        # computed from the same turn payload that was just persisted.
+        turn_cost = _estimate_cost(turn_input_tokens, turn_output_tokens)
+        logger.info(
+            "session_orchestrator: session=%s turn=%s input_tokens=%d "
+            "output_tokens=%d cost_estimate=%.8f model=%s",
+            self.session_id,
+            self.turn_id,
+            turn_input_tokens,
+            turn_output_tokens,
+            turn_cost,
+            actual_model_used,
+        )
 
         # 6. Signal stream end.
         await queue.put_done(
@@ -2206,8 +2770,18 @@ class SessionOrchestrator:
         if len(diff.encode("utf-8")) > MAX_PATCH_BYTES:
             return "Error: diff exceeds maximum size (512 KB)."
 
-        # Stage the patch (upsert).
-        staged_patches[path] = diff
+        # Issue #105 — bound staged_patches growth: reject (never silently
+        # drop) when the upsert would breach the session-wide caps.
+        # _stage_diff_into centralizes the check; every other editor tool
+        # path funnels through it via the guarded-dict wrapper, so this is
+        # the only place the write itself is gated for stage_patch.
+        try:
+            _stage_diff_into(staged_patches, path, diff)
+        except StagedPatchCapacityError as exc:
+            return exc.message
+
+        # Note: staged_patches[path] = diff has already happened inside
+        # _stage_diff_into (which ran the capacity check first).
 
         # If a local checkout exists, sync to disk immediately
         if repo_name:
@@ -2623,18 +3197,27 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_str_replace(
-            path=path,
-            old_str=old_str,
-            new_str=new_str,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            staged_patches=staged_patches,
-            queue=queue,
-            gh_token=self.gh_token,
-            session_id=effective_sid,
-        )
+        # Issue #105 — route every staged-patch write through the
+        # capacity gate so str_replace cannot bypass MAX_STAGED_FILES /
+        # MAX_STAGED_TOTAL_BYTES. tool_str_replace writes the diff inside
+        # the helper; the guard converts any breach into an error string
+        # returned to the LLM (no disk write, no DB write).
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_str_replace(
+                path=path,
+                old_str=old_str,
+                new_str=new_str,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=guarded,
+                queue=queue,
+                gh_token=self.gh_token,
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_create_file(
         self,
@@ -2654,15 +3237,20 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_create_file(
-            path=path,
-            content=content,
-            staged_patches=staged_patches,
-            queue=queue,
-            repo_owner=repo_owner or "",
-            repo_name=repo_name or "",
-            session_id=effective_sid,
-        )
+        # Issue #105 — capacity gate via guarded-dict wrapper. See _tool_str_replace.
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_create_file(
+                path=path,
+                content=content,
+                staged_patches=guarded,
+                queue=queue,
+                repo_owner=repo_owner or "",
+                repo_name=repo_name or "",
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_delete_file(
         self,
@@ -2681,16 +3269,21 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_delete_file(
-            path=path,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            staged_patches=staged_patches,
-            queue=queue,
-            gh_token=self.gh_token,
-            session_id=effective_sid,
-        )
+        # Issue #105 — capacity gate via guarded-dict wrapper. See _tool_str_replace.
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_delete_file(
+                path=path,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=guarded,
+                queue=queue,
+                gh_token=self.gh_token,
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_apply_multi_patch(
         self,
@@ -2711,16 +3304,21 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_apply_multi_patch(
-            patches=patches,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            staged_patches=staged_patches,
-            queue=queue,
-            gh_token=self.gh_token,
-            session_id=effective_sid,
-        )
+        # Issue #105 — capacity gate via guarded-dict wrapper. See _tool_str_replace.
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_apply_multi_patch(
+                patches=patches,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=guarded,
+                queue=queue,
+                gh_token=self.gh_token,
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_get_file_outline(
         self,
@@ -3318,13 +3916,84 @@ class SessionOrchestrator:
             fresh_db.expunge(row)
             return row
 
+    @staticmethod
+    def _plan_delta_statements(
+        session: AgentSession,
+        *,
+        base_history: list[dict[str, Any]] | None,
+        updated_history: list[dict[str, Any]],
+        new_entries: list[dict[str, Any]] | None,
+        patch_upserts: dict[str, str] | None,
+        patch_removed: list[str] | None,
+    ) -> list[Any]:
+        """Plan server-side JSONB delta UPDATEs for a pure-append turn.
+
+        Returns [] unless the update is exactly ``base + new_entries`` plus
+        staged-patch upserts/removals — history suffix via ``||``, a lone
+        patch key via ``jsonb_set``, multi-key changes via ``||`` merge,
+        removals via ``-``. Never raises: any anomaly means "not plannable"
+        and the caller takes the legacy full-document write.
+        """
+        try:
+            if (
+                base_history is None
+                or new_entries is None
+                or patch_upserts is None
+                or patch_removed is None
+            ):
+                return []
+            from app.services import token_accounting as _ta
+
+            suffix = _ta.history_suffix(base_history, updated_history)
+            if suffix is None or len(suffix) != len(new_entries):
+                # Not a pure append (e.g. checkpoint restore rewrote history
+                # mid-turn) — full write.
+                return []
+            if len(patch_upserts) == 1 and not patch_removed:
+                key = next(iter(patch_upserts))
+                patch_stmt = _ta.set_patch_key_stmt(
+                    session.id, key, patch_upserts[key]
+                )
+            else:
+                patch_stmt = _ta.merge_patches_stmt(session.id, patch_upserts)
+            stmts = [
+                _ta.append_history_stmt(session.id, suffix),
+                patch_stmt,
+                _ta.delete_patch_keys_stmt(session.id, patch_removed),
+            ]
+            return [stmt for stmt in stmts if stmt is not None]
+        except Exception:
+            return []
+
     async def _persist(
         self,
         session: AgentSession,
         updated_history: list[dict[str, Any]],
         updated_patches: dict[str, str],
+        *,
+        base_history: list[dict[str, Any]] | None = None,
+        new_entries: list[dict[str, Any]] | None = None,
+        patch_upserts: dict[str, str] | None = None,
+        patch_removed: list[str] | None = None,
     ) -> None:
-        """Atomically persist conversation_history and staged_patches."""
+        """Atomically persist conversation_history and staged_patches.
+
+        Issue #105: `updated_history` is compacted (windowed + truncated) so
+        the JSONB column stays bounded regardless of attempt count. This is
+        the choke point — every persist path funnels through here.
+
+        Issue #106 fast path: when the caller supplies the turn's delta
+        (``base_history`` + ``new_entries`` + ``patch_upserts`` +
+        ``patch_removed``) and it describes a pure append, only the delta
+        ships — history suffix via ``||``, a lone patch key via
+        ``jsonb_set``, multi-key changes via ``||`` merge, removals via
+        ``-`` — instead of rebinding both full JSONB documents. Anything
+        else (no delta args, a mid-turn history rewrite, or any failure)
+        takes the legacy full-document write below — correctness first.
+        """
+        # Compact here as well (idempotent) so early-exit persist paths
+        # (interrupt / LLM-error fallbacks) are bounded too.
+        updated_history = _compact_history_for_storage(updated_history)
         # Snapshot every ORM attribute the fallback path needs BEFORE the
         # commit attempt. rollback() expires all persistent state, so reading
         # session.id / status / ... after rollback can trigger refresh I/O on
@@ -3342,9 +4011,29 @@ class SessionOrchestrator:
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
+        delta_stmts = self._plan_delta_statements(
+            session,
+            base_history=base_history,
+            updated_history=updated_history,
+            new_entries=new_entries,
+            patch_upserts=patch_upserts,
+            patch_removed=patch_removed,
+        )
         try:
             if not getattr(self.db, "is_active", True):
                 raise RuntimeError("self.db is closed or inactive")
+            if delta_stmts:
+                # Expire the full-document attrs (assigned above for
+                # in-memory consistency): expired is not dirty, so the
+                # commit below flushes everything EXCEPT the full rewrites.
+                # The post-commit refresh() reloads server truth.
+                expired = self.db.expire(
+                    session, ["conversation_history", "staged_patches"]
+                )
+                if asyncio.iscoroutine(expired):
+                    await expired
+                for stmt in delta_stmts:
+                    await self.db.execute(stmt)
             await self.db.commit()
             await self.db.refresh(session)
         except Exception as exc:

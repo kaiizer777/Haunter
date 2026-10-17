@@ -59,7 +59,10 @@ from app.services.feature_enforcement import (
     is_sandbox_verification_allowed,
     match_branch,
 )
-from app.services.repo_settings import get_repo_settings
+from app.services.repo_settings import (
+    get_repo_settings,
+    invalidate_repo_settings_cache,
+)
 from main import app
 from tests.fake_audit_db import (  # noqa: F401
     FakeAsyncSession,
@@ -516,6 +519,9 @@ async def test_webhook_pull_request_draft_filtering(
     # 2. Update setting: ignore_draft_prs=False -> draft PR proceeds
     settings_row.ignore_draft_prs = False
     await fake_audit_db.commit()
+    # Direct store write bypasses the service write paths, so invalidate
+    # manually — exactly what update_repo_settings would have done (#134).
+    invalidate_repo_settings_cache(repo.id)
 
     with patch(
         "app.adapters.hosting.AWSHostingAdapter.schedule_review", new_callable=AsyncMock
@@ -890,6 +896,8 @@ async def test_orchestrator_pr_comments_disabled_suppresses_comments(
     # Part 2: Comments enabled -> post_commit_comment invoked
     settings_row.enable_pr_comments = True
     await fake_audit_db.commit()
+    # Direct store write bypasses the service write paths (#134).
+    invalidate_repo_settings_cache(repo.id)
 
     run_enabled = Run(
         id=uuid.uuid4(),
@@ -1185,6 +1193,8 @@ async def test_webhook_issue_comment_refinement_rate_limit_comment_suppressed(
     # Now toggle enable_pr_comments=True
     settings_row.enable_pr_comments = True
     await fake_audit_db.commit()
+    # Direct store write bypasses the service write paths (#134).
+    invalidate_repo_settings_cache(repo.id)
 
     with (
         patch(

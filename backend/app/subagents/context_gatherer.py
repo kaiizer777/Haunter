@@ -27,12 +27,14 @@ import time
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import any_, case, func, literal, select
+from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import github_client as gh
 from app.llm import LLMClient
-from app.models import Attempt, Repo, Run, RunStep
+from app.models import Attempt, Repo, Run
+from app.services.token_accounting import make_run_step, normalize_usage
 from app.subagents.ast_analyzer import (
     extract_generic_symbol_context,
     extract_python_ast_context,
@@ -55,10 +57,8 @@ CAP_CHARS: int = 10_000_000
 # kill the LLM call mid-stream. Tighten once we have a stable success path.
 FETCH_TIMEOUT_S: float = 120.0
 
-# Placeholder pricing: $0.001 / 1k input tokens, $0.002 / 1k output tokens.
-# Replace with real provider pricing once known.
-COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
-COST_PER_OUTPUT_TOKEN: float = 0.002 / 1_000
+# Canonical pricing lives in app.services.token_accounting (issue #106);
+# this module no longer defines its own COST_PER_* copy.
 
 # ---------------------------------------------------------------------------
 # Secret redaction
@@ -325,6 +325,20 @@ async def _empty_result() -> str:
     return ""
 
 
+# Hard ceiling on the SQL recursive CTE. This is a backstop, NOT a real
+# cycle guard: it caps a runaway CTE at an absolute upper bound on
+# depth to prevent an unbounded allocation, but it is well above any
+# realistic retry chain so valid ancestry stays effectively unbounded.
+# The actual cycle detection happens in the recursive term's WHERE
+# clause via the visited-uuid path column (``NOT (Run.id = ANY(path))``).
+# 1,000,000 is six orders of magnitude beyond a realistic one-click
+# retry chain (the 5-children cap bounds siblings, not depth, and a
+# retrying a settled retry child is allowed in principle — but in
+# practice the depth stays under 100). Kept explicit so reviewers
+# notice if it ever needs adjusting.
+_PARENT_CHAIN_HARD_CAP = 1_000_000
+
+
 async def resolve_workflow_run_id(
     run: Run,
     db: AsyncSession,
@@ -342,32 +356,75 @@ async def resolve_workflow_run_id(
     one, in which case callers must degrade gracefully (skip the log fetch)
     instead of issuing a request against ``/actions/runs/None/logs``.
 
-    The walk is bounded by a *visited set* rather than a fixed hop count. A
-    fixed count was wrong in both directions: ``parent_run_id`` chains are not
-    depth-limited (retrying a settled retry child is allowed, so the cap on
-    direct children does not bound total depth), so any fixed bound silently
-    dropped the CI logs for a deep chain. ``parent_run_id`` is a self-FK, so a
-    cycle must not spin forever, and the visited set is what guarantees
-    termination — it terminates on any cycle, not just a self-reference.
+    The whole ancestry is fetched with ONE recursive CTE regardless of chain
+    depth (O(1) queries, not one per level), with cycle detection done in SQL
+    via a visited-uuid path column. The previous implementation clamped chain
+    depth at 200, which was wrong in both directions: ``parent_run_id``
+    chains have no application-level depth cap (the 5-child cap counts
+    siblings, not depth), so a fixed bound silently dropped the CI logs for
+    any retry ancestry >= 200. A corrupt cycle would also have recursed
+    forever if the guard were removed entirely. The CTE now keeps a path
+    array of visited ids and the recursive term carries
+    ``NOT (Run.id = ANY(path))`` — a real cycle guard — so valid chains
+    stay unbounded (up to the hard backstop) and corrupt cycles terminate
+    in SQL. The Python walk's visited set is the second tier of defense.
     """
     if run.github_run_id is not None:
         return run.github_run_id
 
+    # Seed: a 1-element array literal of the seed row's id. We use the PG
+    # ``ARRAY[col]`` literal (via ``postgresql.array([col])``) — NOT
+    # ``func.array(col)`` — because ``array(col)`` is parsed as a function
+    # call to ``array`` and PG emits "syntax error at or near col" since
+    # ``array`` is not a function name. ``ARRAY[col]`` is the proper literal
+    # constructor for a 1-element array in a SELECT list.
+    chain = (
+        select(
+            Run.id,
+            Run.parent_run_id,
+            Run.github_run_id,
+            literal(1).label("depth"),
+            pg_array([Run.id]).label("path"),
+        )
+        .where(Run.id == run.id)
+        .cte(name="run_parent_chain", recursive=True)
+    )
+    chain = chain.union_all(
+        select(
+            Run.id,
+            Run.parent_run_id,
+            Run.github_run_id,
+            (chain.c.depth + 1).label("depth"),
+            func.array_append(chain.c.path, Run.id).label("path"),
+        ).where(
+            Run.id == chain.c.parent_run_id,
+            # Real cycle guard: don't recurse into an id already in path.
+            # ``chain.c.path`` carries the visited ids in order; revisiting
+            # any of them is a cycle and the row is dropped.
+            ~(Run.id == any_(chain.c.path)),
+            # Hard backstop only — should never trigger in practice. See
+            # ``_PARENT_CHAIN_HARD_CAP`` for the rationale.
+            chain.c.depth < _PARENT_CHAIN_HARD_CAP,
+        )
+    )
+    rows = (
+        await db.execute(
+            select(chain.c.id, chain.c.parent_run_id, chain.c.github_run_id)
+        )
+    ).all()
+
+    by_id = {row[0]: (row[1], row[2]) for row in rows}
     seen: set[uuid.UUID] = {run.id}
-    cursor: Optional[Run] = run
-    while cursor is not None:
-        parent_id = cursor.parent_run_id
-        if parent_id is None or parent_id in seen:
-            return None
+    parent_id: Optional[uuid.UUID] = run.parent_run_id
+    while parent_id is not None and parent_id not in seen:
         seen.add(parent_id)
-        parent = (
-            await db.scalars(select(Run).where(Run.id == parent_id))
-        ).first()
-        if parent is None:
+        entry = by_id.get(parent_id)
+        if entry is None:
             return None
-        if parent.github_run_id is not None:
-            return parent.github_run_id
-        cursor = parent
+        next_parent_id, github_run_id = entry
+        if github_run_id is not None:
+            return github_run_id
+        parent_id = next_parent_id
     return None
 
 
@@ -397,6 +454,30 @@ async def _resolve_pr_opening_run_id(run: Run, db: AsyncSession) -> Optional[uui
         if owner is not None:
             return owner.id
     return run.parent_run_id
+
+
+async def _fetch_prior_attempt(
+    prior_source_id: uuid.UUID,
+    db: AsyncSession,
+) -> Optional[Attempt]:
+    """
+    Return the single attempt whose patch the refinement must build on.
+
+    Prefer the latest passing attempt; fall back to the latest attempt
+    overall. A single bounded row (``LIMIT 1``) regardless of how many
+    attempts the source run accumulated — the previous implementation
+    fetched the full history with ``.all()`` and picked in Python.
+    """
+    stmt = (
+        select(Attempt)
+        .where(Attempt.run_id == prior_source_id)
+        .order_by(
+            case((Attempt.verification_status == "pass", 1), else_=0).desc(),
+            Attempt.attempt_number.desc(),
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalars().first()
 
 
 async def gather_pr_feedback_context(
@@ -450,16 +531,7 @@ async def gather_pr_feedback_context(
     prior_attempt_num = 1
     prior_source_id = await _resolve_pr_opening_run_id(run, db)
     if prior_source_id is not None:
-        stmt = (
-            select(Attempt)
-            .where(Attempt.run_id == prior_source_id)
-            .order_by(Attempt.attempt_number.desc())
-        )
-        source_attempts = (await db.scalars(stmt)).all()
-        prior_attempt = next(
-            (a for a in source_attempts if a.verification_status == "pass"),
-            source_attempts[0] if source_attempts else None,
-        )
+        prior_attempt = await _fetch_prior_attempt(prior_source_id, db)
         if prior_attempt:
             prior_patch = prior_attempt.patch_text or ""
             prior_strategy_notes = prior_attempt.strategy_notes or ""
@@ -1090,9 +1162,9 @@ async def _call_with_empty_retry(
         else (time.monotonic() - t0) * 1000
     )
     first_content = (response.get("content") or "").strip()
-    first_usage = response.get("usage", {}) or {}
-    first_in = int(first_usage.get("input_tokens", 0))
-    first_out = int(first_usage.get("output_tokens", 0))
+    # Canonical usage parsing (issue #106): tolerates prompt/completion
+    # spellings, None, and numeric strings instead of raising on int(None).
+    first_in, first_out = normalize_usage(response.get("usage"))
 
     if not _is_empty_summary(first_content):
         return first_content, response, first_latency_ms, first_in, first_out
@@ -1137,9 +1209,7 @@ async def _call_with_empty_retry(
         else (time.monotonic() - t1) * 1000
     )
     retry_content = (retry_response.get("content") or "").strip()
-    retry_usage = retry_response.get("usage", {}) or {}
-    retry_in = int(retry_usage.get("input_tokens", 0))
-    retry_out = int(retry_usage.get("output_tokens", 0))
+    retry_in, retry_out = normalize_usage(retry_response.get("usage"))
 
     if not _is_empty_summary(retry_content):
         # Retry succeeded. Aggregate the token counts so the dashboard shows
@@ -1195,19 +1265,16 @@ async def _persist_run_step(
     """
     Insert a RunStep trace row.
 
-    Cost is a placeholder estimate; replace with real pricing from provider docs.
+    Cost is the canonical placeholder estimate from
+    app.services.token_accounting (issue #106).
     Raw inputs are NEVER stored here — only token counts and latency.
     """
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
-        output_tokens * COST_PER_OUTPUT_TOKEN
-    )
-    step = RunStep(
+    step = make_run_step(
         run_id=run_id,
         step_name=step_name if not error else f"{step_name}_error",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        cost_estimate=round(cost, 8),
     )
     db.add(step)
     await db.commit()

@@ -37,6 +37,23 @@ async def test_get_db_yields_session_and_closes() -> None:
         assert mock_close.await_count >= 1
 
 
+@pytest.mark.asyncio
+async def test_get_db_rolls_back_on_exception_and_closes() -> None:
+    """Failing request rolls back so the pooled connection returns clean."""
+    gen = app.db.get_db()
+    session = await anext(gen)
+    assert isinstance(session, AsyncSession)
+
+    with (
+        patch.object(session, "rollback", wraps=session.rollback) as mock_rollback,
+        patch.object(session, "close", wraps=session.close) as mock_close,
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            await gen.athrow(RuntimeError("boom"))
+        assert mock_rollback.await_count == 1
+        assert mock_close.await_count >= 1
+
+
 def test_connect_args_ssl_condition() -> None:
     """SSL connect arg is enabled for neon.tech URLs and empty for non-neon URLs."""
     neon_url = "postgresql+asyncpg://user:pass@ep-sun-123.c-3.ap-southeast-1.aws.neon.tech/neondb"

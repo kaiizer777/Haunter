@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import logging
+import random as _random
 import time
 import uuid
 from datetime import datetime, timezone
@@ -107,6 +108,23 @@ _TREE_IGNORE_PREFIXES = (
 
 # Maximum concurrent active sessions per user.
 _MAX_ACTIVE_SESSIONS = 2
+
+# Cross-environment turn-discovery retry budget (issue #117). A reconnect that
+# lands on a worker where the turn is still starting up re-reads the latest
+# turn_id; bound that to a few backoff+jitter retries under a total deadline
+# instead of a 25x fixed-sleep stampede, then surface 409 to the caller.
+#
+# Budget math: with `_TURN_DISCOVERY_BASE_DELAY_S = 0.1` and full-jitter
+# caps at `BASE * 2^(n-1)` clamped at `_TURN_DISCOVERY_MAX_DELAY_S`, the
+# worst-case ceiling across N attempts is sum of caps. Choosing
+# N = 5 gives caps [0.1, 0.2, 0.4, 0.8, 1.0] (the last clamped by
+# `_TURN_DISCOVERY_MAX_DELAY_S = 1.0`), summing to exactly
+# `_TURN_DISCOVERY_DEADLINE_S = 2.5s`. The remaining-time clamp below
+# prevents a single oversized jitter from blowing past the deadline.
+_TURN_DISCOVERY_MAX_ATTEMPTS = 5
+_TURN_DISCOVERY_BASE_DELAY_S = 0.1
+_TURN_DISCOVERY_MAX_DELAY_S = 1.0
+_TURN_DISCOVERY_DEADLINE_S = 2.5
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +577,21 @@ def _format_chunk(event_id: int, event: str, chunk: str) -> str:
     return f"id: {event_id}\nevent: {event}\ndata: {chunk}\n\n"
 
 
+#: Seconds between DB polls while a turn runs on another worker. Uses 1.0s ticks
+#: to bound polling round trips across Lambda execution environments, trading up
+#: to 1s of resumed-stream latency for reduced database query load.
+_SSE_POLL_INTERVAL_S = 1.0
+
+#: Consecutive empty polls before probing the session row lock. The NOWAIT
+#: probe opens a lock attempt plus a rollback, so it runs once per idle
+#: window instead of once per tick.
+_SSE_LIVENESS_PROBE_EVERY_TICKS = 5
+
+#: Bounded terminal-event drain attempts after the turn lock releases.
+_SSE_DRAIN_ATTEMPTS = 3
+_SSE_DRAIN_INTERVAL_S = 0.5
+
+
 async def _stream_from_db(
     session_id: uuid.UUID,
     turn_id: str,
@@ -571,41 +604,47 @@ async def _stream_from_db(
     Serves cross-environment resumption on AWS Lambda:
     1. Fetches and yields any events already persisted with event_id > last_event_id.
     2. If a terminal event ('done' or 'error') is yielded, returns immediately.
-    3. If the turn is still running in another environment, polls with a 0.35s sleep
-       until a terminal event is persisted, the turn worker drops its row lock,
-       the client disconnects, or a 900s timeout is reached.
+    3. If the turn is still running in another environment, polls with a
+       _SSE_POLL_INTERVAL_S sleep until a terminal event is persisted, the
+       turn worker drops its row lock, the client disconnects, or a 900s
+       timeout is reached.
+
+    Each poll/probe/drain iteration uses a short-lived session, ensuring database
+    connections are never held idle across sleeps or stream yields (vital under NullPool).
     """
     from app.db import async_session_maker
     from app.models import SessionStreamEvent
 
-    max_yielded_id = last_event_id
-
-    # 1. Fetch initial batch of existing events
-    async with async_session_maker() as poll_db:
-        stmt = (
+    def _pending_stmt(after_id: int):
+        return (
             select(SessionStreamEvent)
             .where(
                 SessionStreamEvent.session_id == session_id,
                 SessionStreamEvent.turn_id == turn_id,
-                SessionStreamEvent.event_id > max_yielded_id,
+                SessionStreamEvent.event_id > after_id,
             )
             .order_by(SessionStreamEvent.event_id.asc())
         )
-        res = await poll_db.execute(stmt)
+
+    max_yielded_id = last_event_id
+
+    # 1. Yield any events already persisted.
+    async with async_session_maker() as poll_db:
+        res = await poll_db.execute(_pending_stmt(max_yielded_id))
         initial_rows = res.scalars().all()
 
     for row in initial_rows:
-        if row.event_id <= 0 or row.event == "turn_start":
+        if row.event_id <= max_yielded_id or row.event == "turn_start":
             continue
         yield _format_chunk(row.event_id, row.event, row.chunk)
-        if row.event_id > max_yielded_id:
-            max_yielded_id = row.event_id
+        max_yielded_id = row.event_id
         if row.event in ("done", "error"):
             return
 
-    # 2. Poll for emerging events if the turn is in-flight on another Lambda worker
+    # 2. Poll for emerging events if the turn is in-flight elsewhere.
     timeout_s = 900.0  # Max Lambda execution time
     start_time = time.monotonic()
+    idle_ticks = 0
 
     while True:
         if time.monotonic() - start_time > timeout_s:
@@ -628,60 +667,49 @@ async def _stream_from_db(
             except Exception:
                 pass
 
-        await _asyncio.sleep(0.35)
+        await _asyncio.sleep(_SSE_POLL_INTERVAL_S)
 
         async with async_session_maker() as poll_db:
-            stmt = (
-                select(SessionStreamEvent)
-                .where(
-                    SessionStreamEvent.session_id == session_id,
-                    SessionStreamEvent.turn_id == turn_id,
-                    SessionStreamEvent.event_id > max_yielded_id,
-                )
-                .order_by(SessionStreamEvent.event_id.asc())
-            )
-            res = await poll_db.execute(stmt)
+            res = await poll_db.execute(_pending_stmt(max_yielded_id))
             rows = res.scalars().all()
 
+        if rows:
+            idle_ticks = 0
             for row in rows:
-                if row.event_id <= 0 or row.event == "turn_start":
+                if row.event_id <= max_yielded_id or row.event == "turn_start":
                     continue
                 yield _format_chunk(row.event_id, row.event, row.chunk)
-                if row.event_id > max_yielded_id:
-                    max_yielded_id = row.event_id
+                max_yielded_id = row.event_id
                 if row.event in ("done", "error"):
                     return
+            continue
 
-            is_active = await _is_turn_active_elsewhere(poll_db, session_id)
-            if not is_active:
-                # Turn lock released: drain any final event committed right before lock release.
-                # If terminal event hasn't landed yet, poll a few short attempts before closing.
-                terminal_seen = False
-                for _ in range(5):
-                    async with async_session_maker() as drain_db:
-                        final_stmt = (
-                            select(SessionStreamEvent)
-                            .where(
-                                SessionStreamEvent.session_id == session_id,
-                                SessionStreamEvent.turn_id == turn_id,
-                                SessionStreamEvent.event_id > max_yielded_id,
-                            )
-                            .order_by(SessionStreamEvent.event_id.asc())
-                        )
-                        final_res = await drain_db.execute(final_stmt)
-                        for row in final_res.scalars().all():
-                            if row.event_id <= 0 or row.event == "turn_start":
-                                continue
-                            yield _format_chunk(row.event_id, row.event, row.chunk)
-                            if row.event_id > max_yielded_id:
-                                max_yielded_id = row.event_id
-                            if row.event in ("done", "error"):
-                                terminal_seen = True
-                                return
-                    if terminal_seen:
-                        break
-                    await _asyncio.sleep(0.1)
-                break
+        idle_ticks += 1
+        if idle_ticks < _SSE_LIVENESS_PROBE_EVERY_TICKS:
+            continue
+        idle_ticks = 0
+
+        async with async_session_maker() as probe_db:
+            is_active = await _is_turn_active_elsewhere(probe_db, session_id)
+        if is_active:
+            continue
+
+        # Turn lock released: drain any final event committed right before
+        # lock release, then close. Bounded attempts.
+        for _ in range(_SSE_DRAIN_ATTEMPTS):
+            async with async_session_maker() as drain_db:
+                final_res = await drain_db.execute(_pending_stmt(max_yielded_id))
+                drain_rows = final_res.scalars().all()
+
+            for row in drain_rows:
+                if row.event_id <= max_yielded_id or row.event == "turn_start":
+                    continue
+                yield _format_chunk(row.event_id, row.event, row.chunk)
+                max_yielded_id = row.event_id
+                if row.event in ("done", "error"):
+                    return
+            await _asyncio.sleep(_SSE_DRAIN_INTERVAL_S)
+        break
 
 
 @router.post("/sessions/{session_id}/chat")
@@ -820,15 +848,51 @@ async def chat_session(
 
         # If turn is active elsewhere, the orchestrator might be in the middle of
         # turn startup (clearing old events and publishing turn_start). Retry turn
-        # discovery for up to 2.5s (25 x 0.1s) until events for the new turn appear.
+        # discovery with bounded exponential backoff + full jitter under a total
+        # deadline until events for the new turn appear. Resume is read-only
+        # (SELECTs only — no turn effects are applied), so a retry can never
+        # double-apply; on exhaustion surface 409 instead of looping silently.
         if await _is_turn_active_elsewhere(db, session_id):
             if active_turn_id is None:
-                for _ in range(25):
-                    await _asyncio.sleep(0.1)
+                deadline = time.monotonic() + _TURN_DISCOVERY_DEADLINE_S
+                for attempt in range(1, _TURN_DISCOVERY_MAX_ATTEMPTS + 1):
+                    # Cap the *planned* sleep by the remaining deadline budget so
+                    # one oversized jitter cannot push a single attempt past
+                    # `_TURN_DISCOVERY_DEADLINE_S`. A negative/zero remaining
+                    # budget means we are already past the deadline — exit
+                    # without sleeping so the caller sees 409 promptly.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    cap = min(
+                        _TURN_DISCOVERY_BASE_DELAY_S * (2 ** (attempt - 1)),
+                        _TURN_DISCOVERY_MAX_DELAY_S,
+                    )
+                    delay = _random.uniform(0, min(cap, remaining))
+                    await _asyncio.sleep(delay)
                     retry_res = await db.execute(latest_turn_stmt)
                     active_turn_id = retry_res.scalars().first()
                     if active_turn_id is not None:
                         break
+                    logger.warning(
+                        "chat resume: turn discovery attempt %d/%d found no turn "
+                        "for session %s; retrying",
+                        attempt,
+                        _TURN_DISCOVERY_MAX_ATTEMPTS,
+                        session_id,
+                    )
+                    # Re-check after the DB read too — a slow read may have
+                    # consumed the rest of the budget, in which case we exit
+                    # instead of returning a stale value on the next iteration.
+                    if time.monotonic() >= deadline:
+                        break
+                if active_turn_id is None:
+                    logger.error(
+                        "chat resume: turn discovery exhausted %d attempts for "
+                        "session %s; turn still active elsewhere",
+                        _TURN_DISCOVERY_MAX_ATTEMPTS,
+                        session_id,
+                    )
 
             # If still None or has no events after discovery retry
             if active_turn_id is None:

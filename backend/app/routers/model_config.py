@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
+from app.llm.config import invalidate_model_config_cache
 from app.llm.discovery import get_dynamic_free_models
 from app.models import ModelConfig, ModelConfigScope, Repo, User
 from app.schemas import (
@@ -225,6 +226,9 @@ async def update_model_config_endpoint(
             repo.active_model_config_id = config.id
 
         await db.commit()
+        # Invalidate before the refresh() await (#134-3): same stale-window
+        # rationale as the repo-settings write paths.
+        invalidate_model_config_cache(body.repo_id)
         await db.refresh(config)
         logger.info(
             "Repo model config updated: user=%s repo=%s provider=%s model=%s",
@@ -261,6 +265,8 @@ async def update_model_config_endpoint(
     db.add(new_config)
     await db.flush()
     await db.commit()
+    # Invalidate before the refresh() await (#134-3).
+    invalidate_model_config_cache()
     await db.refresh(new_config)
 
     logger.info(

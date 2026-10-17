@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -39,8 +39,19 @@ from app.services.repo_settings import get_repo_settings
 from app.subagents.context_gatherer import gather_context
 from sqlalchemy.exc import InterfaceError, OperationalError
 
-# Truncation cap for failure_reason — set to 10M for full error trace persistence
-_FAILURE_REASON_MAX_CHARS = 10_000_000
+# Truncation cap for runs.failure_reason — short dashboard string, not an
+# error-trace archive. Matches the 500-char contract documented on the
+# column (models.py) and the sibling caps in review_orchestrator/webhooks.
+_FAILURE_REASON_MAX_CHARS = 500
+
+# Total-char budget for the fallback diagnosis comment (prefix + body +
+# suffix). _sanitize_fallback subtracts the wrapper lengths from this
+# budget, so the whole posted comment never exceeds 3_000 chars.
+_FALLBACK_BODY_MAX_CHARS = 3_000
+
+# Cap for runs.final_summary — first 1000 chars of the LLM PR body,
+# per the column contract documented in models.py.
+_FINAL_SUMMARY_MAX_CHARS = 1_000
 
 # Hard wall-clock timeout for the whole orchestrator body (Phase 1, O-06).
 # Leaves 100s of headroom under the Lambda 900s limit. Any pipeline still
@@ -184,6 +195,16 @@ class InvalidTransitionError(Exception):
         self.to_status = to_status
 
 
+class RunClaimLost(InvalidTransitionError):
+    """Raised when a CAS UPDATE loses to a concurrent worker (#107).
+
+    Subclasses InvalidTransitionError so existing `except
+    InvalidTransitionError` clauses still catch it, but the global
+    handler treats it as already-claimed (quiet exit) instead of
+    forcing the winner's run into `error`.
+    """
+
+
 def _validate_transition(current: RunStatus, next_status: RunStatus) -> None:
     """Raise InvalidTransitionError if the transition is not allowed."""
     allowed = _ALLOWED_TRANSITIONS.get(current, set())
@@ -199,20 +220,51 @@ async def _transition(
     """
     Validate and persist a status transition on `run`.
 
-    Updates runs.status and runs.updated_at atomically. Raises
-    InvalidTransitionError before touching the DB if the transition is invalid.
+    Uses an atomic compare-and-swap UPDATE (WHERE id + expected status)
+    instead of a held SELECT ... FOR UPDATE (#107). The row lock is held
+    for ms by the single UPDATE, committed immediately — never across an
+    LLM/sandbox await. On CAS conflict (rowcount 0) raises RunClaimLost
+    so the caller treats the run as already-claimed and exits quietly.
     """
     current = RunStatus(run.status)
     _validate_transition(current, new_status)
 
-    run.status = new_status.value
-    run.updated_at = datetime.now(timezone.utc)
-    db.add(run)
+    run_id = run.id
+    expected = current.value
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status == expected)
+        .values(status=new_status.value, updated_at=now)
+    )
+    if result.rowcount == 0:
+        # No-op txn: commit (not rollback) so `run`/`repo` stay valid with
+        # expire_on_commit=False. Rollback would expire them and resumed
+        # attribute reads would raise MissingGreenlet on the winner's run.
+        await db.commit()
+        try:
+            fresh_status = await db.scalar(
+                select(Run.status).where(Run.id == run_id)
+            )
+            # Close the read txn before returning to unbounded awaits.
+            await db.commit()
+        except Exception:
+            fresh_status = None
+        if fresh_status is not None:
+            try:
+                actual = RunStatus(fresh_status)
+            except ValueError:
+                actual = current
+            raise RunClaimLost(actual, new_status)
+        raise RunClaimLost(current, new_status)
+
     await db.commit()
+    run.status = new_status.value
+    run.updated_at = now
 
     logger.info(
         "orchestrator: run=%s %s → %s",
-        run.id,
+        run_id,
         current.value,
         new_status.value,
     )
@@ -235,7 +287,7 @@ def _sanitize_fallback(
       - Prefix with "**Haunter AI Diagnosis:**\n\n" (safe markdown).
       - Apply secret redaction from context_gatherer._redact_secrets.
       - html.escape the summary to prevent stored XSS on dashboard renders.
-      - Hard-cap at 3000 chars AFTER prefix.
+      - Hard-cap the whole comment (prefix + body + suffix) at 3000 chars.
       - NEVER include raw patch text, full CI logs, or stack traces.
     """
     import html as html_module
@@ -259,7 +311,7 @@ def _sanitize_fallback(
             "\n\n*Note: Automated fixes were attempted but none passed the CI sandbox. "
             "Please review the diagnosis above to manually resolve the issue.*"
         )
-    max_body = 10_000_000 - len(prefix) - len(suffix)
+    max_body = _FALLBACK_BODY_MAX_CHARS - len(prefix) - len(suffix)
     body_content = escaped[:max_body]
     return f"{prefix}{body_content}{suffix}"
 
@@ -275,9 +327,11 @@ def _format_failure_reason(stage: str, exc: BaseException) -> str:
 
     Format: "<stage>: <ExcType>: <message>"
 
-    - Truncated to _FAILURE_REASON_MAX_CHARS.
     - html.escape'd so any markup that bubbled through an exception message
       cannot land as raw HTML on the dashboard.
+    - Truncated to _FAILURE_REASON_MAX_CHARS AFTER escaping, so the stored
+      value can never exceed the cap even when the message is full of
+      escapable characters (`&` -> `&amp;` is a 5x expansion).
     - Strips leading/trailing whitespace; collapses internal newlines so it
       renders as one line in the UI.
 
@@ -292,8 +346,11 @@ def _format_failure_reason(stage: str, exc: BaseException) -> str:
     raw = f"{stage}: {type(exc).__name__}: {msg}"
     # Collapse whitespace to single spaces so the column stays one logical line.
     raw = " ".join(raw.split())
-    truncated = raw[:_FAILURE_REASON_MAX_CHARS]
-    return html_module.escape(truncated, quote=False)
+    # Escape BEFORE capping: truncating first would let escapable characters
+    # expand past the cap (`&` -> `&amp;`), breaking the 500-char contract.
+    # The stage/type head survives because truncation drops the tail.
+    escaped = html_module.escape(raw, quote=False)
+    return escaped[:_FAILURE_REASON_MAX_CHARS]
 
 
 async def _recover_session(db: AsyncSession, run: Run, run_id: uuid.UUID) -> None:
@@ -605,6 +662,7 @@ async def _orchestrator_pipeline_body(
     from app.subagents.fix_generator import (
         generate_fix,
         AttemptCapExceeded,
+        AttemptClaimLost,
         LowConfidenceSkip,
         PatchFormatRetryExhausted,
         PatchRejected,
@@ -612,7 +670,6 @@ async def _orchestrator_pipeline_body(
     )
     from app.sandbox import verify as sandbox_verify
     from app.models import RunStep, Attempt
-    from sqlalchemy.orm import selectinload as _selectinload
 
     repo_settings = await get_repo_settings(db, repo.id)
 
@@ -648,8 +705,32 @@ async def _orchestrator_pipeline_body(
     # resume from the current status. This prevents `Invalid transition:
     # fix_generation -> context_gathering` on re-entry.
     if run.status == RunStatus.pending.value:
-        await _transition(run, RunStatus.context_gathering, db)
-        state["step"] = RunStatus.context_gathering.value
+        try:
+            await _transition(run, RunStatus.context_gathering, db)
+        except RunClaimLost:
+            # Lost the CAS race — another worker claimed first (#107).
+            # Exit quietly in ALL cases: continuing would duplicate the
+            # winner's gather_context LLM call and force the winner's run
+            # to `error` on the next CAS conflict. No transaction is left
+            # open across the winner's unbounded awaits.
+            fresh_status = await db.scalar(
+                select(Run.status).where(Run.id == run_id)
+            )
+            await db.commit()
+            if fresh_status is None:
+                logger.error(
+                    "orchestrator: run=%s vanished during claim — aborting",
+                    run_id,
+                )
+                return
+            logger.info(
+                "orchestrator: run=%s claim lost (status=%s) "
+                "— already-claimed, exiting",
+                run_id,
+                fresh_status,
+            )
+            return
+        state["step"] = run.status
     else:
         logger.info(
             "orchestrator: run=%s already past pending (status=%s) "
@@ -835,6 +916,23 @@ async def _orchestrator_pipeline_body(
     skip_to_fallback_reason: Optional[str] = None
     cost_ceiling_failure_reason: Optional[str] = None
 
+    # Issue #113: single baseline SUM before the loop; iterations below use
+    # the in-memory running total (no aggregate query per iteration).
+    try:
+        _baseline_cost = await db.scalar(
+            select(func.coalesce(func.sum(RunStep.cost_estimate), 0.0)).where(
+                RunStep.run_id == run_id
+            )
+        )
+        running_cost_dollars = float(_baseline_cost or 0.0)
+    except Exception as baseline_exc:
+        logger.warning(
+            "orchestrator: run=%s baseline cost SUM failed (%s) — starting at 0.0",
+            run_id,
+            type(baseline_exc).__name__,
+        )
+        running_cost_dollars = 0.0
+
     for iteration in range(max_attempts):
         # ---- Per-iteration session (BLOCKER-1 fix) ----
         # After ~5 min of idle, Neon's pooled connection drops and the
@@ -849,9 +947,11 @@ async def _orchestrator_pipeline_body(
         # next iteration opens a fresh session and the pipeline continues.
         try:
             async with async_session_maker() as attempt_db:
-                # Reload Run with row-lock (mirrors the outer-session lock).
+                # Plain SELECT — no row lock held across generate_fix /
+                # sandbox_verify (#107). Mutual exclusion is via atomic CAS
+                # in _transition, never a held FOR UPDATE.
                 run_result = await attempt_db.execute(
-                    select(Run).where(Run.id == run_id).with_for_update()
+                    select(Run).where(Run.id == run_id)
                 )
                 run = run_result.scalar_one_or_none()
                 if run is None:
@@ -862,11 +962,11 @@ async def _orchestrator_pipeline_body(
                     )
                     return
 
-                # Reload Repo (selectinload for tenant integrity check).
+                # Reload Repo (plain columns only: the tenant check below reads
+                # repo.user_id / repo.id — the eager Repo.user load was an
+                # extra SELECT per iteration that nothing consumed).
                 repo_result = await attempt_db.execute(
-                    select(Repo)
-                    .where(Repo.id == run.repo_id)
-                    .options(_selectinload(Repo.user))
+                    select(Repo).where(Repo.id == run.repo_id)
                 )
                 repo = repo_result.scalar_one_or_none()
                 if repo is None:
@@ -886,10 +986,30 @@ async def _orchestrator_pipeline_body(
                     return
 
                 # Phase 6.3 Feature Enforcement: Cost Ceiling Check
-                cost_stmt = select(
-                    func.coalesce(func.sum(RunStep.cost_estimate), 0.0)
-                ).where(RunStep.run_id == run.id)
-                total_cost_dollars = (await attempt_db.scalar(cost_stmt)) or 0.0
+                # Issue #113: use the in-memory running total instead of a
+                # per-iteration SUM. Re-sync from the DB only when close to
+                # the ceiling (>=80%) so concurrent writers can't slip past.
+                total_cost_dollars = running_cost_dollars
+                try:
+                    _ceiling = repo_settings.max_cost_per_run_cents
+                    if _ceiling and _ceiling > 0 and (
+                        total_cost_dollars * 100.0
+                    ) >= (0.8 * float(_ceiling)):
+                        _resynced = await attempt_db.scalar(
+                            select(
+                                func.coalesce(func.sum(RunStep.cost_estimate), 0.0)
+                            ).where(RunStep.run_id == run.id)
+                        )
+                        if _resynced is not None:
+                            total_cost_dollars = float(_resynced or 0.0)
+                            running_cost_dollars = total_cost_dollars
+                except Exception as resync_exc:
+                    logger.warning(
+                        "orchestrator: run=%s cost resync failed (%s) — using running total",
+                        run_id,
+                        type(resync_exc).__name__,
+                    )
+                    total_cost_dollars = running_cost_dollars
                 total_cost_cents = total_cost_dollars * 100.0
 
                 cost_decision = feature_enforcement.check_cost_ceiling(
@@ -911,6 +1031,10 @@ async def _orchestrator_pipeline_body(
                     )
                     break
 
+                # Close the read-only txn before any unbounded LLM/sandbox
+                # await (#107). No lock is held during generate_fix below.
+                await attempt_db.commit()
+
                 # ---- Generate fix ----
                 try:
                     review_feedback: Optional[str] = None
@@ -930,6 +1054,17 @@ async def _orchestrator_pipeline_body(
                         db=attempt_db,
                         review_feedback=review_feedback,
                     )
+                    # Issue #113: accumulate the just-persisted step cost into
+                    # the running total (no re-SUM). Tolerates mocked
+                    # generate_fix in tests (non-numeric attr ignored).
+                    try:
+                        _step_cost = getattr(attempt, "_haunter_step_cost", 0.0)
+                        if isinstance(_step_cost, bool):
+                            pass
+                        elif isinstance(_step_cost, (int, float)):
+                            running_cost_dollars += float(_step_cost)
+                    except Exception:
+                        pass
                     state["decisions"].append(
                         f"fix_generated_attempt_{attempt.attempt_number}"
                     )
@@ -983,6 +1118,19 @@ async def _orchestrator_pipeline_body(
                     await attempt_db.commit()
                     skip_to_fallback_reason = "format_exhausted"
                     break
+
+                except AttemptClaimLost as claim_err:
+                    # Concurrent worker won the attempt-number race (#107).
+                    # Exit quietly — the winner owns the run. Must NOT
+                    # persist failure_reason or force `error` on the
+                    # shared run.
+                    await attempt_db.commit()
+                    logger.info(
+                        "orchestrator: run=%s %s — already-claimed, exiting",
+                        run_id,
+                        claim_err,
+                    )
+                    return
 
                 except (
                     AttemptCapExceeded,
@@ -1282,7 +1430,7 @@ async def _orchestrator_pipeline_body(
                         run.pr_number = pr["number"]
                         run.pr_branch = branch
                         run.final_summary = html_module.escape(
-                            pr_text["body"][:10_000_000], quote=False
+                            pr_text["body"][:_FINAL_SUMMARY_MAX_CHARS], quote=False
                         )
                         run.updated_at = datetime.now(timezone.utc)
                         attempt_db.add(run)
@@ -1404,9 +1552,7 @@ async def _orchestrator_pipeline_body(
                 return
 
             repo_result = await fb_db.execute(
-                select(Repo)
-                .where(Repo.id == run.repo_id)
-                .options(_selectinload(Repo.user))
+                select(Repo).where(Repo.id == run.repo_id)
             )
             repo = repo_result.scalar_one_or_none()
             if repo is None:
@@ -1589,15 +1735,15 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
     """
     async with async_session_maker() as db:
         # ----------------------------------------------------------------
-        # Load Run + Repo
+        # Load Run + Repo with plain SELECTs — never SELECT ... FOR UPDATE
+        # here (#107). A row lock held across the LLM/sandbox pipeline
+        # serializes concurrent workers behind model inference. Mutual
+        # exclusion is via atomic CAS in _transition
+        # (UPDATE ... WHERE status=expected), lock held for ms only.
+        # Commit immediately to close the read txn before any unbounded
+        # await; no transaction is held during LLM/sandbox calls.
         # ----------------------------------------------------------------
-        # Phase 1 O-09: row-lock the Run record. Mirrors the existing Repo
-        # lock below. The outer session commits before the per-iteration
-        # session opens, so the lock is released before any concurrent
-        # re-entrant select-for-update from the retry loop.
-        run_result = await db.execute(
-            select(Run).where(Run.id == run_id).with_for_update()
-        )
+        run_result = await db.execute(select(Run).where(Run.id == run_id))
         run = run_result.scalar_one_or_none()
         if run is None:
             logger.error("orchestrator: run %s not found — aborting", run_id)
@@ -1605,6 +1751,7 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
 
         from sqlalchemy.orm import selectinload
 
+        # Repo columns only (repo.user_id / repo.id below) — no eager loads.
         repo_result = await db.execute(
             select(Repo)
             .where(Repo.id == run.repo_id)
@@ -1638,6 +1785,9 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                 repo.id,
             )
             return
+
+        # Close the read txn before the pipeline's unbounded awaits (#107).
+        await db.commit()
 
         # Compact in-memory state — NO raw logs or diffs here
         state: dict[str, Any] = {
@@ -1709,6 +1859,18 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
                     type(inner_exc).__name__,
                     inner_exc,
                 )
+            return
+
+        except RunClaimLost as cle:
+            # CAS lost to a concurrent worker (#107) — the winner owns the
+            # run. Exit quietly without forcing `error` on the shared run.
+            logger.info(
+                "orchestrator: run=%s claim lost (%s → %s) — "
+                "already-claimed, exiting",
+                run_id,
+                cle.from_status.value,
+                cle.to_status.value,
+            )
             return
 
         except InvalidTransitionError as ite:
