@@ -18,6 +18,8 @@ under our control. It is:
 
 Public API:
     get_universal_sandbox_repo(org)            -> str  (org/repo)
+    get_sandbox_mirror_pool()                  -> list[str] (bare names)
+    select_sandbox_mirror(org, key)            -> str  (org/repo, pool-routed)
     get_or_create_test_mirror(gh, org, [name], *, token) -> str  (org/name)
     push_patch_to_mirror(gh, repo_full, *, branch, patch_text, workflow_filename,
                          workflow_content, commit_message, token, [seed_files]) -> str
