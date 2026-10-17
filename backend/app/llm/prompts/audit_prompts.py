@@ -66,15 +66,54 @@ MAX_REPO_CONTEXT_CHARS = 10_000
 #: Linked-issue context for the push-level code reviewer (issue #123). Read
 #: together with ``MAX_USER_PROMPT_CHARS``: this block is *reserved out of* that
 #: budget before the diff is composed, so the total stays under the cap and the
-#: cost is paid in diff coverage (~8k of ~80k, i.e. ~10%), not in overflow.
-#: Per-issue bounds are what make ``MAX_LINKED_ISSUES`` self-limiting —
-#: 3 x (300 + 2_000) is well inside ``MAX_ISSUE_CONTEXT_CHARS``, so the outer
-#: bound is a backstop rather than the primary limit. See
-#: ``code_reviewer._build_review_messages`` for the reserve arithmetic.
+#: cost is paid in diff coverage, not in overflow. Per-issue bounds are what make
+#: ``MAX_LINKED_ISSUES`` self-limiting, so the outer bound is a backstop rather
+#: than the primary limit. See ``code_reviewer._build_review_messages`` for the
+#: reserve arithmetic.
+#:
+#: **The cost is concentrated in the worst case, not the common one.** A PR that
+#: closes one issue — the overwhelming majority — renders ~6.9k here, essentially
+#: what #123 shipped. Only a PR that closes three issues *and* has a long
+#: discussion on each reaches the ceiling, and it reaches it by being explicit
+#: about the arithmetic below rather than by clipping:
+#:
+#:     per issue   ~322 (heading + title) + ~100 (opener line)
+#:                + 2_000 (body)
+#:                + 10 x 326 (comment = ~3 + 39 login + ~20 attribution + 260 body)
+#:                + 5 x 143 (cross-reference = label + 120-char title)
+#:                + 10 x  31 (textual mention, upper bound: cross-repo form)
+#:                + ~160 (sub-headings)
+#:               = ~6.9k
+#:     x 3 issues  ~20.6k, + ~550 of heading/preamble/fence = ~21.2k  <  22_000
+#:
+#: The fetch-side bounds that feed these are separate and tighter: the discussion
+#: window is one page of ``github_client.ISSUE_COMMENTS_PER_PAGE`` (15), of which
+#: ``MAX_ISSUE_COMMENTS_PER_ISSUE`` is rendered, so the difference is an exact,
+#: disclosable count rather than an estimate.
 MAX_LINKED_ISSUES = 3
-MAX_ISSUE_CONTEXT_CHARS = 8_000
+MAX_ISSUE_CONTEXT_CHARS = 22_000
 MAX_ISSUE_TITLE_CHARS = 300
 MAX_ISSUE_BODY_CHARS = 2_000
+#: Longest GitHub login rendered beside a comment or as the issue opener. GitHub
+#: caps usernames at 39 characters, so 40 cannot clip a real one.
+MAX_ISSUE_AUTHOR_CHARS = 40
+#: Discussion comments rendered per issue, and how much of each survives. The
+#: bodies are attacker-influenced and are the largest single untrusted surface
+#: this integration puts in front of a model, so both numbers are deliberately
+#: small: enough to carry "the maintainer asked for X and the reporter replied
+#: with Y", not enough to paste a thread.
+MAX_ISSUE_COMMENTS_PER_ISSUE = 10
+MAX_ISSUE_COMMENT_BODY_CHARS = 260
+#: Cross-references rendered per issue, with their titles bounded. A cross-ref
+#: list is a map, not an argument: a handful tells the reviewer what the issue
+#: is entangled with, and a hundred of them is noise inside a 90k prompt.
+MAX_ISSUE_CROSS_REFS = 5
+MAX_ISSUE_CROSS_REF_TITLE_CHARS = 120
+#: Textual mentions rendered per issue. Kept separate from
+#: ``MAX_ISSUE_CROSS_REFS`` because they are weaker evidence: they are regex
+#: matches over prose, so they are shown as unresolved numbers rather than as
+#: typed references (see ``issue_context.extract_textual_mentions``).
+MAX_ISSUE_MENTIONS = 10
 MAX_SYSTEM_PROMPT_CHARS = 12_000
 MAX_USER_PROMPT_CHARS = 90_000
 MAX_REPORT_CHARS = 100_000
