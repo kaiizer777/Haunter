@@ -1204,7 +1204,7 @@ async def gather_issue_context(
             label="issue",
         ),
         _safe_fetch(
-            _fetch_issue_discussion(owner, repo, issue_number),
+            _fetch_issue_discussion(owner, name, issue_number),
             label="issue_comments",
         ),
     )

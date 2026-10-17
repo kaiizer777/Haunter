@@ -44,11 +44,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.github_client import IssueCommentPage
 from app.models import Attempt, Repo, RepoSettings, Run, RunStep
 from app.orchestrator import is_issue_run, record_issue_repro
 from app.schemas import IssuesOpenedWebhookPayload
 from app.services.followup_commands import has_issue_trigger
-from app.subagents.context_gatherer import _render_issue_block, build_issue_repro
+from app.subagents.context_gatherer import (
+    _render_issue_block,
+    build_issue_repro,
+    gather_issue_context,
+)
 from app.subagents.pr_writer import append_issue_closing_line
 
 # `audit_store`, `fake_audit_db` and `fake_audit_user_factory` are pytest
@@ -942,3 +947,59 @@ def test_issue_run_records_repro_artifact_or_documented_fallback(
         if row.run_id == empty_run.id
     ]
     assert leftovers == []
+
+
+@pytest.mark.asyncio
+async def test_gather_issue_context_passes_repo_name_to_comment_fetch():
+    """Issue discussion comments must reach the model context, not vanish.
+
+    Regression: gather_issue_context passed the Repo ORM row into
+    _fetch_issue_discussion, whose fetch_issue_comments feeds it to quote()
+    (str/bytes only) — URL construction raised and _safe_fetch silently
+    degraded to zero comments.
+    """
+    repo = Repo(user_id=uuid.uuid4(), owner=OWNER, name=REPO)
+    run = make_run()
+    issue_payload = {"title": "Crash on empty config", "body": "Start with no config."}
+    page = IssueCommentPage(
+        comments=(
+            {
+                "body": "still broken on main",
+                "user": {"login": "reporter"},
+                "author_association": "NONE",
+            },
+        )
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_llm(**kwargs: Any) -> tuple[str, dict[str, Any], int, int, int]:
+        captured["issue_block"] = kwargs["issue_block"]
+        return ("diagnosis summary", {"model": "test"}, 5, 10, 20)
+
+    with (
+        patch("app.github_client.fetch_issue", new_callable=AsyncMock) as mock_issue,
+        patch("app.github_client.fetch_issue_comments", new_callable=AsyncMock) as mock_comments,
+        patch("app.github_client.fetch_repo_tree_paths", new_callable=AsyncMock) as mock_tree,
+        patch(
+            "app.subagents.context_gatherer._call_with_empty_retry",
+            new_callable=AsyncMock,
+            side_effect=fake_llm,
+        ),
+        patch(
+            "app.subagents.context_gatherer._persist_run_step", new_callable=AsyncMock
+        ),
+    ):
+        mock_issue.return_value = issue_payload
+        mock_comments.return_value = page
+        mock_tree.return_value = []
+        summary = await gather_issue_context(run=run, repo=repo, db=MagicMock())
+
+    assert summary == "diagnosis summary"
+    _, call_kwargs = mock_comments.call_args
+    assert call_kwargs["owner"] == OWNER
+    assert call_kwargs["repo"] == REPO
+    assert type(call_kwargs["repo"]) is str
+    assert call_kwargs["issue_number"] == ISSUE_NUMBER
+    assert call_kwargs["budget"] is not None
+    assert "still broken on main" in captured["issue_block"]
+    assert "@reporter" in captured["issue_block"]
