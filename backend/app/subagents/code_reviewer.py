@@ -574,8 +574,9 @@ def bound_repo_context_with_prefs(repo_context: str, prefs_block: str) -> tuple[
             _safe_model_text_preserving_lines(repo_context or "", MAX_REPO_CONTEXT_CHARS),
             False,
         )
+    base_context = repo_context or ""
     bounded = _safe_model_text_preserving_lines(
-        f"{repo_context or \"\"}{prefs_block}", MAX_REPO_CONTEXT_CHARS
+        f"{base_context}{prefs_block}", MAX_REPO_CONTEXT_CHARS
     )
     return bounded, bounded.endswith("[TRUNCATED]")
 
