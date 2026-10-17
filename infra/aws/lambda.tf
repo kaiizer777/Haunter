@@ -6,6 +6,7 @@
 #   - Lambda Function URL (no API Gateway required — $0 after free tier)
 #   - IAM Role + inline policy (least-privilege, explicit deny on secretsmanager)
 #   - CloudWatch Log Group (7-day retention)
+#   - Reserved concurrency + async queue bound + throttle alarms (Issue #160 storm guard)
 #
 # Cost model (always-free, permanent — not 12-month like EC2):
 #   Lambda: 1M requests/mo + 400,000 GB-seconds/mo
@@ -180,6 +181,10 @@ resource "aws_lambda_function" "haunter" {
 
   timeout     = 900   # 15 minutes — covers sandbox poll loop
   memory_size = 512   # MB
+  # Issue #160: cap concurrent executions so a CI-failure storm throttles
+  # instead of exhausting the account limit (sync callers get HTTP 429 and
+  # GitHub retries webhook delivery; async self-invokes queue, bounded below).
+  reserved_concurrent_executions = var.lambda_reserved_concurrent_executions
 
   environment {
     variables = {
@@ -260,6 +265,22 @@ resource "aws_lambda_function" "haunter" {
     Project = var.project_name
     Phase   = "14"
   }
+}
+
+# ---------------------------------------------------------------------------
+# Async self-invoke backpressure bound (Issue #160)
+#
+# The pipeline fans out via async self-invoke (InvocationType='Event'). Lambda
+# queues throttled async events internally for up to 6h by default - an unbounded
+# backlog during a storm. This caps the queue: at most 2 retries and events older
+# than 1h are discarded, so overflow degrades instead of piling up.
+# ---------------------------------------------------------------------------
+
+resource "aws_lambda_function_event_invoke_config" "haunter" {
+  function_name                = aws_lambda_function.haunter.function_name
+  qualifier                    = "$LATEST"
+  maximum_event_age_in_seconds = 3600
+  maximum_retry_attempts       = 2
 }
 
 # ---------------------------------------------------------------------------
@@ -495,6 +516,45 @@ resource "aws_lambda_permission" "allow_eventbridge_audit_dispatch" {
   function_name = aws_lambda_function.audit_dispatcher.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.audit_dispatch.arn
+}
+# ---------------------------------------------------------------------------
+# Backpressure alarms (Issue #160)
+#
+# Reserved concurrency turns a storm into throttles instead of an outage.
+# These alarms make the shed load visible: Throttles above zero means overflow
+# is being dropped; ConcurrentExecutions near the cap means the next burst sheds.
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_metric_alarm" "lambda_throttles" {
+  alarm_name          = "${var.project_name}-lambda-throttles"
+  alarm_description   = "Orchestrator Lambda is shedding load (throttled invocations). Storm overflow path is active."
+  namespace           = "AWS/Lambda"
+  metric_name         = "Throttles"
+  dimensions          = { FunctionName = aws_lambda_function.haunter.function_name }
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  tags = { Project = var.project_name }
+}
+
+resource "aws_cloudwatch_metric_alarm" "lambda_concurrency_high" {
+  alarm_name          = "${var.project_name}-lambda-concurrency-high"
+  alarm_description   = "Orchestrator Lambda concurrent executions near the reserved cap. Next burst will throttle."
+  namespace           = "AWS/Lambda"
+  metric_name         = "ConcurrentExecutions"
+  dimensions          = { FunctionName = aws_lambda_function.haunter.function_name }
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = var.lambda_reserved_concurrent_executions * 0.8
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  tags = { Project = var.project_name }
 }
 
 # ---------------------------------------------------------------------------

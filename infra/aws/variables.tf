@@ -244,3 +244,20 @@ variable "tinyfish_fetch_url" {
 }
 
 
+# ---------------------------------------------------------------------------
+# Lambda concurrency cap (Issue #160)
+# Bounds concurrent 512MB x 15min executions so a CI-failure storm throttles
+# (HTTP 429 / queued async events) instead of exhausting the account limit.
+# ---------------------------------------------------------------------------
+
+variable "lambda_reserved_concurrent_executions" {
+  description = "Reserved concurrency for the orchestrator Lambda. Caps simultaneous executions; overflow throttles gracefully instead of starving the account limit."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.lambda_reserved_concurrent_executions >= 1 && var.lambda_reserved_concurrent_executions <= 100
+    error_message = "Must be 1-100: 0 disables the function, higher re-opens the storm hole."
+  }
+}
+
