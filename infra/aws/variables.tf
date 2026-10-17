@@ -296,8 +296,8 @@ variable "webhook_rate_limit_max_deliveries" {
   default     = 120
 
   validation {
-    condition     = var.webhook_rate_limit_max_deliveries >= 0
-    error_message = "Must be >= 0; 0 disables webhook throttling."
+    condition     = var.webhook_rate_limit_max_deliveries >= 0 && var.webhook_rate_limit_max_deliveries == floor(var.webhook_rate_limit_max_deliveries)
+    error_message = "Must be a non-negative integer; 0 disables webhook throttling."
   }
 }
 
@@ -307,8 +307,8 @@ variable "webhook_rate_limit_window_seconds" {
   default     = 60
 
   validation {
-    condition     = var.webhook_rate_limit_window_seconds > 0
-    error_message = "Must be > 0; 0 or negative disables webhook throttling."
+    condition     = var.webhook_rate_limit_window_seconds >= 0 && var.webhook_rate_limit_window_seconds == floor(var.webhook_rate_limit_window_seconds)
+    error_message = "Must be a non-negative integer number of seconds; 0 disables webhook throttling."
   }
 }
 
