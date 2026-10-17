@@ -47,6 +47,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Protocol, runtime_checkable
 
 from sqlalchemy import delete, func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.models import WebhookRateLimitHit
 
@@ -288,10 +289,12 @@ class PostgresRateLimitBackend:
         same snapshot, so a prune and a count in one statement would still count
         the rows the prune deleted.
 
-        Deadlock freedom: the advisory lock is taken FIRST and only ever waits on
-        row locks from a concurrent global prune, which in turn never waits on an
-        advisory lock. One lock per transaction, always in the same position, so
-        there is no cycle to form.
+        Deadlock freedom: the advisory lock is taken FIRST while this transaction
+        holds no row locks, so waiting on it can never complete a cycle. The
+        remaining edge — the per-bucket DELETE here and the global prune's
+        DELETE taking row locks in different orders (bucket_key order vs hit_at
+        order) — is closed on the prune side with SELECT ... FOR UPDATE
+        SKIP LOCKED, so the global pass never waits on a row lock at all.
         """
         await db.execute(
             text("SELECT pg_advisory_xact_lock(:lock_id)"),
@@ -332,11 +335,11 @@ class PostgresRateLimitBackend:
     ) -> None:
         """Reclaim rows for buckets that will never post again.
 
-        Gated twice so it can never become the hot path: only when this process
-        has not seen the key before, and only if ``prune_interval_seconds`` has
-        elapsed since the last pass. Across ten execution environments the whole
-        fleet prunes at most ten times per interval, and only on keys it had not
-        already seen.
+        Gated on the interval, not on key novelty: a hot bucket that posts on
+        every delivery must not starve the pass forever, or rows for buckets
+        that will never post again are never reclaimed on a busy instance.
+        Across ten execution environments the whole fleet still prunes at most
+        ten times per interval, and the pass stays out of the hot path.
 
         Runs in its own transaction, BEFORE the bucket lock is taken: a global
         DELETE takes row locks on OTHER buckets, and holding it inside the
@@ -347,13 +350,15 @@ class PostgresRateLimitBackend:
         Failure is logged and swallowed. It is hygiene, not part of any
         delivery's decision, and must not become a 5xx on the webhook path.
         """
-        if key in self._seen_keys:
+        if key not in self._seen_keys:
+            if len(self._seen_keys) >= RATE_LIMIT_MAX_BUCKETS:
+                self._seen_keys.popitem(last=False)
+            self._seen_keys[key] = None
+        if (
+            self._last_prune is not None
+            and now - self._last_prune < self._prune_interval
+        ):
             return
-        if self._last_prune is not None and now - self._last_prune < self._prune_interval:
-            return
-        if len(self._seen_keys) >= RATE_LIMIT_MAX_BUCKETS:
-            self._seen_keys.popitem(last=False)
-        self._seen_keys[key] = None
         # Claim the slot before running, so a prune that keeps failing cannot be
         # retried into a hot loop by every subsequent new key.
         self._last_prune = now
@@ -363,18 +368,27 @@ class PostgresRateLimitBackend:
             # regardless of backlog size, and the subquery is driven by
             # ix_webhook_rate_limit_hits_hit_at, so the pass stays an index scan
             # instead of scanning the whole table to satisfy an ordering it does
-            # not have.
-            await db.execute(
-                delete(WebhookRateLimitHit).where(
-                    WebhookRateLimitHit.id.in_(
-                        select(WebhookRateLimitHit.id)
-                        .where(
-                            WebhookRateLimitHit.hit_at <= _to_utc_datetime(now - window)
-                        )
-                        .limit(POSTGRES_PRUNE_BATCH)
+            # not have. SKIP LOCKED so this pass never waits on a row locked by
+            # a concurrent per-bucket prune: the two DELETEs take row locks in
+            # different orders (hit_at order here, bucket_key order there), which
+            # is a deadlock cycle without it. Skipped rows are simply reclaimed
+            # on a later pass.
+            candidate_ids = (
+                await db.execute(
+                    select(WebhookRateLimitHit.id)
+                    .where(
+                        WebhookRateLimitHit.hit_at <= _to_utc_datetime(now - window)
+                    )
+                    .limit(POSTGRES_PRUNE_BATCH)
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalars().all()
+            if candidate_ids:
+                await db.execute(
+                    delete(WebhookRateLimitHit).where(
+                        WebhookRateLimitHit.id.in_(candidate_ids)
                     )
                 )
-            )
             await db.commit()
         except Exception as exc:
             await db.rollback()
@@ -408,7 +422,7 @@ _BACKENDS: dict[str, type[RateLimitBackend]] = {
     "postgres": PostgresRateLimitBackend,
 }
 
-_unknown_name_logged = False
+_unknown_backend_names_logged: set[str] = set()
 
 _resolved_name: Optional[str] = None
 _resolved: Optional[RateLimitBackend] = None
@@ -417,21 +431,21 @@ _resolved: Optional[RateLimitBackend] = None
 def build_rate_limit_backend(name: str) -> RateLimitBackend:
     """Instantiate the backend registered under ``name``.
 
-    An unrecognised name logs once at ERROR and falls back to the in-memory
-    store rather than raising. Two alternatives were rejected: raising turns a
-    config typo into a 5xx on every webhook delivery — an availability incident
-    caused by a security control — and returning ``None`` switches the control
-    off silently, which is the failure mode this module exists to close. The
-    in-memory store is still a real control, and the ERROR log makes the
-    misconfiguration loud enough to alert on.
+    An unrecognised name logs once per distinct name at ERROR and falls back
+    to the in-memory store rather than raising. Two alternatives were rejected:
+    raising turns a config typo into a 5xx on every webhook delivery — an
+    availability incident caused by a security control — and returning ``None``
+    switches the control off silently, which is the failure mode this module
+    exists to close. The in-memory store is still a real control, and the
+    ERROR log makes the misconfiguration loud enough to alert on.
     """
-    global _unknown_name_logged
+    global _unknown_backend_names_logged
 
     normalized = (name or "").strip().lower()
     backend_cls = _BACKENDS.get(normalized)
     if backend_cls is None:
-        if not _unknown_name_logged:
-            _unknown_name_logged = True
+        if normalized not in _unknown_backend_names_logged:
+            _unknown_backend_names_logged.add(normalized)
             logger.error(
                 "Unknown webhook rate limit backend %r; known values are %s. "
                 "Falling back to the per-process in-memory limiter, whose budget "
@@ -453,9 +467,13 @@ def get_rate_limit_backend(name: str) -> RateLimitBackend:
     """
     global _resolved_name, _resolved
 
-    if _resolved is None or _resolved_name != name:
-        _resolved = build_rate_limit_backend(name)
-        _resolved_name = name
+    # Normalised here, not just in build: without this, "POSTGRES" and
+    # "postgres" resolve to different cache slots and the backend is rebuilt
+    # on every call that spells the name differently.
+    normalized = (name or "").strip().lower()
+    if _resolved is None or _resolved_name != normalized:
+        _resolved = build_rate_limit_backend(normalized)
+        _resolved_name = normalized
     return _resolved
 
 
@@ -464,41 +482,117 @@ def get_rate_limit_backend(name: str) -> RateLimitBackend:
 #: is no limit at all — the opposite of what degraded mode is for.
 _degraded: Optional[RateLimitBackend] = None
 
+#: Ceiling for one store round trip per delivery. The Postgres backend holds a
+#: pooled connection (and transiently a per-bucket advisory lock) for the whole
+#: call, so a wedged store must not wedge the webhook path with it: past this
+#: the call is abandoned and the delivery is throttled by the degraded store.
+STORE_ROUND_TRIP_TIMEOUT_SECONDS = 5.0
+
+#: Consecutive store failures before the breaker opens and deliveries skip the
+#: configured store entirely until the cooldown elapses. Without it, every
+#: delivery during an outage pays a full timeout before degrading.
+_BREAKER_THRESHOLD = 5
+_BREAKER_COOLDOWN_SECONDS = 30.0
+_consecutive_store_failures = 0
+_breaker_open_until: Optional[float] = None
+
+#: Minimum spacing between two ERROR logs for the same backend name. During a
+#: store outage every delivery fails, and an ERROR per delivery is a CloudWatch
+#: cost and signal problem: the first failure is loud, the rest are counted at
+#: debug until the interval elapses.
+BACKEND_ERROR_LOG_INTERVAL_SECONDS = 60.0
+_last_backend_error_log_at: dict[str, float] = {}
+
+
+async def _consume_degraded(
+    key: str, *, maximum: int, window: int, now: Optional[float] = None
+) -> int:
+    """Consume from the reused process-local limiter. Degraded mode only."""
+    global _degraded
+
+    if _degraded is None:
+        _degraded = InMemoryRateLimitBackend()
+    return await _degraded.consume(key, maximum=maximum, window=window, now=now)
+
+
+def _log_backend_error_throttled(name: str, exc: BaseException) -> None:
+    """ERROR on the first failure per interval, debug for the rest."""
+    now_mono = time.monotonic()
+    last = _last_backend_error_log_at.get(name)
+    if last is not None and now_mono - last < BACKEND_ERROR_LOG_INTERVAL_SECONDS:
+        logger.debug(
+            "Webhook rate limit backend %r still unavailable (%s); throttling "
+            "with the in-process limiter (consecutive failures: %d)",
+            name,
+            type(exc).__name__,
+            _consecutive_store_failures,
+        )
+        return
+    _last_backend_error_log_at[name] = now_mono
+    logger.error(
+        "Webhook rate limit backend %r unavailable (%s); throttling with the "
+        "in-process limiter for this delivery (consecutive failures: %d)",
+        name,
+        type(exc).__name__,
+        _consecutive_store_failures,
+    )
+
 
 async def consume_rate_limit(
     name: str, key: str, *, maximum: int, window: int, now: Optional[float] = None
 ) -> int:
     """Resolve the backend named by ``name`` and consume one delivery from it.
 
-    Degrades to the process-local store if the configured one raises. The
-    throttler is a guard rail, not the product: a store outage must not turn
-    every webhook delivery into a 5xx. But the failure is logged at ERROR
-    rather than swallowed, because a limiter that is down is silently weaker
-    than the operator believes it is and that has to be alertable.
+    Degrades to the process-local store when the configured one fails with a
+    store/infrastructure error (``SQLAlchemyError``, ``OSError``, or a store
+    round-trip timeout). Anything else — a programming error in the backend
+    itself — propagates: degrading on those would turn every bug into silently
+    weaker throttling, which is exactly the failure mode the ERROR log exists
+    to surface. The throttler is a guard rail, not the product: a store outage
+    must not turn every webhook delivery into a 5xx, but a down limiter is
+    silently weaker than the operator believes it is and that has to stay
+    alertable, hence the throttled ERROR rather than silence.
+
+    Past ``_BREAKER_THRESHOLD`` consecutive failures the breaker opens and
+    deliveries skip the store until the cooldown elapses, so an outage costs a
+    degraded decision instead of a timeout per delivery.
 
     The caller owns the "disabled" check (``maximum <= 0 or window <= 0``), so
     it costs nothing and cannot be bypassed by whichever store is deployed.
     """
-    global _degraded
+    global _consecutive_store_failures, _breaker_open_until
 
     backend = get_rate_limit_backend(name)
-    try:
-        return await backend.consume(key, maximum=maximum, window=window, now=now)
-    except Exception as exc:
-        logger.error(
-            "Webhook rate limit backend %r unavailable (%s); throttling with the "
+    if _breaker_open_until is not None and time.monotonic() < _breaker_open_until:
+        logger.debug(
+            "Webhook rate limit backend %r breaker open; throttling with the "
             "in-process limiter for this delivery",
             name,
-            type(exc).__name__,
         )
-        if _degraded is None:
-            _degraded = InMemoryRateLimitBackend()
-        return await _degraded.consume(key, maximum=maximum, window=window, now=now)
+        return await _consume_degraded(
+            key, maximum=maximum, window=window, now=now
+        )
+    try:
+        result = await asyncio.wait_for(
+            backend.consume(key, maximum=maximum, window=window, now=now),
+            timeout=STORE_ROUND_TRIP_TIMEOUT_SECONDS,
+        )
+    except (SQLAlchemyError, OSError, asyncio.TimeoutError) as exc:
+        _consecutive_store_failures += 1
+        if _consecutive_store_failures >= _BREAKER_THRESHOLD:
+            _breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN_SECONDS
+        _log_backend_error_throttled(name, exc)
+        return await _consume_degraded(
+            key, maximum=maximum, window=window, now=now
+        )
+    _consecutive_store_failures = 0
+    return result
 
 
 def reset_rate_limit_backend() -> None:
     """Drop the cached backend and its process-local state. Test hook only."""
     global _degraded, _resolved_name, _resolved
+    global _consecutive_store_failures, _breaker_open_until
 
     if _resolved is not None:
         _resolved.reset()
@@ -507,3 +601,7 @@ def reset_rate_limit_backend() -> None:
     _resolved = None
     _resolved_name = None
     _degraded = None
+    _unknown_backend_names_logged.clear()
+    _consecutive_store_failures = 0
+    _breaker_open_until = None
+    _last_backend_error_log_at.clear()
