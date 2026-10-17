@@ -1175,6 +1175,50 @@ async def test_issue_without_a_title_is_skipped_rather_than_rendered_empty(
     assert "Linked GitHub Issue Context" not in content
 
 
+async def test_issue_with_a_non_string_body_is_skipped(
+    pending_review: CodeReview,
+) -> None:
+    """``body`` must be present and either a string or ``null``.
+
+    The narrower half of the same rule as the missing title: GitHub's Issue
+    schema types ``body`` as ``string or null``, and null is a legitimate state
+    (an issue with no description) that ``test_null_issue_body_does_not_break_the_review``
+    covers. What is not legitimate is the key being absent, or holding anything
+    other than a string or null -- a truncated or foreign payload that would
+    otherwise be stringified into the prompt by ``str(payload["body"])``.
+    """
+    payload = _issue_payload(12)
+    payload["body"] = {"unexpected": "object"}
+    recorded: list[httpx.Request] = []
+    transport = _github_transport(
+        recorded,
+        pr_body="Fixes #12\n",
+        issues={12: httpx.Response(200, json=payload)},
+    )
+    stub, captured = _prompt_capture()
+    mock_pr_review = AsyncMock(return_value={"id": 9013})
+
+    with (
+        patch(
+            "app.services.review_orchestrator.fetch_pull_request_diff",
+            new_callable=AsyncMock,
+            return_value=_SAMPLE_DIFF,
+        ),
+        patch("app.subagents.code_reviewer.LLMClient", stub),
+        patch("app.services.review_orchestrator.create_pull_request_review", mock_pr_review),
+        _install_token_patch(),
+        patch(
+            "app.github_client.httpx.AsyncClient",
+            side_effect=lambda *a, **k: _REAL_ASYNC_CLIENT(transport=transport),
+        ),
+    ):
+        await run_code_review_pipeline(pending_review.id)
+
+    mock_pr_review.assert_awaited_once()
+    assert "unexpected" not in _user_content(captured[-1])
+    assert "Linked GitHub Issue Context" not in _user_content(captured[-1])
+
+
 async def test_skipped_issue_is_disclosed_as_not_shown(
     pending_review: CodeReview,
 ) -> None:

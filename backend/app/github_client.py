@@ -1341,18 +1341,22 @@ async def fetch_issue(
     # both would otherwise sail through as "an issue with no title".
     if isinstance(data, dict) and data.get("errors"):
         raise GitHubClientError("GitHub returned an error envelope for fetch-issue")
-    # `title` is required and `number` is required in GitHub's own Issue schema;
-    # `body` is explicitly `string or null` (an issue with no description), which
-    # is why it is absent from this check. A response with no title is not a
-    # title-less issue, it is a truncated or foreign payload, and rendering it
-    # would put a bare `### Issue #12` heading in front of the model as though
-    # the issue had been read.
+    # `number` and `title` are `required` in GitHub's own Issue schema, so a
+    # response missing either is truncated or foreign rather than an issue that
+    # happens to have no title. `body` is `string or null` — null being a
+    # first-class state for an issue with no description — but the key is always
+    # present in a real response, so requiring a string or null catches a
+    # truncated body without rejecting a description-less issue. Rendering a
+    # payload that fails this would put a bare `### Issue #12` heading in front
+    # of the model as though the issue had been read.
     if (
         not isinstance(data, dict)
         or not isinstance(data.get("html_url"), str)
         or not isinstance(data.get("number"), int)
         or isinstance(data.get("number"), bool)
         or not isinstance(data.get("title"), str)
+        or "body" not in data
+        or not (data["body"] is None or isinstance(data["body"], str))
     ):
         raise GitHubClientError("Unexpected fetch-issue response structure from GitHub API")
     return data
