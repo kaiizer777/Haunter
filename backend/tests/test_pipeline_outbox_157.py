@@ -221,6 +221,31 @@ async def test_failed_redrive_marks_run_error():
 
 
 @pytest.mark.asyncio
+async def test_exhaust_race_with_starting_child_is_skipped():
+    """An ancient run claimed by its child at exhaust time is skipped, not failed."""
+    run = _make_run(status="pending", age_seconds=99999)
+    session = FakeSession(
+        [
+            FakeResult(rows=[run]),  # scan
+            FakeResult(rowcount=0),  # lost the race — child started
+        ]
+    )
+    adapter = FakeAdapter()
+
+    summary = await sweep_stale_pending_runs(
+        session_factory=_session_factory(session),
+        adapter_factory=_adapter_factory(adapter),
+        stale_after_s=300,
+        exhaust_after_s=7200,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert adapter.scheduled == []
+    assert summary.exhausted == []
+    assert summary.skipped == 1
+
+
+@pytest.mark.asyncio
 async def test_race_with_starting_child_is_skipped():
     """If the child claimed the run first (CAS rowcount 0), skip quietly."""
     run = _make_run(status="pending", age_seconds=3600)
