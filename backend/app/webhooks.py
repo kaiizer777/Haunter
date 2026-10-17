@@ -1932,6 +1932,34 @@ async def _handle_review_auto_fix_command(
         return {"status": "error", "reason": str(exc)}
 
 
+async def _find_existing_issue_root_run(
+    db: AsyncSession,
+    repo_id: Any,
+    issue_number: int,
+) -> Optional[Run]:
+    """Latest root Run already minted for one issue (feat-125 R1 guard).
+
+    Root issue runs are exactly rows with parent NULL + `github_run_id` NULL
+    + `reply_to_comment_id` == issue number: refinement children always carry
+    a parent, CI roots always carry a `github_run_id`, and legacy roots carry
+    no reply thread. The per-repo aggregate bucket (issue #161 ingress
+    throttling, enforced before routing) covers the cross-issue flood; this
+    covers the per-issue double-fire.
+    """
+    stmt = (
+        select(Run)
+        .where(
+            Run.repo_id == repo_id,
+            Run.parent_run_id.is_(None),
+            Run.github_run_id.is_(None),
+            Run.reply_to_comment_id == issue_number,
+        )
+        .order_by(Run.created_at.desc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalars().first()
+
+
 async def _handle_issue_trigger(
     db: AsyncSession,
     background_tasks: BackgroundTasks,
@@ -2055,6 +2083,43 @@ async def _handle_issue_trigger(
             cost_decision.reason,
         )
         return {"status": "skipped", "reason": cost_decision.reason}
+
+    # 6b. Per-(repo, issue) throttle (R1/R6): one root Run per issue. A second
+    # trigger — the body-mention + comment-mention double-fire, a re-tag on an
+    # already-processed issue, or a redelivery that raced the insert — is a
+    # duplicate no-op pointing at the existing Run/PR (R8). Residual race,
+    # documented: two concurrent intakes can both pass this SELECT before
+    # either inserts (this service uses no SELECT FOR UPDATE); the UNIQUE keys
+    # still dedupe exact redeliveries.
+    existing_issue_run = await _find_existing_issue_root_run(
+        db, repo.id, issue_number
+    )
+    if existing_issue_run is not None:
+        logger.info(
+            "Duplicate issue trigger %s for %s#%d: run %s already owns it",
+            delivery_id,
+            log_repo,
+            issue_number,
+            existing_issue_run.id,
+        )
+        await _record_webhook_delivery(
+            db,
+            event=event,
+            delivery_id=delivery_id,
+            status_value="duplicate",
+            reason=f"issue={issue_number} run_id={existing_issue_run.id}",
+            repo=log_repo,
+            repo_id=repo.id,
+            payload=raw_body,
+        )
+        return {
+            "status": "duplicate",
+            "delivery_id": delivery_id,
+            "issue_number": issue_number,
+            "run_id": str(existing_issue_run.id),
+            "pr_url": getattr(existing_issue_run, "pr_url", None),
+            "pr_number": getattr(existing_issue_run, "pr_number", None),
+        }
 
     # 7. Resolve the default-branch head SHA best-effort (R2): an issue event
     # carries no SHA for the NOT NULL column, and the sandbox clones fresh
