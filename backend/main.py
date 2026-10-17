@@ -171,8 +171,12 @@ app.include_router(eval_router)
 
 
 @app.get("/health")
-async def health_check() -> dict[str, str]:
-    return {"status": "ok"}
+async def health_check() -> dict:
+    ages = await _query_active_run_ages()
+    return {
+        "status": "ok",
+        "runs": _summarize_active_runs(ages) if ages is not None else None,
+    }
 
 
 @app.get("/health/sandbox")
