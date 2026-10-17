@@ -1097,7 +1097,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             getattr(settings, "github_sandbox_poll_interval_seconds", 10.0) or 10.0
         )
         poll_timeout: float = float(
-            getattr(settings, "github_sandbox_poll_timeout_seconds", 120.0) or 120.0
+            getattr(settings, "github_sandbox_poll_timeout_seconds", 600.0) or 600.0
         )
         # Workflow filenames are resolved per attempt by
         # select_workflow_filename() once the language is detected.
@@ -1416,7 +1416,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             getattr(settings, "github_sandbox_poll_interval_seconds", 10.0) or 10.0
         )
         poll_timeout: float = float(
-            getattr(settings, "github_sandbox_poll_timeout_seconds", 120.0) or 120.0
+            getattr(settings, "github_sandbox_poll_timeout_seconds", 600.0) or 600.0
         )
         # Workflow filename is resolved per run by select_workflow_filename().
 
