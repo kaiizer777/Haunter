@@ -53,6 +53,38 @@ def test_subagent_patch_installs_on_the_scoped_subclass_only() -> None:
     assert LLMClient.__dict__["complete"] is shared_complete
 
 
+def test_package_reexport_patch_cannot_stub_the_shared_client() -> None:
+    """``app.llm.LLMClient`` re-exports the shared class, so it is the worst vector.
+
+    ``patch("app.llm.LLMClient.complete", ...)`` resolves the package attribute
+    and therefore writes straight onto ``app.llm.client.LLMClient``. Unlike the
+    subagent targets there is no intermediate module global to redirect, so this
+    only holds together because ``scoped_llm_client`` rebinds ``app.llm`` itself.
+    Three test files use this target (``test_ast_context_gatherer.py``,
+    ``test_followup_reply.py``, ``test_pr_feedback.py``) and two of them sort
+    before ``tests/test_llm.py``, so it is the variant that could still have
+    reproduced the reported leak after the subagent-only guard landed.
+    """
+    import app.llm
+
+    shared_complete = LLMClient.__dict__["complete"]
+    assert app.llm.LLMClient is not LLMClient  # rebound to the scoped subclass
+
+    patcher = patch(
+        "app.llm.LLMClient.complete",
+        new_callable=AsyncMock,
+        return_value={"content": '{"patch": "leaked", "confidence": 78}'},
+    )
+    patcher.start()  # deliberately never stopped
+    try:
+        assert app.llm.LLMClient.complete is not shared_complete
+        assert LLMClient.__dict__["complete"] is shared_complete
+    finally:
+        patcher.stop()
+
+    assert LLMClient.__dict__["complete"] is shared_complete
+
+
 def test_abandoned_subagent_patch_cannot_stub_the_shared_client() -> None:
     """A patch that is never unwound must still leave the shared client clean.
 
