@@ -139,3 +139,20 @@ async def test_webhook_rate_window_expiry(monkeypatch: pytest.MonkeyPatch):
     retry_after = await _consume_webhook_rate_limit("exp-org/exp-repo|s", now=1002.0)
     assert retry_after == 9
     assert await _consume_webhook_rate_limit("exp-org/exp-repo|s", now=1011.0) == 0
+
+
+@pytest.mark.fast
+def test_webhook_rate_limit_key_building():
+    """Key builder normalizes case, falls back, and never raises."""
+    from app.webhooks import _webhook_rate_limit_key
+
+    raw = _ping_body("Acme-Org", "Acme-Repo", "Some-Sender")
+    assert _webhook_rate_limit_key("ping", raw) == "acme-org/acme-repo|some-sender"
+
+    no_ids = json.dumps({"zen": "hi"}).encode("utf-8")
+    assert _webhook_rate_limit_key("ping", no_ids) == "unknown-repo|unknown-sender"
+
+    assert (
+        _webhook_rate_limit_key("ping", b"not-json{{{")
+        == "unknown-repo|unknown-sender"
+    )
