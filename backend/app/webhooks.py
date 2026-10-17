@@ -1960,6 +1960,58 @@ async def _find_existing_issue_root_run(
     return (await db.execute(stmt)).scalars().first()
 
 
+async def _post_issue_trigger_ack(
+    *,
+    repo: Any,
+    repo_owner: str,
+    repo_name: str,
+    issue_number: int,
+    body: str,
+    enable_pr_comments: bool,
+    delivery_id: Any,
+    token: Optional[str] = None,
+) -> None:
+    """Best-effort ack comment on the triggering issue (feat-125 D6/R12).
+
+    Gated on the repo's `pr_comments` setting and never raises: a missing
+    `issues:write` grant (D3 degrades on 403), a missing token, or any
+    transport failure collapses to a warning log while the Run stands.
+    Pass an already-minted `token` when the caller holds one (the queued path
+    resolved it for the head-SHA read); otherwise it is resolved here, so call
+    before any commit that would expire `repo`.
+    """
+    if not enable_pr_comments:
+        logger.info(
+            "Issue ack suppressed for %s/%s#%d: pr_comments disabled",
+            repo_owner,
+            repo_name,
+            issue_number,
+        )
+        return
+    from app.github.pr import get_installation_token
+    from app import github_client
+
+    try:
+        if token is None:
+            token = await get_installation_token(repo)
+        await github_client.create_issue_comment(
+            owner=repo_owner,
+            repo=repo_name,
+            issue_number=issue_number,
+            body=body,
+            token=token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Issue ack comment failed for %s/%s#%d (delivery_id=%s, %s) — run stands",
+            repo_owner,
+            repo_name,
+            issue_number,
+            delivery_id,
+            type(exc).__name__,
+        )
+
+
 async def _handle_issue_trigger(
     db: AsyncSession,
     background_tasks: BackgroundTasks,
@@ -2061,6 +2113,8 @@ async def _handle_issue_trigger(
     # repo disabled autonomous fixes. The spend gate is evaluated at zero
     # accumulated cost here; the orchestrator re-enforces it with real spend.
     repo_settings = await get_repo_settings(db, repo.id)
+    # Snapshot before any commit below expires ORM state (MissingGreenlet).
+    enable_issue_ack = bool(repo_settings.enable_pr_comments)
     auto_fix_decision = feature_enforcement.is_auto_fix_allowed(
         repo_settings.enable_auto_fix
     )
@@ -2101,6 +2155,26 @@ async def _handle_issue_trigger(
             log_repo,
             issue_number,
             existing_issue_run.id,
+        )
+        dup_pr_url = getattr(existing_issue_run, "pr_url", None)
+        dup_pr_number = getattr(existing_issue_run, "pr_number", None)
+        if dup_pr_url:
+            dup_suffix = f" — PR #{dup_pr_number}: {dup_pr_url}"
+        elif dup_pr_number:
+            dup_suffix = f" — PR #{dup_pr_number}"
+        else:
+            dup_suffix = " — I'll comment here when the fix lands."
+        await _post_issue_trigger_ack(
+            repo=repo,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            issue_number=issue_number,
+            body=(
+                f"🤖 Already working on issue #{issue_number} "
+                f"(run `{existing_issue_run.id}`){dup_suffix}"
+            ),
+            enable_pr_comments=enable_issue_ack,
+            delivery_id=delivery_id,
         )
         await _record_webhook_delivery(
             db,
@@ -2220,6 +2294,21 @@ async def _handle_issue_trigger(
         repo=log_repo,
         repo_id=repo_id,
         payload=raw_body,
+    )
+
+    await _post_issue_trigger_ack(
+        repo=repo,
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        issue_number=issue_number,
+        body=(
+            f"🤖 **Haunter** picked up issue #{issue_number} "
+            f"(run `{queued_run_id}`) — diagnosing now. I'll open a PR "
+            f"with `Fixes #{issue_number}` when a verified fix lands."
+        ),
+        enable_pr_comments=enable_issue_ack,
+        delivery_id=delivery_id,
+        token=token,
     )
 
     return {
