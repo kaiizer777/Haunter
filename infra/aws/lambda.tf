@@ -540,3 +540,20 @@ resource "aws_cloudwatch_metric_alarm" "lambda_throttles" {
   tags = { Project = var.project_name }
 }
 
+
+resource "aws_cloudwatch_metric_alarm" "lambda_concurrency_high" {
+  alarm_name          = "${var.project_name}-lambda-concurrency-high"
+  alarm_description   = "Orchestrator Lambda concurrent executions near the reserved cap. Next burst will throttle."
+  namespace           = "AWS/Lambda"
+  metric_name         = "ConcurrentExecutions"
+  dimensions          = { FunctionName = aws_lambda_function.haunter.function_name }
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = var.lambda_reserved_concurrent_executions * 0.8
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  tags = { Project = var.project_name }
+}
+
