@@ -629,10 +629,12 @@ async def _stream_from_db(
     Serves cross-environment resumption on AWS Lambda:
     1. Fetches and yields any events already persisted with event_id > last_event_id.
     2. If a terminal event ('done' or 'error') is yielded, returns immediately.
-    3. If the turn is still running in another environment, polls with a
-       _SSE_POLL_INTERVAL_S sleep until a terminal event is persisted, the
-       turn worker drops its row lock, the client disconnects, or a 900s
-       timeout is reached.
+    3. If the turn is still running in another environment, polls with an
+       _SSE_POLL_INTERVAL_S sleep — exponentially backed off up to
+       _SSE_IDLE_BACKOFF_MAX_S across consecutive empty ticks, and reset to
+       _SSE_POLL_INTERVAL_S as soon as events arrive — until a terminal event
+       is persisted, the turn worker drops its row lock, the client
+       disconnects, or a 900s timeout is reached.
 
     Each poll/probe/drain iteration uses a short-lived session, ensuring database
     connections are never held idle across sleeps or stream yields (vital under NullPool).
@@ -670,6 +672,11 @@ async def _stream_from_db(
     timeout_s = 900.0  # Max Lambda execution time
     start_time = time.monotonic()
     idle_ticks = 0
+    # Deliberately NOT the same counter as `idle_ticks`: the liveliness probe
+    # zeroes `idle_ticks` every _SSE_LIVENESS_PROBE_EVERY_TICKS, so reusing it
+    # would cap the backoff at 8s and give up most of the connection-churn
+    # reduction this counter exists for. `idle_streak` only resets on real rows.
+    idle_streak = 0
 
     while True:
         if time.monotonic() - start_time > timeout_s:
@@ -692,7 +699,7 @@ async def _stream_from_db(
             except Exception:
                 pass
 
-        await _asyncio.sleep(_SSE_POLL_INTERVAL_S)
+        await _asyncio.sleep(_sse_idle_delay_s(idle_streak))
 
         async with async_session_maker() as poll_db:
             res = await poll_db.execute(_pending_stmt(max_yielded_id))
@@ -700,6 +707,7 @@ async def _stream_from_db(
 
         if rows:
             idle_ticks = 0
+            idle_streak = 0
             for row in rows:
                 if row.event_id <= max_yielded_id or row.event == "turn_start":
                     continue
@@ -710,6 +718,7 @@ async def _stream_from_db(
             continue
 
         idle_ticks += 1
+        idle_streak += 1
         if idle_ticks < _SSE_LIVENESS_PROBE_EVERY_TICKS:
             continue
         idle_ticks = 0
