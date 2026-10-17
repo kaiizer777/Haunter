@@ -145,6 +145,33 @@ async def test_stale_pending_run_is_redriven():
 
 
 @pytest.mark.asyncio
+async def test_default_horizons_resolve_from_settings():
+    """Omitting horizons uses settings (env-tunable), still hermetic."""
+    from app.config import settings as app_settings
+
+    run = _make_run(
+        status="pending",
+        age_seconds=int(app_settings.pipeline_pending_timeout_s) + 60,
+    )
+    session = FakeSession(
+        [
+            FakeResult(rows=[run]),
+            FakeResult(rowcount=1),
+        ]
+    )
+    adapter = FakeAdapter()
+
+    summary = await sweep_stale_pending_runs(
+        session_factory=_session_factory(session),
+        adapter_factory=_adapter_factory(adapter),
+        now=datetime.now(timezone.utc),
+    )
+
+    assert summary.redriven == [str(run.id)]
+    assert summary.exhausted == []
+
+
+@pytest.mark.asyncio
 async def test_fresh_pending_run_is_untouched():
     """A recently accepted run (child may still start) is never redriven."""
     run = _make_run(status="pending", age_seconds=10)
