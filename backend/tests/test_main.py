@@ -81,6 +81,36 @@ async def test_health_no_stuck_runs_not_degraded(
     assert runs["degraded"] is False
 
 
+@pytest.mark.asyncio
+async def test_health_db_unavailable_still_ok(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """DB outage keeps liveness 200 with runs=null instead of flapping."""
+    import main
+
+    async def _db_down() -> None:
+        return None
+
+    monkeypatch.setattr(main, "_query_active_run_ages", _db_down)
+    response = await client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "runs": None}
+
+
+@pytest.mark.asyncio
+async def test_query_active_run_ages_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The DB helper converts any failure into None without raising."""
+    import main
+
+    def _raising_factory(*args: object, **kwargs: object) -> object:
+        raise TimeoutError("database unreachable")
+
+    monkeypatch.setattr(main, "async_session_maker", _raising_factory)
+    assert await main._query_active_run_ages() is None
+
+
 async def test_sandbox_health_default_github_actions(client: httpx.AsyncClient):
     """GET /health/sandbox returns 200 with github_actions provider details."""
     response = await client.get("/health/sandbox")
