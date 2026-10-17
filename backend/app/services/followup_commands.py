@@ -77,11 +77,15 @@ _MENTION_RE: re.Pattern[str] = re.compile(r"@haunter\b", re.IGNORECASE)
 #: a pasted log or code sample that mentions the bot cannot fire the pipeline.
 _FENCED_CODE_RE: re.Pattern[str] = re.compile(r"```.*?```", re.DOTALL)
 
-#: Issue trigger mention (feat-125): ``@haunter`` or ``@haunter-bot``. The
-#: leading boundary excludes emails (``user@haunter...``); the trailing
-#: boundary excludes ``@haunterbot``.
+#: Issue trigger mention (feat-125): ``@haunter`` plus any hyphenated
+#: subsystem suffix (``@haunter-bot``, ``@haunter-auditor``). The leading
+#: boundary excludes emails (``user@haunter...``); the trailing boundary
+#: excludes ``@haunterbot`` only. A subsystem suffix never mints a fix run by
+#: itself: the webhook router gives the auditor check (R5) the first word, so
+#: ``@haunter-auditor ...`` is answered there, mirroring how the PR-comment
+#: flow reads ``@haunter-auditor ...`` as a bare ``@haunter`` mention first.
 _ISSUE_MENTION_RE: re.Pattern[str] = re.compile(
-    r"(?<![A-Za-z0-9_])@haunter(?:-bot)?(?![A-Za-z0-9_-])", re.IGNORECASE
+    r"(?<![A-Za-z0-9_])@haunter(?![A-Za-z0-9_])", re.IGNORECASE
 )
 
 #: Bare ``/fix`` trigger (feat-125). The lookbehind excludes URL paths
