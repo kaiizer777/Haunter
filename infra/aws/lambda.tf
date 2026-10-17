@@ -6,6 +6,7 @@
 #   - Lambda Function URL (no API Gateway required — $0 after free tier)
 #   - IAM Role + inline policy (least-privilege, explicit deny on secretsmanager)
 #   - CloudWatch Log Group (7-day retention)
+#   - Reserved concurrency + async queue bound + throttle alarms (Issue #160 storm guard)
 #
 # Cost model (always-free, permanent — not 12-month like EC2):
 #   Lambda: 1M requests/mo + 400,000 GB-seconds/mo
