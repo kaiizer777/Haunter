@@ -1694,65 +1694,88 @@ class SessionOrchestrator:
             )
             # Fall back to per-event insert so one bad row or transient issue
             # doesn't drop the entire batch of replay events. Handles duplicate
-            # collisions idempotently so retries after ambiguous commit failures
-            for event_id, event, chunk in items_to_persist:
-                try:
-                    async with async_session_maker() as fallback_db:
-                        fb_bind = getattr(fallback_db, "bind", None)
-                        fb_dialect_obj = getattr(fb_bind, "dialect", None)
-                        fb_dialect = getattr(fb_dialect_obj, "name", "")
-                        if fb_dialect == "postgresql":
-                            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            # collisions idempotently so retries after ambiguous commit failures.
+            # One shared session for the whole batch (issue #142): under NullPool
+            # each session is a fresh TCP+TLS connection, so one session per event
+            # would cost up to _MIRROR_BATCH_MAX connections exactly when the
+            # database is already unhealthy. Each event still gets its own
+            # transaction: rollback() after any per-event failure isolates the
+            # poisoned transaction so the rest of the batch is still attempted.
+            try:
+                async with async_session_maker() as fallback_db:
+                    fb_bind = getattr(fallback_db, "bind", None)
+                    fb_dialect_obj = getattr(fb_bind, "dialect", None)
+                    fb_dialect = getattr(fb_dialect_obj, "name", "")
+                    for event_id, event, chunk in items_to_persist:
+                        try:
+                            if fb_dialect == "postgresql":
+                                from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-                            fb_stmt = (
-                                pg_insert(SessionStreamEvent)
-                                .values(
-                                    session_id=self.session_id,
-                                    turn_id=self.turn_id,
-                                    event_id=event_id,
-                                    event=event,
-                                    chunk=chunk,
+                                fb_stmt = (
+                                    pg_insert(SessionStreamEvent)
+                                    .values(
+                                        session_id=self.session_id,
+                                        turn_id=self.turn_id,
+                                        event_id=event_id,
+                                        event=event,
+                                        chunk=chunk,
+                                    )
+                                    .on_conflict_do_nothing(
+                                        index_elements=["session_id", "turn_id", "event_id"]
+                                    )
                                 )
-                                .on_conflict_do_nothing(
-                                    index_elements=["session_id", "turn_id", "event_id"]
-                                )
-                            )
-                            await fallback_db.execute(fb_stmt)
-                        elif fb_dialect == "sqlite":
-                            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+                                await fallback_db.execute(fb_stmt)
+                            elif fb_dialect == "sqlite":
+                                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-                            fb_stmt = (
-                                sqlite_insert(SessionStreamEvent)
-                                .values(
-                                    session_id=self.session_id,
-                                    turn_id=self.turn_id,
-                                    event_id=event_id,
-                                    event=event,
-                                    chunk=chunk,
+                                fb_stmt = (
+                                    sqlite_insert(SessionStreamEvent)
+                                    .values(
+                                        session_id=self.session_id,
+                                        turn_id=self.turn_id,
+                                        event_id=event_id,
+                                        event=event,
+                                        chunk=chunk,
+                                    )
+                                    .on_conflict_do_nothing(
+                                        index_elements=["session_id", "turn_id", "event_id"]
+                                    )
                                 )
-                                .on_conflict_do_nothing(
-                                    index_elements=["session_id", "turn_id", "event_id"]
+                                await fallback_db.execute(fb_stmt)
+                            else:
+                                fallback_db.add(
+                                    SessionStreamEvent(
+                                        session_id=self.session_id,
+                                        turn_id=self.turn_id,
+                                        event_id=event_id,
+                                        event=event,
+                                        chunk=chunk,
+                                    )
                                 )
+                            await fallback_db.commit()
+                        except Exception as ind_exc:
+                            try:
+                                await fallback_db.rollback()
+                            except Exception as rb_exc:
+                                logger.warning(
+                                    "session_orchestrator: fallback rollback failed "
+                                    "for event_id=%d session=%s: %s",
+                                    event_id,
+                                    self.session_id,
+                                    rb_exc,
+                                )
+                            logger.error(
+                                "session_orchestrator: fallback mirror failed for event_id=%d session=%s: %s",
+                                event_id,
+                                self.session_id,
+                                ind_exc,
                             )
-                            await fallback_db.execute(fb_stmt)
-                        else:
-                            fallback_db.add(
-                                SessionStreamEvent(
-                                    session_id=self.session_id,
-                                    turn_id=self.turn_id,
-                                    event_id=event_id,
-                                    event=event,
-                                    chunk=chunk,
-                                )
-                            )
-                        await fallback_db.commit()
-                except Exception as ind_exc:
-                    logger.error(
-                        "session_orchestrator: fallback mirror failed for event_id=%d session=%s: %s",
-                        event_id,
-                        self.session_id,
-                        ind_exc,
-                    )
+            except Exception as sess_exc:
+                logger.error(
+                    "session_orchestrator: fallback mirror session failed for session=%s: %s",
+                    self.session_id,
+                    sess_exc,
+                )
 
     async def _mirror_worker(self) -> None:
         """Serialize event mirroring, flushing in batches.
