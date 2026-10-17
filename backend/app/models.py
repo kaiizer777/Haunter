@@ -909,3 +909,56 @@ class WebhookDelivery(Base):
             "created_at",
         ),
     )
+
+
+class WebhookRateLimitHit(Base):
+    """
+    Shared sliding-window buckets for webhook ingress throttling (issue #161).
+
+    One row per accepted delivery, keyed by the same `repo-full-name|sender-login`
+    bucket key the in-memory limiter used. The in-window count for a bucket is
+    the number of its rows newer than `now - window`, so the budget is a count
+    over rows rather than a per-process counter — which is the point: a row is
+    visible to every process that can see the database, so all ten Lambda
+    execution environments spend from one budget instead of each enforcing its
+    own copy.
+
+    Deliberately NOT a foreign-key'd, tenant-scoped table. `bucket_key` is derived
+    best-effort from an attacker-supplied payload (see `_webhook_rate_limit_key`
+    in app/webhooks.py) and is frequently `unknown-repo|unknown-sender` for
+    deliveries that never resolve to a tenant, so it is an opaque throttle key
+    and nothing else. No row written here is ever returned by any endpoint.
+
+    Rows are reclaimed by time, not by a hard cap: see _POSTGRES_STORE_BOUND_NOTE
+    in app/services/rate_limit.py for why evicting live buckets would be worse
+    than letting the row count float with the number of active keys.
+
+    `hit_at` is a wall-clock timestamp because these rows are shared. A monotonic
+    clock would not be comparable between processes, and the in-memory backend
+    uses one only because its buckets never leave the process that wrote them.
+    """
+
+    __tablename__ = "webhook_rate_limit_hits"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 200 chars matches _WEBHOOK_RATE_KEY_MAX_CHARS in app/webhooks.py, which
+    # truncates the key before it ever reaches a store. Postgres VARCHAR counts
+    # characters and Python len() counts code points, so the two agree.
+    bucket_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    hit_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        # Every per-bucket statement is `WHERE bucket_key = :key` plus a
+        # hit_at range (prune) or a bare min()/count(): equality column first,
+        # range column second, so all three are index lookups.
+        Index("ix_webhook_rate_limit_hits_key_hit_at", "bucket_key", "hit_at"),
+        # Separate, and deliberately so: the batched global prune filters on
+        # hit_at ALONE (`WHERE hit_at <= :cutoff LIMIT n`) to reclaim buckets
+        # that will never post again. That predicate has no leading bucket_key,
+        # so the composite above cannot serve it and a second index is the
+        # difference between a bounded index scan and a seq scan of the whole
+        # table on the hot path.
+        Index("ix_webhook_rate_limit_hits_hit_at", "hit_at"),
+    )
