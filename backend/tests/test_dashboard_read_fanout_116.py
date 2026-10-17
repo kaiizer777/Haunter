@@ -123,10 +123,12 @@ class _FanoutSession:
         *,
         reviews: list[CodeReview] | None = None,
         aggregate_row: tuple[Any, ...] | None = None,
+        count_value: int = 0,
     ) -> None:
         self._user = user
         self._reviews = list(reviews or [])
         self._aggregate_row = aggregate_row
+        self._count_value = count_value
         self.statements: list[Any] = []
 
     async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> FakeResult:
@@ -137,11 +139,22 @@ class _FanoutSession:
             entity = descriptions[0].get("entity") if descriptions else None
         if entity is User:
             return FakeResult([self._user])
+        if entity is Repo:
+            if descriptions[0].get("expr") is Repo:
+                return FakeResult([_repo()])
+            return FakeResult([_REPO_ID])
         if entity is CodeReview:
             return FakeResult(list(self._reviews))
         if isinstance(statement, Select) and self._aggregate_row is not None:
             if len(statement.selected_columns) >= 10:
                 return FakeResult([self._aggregate_row])
+        if (
+            isinstance(statement, Select)
+            and entity is None
+            and len(statement.selected_columns) == 1
+            and self._aggregate_row is None
+        ):
+            return FakeResult([self._count_value])
         raise UnsupportedStatementError(
             f"unmodelled statement: {type(statement).__name__} "
             f"entity={entity!r} columns="
@@ -155,13 +168,19 @@ class _FanoutSession:
         return None
 
     def code_review_statements(self) -> list[Any]:
-        return [
-            s
-            for s in self.statements
-            if isinstance(s, Select)
-            and s.column_descriptions
-            and s.column_descriptions[0].get("entity") is CodeReview
-        ]
+        # Any statement reading code_reviews — whole-entity page selects and
+        # entity-less COUNT aggregates alike.
+        found: list[Any] = []
+        for s in self.statements:
+            if not isinstance(s, Select):
+                continue
+            descriptions = s.column_descriptions
+            if descriptions and descriptions[0].get("entity") is CodeReview:
+                found.append(s)
+            elif not descriptions or descriptions[0].get("entity") is None:
+                if "code_reviews" in _render(s):
+                    found.append(s)
+        return found
 
 
 @pytest.fixture
@@ -176,8 +195,11 @@ def fanout_db():
         *,
         reviews: list[CodeReview] | None = None,
         aggregate_row: tuple[Any, ...] | None = None,
+        count_value: int = 0,
     ) -> _FanoutSession:
-        session = _FanoutSession(user, reviews=reviews, aggregate_row=aggregate_row)
+        session = _FanoutSession(
+            user, reviews=reviews, aggregate_row=aggregate_row, count_value=count_value
+        )
 
         async def _get_db() -> AsyncIterator[_FanoutSession]:
             try:
@@ -331,7 +353,7 @@ async def test_reviews_list_renders_page_in_constant_queries(
     rows = [
         _review(i, sha=f"{i:040d}", pr_number=i, severity="high") for i in range(100)
     ]
-    session = fanout_db(_user(), reviews=rows)
+    session = fanout_db(_user(), reviews=rows, count_value=100)
 
     async with make_auth_client(_USER_ID) as ac:
         resp = await ac.get("/reviews", params={"severity": "high", "limit": 100})
@@ -341,6 +363,9 @@ async def test_reviews_list_renders_page_in_constant_queries(
         f"expected COUNT + page only, got {len(session.code_review_statements())} "
         "code_reviews statements"
     )
+    data = resp.json()
+    assert data["total"] == 100
+    assert len(data["reviews"]) == 100
 
 
 # ---------------------------------------------------------------------------
