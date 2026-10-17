@@ -1,15 +1,20 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from datetime import datetime, timezone
+from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import select
 
 from app.auth import router as auth_router
 from app.config import settings
+from app import db as db_module
+from app.models import Run
 from app.limiter import limiter
 from app.repos import router as repos_router
 from app.routers.eval import router as eval_router
@@ -31,6 +36,79 @@ from app.webhooks import router as webhooks_router
 logging.basicConfig(level=logging.INFO, force=True)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Issue #158 — stranded-run signal on /health.
+# Runs sitting in a non-terminal pipeline state are "active". Past
+# _HEALTH_STUCK_AFTER_SECONDS they are reported as "stuck" so dashboards and
+# alerts can detect a wedged pipeline without manual DB queries.
+# Mirrors app.orchestrator.RunStatus minus its terminal states (pr_opened,
+# fallback_commented, flaky_detected, completed, error).
+# ---------------------------------------------------------------------------
+_ACTIVE_RUN_STATUSES: frozenset = frozenset(
+    {
+        "pending",
+        "context_gathering",
+        "flake_verification",
+        "fix_generation",
+        "verification",
+        "pending_pr",
+        "fallback",
+    }
+)
+
+# An active run older than this is counted as stuck. Pipeline runs normally
+# settle in minutes; 30 minutes is a conservative wedge signal.
+_HEALTH_STUCK_AFTER_SECONDS = 1800
+
+# Upper bound on the runs-metrics lookup so a slow database can never make
+# the liveness probe hang or flap. On timeout the probe still returns 200
+# with "runs": null (see health_check).
+_HEALTH_DB_TIMEOUT_SECONDS = 3.0
+
+
+def _summarize_active_runs(
+    ages_seconds: list, stuck_after_seconds: int = _HEALTH_STUCK_AFTER_SECONDS
+) -> dict:
+    """Build the runs-metrics payload from active-run ages. Pure: no I/O."""
+    stuck_count = sum(1 for age in ages_seconds if age >= stuck_after_seconds)
+    return {
+        "active_count": len(ages_seconds),
+        "oldest_active_age_seconds": max(ages_seconds) if ages_seconds else None,
+        "stuck_count": stuck_count,
+        "stuck_threshold_seconds": stuck_after_seconds,
+        "degraded": stuck_count > 0,
+    }
+
+
+async def _query_active_run_ages() -> Optional[list]:
+    """Return ages in seconds of runs in non-terminal pipeline states.
+
+    Returns None when the database is unreachable or slow. Never raises:
+    /health is a liveness probe and must not flap under DB pressure.
+    """
+    try:
+        async with asyncio.timeout(_HEALTH_DB_TIMEOUT_SECONDS):
+            async with db_module.async_session_maker() as session:
+                result = await session.execute(
+                    select(Run.created_at).where(
+                        Run.status.in_(_ACTIVE_RUN_STATUSES)
+                    )
+                )
+                created_dates = result.scalars().all()
+        now = datetime.now(timezone.utc)
+        ages = []
+        for created_at in created_dates:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            ages.append((now - created_at).total_seconds())
+        return ages
+    except Exception:
+        logger.warning(
+            "health: active-run query failed; reporting runs=null", exc_info=True
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +171,20 @@ app.include_router(eval_router)
 
 
 @app.get("/health")
-async def health_check() -> dict[str, str]:
-    return {"status": "ok"}
+async def health_check() -> dict:
+    """Liveness probe plus stranded-run metrics (issue #158).
+
+    "status" stays "ok" while the process serves — it never flaps for
+    pipeline or database reasons, so load balancers keep routing.
+    "runs" carries the alert signal instead: active-run count, oldest
+    active-run age, stuck count past the threshold, and a degraded flag.
+    "runs" is null when the database is unreachable.
+    """
+    ages = await _query_active_run_ages()
+    return {
+        "status": "ok",
+        "runs": _summarize_active_runs(ages) if ages is not None else None,
+    }
 
 
 @app.get("/health/sandbox")
