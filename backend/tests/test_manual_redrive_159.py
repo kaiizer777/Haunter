@@ -110,6 +110,8 @@ async def test_exhausted_run_replays_into_clean_pending_child(
     data = resp.json()
     assert data["status"] == "pending"
     assert data["parent_run_id"] == str(source_id)
+    assert data["repo_id"] == str(repo.id)
+    assert data["conclusion"] == "failure"
 
     child_id = uuid.UUID(data["id"])
     child = (await db.execute(select(Run).where(Run.id == child_id))).scalar_one()
