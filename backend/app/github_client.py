@@ -115,6 +115,63 @@ class BoundedResponse:
         return json.loads(self.content)
 
 
+@dataclass
+class GitHubRequestBudget:
+    """Hard ceiling on the GitHub requests one caller may spend in total.
+
+    The page caps above (:data:`MAX_REVIEW_COMMENT_PAGES`,
+    :data:`ISSUE_TIMELINE_PAGES`) bound *one call*. A collection cap such as
+    ``MAX_LINKED_ISSUES`` bounds *how many subjects* are read. Neither can see
+    the other's total, so without a third limit the worst case is the product of
+    every individual cap — a number nobody wrote down and no test asserted. This
+    is that number: one mutable counter every call site charges, so the ceiling
+    is the sum rather than the product.
+
+    Reserve *before* the request, never after. A fetcher that charged itself on
+    return would still have issued the request that broke the cap, which is the
+    only outcome the cap exists to prevent. A refused reservation is not
+    retried by the fetcher either: it returns what it has and lets the caller
+    record the omission, because a step that silently keeps going after being
+    told "no" is not bounded by anything.
+
+    Mutable by design and deliberately not lock-guarded: one review step owns
+    one budget and walks it sequentially within a single event loop, so the
+    state cannot be raced. ``asyncio.Lock`` here would add a lock acquisition to
+    every request to protect something no caller can corrupt.
+    """
+
+    #: Total requests this budget may spend. Must be non-negative.
+    limit: int
+    #: Requests already claimed. Start at 0; the call sites move it.
+    spent: int = 0
+
+    def __post_init__(self) -> None:
+        if self.limit < 0:
+            raise ValueError("GitHub request budget limit must not be negative")
+
+    @property
+    def remaining(self) -> int:
+        """Requests still claimable, floored at 0 so an overspent budget reads 0."""
+        return max(0, self.limit - self.spent)
+
+    @property
+    def exhausted(self) -> bool:
+        """True once nothing can be claimed. The caller must record the omission."""
+        return self.remaining <= 0
+
+    def reserve(self) -> bool:
+        """Claim one request. Returns ``False``, having claimed nothing, if full.
+
+        All-or-nothing by construction: there is no partial state to reconcile,
+        because the unit is a single request and the answer a caller acts on is
+        "may I still go to GitHub".
+        """
+        if self.remaining <= 0:
+            return False
+        self.spent += 1
+        return True
+
+
 async def _bounded_get(
     client: httpx.AsyncClient,
     url: str,
