@@ -30,8 +30,9 @@ def main() -> int:
 
     ok = True
     ok &= check(
-        "reserved_concurrent_executions set on the main Lambda",
-        "reserved_concurrent_executions" in lambda_src,
+        "main Lambda wired to the concurrency variable",
+        "reserved_concurrent_executions = var.lambda_reserved_concurrent_executions"
+        in lambda_src,
     )
     ok &= check(
         "lambda_reserved_concurrent_executions variable defined",
