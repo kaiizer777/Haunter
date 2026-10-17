@@ -168,7 +168,7 @@ async def test_poll_stream_holds_a_single_connection() -> None:
         _SSE_POLL_INTERVAL_S,
         _SSE_POLL_INTERVAL_S,
         _SSE_POLL_INTERVAL_S,
-        2 * _SSE_POLL_INTERVAL_S,
+        _SSE_POLL_INTERVAL_S,
     ]
     # Rows kept arriving, so the liveliness probe never needed to fire.
     probe.assert_not_awaited()
