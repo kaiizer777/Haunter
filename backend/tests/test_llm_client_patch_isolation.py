@@ -29,6 +29,10 @@ from app.subagents import fix_generator
 
 pytestmark = pytest.mark.usefixtures("scoped_llm_client")
 
+# Captured at import, before any test has had a chance to touch it. The two
+# backstop tests below compare against this to prove the repair happened.
+_PRISTINE_COMPLETE = LLMClient.__dict__["complete"]
+
 
 def test_subagent_patch_installs_on_the_scoped_subclass_only() -> None:
     """The stub is visible to the module under test and nowhere else."""
@@ -88,3 +92,37 @@ def test_context_gatherer_patch_is_scoped_too() -> None:
         assert LLMClient.__dict__["complete"] is shared_complete
 
     assert LLMClient.__dict__["complete"] is shared_complete
+
+
+# ---------------------------------------------------------------------------
+# Backstop: unaudited writers must still not be able to leak
+# ---------------------------------------------------------------------------
+# ``scoped_llm_client`` only covers the writers that opt into it. Roughly a dozen
+# other modules patch ``LLMClient.complete`` through their own global, and any of
+# them can be interrupted mid-``with`` by the 120s ``timeout`` in pytest.ini,
+# leaving the stub installed for every later test. The autouse
+# ``_restore_shared_llm_client_complete`` fixture in conftest.py repairs that
+# between tests; these two tests pin the repair.
+#
+# They patch the shared class object directly rather than a module global,
+# which is exactly what ``scoped_llm_client`` cannot intercept - so they still
+# leak, and still have to be cleaned up.
+
+
+def test_abandoned_stub_on_the_shared_class_is_installed() -> None:
+    """Abandon a stub on the shared client exactly as an aborted test would."""
+    patcher = patch.object(
+        LLMClient,
+        "complete",
+        new_callable=AsyncMock,
+        return_value={"content": '{"patch": "leaked", "confidence": 78}'},
+    )
+    patcher.start()  # deliberately never stopped
+
+    assert LLMClient.__dict__["complete"] is not _PRISTINE_COMPLETE
+
+
+def test_abandoned_stub_on_the_shared_class_is_repaired_afterwards() -> None:
+    """Runs after the test above by definition order; fails if the backstop is gone."""
+    assert LLMClient.__dict__["complete"] is _PRISTINE_COMPLETE
+    assert LLMClient.complete is _PRISTINE_COMPLETE
