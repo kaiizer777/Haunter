@@ -322,6 +322,7 @@ Terraform detects the hash changed back and re-uploads. Lambda swaps code atomic
 | Terraform hangs, no output | stale `infra/aws/.terraform.tfstate.lock.info` from a killed apply | confirm no terraform process, delete the file, retry |
 | `Provider produced inconsistent result` | transient AWS hiccup | re-run apply (idempotent) |
 | 502 on every webhook after deploy | import/syntax error in deployed code | check CloudWatch immediately, roll back |
+| Webhooks return 429 during a CI-failure burst | reserved concurrency cap shedding load by design (Issue #160) | no action: GitHub retries delivery; watch the -lambda-throttles alarm |
 | **NEW env vars but OLD code** | non-atomic apply | compare `CodeSha256` to zip hash; re-run apply |
 | Deploy looks clean but secrets leak | dotfiles re-copied into zip | verify zip contents, §3 step 3 check #1 |
 | `Invalid function argument` on `filebase64sha256` | `lambda.zip` missing | build it first |
