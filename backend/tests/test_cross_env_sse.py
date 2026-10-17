@@ -37,6 +37,16 @@ from app.services.session_orchestrator import SessionOrchestrator
 from app.services.session_streamer import SseQueue
 
 
+class _FakeEngine:
+    """Presents a connection fake as the shared `app.db.engine` seam (#165)."""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def connect(self) -> Any:
+        return self._conn
+
+
 # ---------------------------------------------------------------------------
 # 1. SseQueue mirror_sink tests
 # ---------------------------------------------------------------------------
@@ -182,13 +192,16 @@ async def test_stream_from_db_completed_turn() -> None:
         async def execute(self, stmt):
             return _MockResult()
 
+        async def rollback(self):
+            pass
+
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *args):
             return False
 
-    with patch("app.db.async_session_maker", return_value=_MockDb()):
+    with patch("app.db.engine", _FakeEngine(_MockDb())):
         yielded: list[str] = []
         async for chunk in _stream_from_db(session_id, turn_id, last_event_id=1):
             yielded.append(chunk)
@@ -255,7 +268,7 @@ async def test_stream_from_db_inflight_polling() -> None:
             return False
 
     with (
-        patch("app.db.async_session_maker", return_value=_MockDb()),
+        patch("app.db.engine", _FakeEngine(_MockDb())),
         patch("app.routers.sessions._is_turn_active_elsewhere", new_callable=AsyncMock, return_value=True),
     ):
         yielded: list[str] = []
@@ -356,7 +369,7 @@ async def test_chat_session_cross_env_replays_completed_turn() -> None:
             return False
 
     body = SessionChatIn(message="Resume")
-    with patch("app.db.async_session_maker", return_value=_ReplayDb()):
+    with patch("app.db.engine", _FakeEngine(_ReplayDb())):
         resp = await chat_session(
             session_id=session_id,
             body=body,
@@ -527,13 +540,16 @@ async def test_stream_from_db_filters_out_turn_start_events() -> None:
         async def execute(self, stmt):
             return _MockResult([init_event, thought_event, done_event])
 
+        async def rollback(self):
+            pass
+
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *args):
             return False
 
-    with patch("app.db.async_session_maker", return_value=_MockDb()):
+    with patch("app.db.engine", _FakeEngine(_MockDb())):
         yielded: list[str] = []
         async for chunk in _stream_from_db(session_id, turn_id, last_event_id=0):
             yielded.append(chunk)
@@ -677,9 +693,12 @@ async def test_stream_from_db_deduplicates_duplicate_event_ids() -> None:
         async def execute(self, stmt):
             return _MockResult(events)
 
+        async def rollback(self):
+            pass
+
     from app.routers.sessions import _stream_from_db
 
-    with patch("app.db.async_session_maker", return_value=_MockSession()):
+    with patch("app.db.engine", _FakeEngine(_MockSession())):
         chunks = [
             chunk
             async for chunk in _stream_from_db(
@@ -1063,6 +1082,9 @@ async def test_resume_replay_drains_streams_with_zero_writes() -> None:
         replay_dbs.append(db)
         return db
 
+    mock_engine = MagicMock()
+    mock_engine.connect.side_effect = _replay_factory
+
     body = SessionChatIn(message="Resume")
 
     # Drive two resumes back-to-back; each should succeed once the second
@@ -1071,7 +1093,7 @@ async def test_resume_replay_drains_streams_with_zero_writes() -> None:
     with (
         patch("app.routers.sessions._is_turn_active_elsewhere", new_callable=AsyncMock, return_value=True),
         patch("asyncio.sleep", new_callable=AsyncMock),
-        patch("app.db.async_session_maker", side_effect=_replay_factory),
+        patch("app.db.engine", mock_engine),
     ):
         for _ in range(2):
             resp = await chat_session(

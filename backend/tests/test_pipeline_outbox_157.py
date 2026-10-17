@@ -1,0 +1,358 @@
+"""Issue #157 — orphan pending runs: pipeline-outbox sweeper (hermetic).
+
+Repro: a run accepted (row committed as ``pending``) but never executed
+because the async self-invoke failed/crashed stays ``pending`` forever —
+nothing ever scans for accepted-but-never-started runs.
+
+Expected: a periodic sweeper redrives stale ``pending`` runs past a timeout
+and marks ancient ones exhausted (``error`` + ``failure_reason``), so no run
+stays ``pending`` past the timeout without executing or being failed.
+
+Zero I/O: fake session + fake hosting adapter, no database, no network.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.services.pipeline_outbox import sweep_stale_pending_runs
+
+pytestmark = pytest.mark.fast
+
+
+# ---------------------------------------------------------------------------
+# Fakes (zero I/O)
+# ---------------------------------------------------------------------------
+
+
+class FakeResult:
+    def __init__(self, rows=(), rowcount=0):
+        self._rows = list(rows)
+        self.rowcount = rowcount
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class FakeSession:
+    """Scripted stand-in for AsyncSession: one canned result per execute()."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self.executed = []
+        self.commits = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def execute(self, stmt):
+        self.executed.append(stmt)
+        assert self._script, "FakeSession: more execute() calls than scripted"
+        return self._script.pop(0)
+
+    async def commit(self):
+        self.commits += 1
+
+    async def rollback(self):
+        pass
+
+    def add(self, obj):
+        pass
+
+
+class FakeAdapter:
+    """Stand-in for AWSHostingAdapter: records redrives, optionally raises."""
+
+    def __init__(self, fail_with=None):
+        self.scheduled = []
+        self.fail_with = fail_with
+
+    async def schedule_pipeline(self, run_id, background_tasks=None):
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.scheduled.append(run_id)
+
+
+def _make_run(status="pending", age_seconds=0):
+    from app.models import Run
+
+    now = datetime.now(timezone.utc)
+    uid = uuid.uuid4()
+    return Run(
+        id=uid,
+        repo_id=uuid.uuid4(),
+        github_run_id=None,
+        head_sha="a" * 40,
+        head_branch="main",
+        status=status,
+        conclusion="failure",
+        created_at=now - timedelta(seconds=age_seconds),
+        updated_at=now - timedelta(seconds=age_seconds),
+    )
+
+
+def _session_factory(session):
+    def _factory():
+        return session
+
+    return _factory
+
+
+def _adapter_factory(adapter):
+    async def _factory():
+        return adapter
+
+    return _factory
+
+
+# ---------------------------------------------------------------------------
+# Repro + behavior
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_run_is_redriven():
+    """Core #157 repro: pending run older than the timeout gets rescheduled."""
+    run = _make_run(status="pending", age_seconds=3600)
+    session = FakeSession(
+        [
+            FakeResult(rows=[run]),  # scan
+            FakeResult(rowcount=1),  # CAS claim (still pending)
+        ]
+    )
+    adapter = FakeAdapter()
+
+    summary = await sweep_stale_pending_runs(
+        session_factory=_session_factory(session),
+        adapter_factory=_adapter_factory(adapter),
+        stale_after_s=300,
+        exhaust_after_s=7200,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert adapter.scheduled == [run.id]
+    assert summary.redriven == [str(run.id)]
+    assert summary.exhausted == []
+
+
+@pytest.mark.asyncio
+async def test_default_horizons_resolve_from_settings():
+    """Omitting horizons uses settings (env-tunable), still hermetic."""
+    from app.config import settings as app_settings
+
+    run = _make_run(
+        status="pending",
+        age_seconds=int(app_settings.pipeline_pending_timeout_s) + 60,
+    )
+    session = FakeSession(
+        [
+            FakeResult(rows=[run]),
+            FakeResult(rowcount=1),
+        ]
+    )
+    adapter = FakeAdapter()
+
+    summary = await sweep_stale_pending_runs(
+        session_factory=_session_factory(session),
+        adapter_factory=_adapter_factory(adapter),
+        now=datetime.now(timezone.utc),
+    )
+
+    assert summary.redriven == [str(run.id)]
+    assert summary.exhausted == []
+
+
+@pytest.mark.asyncio
+async def test_fresh_pending_run_is_untouched():
+    """A recently accepted run (child may still start) is never redriven."""
+    run = _make_run(status="pending", age_seconds=10)
+    session = FakeSession(
+        [
+            FakeResult(rows=[]),  # scan finds nothing stale
+        ]
+    )
+    adapter = FakeAdapter()
+
+    summary = await sweep_stale_pending_runs(
+        session_factory=_session_factory(session),
+        adapter_factory=_adapter_factory(adapter),
+        stale_after_s=300,
+        exhaust_after_s=7200,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert adapter.scheduled == []
+    assert summary.redriven == []
+    assert summary.exhausted == []
+    assert summary.scanned == 0
+
+
+@pytest.mark.asyncio
+async def test_ancient_pending_run_is_marked_exhausted():
+    """A run pending past the exhaust horizon is failed, never redriven."""
+    run = _make_run(status="pending", age_seconds=99999)
+    session = FakeSession(
+        [
+            FakeResult(rows=[run]),  # scan
+            FakeResult(rowcount=1),  # CAS pending -> error
+        ]
+    )
+    adapter = FakeAdapter()
+
+    summary = await sweep_stale_pending_runs(
+        session_factory=_session_factory(session),
+        adapter_factory=_adapter_factory(adapter),
+        stale_after_s=300,
+        exhaust_after_s=7200,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert adapter.scheduled == []
+    assert summary.exhausted == [str(run.id)]
+    assert summary.redriven == []
+
+
+@pytest.mark.asyncio
+async def test_failed_redrive_marks_run_error():
+    """A stale run whose reschedule raises is failed, not left pending."""
+    run = _make_run(status="pending", age_seconds=3600)
+    session = FakeSession(
+        [
+            FakeResult(rows=[run]),  # scan
+            FakeResult(rowcount=1),  # CAS claim (still pending)
+            FakeResult(rowcount=1),  # CAS pending -> error after raise
+        ]
+    )
+    adapter = FakeAdapter(fail_with=RuntimeError("Lambda invoke refused"))
+
+    summary = await sweep_stale_pending_runs(
+        session_factory=_session_factory(session),
+        adapter_factory=_adapter_factory(adapter),
+        stale_after_s=300,
+        exhaust_after_s=7200,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert adapter.scheduled == []
+    assert summary.exhausted == [str(run.id)]
+    assert summary.redriven == []
+
+
+@pytest.mark.asyncio
+async def test_exhaust_race_with_starting_child_is_skipped():
+    """An ancient run claimed by its child at exhaust time is skipped, not failed."""
+    run = _make_run(status="pending", age_seconds=99999)
+    session = FakeSession(
+        [
+            FakeResult(rows=[run]),  # scan
+            FakeResult(rowcount=0),  # lost the race — child started
+        ]
+    )
+    adapter = FakeAdapter()
+
+    summary = await sweep_stale_pending_runs(
+        session_factory=_session_factory(session),
+        adapter_factory=_adapter_factory(adapter),
+        stale_after_s=300,
+        exhaust_after_s=7200,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert adapter.scheduled == []
+    assert summary.exhausted == []
+    assert summary.skipped == 1
+
+
+def test_handler_success_shape():
+    """The EventBridge handler returns sweep counts on success."""
+    import pipeline_outbox_handler as poh
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.pipeline_outbox import PipelineOutboxSummary
+
+    summary = PipelineOutboxSummary(
+        scanned=2, redriven=["run-1"], exhausted=["run-2"], skipped=0
+    )
+    with patch(
+        "app.services.pipeline_outbox.sweep_stale_pending_runs",
+        AsyncMock(return_value=summary),
+    ):
+        result = poh.handler({"operation": "sweep_pipeline_outbox"})
+
+    assert result["status"] == "completed"
+    assert result["scanned"] == 2
+    assert result["redriven"] == ["run-1"]
+    assert result["exhausted"] == ["run-2"]
+    assert result["skipped"] == 0
+
+
+def test_handler_rejects_untrusted_invocations():
+    """Non-dict, HTTP, and unknown-operation events are refused."""
+    import pipeline_outbox_handler as poh
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.pipeline_outbox import PipelineOutboxSummary
+
+    assert poh.handler("nope") == {"error": "invalid invocation"}
+    with patch(
+        "app.services.pipeline_outbox.sweep_stale_pending_runs",
+        AsyncMock(return_value=PipelineOutboxSummary()),
+    ):
+        assert poh.handler({"operation": "sweep_pipeline_outbox"})["status"] == (
+            "completed"
+        )
+    assert poh.handler(
+        {"requestContext": {}, "operation": "sweep_pipeline_outbox"}
+    ) == {"error": "unsupported invocation"}
+    assert poh.handler({"operation": "dispatch_audits"}) == {
+        "error": "unsupported invocation"
+    }
+
+
+def test_handler_reports_sweep_failure_without_raising():
+    """A throwing sweep surfaces as an error dict, never an exception."""
+    import pipeline_outbox_handler as poh
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "app.services.pipeline_outbox.sweep_stale_pending_runs",
+        AsyncMock(side_effect=RuntimeError("db down")),
+    ):
+        assert poh.handler({"operation": "sweep_pipeline_outbox"}) == {
+            "error": "pipeline outbox sweep failed"
+        }
+
+
+@pytest.mark.asyncio
+async def test_race_with_starting_child_is_skipped():
+    """If the child claimed the run first (CAS rowcount 0), skip quietly."""
+    run = _make_run(status="pending", age_seconds=3600)
+    session = FakeSession(
+        [
+            FakeResult(rows=[run]),  # scan
+            FakeResult(rowcount=0),  # lost the race — child started
+        ]
+    )
+    adapter = FakeAdapter()
+
+    summary = await sweep_stale_pending_runs(
+        session_factory=_session_factory(session),
+        adapter_factory=_adapter_factory(adapter),
+        stale_after_s=300,
+        exhaust_after_s=7200,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert adapter.scheduled == []
+    assert summary.redriven == []
+    assert summary.exhausted == []
+    assert summary.skipped == 1

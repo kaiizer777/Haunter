@@ -16,7 +16,7 @@ Flow (github.md §5.2):
      MVP simplicity (caching is a small optimization per github.md §10).
   5. Push the patch as a commit on ``haunter-attempt-{N}`` via the
      Git Data API (see ``app.sandbox.mirror``).
-  6. Poll the check-runs API every ``poll_interval_seconds`` up to
+  6. Poll the check-runs API every ``poll_interval_seconds`` (with backoff) up to
      ``poll_timeout_seconds``.
   7. Return ``make_result(passed, reason, duration_ms)``.
 
@@ -64,8 +64,8 @@ from app.log_hygiene import sanitize_log_value
 from app.sandbox.mirror import (
     detect_language,
     get_or_create_test_mirror,
-    get_universal_sandbox_repo,
     push_patch_to_mirror,
+    select_sandbox_mirror,
 )
 from app.sandbox.runner import (
     DeterminismResult,
@@ -126,6 +126,32 @@ _NON_RETRYABLE_GITHUB_PHRASES: tuple[str, ...] = (
 _RETRY_MAX_ATTEMPTS: int = 3
 _RETRY_BACKOFF_BASE_SECONDS: float = 1.0
 _RETRY_BACKOFF_CAP_SECONDS: float = 10.0
+
+# Poll backoff between check-runs polls (issue #163). The base interval comes
+# from settings.github_sandbox_poll_interval_seconds; the delay grows
+# geometrically per poll and is capped so a long window stays responsive
+# without hammering the Actions API while a run sits queued.
+_POLL_BACKOFF_FACTOR: float = 1.5
+_POLL_MAX_INTERVAL_SECONDS: float = 60.0
+
+
+def _poll_delay_seconds(attempt: int, base_interval: float) -> float:
+    """Delay before poll ``attempt`` (0-based) with exponential backoff.
+
+    Returns ``base_interval`` for the first poll, growing by
+    ``_POLL_BACKOFF_FACTOR`` per attempt up to ``_POLL_MAX_INTERVAL_SECONDS``.
+    Non-positive bases fall back to 10s so a misconfigured interval can
+    never busy-loop the Actions API.
+    """
+    try:
+        base = float(base_interval)
+    except (TypeError, ValueError):
+        base = 10.0
+    if base <= 0:
+        base = 10.0
+    if attempt <= 0:
+        return base
+    return min(base * (_POLL_BACKOFF_FACTOR**attempt), _POLL_MAX_INTERVAL_SECONDS)
 
 # File path extractor for the patch-fallback language detection.
 _FILE_PATH_RE: re.Pattern[str] = re.compile(r"^\+\+\+\s+(?:[ab]/)?(\S+)")
@@ -1071,7 +1097,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             getattr(settings, "github_sandbox_poll_interval_seconds", 10.0) or 10.0
         )
         poll_timeout: float = float(
-            getattr(settings, "github_sandbox_poll_timeout_seconds", 120.0) or 120.0
+            getattr(settings, "github_sandbox_poll_timeout_seconds", 600.0) or 600.0
         )
         # Workflow filenames are resolved per attempt by
         # select_workflow_filename() once the language is detected.
@@ -1133,10 +1159,10 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             )
 
         # ----------------------------------------------------------------
-        # 5. Get or create the universal test mirror
+        # 5. Get or create the pool-selected test mirror (#164)
         # ----------------------------------------------------------------
         fallback_token: Optional[str] = getattr(settings, "github_token", None)
-        repo_full = get_universal_sandbox_repo(org)
+        repo_full = select_sandbox_mirror(org, str(inp.run_id))
         branch = f"sandbox/run-{inp.run_id}-att-{inp.attempt_number}"
 
         try:
@@ -1144,6 +1170,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                 repo_full = await get_or_create_test_mirror(
                     client,
                     org,
+                    repo_name=repo_full.rsplit("/", 1)[-1],
                     token=token,
                     fallback_token=fallback_token,
                 )
@@ -1252,9 +1279,13 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                     # --------------------------------------------------------
                     # 8. Poll Actions workflow runs
                     # --------------------------------------------------------
+                    poll_attempt = 0
                     deadline = time.monotonic() + poll_timeout
                     while time.monotonic() < deadline:
-                        await asyncio.sleep(poll_interval)
+                        await asyncio.sleep(
+                            _poll_delay_seconds(poll_attempt, poll_interval),
+                        )
+                        poll_attempt += 1
                         runs = await _list_workflow_runs(
                             client, repo_full, head_sha, token=token
                         )
@@ -1386,7 +1417,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             getattr(settings, "github_sandbox_poll_interval_seconds", 10.0) or 10.0
         )
         poll_timeout: float = float(
-            getattr(settings, "github_sandbox_poll_timeout_seconds", 120.0) or 120.0
+            getattr(settings, "github_sandbox_poll_timeout_seconds", 600.0) or 600.0
         )
         # Workflow filename is resolved per run by select_workflow_filename().
 
@@ -1436,7 +1467,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
             )
 
         fallback_token: Optional[str] = getattr(settings, "github_token", None)
-        repo_full = get_universal_sandbox_repo(org)
+        repo_full = select_sandbox_mirror(org, str(getattr(run, "id", "")))
         user_repo_full = f"{repo.owner}/{repo.name}"
         head_sha = getattr(run, "head_sha", None) or getattr(
             repo, "default_branch", "main"
@@ -1447,6 +1478,7 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                 repo_full = await get_or_create_test_mirror(
                     client,
                     org,
+                    repo_name=repo_full.rsplit("/", 1)[-1],
                     token=token,
                     fallback_token=fallback_token,
                 )
@@ -1529,9 +1561,13 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                         )
 
                         # Poll workflow runs
+                        poll_attempt = 0
                         deadline = time.monotonic() + poll_timeout
                         while time.monotonic() < deadline:
-                            await asyncio.sleep(poll_interval)
+                            await asyncio.sleep(
+                                _poll_delay_seconds(poll_attempt, poll_interval),
+                            )
+                            poll_attempt += 1
                             wf_runs = await _list_workflow_runs(
                                 client, repo_full, iter_head_sha, token=token
                             )
