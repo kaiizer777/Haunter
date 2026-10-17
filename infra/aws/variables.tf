@@ -261,3 +261,54 @@ variable "lambda_reserved_concurrent_executions" {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Webhook ingress rate limit store
+#
+# "memory" keeps the sliding-window buckets in module state, which under Lambda
+# means one copy PER EXECUTION ENVIRONMENT — the budget would then be enforced
+# reserved_concurrent_executions times over (10x on the default above) and reset
+# on every cold start. "postgres" keeps them in webhook_rate_limit_hits so every
+# environment shares one budget. Postgres is the correct setting for this
+# function and needs no extra IAM: the role above grants self-invoke plus one
+# SSM read and explicitly denies every other service, and DATABASE_URL already
+# reaches Neon.
+#
+# Note the deliberate asymmetry with app/config.py, where the default is
+# "memory": Terraform only ever provisions the Lambda, where "postgres" is the
+# correct answer, while the Python default must keep the hermetic test suite and
+# local dev working with no database at all.
+# ---------------------------------------------------------------------------
+
+variable "webhook_rate_limit_backend" {
+  description = "Store for the webhook ingress sliding-window buckets: 'memory' (process-local) or 'postgres' (shared across execution environments)."
+  type        = string
+  default     = "postgres"
+
+  validation {
+    condition     = contains(["memory", "postgres"], var.webhook_rate_limit_backend)
+    error_message = "Must be 'memory' or 'postgres'; anything else is rejected at plan time rather than silently falling back per-request."
+  }
+}
+
+variable "webhook_rate_limit_max_deliveries" {
+  description = "Max webhook deliveries accepted per sliding window per repository/sender bucket before a 429 + Retry-After."
+  type        = number
+  default     = 120
+
+  validation {
+    condition     = var.webhook_rate_limit_max_deliveries >= 0
+    error_message = "Must be >= 0; 0 disables webhook throttling."
+  }
+}
+
+variable "webhook_rate_limit_window_seconds" {
+  description = "Sliding-window length for the webhook ingress rate limit, in seconds."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.webhook_rate_limit_window_seconds > 0
+    error_message = "Must be > 0; 0 or negative disables webhook throttling."
+  }
+}
+
