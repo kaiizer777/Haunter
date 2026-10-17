@@ -1,15 +1,20 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from datetime import datetime, timezone
+from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import select
 
 from app.auth import router as auth_router
 from app.config import settings
+from app.db import async_session_maker
+from app.models import Run
 from app.limiter import limiter
 from app.repos import router as repos_router
 from app.routers.eval import router as eval_router
