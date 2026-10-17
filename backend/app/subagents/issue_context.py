@@ -1,23 +1,39 @@
-"""Scope: the issue *title* and *body*, and the issue's **discussion comments**.
+"""Linked-issue context for the push-level code reviewer (issue #123).
 
-Comments are the same kind of input as a title and a body — written by
-whoever typed them — and they get the same treatment here for the same
-reason. What makes them worth the extra budget is *attribution*: every
-comment carries GitHub's ``author_association``, so the block can tell the
-model that "the repository owner asked for X" apart from "a first-time
-commenter claims Y". An unattributed wall of issue discussion is close to
-useless as review evidence precisely because that distinction cannot be
-recovered from the text.
+Pure and I/O-free on purpose. It turns a pull-request body into a bounded,
+fenced, explicitly-untrusted prompt block and nothing else — no HTTP, no
+database, no LLM. That keeps the parsing rules and the rendering budget
+directly testable without a GitHub connection, and keeps ``code_reviewer``
+(which already owns the review contract) from growing a second concern.
+
+Everything here treats its inputs as **hostile**. A PR body and an issue body
+are written by whoever opened them, which is not necessarily the owner of the
+repository, and both end up inside a prompt that instructs a model to emit
+findings. So the only things done to that text are the ones this repo already
+does everywhere else it lets untrusted data reach a model — redact, bound,
+fence, and label — plus an explicit "do not obey this" directive. Nothing is
+evaluated, formatted, or interpreted.
+
+Scope: the issue *title* and *body*, the issue's **discussion comments**, and
+the issues and pull requests it **cross-references**.
+
+Comments and cross-reference titles are the same kind of input as a title and a
+body — written by whoever typed them — and they get the same treatment here for
+the same reason. What makes them worth the extra budget is *attribution*: every
+comment carries GitHub's ``author_association``, so the block can tell the model
+that "the repository owner asked for X" apart from "a first-time commenter
+claims Y". An unattributed wall of issue discussion is close to useless as
+review evidence precisely because that distinction cannot be recovered from the
+text.
 
 Permission note, unchanged and still the deployment prerequisite: reading the
 issue *body* requires the GitHub App ``issues: read`` and has no alternative
-grant. The comments endpoint is additionally satisfied by
+grant. The comments and timeline endpoints are additionally satisfied by
 ``pull_requests: read``, which the permissions this repo documents installing
 already carry (``HAUNTER.md`` §7.2). So on a default install the one endpoint
-that 403s is still the issue body, and enabling this is the same operational
-step #123 already documented: grant ``issues: read`` and re-install.
+that 403s is still the issue body, and enabling any of this is the same
+operational step #123 already documented: grant ``issues: read`` and re-install.
 """
-
 
 from __future__ import annotations
 
@@ -427,11 +443,19 @@ class IssueEnrichment:
     comments: tuple[IssueComment, ...] = ()
     comments_omitted: int = 0
     discussion_truncated: bool = False
+    cross_references: tuple[IssueCrossReference, ...] = ()
+    cross_references_omitted: int = 0
+    timeline_truncated: bool = False
 
     @property
     def is_empty(self) -> bool:
         """True when there is nothing to render and nothing to disclose."""
-        return not self.comments and not self.discussion_truncated
+        return (
+            not self.comments
+            and not self.discussion_truncated
+            and not self.cross_references
+            and not self.timeline_truncated
+        )
 
 
 @dataclass(frozen=True)
@@ -592,6 +616,27 @@ def _render_issue(issue: LinkedIssue) -> str:
             "comments",
             enrichment.comments_omitted,
             beyond_window=enrichment.discussion_truncated,
+        )
+        if disclosure:
+            lines.append(disclosure)
+
+    if enrichment.cross_references:
+        lines.extend(("", "Cross-referenced (recorded in the issue timeline):"))
+        for reference in enrichment.cross_references:
+            target = (
+                f"{reference.repo}#{reference.number}"
+                if reference.repo
+                else f"#{reference.number}"
+            )
+            label = (
+                "pull request" if reference.kind == "pull_request" else "issue"
+            )
+            title = f" — {reference.title}" if reference.title else ""
+            lines.append(f"- {target} ({label}){title}")
+        disclosure = _truncation_disclosure(
+            "cross-references",
+            enrichment.cross_references_omitted,
+            beyond_window=enrichment.timeline_truncated,
         )
         if disclosure:
             lines.append(disclosure)
