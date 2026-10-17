@@ -69,13 +69,41 @@ class _Result:
 
 
 class _FakePollDb:
-    """The short-lived session `_stream_from_db` opens per poll/probe/drain."""
+    """The short-lived session `_stream_from_db` opens per poll/probe/drain.
 
-    def __init__(self, rows: list[SessionStreamEvent]) -> None:
+    Enforces the `session_id`/`turn_id` scope that `_pending_stmt` applies in
+    production, and asserts that scope is still present in the rendered SQL. A
+    fake that just returned `rows` would hide a dropped predicate entirely: the
+    event-reset test would still pass on rows the real query could never
+    return, so the scoping would be pinned by nothing.
+    """
+
+    def __init__(
+        self,
+        rows: list[SessionStreamEvent],
+        *,
+        session_id: uuid.UUID,
+        turn_id: str,
+    ) -> None:
         self.rows = rows
+        self.session_id = session_id
+        self.turn_id = turn_id
 
     async def execute(self, stmt):
-        return _Result(self.rows)
+        sql = str(stmt).lower()
+        assert "session_stream_events.session_id =" in sql, (
+            "poll query lost its session_id scope: " + sql
+        )
+        assert "session_stream_events.turn_id =" in sql, (
+            "poll query lost its turn_id scope: " + sql
+        )
+        return _Result(
+            [
+                r
+                for r in self.rows
+                if r.session_id == self.session_id and r.turn_id == self.turn_id
+            ]
+        )
 
     async def rollback(self) -> None:
         pass
@@ -90,24 +118,32 @@ class _FakePollDb:
 async def _drive_idle_stream(
     rows_plan: list[list[SessionStreamEvent]],
     *,
+    session_id: uuid.UUID | None = None,
     flat_cadence: bool = False,
-) -> tuple[int, list[float]]:
+) -> tuple[int, list[float], list[str]]:
     """Run `_stream_from_db` to completion on a virtual clock.
 
-    Returns ``(sessions_opened, sleep_delays)``. Every `async_session_maker`
-    call is counted through a factory (`return_value` would hand back the same
-    object and hide the churn entirely — `app.db.async_session_maker` is
-    imported *inside* the function, which is what makes the patch visible).
-    `time.monotonic` and `asyncio.sleep` are virtual, so the full 900s idle
-    window is reached in ~80 iterations with zero real waiting.
+    Returns ``(sessions_opened, sleep_delays, yielded_chunks)``. Every
+    `async_session_maker` call is counted through a factory (`return_value`
+    would hand back the same object and hide the churn entirely —
+    `app.db.async_session_maker` is imported *inside* the function, which is
+    what makes the patch visible). `time.monotonic` and `asyncio.sleep` are
+    virtual, so the full 900s idle window is reached in ~80 iterations with
+    zero real waiting.
 
     `rows_plan` is consumed one entry per poll read (the initial replay read
     included); an exhausted plan yields zero rows, i.e. a fully idle stream.
+
+    `session_id` is the session the stream is driven for — pass the same ID the
+    `rows_plan` rows were built with. It is generated when omitted, which is
+    only safe for fully idle plans (no rows to scope).
     """
     clock = {"t": 1_000.0}
     delays: list[float] = []
+    chunks: list[str] = []
     sessions: list[_FakePollDb] = []
     plan = list(rows_plan)
+    stream_session_id = session_id if session_id is not None else uuid.uuid4()
 
     def _monotonic() -> float:
         return clock["t"]
@@ -118,7 +154,7 @@ async def _drive_idle_stream(
 
     def _factory() -> _FakePollDb:
         rows = plan.pop(0) if plan else []
-        db = _FakePollDb(rows)
+        db = _FakePollDb(rows, session_id=stream_session_id, turn_id="turn-1")
         sessions.append(db)
         return db
 
@@ -146,12 +182,15 @@ async def _drive_idle_stream(
                     side_effect=lambda _streak: _SSE_POLL_INTERVAL_S,
                 )
             )
-        async for _ in _stream_from_db(
-            session_id=uuid.uuid4(), turn_id="turn-1", last_event_id=0, request=None
+        async for chunk in _stream_from_db(
+            session_id=stream_session_id,
+            turn_id="turn-1",
+            last_event_id=0,
+            request=None,
         ):
-            pass
+            chunks.append(chunk)
 
-    return len(sessions), delays
+    return len(sessions), delays, chunks
 
 
 class _FakeMetaDb:
@@ -281,8 +320,8 @@ async def test_idle_stream_sessions_do_not_scale_with_wall_clock() -> None:
     15-minute Lambda window. The backoff must keep that cost proportional to
     `_SSE_IDLE_BACKOFF_MAX_S` instead, which is what makes it bounded.
     """
-    sessions_backoff, delays_backoff = await _drive_idle_stream([])
-    sessions_flat, delays_flat = await _drive_idle_stream([], flat_cadence=True)
+    sessions_backoff, delays_backoff, _ = await _drive_idle_stream([])
+    sessions_flat, delays_flat, _ = await _drive_idle_stream([], flat_cadence=True)
 
     # Both runs really did idle for the whole 900s window.
     assert sum(delays_flat) >= _IDLE_WINDOW_S
@@ -316,7 +355,7 @@ async def test_idle_stream_sessions_do_not_scale_with_wall_clock() -> None:
 async def test_idle_delay_resets_when_events_arrive() -> None:
     """An active stream keeps the 1s cadence: the backoff resets on real rows."""
     session_id = uuid.uuid4()
-    reads, delays = await _drive_idle_stream(
+    reads, delays, chunks = await _drive_idle_stream(
         [
             [],  # initial replay read — nothing yet
             [],  # empty poll
@@ -325,7 +364,8 @@ async def test_idle_delay_resets_when_events_arrive() -> None:
             [],  # empty poll
             [],  # empty poll
             [_done(session_id, 2)],  # terminal event ends the stream
-        ]
+        ],
+        session_id=session_id,
     )
 
     # Ramp before the thought, reset to the base interval after it.
@@ -340,6 +380,61 @@ async def test_idle_delay_resets_when_events_arrive() -> None:
     # fired: the probe cadence is measured in ticks and resets on rows too.
     assert reads == 7
     assert reads - 1 < _SSE_LIVENESS_PROBE_EVERY_TICKS * 2
+
+    # The reset was driven by rows the *scoped* query actually returned: both
+    # chunks the stream owns reached the client, in event_id order.
+    assert [c.splitlines()[0] for c in chunks] == [
+        "event: thought",
+        "event: done",
+    ]
+    assert "id: 1" in chunks[0] and "id: 2" in chunks[1]
+
+
+@pytest.mark.asyncio
+async def test_poll_rows_are_scoped_to_the_streamed_session() -> None:
+    """Rows belonging to another session are not delivered and do not un-backoff.
+
+    Guards the test fixture itself. The fake poll DB used to ignore the query
+    predicates and hand back whatever the rows plan contained, so a dropped
+    `session_id` predicate in `_pending_stmt` — or rows carrying the wrong
+    session — would still have produced a passing event-reset test. The fake
+    now enforces the scope, and this is what proves the enforcement is live.
+    """
+    stream_session_id = uuid.uuid4()
+    foreign_session_id = uuid.uuid4()
+
+    reads, delays, chunks = await _drive_idle_stream(
+        [
+            [_thought(foreign_session_id, 1)],  # wrong session — filtered out
+            [],  # empty poll
+            [_thought(foreign_session_id, 2)],  # wrong session — filtered out
+            [_thought(stream_session_id, 1)],  # ours — delivered, resets backoff
+            [_done(stream_session_id, 2)],  # ours — terminal, stream ends
+        ],
+        session_id=stream_session_id,
+    )
+
+    # Exactly the two events the streamed session owns reached the client. The
+    # foreign rows carry event_id 1 and 2 too, so had the fake not scoped the
+    # query they would have displaced both of these — and no terminal event
+    # would ever have arrived, since `_stream_from_db` skips event_ids it has
+    # already yielded.
+    assert [c.splitlines()[0] for c in chunks] == ["event: thought", "event: done"]
+    assert "id: 1" in chunks[0]
+    assert "id: 2" in chunks[1]
+
+    # Foreign rows read as empty ticks, so the backoff kept ramping right up to
+    # our own row — proof the filtered reads were genuinely empty, not passed
+    # through with the delay reset.
+    assert delays == [
+        _SSE_POLL_INTERVAL_S,
+        _SSE_POLL_INTERVAL_S,
+        2 * _SSE_POLL_INTERVAL_S,
+        _SSE_POLL_INTERVAL_S,
+    ]
+
+    # 1 initial read + 4 polls, then the terminal event returned.
+    assert reads == 5
 
 
 # ---------------------------------------------------------------------------
