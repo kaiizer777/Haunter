@@ -888,6 +888,45 @@ def _webhook_rate_limit_key(event: Any, raw_body: bytes) -> str:
     return key
 
 
+async def _consume_webhook_rate_limit(
+    key: str, *, now: Optional[float] = None
+) -> int:
+    """Consume one delivery from the bucket; return retry-after seconds.
+
+    Sliding window of `settings.webhook_rate_limit_window_seconds` holding at
+    most `settings.webhook_rate_limit_max_deliveries` accepted deliveries.
+    Returns 0 when the delivery is allowed (and records it), otherwise the
+    seconds until the oldest entry leaves the window — the caller's
+    `Retry-After`. A non-positive budget or window disables throttling (fail
+    open for misconfiguration, never fail closed on legitimate traffic).
+    `now` is a monotonic timestamp override for deterministic tests only.
+    """
+    maximum = settings.webhook_rate_limit_max_deliveries
+    window = settings.webhook_rate_limit_window_seconds
+    if maximum <= 0 or window <= 0:
+        return 0
+    current = now if now is not None else time.monotonic()
+    async with _WEBHOOK_RATE_LOCK:
+        bucket = _WEBHOOK_RATE_BUCKETS.get(key)
+        if bucket is None:
+            if len(_WEBHOOK_RATE_BUCKETS) >= _WEBHOOK_RATE_MAX_BUCKETS:
+                _WEBHOOK_RATE_BUCKETS.pop(next(iter(_WEBHOOK_RATE_BUCKETS)))
+            bucket = _WEBHOOK_RATE_BUCKETS[key] = deque()
+        cutoff = current - window
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if len(bucket) >= maximum:
+            retry_after = int(bucket[0] + window - current) + 1
+            return max(1, retry_after)
+        bucket.append(current)
+        return 0
+
+
+def _reset_webhook_rate_limiter() -> None:
+    """Clear all throttle buckets. Test hook only — production paths never call it."""
+    _WEBHOOK_RATE_BUCKETS.clear()
+
+
 def _truncate_reason(reason: Any) -> Optional[str]:
     """Bound persisted reason length; attacker-influenced, never stored raw unbounded."""
     if reason is None:
