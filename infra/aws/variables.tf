@@ -254,5 +254,10 @@ variable "lambda_reserved_concurrent_executions" {
   description = "Reserved concurrency for the orchestrator Lambda. Caps simultaneous executions; overflow throttles gracefully instead of starving the account limit."
   type        = number
   default     = 10
+
+  validation {
+    condition     = var.lambda_reserved_concurrent_executions >= 1 && var.lambda_reserved_concurrent_executions <= 100
+    error_message = "Must be 1-100: 0 disables the function, higher re-opens the storm hole."
+  }
 }
 
