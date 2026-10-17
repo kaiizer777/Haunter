@@ -42,6 +42,26 @@ REVIEW_COMMENTS_PER_PAGE = 100
 #: Hard ceiling on review-comment pages walked per fetch, so an unbounded thread
 #: cannot inflate the context window. 5 pages x 100 = 500 comments.
 MAX_REVIEW_COMMENT_PAGES = 5
+#: Page size for the linked-issue discussion-comment fetch. 15 is not a
+#: GitHub maximum — it is what one screen of an issue thread is worth to a code
+#: reviewer, sized against ``MAX_ISSUE_COMMENTS_PER_ISSUE`` in
+#: ``app.subagents.issue_context`` so the rendered block cannot overflow.
+ISSUE_COMMENTS_PER_PAGE = 15
+#: Exactly one page. The discussion stream is an unbounded, freely-writable
+#: surface, so it is sampled rather than paginated; a 400-comment thread costs
+#: the same one request as a quiet one. GitHub returns comments oldest-first,
+#: so the window is the *opening* exchange — the triage conversation, which is
+#: where the requester's intent and the maintainer's direction are actually
+#: stated — rather than the most recent 15 replies.
+MAX_ISSUE_COMMENT_PAGES = 1
+#: Page size for the linked-issue timeline fetch. 100 is the GitHub maximum: the
+#: timeline is mostly non-cross-reference events (labels, assignments, state
+#: changes), and a small page would spend the 5-page budget on noise.
+ISSUE_TIMELINE_PER_PAGE = 100
+#: Hard ceiling on timeline pages walked per fetch. 5 x 100 = 500 events, which
+#: is far past the number of cross-references a real issue accumulates, while
+#: still bounding a pathological timeline.
+MAX_ISSUE_TIMELINE_PAGES = 5
 #: Content types that promise a zip container. A body that fails to unzip under
 #: one of these is a broken or forged archive, never a log stream.
 ARCHIVE_CONTENT_TYPES: frozenset[str] = frozenset(
@@ -113,6 +133,63 @@ class BoundedResponse:
 
     def json(self) -> Any:
         return json.loads(self.content)
+
+
+@dataclass
+class GitHubRequestBudget:
+    """Hard ceiling on the GitHub requests one caller may spend in total.
+
+    The page caps above (:data:`MAX_REVIEW_COMMENT_PAGES`,
+    :data:`ISSUE_TIMELINE_PAGES`) bound *one call*. A collection cap such as
+    ``MAX_LINKED_ISSUES`` bounds *how many subjects* are read. Neither can see
+    the other's total, so without a third limit the worst case is the product of
+    every individual cap — a number nobody wrote down and no test asserted. This
+    is that number: one mutable counter every call site charges, so the ceiling
+    is the sum rather than the product.
+
+    Reserve *before* the request, never after. A fetcher that charged itself on
+    return would still have issued the request that broke the cap, which is the
+    only outcome the cap exists to prevent. A refused reservation is not
+    retried by the fetcher either: it returns what it has and lets the caller
+    record the omission, because a step that silently keeps going after being
+    told "no" is not bounded by anything.
+
+    Mutable by design and deliberately not lock-guarded: one review step owns
+    one budget and walks it sequentially within a single event loop, so the
+    state cannot be raced. ``asyncio.Lock`` here would add a lock acquisition to
+    every request to protect something no caller can corrupt.
+    """
+
+    #: Total requests this budget may spend. Must be non-negative.
+    limit: int
+    #: Requests already claimed. Start at 0; the call sites move it.
+    spent: int = 0
+
+    def __post_init__(self) -> None:
+        if self.limit < 0:
+            raise ValueError("GitHub request budget limit must not be negative")
+
+    @property
+    def remaining(self) -> int:
+        """Requests still claimable, floored at 0 so an overspent budget reads 0."""
+        return max(0, self.limit - self.spent)
+
+    @property
+    def exhausted(self) -> bool:
+        """True once nothing can be claimed. The caller must record the omission."""
+        return self.remaining <= 0
+
+    def reserve(self) -> bool:
+        """Claim one request. Returns ``False``, having claimed nothing, if full.
+
+        All-or-nothing by construction: there is no partial state to reconcile,
+        because the unit is a single request and the answer a caller acts on is
+        "may I still go to GitHub".
+        """
+        if self.remaining <= 0:
+            return False
+        self.spent += 1
+        return True
 
 
 async def _bounded_get(
@@ -1374,6 +1451,321 @@ async def fetch_issue(
     ):
         raise GitHubClientError("Unexpected fetch-issue response structure from GitHub API")
     return data
+
+
+@dataclass(frozen=True)
+class IssueCommentPage:
+    """One bounded page of ``GET /issues/{n}/comments``, plus what it hid.
+
+    ``truncated`` travels with the comments rather than being left for the
+    caller to reconstruct, because only the fetcher sees the ``Link:
+    rel="next"`` header and the omission has to reach the prompt: a model shown
+    the first 15 comments of a 400-comment thread and told nothing about the
+    rest reads them as the whole discussion. It means exactly "GitHub advertised
+    a further page this call did not walk" — never an estimate of how many
+    comments were left behind, which this endpoint cannot tell us without
+    spending the requests the budget refuses to spend.
+    """
+
+    comments: tuple[dict[str, Any], ...]
+    truncated: bool = False
+
+
+async def fetch_issue_comments(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    *,
+    budget: GitHubRequestBudget,
+    token: Optional[str] = None,
+    allow_global_token: bool = True,
+) -> IssueCommentPage:
+    """
+    Fetch the opening discussion on a linked issue (issue #123b).
+
+    GET /repos/{owner}/{repo}/issues/{issue_number}/comments?per_page=15
+
+    This is the endpoint :func:`fetch_issue` explicitly declined to read. Its
+    permission story is the reason, restated because it decides whether this
+    feature works at all in production: per GitHub's *Permissions required for
+    GitHub Apps*, this endpoint is listed under *Repository permissions for
+    issues* **and** under *Repository permissions for pull requests*, and
+    either ``issues: read`` or ``pull_requests: read`` satisfies it. Haunter's
+    documented install grants ``pull_requests:write`` (``HAUNTER.md`` §7.2),
+    which implies ``pull_requests: read``, so unlike the issue body this call is
+    already authorized. Everything fetched here still needs ``issues: read`` for
+    the *issue* it annotates, so the two permissions are required together in
+    practice — :func:`fetch_issue`'s note about the missing grant still governs
+    whether a linked issue is read at all.
+
+    One page only (:data:`MAX_ISSUE_COMMENT_PAGES`), and every page costs a
+    reservation from ``budget`` *before* the request. A refused reservation
+    returns an empty page: the discussion is a hint, and the caller records the
+    omission rather than this function deciding the budget is advisory.
+
+    Every comment body here is attacker-influenced text on its way into a
+    prompt that produces a review a human will act on, and the discussion is far
+    more freely writable than an issue description — anyone who can comment can.
+    This function does no redaction; that is
+    :mod:`app.subagents.issue_context`'s job at the render boundary, where it
+    cannot be forgotten.
+
+    Raises:
+        GitHubNetworkError: Connection failure / timeout.
+        GitHubResponseLimitError: Response past ``MAX_API_RESPONSE_BYTES``.
+        GitHubResourceNotFoundError: 404 — the issue is deleted or invisible.
+        GitHubRateLimitError: 429, or 401/403 whose body names a rate limit.
+        GitHubAuthError: 401/403 for any other reason.
+        GitHubClientError: Any other error status, or a body that is not JSON.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/issues/{quote(str(issue_number), safe='')}/comments"
+    )
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
+
+    collected: list[dict[str, Any]] = []
+    next_url: Optional[str] = url
+    pages = 0
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        while next_url and pages < MAX_ISSUE_COMMENT_PAGES:
+            if not budget.reserve():
+                logger.info(
+                    "github request_budget_exhausted resource=issue_comments "
+                    "repo=%s/%s issue=%s limit=%d",
+                    owner,
+                    repo,
+                    issue_number,
+                    budget.limit,
+                )
+                break
+            pages += 1
+            try:
+                response = await _bounded_get(
+                    client,
+                    next_url,
+                    headers=headers,
+                    params={"per_page": ISSUE_COMMENTS_PER_PAGE}
+                    if pages == 1
+                    else None,
+                    max_bytes=MAX_API_RESPONSE_BYTES,
+                )
+            except httpx.RequestError as exc:
+                logger.error(
+                    "Network error fetching comments for issue %s/%s #%s",
+                    owner,
+                    repo,
+                    issue_number,
+                )
+                raise GitHubNetworkError(
+                    f"Network error connecting to GitHub: {exc.__class__.__name__}"
+                ) from exc
+
+            if response.status_code == 404:
+                raise GitHubResourceNotFoundError(
+                    f"Issue comments not found for {owner}/{repo} #{issue_number}"
+                )
+            if response.status_code in (401, 403):
+                if "rate limit" in response.text.lower():
+                    raise GitHubRateLimitError("GitHub API rate limit exceeded")
+                raise GitHubAuthError(
+                    f"GitHub authentication failure ({response.status_code})"
+                )
+            if response.status_code == 429:
+                raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+            if response.is_error:
+                raise GitHubClientError(
+                    f"GitHub API returned error {response.status_code}"
+                )
+
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise GitHubClientError(
+                    "Invalid JSON returned for issue comments"
+                ) from exc
+            # A body that is not a list is a wrong-content-type or truncated
+            # response, not an issue with no discussion. It degrades to "no
+            # comments", the same reading :func:`fetch_pr_review_comments` takes,
+            # because the caller's degradation path is identical either way.
+            if isinstance(data, list):
+                collected.extend(item for item in data if isinstance(item, dict))
+            next_url = _parse_next_page_url(response.headers)
+
+    if next_url is not None:
+        logger.info(
+            "Issue comments for %s/%s #%s truncated at %d page(s) (%d comments)",
+            owner,
+            repo,
+            issue_number,
+            pages,
+            len(collected),
+        )
+    # `pages > 0` so a budget refusal before the first request cannot claim the
+    # endpoint "had more" — nothing was read, so nothing was withheld.
+    return IssueCommentPage(
+        comments=tuple(collected), truncated=pages > 0 and next_url is not None
+    )
+
+
+@dataclass(frozen=True)
+class IssueTimelinePage:
+    """One bounded window of ``GET /issues/{n}/timeline``, plus what it hid.
+
+    Raw events, deliberately unfiltered: cross-reference extraction is a parsing
+    rule with its own tests, and it belongs in
+    :mod:`app.subagents.issue_context` (pure, I/O-free) rather than in the
+    transport layer where it could not be tested without a wire. What comes back
+    is exactly what GitHub sent, bounded.
+    """
+
+    events: tuple[dict[str, Any], ...]
+    truncated: bool = False
+
+
+async def fetch_issue_timeline(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    *,
+    budget: GitHubRequestBudget,
+    token: Optional[str] = None,
+    allow_global_token: bool = True,
+) -> IssueTimelinePage:
+    """
+    Fetch the issue timeline, whose ``cross-referenced`` events are GitHub's own
+    account of what an issue is linked to (issue #123b).
+
+    GET /repos/{owner}/{repo}/issues/{issue_number}/timeline?per_page=100
+
+    Walks up to :data:`MAX_ISSUE_TIMELINE_PAGES` pages, each behind its own
+    reservation from ``budget``, and stops the moment a reservation is refused.
+    ``application/vnd.github+json`` is the correct Accept header: the timeline
+    API graduated out of its ``mockingbird`` preview and the preview media type
+    is no longer accepted, so this is the documented current form rather than an
+    invention.
+
+    The timeline is the authoritative half of the cross-reference strategy. It
+    reports the links GitHub itself recognises, carries the *type* of each link
+    (issue vs pull request) in ``source.issue`` / ``source.pull_request``, and
+    cannot be fooled by prose. It is also mostly noise -- labels, assignments,
+    state changes, ``commented`` markers -- which is why the page size is the
+    GitHub maximum rather than something smaller: a small page would spend the
+    5-page budget on label churn and never reach the cross-references.
+
+    Same permission story as :func:`fetch_issue_comments` (``issues: read`` or
+    ``pull_requests: read``) and the same untrusted-input contract: the titles
+    inside are attacker-influenced and are redacted and bounded at the render
+    boundary in :mod:`app.subagents.issue_context`, never here.
+
+    Raises:
+        GitHubNetworkError: Connection failure / timeout.
+        GitHubResponseLimitError: Response past ``MAX_API_RESPONSE_BYTES``.
+        GitHubResourceNotFoundError: 404 -- the issue is deleted or invisible.
+        GitHubRateLimitError: 429, or 401/403 whose body names a rate limit.
+        GitHubAuthError: 401/403 for any other reason.
+        GitHubClientError: Any other error status, or a body that is not JSON.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/issues/{quote(str(issue_number), safe='')}/timeline"
+    )
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
+
+    collected: list[dict[str, Any]] = []
+    next_url: Optional[str] = url
+    pages = 0
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        while next_url and pages < MAX_ISSUE_TIMELINE_PAGES:
+            if not budget.reserve():
+                logger.info(
+                    "github request_budget_exhausted resource=issue_timeline "
+                    "repo=%s/%s issue=%s limit=%d",
+                    owner,
+                    repo,
+                    issue_number,
+                    budget.limit,
+                )
+                break
+            pages += 1
+            try:
+                response = await _bounded_get(
+                    client,
+                    next_url,
+                    headers=headers,
+                    params={"per_page": ISSUE_TIMELINE_PER_PAGE}
+                    if pages == 1
+                    else None,
+                    max_bytes=MAX_API_RESPONSE_BYTES,
+                )
+            except httpx.RequestError as exc:
+                logger.error(
+                    "Network error fetching timeline for issue %s/%s #%s",
+                    owner,
+                    repo,
+                    issue_number,
+                )
+                raise GitHubNetworkError(
+                    f"Network error connecting to GitHub: {exc.__class__.__name__}"
+                ) from exc
+
+            if response.status_code == 404:
+                raise GitHubResourceNotFoundError(
+                    f"Issue timeline not found for {owner}/{repo} #{issue_number}"
+                )
+            if response.status_code in (401, 403):
+                if "rate limit" in response.text.lower():
+                    raise GitHubRateLimitError("GitHub API rate limit exceeded")
+                raise GitHubAuthError(
+                    f"GitHub authentication failure ({response.status_code})"
+                )
+            if response.status_code == 429:
+                raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+            if response.is_error:
+                raise GitHubClientError(
+                    f"GitHub API returned error {response.status_code}"
+                )
+
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise GitHubClientError(
+                    "Invalid JSON returned for issue timeline"
+                ) from exc
+            # Non-list degrades to "no events", matching the comments fetch and
+            # the existing review-comment fetch: a wrong-content-type or
+            # truncated response is indistinguishable, to the caller, from a
+            # quiet issue.
+            if isinstance(data, list):
+                collected.extend(item for item in data if isinstance(item, dict))
+            next_url = _parse_next_page_url(response.headers)
+
+    if next_url is not None:
+        logger.info(
+            "Issue timeline for %s/%s #%s truncated at %d page(s) (%d events)",
+            owner,
+            repo,
+            issue_number,
+            pages,
+            len(collected),
+        )
+    # `pages > 0` for the same reason as the comments fetch: a budget refusal
+    # before the first request read nothing, so it withheld nothing.
+    return IssueTimelinePage(
+        events=tuple(collected), truncated=pages > 0 and next_url is not None
+    )
 
 
 async def create_pr_review(

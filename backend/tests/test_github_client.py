@@ -11,6 +11,11 @@ Covers:
 - fetch_issue: 200 verbatim (incl. null body), token header, 404, rate limit (401/403),
   auth error (401/403), 5xx, ConnectError, error envelope on 200, unusable 200 shape,
   and absent `body` key on an otherwise well-formed issue object.
+- fetch_issue_comments / fetch_issue_timeline: page window and per_page on the wire,
+  Link-following and the page cap, budget refusal (no request issued), truncation
+  disclosure, the full typed error ladder (404 / 401 / 403 / 429 / 5xx), network
+  errors, and non-JSON bodies.
+- GitHubRequestBudget: all-or-nothing reservation, zero floor, no negative limit.
 - post_commit_comment: 201 response JSON, 404, network error, rate limit, auth error, and 5xx.
 """
 
@@ -27,17 +32,22 @@ import respx
 from app.config import settings
 from app.github_client import (
     GITHUB_API_BASE,
+    MAX_ISSUE_COMMENT_PAGES,
+    MAX_ISSUE_TIMELINE_PAGES,
     GitHubArchiveError,
     GitHubAuthError,
     GitHubClientError,
     GitHubNetworkError,
     GitHubRateLimitError,
+    GitHubRequestBudget,
     GitHubResourceNotFoundError,
     GitHubResponseLimitError,
     _build_headers,
     fetch_commit_metadata,
     fetch_diff,
     fetch_issue,
+    fetch_issue_comments,
+    fetch_issue_timeline,
     fetch_workflow_run_logs,
     post_commit_comment,
     update_branch_ref,
@@ -826,6 +836,361 @@ async def test_fetch_issue_rejects_payload_with_absent_body_key():
         await fetch_issue(owner="owner", repo="repo", issue_number=5)
 
     assert "Unexpected fetch-issue response structure" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# fetch_issue_comments / fetch_issue_timeline tests
+# ---------------------------------------------------------------------------
+#
+# Both are linked-issue enrichment reads behind a GitHubRequestBudget. The
+# ladder is asserted in full for both because the caller's degradation differs
+# by type: a rate limit stops the whole enrichment pass, a 404 costs that one
+# field, and anything else is logged and skipped. A fetcher that collapsed two
+# rungs into one would turn "GitHub throttled us" into "this issue has no
+# discussion", which is a different and wrong statement in the prompt.
+
+
+def _budget(limit: int = 10) -> GitHubRequestBudget:
+    return GitHubRequestBudget(limit=limit)
+
+
+def _comment_payload(number: int = 1) -> dict[str, Any]:
+    return {
+        "id": 900 + number,
+        "body": "please also cover the CSRF token",
+        "user": {"login": "maintainer"},
+        "author_association": "MEMBER",
+    }
+
+
+def _cross_reference_event(number: int = 44) -> dict[str, Any]:
+    return {
+        "event": "cross-referenced",
+        "source": {
+            "issue": {
+                "number": number,
+                "title": "Rate limiter is unbounded",
+                "html_url": f"https://github.com/owner/repo/issues/{number}",
+            }
+        },
+    }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_comments_returns_the_first_page():
+    """A 200 list comes back as typed comment dicts, bounded to one page.
+
+    ``per_page`` is asserted on the wire rather than in the return value: the
+    window is the whole point of the call, and a fetcher that silently dropped
+    the parameter would read GitHub's default 30 and quietly ship 30 comments
+    into a prompt budget sized for 15.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/comments"
+    route = respx.get(url).respond(
+        status_code=200, json=[_comment_payload(1), _comment_payload(2)]
+    )
+
+    page = await fetch_issue_comments(
+        owner="owner", repo="repo", issue_number=12, budget=_budget()
+    )
+
+    assert route.called
+    assert route.calls.last.request.url.params["per_page"] == "15"
+    assert [comment["id"] for comment in page.comments] == [901, 902]
+    assert page.truncated is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_comments_reports_a_held_page_as_truncated():
+    """A ``Link: rel="next"`` we did not walk is disclosed, never dropped silently.
+
+    The caller cannot recompute this: only the fetcher sees the header, and the
+    disclosure has to reach the prompt so a model reading 15 comments of a long
+    thread knows it is reading a window.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/comments"
+    respx.get(url).respond(
+        status_code=200,
+        json=[_comment_payload(1)],
+        headers={
+            "link": f'<{GITHUB_API_BASE}/repos/owner/repo/issues/12/comments'
+            f'?per_page=15&page=2>; rel="next"'
+        },
+    )
+
+    page = await fetch_issue_comments(
+        owner="owner", repo="repo", issue_number=12, budget=_budget()
+    )
+
+    assert page.truncated is True
+    assert len(respx.calls) == MAX_ISSUE_COMMENT_PAGES, (
+        "the comment window is one page; walking the next one would spend the "
+        "budget the owner capped it at"
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_comments_refuses_to_issue_a_request_once_budget_is_gone():
+    """An exhausted budget means no request at all, not a best-effort one.
+
+    Reserve-before-request is the contract that makes the cap real: charging the
+    budget on return would still have spent the request that broke it.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/comments"
+    route = respx.get(url).respond(status_code=200, json=[_comment_payload(1)])
+    budget = GitHubRequestBudget(limit=0)
+
+    page = await fetch_issue_comments(
+        owner="owner", repo="repo", issue_number=12, budget=budget
+    )
+
+    assert not route.called, "a refused reservation must not still hit the wire"
+    assert page.comments == ()
+    assert page.truncated is False
+    assert budget.spent == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("status", "text", "expected"),
+    [
+        pytest.param(404, "Not Found", GitHubResourceNotFoundError, id="404"),
+        pytest.param(
+            401, "API rate limit exceeded", GitHubRateLimitError, id="401-limit"
+        ),
+        pytest.param(
+            403, "Primary rate limit reached", GitHubRateLimitError, id="403-limit"
+        ),
+        pytest.param(429, "secondary rate limit", GitHubRateLimitError, id="429"),
+        pytest.param(401, "Bad credentials", GitHubAuthError, id="401-auth"),
+        pytest.param(403, "Resource not accessible", GitHubAuthError, id="403-auth"),
+        pytest.param(500, "boom", GitHubClientError, id="5xx"),
+    ],
+)
+async def test_fetch_issue_comments_error_ladder(status, text, expected):
+    """Every rung of the ladder is a typed error, including the 429.
+
+    429 is called out because it is the rung most easily lost: without an
+    explicit branch it falls to the generic error arm, the caller's "stop
+    fetching" branch never fires, and a throttled installation keeps issuing
+    requests into the limit that is already rejecting them.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/comments"
+    respx.get(url).respond(status_code=status, text=text)
+
+    with pytest.raises(expected):
+        await fetch_issue_comments(
+            owner="owner", repo="repo", issue_number=12, budget=_budget()
+        )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_comments_network_error_is_typed():
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/comments"
+    respx.get(url).mock(side_effect=httpx.ConnectError("no route"))
+
+    with pytest.raises(GitHubNetworkError) as exc_info:
+        await fetch_issue_comments(
+            owner="owner", repo="repo", issue_number=12, budget=_budget()
+        )
+
+    assert "ConnectError" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_comments_rejects_a_non_json_body():
+    """A 200 whose body is not JSON raises rather than returning "no comments".
+
+    ``json.JSONDecodeError`` is a ``ValueError``, not a ``GitHubClientError``: an
+    un-guarded decode would escape the typed ladder and take a different
+    degradation path than every other failure of the same request.
+    """
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/comments"
+    respx.get(url).respond(status_code=200, text="<html>not json</html>")
+
+    with pytest.raises(GitHubClientError) as exc_info:
+        await fetch_issue_comments(
+            owner="owner", repo="repo", issue_number=12, budget=_budget()
+        )
+
+    assert "Invalid JSON returned for issue comments" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_timeline_walks_pages_until_the_next_link_runs_out():
+    """Pagination is followed, and each page is a separate reservation.
+
+    Asserted on ``budget.spent`` as well as on the call count: a walk that
+    fetched N pages but reserved one would let the collector believe it had
+    budget left for another issue's enrichment.
+    """
+    base = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/timeline"
+    first_page = respx.get(url__eq=f"{base}?per_page=100").respond(
+        status_code=200,
+        json=[{"event": "labeled"}, _cross_reference_event(44)],
+        headers={"link": f'<{base}?page=2>; rel="next"'},
+    )
+    respx.get(url__eq=f"{base}?page=2").respond(
+        status_code=200, json=[_cross_reference_event(45)]
+    )
+    budget = _budget()
+
+    page = await fetch_issue_timeline(
+        owner="owner", repo="repo", issue_number=12, budget=budget
+    )
+
+    assert len(page.events) == 3
+    assert budget.spent == 2
+    assert first_page.calls.last.request.url.params["per_page"] == "100"
+    assert page.truncated is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_timeline_stops_at_the_page_cap_and_says_so():
+    """Past the page cap the walk stops and reports truncation.
+
+    The cap and the disclosure are the same test on purpose: a fetcher that
+    stopped at five pages without saying so would let the model read five pages
+    as the issue's entire history.
+    """
+    base = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/timeline"
+    respx.get(url__eq=f"{base}?per_page=100").respond(
+        status_code=200,
+        json=[_cross_reference_event(44)],
+        headers={"link": f'<{base}?page=2>; rel="next"'},
+    )
+    for index in range(2, MAX_ISSUE_TIMELINE_PAGES + 3):
+        respx.get(url__eq=f"{base}?page={index}").respond(
+            status_code=200,
+            json=[{"event": "labeled", "index": index}],
+            headers={"link": f'<{base}?page={index + 1}>; rel="next"'},
+        )
+    budget = _budget(limit=MAX_ISSUE_TIMELINE_PAGES)
+
+    page = await fetch_issue_timeline(
+        owner="owner", repo="repo", issue_number=12, budget=budget
+    )
+
+    assert len(respx.calls) == MAX_ISSUE_TIMELINE_PAGES
+    assert budget.spent == MAX_ISSUE_TIMELINE_PAGES
+    assert page.truncated is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_timeline_stops_mid_walk_when_the_budget_is_spent():
+    """A budget refusal ends the pagination loop instead of being ignored.
+
+    The walk is bounded by two independent ceilings and this is the one that is
+    the collector's: five pages per issue is affordable on its own and is not
+    affordable three times over.
+    """
+    base = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/timeline"
+    respx.get(url__eq=f"{base}?per_page=100").respond(
+        status_code=200,
+        json=[_cross_reference_event(44)],
+        headers={"link": f'<{base}?page=2>; rel="next"'},
+    )
+    respx.get(url__eq=f"{base}?page=2").respond(status_code=200, json=[])
+    budget = _budget(limit=1)
+
+    page = await fetch_issue_timeline(
+        owner="owner", repo="repo", issue_number=12, budget=budget
+    )
+
+    assert len(page.events) == 1
+    assert len(respx.calls) == 1, "page 2 was fetched despite a refused reservation"
+    assert page.truncated is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("status", "text", "expected"),
+    [
+        pytest.param(404, "Not Found", GitHubResourceNotFoundError, id="404"),
+        pytest.param(
+            401, "API rate limit exceeded", GitHubRateLimitError, id="401-limit"
+        ),
+        pytest.param(
+            403, "Primary rate limit reached", GitHubRateLimitError, id="403-limit"
+        ),
+        pytest.param(429, "secondary rate limit", GitHubRateLimitError, id="429"),
+        pytest.param(401, "Bad credentials", GitHubAuthError, id="401-auth"),
+        pytest.param(403, "Resource not accessible", GitHubAuthError, id="403-auth"),
+        pytest.param(500, "boom", GitHubClientError, id="5xx"),
+    ],
+)
+async def test_fetch_issue_timeline_error_ladder(status, text, expected):
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/timeline"
+    respx.get(url).respond(status_code=status, text=text)
+
+    with pytest.raises(expected):
+        await fetch_issue_timeline(
+            owner="owner", repo="repo", issue_number=12, budget=_budget()
+        )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_timeline_network_error_is_typed():
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/timeline"
+    respx.get(url).mock(side_effect=httpx.ReadTimeout("slow"))
+
+    with pytest.raises(GitHubNetworkError):
+        await fetch_issue_timeline(
+            owner="owner", repo="repo", issue_number=12, budget=_budget()
+        )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_issue_timeline_rejects_a_non_json_body():
+    url = f"{GITHUB_API_BASE}/repos/owner/repo/issues/12/timeline"
+    respx.get(url).respond(status_code=200, text="<html>not json</html>")
+
+    with pytest.raises(GitHubClientError) as exc_info:
+        await fetch_issue_timeline(
+            owner="owner", repo="repo", issue_number=12, budget=_budget()
+        )
+
+    assert "Invalid JSON returned for issue timeline" in str(exc_info.value)
+
+
+def test_request_budget_is_all_or_nothing_and_floors_at_zero():
+    """A budget cannot be overdrawn, partially reserved, or driven negative.
+
+    ``remaining`` flooring at 0 is what keeps an overspent budget from
+    advertising capacity it does not have: without the floor a caller reading
+    ``remaining`` after a refusal would compute a negative allowance and, in
+    arithmetic that trusts it, issue requests.
+    """
+    budget = GitHubRequestBudget(limit=2)
+
+    assert budget.reserve() is True
+    assert budget.reserve() is True
+    assert budget.exhausted is True
+    assert budget.reserve() is False
+    assert budget.spent == 2
+    assert budget.remaining == 0
+
+    budget.spent = 99
+    assert budget.remaining == 0
+    assert budget.reserve() is False
+    assert budget.spent == 99, "a refused reservation must not move the counter"
+
+
+def test_request_budget_rejects_a_negative_limit():
+    with pytest.raises(ValueError, match="must not be negative"):
+        GitHubRequestBudget(limit=-1)
 
 
 # ---------------------------------------------------------------------------

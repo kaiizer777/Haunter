@@ -32,8 +32,11 @@ from app.github.pr import (
     resolve_installation_id,
 )
 from app.github_client import (
+    MAX_ISSUE_COMMENT_PAGES,
+    MAX_ISSUE_TIMELINE_PAGES,
     GitHubClientError,
     GitHubRateLimitError,
+    GitHubRequestBudget,
     GitHubResourceNotFoundError,
     GitHubUnprocessableEntityError,
     create_commit_comment,
@@ -41,6 +44,8 @@ from app.github_client import (
     fetch_bot_identity,
     fetch_diff,
     fetch_issue,
+    fetch_issue_comments,
+    fetch_issue_timeline,
     fetch_pull_request,
     fetch_pull_request_diff,
     fetch_review_threads,
@@ -62,7 +67,11 @@ from app.subagents.code_reviewer import (
     format_github_suggestion,
 )
 from app.subagents.issue_context import (
+    IssueEnrichment,
     LinkedIssue,
+    cross_references_from_timeline,
+    extract_textual_mentions,
+    issue_comments_from_payloads,
     linked_issue_from_payload,
     parse_closing_issue_refs,
     render_issue_context,
@@ -716,8 +725,36 @@ async def _collect_linked_issue_context(
         if not numbers:
             return ""
 
+        # One budget for the whole pass, not one per issue: each per-issue cap
+        # bounds a single issue's enrichment and knows nothing about the other
+        # two, so without a shared counter the ceiling is the product of the
+        # caps rather than the sum.
+        budget = GitHubRequestBudget(limit=MAX_LINKED_ISSUE_REQUESTS)
         issues: list[LinkedIssue] = []
+        # Whether the block must disclose unfetched detail. This is NOT
+        # `budget.exhausted`: the per-issue caps sum exactly to the limit
+        # (3 x (1 + 1 + 5) = 21), so a full pass spends the whole budget
+        # without a single refusal, while a rate limit can cut enrichment
+        # short with room to spare. Set below on an actual refused
+        # reservation and on a rate-limit-shortened enrichment.
+        detail_incomplete = False
         for number in numbers:
+            # `fetch_issue` predates the budget, so its reservation is claimed
+            # here rather than inside the fetcher. Adding a parameter to a
+            # shipped fetcher for the sake of one caller is a worse trade than
+            # one explicit line where the cap is actually being spent.
+            if not budget.reserve():
+                logger.warning(
+                    "review_orchestrator: issue_context_budget_exhausted "
+                    "repo=%s/%s pr=%s issue=%s limit=%d",
+                    sanitize_log_value(owner, 128),
+                    sanitize_log_value(repo, 128),
+                    pr_number,
+                    number,
+                    MAX_LINKED_ISSUE_REQUESTS,
+                )
+                detail_incomplete = True
+                break
             try:
                 issue_payload = await fetch_issue(
                     owner=owner,
@@ -783,7 +820,55 @@ async def _collect_linked_issue_context(
                     number,
                 )
                 continue
-            issues.append(issue)
+
+            try:
+                enrichment = await _enrich_linked_issue(
+                    issue=issue,
+                    owner=owner,
+                    repo=repo,
+                    token=token,
+                    budget=budget,
+                    pr_number=pr_number,
+                )
+            except GitHubRateLimitError as limited_err:
+                # Re-raised by the helper and handled here rather than
+                # swallowed there: a throttled installation must stop issuing
+                # enrichment requests, not fall through to the next issue. The
+                # body already read is kept — only fields nobody fetched are
+                # missing, and the incomplete-detail flag below discloses that:
+                # the budget may still have room here, so `budget.exhausted`
+                # alone would stay silent.
+                logger.warning(
+                    "review_orchestrator: issue_context_truncated repo=%s/%s "
+                    "pr=%s issue=%s reason=rate_limit_during_enrichment "
+                    "error=%s",
+                    sanitize_log_value(owner, 128),
+                    sanitize_log_value(repo, 128),
+                    pr_number,
+                    number,
+                    sanitize_log_value(limited_err),
+                )
+                detail_incomplete = True
+                issues.append(issue)
+                break
+            except Exception:
+                # This call site sits outside the `analyze_diff` try/except, so
+                # an uncaught raise would be terminalised by the pipeline's
+                # crash handler and the review would be lost over a hint.
+                logger.exception(
+                    "review_orchestrator: issue_context_enrichment_failed "
+                    "repo=%s/%s pr=%s issue=%s",
+                    sanitize_log_value(owner, 128),
+                    sanitize_log_value(repo, 128),
+                    pr_number,
+                    number,
+                )
+                enrichment = IssueEnrichment()
+            issues.append(
+                issue
+                if enrichment.is_empty
+                else _with_enrichment(issue, enrichment)
+            )
 
         # Nothing was read at all: no block. A block whose entire content is
         # "(+N linked issue(s) not shown)" describes an absence, not context,
@@ -794,12 +879,17 @@ async def _collect_linked_issue_context(
         # `omitted` from `select_local_issue_numbers` counts only what never
         # reached the fetch because it was past the cap. Anything selected that
         # did not make it into `issues` — 404'd, errored, or left unattempted by
-        # a rate-limit `break` — is a referenced issue the model is not being
-        # shown, so it belongs in the same disclosure. Reporting only the
-        # beyond-cap remainder would let the model read a one-issue block for a
-        # PR that named three and conclude the other two do not exist.
+        # a rate-limit `break` or a refused budget reservation — is a referenced
+        # issue the model is not being shown, so it belongs in the same
+        # disclosure. Reporting only the beyond-cap remainder would let the
+        # model read a one-issue block for a PR that named three and conclude
+        # the other two do not exist.
         return render_issue_context(
-            issues, omitted=omitted + (len(numbers) - len(issues))
+            issues,
+            omitted=omitted + (len(numbers) - len(issues)),
+            # `detail_incomplete`, not `budget.exhausted`: the caps sum exactly
+            # to the limit, so a spent budget refused nothing.
+            budget_exhausted=detail_incomplete,
         )
     except Exception:
         logger.exception(
@@ -809,6 +899,161 @@ async def _collect_linked_issue_context(
             pr_number,
         )
         return ""
+
+
+def _with_enrichment(issue: LinkedIssue, enrichment: IssueEnrichment) -> LinkedIssue:
+    """``issue`` carrying ``enrichment``; a frozen dataclass has no ``with``."""
+    return LinkedIssue(
+        number=issue.number,
+        title=issue.title,
+        body=issue.body,
+        opener=issue.opener,
+        opener_association=issue.opener_association,
+        enrichment=enrichment,
+    )
+
+
+async def _enrich_linked_issue(
+    *,
+    issue: LinkedIssue,
+    owner: str,
+    repo: str,
+    token: Any,
+    budget: GitHubRequestBudget,
+    pr_number: Optional[int],
+) -> IssueEnrichment:
+    """Read the discussion and the cross-references of one linked issue.
+
+    Each field degrades independently: a comments failure costs the discussion
+    and nothing else, a timeline failure costs the cross-references and nothing
+    else, and the body already read is kept either way. That independence is the
+    point — these are three separate endpoints with three separate failure
+    modes, and coupling them would mean a flaky timeline endpoint costs the
+    discussion too.
+
+    **The one exception is a rate limit, which is re-raised.** Not a 404, not a
+    500, not a transport error: those are answers about one request, while a
+    rate limit is an answer about the installation, and every further request
+    would be another request into a limit that is already rejecting them. The
+    caller turns it into ``break``, exactly as it already does for the issue
+    body. Nothing else escapes this function.
+
+    A bare ``except Exception`` guards each new call site as well. The insertion
+    point is outside the ``analyze_diff`` try/except, so an uncaught raise here
+    is caught nowhere else: it would be terminalised by the pipeline's
+    timeout/crash handler and the review lost over a hint that was never
+    required. That is not hypothetical — it is the bug #123's own review caught.
+
+    Not wall-clock bounded here on purpose:
+    :data:`LINKED_ISSUE_CONTEXT_TIMEOUT_S` wraps the whole loop at the caller,
+    which is the bound that actually matters; a second one per call would only
+    change which of the two fires first.
+    """
+    comments: tuple = ()
+    comments_omitted = 0
+    discussion_truncated = False
+    try:
+        comment_page = await fetch_issue_comments(
+            owner=owner,
+            repo=repo,
+            issue_number=issue.number,
+            budget=budget,
+            token=token,
+        )
+        comments, comments_omitted = issue_comments_from_payloads(comment_page.comments)
+        discussion_truncated = comment_page.truncated
+    except GitHubRateLimitError:
+        raise
+    except GitHubClientError as comments_err:
+        logger.warning(
+            "review_orchestrator: issue_enrichment_skip field=comments "
+            "repo=%s/%s issue=%s error_type=%s error=%s",
+            sanitize_log_value(owner, 128),
+            sanitize_log_value(repo, 128),
+            issue.number,
+            type(comments_err).__name__,
+            sanitize_log_value(comments_err),
+        )
+    except Exception:
+        logger.exception(
+            "review_orchestrator: issue_enrichment_skip field=comments "
+            "repo=%s/%s issue=%s reason=unexpected",
+            sanitize_log_value(owner, 128),
+            sanitize_log_value(repo, 128),
+            issue.number,
+        )
+
+    cross_references: tuple = ()
+    cross_references_omitted = 0
+    timeline_truncated = False
+    try:
+        timeline_page = await fetch_issue_timeline(
+            owner=owner,
+            repo=repo,
+            issue_number=issue.number,
+            budget=budget,
+            token=token,
+        )
+        cross_references, cross_references_omitted = cross_references_from_timeline(
+            timeline_page.events
+        )
+        timeline_truncated = timeline_page.truncated
+    except GitHubRateLimitError:
+        raise
+    except GitHubClientError as timeline_err:
+        logger.warning(
+            "review_orchestrator: issue_enrichment_skip field=cross_references "
+            "repo=%s/%s issue=%s error_type=%s error=%s",
+            sanitize_log_value(owner, 128),
+            sanitize_log_value(repo, 128),
+            issue.number,
+            type(timeline_err).__name__,
+            sanitize_log_value(timeline_err),
+        )
+    except Exception:
+        logger.exception(
+            "review_orchestrator: issue_enrichment_skip field=cross_references "
+            "repo=%s/%s issue=%s reason=unexpected",
+            sanitize_log_value(owner, 128),
+            sanitize_log_value(repo, 128),
+            issue.number,
+        )
+
+    mentions: tuple = ()
+    mentions_omitted = 0
+    try:
+        # The issue's own number, the pull request under review, and every
+        # number the timeline already resolved are excluded: one reference shown
+        # twice under two different confidences is worse than one reference shown
+        # once under the right one. Cross-repository references are not excluded
+        # by number — the same number in another repository is a different thing.
+        resolved = [
+            reference.number for reference in cross_references if not reference.repo
+        ]
+        exclude = [issue.number, pr_number, *resolved]
+        mentions, mentions_omitted = extract_textual_mentions(
+            [issue.body, *(comment.body for comment in comments)],
+            exclude=[number for number in exclude if isinstance(number, int)],
+        )
+    except Exception:
+        logger.exception(
+            "review_orchestrator: issue_enrichment_skip field=mentions "
+            "repo=%s/%s issue=%s reason=unexpected",
+            sanitize_log_value(owner, 128),
+            sanitize_log_value(repo, 128),
+            issue.number,
+        )
+
+    return IssueEnrichment(
+        comments=comments,
+        comments_omitted=comments_omitted,
+        discussion_truncated=discussion_truncated,
+        cross_references=cross_references,
+        cross_references_omitted=cross_references_omitted,
+        timeline_truncated=timeline_truncated,
+        mentions=mentions,
+        mentions_omitted=mentions_omitted,
+    )
 
 
 #: Wall-clock ceiling for the whole post-publish thread-resolution step.
@@ -828,6 +1073,27 @@ REVIEW_THREAD_RESOLUTION_TIMEOUT_S: float = 30.0
 #: endpoint in well under a second — and gives up rather than competing with the
 #: LLM call and the publish for the rest of the budget.
 LINKED_ISSUE_CONTEXT_TIMEOUT_S: float = 30.0
+
+#: Hard ceiling on the GitHub requests one linked-issue enrichment pass may
+#: spend, shared across every issue in the pass rather than reset per issue.
+#: Written as the sum of the per-issue caps on purpose, so the number below is
+#: the arithmetic and not a guess:
+#:
+#:     MAX_LINKED_ISSUES (3 issues)
+#:       x (1 issue body + 1 comments page + 5 timeline pages)
+#:     = 3 x 7 = 21
+#:
+#: Every call site charges a :class:`~app.github_client.GitHubRequestBudget`
+#: reservation *before* issuing its request, and a refused reservation stops
+#: that fetch instead of falling through to a best-effort one. The block says
+#: so only when detail was actually withheld -- a refused reservation or a
+#: rate-limit-shortened enrichment -- because the alternative is a review that
+#: reads a comment-less issue as a comment-less issue. Merely spending the
+#: whole budget says nothing: the per-issue caps above sum exactly to this
+#: limit, so a full pass ends at the cap with nothing refused.
+MAX_LINKED_ISSUE_REQUESTS: int = MAX_LINKED_ISSUES * (
+    1 + MAX_ISSUE_COMMENT_PAGES + MAX_ISSUE_TIMELINE_PAGES
+)
 
 
 def _thread_author_login(thread: dict[str, Any]) -> str:
