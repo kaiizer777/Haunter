@@ -1237,6 +1237,145 @@ async def fetch_pull_request(
     return response.json()
 
 
+async def fetch_issue(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    token: Optional[str] = None,
+    allow_global_token: bool = True,
+) -> dict[str, Any]:
+    """
+    Fetch a single GitHub issue (title + body) via the Issues API.
+    GET /repos/{owner}/{repo}/issues/{issue_number}
+
+    Reads only.
+
+    **Permission prerequisite — read before trusting this in production.**
+    Per GitHub's *Permissions required for GitHub Apps* reference, the two
+    endpoints in this area are governed differently:
+
+    * ``GET /repos/{owner}/{repo}/issues/{n}`` appears exactly once, under
+      *Repository permissions for issues*: ``issues: read``, with no
+      alternative grant that would satisfy it.
+    * ``GET /repos/{owner}/{repo}/issues/{n}/comments`` appears twice, under
+      that heading **and** under *Repository permissions for pull requests*:
+      ``issues: read`` **or** ``pull_requests: read`` — either one suffices.
+
+    So a ``pull_requests`` grant carries the comments endpoint and not this
+    one. The permissions Haunter documents installing (``contents:write``,
+    ``pull_requests:write``, ``checks:read``, ``actions:read``; see
+    ``HAUNTER.md`` §7.2 "GitHub Credential Segregation") satisfy
+    ``pull_requests: read`` — GitHub's permission ladder is three-state (No
+    access / Read-only / Read & write), so ``write`` implies ``read`` — but do
+    **not** include ``issues: read``. On an installation that has not been
+    granted it this call answers 403 and the caller degrades to a review with
+    no issue context. Enabling the feature is therefore an operational step —
+    grant the App ``issues: read`` and re-install it — not something this
+    function can decide. It is spelled out here because the failure is a
+    silent no-op: a review still publishes, just without the context.
+
+    The non-obvious half, stated because it is what a reader debugging that
+    403 gets wrong: this is the endpoint that does not work. The comments
+    endpoint above — deliberately not implemented, see
+    :mod:`app.subagents.issue_context` for why — was authorized under the
+    permissions this repo already documents.
+
+    Mirrors :func:`fetch_pull_request` exactly — same bounded read, same error
+    ladder, same header construction — because a caller that handles one of
+    those failures must handle these identically, and a second shape would be a
+    second thing to get wrong. A rate limit is surfaced as
+    :class:`GitHubRateLimitError` rather than slept through, so the caller can
+    decide: the review pipeline runs under a 300s wall-clock bound it cannot
+    afford to spend on a backoff.
+
+    Raises:
+        GitHubNetworkError: Connection failure / timeout.
+        GitHubResponseLimitError: Response past ``MAX_API_RESPONSE_BYTES``.
+        GitHubResourceNotFoundError: 404 — the issue was deleted, or is in a
+            repository this installation cannot see.
+        GitHubRateLimitError: 429, or 401/403 whose body names a rate limit.
+        GitHubAuthError: 401/403 for any other reason — including the missing
+            ``issues: read`` grant described above.
+        GitHubClientError: Any other error status, or a 200 whose body is not
+            an issue object.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/issues/{quote(str(issue_number), safe='')}"
+    )
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await _bounded_get(
+                client,
+                url,
+                headers=headers,
+                max_bytes=MAX_API_RESPONSE_BYTES,
+            )
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error fetching issue %s/%s #%s",
+                owner,
+                repo,
+                issue_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Issue not found for {owner}/{repo} #{issue_number}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        # The same branch the other fetchers in this file already carry. Without
+        # it a 429 falls to the generic branch below and surfaces as a plain
+        # GitHubClientError, which this caller's loop treats as "skip this one"
+        # — so a throttled installation would keep issuing requests into the
+        # limit that is already rejecting them.
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    data = response.json()
+    # A 200 is not proof of a payload. GitHub answers a GraphQL-shaped
+    # `{"errors": [...]}` body with 200 on some proxies and gateways, and a
+    # bare `{}` is what a truncated or wrong-content-type response decodes to;
+    # both would otherwise sail through as "an issue with no title".
+    if isinstance(data, dict) and data.get("errors"):
+        raise GitHubClientError("GitHub returned an error envelope for fetch-issue")
+    # `number` and `title` are `required` in GitHub's own Issue schema, so a
+    # response missing either is truncated or foreign rather than an issue that
+    # happens to have no title. `body` is `string or null` — null being a
+    # first-class state for an issue with no description — but the key is always
+    # present in a real response, so requiring a string or null catches a
+    # truncated body without rejecting a description-less issue. Rendering a
+    # payload that fails this would put a bare `### Issue #12` heading in front
+    # of the model as though the issue had been read.
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("html_url"), str)
+        or not isinstance(data.get("number"), int)
+        or isinstance(data.get("number"), bool)
+        or not isinstance(data.get("title"), str)
+        or "body" not in data
+        or not (data["body"] is None or isinstance(data["body"], str))
+    ):
+        raise GitHubClientError("Unexpected fetch-issue response structure from GitHub API")
+    return data
+
+
 async def create_pr_review(
     owner: str,
     repo: str,

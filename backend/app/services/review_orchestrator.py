@@ -17,7 +17,7 @@ import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
 import logging
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 import uuid
 
 from sqlalchemy import select
@@ -33,17 +33,20 @@ from app.github.pr import (
 )
 from app.github_client import (
     GitHubClientError,
+    GitHubRateLimitError,
+    GitHubResourceNotFoundError,
     GitHubUnprocessableEntityError,
     create_commit_comment,
     create_pull_request_review,
     fetch_bot_identity,
     fetch_diff,
+    fetch_issue,
     fetch_pull_request,
     fetch_pull_request_diff,
     fetch_review_threads,
     resolve_review_threads,
 )
-from app.llm.prompts.audit_prompts import MAX_GITHUB_COMMENT_CHARS
+from app.llm.prompts.audit_prompts import MAX_GITHUB_COMMENT_CHARS, MAX_LINKED_ISSUES
 from app.log_hygiene import sanitize_log_value
 from app.models import CodeReview
 from app.services.repo_settings import get_repo_settings
@@ -57,6 +60,13 @@ from app.subagents.code_reviewer import (
     analyze_diff,
     bound_github_body,
     format_github_suggestion,
+)
+from app.subagents.issue_context import (
+    LinkedIssue,
+    linked_issue_from_payload,
+    parse_closing_issue_refs,
+    render_issue_context,
+    select_local_issue_numbers,
 )
 
 logger = logging.getLogger(__name__)
@@ -522,7 +532,7 @@ async def _resolve_publish_sha(
     pr_number: int,
     enqueue_sha: str,
     token: Any,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, Optional[dict[str, Any]]]:
     """Resolve the PR head the review should be published against.
 
     ``review.commit_sha`` is pinned when the webhook is delivered
@@ -545,7 +555,20 @@ async def _resolve_publish_sha(
     deliberate: the review would otherwise be discarded over a transient
     metadata failure, and the caller logs the unverified pin either way.
 
-    Returns ``(commit_sha, live_head_verified)``.
+    The PR body is returned alongside the SHA because this call is already
+    paying for ``GET /pulls/{n}`` and that response carries the title and
+    description — the only place in the pipeline that mentions *what the change
+    was supposed to do*. The caller used to keep the SHA and discard the rest,
+    which made linked-issue context (issue #123) look like it needed its own
+    API call. It does not.
+
+    The payload is independent of the SHA verdict: a response missing
+    ``head.sha`` still describes the pull request perfectly well, so it is
+    returned there too. ``None`` means the request itself failed, or GitHub
+    answered with something that is not an object — the paths where there is
+    nothing to read a PR body out of.
+
+    Returns ``(commit_sha, live_head_verified, pull_request_payload)``.
     """
     try:
         pr = await fetch_pull_request(
@@ -565,9 +588,10 @@ async def _resolve_publish_sha(
             sanitize_log_value(head_err),
             sanitize_log_value(enqueue_sha, 64),
         )
-        return enqueue_sha, False
+        return enqueue_sha, False, None
 
-    head = pr.get("head") if isinstance(pr, dict) else None
+    payload: Optional[dict[str, Any]] = pr if isinstance(pr, dict) else None
+    head = payload.get("head") if payload is not None else None
     live_sha = head.get("sha") if isinstance(head, dict) else None
     if not isinstance(live_sha, str) or not live_sha.strip():
         logger.warning(
@@ -578,7 +602,7 @@ async def _resolve_publish_sha(
             pr_number,
             sanitize_log_value(enqueue_sha, 64),
         )
-        return enqueue_sha, False
+        return enqueue_sha, False, payload
 
     live_sha = live_sha.strip()
     if live_sha != enqueue_sha:
@@ -591,7 +615,200 @@ async def _resolve_publish_sha(
             sanitize_log_value(enqueue_sha, 64),
             sanitize_log_value(live_sha, 64),
         )
-    return live_sha, True
+    return live_sha, True, payload
+
+
+async def _resolve_linked_issue_context(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: Optional[int],
+    pr_payload: Optional[dict[str, Any]],
+    token: Any,
+) -> str:
+    """Render the linked-issue context block for one review, or ``""``.
+
+    Resolves which issues a pull request claims to close (``Fixes #12``,
+    ``closes owner/repo#13``, …) from the PR body that
+    :func:`_resolve_publish_sha` already fetched, then reads each referenced
+    issue and renders the result as a bounded, fenced, explicitly-untrusted
+    block. The PR body costs nothing extra — see that function.
+
+    **This function never raises.** Every failure mode below resolves to ``""``
+    and the review proceeds unchanged, because the thing this adds is context,
+    not correctness: a review that publishes without it is worth strictly more
+    than a review that does not publish at all. The insertion point sits outside
+    the ``analyze_diff`` try/except, so an uncaught raise here would be
+    terminalised by the pipeline's timeout/crash handler and the review would be
+    lost over a missing hint. Hence the bare ``except Exception``.
+
+    * 404 on one issue: skip it, keep the rest. A PR body saying ``Fixes #99``
+      routinely outlives issue #99 (deleted, transferred, private).
+    * rate limit: stop fetching. ``github_client`` has no backoff mechanism and
+      ``REVIEW_TIMEOUT_S`` (300s) cannot absorb one, so sleeping here would risk
+      the timeout handler overwriting a review that was about to publish fine.
+      The remaining issues are dropped rather than retried.
+    * auth / network / 5xx / malformed payload: logged, then skipped.
+    * no PR (a push review), no installation token, or no usable PR body: no
+      request at all.
+
+    Failure values reaching a log line are passed through ``sanitize_log_value``
+    like every other message in this module — a PR body is attacker-influenced
+    text and can end up inside an exception message.
+
+    Wall-clock bounded to :data:`LINKED_ISSUE_CONTEXT_TIMEOUT_S`; see there.
+    """
+    try:
+        return await asyncio.wait_for(
+            _collect_linked_issue_context(
+                owner=owner,
+                repo=repo,
+                pr_number=pr_number,
+                pr_payload=pr_payload,
+                token=token,
+            ),
+            timeout=LINKED_ISSUE_CONTEXT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        # Cancelling mid-flight abandons the remaining requests, which is the
+        # point: this step is a hint, and the 300s the pipeline owes the LLM and
+        # the publish call is worth more than whatever the next issue would have
+        # said. Anything already fetched is discarded rather than half-rendered.
+        logger.warning(
+            "review_orchestrator: issue_context_unavailable repo=%s/%s pr=%s "
+            "reason=timeout budget_s=%s",
+            sanitize_log_value(owner, 128),
+            sanitize_log_value(repo, 128),
+            pr_number,
+            LINKED_ISSUE_CONTEXT_TIMEOUT_S,
+        )
+        return ""
+
+
+async def _collect_linked_issue_context(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: Optional[int],
+    pr_payload: Optional[dict[str, Any]],
+    token: Any,
+) -> str:
+    """Fetch and render the linked issues; always bounded by its caller.
+
+    Split out of :func:`_resolve_linked_issue_context` only so the
+    ``asyncio.wait_for`` that bounds it wraps the whole fetch loop rather than
+    each request — a per-request bound would still let three sequential reads
+    add up to the client timeout three times over.
+    """
+    if not pr_number or not token or not isinstance(pr_payload, dict):
+        return ""
+    pr_body = pr_payload.get("body")
+    if not isinstance(pr_body, str) or not pr_body:
+        return ""
+
+    try:
+        refs = parse_closing_issue_refs(pr_body)
+        if not refs:
+            return ""
+        numbers, omitted = select_local_issue_numbers(
+            refs, owner=owner, repo=repo, limit=MAX_LINKED_ISSUES
+        )
+        if not numbers:
+            return ""
+
+        issues: list[LinkedIssue] = []
+        for number in numbers:
+            try:
+                issue_payload = await fetch_issue(
+                    owner=owner,
+                    repo=repo,
+                    issue_number=number,
+                    token=token,
+                )
+            except GitHubResourceNotFoundError as missing_err:
+                logger.info(
+                    "review_orchestrator: issue_context_skip repo=%s/%s pr=%s "
+                    "issue=%s reason=not_found error=%s",
+                    sanitize_log_value(owner, 128),
+                    sanitize_log_value(repo, 128),
+                    pr_number,
+                    number,
+                    sanitize_log_value(missing_err),
+                )
+                continue
+            except GitHubRateLimitError as limited_err:
+                # `break`, not `continue`: every remaining reference would be
+                # another request against a limit that has already answered.
+                logger.warning(
+                    "review_orchestrator: issue_context_truncated repo=%s/%s "
+                    "pr=%s issue=%s reason=rate_limit error=%s",
+                    sanitize_log_value(owner, 128),
+                    sanitize_log_value(repo, 128),
+                    pr_number,
+                    number,
+                    sanitize_log_value(limited_err),
+                )
+                break
+            except GitHubClientError as issue_err:
+                logger.warning(
+                    "review_orchestrator: issue_context_skip repo=%s/%s pr=%s "
+                    "issue=%s error_type=%s error=%s",
+                    sanitize_log_value(owner, 128),
+                    sanitize_log_value(repo, 128),
+                    pr_number,
+                    number,
+                    type(issue_err).__name__,
+                    sanitize_log_value(issue_err),
+                )
+                continue
+            except Exception:
+                logger.exception(
+                    "review_orchestrator: issue_context_skip repo=%s/%s pr=%s "
+                    "issue=%s reason=unexpected",
+                    sanitize_log_value(owner, 128),
+                    sanitize_log_value(repo, 128),
+                    pr_number,
+                    number,
+                )
+                continue
+
+            issue = linked_issue_from_payload(issue_payload)
+            if issue is None:
+                logger.warning(
+                    "review_orchestrator: issue_context_skip repo=%s/%s pr=%s "
+                    "issue=%s reason=unusable_payload",
+                    sanitize_log_value(owner, 128),
+                    sanitize_log_value(repo, 128),
+                    pr_number,
+                    number,
+                )
+                continue
+            issues.append(issue)
+
+        # Nothing was read at all: no block. A block whose entire content is
+        # "(+N linked issue(s) not shown)" describes an absence, not context,
+        # and it would be the one thing the model is told to reason about.
+        if not issues:
+            return ""
+
+        # `omitted` from `select_local_issue_numbers` counts only what never
+        # reached the fetch because it was past the cap. Anything selected that
+        # did not make it into `issues` — 404'd, errored, or left unattempted by
+        # a rate-limit `break` — is a referenced issue the model is not being
+        # shown, so it belongs in the same disclosure. Reporting only the
+        # beyond-cap remainder would let the model read a one-issue block for a
+        # PR that named three and conclude the other two do not exist.
+        return render_issue_context(
+            issues, omitted=omitted + (len(numbers) - len(issues))
+        )
+    except Exception:
+        logger.exception(
+            "review_orchestrator: issue_context_unavailable repo=%s/%s pr=%s",
+            sanitize_log_value(owner, 128),
+            sanitize_log_value(repo, 128),
+            pr_number,
+        )
+        return ""
 
 
 #: Wall-clock ceiling for the whole post-publish thread-resolution step.
@@ -601,6 +818,16 @@ async def _resolve_publish_sha(
 #: the timeout handler overwrite a review that already published successfully.
 #: The step is a courtesy to the reviewer, so it yields rather than the row.
 REVIEW_THREAD_RESOLUTION_TIMEOUT_S: float = 30.0
+
+#: Wall-clock ceiling for resolving linked-issue context (issue #123). Same
+#: reasoning as ``REVIEW_THREAD_RESOLUTION_TIMEOUT_S`` above, one step earlier:
+#: up to ``MAX_LINKED_ISSUES`` sequential reads at the 30s client timeout is 90s
+#: of a ``REVIEW_TIMEOUT_S`` (300s) budget spent on an optional hint, and a
+#: GitHub slow to answer would have the timeout handler mark an otherwise
+#: publishable review as errored. 30s buys the common case — GitHub answers this
+#: endpoint in well under a second — and gives up rather than competing with the
+#: LLM call and the publish for the rest of the budget.
+LINKED_ISSUE_CONTEXT_TIMEOUT_S: float = 30.0
 
 
 def _thread_author_login(thread: dict[str, Any]) -> str:
@@ -1139,9 +1366,13 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
         target_sha = review.commit_sha
         sha_pin_verified = True
         grounding_source = GroundingSource.COMMIT_DIFF
+        # The `GET /pulls/{n}` response, kept so the linked-issue context can be
+        # parsed from the PR description without a second API call (issue #123).
+        # `None` for a push review and whenever that fetch failed.
+        pr_payload: Optional[dict[str, Any]] = None
         try:
             if review.pr_number:
-                target_sha, sha_pin_verified = await _resolve_publish_sha(
+                target_sha, sha_pin_verified, pr_payload = await _resolve_publish_sha(
                     owner=repo.owner,
                     repo=repo.name,
                     pr_number=review.pr_number,
@@ -1206,12 +1437,28 @@ async def _run_review_pipeline_body(review_id: uuid.UUID) -> None:
         if repo.language_hint:
             repo_context += f" (primary language: {repo.language_hint})"
 
+        # What this pull request claims to close, so the model can judge the
+        # diff against the ask instead of guessing at intent from the diff
+        # alone (issue #123). `repo_context` above is the entire repo context the
+        # reviewer has today — an owner/name and a language — which is why the
+        # issue text is the only other thing it gets. Resolved from the PR body
+        # `_resolve_publish_sha` already fetched, never-raising, and empty for
+        # every PR that closes nothing.
+        issue_context = await _resolve_linked_issue_context(
+            owner=repo.owner,
+            repo=repo.name,
+            pr_number=review.pr_number,
+            pr_payload=pr_payload,
+            token=token,
+        )
+
         try:
             result = await analyze_diff(
                 diff_text=diff_text,
                 repo_context=repo_context,
                 db=session,
                 repo_id=repo.id,
+                issue_context=issue_context,
             )
         except Exception as llm_err:
             logger.exception(
