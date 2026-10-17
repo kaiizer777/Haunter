@@ -217,6 +217,25 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("max_attempts", "HAUNTER_MAX_ATTEMPTS"),
     )
 
+    # Issue #157 — pipeline-outbox sweeper horizons. A run still `pending`
+    # past `pipeline_pending_timeout_s` never started (its async self-invoke
+    # failed/crashed) and is redriven; past `pipeline_pending_exhaust_after_s`
+    # it is marked `error` (exhausted) so redrives stay bounded when the child
+    # keeps crashing post-accept. Override per environment via
+    # PIPELINE_PENDING_TIMEOUT_S / PIPELINE_PENDING_EXHAUST_AFTER_S.
+    pipeline_pending_timeout_s: float = Field(
+        default=300.0,
+        validation_alias=AliasChoices(
+            "pipeline_pending_timeout_s", "PIPELINE_PENDING_TIMEOUT_S"
+        ),
+    )
+    pipeline_pending_exhaust_after_s: float = Field(
+        default=3600.0,
+        validation_alias=AliasChoices(
+            "pipeline_pending_exhaust_after_s", "PIPELINE_PENDING_EXHAUST_AFTER_S"
+        ),
+    )
+
     # NICE-3: cap on the number of files Haunter seeds from the user's failing
     # commit into the test mirror. Raised from 50 → 500 so large repos (e.g.
     # UpGrade at 343 files) don't have their pytest configs and test directories
