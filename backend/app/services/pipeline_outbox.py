@@ -91,6 +91,7 @@ async def sweep_stale_pending_runs(
     stale_cutoff = current - timedelta(seconds=stale_after_s)
 
     make_session = session_factory or _default_session_factory
+    make_adapter = adapter_factory or _default_adapter_factory
     summary = PipelineOutboxSummary()
     async with make_session() as db:
         result = await db.execute(
@@ -104,4 +105,79 @@ async def sweep_stale_pending_runs(
         logger.info(
             "pipeline_outbox: sweep found %d stale pending runs", summary.scanned
         )
+        for run in stale_runs:
+            await _sweep_one(db, run, make_adapter, summary, current, exhaust_after_s)
+            await db.commit()
     return summary
+
+
+async def _sweep_one(db, run, make_adapter, summary, current, exhaust_after_s) -> None:
+    """Redrive one stale run, or exhaust it when past the horizon."""
+    from fastapi import BackgroundTasks
+
+    from app.models import Run
+    from sqlalchemy import update
+
+    run_id = run.id
+    created_at = run.created_at
+    if created_at is not None and created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    exhaust_cutoff = current - timedelta(seconds=exhaust_after_s)
+
+    if created_at is not None and created_at <= exhaust_cutoff:
+        await _fail_run(db, run_id, FAILURE_REASON_EXHAUSTED)
+        summary.exhausted.append(str(run_id))
+        logger.warning(
+            "pipeline_outbox: run=%s exhausted (pending past horizon)", run_id
+        )
+        return
+
+    # CAS claim: only the sweeper (or nobody) owns this run. A rowcount of 0
+    # means the child started concurrently — it wins, we skip quietly.
+    # The updated_at bump gives the redriven child a full fresh window before
+    # the next sweep can redrive it again (no hot-loop redrive every tick).
+    claimed = await db.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status == "pending")
+        .values(updated_at=current)
+    )
+    if claimed.rowcount == 0:
+        summary.skipped += 1
+        logger.info("pipeline_outbox: run=%s already started, skipping", run_id)
+        return
+
+    adapter = await make_adapter()
+    try:
+        await adapter.schedule_pipeline(run_id, BackgroundTasks())
+    except Exception as exc:
+        logger.warning(
+            "pipeline_outbox: run=%s redrive failed (%s) — failing run",
+            run_id,
+            type(exc).__name__,
+        )
+        await _fail_run(db, run_id, FAILURE_REASON_REDRIVE_FAILED)
+        summary.exhausted.append(str(run_id))
+        return
+    summary.redriven.append(str(run_id))
+    logger.info("pipeline_outbox: run=%s redriven", run_id)
+
+
+async def _fail_run(db, run_id: UUID, reason: str) -> None:
+    """CAS-transition a still-``pending`` run to ``error`` with a reason.
+
+    Never raises on a lost race: rowcount 0 means someone else moved the run
+    (the child started, or another sweep exhausted it) — that outcome is
+    already terminal-or-executing, which is exactly what the sweeper wants.
+    """
+    from app.models import Run
+    from sqlalchemy import update
+
+    await db.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status == "pending")
+        .values(
+            status="error",
+            failure_reason=reason[:500],
+            updated_at=_utcnow(),
+        )
+    )
