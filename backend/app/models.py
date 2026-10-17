@@ -919,8 +919,8 @@ class WebhookRateLimitHit(Base):
     bucket key the in-memory limiter used. The in-window count for a bucket is
     the number of its rows newer than `now - window`, so the budget is a count
     over rows rather than a per-process counter — which is the point: a row is
-    visible to every process that can see the database, so all ten Lambda
-    execution environments spend from one budget instead of each enforcing its
+    visible to every process that can see the database, so every Lambda
+    execution environment spends from one budget instead of each enforcing its
     own copy.
 
     Deliberately NOT a foreign-key'd, tenant-scoped table. `bucket_key` is derived
