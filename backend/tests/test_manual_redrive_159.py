@@ -147,3 +147,50 @@ async def test_exhausted_run_replays_into_clean_pending_child(
         select(func.count(Attempt.id)).where(Attempt.run_id == source_id)
     )
     assert src_attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_transient_error_run_replays_and_child_trace_resolves(
+    db: AsyncSession, make_auth_client
+):
+    """Issue #159: a transiently failed run replays and the child is traceable.
+
+    The dashboard lands on the dispatched child via the POST response id, so
+    the child trace must resolve with its parent linkage intact.
+    """
+    await truncate_all(db)
+    user, repo = await _seed_user_repo(db, 15902, "redrive_transient_user")
+
+    source = Run(
+        repo_id=repo.id,
+        github_run_id=159000222,
+        github_delivery_id="delivery-159-transient",
+        head_sha="b" * 40,
+        head_branch="main",
+        status="error",
+        conclusion="failure",
+        failure_reason="sandbox verification timed out",
+    )
+    db.add(source)
+    await db.commit()
+    await db.refresh(source)
+    source_id = source.id
+
+    mock_adapter = AsyncMock()
+    async with make_auth_client(user.id) as client:
+        with patch(
+            "app.adapters.hosting.get_hosting_adapter",
+            new=AsyncMock(return_value=mock_adapter),
+        ):
+            resp = await client.post(f"/runs/{source_id}/retry")
+        assert resp.status_code == 201
+        child_id = resp.json()["id"]
+
+        trace = await client.get(f"/runs/{child_id}/trace")
+
+    assert trace.status_code == 200
+    body = trace.json()
+    assert body["run"]["status"] == "pending"
+    assert body["run"]["parent_run_id"] == str(source_id)
+    assert body["parent"]["id"] == str(source_id)
+    mock_adapter.schedule_pipeline.assert_awaited_once()
