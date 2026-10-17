@@ -109,16 +109,20 @@ async def test_two_instances_share_one_budget(db: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_buckets_stay_scoped_to_their_key(db: AsyncSession):
-    """One noisy sender cannot starve another bucket — no accidental merge."""
+    """One noisy sender cannot starve another bucket — no accidental merge.
+
+    Wall-clock pinned via explicit ``now`` so the window is deterministic
+    rather than a function of when the suite happens to run.
+    """
     env_a = PostgresRateLimitBackend()
     env_b = PostgresRateLimitBackend()
 
-    assert await env_a.consume("noisy/noisy-repo|s", maximum=2, window=60) == 0
-    assert await env_a.consume("noisy/noisy-repo|s", maximum=2, window=60) == 0
-    assert await env_a.consume("noisy/noisy-repo|s", maximum=2, window=60) > 0
+    assert await env_a.consume("noisy/noisy-repo|s", maximum=2, window=60, now=8000.0) == 0
+    assert await env_a.consume("noisy/noisy-repo|s", maximum=2, window=60, now=8001.0) == 0
+    assert await env_a.consume("noisy/noisy-repo|s", maximum=2, window=60, now=8002.0) > 0
     # Same repo, different sender, and different repo entirely: both fresh.
-    assert await env_b.consume("noisy/noisy-repo|other", maximum=2, window=60) == 0
-    assert await env_b.consume("other-org/noisy-repo|s", maximum=2, window=60) == 0
+    assert await env_b.consume("noisy/noisy-repo|other", maximum=2, window=60, now=8002.0) == 0
+    assert await env_b.consume("other-org/noisy-repo|s", maximum=2, window=60, now=8002.0) == 0
     assert await _row_count(db, "noisy/noisy-repo|s") == 2
 
 
@@ -221,7 +225,12 @@ async def test_global_prune_is_interval_throttled(db: AsyncSession):
 
     # ...and the interval resets, so the next new key is throttled again.
     assert (
-        await backend.consume("gate/k4|s", maximum=5, window=10, now=5031.0)
+        await backend.consume(
+            "gate/k4|s",
+            maximum=5,
+            window=10,
+            now=5000.0 + POSTGRES_PRUNE_INTERVAL_SECONDS + 1.0,
+        )
         == 0
     )
     assert await _total_rows(db) == 2

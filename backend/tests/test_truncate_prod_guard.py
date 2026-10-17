@@ -148,6 +148,9 @@ async def test_truncate_all_permits_the_ci_loopback_container() -> None:
     # rather than silently skipping them.
     assert len(session.executed) == 14
     assert any("DELETE FROM users" in stmt for stmt in session.executed)
+    assert any(
+        "DELETE FROM webhook_rate_limit_hits" in stmt for stmt in session.executed
+    )
 
 
 @pytest.mark.asyncio
