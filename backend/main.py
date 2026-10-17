@@ -82,6 +82,35 @@ def _summarize_active_runs(
     }
 
 
+async def _query_active_run_ages() -> Optional[list]:
+    """Return ages in seconds of runs in non-terminal pipeline states.
+
+    Returns None when the database is unreachable or slow. Never raises:
+    /health is a liveness probe and must not flap under DB pressure.
+    """
+    try:
+        async with asyncio.timeout(_HEALTH_DB_TIMEOUT_SECONDS):
+            async with async_session_maker() as session:
+                result = await session.execute(
+                    select(Run.created_at).where(
+                        Run.status.in_(_ACTIVE_RUN_STATUSES)
+                    )
+                )
+                created_dates = result.scalars().all()
+        now = datetime.now(timezone.utc)
+        ages = []
+        for created_at in created_dates:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            ages.append((now - created_at).total_seconds())
+        return ages
+    except Exception:
+        logger.warning(
+            "health: active-run query failed; reporting runs=null", exc_info=True
+        )
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Rate limiter (slowapi = express-rate-limit equivalent for FastAPI)
 # Per-IP limiting applied to auth endpoints in auth.py via @limiter.limit().
