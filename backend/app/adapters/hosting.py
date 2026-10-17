@@ -134,6 +134,7 @@ async def _get_provider_config(key: str, env_default: str) -> str:
         )
         value = env_default
 
+    _prune_cfg_cache(now, normalized)
     _cfg_cache[normalized] = (value, now)
     return value
 
