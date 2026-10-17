@@ -135,6 +135,17 @@ def _verify_self_invocation(kind: str, identifier: str, event: dict) -> bool:
 
 
 def handler(event: dict, context) -> dict:
+    """Lambda entry point. Stashes ``context`` for remaining-time reads, then dispatches."""
+    from app.lambda_runtime import reset_lambda_context, set_lambda_context
+
+    token = set_lambda_context(context)
+    try:
+        return _handler(event, context)
+    finally:
+        reset_lambda_context(token)
+
+
+def _handler(event: dict, context) -> dict:
     """
     AWS Lambda handler for the public Function URL.
 

@@ -48,6 +48,7 @@ from app.github_client import (
     fetch_branch_sha,
     fetch_git_tree,
 )
+from app.lambda_runtime import resolve_lambda_timeout_s
 from app.models import AgentSession, Repo, User
 from app.schemas import (
     ClarificationIn,
@@ -624,6 +625,7 @@ async def _stream_from_db(
     turn_id: str,
     last_event_id: int,
     request: Optional[Request] = None,
+    timeout_s: Optional[float] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Async generator that reads and streams SSE events from PostgreSQL.
@@ -636,7 +638,9 @@ async def _stream_from_db(
        _SSE_IDLE_BACKOFF_MAX_S across consecutive empty ticks, and reset to
        _SSE_POLL_INTERVAL_S as soon as events arrive — until a terminal event
        is persisted, the turn worker drops its row lock, the client
-       disconnects, or a 900s timeout is reached.
+       disconnects, or the Lambda-anchored timeout below is reached
+       (explicit ``timeout_s`` wins; otherwise the invoke's remaining
+       time minus a safety margin, 900s fallback outside Lambda).
 
     Each poll/probe/drain iteration uses a short-lived session, ensuring database
     connections are never held idle across sleeps or stream yields (vital under NullPool).
@@ -671,7 +675,12 @@ async def _stream_from_db(
             return
 
     # 2. Poll for emerging events if the turn is in-flight elsewhere.
-    timeout_s = 900.0  # Max Lambda execution time
+    if timeout_s is None:
+        # Anchor to the real Lambda remaining budget (900s fallback outside
+        # Lambda) so the guard below fires before the hard kill. The deadline
+        # is measured from here, but remaining time already excludes the
+        # pre-stream work above plus a safety margin.
+        timeout_s = resolve_lambda_timeout_s()
     start_time = time.monotonic()
     # Wall-clock liveliness probe (#148): `idle_streak` drives the poll backoff
     # and resets only on real rows; `last_probe_at` drives the probe and resets
