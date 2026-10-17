@@ -16,7 +16,7 @@ Flow (github.md §5.2):
      MVP simplicity (caching is a small optimization per github.md §10).
   5. Push the patch as a commit on ``haunter-attempt-{N}`` via the
      Git Data API (see ``app.sandbox.mirror``).
-  6. Poll the check-runs API every ``poll_interval_seconds`` up to
+  6. Poll the check-runs API every ``poll_interval_seconds`` (with backoff) up to
      ``poll_timeout_seconds``.
   7. Return ``make_result(passed, reason, duration_ms)``.
 
