@@ -512,7 +512,11 @@ def _build_review_messages(
         MAX_ISSUE_CONTEXT_CHARS,
         marker=_ISSUE_CONTEXT_TRUNCATION_MARKER,
     )
-    issue_reserve = len(issue_block) + len("\n\n") if issue_block else 0
+    # `strip()`, not truthiness: a block of nothing but newlines carries no
+    # context, and reserving budget for it would shrink the diff to buy
+    # whitespace. Every block that does carry something is unaffected.
+    has_issue_context = bool(issue_block.strip())
+    issue_reserve = len(issue_block) + len("\n\n") if has_issue_context else 0
     user_budget = MAX_USER_PROMPT_CHARS - issue_reserve
     if validation_error_context:
         user_budget -= _RETRY_RESERVE_CHARS
@@ -528,7 +532,7 @@ def _build_review_messages(
     # end-trimming the right priority: a diff cut is a lost finding, an
     # issue-context cut is a lost hint.
     user_content = (
-        f"{core_content}\n\n{issue_block}" if issue_block else core_content
+        f"{core_content}\n\n{issue_block}" if has_issue_context else core_content
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
