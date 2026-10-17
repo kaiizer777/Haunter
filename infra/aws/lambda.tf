@@ -267,6 +267,22 @@ resource "aws_lambda_function" "haunter" {
 }
 
 # ---------------------------------------------------------------------------
+# Async self-invoke backpressure bound (Issue #160)
+#
+# The pipeline fans out via async self-invoke (InvocationType='Event'). Lambda
+# queues throttled async events internally for up to 6h by default - an unbounded
+# backlog during a storm. This caps the queue: at most 2 retries and events older
+# than 1h are discarded, so overflow degrades instead of piling up.
+# ---------------------------------------------------------------------------
+
+resource "aws_lambda_function_event_invoke_config" "haunter" {
+  function_name                = aws_lambda_function.haunter.function_name
+  qualifier                    = "$LATEST"
+  maximum_event_age_in_seconds = 3600
+  maximum_retry_attempts       = 2
+}
+
+# ---------------------------------------------------------------------------
 # Lambda Function URL
 #
 # Preferred over API Gateway HTTP API because:
