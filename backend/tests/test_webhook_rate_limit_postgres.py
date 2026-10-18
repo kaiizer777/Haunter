@@ -214,8 +214,13 @@ async def test_global_prune_is_interval_throttled(db: AsyncSession):
     assert await backend.consume("gate/k1|s", maximum=5, window=10, now=5000.0) == 0
     assert await _total_rows(db) == 1
 
-    # A different, never-seen key 1s later must NOT prune.
-    assert await backend.consume("gate/k2|s", maximum=5, window=10, now=5001.0) == 0
+    # A different, never-seen key 10s later must NOT prune. `now` is 5010.0, not
+    # 5001.0, and that is the whole point: the pass reclaims `hit_at <= now - window`,
+    # so at now=5010.0 the cutoff is 5000.0 and the row written at 5000.0 IS expired
+    # and WOULD be reclaimed if the pass ran -- the assertion below would see 1 row,
+    # not 2. At now=5001.0 the cutoff is 4991.0, nothing is expired, and the
+    # assertion is satisfied whether the pass ran or not: it cannot see the throttle.
+    assert await backend.consume("gate/k2|s", maximum=5, window=10, now=5010.0) == 0
     assert await _total_rows(db) == 2, "prune ran despite the interval not elapsing"
 
     # Past the interval it does: the two older rows are now outside the window.
@@ -230,13 +235,17 @@ async def test_global_prune_is_interval_throttled(db: AsyncSession):
     )
     assert await _total_rows(db) == 1, "prune did not run after the interval elapsed"
 
-    # ...and the interval resets, so the next new key is throttled again.
+    # ...and the interval resets, so the next new key is throttled again. 10s later,
+    # not 1s: if `_last_prune` had NOT been reset by the pass above, the pass would
+    # run again here (5040 - 5000 = 40 >= 30) with cutoff 5030.0, reclaiming the row
+    # written at 5030.0 and leaving one row instead of two. That difference is what
+    # this assertion now measures.
     assert (
         await backend.consume(
             "gate/k4|s",
             maximum=5,
             window=10,
-            now=5000.0 + POSTGRES_PRUNE_INTERVAL_SECONDS + 1.0,
+            now=5000.0 + POSTGRES_PRUNE_INTERVAL_SECONDS + 10.0,
         )
         == 0
     )
