@@ -162,7 +162,14 @@ async def test_live_bucket_is_bounded_by_pruning_on_every_consume(
     `maximum` rows on top of the previous cycle's, so the table would grow
     without bound for a key that is still active.
     """
-    backend = PostgresRateLimitBackend()
+    # A prune interval no timeline in this test can reach -- the whole span is
+    # 402s. Without it the GLOBAL pass fires at the start of every cycle (cycles
+    # are 100s apart, the interval is 30s) and reclaims all three prior rows
+    # before `_consume_locked` runs, so the per-consume DELETE is never
+    # exercised and deleting it leaves every assertion here green. With the
+    # global pass out of reach, that DELETE is the only mechanism that can keep
+    # this bucket under `maximum`.
+    backend = PostgresRateLimitBackend(prune_interval_seconds=10_000.0)
     key = "cycling/cycling|s"
     for cycle in range(5):
         base = 4000.0 + cycle * 100.0
