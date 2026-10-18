@@ -461,7 +461,12 @@ async def test_wedged_store_call_is_abandoned_after_the_timeout(
     )
     monkeypatch.setattr(rate_limit, "STORE_ROUND_TRIP_TIMEOUT_SECONDS", 0.01)
 
+    # Not just "it returned": the degraded store must actually be spending the
+    # budget. A blanket `except Exception: return 0` satisfies a single-call
+    # assertion and would leave the limiter completely off during an outage.
     assert await _consume_webhook_rate_limit("hang/hang|s", now=1000.0) == 0
+    assert await _consume_webhook_rate_limit("hang/hang|s", now=1001.0) == 0
+    assert await _consume_webhook_rate_limit("hang/hang|s", now=1002.0) == 9
 
 
 @pytest.mark.fast
