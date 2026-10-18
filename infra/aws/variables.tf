@@ -283,6 +283,7 @@ variable "webhook_rate_limit_backend" {
   description = "Store for the webhook ingress sliding-window buckets: 'memory' (process-local) or 'postgres' (shared across execution environments)."
   type        = string
   default     = "postgres"
+  nullable    = false
 
   validation {
     condition     = contains(["memory", "postgres"], var.webhook_rate_limit_backend)
