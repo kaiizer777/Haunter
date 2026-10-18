@@ -185,8 +185,9 @@ async def truncate_all(db: AsyncSession) -> None:
         "DELETE FROM system_configs",
         "DELETE FROM webhook_deliveries",
         # No FKs in either direction, so its position in this FK-ordered list is
-        # not load-bearing; it sits with the other webhook tables because it is
-        # the other table the webhook request path writes to.
+        # not load-bearing; it sits next to webhook_deliveries because that is
+        # the other webhook_* table the ingress path writes to (the path also
+        # writes runs/code_reviews, both already listed below).
         "DELETE FROM webhook_rate_limit_hits",
         # NOTE: this clears the TABLE only. The limiter's module-global state
         # (app/services/rate_limit.py: store cache, _degraded,
