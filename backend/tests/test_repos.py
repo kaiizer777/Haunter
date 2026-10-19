@@ -364,18 +364,17 @@ async def test_registration_conflict_visible_on_post_and_list(
         assert len(list_a_before) == 1
         assert list_a_before[0]["registration_conflict"] is False
 
-    async with client_b:
-        resp_b = await client_b.post(
-            "/repos", json={"owner": "shared-org", "name": "shared-repo"}
-        )
-        assert resp_b.status_code == 201
-        assert resp_b.json()["registration_conflict"] is True
+        async with client_b:
+            resp_b = await client_b.post(
+                "/repos", json={"owner": "shared-org", "name": "shared-repo"}
+            )
+            assert resp_b.status_code == 201
+            assert resp_b.json()["registration_conflict"] is True
 
-        list_b = (await client_b.get("/repos")).json()
-        assert len(list_b) == 1
-        assert list_b[0]["registration_conflict"] is True
+            list_b = (await client_b.get("/repos")).json()
+            assert len(list_b) == 1
+            assert list_b[0]["registration_conflict"] is True
 
-    async with client_a:
         list_a_after = (await client_a.get("/repos")).json()
     assert len(list_a_after) == 1
     assert list_a_after[0]["registration_conflict"] is True
@@ -428,18 +427,17 @@ async def test_registration_conflict_is_exact_case(
         assert resp_a.status_code == 201
         assert resp_a.json()["registration_conflict"] is False
 
-    async with client_b:
-        resp_b = await client_b.post(
-            "/repos", json={"owner": "case-org", "name": "case-repo"}
-        )
-        assert resp_b.status_code == 201
-        assert resp_b.json()["registration_conflict"] is False
+        async with client_b:
+            resp_b = await client_b.post(
+                "/repos", json={"owner": "case-org", "name": "case-repo"}
+            )
+            assert resp_b.status_code == 201
+            assert resp_b.json()["registration_conflict"] is False
 
-        list_b = (await client_b.get("/repos")).json()
-        assert len(list_b) == 1
-        assert list_b[0]["registration_conflict"] is False
+            list_b = (await client_b.get("/repos")).json()
+            assert len(list_b) == 1
+            assert list_b[0]["registration_conflict"] is False
 
-    async with client_a:
         list_a = (await client_a.get("/repos")).json()
     assert len(list_a) == 1
     assert list_a[0]["registration_conflict"] is False
