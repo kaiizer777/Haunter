@@ -1,7 +1,7 @@
 """bound webhook_deliveries payload at the database level (issue #36)
 
 Revision ID: d5e6f7a8b9c0
-Revises: a5c6d7e8f9b0
+Revises: c2d3e4f5a6b7
 Create Date: 2026-10-02 00:00:00.000000
 
 Adds CHECK (payload IS NULL OR octet_length(payload) <= 262144) to
@@ -53,7 +53,7 @@ from typing import Sequence, Union
 from alembic import op
 
 revision: str = "d5e6f7a8b9c0"
-down_revision: Union[str, Sequence[str], None] = "a5c6d7e8f9b0"
+down_revision: Union[str, Sequence[str], None] = "c2d3e4f5a6b7"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
