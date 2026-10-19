@@ -137,3 +137,38 @@ async def test_order_by_created_at_desc_then_id_desc(
         uuid.UUID(int=4),
         uuid.UUID(int=1),
     ]
+
+
+@pytest.mark.asyncio
+async def test_order_by_created_at_desc_then_id_asc(
+    audit_store: FakeStore,
+) -> None:
+    """Mixed direction: created_at groups newest-first, id asc inside each group.
+
+    The rightmost clause (``id``) breaks ties inside equal timestamps, so the
+    DESC and ASC clauses must not be applied with one shared direction.
+    """
+    session = FakeAsyncSession(audit_store)
+    session.add(
+        _delivery(row_id=uuid.UUID(int=1), created_at=_JAN_1, status="first")
+    )
+    session.add(
+        _delivery(row_id=uuid.UUID(int=4), created_at=_JAN_1, status="fourth")
+    )
+    session.add(
+        _delivery(row_id=uuid.UUID(int=2), created_at=_JAN_2, status="second")
+    )
+    session.add(
+        _delivery(row_id=uuid.UUID(int=3), created_at=_JAN_2, status="third")
+    )
+
+    assert await _ordered_ids(
+        session,
+        WebhookDelivery.created_at.desc(),
+        WebhookDelivery.id.asc(),
+    ) == [
+        uuid.UUID(int=2),
+        uuid.UUID(int=3),
+        uuid.UUID(int=1),
+        uuid.UUID(int=4),
+    ]
