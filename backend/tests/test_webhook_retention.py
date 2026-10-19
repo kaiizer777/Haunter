@@ -51,11 +51,13 @@ from app.webhooks import WebhookDeliveryOut
 
 SWEEP_PATH = "/webhooks/deliveries/retention-sweep"
 
-# Mirrors CHECK (payload IS NULL OR octet_length(payload) <= 262144) from
-# migration d5e6f7a8b9c0. Duplicated here on purpose: this is the number the
-# schema promises, and a test that read the bound back out of the migration
-# would still pass if the migration were loosened past what the app honours.
-DB_PAYLOAD_MAX_BYTES = 262_144
+# Mirrors CHECK (payload IS NULL OR octet_length(payload) <= 2796204) from
+# migration d5e6f7a8b9c0: base64 of the 2 MiB ingestion cap
+# (MAX_PAYLOAD_SIZE_BYTES), the widest body any write path can store.
+# Duplicated here on purpose: this is the number the schema promises, and a test
+# that read the bound back out of the migration would still pass if the
+# migration were loosened past what the app honours.
+DB_PAYLOAD_MAX_BYTES = 2_796_204
 
 NOW = datetime(2026, 10, 2, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -495,7 +497,7 @@ async def test_sweep_endpoint_runs_the_sweep_when_authenticated(
 
 @pytest.mark.asyncio
 async def test_db_check_constraint_rejects_oversized_payload(db: AsyncSession):
-    """The 128 KiB invariant is now enforced by Postgres, not just by Python."""
+    """The ingestion-cap backstop is enforced by Postgres, not just by Python."""
     db.add(
         WebhookDelivery(
             id=uuid.uuid4(),
@@ -563,12 +565,17 @@ async def test_db_check_constraint_is_present_and_validated(db: AsyncSession):
 
 
 def test_app_written_payload_always_fits_the_db_constraint():
-    """The contract between the encoder's cap and the constraint's bound.
+    """The contract between the encoder's caps and the constraint's bound.
 
     If either moves independently of the other, this fails: it pins the largest
-    base64 the app can ever produce (174,764 bytes) below the DB bound.
+    base64 each write path can produce below the DB bound — the 128 KiB default
+    replay buffer and the 2 MiB auditor-ack retain_full path.
     """
-    from app.webhooks import _WEBHOOK_PAYLOAD_MAX_BYTES, _encode_replay_buffer
+    from app.webhooks import (
+        MAX_PAYLOAD_SIZE_BYTES,
+        _WEBHOOK_PAYLOAD_MAX_BYTES,
+        _encode_replay_buffer,
+    )
 
     encoded = _encode_replay_buffer(b"x" * _WEBHOOK_PAYLOAD_MAX_BYTES)
     assert encoded is not None
@@ -577,6 +584,19 @@ def test_app_written_payload_always_fits_the_db_constraint():
 
     # One byte over the app cap is stored as NULL, never as an oversized string.
     assert _encode_replay_buffer(b"x" * (_WEBHOOK_PAYLOAD_MAX_BYTES + 1)) is None
+
+    # retain_full (auditor ack paths) is the widest thing the app can store:
+    # base64 of the full 2 MiB ingestion cap sits exactly at the DB bound.
+    full = _encode_replay_buffer(b"x" * MAX_PAYLOAD_SIZE_BYTES, retain_full=True)
+    assert full is not None
+    assert len(full.encode("ascii")) == 2_796_204
+    assert len(full.encode("ascii")) <= DB_PAYLOAD_MAX_BYTES
+
+    # Nothing above ingestion can ever reach the column, even with retain_full.
+    assert (
+        _encode_replay_buffer(b"x" * (MAX_PAYLOAD_SIZE_BYTES + 1), retain_full=True)
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
