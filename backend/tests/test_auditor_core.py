@@ -3052,6 +3052,140 @@ def test_informational_findings_are_not_publishable_actionable_remediation():
     assert "password =" not in report
 
 
+def _remediation_finding(
+    suggested_fix: str | None,
+    *,
+    file_path: str = "backend/app/auth.py",
+    informational_only: bool = False,
+) -> AuditFinding:
+    return AuditFinding(
+        id="AUD-REMEDIATION-1",
+        file_path=file_path,
+        line_start=1,
+        line_end=1,
+        perspective="security",
+        severity="BLOCKER",
+        category="Test Category",
+        title="Remediation test finding",
+        description="A concrete defect.",
+        suggested_fix=suggested_fix,
+        confidence=90,
+        informational_only=informational_only,
+    )
+
+
+SENTINEL = "(no automated remediation suggested; see findings above)"
+VALID_REMEDIATION_DIFF = (
+    "--- a/backend/app/auth.py\n"
+    "+++ b/backend/app/auth.py\n"
+    "@@ -1,1 +1,1 @@\n"
+    "-if left == right:\n"
+    "+if hmac.compare_digest(left, right):\n"
+)
+
+
+def test_build_remediation_diff_never_turns_prose_into_a_hunk():
+    diff = auditor.build_remediation_diff(
+        [
+            _remediation_finding(
+                "Run cd backend && python scripts/check_test_count.py --write"
+            )
+        ]
+    )
+
+    assert diff == SENTINEL
+    assert "--- " not in diff
+    assert "@@" not in diff
+
+
+def test_build_remediation_diff_keeps_a_valid_model_diff():
+    diff = auditor.build_remediation_diff(
+        [_remediation_finding(VALID_REMEDIATION_DIFF)]
+    )
+
+    assert diff == VALID_REMEDIATION_DIFF
+    from app.diff_validation import validate_unified_diff
+
+    validate_unified_diff(diff)
+
+
+def test_build_remediation_diff_rejects_patch_envelope():
+    diff = auditor.build_remediation_diff(
+        [
+            _remediation_finding(
+                "*** Begin Patch\n"
+                "*** Update File: backend/app/auth.py\n"
+                f"{VALID_REMEDIATION_DIFF}"
+                "*** End Patch"
+            )
+        ]
+    )
+
+    assert diff == SENTINEL
+    assert "*** Begin Patch" not in diff
+
+
+def test_build_remediation_diff_rejects_truncated_hunk():
+    truncated = (
+        "--- a/backend/app/auth.py\n"
+        "+++ b/backend/app/auth.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-if token == stored:\n"
+        "+if hmac.compare_digest(token, stored):\n"
+    )
+
+    assert auditor.build_remediation_diff([_remediation_finding(truncated)]) == SENTINEL
+
+
+def test_build_remediation_diff_drops_findings_that_are_not_whole_valid_diffs():
+    mixed = VALID_REMEDIATION_DIFF + "\nThen run the test suite.\n"
+
+    assert auditor.build_remediation_diff([_remediation_finding(mixed)]) == SENTINEL
+
+
+def test_build_remediation_diff_keeps_valid_sections_alongside_prose():
+    diff = auditor.build_remediation_diff(
+        [
+            _remediation_finding("Change the comparison operator."),
+            _remediation_finding(VALID_REMEDIATION_DIFF),
+        ]
+    )
+
+    assert diff == VALID_REMEDIATION_DIFF
+    assert "Change the comparison operator." not in diff
+
+
+def test_build_remediation_diff_ignores_informational_findings():
+    diff = auditor.build_remediation_diff(
+        [
+            _remediation_finding(
+                VALID_REMEDIATION_DIFF,
+                informational_only=True,
+            )
+        ]
+    )
+
+    assert diff == SENTINEL
+
+
+def test_prose_remediation_renders_as_notes_not_a_diff_fence():
+    report = format_audit_report(
+        executive_summary="Prose suggestion only.",
+        findings=[],
+        confidence=90,
+        status=build_status_label(0, 0, 90),
+        audit_target="PR #1",
+        engine="test-engine",
+        remediation_diff="Run cd backend && python scripts/check_test_count.py --write",
+        publish_allowed=True,
+    )
+
+    assert "### 🛠️ Suggested Remediation Notes" in report
+    assert "### 🛠️ Remediation Unified Diff" not in report
+    assert "```diff" not in report
+    assert "check_test_count.py" in report
+
+
 def test_publication_policy_fails_closed_for_non_boolean_values():
     report = format_audit_report(
         executive_summary="Untrusted policy value.",
@@ -5877,7 +6011,7 @@ def test_pr_confidence_score_and_merge_status_tier_mapping():
 
 
 def test_auditor_format_finding_comment_helper():
-    """Verify auditor.py format_finding_comment re-export produces clean diff comments."""
+    """Verify auditor.py format_finding_comment re-export renders manual—not diff—prose."""
     from app.subagents.auditor import format_finding_comment
 
     finding = {
@@ -5893,8 +6027,10 @@ def test_auditor_format_finding_comment_helper():
     comment = format_finding_comment(finding)
     assert "### ⛔ Must-Fix: Unsafe Deserialization" in comment
     assert "**Location:** `backend/app/main.py#42`" in comment
-    assert "```diff" in comment
-    assert "+ json.loads" in comment
+    # Prose is not a patch: it must not be fenced as a diff.
+    assert "```diff" not in comment
+    assert "**Suggested Remediation (manual):**" in comment
+    assert "json.loads(payload)" in comment
 
 
 # ---------------------------------------------------------------------------
