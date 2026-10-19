@@ -406,12 +406,31 @@ AlembicTargetError: Alembic target mismatch: ALEMBIC_DATABASE_URL resolves to
 
 - Fix the stale override, or
 - For an intentional scratch/test database on another host only, opt in for that single
-  command: `$env:ALEMBIC_ALLOW_DB_MISMATCH = "1"`. The exact value `1` is required
-  (`true` / `yes` are rejected), and a WARNING naming both redacted targets is printed.
+  command. The exact value `1` is required (`true` / `yes` are rejected), and a WARNING
+  naming both redacted targets is printed.
 - Different database **names** on the same host/port are not blocked (the guard compares
   host/port only), so verify the database name in the printed descriptor.
 - Malformed URLs (missing host, non-postgres scheme, invalid port) fail closed with an
   error naming the source; the raw URL and credentials are never echoed.
+
+#### Opting in for a single command
+
+The bypass must be scoped to the one command that needs it. **In PowerShell,
+`$env:VAR = "1"` sets the variable for the whole session** — every later Alembic command
+in that shell keeps the bypass. Set it, run the command, unset it:
+
+```powershell
+$env:ALEMBIC_ALLOW_DB_MISMATCH = "1"; alembic upgrade head; Remove-Item Env:\ALEMBIC_ALLOW_DB_MISMATCH
+```
+
+In bash/zsh the prefix form is already scoped to the single command:
+
+```bash
+ALEMBIC_ALLOW_DB_MISMATCH=1 alembic upgrade head
+```
+
+Never put the bypass in `backend/.env`: `load_dotenv()` would apply it to every later
+Alembic command in that directory too.
 
 ### 10.5 Preflight
 
@@ -469,9 +488,19 @@ ALEMBIC_DATABASE_URL="<direct test Neon URL>" alembic upgrade head
 ```
 
 If the test database is on a different host from the live `DATABASE_URL_UNPOOLED`, add
-`ALEMBIC_ALLOW_DB_MISMATCH=1` for that invocation. Hand-editing `.env` for a one-off
-migration is forbidden — it recreates the silent misdirection bug this runbook exists to
-prevent.
+`ALEMBIC_ALLOW_DB_MISMATCH=1` for that invocation — scoped the same way as §10.4, so the
+bypass cannot outlive the command:
+
+```powershell
+$env:ALEMBIC_ALLOW_DB_MISMATCH = "1"; alembic upgrade head; Remove-Item Env:\ALEMBIC_ALLOW_DB_MISMATCH
+```
+
+```bash
+ALEMBIC_ALLOW_DB_MISMATCH=1 alembic upgrade head
+```
+
+Hand-editing `.env` for a one-off migration is forbidden — it recreates the silent
+misdirection bug this runbook exists to prevent.
 
 ### 10.7 Verification
 
