@@ -19,9 +19,10 @@ from typing import Annotated, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.auth import _decrypt_token, get_current_user
 from app.db import get_db
@@ -168,6 +169,51 @@ async def _verify_user_repo_permission(
         )
 
 
+def _registration_conflict_predicate(
+    current_user_id: uuid.UUID,
+) -> ColumnElement[bool]:
+    """
+    Correlated EXISTS: another tenant has registered the same owner/name.
+
+    Matching is exact-case, mirroring ``_resolve_repo_for_delivery`` — a
+    case-insensitive comparison here would flag pairs the webhook resolver does
+    not consider ambiguous. Only existence is exposed; the other tenant(s) and
+    their count never leave the database.
+    """
+    other = aliased(Repo)
+    return (
+        exists()
+        .where(
+            other.owner == Repo.owner,
+            other.name == Repo.name,
+            other.user_id != current_user_id,
+        )
+        .correlate(Repo)
+    )
+
+
+async def _has_registration_conflict(db: AsyncSession, repo: Repo) -> bool:
+    """
+    Single-round-trip conflict check for one repo the caller already owns.
+
+    Reuses the correlated predicate from ``list_repos`` so the list and
+    single-row responses can never disagree about what counts as a conflict.
+    """
+    result = await db.execute(
+        select(_registration_conflict_predicate(repo.user_id)).where(
+            Repo.id == repo.id
+        )
+    )
+    return bool(result.scalar_one_or_none())
+
+
+def _repo_out(repo: Repo, registration_conflict: bool) -> RepoOut:
+    """Serialize a repo with its derived conflict flag."""
+    return RepoOut.model_validate(repo).model_copy(
+        update={"registration_conflict": registration_conflict}
+    )
+
+
 # ---------------------------------------------------------------------------
 # Repo CRUD
 # ---------------------------------------------------------------------------
@@ -251,7 +297,7 @@ async def add_repo(
         body.name,
         final_install_id,
     )
-    return RepoOut.model_validate(repo)
+    return _repo_out(repo, await _has_registration_conflict(db, repo))
 
 
 @router.get("/repos", response_model=list[RepoOut])
@@ -264,12 +310,19 @@ async def list_repos(
     Scoped strictly to WHERE user_id = current_user.id — no cross-tenant leakage.
     """
     result = await db.execute(
-        select(Repo)
+        select(
+            Repo,
+            _registration_conflict_predicate(current_user.id).label(
+                "registration_conflict"
+            ),
+        )
         .where(Repo.user_id == current_user.id)
         .order_by(Repo.created_at.desc())
     )
-    repos = result.scalars().all()
-    return [RepoOut.model_validate(r) for r in repos]
+    return [
+        _repo_out(repo, bool(registration_conflict))
+        for repo, registration_conflict in result.all()
+    ]
 
 
 @router.delete("/repos/{repo_id}", status_code=204)
@@ -319,4 +372,4 @@ async def set_repo_auditor_install(
     logger.info(
         "Repo auditor install updated: user=%s repo_id=%s", current_user.id, repo_id
     )
-    return RepoOut.model_validate(repo)
+    return _repo_out(repo, await _has_registration_conflict(db, repo))
