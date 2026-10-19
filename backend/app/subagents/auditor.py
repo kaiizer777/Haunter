@@ -27,8 +27,9 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.llm import LLMClient
+from app.llm import LLMClient, ResolvedModelConfig, get_active_model_config
 from app.llm.prompts.audit_prompts import (
+    AUDIT_STATUS_LABELS,
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
     MAX_AST_CONTEXT_CHARS,
     MAX_CATEGORY_CHARS,
@@ -46,6 +47,7 @@ from app.llm.prompts.audit_prompts import (
     PerspectiveName,
     build_perspective_messages,
     build_status_label,
+    calculate_pr_confidence_score,
     format_audit_report,
     redact_sensitive_text,
     redact_sensitive_text_preserving_lines,
@@ -68,12 +70,31 @@ PERSPECTIVE_TIMEOUT_S = 75.0
 PERSPECTIVE_DEADLINE_S = 100.0
 PERSPECTIVE_CONCURRENCY_LIMIT = 4
 AUDIT_FETCH_TIMEOUT_S = 35.0
+# Budget for resolving the shared model config BEFORE any perspective starts.
+# The per-perspective ``PERSPECTIVE_DEADLINE_S`` wraps ``_run_single_perspective``
+# only; an unbounded ``get_active_model_config`` call on a stuck DB would stall
+# the audit before any deadline can fire. Kept well under
+# ``PERSPECTIVE_DEADLINE_S`` so a slow resolve still leaves room for the four
+# perspectives to run. ``None`` falls back to ``get_active_model_config``'s own
+# no-timeout behavior.
+AUDIT_CONFIG_RESOLVE_TIMEOUT_S = 5.0
 MAX_LLM_RESPONSE_CHARS = 32_000
 MAX_FINDINGS_PER_PERSPECTIVE = 20
 MAX_LINE_NUMBER = 10_000_000
 MAX_GROUNDING_SPAN = 200
 MAX_EXECUTIVE_SUMMARY_CHARS = 1_200
 FALLBACK_ENGINE_LABEL = "haunter-auditor"
+AUDIT_STATUS_LABELS = AUDIT_STATUS_LABELS
+
+
+class AuditStatus(StrEnum):
+    GREAT_TO_MERGE = "✅ Great to Merge"
+    LOOKS_GOOD_TO_MERGE = "👌 Looks Good to Merge"
+    MERGE_BLOCKED = "⚠️ Merge Blocked (Changes Needed)"
+    MUST_NOT_MERGE = "⛔ Must Not Merge"
+
+
+VALID_AUDIT_STATUSES: frozenset[str] = frozenset(AuditStatus)
 
 AuditSeverity = Literal["BLOCKER", "WARNING", "NOTE"]
 _SEVERITY_RANK: dict[AuditSeverity, int] = {"BLOCKER": 0, "WARNING": 1, "NOTE": 2}
@@ -600,6 +621,254 @@ def _diff_prefix(
     return prefix, True
 
 
+LOCKFILE_NAMES: frozenset[str] = frozenset({
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "pipfile.lock",
+    "cargo.lock",
+    "composer.lock",
+    "go.sum",
+    "flake.lock",
+    "pubspec.lock",
+    "gemfile.lock",
+    "mix.lock",
+    "pdm.lock",
+    "packages.lock.json",
+    "project.assets.json",
+})
+NOISE_SUFFIXES: tuple[str, ...] = (
+    ".min.js",
+    ".min.css",
+    ".map",
+    ".bundle.js",
+    ".bundle.css",
+    ".chunk.js",
+    ".chunk.css",
+    "_pb2.py",
+    "_pb2.pyi",
+    "_pb2_grpc.py",
+    ".pb.go",
+    ".pb.cc",
+    ".pb.h",
+)
+
+
+def is_noise_path(path: str) -> bool:
+    if not path or not isinstance(path, str):
+        return False
+    normalized = path.strip().replace("\\", "/")
+    if normalized.startswith("a/") or normalized.startswith("b/"):
+        normalized = normalized[2:]
+    parts = normalized.split("/")
+    filename = parts[-1].lower() if parts else ""
+    if filename in LOCKFILE_NAMES:
+        return True
+    return any(filename.endswith(suffix) for suffix in NOISE_SUFFIXES)
+
+
+def _extract_file_path_from_chunk(chunk_lines: list[str]) -> str:
+    for line in chunk_lines:
+        if line.startswith("+++ "):
+            raw = line[4:].split("\t", 1)[0].strip().strip("'\"")
+            if raw not in ("/dev/null", "dev/null"):
+                if raw.startswith("b/") or raw.startswith("a/"):
+                    raw = raw[2:]
+                return raw.replace("\\", "/").strip()
+    for line in chunk_lines:
+        if line.startswith("--- "):
+            raw = line[4:].split("\t", 1)[0].strip().strip("'\"")
+            if raw not in ("/dev/null", "dev/null"):
+                if raw.startswith("a/") or raw.startswith("b/"):
+                    raw = raw[2:]
+                return raw.replace("\\", "/").strip()
+    for line in chunk_lines:
+        if line.startswith("diff --git "):
+            rest = line[len("diff --git "):].strip()
+            match = re.match(r'^(?:"?a/(.*?)"?)\s+(?:"?b/(.*?)"?)$', rest)
+            if match:
+                a_path, b_path = match.group(1).strip('"\''), match.group(2).strip('"\'')
+                target = a_path if b_path in ("/dev/null", "dev/null") else b_path
+                return target.replace("\\", "/").strip()
+            parts = rest.split(" b/", 1)
+            if len(parts) == 2:
+                b_path = parts[1].strip().strip('"\'')
+                if b_path not in ("/dev/null", "dev/null"):
+                    return b_path.replace("\\", "/").strip()
+                a_path = parts[0].strip().strip('"\'')
+                if a_path.startswith("a/"):
+                    a_path = a_path[2:]
+                return a_path.replace("\\", "/").strip()
+    return ""
+
+
+MAX_SPLIT_DIFF_CHARS = 5_000_000
+
+
+def split_diff_by_files(
+    diff_text: str,
+    max_chars: int = MAX_SPLIT_DIFF_CHARS,
+) -> list[tuple[str, str]]:
+    raw = str(diff_text or "")
+    if not raw.strip():
+        return []
+
+    if len(raw) > max_chars:
+        raw, _ = _diff_prefix(raw, max_chars)
+
+    lines = raw.splitlines(keepends=True)
+    chunks: list[list[str]] = []
+    has_diff_git = any(line.startswith("diff --git ") for line in lines)
+
+    if has_diff_git:
+        current_chunk: list[str] = []
+        preamble: list[str] = []
+        for line in lines:
+            if line.startswith("diff --git "):
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = [line]
+            elif not current_chunk:
+                preamble.append(line)
+            else:
+                current_chunk.append(line)
+        if current_chunk:
+            chunks.append(current_chunk)
+        if preamble and chunks:
+            chunks[0] = preamble + chunks[0]
+    else:
+        current_chunk = []
+        for idx, line in enumerate(lines):
+            is_file_start = False
+            if line.startswith("--- "):
+                is_dev_null, path = _diff_header_path(line, "--- ")
+                if is_dev_null or path is not None:
+                    for next_line in lines[idx + 1 : idx + 3]:
+                        next_dev_null, next_path = _diff_header_path(next_line, "+++ ")
+                        if next_dev_null or next_path is not None:
+                            is_file_start = True
+                            break
+            if is_file_start and current_chunk and any(chunk_line.startswith("+++ ") for chunk_line in current_chunk):
+                chunks.append(current_chunk)
+                current_chunk = [line]
+            else:
+                current_chunk.append(line)
+        if current_chunk:
+            chunks.append(current_chunk)
+
+    results: list[tuple[str, str]] = []
+    for chunk in chunks:
+        path = _extract_file_path_from_chunk(chunk)
+        results.append((path, "".join(chunk)))
+    return results
+
+
+def filter_audit_diff_noise(
+    diff_text: str,
+    max_chars: int = MAX_SPLIT_DIFF_CHARS,
+) -> tuple[str, list[str]]:
+    raw = str(diff_text or "")
+    if not raw.strip():
+        return raw, []
+
+    if len(raw) > max_chars:
+        raw, _ = _diff_prefix(raw, max_chars)
+
+    files = split_diff_by_files(raw, max_chars=max_chars)
+    if not files:
+        return raw, []
+
+    non_noise: list[tuple[str, str]] = []
+    noise: list[tuple[str, str]] = []
+    for path, chunk in files:
+        if is_noise_path(path):
+            noise.append((path, chunk))
+        else:
+            non_noise.append((path, chunk))
+
+    if non_noise:
+        clean_diff = "".join(chunk for _, chunk in non_noise)
+        omitted_paths = [path for path, _ in noise if path]
+        return clean_diff, omitted_paths
+
+    notice = "# Notice: Diff contains only lockfiles or generated files. Showing bounded preview.\n"
+    max_preview = 10_000
+    target_len = max(100, max_preview - len(notice))
+    preview_body, clipped = _diff_prefix(raw, target_len)
+    clean_diff = notice + preview_body
+    if clipped:
+        clean_diff += "\n[...NOISE DIFF PREVIEW TRUNCATED...]\n"
+    return clean_diff, []
+
+
+def partition_and_budget_diff(
+    diff_text: str,
+    max_total_chars: int,
+    max_per_file_chars: int = 25_000,
+) -> tuple[str, bool, list[str]]:
+    raw = str(diff_text or "")
+    if not raw.strip():
+        return raw, False, []
+
+    files = split_diff_by_files(raw)
+    if not files:
+        if len(raw) > max_total_chars:
+            prefix, _ = _diff_prefix(raw, max_total_chars - 35)
+            return prefix + "\n[...DIFF TRUNCATED...]\n", True, []
+        return raw, False, []
+
+    budgeted_chunks: list[str] = []
+    affected_paths: list[str] = []
+    was_truncated = False
+    current_chars = 0
+    per_file_marker = "\n[...DIFF EXCEEDED PER-FILE BUDGET...]\n"
+    total_budget_marker = "\n[...DIFF EXCEEDED TOTAL BUDGET...]\n"
+
+    for i, (path, chunk) in enumerate(files):
+        chunk_to_add = chunk
+        if len(chunk) > max_per_file_chars:
+            allowed = max(0, max_per_file_chars - len(per_file_marker))
+            prefix, _ = _diff_prefix(chunk, allowed)
+            chunk_to_add = prefix + per_file_marker
+            was_truncated = True
+            if path and path not in affected_paths:
+                affected_paths.append(path)
+
+        remaining_budget = max_total_chars - current_chars
+        if remaining_budget <= 0:
+            was_truncated = True
+            for remaining_path, _ in files[i:]:
+                if remaining_path and remaining_path not in affected_paths:
+                    affected_paths.append(remaining_path)
+            break
+
+        if len(chunk_to_add) > remaining_budget:
+            if remaining_budget >= len(total_budget_marker):
+                allowed_total = remaining_budget - len(total_budget_marker)
+                prefix, _ = _diff_prefix(chunk_to_add, allowed_total)
+                budgeted_chunks.append(prefix + total_budget_marker)
+                current_chars += len(prefix) + len(total_budget_marker)
+            else:
+                prefix, _ = _diff_prefix(chunk_to_add, remaining_budget)
+                if prefix:
+                    budgeted_chunks.append(prefix)
+                    current_chars += len(prefix)
+            was_truncated = True
+            if path and path not in affected_paths:
+                affected_paths.append(path)
+            for remaining_path, _ in files[i + 1 :]:
+                if remaining_path and remaining_path not in affected_paths:
+                    affected_paths.append(remaining_path)
+            break
+        else:
+            budgeted_chunks.append(chunk_to_add)
+            current_chars += len(chunk_to_add)
+
+    return "".join(budgeted_chunks), was_truncated, affected_paths
+
+
 def build_diff_grounding(
     diff_text: str,
     *,
@@ -652,7 +921,7 @@ def build_diff_grounding(
             removed_lines += hunk.removed
         hunk = None
 
-    def mark_truncated() -> None:
+    def mark_truncated(is_budget_truncated: bool = False) -> None:
         """Close out a hunk whose declared counts were never reached.
 
         The body may simply have been cut off by the caller's character bound,
@@ -660,10 +929,10 @@ def build_diff_grounding(
         hunk that ran short because the diff text was malformed is dropped
         instead, and its file is rejected.
         """
-        nonlocal hunk_count, added_lines, removed_lines
+        nonlocal hunk_count, added_lines, removed_lines, hunk
         if hunk is None or current_path is None:
             return
-        if clipped:
+        if clipped or is_budget_truncated:
             if hunk.lines:
                 index.setdefault(current_path, set()).update(hunk.lines)
             valid_paths.add(current_path)
@@ -674,17 +943,23 @@ def build_diff_grounding(
             truncated_ranges.setdefault(current_path, set()).add(
                 (hunk.next_new, hunk.new_start + hunk.new_count - 1)
             )
-        if not clipped:
-            # Only a genuinely short body means a malformed diff. A clipped one
-            # was just cut off by the character bound, and rejecting it here put
-            # the same path in `rejected_paths` and `valid_paths` at once: the
-            # summary then announced a file it had just accepted as "Rejected
-            # non-text or malformed", which is a statement about the diff the
-            # report is citing, not about the auditor's own bound. The truncation
-            # is reported on its own line, by `truncated_ranges` and `clipped`.
+        if not (clipped or is_budget_truncated):
             reject_current()
+        hunk = None
 
     for line in text.splitlines():
+        if (
+            line.startswith("[...DIFF ")
+            or line.startswith("[TRUNCATED")
+            or line.startswith("# Notice:")
+        ):
+            if hunk is not None:
+                mark_truncated(is_budget_truncated=True)
+            continue
+
+        if not line:
+            continue
+
         if hunk is not None:
             if (
                 line.startswith("diff --git ")
@@ -693,11 +968,6 @@ def build_diff_grounding(
                 or line.startswith("Binary files ")
                 or line.startswith("GIT binary patch")
             ):
-                # A file header is never read while a hunk body is open. The
-                # `+++` of a forged or trailing hunk would otherwise be taken
-                # for the start of another file, and everything after an
-                # unsatisfied hunk is ungroundable, so the walk stops here
-                # rather than guessing where the real content resumes.
                 invalidate_hunk()
                 break
             if line.startswith("\\ No newline at end of file"):
@@ -1132,6 +1402,7 @@ async def _run_single_perspective(
     repo_context: str,
     llm: LLMClient,
     repo_id: Optional[uuid.UUID],
+    model_config: Optional[ResolvedModelConfig] = None,
 ) -> PerspectiveResult:
     started = time.monotonic()
     messages: list[dict[str, Any]] = [
@@ -1147,6 +1418,7 @@ async def _run_single_perspective(
         messages=messages,
         db=None,
         repo_id=repo_id,
+        model_config=model_config,
         max_tokens=4_096,
     )
     input_tokens = _usage_value(response, "input_tokens")
@@ -1181,6 +1453,7 @@ async def _run_single_perspective(
             messages=retry_messages,
             db=None,
             repo_id=repo_id,
+            model_config=model_config,
             max_tokens=4_096,
         )
         response = retry_response
@@ -1700,8 +1973,6 @@ async def run_audit(
     ):
         raise ValueError("ref is invalid")
     raw_diff = str(diff_text or "")
-    if len(raw_diff) > MAX_RAW_DIFF_CHARS:
-        raise ValueError("diff exceeds the bounded audit input limit")
     resolved_target = _target_label(
         target_label,
         ref=ref,
@@ -1724,15 +1995,20 @@ async def run_audit(
             publish_allowed=True,
         )
         report = format_audit_report(
+            pr_summary=empty.executive_summary,
             executive_summary=empty.executive_summary,
             findings=[],
             confidence=empty.confidence,
             status=empty.status,
+            blast_radius="**Isolated** (No changes)",
             audit_target=empty.target_label,
             engine=empty.engine,
+            must_fix_count=0,
+            should_fix_count=0,
             remediation_diff=empty.remediation_diff,
             analysis_metadata=empty.analysis_metadata,
             publish_allowed=empty.publish_allowed,
+            pr_score=10,
         )
         return AuditResult(
             audit_id=empty.audit_id,
@@ -1749,40 +2025,100 @@ async def run_audit(
             publish_allowed=empty.publish_allowed,
         )
 
-    # The redactor must be the line-preserving one. Grounding is built from
-    # `raw_diff` (see the `synthesize_findings` call below), and the model
-    # answers with a line number it read off *this* text. The canonical
-    # redactor collapses a multi-line secret — a PEM private key added by a diff
-    # — to a single `[REDACTED_PRIVATE_KEY]` token, which silently shifts every
-    # later line of the diff the model is shown: it would count `+time.sleep(5)`
-    # on visible line 7 and cite new-file line 3, a line inside the key it never
-    # saw. The grounding index is right and the citation is wrong, so the finding
-    # survives, pointing at the wrong code. The line-preserving redactor
-    # re-emits the newlines the match consumed, so model-visible line N is raw
-    # line N. See _redact_preserving_line_anchors.
-    clean_diff = _redact_preserving_line_anchors(raw_diff)
-    clipped_diff, was_truncated = _truncate_diff(clean_diff)
-    clean_diff = clipped_diff
-    ast_summary = await build_ast_diff_summary_async(raw_diff)
+    raw_clipped = len(raw_diff) > MAX_SPLIT_DIFF_CHARS
+    filtered_diff, omitted_noise = filter_audit_diff_noise(raw_diff)
+    budgeted_diff, budget_truncated, affected_paths = partition_and_budget_diff(
+        filtered_diff,
+        max_total_chars=AUDIT_MAX_DIFF_CHARS,
+        max_per_file_chars=25_000,
+    )
+    clean_diff = _redact_preserving_line_anchors(budgeted_diff)
+    was_truncated = raw_clipped or budget_truncated
+
+    ast_summary = await build_ast_diff_summary_async(clean_diff)
     supplied_ast = _redact_audit_secrets(str(ast_context or ""))
     if supplied_ast.strip():
         supplied_ast = _clip(supplied_ast, MAX_AST_CONTEXT_CHARS // 2)
-        ast_summary = _clip(
-            f"{ast_summary}\n\nCaller-supplied parser context:\n{supplied_ast}",
-            MAX_AST_CONTEXT_CHARS,
-        )
+        ast_summary = f"{ast_summary}\n\nCaller-supplied parser context:\n{supplied_ast}"
+
+    notices: list[str] = []
     if was_truncated:
-        ast_summary = _clip(
-            ast_summary
-            + f"\nInput was truncated to {AUDIT_MAX_DIFF_CHARS} characters.",
-            MAX_AST_CONTEXT_CHARS,
+        if raw_clipped:
+            trunc_msg = f"Input diff exceeded {MAX_SPLIT_DIFF_CHARS} characters and was bounded."
+        else:
+            trunc_msg = f"Input diff was partitioned/truncated to {AUDIT_MAX_DIFF_CHARS} characters."
+        if affected_paths:
+            trunc_files = ", ".join(affected_paths[:5])
+            if len(affected_paths) > 5:
+                trunc_files += f" and {len(affected_paths) - 5} more"
+            trunc_msg += f" Budget limits affected: {trunc_files}."
+        notices.append(trunc_msg)
+    if omitted_noise:
+        omitted_str = ", ".join(omitted_noise[:10])
+        if len(omitted_noise) > 10:
+            omitted_str += f" and {len(omitted_noise) - 10} more"
+        notices.append(
+            f"Omitted {len(omitted_noise)} noise/lockfile file(s) from audit: {omitted_str}."
         )
+
+    if notices:
+        notice_block = "\n".join(notices)
+        ast_summary = f"{notice_block}\n\n{ast_summary}"
+    ast_summary = _clip(ast_summary, MAX_AST_CONTEXT_CHARS)
     clean_repo_context = _clip(
         _redact_audit_secrets(str(repo_context or "")),
         MAX_REPO_CONTEXT_CHARS,
     )
     llm = llm_client or LLMClient(timeout=PERSPECTIVE_TIMEOUT_S)
     semaphore = asyncio.Semaphore(PERSPECTIVE_CONCURRENCY_LIMIT)
+
+    # Resolve the active model config ONCE and share it across all
+    # perspectives. Each llm.complete() with db=None opens its own DB session
+    # to resolve this, so without sharing, one audit fans out to 4-8
+    # sessions (one per perspective, doubled on schema-retry). A single
+    # shared session across the concurrent perspectives would be unsafe
+    # (AsyncSession is not concurrency-safe), so instead one pre-resolved
+    # config feeds all four — zero per-perspective sessions.
+    #
+    # Two bot-flagged gaps close here:
+    #   1. A stuck DB lookup cannot stall an audit before perspectives
+    #      start. The resolution is bounded by ``AUDIT_CONFIG_RESOLVE_TIMEOUT_S``
+    #      and, on timeout, falls through to env defaults — the same shape
+    #      ``get_active_model_config`` itself uses for DB failures.
+    #   2. Tests/mocks that inject a non-``LLMClient`` (e.g. ``_FakeLLM``)
+    #      never needed the DB resolve at all: the fake owns its responses
+    #      and forwards ``model_config`` straight through. Skipping the
+    #      call when the client is not a real LLMClient keeps the path
+    #      hermetic (zero external I/O in unit tests).
+    if llm_client is not None and not isinstance(llm_client, LLMClient):
+        shared_config = ResolvedModelConfig(
+            provider="passthrough",
+            model_name="injected-test-client",
+            base_url="http://test.invalid",
+        )
+    else:
+        try:
+            shared_config = await asyncio.wait_for(
+                get_active_model_config(db=db, repo_id=repo_id),
+                timeout=AUDIT_CONFIG_RESOLVE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "auditor: model-config resolve exceeded %.1fs — using env defaults",
+                AUDIT_CONFIG_RESOLVE_TIMEOUT_S,
+            )
+            # Fall back to env defaults directly so we never issue a
+            # second DB call here: the DB is exactly what was slow.
+            # ``get_active_model_config`` itself uses the same
+            # shape when its DB query raises.
+            from app.config import settings
+            from app.llm.config import default_base_url_for_provider
+
+            shared_config = ResolvedModelConfig(
+                provider=settings.default_provider,
+                model_name=settings.default_model,
+                base_url=default_base_url_for_provider(settings.default_provider),
+            )
 
     async def run_one(
         perspective: PerspectiveName,
@@ -1797,6 +2133,7 @@ async def run_audit(
                         repo_context=clean_repo_context,
                         llm=llm,
                         repo_id=repo_id,
+                        model_config=shared_config,
                     ),
                     timeout=PERSPECTIVE_DEADLINE_S,
                 )
@@ -1843,7 +2180,7 @@ async def run_audit(
         asyncio.to_thread(
             synthesize_findings,
             executed_perspectives,
-            raw_diff,
+            budgeted_diff,
             overall_confidence=overall_confidence,
         ),
         timeout=AST_ANALYSIS_TIMEOUT_S,
@@ -1853,6 +2190,7 @@ async def run_audit(
         counts.get("BLOCKER", 0),
         counts.get("WARNING", 0),
         overall_confidence,
+        has_notes=counts.get("NOTE", 0) > 0,
     )
     executive_summary = _synthesize_executive_summary(
         executed_perspectives, len(findings)
@@ -1885,16 +2223,26 @@ async def run_audit(
         latency_ms=int((time.monotonic() - started) * 1000),
         publish_allowed=publish_allowed,
     )
+    pr_score = calculate_pr_confidence_score(
+        confidence=result.confidence,
+        must_fix=counts.get("BLOCKER", 0),
+        should_fix=counts.get("WARNING", 0),
+        n_notes=counts.get("NOTE", 0),
+    )
     report = format_audit_report(
+        pr_summary=result.executive_summary,
         executive_summary=result.executive_summary,
         findings=[finding.to_report_dict() for finding in result.findings],
         confidence=result.confidence,
         status=result.status,
         audit_target=result.target_label,
         engine=result.engine,
+        must_fix_count=counts.get("BLOCKER", 0),
+        should_fix_count=counts.get("WARNING", 0),
         remediation_diff=result.remediation_diff,
         analysis_metadata=result.analysis_metadata,
         publish_allowed=result.publish_allowed,
+        pr_score=pr_score,
     )
     result = AuditResult(
         audit_id=result.audit_id,
@@ -1927,3 +2275,11 @@ async def run_audit(
         result.latency_ms,
     )
     return result
+
+
+def format_finding_comment(finding: Any) -> str:
+    """Format an individual review comment for an audit finding with code diff."""
+    from app.github.audit_publisher import format_finding_comment as _fmt
+
+    return _fmt(finding)
+

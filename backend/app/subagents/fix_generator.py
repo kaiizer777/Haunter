@@ -12,8 +12,10 @@ Security invariants:
     extraction, no eval, no coercion of out-of-bounds values.
   - Patch is validated for path traversal before any DB insert:
     PurePosixPath rejects absolute paths, '..' components, .git/, .github/workflows/.
-  - Attempt cap of 3 is enforced atomically via SELECT FOR UPDATE before any
-    LLM call — a Phase 7 retry loop bug cannot create unbounded attempts.
+  - Attempt cap is enforced via a plain count read before any LLM call
+    (no row lock held across inference, #107) — a Phase 7 retry loop bug
+    cannot create unbounded attempts. Concurrent over-cap races are fenced
+    by the uq_attempt_run_number unique constraint on insert.
     The cap is now driven by app.config.settings.max_attempts (env: HAUNTER_MAX_ATTEMPTS),
     not a hard-coded constant, so Phase 1 could de-duplicate it with the
     orchestrator.
@@ -32,11 +34,13 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.llm import LLMClient
-from app.models import Attempt, Run, RunStep
+from app.models import Attempt, Run
+from app.services.token_accounting import make_run_step, normalize_usage
 from app.subagents.context_gatherer import _redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -53,9 +57,8 @@ def _max_attempts() -> int:
     return settings.max_attempts
 
 
-# Placeholder pricing — same as context_gatherer; replace with real figures.
-COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
-COST_PER_OUTPUT_TOKEN: float = 0.002 / 1_000
+# Canonical pricing lives in app.services.token_accounting (issue #106);
+# this module no longer defines its own COST_PER_* copy.
 
 # Paths that must never appear in a generated patch, even if explicitly requested.
 _BLOCKED_PATH_PREFIXES: tuple[str, ...] = (".git/", ".github/workflows/")
@@ -73,6 +76,14 @@ _HUNK_PATH_RE: re.Pattern[str] = re.compile(
 
 class AttemptCapExceeded(Exception):
     """Raised when run already has max_attempts (settings) attempts. No LLM call is made."""
+
+
+class AttemptClaimLost(Exception):
+    """Raised when a concurrent worker won the attempt-number race.
+
+    The losing INSERT hits uq_attempt_run_number. The loser must exit
+    quietly (already-claimed) without marking the winner's run as error.
+    """
 
 
 class PatchRejected(Exception):
@@ -724,14 +735,16 @@ async def _call_and_parse(
 
     try:
         fix_output = FixOutput.model_validate_json(retry_content)
-        # Accumulate token usage across both calls for the trace row
-        usage = retry_response.get("usage", {})
-        first_usage = response.get("usage", {})
+        # Accumulate token usage across both calls for the trace row.
+        # Each per-call usage is normalized first so a ``None`` count
+        # can't TypeError on ``+``, and a numeric-string count can't
+        # silently concatenate into the wrong total (cubic#4297090228
+        # and the canonical-usage rule this PR introduced).
+        retry_in, retry_out = normalize_usage(retry_response.get("usage"))
+        first_in, first_out = normalize_usage(response.get("usage"))
         combined_usage = {
-            "input_tokens": usage.get("input_tokens", 0)
-            + first_usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0)
-            + first_usage.get("output_tokens", 0),
+            "input_tokens": retry_in + first_in,
+            "output_tokens": retry_out + first_out,
         }
         retry_response = {**retry_response, "usage": combined_usage}
         return fix_output, retry_response
@@ -773,12 +786,23 @@ async def _call_with_format_retry(
     if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
         return fix_output, response
 
+    # Running totals across retries — normalize_usage each response before
+    # adding so a ``None`` count cannot TypeError and a numeric-string count
+    # cannot silently concatenate (cubic#4297090208 / cubic#4297090249).
+    # Previously the retry path overwrote ``response``, dropping the first
+    # call's tokens from the trace row.
+    total_in, total_out = normalize_usage(response.get("usage"))
+
     # Retry loop. _PATCH_FORMAT_RETRY_CAP=1 means: try once, retry once,
     # then give up. Path-traversal rejections (the base PatchRejected
     # class) are NOT caught here — they bubble up immediately.
     for _format_attempt in range(_PATCH_FORMAT_RETRY_CAP):
         try:
             _validate_patch(fix_output.patch)
+            response = {**response, "usage": {
+                "input_tokens": total_in,
+                "output_tokens": total_out,
+            }}
             return fix_output, response
         except PatchFormatRejected as e:
             logger.warning(
@@ -801,15 +825,27 @@ async def _call_with_format_retry(
                 repo_id=repo_id,
                 review_feedback=review_feedback,
             )
+            # Accumulate this retry's usage into the running totals.
+            new_in, new_out = normalize_usage(response.get("usage"))
+            total_in += new_in
+            total_out += new_out
             if (
                 fix_output.confidence < LOW_CONFIDENCE_THRESHOLD
                 or not fix_output.patch.strip()
             ):
+                response = {**response, "usage": {
+                    "input_tokens": total_in,
+                    "output_tokens": total_out,
+                }}
                 return fix_output, response
 
     # Final attempt: validate and raise exhausted if it still fails.
     try:
         _validate_patch(fix_output.patch)
+        response = {**response, "usage": {
+            "input_tokens": total_in,
+            "output_tokens": total_out,
+        }}
         return fix_output, response
     except PatchFormatRejected as e:
         raise PatchFormatRetryExhausted(str(e)) from e
@@ -845,6 +881,9 @@ async def generate_fix(
     Raises:
         AttemptCapExceeded:  If run already has settings.max_attempts attempts.
                              No LLM call is made.
+        AttemptClaimLost:    If a concurrent worker won the attempt-number race
+                             (uq_attempt_run_number). The loser must exit quietly
+                             without marking the winner's run as error.
         LowConfidenceSkip:   If confidence < LOW_CONFIDENCE_THRESHOLD or patch is blank.
                              Soft signal — orchestrator should route to fallback.
                              Attempt is NOT inserted.
@@ -855,32 +894,44 @@ async def generate_fix(
                              initial and retry calls. Attempt is NOT inserted.
     """
     t0 = time.monotonic()
+    # Capture ORM scalars before any DB await — after rollback/commit the
+    # objects may expire and lazy attribute reads raise MissingGreenlet.
+    run_id = run.id
+    run_diagnosis = run.diagnosis_summary
+    run_repo_id: Optional[uuid.UUID] = run.repo_id
 
     # -------------------------------------------------------------------------
-    # 1. Atomic attempt cap check — lock the Run row to prevent race conditions
+    # 1. Attempt cap check — plain read, no row lock held across the LLM
+    # call below (#107). A SELECT ... FOR UPDATE here would serialize
+    # concurrent workers behind model inference; over-cap races are fenced
+    # by the uq_attempt_run_number unique constraint on insert instead.
     # -------------------------------------------------------------------------
-    await db.execute(select(Run.id).where(Run.id == run.id).with_for_update())
-
     count_result = await db.execute(
-        select(func.count()).select_from(Attempt).where(Attempt.run_id == run.id)
+        select(func.count()).select_from(Attempt).where(Attempt.run_id == run_id)
     )
     existing_count: int = count_result.scalar_one()
 
     cap = _max_attempts()
     if existing_count >= cap:
+        # Read-only txn: commit (not rollback) so loaded objects stay valid
+        # with expire_on_commit=False. Rollback would expire `run` and the
+        # f-string below would raise MissingGreenlet instead of the cap error.
+        await db.commit()
         raise AttemptCapExceeded(
-            f"run {run.id} already has {existing_count} attempt(s); "
+            f"run {run_id} already has {existing_count} attempt(s); "
             f"cap is {cap}. No LLM call made."
         )
 
     attempt_number = existing_count + 1
+    # Close the read txn before the unbounded LLM await below.
+    await db.commit()
 
     # -------------------------------------------------------------------------
     # 2. Deterministic ModuleNotFoundError fast-path.
     #    Only taken on the FIRST attempt when NO review_feedback is present.
     # -------------------------------------------------------------------------
     deterministic_patch: Optional[str] = (
-        _module_not_found_path_fix(run.diagnosis_summary or diagnosis_summary)
+        _module_not_found_path_fix(run_diagnosis or diagnosis_summary)
         if prior_attempt is None and review_feedback is None
         else None
     )
@@ -890,7 +941,7 @@ async def generate_fix(
     if used_deterministic:
         logger.info(
             "fix_generator: run=%s attempt=%d using deterministic ModuleNotFoundError fallback (no LLM call)",
-            run.id,
+            run_id,
             attempt_number,
         )
         fix_output = FixOutput(
@@ -911,14 +962,14 @@ async def generate_fix(
         # ---------------------------------------------------------------------
         # 3. LLM call + strict Pydantic parse (one retry on ValidationError)
         # ---------------------------------------------------------------------
-        repo_id: Optional[uuid.UUID] = getattr(run, "repo_id", None)
+        repo_id: Optional[uuid.UUID] = run_repo_id
 
         fix_output, response = await _call_with_format_retry(
             messages=messages,
             diagnosis_summary=diagnosis_summary,
             prior_attempt=prior_attempt,
             db=db,
-            run_id=run.id,
+            run_id=run_id,
             repo_id=repo_id,
             review_feedback=review_feedback,
         )
@@ -931,7 +982,7 @@ async def generate_fix(
     if fix_output.confidence < LOW_CONFIDENCE_THRESHOLD or not fix_output.patch.strip():
         logger.info(
             "fix_generator: run=%s confidence=%d patch_len=%d — below threshold (%d) or empty, skipping attempt",
-            run.id,
+            run_id,
             fix_output.confidence,
             len(fix_output.patch.strip()),
             LOW_CONFIDENCE_THRESHOLD,
@@ -952,7 +1003,7 @@ async def generate_fix(
     # -------------------------------------------------------------------------
     persisted_notes = (review_feedback or fix_output.strategy_notes or "")[:500]
     attempt = Attempt(
-        run_id=run.id,
+        run_id=run_id,
         attempt_number=attempt_number,
         patch_text=fix_output.patch,
         confidence_score=fix_output.confidence,
@@ -960,19 +1011,36 @@ async def generate_fix(
         verification_status="pending",
     )
     db.add(attempt)
-    await db.flush()  # get attempt.id before commit
-    await db.commit()
+    try:
+        await db.flush()  # get attempt.id before commit
+        await db.commit()
+    except IntegrityError as ie:
+        # Concurrent worker won the attempt-number race (#107): the
+        # uq_attempt_run_number loser must exit quietly without marking
+        # the winner's run as error.
+        await db.rollback()
+        logger.info(
+            "fix_generator: run=%s attempt=%d claim lost to concurrent worker "
+            "(%s) — already-claimed, exiting",
+            run_id,
+            attempt_number,
+            type(ie).__name__,
+        )
+        raise AttemptClaimLost(
+            f"run {run_id} attempt {attempt_number} already claimed by "
+            f"concurrent worker"
+        ) from ie
 
     # -------------------------------------------------------------------------
     # 7. Persist RunStep trace — tokens + latency only, never raw content
     # -------------------------------------------------------------------------
-    usage = response.get("usage", {})
-    input_tokens: int = usage.get("input_tokens", 0)
-    output_tokens: int = usage.get("output_tokens", 0)
+    # Canonical usage parsing (issue #106): tolerates prompt/completion
+    # spellings, None, and numeric strings instead of silently recording 0.
+    input_tokens, output_tokens = normalize_usage(response.get("usage"))
 
-    await _persist_run_step(
+    step_cost = await _persist_run_step(
         db=db,
-        run_id=run.id,
+        run_id=run_id,
         step_name="fix_generator_deterministic"
         if used_deterministic
         else "fix_generator",
@@ -980,10 +1048,14 @@ async def generate_fix(
         output_tokens=output_tokens,
         latency_ms=latency_ms,
     )
+    try:
+        object.__setattr__(attempt, "_haunter_step_cost", step_cost)
+    except Exception:
+        pass
 
     logger.info(
         "fix_generator: run=%s attempt=%d confidence=%d latency_ms=%d path=%s",
-        run.id,
+        run_id,
         attempt_number,
         fix_output.confidence,
         latency_ms,
@@ -1006,18 +1078,21 @@ async def _persist_run_step(
     input_tokens: int,
     output_tokens: int,
     latency_ms: int,
-) -> None:
-    """Insert a RunStep trace row. Never stores patch content."""
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
-        output_tokens * COST_PER_OUTPUT_TOKEN
-    )
-    step = RunStep(
+) -> float:
+    """Insert a RunStep trace row. Never stores patch content.
+
+    Returns the persisted cost_estimate so callers can maintain a running
+    cost total without re-SUMming the table (issue #113). Cost is
+    recomputed by :func:`make_run_step` so the row is self-consistent
+    with the stored token counts (issue #106 — one formula, one place).
+    """
+    step = make_run_step(
         run_id=run_id,
         step_name=step_name,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        cost_estimate=round(cost, 8),
     )
     db.add(step)
     await db.commit()
+    return step.cost_estimate

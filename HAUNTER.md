@@ -108,6 +108,14 @@ sequenceDiagram
 
 ---
 
+### 2.3 Manual Replay / Operator Redrive (Issue #159)
+
+A run that fails or exhausts its fix attempts never needs a dummy commit to run again. `POST /runs/{run_id}/retry` (`backend/app/routers/traces.py`) clones a settled run into a fresh `pending` child linked by `parent_run_id` + `is_retry_child`, then re-dispatches the pipeline through the hosting adapter (async self-invoke on Lambda, `BackgroundTasks` locally) and returns the child with HTTP 201.
+
+The child copies only the tenant scope (`repo_id`) and failure coordinates (`head_sha`/`head_branch`). Every pipeline-owned field resets: diagnosis summary, PR coordinates, final summary, failure reason, and any fallback tracking issue. `github_run_id`/`github_delivery_id` stay NULL — the child corresponds to no new GitHub delivery, so a fabricated id can never collide with a real delivery's UNIQUE idempotency key. The source run is never mutated, preserving its audit history.
+
+Only settled (terminal-state) runs replay: retryability is read from the orchestrator's own `_TERMINAL_STATUSES` (`pr_opened`, `fallback_commented`, `flaky_detected`, `completed`, `error`), so a newly added terminal status cannot drift out of the allowlist. Guards: 404 on non-owned runs (no existence oracle), 409 while the source or any child is still in flight, 429 past 5 children per run, and 503 with the child marked `error` when dispatch itself fails. The dashboard offers the action per row on the runs list and on the run detail page (`RetryRunButton`), lands on the dispatched child, and the trace endpoint exposes the parent/children thread for the retry lineage.
+
 ## 3. Orchestrator Engine & State Machine
 
 The orchestrator (`backend/app/orchestrator.py`) enforces a forward-only, deterministic state machine over `RunStatus`. Skipping states or reverting backwards triggers an immediate `InvalidTransitionError`.
@@ -622,7 +630,7 @@ Asynchronous self-invocations (`boto3.client("lambda").invoke(InvocationType="Ev
 
 ### 8.1 Backend: AWS Lambda Function URL
 - **Hosting Adapter:** FastAPI wrapped with Mangum (`lifespan="off"`).
-- **Architecture:** `x86_64` (Verified in `infra/aws/lambda.tf:159`, `backend/rebuild_lambda_zip.py:53`, and `aws.md:57`).
+- **Architecture:** `x86_64` (Verified in `infra/aws/lambda.tf:159`, `backend/rebuild_lambda_zip.py:53`, and `redeploy.md`).
 - **Memory:** 512 MB.
 - **Execution Timeout:** 900 seconds (15 minutes).
 - **Endpoint Protocol:** AWS Lambda Function URL (`auth_type = "NONE"`).
@@ -737,7 +745,7 @@ During early system design, Haunter planned multi-cloud sandbox runners across A
 Originally targeted for Cloudflare Pages (`*.pages.dev`), the frontend hosting was migrated to **Cloudflare Workers Static Assets** (`frontend/wrangler.jsonc`) using worker `haunter`. This consolidates edge infrastructure onto Cloudflare's modern Workers platform with explicit asset directory routing (`./out`) and single-command Wrangler deployments.
 
 ### 12.3 Compute Architecture Alignment: x86_64
-Early architecture drafts proposed ARM64 Graviton2 for Lambda. Ground truth verification confirmed and locked the architecture to **`x86_64`** (`infra/aws/lambda.tf:159`, `aws.md:57`). Cross-compiling Python packages with native extensions (such as `asyncpg` and `cryptography`) from Windows development hosts for Lambda requires standardizing on `--platform manylinux2014_x86_64`, which aligns with the x86_64 Lambda runtime.
+Early architecture drafts proposed ARM64 Graviton2 for Lambda. Ground truth verification confirmed and locked the architecture to **`x86_64`** (`infra/aws/lambda.tf:159`, `redeploy.md`). Cross-compiling Python packages with native extensions (such as `asyncpg` and `cryptography`) from Windows development hosts for Lambda requires standardizing on `--platform manylinux2014_x86_64`, which aligns with the x86_64 Lambda runtime.
 
 ### 12.4 Session Security Fix: SameSite=None
 Original drafts specified `SameSite=Lax` for session cookies. In cross-origin topologies where the frontend is hosted on Cloudflare Workers and the API is hosted on AWS Lambda Function URL, modern browsers classify API requests as third-party cross-site contexts and refuse to send `SameSite=Lax` cookies. The architecture strictly mandates `samesite="none"` paired with `secure=True` and `httponly=True`.
@@ -800,7 +808,7 @@ Configured per repository via granular event flags evaluated in `backend/app/web
 - `on_pull_request`: Triggered on `pull_request.opened` and `pull_request.synchronize` to audit new PR diffs against the base branch.
 - `on_ci_failure`: Triggered on `workflow_run.completed` with conclusion `failure`. Conducts an automated root-cause analysis without creating an unsolicited PR.
 - `on_ci_success`: Triggered on `workflow_run.completed` with conclusion `success`. Runs regression and performance checks on verified green builds.
-- `on_manual_mention`: Triggered on `issue_comment.created` matching `@haunter audit`. Conducts an on-demand ad-hoc review of the PR or issue context.
+- `on_manual_mention`: Triggered on `issue_comment.created` matching `@haunter-auditor audit` (imperative audit request; questions about audits — including capability questions like `what can you audit?` — stay on the Q&A path). Conducts an on-demand ad-hoc review of the PR or issue context. Endpoints resolve synchronously before the ack with bounded waits and the replayable delivery row is recorded first, so the path needs no post-response work (Lambda-safe); the durable outbox claim deduplicates redeliveries on `delivery_id`.
 
 ### 14.3 Multi-Perspective Audit Core (`backend/app/subagents/auditor.py`)
 Audits repository diffs across four comprehensive engineering perspectives:

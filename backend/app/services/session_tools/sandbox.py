@@ -250,6 +250,81 @@ def _loop_supports_subprocesses(loop: asyncio.AbstractEventLoop) -> bool:
     )
 
 
+_BLOCKED_ENV_EXACT: frozenset[str] = frozenset(
+    {
+        "DATABASE_URL",
+        "DATABASE_URL_UNPOOLED",
+        "TEST_DATABASE_URL",
+        "ALEMBIC_DATABASE_URL",
+        "SESSION_SECRET_KEY",
+        "GITHUB_CLIENT_SECRET",
+        "GITHUB_CLIENT_ID",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_APP_PRIVATE_KEY",
+        "JWT_SECRET",
+        "SECRET_KEY",
+        "OPENAI_API_KEY",
+        "GROQ_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "TINYFISH_API_KEY",
+    }
+)
+
+_BLOCKED_ENV_SUFFIXES: tuple[str, ...] = (
+    "_KEY",
+    "_SECRET",
+    "_TOKEN",
+    "_PASSWORD",
+    "_CREDENTIALS",
+    "_AUTH",
+    "_PAT",
+)
+
+_BLOCKED_ENV_SUBSTRINGS: tuple[str, ...] = (
+    "SECRET",
+    "PASSWORD",
+    "CREDENTIAL",
+    "DATABASE_URL",
+)
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    """Check if an environment variable key holds sensitive server secrets."""
+    upper = key.upper()
+    if upper in _BLOCKED_ENV_EXACT:
+        return True
+    if any(upper.endswith(suffix) for suffix in _BLOCKED_ENV_SUFFIXES):
+        return True
+    if any(sub in upper for sub in _BLOCKED_ENV_SUBSTRINGS):
+        return True
+    return False
+
+
+def _get_clean_subprocess_env(cwd: str | None = None) -> dict[str, str]:
+    """
+    Build a clean environment dictionary for sandbox subprocess execution.
+
+    Strips server secrets, database URLs, auth tokens, and credentials from
+    the parent process environment to prevent leaks into user scripts or commands.
+    Ensures local virtualenv bin/Scripts directory is prepended to PATH.
+    """
+    clean_env: dict[str, str] = {}
+    for k, v in os.environ.items():
+        if not _is_sensitive_env_key(k):
+            clean_env[k] = v
+
+    repo_python = _find_repo_python(cwd)
+    effective_python = repo_python if repo_python else sys.executable
+    bin_dir = os.path.dirname(effective_python)
+    scripts_dir = os.path.join(bin_dir, "Scripts")
+    path_dirs = [d for d in (bin_dir, scripts_dir) if os.path.isdir(d)]
+    if path_dirs:
+        clean_env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{clean_env.get('PATH', '')}"
+
+    return clean_env
+
+
 def _run_subprocess_sync(
     argv: list[str],
     timeout_sec: int,
@@ -268,15 +343,8 @@ def _run_subprocess_sync(
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
 
-    # Ensure virtualenv bin/Scripts directory is in PATH
-    env = os.environ.copy()
-    repo_python = _find_repo_python(cwd)
-    effective_python = repo_python if repo_python else sys.executable
-    bin_dir = os.path.dirname(effective_python)
-    scripts_dir = os.path.join(bin_dir, "Scripts")
-    path_dirs = [d for d in (bin_dir, scripts_dir) if os.path.isdir(d)]
-    if path_dirs:
-        env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{env.get('PATH', '')}"
+    # Clean subprocess environment: strip server secrets, ensure virtualenv PATH
+    env = _get_clean_subprocess_env(cwd)
 
     try:
         cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)
@@ -398,15 +466,8 @@ async def _run_subprocess(
     stdout_chunks: list[str] = []
     stderr_text = ""
 
-    # Ensure virtualenv bin/Scripts is in PATH
-    env = os.environ.copy()
-    repo_python = _find_repo_python(cwd)
-    effective_python = repo_python if repo_python else sys.executable
-    bin_dir = os.path.dirname(effective_python)
-    scripts_dir = os.path.join(bin_dir, "Scripts")
-    path_dirs = [d for d in (bin_dir, scripts_dir) if os.path.isdir(d)]
-    if path_dirs:
-        env["PATH"] = f"{os.pathsep.join(path_dirs)}{os.pathsep}{env.get('PATH', '')}"
+    # Clean subprocess environment: strip server secrets, ensure virtualenv PATH
+    env = _get_clean_subprocess_env(cwd)
 
     try:
         cmd_argv = _prepare_cmd_argv(argv, cwd=cwd)
@@ -1123,7 +1184,15 @@ def resolve_repo_dir(
             break
 
     if not resolved_repo_root:
+        from app.lambda_runtime import is_lambda_runtime
+
         repo_desc = f"{clean_owner}/{clean_repo}" if clean_owner else clean_repo
+        if is_lambda_runtime():
+            return None, (
+                f"Error: Local checkout for repository {repo_desc!r} is not available in the AWS Lambda runtime. "
+                "Local terminal commands, linters, and test runners cannot execute locally on Lambda. "
+                "To verify staged patches in an isolated cloud environment, use 'verify_in_ci_sandbox'."
+            )
         return None, (
             f"Error: Local checkout for repository {repo_desc!r} was not found on this machine. "
             "Local terminal commands and test runners require a local clone of the repository. "
@@ -1412,6 +1481,25 @@ async def tool_run_linter(
     if not paths:
         return "Error: No paths provided to run_linter."
 
+    # Sanitize each path — no traversal allowed.
+    cleaned: list[str] = []
+    for p in paths:
+        stripped = p.strip()
+        if ".." in stripped or stripped.startswith("/"):
+            return (
+                f"Error: Path rejected — traversal or absolute path not allowed: {p!r}"
+            )
+        cleaned.append(stripped)
+
+    linter_name, argv_prefix = _select_linter(cleaned, linter)
+    argv = argv_prefix + cleaned
+
+    command_str = shlex.join(argv)
+    try:
+        _sanitize_command(command_str)
+    except ValueError as exc:
+        return f"Error: {exc}"
+
     effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
         repo_name=repo_name,
@@ -1440,25 +1528,6 @@ async def tool_run_linter(
             base_sha=_kwargs.get("base_sha"),
             session_id=effective_session_id,
         )
-
-    # Sanitize each path — no traversal allowed.
-    cleaned: list[str] = []
-    for p in paths:
-        stripped = p.strip()
-        if ".." in stripped or stripped.startswith("/"):
-            return (
-                f"Error: Path rejected — traversal or absolute path not allowed: {p!r}"
-            )
-        cleaned.append(stripped)
-
-    linter_name, argv_prefix = _select_linter(cleaned, linter)
-    argv = argv_prefix + cleaned
-
-    command_str = shlex.join(argv)
-    try:
-        _sanitize_command(command_str)
-    except ValueError as exc:
-        return f"Error: {exc}"
 
     timeout_sec = max(_MIN_TIMEOUT, min(_MAX_TIMEOUT, timeout_sec))
 
@@ -1538,6 +1607,23 @@ async def tool_run_targeted_tests(
     if not test_targets:
         return "Error: No test targets provided."
 
+    # Sanitize target paths.
+    cleaned: list[str] = []
+    for t in test_targets:
+        stripped = t.strip()
+        if ".." in stripped or stripped.startswith("/"):
+            return f"Error: Target rejected — traversal or absolute path not allowed: {t!r}"
+        cleaned.append(stripped)
+
+    framework, argv_prefix = _select_test_framework(cleaned)
+    argv = argv_prefix + cleaned
+
+    command_str = shlex.join(argv)
+    try:
+        _sanitize_command(command_str)
+    except ValueError as exc:
+        return f"Error: {exc}"
+
     effective_session_id = session_id or _kwargs.get("session_id")
     resolved_cwd, err = resolve_repo_dir(
         repo_name=repo_name,
@@ -1566,23 +1652,6 @@ async def tool_run_targeted_tests(
             base_sha=_kwargs.get("base_sha"),
             session_id=effective_session_id,
         )
-
-    # Sanitize target paths.
-    cleaned: list[str] = []
-    for t in test_targets:
-        stripped = t.strip()
-        if ".." in stripped or stripped.startswith("/"):
-            return f"Error: Target rejected — traversal or absolute path not allowed: {t!r}"
-        cleaned.append(stripped)
-
-    framework, argv_prefix = _select_test_framework(cleaned)
-    argv = argv_prefix + cleaned
-
-    command_str = shlex.join(argv)
-    try:
-        _sanitize_command(command_str)
-    except ValueError as exc:
-        return f"Error: {exc}"
 
     timeout_sec = max(_MIN_TIMEOUT, min(_MAX_TIMEOUT, timeout_sec))
 
@@ -1712,6 +1781,9 @@ async def tool_verify_ci_sandbox(
         getattr(settings, "sandbox_provider", "github_actions") or "github_actions"
     )
     provider = provider.lower().strip()
+
+    if provider not in ("github_actions", "local"):
+        return f"Error: Unknown SANDBOX_PROVIDER={provider!r}. Must be 'github_actions' or 'local'."
 
     # ---- Local fast path: run staged files through the local test runner.
     if provider == "local":

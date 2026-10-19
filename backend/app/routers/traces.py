@@ -12,13 +12,14 @@ Exposes:
                                is_retry_child) and re-dispatch the
                                orchestrator pipeline (Feature 1).
 
-Security invariants (match WORK.md Phase 9 spec):
+Security invariants (HAUNTER.md §7 "Security Architecture & Invariants"; note
+that WORK.md is NOT tracked in this repository, so this docstring is the contract):
   - Every endpoint requires get_current_user (signed session cookie).
   - Ownership is enforced at the SQL WHERE clause — never fetch-then-filter.
   - Non-owned / non-existent resources → 404, not 403 (no existence oracle).
   - All filter parameters are Pydantic-bounded:
       limit  ∈ [1, 100]
-      status ∈ exact allowlist (Literal)
+      status ∈ the orchestrator's RunStatus values (derived, not transcribed)
       from/to datetime range ≤ 90 days, to ≥ from
       repo_id must be UUID (auto-validated by FastAPI path param type)
   - run_steps rows contain only token counts / latency (Phase 5 stores no raw
@@ -30,7 +31,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Optional
 
 from fastapi import (
     APIRouter,
@@ -42,7 +43,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
@@ -51,7 +52,7 @@ from app.failure_signature import (
     MAX_SIGNATURE_INPUT_CHARS,
     normalize_failure_signature,
 )
-from app.models import Attempt, Repo, Run, RunStep, User
+from app.models import Attempt, EvalResult, Repo, Run, RunStep, User
 from app.schemas import BatchDeleteRunsRequest, BatchDeleteRunsResponse, RunOut
 from app.services.followup_commands import FEEDBACK_CONCLUSION, TEST_FIX_CONCLUSION
 from app.traces.classify import classify_failure
@@ -66,19 +67,37 @@ router = APIRouter(tags=["traces"])
 SIGNATURE_CLUSTER_MAX_RUNS = 5000
 
 # ---------------------------------------------------------------------------
-# Status allowlist (mirrors RunStatus enum values)
+# Status allowlist (derived from the orchestrator's own state machine)
 # ---------------------------------------------------------------------------
 
-RunStatusLiteral = Literal[
-    "pending",
-    "context_gathering",
-    "fix_generation",
-    "verification",
-    "pending_pr",
-    "fallback",
-    "completed",
-    "error",
-]
+
+def _allowed_run_statuses() -> tuple[str, ...]:
+    """
+    The status values ``GET /runs?status=`` accepts, read from
+    ``app.orchestrator.RunStatus`` instead of being transcribed here.
+
+    Transcribing the set is what let it drift: the filter listed 8 values while the
+    pipeline wrote 12, and every status added to the state machine afterwards
+    surfaced as HTTP 422 on a filter that exists precisely to list those runs.
+
+    The import is function-local because of a real cycle, not out of caution:
+    ``app.orchestrator:36`` -> ``app.services.feature_enforcement:25`` ->
+    ``app.services.repo_settings:456`` -> ``app.services.feature_enforcement``
+    again. Loading ``app.orchestrator`` first raises
+    ``ImportError: cannot import name 'EnforcementDecision' from partially
+    initialized module 'app.services.feature_enforcement'``, and a module-level
+    import here would make traces.py exactly that first loader. It resolves
+    because app startup loads both ends of the cycle first (``main.py:23``
+    imports ``app.services.audit_pipeline``, which imports
+    ``app.services.feature_enforcement``), so by the time a request triggers
+    this validator the cycle is already closed. Note that this is not "every
+    module has loaded": after ``import main``, ``'app.orchestrator' in
+    sys.modules`` is False, and this function is what performs that deferred
+    import -- the first ``/runs`` request that carries ``status=`` pays it.
+    """
+    from app.orchestrator import RunStatus
+
+    return tuple(status.value for status in RunStatus)
 
 # ---------------------------------------------------------------------------
 # Response schemas
@@ -98,6 +117,12 @@ class RunStepOut(BaseModel):
 
 class AttemptOut(BaseModel):
     attempt_number: int
+    # The unified diff the Fix Generator produced for this attempt. It is NOT NULL
+    # on the column (app/models.py:298) and is populated on every read from the
+    # ORM row, but stays optional on the wire so it matches the frontend contract
+    # (`patch_text?: string`) and an attempt that somehow carries no diff still
+    # serialises instead of 500-ing the whole trace.
+    patch_text: Optional[str] = None
     confidence_score: Optional[int]
     verification_status: Optional[str]
     failure_reason: Optional[str]
@@ -174,11 +199,13 @@ class RunListParams(BaseModel):
       limit  ∈ [1, 100]           — prevents unbounded SELECT DoS
       offset ≥ 0
       from/to datetime range ≤ 90d, and to ≥ from when both supplied
-      status in Literal allowlist  — rejects free-text SQL injection vector
+      status in the RunStatus allowlist — rejects the free-text SQL injection
+             vector; see _allowed_run_statuses for why the set is derived
+             rather than transcribed
     """
 
     repo_id: Optional[uuid.UUID] = None
-    status: Optional[RunStatusLiteral] = None
+    status: Optional[str] = None
     from_: Optional[datetime] = Field(None, alias="from")
     to: Optional[datetime] = None
     limit: int = Field(20, ge=1, le=100)
@@ -195,6 +222,15 @@ class RunListParams(BaseModel):
                 raise ValueError("'to' must be >= 'from'")
             if (to - from_) > timedelta(days=90):
                 raise ValueError("date range must not exceed 90 days")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> "RunListParams":
+        if self.status is None:
+            return self
+        allowed = _allowed_run_statuses()
+        if self.status not in allowed:
+            raise ValueError(f"status must be one of: {', '.join(allowed)}")
         return self
 
 
@@ -228,18 +264,25 @@ async def get_run_trace(
         )
 
     # Fetch steps ordered ASC by created_at (chronological pipeline timeline).
+    # Bounded: a run's step count is fixed by the pipeline stage list, the
+    # LIMIT is a backstop against pathological rows, not pagination.
     steps_result = await db.execute(
         select(RunStep)
         .where(RunStep.run_id == run_id)
         .order_by(RunStep.created_at.asc())
+        .limit(500)
     )
     steps: list[RunStep] = list(steps_result.scalars().all())
 
-    # Fetch attempts ordered ASC by attempt_number.
+    # Fetch attempts ordered ASC by attempt_number. Bounded for the same
+    # reason (orchestrator max_attempts is single-digit); patch_text stays
+    # inline because the C1 wire contract requires attempts[].patch_text on
+    # this response for the dashboard diff viewer.
     attempts_result = await db.execute(
         select(Attempt)
         .where(Attempt.run_id == run_id)
         .order_by(Attempt.attempt_number.asc())
+        .limit(100)
     )
     attempts: list[Attempt] = list(attempts_result.scalars().all())
 
@@ -272,6 +315,9 @@ async def get_run_trace(
             Repo.user_id == current_user.id,
         )
         .order_by(Run.created_at.asc())
+        # Bounded: retry creation caps children at _MAX_RUN_CHILDREN, so this
+        # LIMIT is a backstop against races, not a truncation of live data.
+        .limit(_MAX_TRACE_CHILDREN)
     )
     children_out = [
         RunSummaryOut.model_validate(child)
@@ -298,6 +344,11 @@ async def get_run_trace(
 # run. Matches the interactive refinement cap in app/webhooks.py so a single
 # run can never fan out into an unbounded pipeline storm.
 _MAX_RUN_CHILDREN = 5
+
+# Backstop LIMIT for the retry-thread children lookup in get_run_trace.
+# Creation is capped at _MAX_RUN_CHILDREN above, so this never truncates live
+# data — it bounds the SELECT against check-then-act races at the cap.
+_MAX_TRACE_CHILDREN = 50
 
 # Conclusions the pipeline writes onto `Run.conclusion` as its own
 # classification, overwriting the GitHub conclusion the run was created with.
@@ -543,7 +594,7 @@ async def list_runs(
     try:
         params = RunListParams(
             repo_id=repo_id,
-            status=status_filter,  # type: ignore[arg-type]
+            status=status_filter,
             **{"from": from_},
             to=to,
             limit=limit,
@@ -672,61 +723,58 @@ async def get_repo_stats(
             status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
         )
 
-    # Aggregate run-level stats.
-    run_agg_result = await db.execute(
-        select(
-            func.count(Run.id).label("total_runs"),
-            func.sum(
-                func.cast(Run.status == "completed", type_=func.count(Run.id).type)
-            ).label("completed_count"),
-        ).where(Run.repo_id == repo_id)
-    )
-    run_row = run_agg_result.one()
-    total_runs: int = run_row.total_runs or 0
-    # COUNT(status == completed) via a FILTER aggregate.
-    # Re-query more explicitly for cross-DB compatibility:
-    completed_result = await db.execute(
-        select(func.count(Run.id)).where(
-            Run.repo_id == repo_id, Run.status == "completed"
+    # Aggregate run-level stats in ONE round trip: total rows plus the
+    # completed subset via a conditional SUM. (The previous code ran this
+    # aggregate and then re-queried the completed count separately.)
+    stats_row = (
+        await db.execute(
+            select(
+                func.count(Run.id).label("total_runs"),
+                func.coalesce(
+                    func.sum(case((Run.status == "completed", 1), else_=0)),
+                    0,
+                ).label("completed_count"),
+            ).where(Run.repo_id == repo_id)
         )
-    )
-    completed_count: int = completed_result.scalar_one() or 0
+    ).one()
+    total_runs: int = int(stats_row.total_runs or 0)
+    completed_count: int = int(stats_row.completed_count or 0)
 
     success_rate: float = (completed_count / total_runs) if total_runs > 0 else 0.0
 
-    # Average attempts per run.
-    avg_attempts_result = await db.execute(
-        select(
-            func.avg(
-                select(func.count(Attempt.id))
-                .where(Attempt.run_id == Run.id)
-                .correlate(Run)
-                .scalar_subquery()
-            )
-        ).where(Run.repo_id == repo_id)
+    # Per-run attempt/cost/latency averages in a SECOND single round trip.
+    # Each average is over a correlated per-run scalar subquery; combining the
+    # three into one SELECT halves the statements without changing the math.
+    attempt_count_subq = (
+        select(func.count(Attempt.id))
+        .where(Attempt.run_id == Run.id)
+        .correlate(Run)
+        .scalar_subquery()
     )
-    avg_attempts: float = float(avg_attempts_result.scalar_one() or 0.0)
-
-    # Average cost and latency per run (summed per run, then averaged).
-    cost_lat_result = await db.execute(
-        select(
-            func.avg(
-                select(func.coalesce(func.sum(RunStep.cost_estimate), 0))
-                .where(RunStep.run_id == Run.id)
-                .correlate(Run)
-                .scalar_subquery()
-            ),
-            func.avg(
-                select(func.coalesce(func.sum(RunStep.latency_ms), 0))
-                .where(RunStep.run_id == Run.id)
-                .correlate(Run)
-                .scalar_subquery()
-            ),
-        ).where(Run.repo_id == repo_id)
+    cost_sum_subq = (
+        select(func.coalesce(func.sum(RunStep.cost_estimate), 0))
+        .where(RunStep.run_id == Run.id)
+        .correlate(Run)
+        .scalar_subquery()
     )
-    cost_lat_row = cost_lat_result.one()
-    avg_cost: float = float(cost_lat_row[0] or 0.0)
-    avg_latency_ms: float = float(cost_lat_row[1] or 0.0)
+    latency_sum_subq = (
+        select(func.coalesce(func.sum(RunStep.latency_ms), 0))
+        .where(RunStep.run_id == Run.id)
+        .correlate(Run)
+        .scalar_subquery()
+    )
+    avg_row = (
+        await db.execute(
+            select(
+                func.avg(attempt_count_subq),
+                func.avg(cost_sum_subq),
+                func.avg(latency_sum_subq),
+            ).where(Run.repo_id == repo_id)
+        )
+    ).one()
+    avg_attempts: float = float(avg_row[0] or 0.0)
+    avg_cost: float = float(avg_row[1] or 0.0)
+    avg_latency_ms: float = float(avg_row[2] or 0.0)
 
     return RepoStatsOut(
         success_rate=round(success_rate, 4),
@@ -788,25 +836,26 @@ async def batch_delete_runs(
 
     user_repo_ids = select(Repo.id).where(Repo.user_id == current_user.id)
     result = await db.execute(
-        select(Run).where(
+        select(Run.id).where(
             Run.id.in_(payload.run_ids),
             Run.repo_id.in_(user_repo_ids),
         )
     )
-    matching_runs = list(result.scalars().all())
+    matching_run_ids = list(result.scalars().all())
 
-    if not matching_runs:
+    if not matching_run_ids:
         return BatchDeleteRunsResponse(deleted_count=0)
 
-    matching_run_ids = [r.id for r in matching_runs]
-
-    # Explicit cascade cleanup for RunStep and Attempt (RunAttempt) records
-    # in case DB-level foreign key cascade is not handled.
+    # Explicit cascade cleanup for RunStep, Attempt, and EvalResult records.
+    # Note: eval_results.run_id FK is ON DELETE SET NULL, so without explicit
+    # deletion here, bulk deleting Run would leave orphaned EvalResult rows.
+    await db.execute(delete(EvalResult).where(EvalResult.run_id.in_(matching_run_ids)))
     await db.execute(delete(RunStep).where(RunStep.run_id.in_(matching_run_ids)))
     await db.execute(delete(Attempt).where(Attempt.run_id.in_(matching_run_ids)))
 
-    for run in matching_runs:
-        await db.delete(run)
+    # Single bulk DELETE: the previous per-row db.delete() loop emitted one
+    # statement per run inside the same long transaction.
+    await db.execute(delete(Run).where(Run.id.in_(matching_run_ids)))
     await db.commit()
 
-    return BatchDeleteRunsResponse(deleted_count=len(matching_runs))
+    return BatchDeleteRunsResponse(deleted_count=len(matching_run_ids))

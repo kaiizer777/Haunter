@@ -263,6 +263,13 @@ class Run(Base):
         "EvalResult", back_populates="run", uselist=False, cascade="all, delete-orphan"
     )
 
+    __table_args__ = (
+        # Issue #110: composite for the traces list query
+        # (routers/traces.py: filters repo_id + status, range on created_at,
+        # ORDER BY created_at DESC). Equality columns first, range/order last.
+        Index("ix_runs_repo_status_created", "repo_id", "status", "created_at"),
+    )
+
 
 class RunStep(Base):
     __tablename__ = "run_steps"
@@ -440,6 +447,13 @@ class CodeReview(Base):
     )
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="completed")
     failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Issue #131: snapshot of the team review preferences that shaped this
+    # review - {prefs, settings_version, truncated}. Nullable so rows written
+    # before the c2d3e4f5a6b7 migration stay valid; populated by the review
+    # orchestrator at analyze time.
+    applied_review_prefs: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
@@ -447,6 +461,12 @@ class CodeReview(Base):
     )
 
     repo: Mapped["Repo"] = relationship("Repo", back_populates="code_reviews")
+
+    __table_args__ = (
+        # Issue #110: composite for the review dedup lookup
+        # (webhooks.py: repo_id + commit_sha + pr_number, all equality).
+        Index("ix_code_reviews_repo_commit_pr", "repo_id", "commit_sha", "pr_number"),
+    )
 
 
 class RepoSettings(Base):
@@ -457,6 +477,10 @@ class RepoSettings(Base):
         CheckConstraint(
             "max_cost_per_run_cents >= 0",
             name="ck_repo_settings_cost_bounds",
+        ),
+        CheckConstraint(
+            "review_strictness IN ('low', 'medium', 'high')",
+            name="ck_repo_settings_review_strictness",
         ),
     )
 
@@ -535,6 +559,22 @@ class RepoSettings(Base):
     # validate_test_command on every write; NULL/empty clears the override.
     working_dir: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     test_command: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Issue #131: configurable team review preferences. Source of truth for
+    # the PR review bot; injected into the review prompt at analyze time and
+    # snapshotted per review onto CodeReview.applied_review_prefs.
+    review_guidelines_text: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    review_strictness: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="medium", server_default="medium"
+    )
+    review_focus_areas: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
+    )
+    review_checklist: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
+    )
 
     # Monotonic counter bumped whenever trigger semantics change. Persisted on
     # each audit job so a replayed delivery under changed settings is detected
@@ -729,6 +769,8 @@ class AgentSession(Base):
     checkpoints: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
     )
+    # Issue #96: Active/latest turn ID for multi-environment Lambda SSE replay
+    active_turn_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -740,11 +782,48 @@ class AgentSession(Base):
 
     user: Mapped["User"] = relationship("User", back_populates="agent_sessions")
     repo: Mapped["Repo"] = relationship("Repo", back_populates="agent_sessions")
+    stream_events: Mapped[list["SessionStreamEvent"]] = relationship(
+        "SessionStreamEvent", back_populates="session", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         # Composite index for fast active-session lookups per user.
         # Column order: equality first (user_id), then status.
         Index("ix_agent_sessions_user_id_status", "user_id", "status"),
+    )
+
+
+class SessionStreamEvent(Base):
+    """
+    Issue #96 — DB-backed SSE event store for cross-environment resumption.
+
+    Persists raw SSE events emitted during an interactive agent turn so any
+    concurrent or subsequent request routed to a different AWS Lambda worker
+    can replay the turn contiguously from Postgres rather than dropping the
+    connection with a 410 GONE or 409 TURN_ACTIVE_ELSEWHERE.
+    """
+
+    __tablename__ = "session_stream_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    turn_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    event_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    event: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunk: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    session: Mapped["AgentSession"] = relationship("AgentSession", back_populates="stream_events")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id", "turn_id", "event_id", name="uq_session_stream_events_session_turn_event"
+        ),
+        Index("ix_session_stream_events_lookup", "session_id", "turn_id", "event_id"),
     )
 
 
@@ -834,5 +913,14 @@ class WebhookDelivery(Base):
         CheckConstraint(
             "payload IS NULL OR octet_length(payload) <= 262144",
             name="ck_webhook_deliveries_payload_octet_length",
+        ),
+        # Issue #110: composite for the health list with event filter
+        # (webhooks.py list_webhook_deliveries: repo_id + event equality,
+        # created_at DESC ordering). Equality columns first, order column last.
+        Index(
+            "ix_webhook_deliveries_repo_event_created",
+            "repo_id",
+            "event",
+            "created_at",
         ),
     )

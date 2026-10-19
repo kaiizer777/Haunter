@@ -160,6 +160,7 @@ class AnthropicAdapter:
                 "usage": {"input_tokens": int, "output_tokens": int},
                 "latency_ms": int,
                 "model": str,
+                "finish_reason": str | None,
             }
         """
         if not self._api_key:
@@ -250,6 +251,12 @@ class AnthropicAdapter:
 
             content = "\n".join(text_parts) if text_parts else None
 
+            # Anthropic names the field ``stop_reason``; reported verbatim under
+            # the shared contract key so a caller can tell a complete generation
+            # from one the provider cut off at the token budget ("max_tokens").
+            # Never synthesized: absent means unknown, not "end_turn".
+            finish_reason = data.get("stop_reason")
+
             usage_data = (
                 data.get("usage", {}) if isinstance(data.get("usage"), dict) else {}
             )
@@ -266,6 +273,7 @@ class AnthropicAdapter:
                 },
                 "latency_ms": latency_ms,
                 "model": returned_model,
+                "finish_reason": finish_reason,
             }
 
         return await execute_with_retry(_make_request)

@@ -12,6 +12,12 @@ from app.models import Repo, Run, User
 from app.subagents.context_gatherer import gather_context
 from tests.conftest import truncate_all
 
+# `patch("app.llm.LLMClient.complete", ...)` below targets the package
+# re-export, which *is* the process-wide client class, so a subagent-scoped
+# subclass cannot intercept it on its own. `scoped_llm_client` rebinds
+# `app.llm` as well - see tests/conftest.py and issue #146.
+pytestmark = pytest.mark.usefixtures("scoped_llm_client")
+
 
 @pytest.mark.asyncio
 async def test_gather_context_enriches_summary_with_ast_context(db: AsyncSession):

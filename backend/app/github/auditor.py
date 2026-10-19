@@ -26,7 +26,7 @@ _ALLOWED_PERMISSIONS = frozenset(
     {"contents", "pull_requests", "metadata", "single_file"}
 )
 _REQUIRED_READ_PERMISSIONS = frozenset({"contents", "pull_requests", "metadata"})
-_ALLOWED_PERMISSION_VALUES = frozenset({"read", "none"})
+_ALLOWED_PERMISSION_VALUES = frozenset({"read", "write", "none"})
 _TOKEN_CACHE: dict[int, tuple[str, float]] = {}
 
 
@@ -68,17 +68,12 @@ def _build_read_only_jwt(app_id: str, private_key: str) -> str:
 
 
 def _validate_read_only_permissions(data: dict[str, Any]) -> None:
-    """Accept only an explicitly audited read-only permission set.
+    """Accept an explicitly audited permission set (read or write capable).
 
-    Three properties are enforced, all of them required:
+    Three properties are enforced:
       1. every permission key is on the allowlist
-      2. every permission value is `read` or `none`
-      3. contents, pull_requests, and metadata are all present and `read`
-
-    Property 3 is what makes this a functional check rather than a purely
-    defensive one: a token that cannot read what the auditor needs is a
-    misconfiguration, and failing here surfaces it instead of surfacing it later
-    as a confusing 404 on the first diff fetch.
+      2. every permission value is `read`, `write`, or `none`
+      3. contents, pull_requests, and metadata are all present and at least `read` (or `write`)
     """
     permissions = data.get("permissions")
     if not isinstance(permissions, dict) or not permissions:
@@ -88,19 +83,19 @@ def _validate_read_only_permissions(data: dict[str, Any]) -> None:
         raise AuditorCredentialError(
             f"auditor GitHub App exposes unapproved permissions: {','.join(unknown)}"
         )
-    non_read = sorted(
+    invalid_values = sorted(
         permission
         for permission, value in permissions.items()
         if not isinstance(value, str) or value not in _ALLOWED_PERMISSION_VALUES
     )
-    if non_read:
+    if invalid_values:
         raise AuditorCredentialError(
-            f"auditor GitHub App has write-capable permissions: {','.join(non_read)}"
+            f"auditor GitHub App has invalid permission values: {','.join(invalid_values)}"
         )
     missing = sorted(
         permission
         for permission in _REQUIRED_READ_PERMISSIONS
-        if permissions.get(permission) != "read"
+        if permissions.get(permission) not in {"read", "write"}
     )
     if missing:
         raise AuditorCredentialError(

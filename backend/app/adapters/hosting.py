@@ -40,12 +40,57 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # System config helpers — 60s TTL cache for hot-switch without redeploy
+#
+# The cache stores only detached scalars: an allowlisted provider name plus a
+# ``time.monotonic()`` stamp. No ORM row, session or connection is retained,
+# so a cache hit cannot outlive the ``async with async_session_maker()`` block
+# that produced it.
+#
+# The cache is bounded: expired entries are pruned on every store and the
+# size is capped (#136). TTL being checked on read alone left expired keys
+# resident with no eviction path — the only removal primitive was a blanket
+# ``invalidate_provider_cache()`` .clear(). That is a shape defect, not a live
+# leak: every production call site passes a hardcoded literal
+# ("hosting_provider" / "sandbox_provider"), so after normalization
+# (``key.strip().lower()``) the keyspace has cardinality 2 and
+# ``len(_cfg_cache) <= 2`` regardless. The cap exists purely as
+# defense-in-depth, so a future caller passing a dynamic key cannot turn this
+# into a per-worker leak. Hence a small cap, not a large one.
 # ---------------------------------------------------------------------------
 
 _cfg_cache: dict[str, tuple[str, float]] = {}
 _CACHE_TTL: float = 60.0
+# Invalidation generation (#141): bumped by invalidate_provider_cache().
+# _get_provider_config captures it before the DB await and skips the
+# write-back when it changed, so an invalidation landing mid-read (e.g.
+# PUT /config/hosting) is never undone by a stale in-flight read.
+_CFG_GEN: int = 0
+# Keyspace is 2 (hosting_provider / sandbox_provider), so 8 leaves room for
+# new literal config keys without implying a cardinality that cannot exist.
+# Must stay >= 2: get_active_hosting_provider() and get_active_sandbox_provider()
+# read their respective keys independently, so a cap of 1 would make each read
+# evict the key the other one just cached and the cache could never hit.
+_CFG_CACHE_MAXSIZE: int = 8
 
 _ALLOWED_PROVIDERS: frozenset[str] = frozenset({"aws"})
+
+
+def _prune_cfg_cache(now: float, stored_key: str) -> None:
+    """Evict expired entries, then oldest-inserted ones past the cap.
+
+    The size cap is only enforced when storing a new key: overwriting
+    an existing entry must not evict an unrelated live entry.
+    """
+    expired = [
+        key
+        for key, (_, cached_at) in _cfg_cache.items()
+        if now - cached_at >= _CACHE_TTL
+    ]
+    for key in expired:
+        del _cfg_cache[key]
+    if stored_key not in _cfg_cache:
+        while len(_cfg_cache) >= _CFG_CACHE_MAXSIZE:
+            _cfg_cache.pop(next(iter(_cfg_cache)))
 
 
 async def _get_provider_config(key: str, env_default: str) -> str:
@@ -53,13 +98,20 @@ async def _get_provider_config(key: str, env_default: str) -> str:
     Read provider config from DB system_configs table (TTL-cached 60s).
     Falls back to env default if DB is unavailable or key not set.
     Always validates against allowlist — returns env_default on invalid value.
+
+    Keys are normalized to lowercase: system_configs rows are written in
+    lowercase (``hosting_provider``/``sandbox_provider``) but one caller
+    historically passed ``HOSTING_PROVIDER``, splitting the cache and the
+    DB lookup. Normalizing here closes that class of bug.
     """
     from app.db import async_session_maker
     from app.models import SystemConfig
     from sqlalchemy import select
 
+    normalized = key.strip().lower()
     now = time.monotonic()
-    cached_val, cached_at = _cfg_cache.get(key, ("", -_CACHE_TTL - 1))
+    generation = _CFG_GEN
+    cached_val, cached_at = _cfg_cache.get(normalized, ("", -_CACHE_TTL - 1))
     if now - cached_at < _CACHE_TTL and cached_val:
         return cached_val
 
@@ -67,7 +119,7 @@ async def _get_provider_config(key: str, env_default: str) -> str:
     try:
         async with async_session_maker() as session:
             result = await session.execute(
-                select(SystemConfig).where(SystemConfig.key == key)
+                select(SystemConfig).where(SystemConfig.key == normalized)
             )
             row = result.scalar_one_or_none()
             if row:
@@ -75,7 +127,7 @@ async def _get_provider_config(key: str, env_default: str) -> str:
     except Exception as exc:
         logger.warning(
             "hosting: failed to read system_configs.%s from DB (%s), using env default %r",
-            key,
+            normalized,
             exc,
             env_default,
         )
@@ -84,12 +136,15 @@ async def _get_provider_config(key: str, env_default: str) -> str:
         logger.error(
             "hosting: invalid provider %r for key=%s, falling back to %r",
             value,
-            key,
+            normalized,
             env_default,
         )
         value = env_default
 
-    _cfg_cache[key] = (value, now)
+    if generation != _CFG_GEN:
+        return value
+    _prune_cfg_cache(now, normalized)
+    _cfg_cache[normalized] = (value, now)
     return value
 
 
@@ -109,6 +164,8 @@ async def get_active_sandbox_provider() -> str:
 
 def invalidate_provider_cache() -> None:
     """Clear the TTL cache — call after PUT /config/hosting writes to DB."""
+    global _CFG_GEN
+    _CFG_GEN += 1
     _cfg_cache.clear()
 
 
@@ -347,9 +404,15 @@ def _invoke_lambda_async(function_name: str, payload: bytes) -> None:
 
 async def get_hosting_adapter(provider: str | None = None) -> AWSHostingAdapter:
     """
-    Return the appropriate HostingAdapter for the current HOSTING_PROVIDER.
-    Provider value is hot-switchable via DB (60s TTL cache).
+    Return the adapter for `provider`, or the active HOSTING_PROVIDER when omitted.
+
+    When omitted, the provider is read live (DB ``hosting_provider`` key with
+    60s TTL cache, falling back to ``settings.hosting_provider``), so a DB
+    switch takes effect without redeploy. Only "aws" is supported today;
+    any other resolved value raises ValueError.
     """
     if provider is None:
-        await _get_provider_config("HOSTING_PROVIDER", "aws")
+        provider = await get_active_hosting_provider()
+    if provider.strip().lower() not in _ALLOWED_PROVIDERS:
+        raise ValueError(f"unsupported hosting provider: {provider!r}")
     return AWSHostingAdapter()

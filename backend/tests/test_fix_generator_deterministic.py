@@ -31,6 +31,10 @@ from app.subagents.fix_generator import (
 )
 from tests.conftest import truncate_all
 
+# Keep the `LLMClient.complete` stub below off the process-wide client class
+# so it cannot leak into another test module — see `scoped_llm_client`, #146.
+pytestmark = pytest.mark.usefixtures("scoped_llm_client")
+
 
 # ---------------------------------------------------------------------------
 # Pure-function tests (sync, no DB)

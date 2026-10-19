@@ -5,6 +5,7 @@ All external input crossing a trust boundary is validated through these schemas.
 No free-text injection vectors — provider and model_name use Literal allowlists.
 """
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Literal, Optional
@@ -12,6 +13,104 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import UserRole
+
+# Branch name and repo ident validation regexes and protected branch names
+_BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9/_.-]+$")
+_REPO_IDENT_RE = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+_PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "develop", "dev"})
+PROTECTED_BRANCHES: frozenset[str] = _PROTECTED_BRANCHES
+
+
+def is_protected_branch(branch: Optional[str]) -> bool:
+    """Return True if branch name (stripped of refs/heads/) is a protected branch."""
+    if not branch:
+        return False
+    clean = branch.strip().removeprefix("refs/heads/")
+    return clean.lower() in _PROTECTED_BRANCHES
+
+
+def validate_repo_ident(value: str, label: str = "identifier") -> str:
+    r"""Validate repository identifier (owner or name).
+
+    Checks ^[a-zA-Z0-9_.\-]+$ and rejects exact dot segments
+    (value in ('.', '..') or containing '/../'), without rejecting
+    valid names like 'foo..bar'.
+    """
+    if not value or not isinstance(value, str):
+        raise ValueError(f"Invalid repository {label}: cannot be empty.")
+    if not _REPO_IDENT_RE.match(value):
+        raise ValueError(
+            f"Invalid repository {label}: {value!r}. Only alphanumeric characters, '.', '_', and '-' are allowed."
+        )
+    if (
+        value in (".", "..")
+        or "/../" in value
+        or value.startswith("../")
+        or value.endswith("/..")
+    ):
+        raise ValueError(
+            f"Invalid repository {label}: {value!r}. Path traversal segments are not allowed."
+        )
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError(
+            f"Invalid repository {label}: {value!r}. Control characters are not allowed."
+        )
+    return value
+
+
+def _validate_git_branch(
+    branch: Optional[str], allow_protected: bool = True
+) -> Optional[str]:
+    """Validate Git branch format and enforce protected branch rules."""
+    if branch is None:
+        return None
+    b = branch.strip()
+    if not b:
+        return None
+    clean = b.removeprefix("refs/heads/")
+    if not clean:
+        raise ValueError("Branch name cannot be empty.")
+    if len(clean) > 255:
+        raise ValueError("Branch name cannot exceed 255 characters.")
+    if (
+        not _BRANCH_NAME_RE.match(clean)
+        or clean.startswith("/")
+        or clean.endswith("/")
+        or "//" in clean
+    ):
+        raise ValueError(
+            f"Invalid Git branch name format: {branch!r}. "
+            "Only alphanumeric characters, '/', '_', '-', and '.' are allowed."
+        )
+    components = clean.split("/")
+    for comp in components:
+        if not comp:
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Empty path components are not allowed."
+            )
+        if comp.startswith("."):
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot start with '.': {comp!r}."
+            )
+        if comp.endswith("."):
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot end with '.': {comp!r}."
+            )
+        if comp.endswith(".lock"):
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot end with '.lock': {comp!r}."
+            )
+        if ".." in comp:
+            raise ValueError(
+                f"Invalid Git branch name format: {branch!r}. Branch component cannot contain '..': {comp!r}."
+            )
+
+    if not allow_protected and is_protected_branch(clean):
+        raise ValueError(
+            f"Target branch cannot be a protected branch: {branch!r}. "
+            f"Protected branches: {sorted(_PROTECTED_BRANCHES)}"
+        )
+    return clean
 
 
 class UserRoleUpdate(BaseModel):
@@ -30,6 +129,16 @@ class RepoCreate(BaseModel):
     language_hint: Optional[str] = Field(None, max_length=255)
     active_model_config_id: Optional[uuid.UUID] = None
     github_install_id: Optional[int] = Field(default=None, gt=0)
+
+    @field_validator("owner", "name")
+    @classmethod
+    def validate_repo_ident_field(cls, v: str) -> str:
+        return validate_repo_ident(v)
+
+    @field_validator("default_branch", mode="before")
+    @classmethod
+    def validate_default_branch(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_git_branch(v, allow_protected=True)
 
     @field_validator("github_install_id")
     @classmethod
@@ -236,7 +345,10 @@ class RunOut(BaseModel):
 
 
 class BatchDeleteRunsRequest(BaseModel):
-    run_ids: list[uuid.UUID] = Field(default_factory=list)
+    # Hard cap: each id fans out to RunStep/Attempt cascade deletes, so an
+    # unbounded list holds one long write transaction and blocks autovacuum.
+    # Clients with more ids page them into multiple calls.
+    run_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
 
 
 class BatchDeleteRunsResponse(BaseModel):
@@ -270,6 +382,13 @@ class WorkflowRunObj(BaseModel):
     html_url: Optional[str] = None
 
     model_config = {"extra": "ignore"}
+
+    @field_validator("head_branch", mode="before")
+    @classmethod
+    def normalize_head_branch(cls, v: Optional[str]) -> Optional[str]:
+        if isinstance(v, str):
+            return v.removeprefix("refs/heads/")
+        return v
 
 
 class WorkflowRunWebhookPayload(BaseModel):
@@ -320,6 +439,13 @@ class PullRequestBranchRef(BaseModel):
 
     model_config = {"extra": "ignore"}
 
+    @field_validator("ref", mode="before")
+    @classmethod
+    def normalize_ref(cls, v: str) -> str:
+        if isinstance(v, str):
+            return v.removeprefix("refs/heads/")
+        return v
+
 
 class PullRequestObj(BaseModel):
     number: int
@@ -333,6 +459,35 @@ class IssueCommentWebhookPayload(BaseModel):
     action: str
     comment: IssueCommentObj
     issue: IssueObj
+    repository: WorkflowRunRepo
+
+    model_config = {"extra": "ignore"}
+
+
+class IssueTriggerObj(BaseModel):
+    """The `issue` object on an `issues` webhook event (feat-125).
+
+    `title`/`body` carry the trigger text so intake needs no extra GitHub
+    read. `pull_request` is present when the event is really a PR lifecycle
+    event (a PR is an issue) — the router must ignore those, since PRs have
+    their own pipeline.
+    """
+
+    number: int
+    title: Optional[str] = Field(default=None, max_length=5000)
+    body: Optional[str] = None
+    author_association: str = Field(default="NONE", max_length=50)
+    user: Optional[IssueCommentUser] = None
+    pull_request: Optional[IssuePullRequestRef] = None
+
+    model_config = {"extra": "ignore"}
+
+
+class IssuesOpenedWebhookPayload(BaseModel):
+    """Validated `issues` webhook payload (feat-125, `opened` only)."""
+
+    action: str
+    issue: IssueTriggerObj
     repository: WorkflowRunRepo
 
     model_config = {"extra": "ignore"}
@@ -443,6 +598,15 @@ class SessionCreateIn(BaseModel):
     title: Optional[str] = Field(None, max_length=255)
 
     model_config = {"extra": "forbid"}
+
+    @field_validator("branch_name", mode="before")
+    @classmethod
+    def validate_session_branch_name(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_git_branch(v, allow_protected=True)
+
+
+# Alias for backward compatibility / external imports
+SessionCreate = SessionCreateIn
 
 
 class PlanTask(BaseModel):
@@ -558,13 +722,24 @@ class SessionCommitIn(BaseModel):
 
     title: PR title string.
     body: Optional PR description markdown.
+    branch_name: Optional target branch override (disallows protected branches).
     extra="forbid" prevents mass-assignment injection.
     """
 
     title: str = Field(..., min_length=1, max_length=255)
     body: str | None = Field(None, max_length=65535)
+    branch_name: Optional[str] = Field(None, max_length=255)
 
     model_config = {"extra": "forbid"}
+
+    @field_validator("branch_name", mode="before")
+    @classmethod
+    def validate_commit_branch_name(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_git_branch(v, allow_protected=False)
+
+
+# Alias for backward compatibility / external imports
+CommitRequest = SessionCommitIn
 
 
 class SessionCommitOut(BaseModel):
@@ -614,6 +789,10 @@ class RepoSettingsOut(BaseModel):
     model_override_scope: str = "inherit"
     working_dir: Optional[str] = None
     test_command: Optional[str] = None
+    review_guidelines_text: Optional[str] = None
+    review_strictness: str = "medium"
+    review_focus_areas: list[str] = Field(default_factory=list)
+    review_checklist: list[str] = Field(default_factory=list)
     settings_version: int = 1
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -675,6 +854,10 @@ class RepoSettingsUpdate(BaseModel):
     model_override_scope: Optional[str] = None
     working_dir: Optional[str] = None
     test_command: Optional[str] = None
+    review_guidelines_text: Optional[str] = None
+    review_strictness: Optional[str] = None
+    review_focus_areas: Optional[list[str]] = None
+    review_checklist: Optional[list[str]] = None
 
     # Nested structures for future02.md payload compatibility
     features: Optional[dict[str, bool]] = None
@@ -760,6 +943,37 @@ class RepoSettingsUpdate(BaseModel):
                 out["allowed_branches"] = validate_branches(out["allowed_branches"])
             except ValueError as exc:
                 raise ValueError(str(exc)) from exc
+
+        if "review_strictness" in out and out["review_strictness"] is not None:
+            from app.services.repo_settings import normalize_review_strictness
+
+            try:
+                out["review_strictness"] = normalize_review_strictness(
+                    out["review_strictness"]
+                )
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+
+        if "review_guidelines_text" in out and out["review_guidelines_text"] is not None:
+            from app.services.repo_settings import normalize_review_guidelines
+
+            try:
+                out["review_guidelines_text"] = normalize_review_guidelines(
+                    out["review_guidelines_text"]
+                )
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+
+        for _prefs_key in ("review_focus_areas", "review_checklist"):
+            if _prefs_key in out and out[_prefs_key] is not None:
+                from app.services.repo_settings import normalize_review_string_list
+
+                try:
+                    out[_prefs_key] = normalize_review_string_list(
+                        out[_prefs_key], _prefs_key
+                    )
+                except ValueError as exc:
+                    raise ValueError(str(exc)) from exc
 
         return out
 

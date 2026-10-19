@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
@@ -271,6 +272,161 @@ def validate_test_command(value: str | None) -> str | None:
     return clean
 
 
+# Issue #131: bounds for team review preferences (R10).
+# review_guidelines_text rides the 512-entry settings cache as TEXT, so it
+# is capped at 4000 chars; focus/checklist lists are capped at 20 items of
+# 200 chars each. Enforced on every write path via the normalizers below.
+REVIEW_STRICTNESS_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+_MAX_REVIEW_GUIDELINES_CHARS: int = 4000
+_MAX_REVIEW_LIST_ITEMS: int = 20
+_MAX_REVIEW_LIST_ITEM_CHARS: int = 200
+
+
+def normalize_review_strictness(value: object) -> str:
+    """Normalize a review strictness level to its canonical form."""
+    if not isinstance(value, str):
+        raise ValueError("review_strictness must be one of low, medium, high.")
+    clean = value.strip().lower()
+    if clean not in REVIEW_STRICTNESS_LEVELS:
+        raise ValueError("review_strictness must be one of low, medium, high.")
+    return clean
+
+
+def normalize_review_guidelines(value: object) -> str | None:
+    """Normalize guidelines text; blank clears the override (None)."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("review_guidelines_text must be a string.")
+    clean = value.strip()
+    if not clean:
+        return None
+    if len(clean) > _MAX_REVIEW_GUIDELINES_CHARS:
+        raise ValueError(
+            f"review_guidelines_text exceeds maximum length of {_MAX_REVIEW_GUIDELINES_CHARS} characters."
+        )
+    return clean
+
+
+def normalize_review_string_list(value: object, field_name: str) -> list[str]:
+    """Normalize a focus-area/checklist list: strip, drop blanks, cap."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field_name} must be a list of strings.")
+    cleaned: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field_name} must be a list of strings.")
+        stripped = item.strip()
+        if stripped:
+            cleaned.append(stripped)
+    if len(cleaned) > _MAX_REVIEW_LIST_ITEMS:
+        raise ValueError(
+            f"{field_name} accepts at most {_MAX_REVIEW_LIST_ITEMS} items."
+        )
+    for item in cleaned:
+        if len(item) > _MAX_REVIEW_LIST_ITEM_CHARS:
+            raise ValueError(
+                f"{field_name} items accept at most {_MAX_REVIEW_LIST_ITEM_CHARS} characters each."
+            )
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Short-TTL read cache for near-static governance config (db-perf #109,
+# hardened by #134).
+#
+# The cache stores *detached snapshot copies* (transient ``RepoSettings``
+# instances with no session attached), never the live session-bound row:
+# caching the live row meant a later ``db.rollback()`` (e.g. duplicate
+# webhook delivery) expired its attributes and the next cache hit raised
+# ``MissingGreenlet``/``DetachedInstanceError`` (#134-1).
+#
+# Writes are guarded by an invalidation generation counter: the read path
+# captures the generation before the DB await and only stores the result
+# when it is unchanged, so an in-flight read can never restore stale data
+# after a concurrent write invalidated the cache (#134-2).
+#
+# The cache is bounded: expired entries are pruned on every store and the
+# size is capped, so distinct-repo reads cannot leak memory over a worker
+# lifetime (#134-4).
+# ---------------------------------------------------------------------------
+
+_REPO_SETTINGS_TTL: float = 60.0
+_REPO_SETTINGS_MAXSIZE: int = 512
+_REPO_SETTINGS_CACHE: dict[uuid.UUID, tuple[RepoSettings, float]] = {}
+_REPO_SETTINGS_GEN: int = 0
+
+
+def invalidate_repo_settings_cache(repo_id: uuid.UUID | None = None) -> None:
+    """Drop cached repo settings — all rows, or one repo.
+
+    Call after every write path (``update_repo_settings``, preset POST
+    handlers, ``auto_create`` row creation is handled inline) so the next
+    read re-queries the DB instead of serving a stale row for up to TTL.
+    Bumps the invalidation generation so in-flight reads that started
+    before this call do not repopulate the cache with stale data.
+    """
+    global _REPO_SETTINGS_GEN
+    _REPO_SETTINGS_GEN += 1
+    if repo_id is None:
+        _REPO_SETTINGS_CACHE.clear()
+    else:
+        _REPO_SETTINGS_CACHE.pop(repo_id, None)
+
+
+def _prune_repo_settings_cache(now: float, stored_key: uuid.UUID) -> None:
+    """Evict expired entries, then oldest-inserted ones past the cap.
+
+    The size cap is only enforced when storing a new key: overwriting
+    an existing entry must not evict an unrelated repo's live entry.
+    """
+    expired = [
+        key
+        for key, (_, cached_at) in _REPO_SETTINGS_CACHE.items()
+        if now - cached_at >= _REPO_SETTINGS_TTL
+    ]
+    for key in expired:
+        del _REPO_SETTINGS_CACHE[key]
+    if stored_key not in _REPO_SETTINGS_CACHE:
+        while len(_REPO_SETTINGS_CACHE) >= _REPO_SETTINGS_MAXSIZE:
+            _REPO_SETTINGS_CACHE.pop(next(iter(_REPO_SETTINGS_CACHE)))
+
+
+def _detached_settings_copy(row: RepoSettings) -> RepoSettings:
+    """Build a session-independent snapshot copy of a settings row.
+
+    Copies every mapped column into a transient instance (no session, so
+    no rollback/close can ever expire it). Mutable column values are
+    copied per-object so the cache entry cannot alias caller state. Each
+    cache hit hands out a fresh copy, so a caller mutating its result
+    can never poison the cached entry.
+    """
+    values = {
+        col.name: getattr(row, col.name) for col in RepoSettings.__table__.columns
+    }
+    branches = values.get("allowed_branches")
+    if isinstance(branches, list):
+        values["allowed_branches"] = list(branches)
+    for _list_key in ("review_focus_areas", "review_checklist"):
+        _items = values.get(_list_key)
+        if isinstance(_items, list):
+            values[_list_key] = list(_items)
+    return RepoSettings(**values)
+
+
+def _store_repo_settings_snapshot(
+    repo_id: uuid.UUID,
+    row: RepoSettings,
+    generation: int,
+    now: float,
+) -> None:
+    """Cache a detached snapshot unless an invalidation landed mid-read."""
+    if generation != _REPO_SETTINGS_GEN:
+        return
+    _prune_repo_settings_cache(now, repo_id)
+    _REPO_SETTINGS_CACHE[repo_id] = (_detached_settings_copy(row), now)
+
+
 def create_default_repo_settings(
     repo_id: uuid.UUID,
     preset: str = DEFAULT_PRESET,
@@ -302,6 +458,10 @@ def create_default_repo_settings(
         model_override_scope=cfg.get("model_override_scope", "inherit"),
         working_dir=None,
         test_command=None,
+        review_guidelines_text=None,
+        review_strictness="medium",
+        review_focus_areas=[],
+        review_checklist=[],
         settings_version=1,
         created_at=now,
         updated_at=now,
@@ -317,23 +477,48 @@ async def get_repo_settings(
     """
     Fetch repository settings for repo_id.
 
-    If not found in DB:
-    - If auto_create=True, instantiates default settings, persists to DB, and returns it.
-    - If auto_create=False, returns an in-memory default fallback instance.
+    Hot-read path (``auto_create=False``) is served from a 60s in-process
+    TTL cache: near-static governance config must not cost a SELECT per
+    request. Only persisted DB rows are cached — the in-memory default
+    fallback is cheap to build and never cached, so a later row creation
+    cannot be hidden behind a stale miss.
+
+    Write paths (``auto_create=True`` creation, :func:`update_repo_settings`,
+    preset POST handlers) always hit the DB for an attached instance and
+    invalidate this cache, so a cached snapshot is never used as a write
+    target for a different session.
     """
+    if not auto_create:
+        cached = _REPO_SETTINGS_CACHE.get(repo_id)
+        if cached is not None:
+            row_cached, cached_at = cached
+            if time.monotonic() - cached_at < _REPO_SETTINGS_TTL:
+                return _detached_settings_copy(row_cached)
+
+    generation = _REPO_SETTINGS_GEN
     row = await db.scalar(select(RepoSettings).where(RepoSettings.repo_id == repo_id))
     if row is not None:
+        _store_repo_settings_snapshot(repo_id, row, generation, time.monotonic())
         return row
 
     default_settings = create_default_repo_settings(repo_id)
     if auto_create:
         db.add(default_settings)
         await db.commit()
+        # This commit is the newest write: drop anything a concurrent
+        # writer cached, then publish our fresh row — capturing the
+        # generation after commit so a writer that lands during the
+        # refresh() await below wins over our store.
+        invalidate_repo_settings_cache(repo_id)
+        generation = _REPO_SETTINGS_GEN
         await db.refresh(default_settings)
         logger.info(
             "Created default repo settings: repo_id=%s preset=%s",
             repo_id,
             default_settings.preset,
+        )
+        _store_repo_settings_snapshot(
+            repo_id, default_settings, generation, time.monotonic()
         )
         return default_settings
 
@@ -392,6 +577,10 @@ async def update_repo_settings(
         "audit_trigger_on_ci_success",
         "audit_trigger_on_manual_mention",
         "preset",
+        "review_guidelines_text",
+        "review_strictness",
+        "review_focus_areas",
+        "review_checklist",
     }
     bump_version = False
     preset_applied = False
@@ -411,6 +600,28 @@ async def update_repo_settings(
                 bump_version = True
 
     for key, value in updates.items():
+        if key == "review_guidelines_text":
+            normalized_guidelines = normalize_review_guidelines(value)
+            if settings.review_guidelines_text != normalized_guidelines:
+                settings.review_guidelines_text = normalized_guidelines
+                bump_version = True
+            continue
+        if key == "review_strictness":
+            normalized_strictness = (
+                "medium" if value is None else normalize_review_strictness(value)
+            )
+            if settings.review_strictness != normalized_strictness:
+                settings.review_strictness = normalized_strictness
+                bump_version = True
+            continue
+        if key in ("review_focus_areas", "review_checklist"):
+            normalized_items = (
+                [] if value is None else normalize_review_string_list(value, key)
+            )
+            if list(getattr(settings, key) or []) != normalized_items:
+                setattr(settings, key, normalized_items)
+                bump_version = True
+            continue
         if key in ("working_dir", "test_command"):
             # Handled before the None-skip below: these two are optional
             # overrides, so an explicit null is how a caller *clears* one.
@@ -448,6 +659,9 @@ async def update_repo_settings(
 
     settings.updated_at = datetime.now(timezone.utc)
     await db.commit()
+    # Invalidate before the refresh() await: the commit is already durable,
+    # and a concurrent read during refresh must not see the stale cache.
+    invalidate_repo_settings_cache(repo_id)
     await db.refresh(settings)
     return settings
 
@@ -477,6 +691,7 @@ __all__ = [
     "check_feature_enforcement",
     "create_default_repo_settings",
     "get_repo_settings",
+    "invalidate_repo_settings_cache",
     "is_auto_fix_allowed",
     "is_branch_allowed",
     "is_draft_pr_allowed",
@@ -485,6 +700,9 @@ __all__ = [
     "is_sandbox_verification_allowed",
     "match_branch",
     "normalize_preset_name",
+    "normalize_review_guidelines",
+    "normalize_review_strictness",
+    "normalize_review_string_list",
     "update_repo_settings",
     "validate_branch_name",
     "validate_branches",

@@ -26,8 +26,10 @@ from app import github_client
 from app.github.audit_publisher import (
     PublishResult,
     build_inline_review_comments,
+    format_finding_comment_body,
     format_inline_comment_body,
     publish_audit_review,
+    publish_finding_comments,
     validate_finding_coordinates,
 )
 from app.github_client import (
@@ -39,6 +41,10 @@ from app.github_client import (
 )
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
+    MAX_GITHUB_COMMENT_CHARS,
+    _render_structural_analysis,
+    build_status_label,
+    derive_blast_radius,
     format_audit_report,
 )
 from app.models import Repo
@@ -581,7 +587,7 @@ async def test_github_api_error_raises_when_requested():
 
 
 @pytest.mark.asyncio
-async def test_audit_pipeline_wiring_tolerates_publisher_failure():
+async def test_audit_pipeline_wiring_surfaces_publisher_failure():
     repo = cast(Repo, SimpleNamespace(id="repo-1", owner="octocat", name="hello-world"))
     target = audit_pipeline.AuditTarget(base_sha="b" * 40, head_sha="a" * 40)
     fake_result = _make_audit_result(confidence=90, publish_allowed=True)
@@ -619,7 +625,7 @@ async def test_audit_pipeline_wiring_tolerates_publisher_failure():
             "app.subagents.auditor.run_audit",
             new_callable=AsyncMock,
             return_value=fake_result,
-        ),
+        ) as mock_run_audit,
         patch("app.github.audit_publisher.publish_audit_review", mock_pub),
     ):
         outcome = await audit_pipeline.execute_audit_job(
@@ -634,15 +640,158 @@ async def test_audit_pipeline_wiring_tolerates_publisher_failure():
             token="test-token",
         )
 
-    # The audit job completed normally despite the publisher encountering a failure
-    assert outcome.status == "completed"
+    # A publish failure is a visible publish failure, not a completed audit: the
+    # model ran and its report exists, but GitHub never received it, so recording
+    # "completed" would report a success that did not happen.
+    assert outcome.status == "publish_failed"
+    # The report survives the failure. The job row is closed out, not discarded,
+    # so the audit record still identifies what was analysed.
+    assert outcome.result is fake_result
     assert outcome.result.audit_id == "audit-1234567890ab"
+    # The failure is neither swallowed nor re-analysed: the publisher was reached
+    # exactly once and the model ran exactly once, so nothing here loops back
+    # through the analysis to rebuild a report GitHub has already refused.
     mock_pub.assert_awaited_once()
+    mock_run_audit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_audit_job_routes_publish_failure_terminal_without_retry():
+    """A publish failure must close the job out, never requeue it.
+
+    Retrying would re-run the model to rebuild a report GitHub has already
+    refused, burning tokens to hit the same rejection. Pin both halves of that:
+    the terminal close-out is taken, and neither retry path is.
+    """
+    job = SimpleNamespace(
+        audit_id="audit-1234567890ab",
+        audit_type="pr_audit",
+        ref="main",
+        pr_number=42,
+        base_sha="b" * 40,
+        head_sha="a" * 40,
+        workflow_run_id=None,
+    )
+    repo = cast(Repo, SimpleNamespace(id="repo-1", owner="octocat", name="hello-world"))
+    publish_failed = audit_pipeline.AuditExecutionOutcome(
+        status="publish_failed", result=_make_audit_result(publish_allowed=True)
+    )
+
+    mock_fail_publish = AsyncMock(return_value=True)
+    mock_retry_or_fail = AsyncMock()
+    mock_record_failure = AsyncMock()
+
+    with (
+        patch(
+            "app.services.audit_pipeline._claim_processing_job",
+            new_callable=AsyncMock,
+            return_value=(job, repo, 1),
+        ),
+        patch(
+            "app.services.audit_pipeline.get_auditor_installation_token",
+            new_callable=AsyncMock,
+            return_value="ghs_token",
+        ),
+        patch(
+            "app.services.audit_pipeline.execute_audit_job",
+            new_callable=AsyncMock,
+            return_value=publish_failed,
+        ),
+        patch("app.services.audit_pipeline._fail_publish_audit_job", mock_fail_publish),
+        patch(
+            "app.services.audit_pipeline._retry_or_fail_audit_job",
+            mock_retry_or_fail,
+        ),
+        patch(
+            "app.services.audit_pipeline._record_processing_failure",
+            mock_record_failure,
+        ),
+    ):
+        handled = await audit_pipeline.process_audit_job(
+            "audit-1234567890ab", "fence-token-1234"
+        )
+
+    assert handled is True
+    mock_fail_publish.assert_awaited_once_with("audit-1234567890ab", 1)
+    # `_record_processing_failure` is the invalid-outcome path: reaching it would
+    # mean `publish_failed` was not recognised as a known outcome and the whole
+    # audit was treated as a defect to retry.
+    mock_record_failure.assert_not_called()
+    mock_retry_or_fail.assert_not_called()
 
 
 # ==============================================================================
 # 6. Direct GitHub Client Methods Tests
 # ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_oversized_report_is_clamped_to_github_comment_limit():
+    """The clamp is pinned at GitHub's real limit, not the internal report budget.
+
+    `MAX_REPORT_CHARS` (100_000) is what we are willing to ask a model for;
+    `MAX_GITHUB_COMMENT_CHARS` (65_536) is what GitHub will accept. A report over
+    the second is rejected whole with HTTP 422, taking every inline comment with
+    it, so the published body must respect the smaller of the two.
+    """
+    oversized = "# Report\n\n" + ("x" * (MAX_GITHUB_COMMENT_CHARS + 5_000))
+    result = _make_audit_result(confidence=90, publish_allowed=True)
+    object.__setattr__(result, "report_markdown", oversized)
+
+    mock_pr = AsyncMock()
+    mock_pr.return_value = {"id": 3001}
+
+    with patch("app.github.audit_publisher.github_client.create_pr_review", mock_pr):
+        outcome = await publish_audit_review(
+            result=result,
+            owner="octocat",
+            repo="hello-world",
+            pr_number=42,
+            head_sha="a" * 40,
+            diff_text=SAMPLE_DIFF,
+            token="ghs_test123",
+        )
+
+    assert outcome.published is True
+    body = mock_pr.call_args.kwargs["body"]
+    assert len(body) <= MAX_GITHUB_COMMENT_CHARS, (
+        f"published review body of {len(body)} chars exceeds GitHub's "
+        f"{MAX_GITHUB_COMMENT_CHARS}-character comment limit"
+    )
+    # Truncation, not rejection: the audit still publishes what fits.
+    assert body.endswith("\n[TRUNCATED]")
+
+
+@pytest.mark.asyncio
+async def test_oversized_report_is_clamped_on_commit_comment_path():
+    """Same clamp on the commit-comment fallback, the second publish site."""
+    oversized = "# Report\n\n" + ("x" * (MAX_GITHUB_COMMENT_CHARS + 5_000))
+    result = _make_audit_result(
+        audit_type="ci_failure_audit", confidence=90, publish_allowed=True
+    )
+    object.__setattr__(result, "report_markdown", oversized)
+
+    mock_commit = AsyncMock()
+    mock_commit.return_value = {"id": 3002}
+
+    with patch(
+        "app.github.audit_publisher.github_client.create_commit_comment", mock_commit
+    ):
+        outcome = await publish_audit_review(
+            result=result,
+            owner="octocat",
+            repo="hello-world",
+            pr_number=None,
+            head_sha="b" * 40,
+            token="ghs_test123",
+        )
+
+    assert outcome.published is True
+    body = mock_commit.call_args.kwargs["body"]
+    assert len(body) <= MAX_GITHUB_COMMENT_CHARS, (
+        f"published commit comment of {len(body)} chars exceeds GitHub's "
+        f"{MAX_GITHUB_COMMENT_CHARS}-character comment limit"
+    )
 
 
 @pytest.mark.asyncio
@@ -768,3 +917,626 @@ def test_auditor_publisher_never_calls_code_mutation_apis():
         assert (
             token not in source
         ), f"audit_publisher.py violates read-only invariant: contains {token!r}"
+
+
+# ==============================================================================
+# 8. Visual Polish & Layout Hierarchy Tests
+# ==============================================================================
+
+
+def test_audit_report_markdown_visual_hierarchy_and_tables():
+    """Verify executive summary table, badges, alert callout, findings table, and details blocks."""
+    f1 = _make_finding(
+        id="AUD-SEC-01",
+        file_path="backend/app/auth.py",
+        line_start=84,
+        line_end=84,
+        severity="BLOCKER",
+        category="Timing Attack",
+        title="Non-Constant-Time Token Comparison",
+        description="Timing side-channel in token validation.",
+        suggested_fix="hmac.compare_digest(token, stored_token)",
+        confidence=95,
+    )
+    result = _make_audit_result(
+        confidence=95,
+        publish_allowed=True,
+        findings=[f1],
+        target_label="PR `#42` (`a8f3b21`)",
+    )
+
+    report = result.report_markdown
+
+    # 1. 3-Tier Sequence: Tier 1 PR Summary (Clean, borderless, NO blockquote or alert box)
+    assert "## 🛡️ Haunter Autonomous Audit Report" in report
+    assert "### 📌 PR Summary" in report
+    assert "> [!NOTE]" not in report
+    assert "> **PR Summary:**" not in report
+
+    # 2. Tier 2: Clean Overview Table (Status, PR Confidence 0-10, Blockers, Blast Radius - 100% full-width)
+    assert '<table width="100%">' in report
+    assert "Status" in report
+    assert "PR Confidence" in report
+    assert "Blockers" in report
+    assert "Blast Radius" in report
+    assert "<b>3/10</b>" in report
+    assert "<div>Must-Fix: <code>1</code></div>" in report
+    assert "<div>Should-Fix: <code>0</code></div>" in report
+    assert "⛔ Must Not Merge" in report
+
+    # 3. Tier 3: Structural & Blast Radius Analysis
+    assert "### 🔬 Structural & Blast Radius Analysis" in report
+    assert "- **Impact Surface:**" in report
+    assert "- **Files Modified:**" in report
+    assert "- **Touched Components:**" in report
+    assert "- **Risk Assessment:**" in report
+
+    summary_pos = report.find("PR Summary")
+    overview_pos = report.find('<table width="100%">')
+    structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
+    assert -1 < summary_pos < overview_pos < structural_pos
+
+    # 4. Findings Summary points to separate comments with code diffs
+    assert "### 📋 Findings Overview" not in report
+    assert "### 💡 Findings Summary" in report
+    assert "*Detailed code diffs posted as separate review comments:*" in report
+    assert "⛔ **Must-Fix:**" in report
+    assert "backend/app/auth.py#L84" in report
+
+    # 5. Main report does NOT dump giant diffs when findings are present
+    assert "```diff" not in report
+
+    # 6. Strict Negative Assertion: Zero Model Exposure
+    for forbidden_model in ("space-bunny-free", "nemotron", "gpt-4o", "claude", "test-engine"):
+        assert forbidden_model not in report
+
+    # 7. Polished Footer
+    assert "Generated autonomously by Haunter Guardian Mode" in report
+
+
+def test_format_inline_comment_body_renders_suggestion_block():
+    """Verify inline comments render single-click suggestion blocks with bolded Problem and Remediation."""
+    finding = _make_finding(
+        description="Comparing tokens with == leaks timing info.",
+        suggested_fix="return hmac.compare_digest(token, stored_token)",
+    )
+    body = format_inline_comment_body(finding)
+
+    assert "**Problem:**" in body
+    assert "**Suggested Remediation:**" in body
+    assert "```suggestion\nreturn hmac.compare_digest(token, stored_token)\n```" in body
+    assert "> [!WARNING]" in body
+
+
+# ==============================================================================
+# 9. Regression Tests: Blast Radius & Structural Analysis Defect Fixes
+# ==============================================================================
+
+
+def test_derive_blast_radius_regression_no_substring_false_positives():
+    """Verify production files containing 'test' substring are NOT classified as test suite."""
+    # Production API endpoint with 'test' in name ('latest.py')
+    badge, surface, risk = derive_blast_radius(["backend/app/api/latest.py"])
+    assert badge.startswith("**Moderate (API & Endpoints)**")
+    assert 15 <= len(badge.replace("**", "").split()) <= 30
+    assert surface == "API / Endpoints & Schemas"
+    assert "Moderate risk" in risk
+    assert "Test Suite" not in badge
+
+    # Other files with 'test' as a substring
+    badge, surface, _ = derive_blast_radius(["contest.py"])
+    assert "Test Suite" not in badge
+    assert surface == "Application Logic"
+    assert 15 <= len(badge.replace("**", "").split()) <= 30
+
+    badge, surface, _ = derive_blast_radius(["attestation.py"])
+    assert "Test Suite" not in badge
+    assert surface == "Application Logic"
+    assert 15 <= len(badge.replace("**", "").split()) <= 30
+
+    badge, surface, _ = derive_blast_radius(["backend/app/auth/attestation.py"])
+    assert badge.startswith("**High (Auth & Data Layer)**")
+    assert surface == "Core / Auth & Database"
+    assert 15 <= len(badge.replace("**", "").split()) <= 30
+
+    # Legitimate test paths MUST be classified as test suite
+    test_cases = [
+        ["tests/test_latest.py"],
+        ["backend/tests/test_api.py"],
+        ["tests/unit/test_auth.py"],
+        ["frontend/src/components/Button.test.tsx"],
+        ["frontend/src/components/Button.spec.ts"],
+        ["frontend/src/__tests__/Button.tsx"],
+        ["conftest.py"],
+        ["tests/helpers.py"],
+        ["backend/tests/test_models.py", "tests/conftest.py"],
+    ]
+    for paths in test_cases:
+        badge, surface, risk = derive_blast_radius(paths)
+        assert badge.startswith("**Isolated (Test Suite)**"), f"Failed for {paths}"
+        assert 15 <= len(badge.replace("**", "").split()) <= 30
+        assert surface == "Isolated / Test Suite", f"Failed for {paths}"
+        assert "zero production runtime impact" in risk
+
+
+def test_render_structural_analysis_with_stats_no_unbound_local_error():
+    """Verify _render_structural_analysis works without UnboundLocalError when stats dict is provided."""
+    stats = {
+        "file_count": 2,
+        "added_lines": 12,
+        "removed_lines": 3,
+        "valid_paths": ["backend/app/main.py", "backend/app/api/latest.py"],
+    }
+    rendered = _render_structural_analysis(metadata="", blast_radius="", stats=stats)
+    assert "### 🔬 Structural & Blast Radius Analysis" in rendered
+    assert "- **Impact Surface:** API / Endpoints & Schemas" in rendered
+    assert "- **Files Modified:** `2 files` (+12 / -3 lines)" in rendered
+    assert "`backend/app/main.py`" in rendered
+    assert "`backend/app/api/latest.py`" in rendered
+    assert "- **Risk Assessment:** Moderate risk — modifies external request handling or public contract surfaces." in rendered
+
+
+def test_render_structural_analysis_with_raw_metadata_and_ast_noise():
+    """Verify _render_structural_analysis parses raw metadata and strips AST noise properly."""
+    raw_meta = (
+        "Files changed: 1; accepted hunks: 1; +5 added / -2 removed lines\n"
+        "Touched files:\n"
+        "- backend/app/api/latest.py\n"
+        "- **Metadata Note:** Custom analysis note on modified routes\n"
+        "No complete bounded Python source was available for parser-backed AST analysis.\n"
+        "Caller-supplied parser context: None\n"
+    )
+    rendered = _render_structural_analysis(metadata=raw_meta, blast_radius="", stats=None)
+    assert "### 🔬 Structural & Blast Radius Analysis" in rendered
+    assert "- **Impact Surface:** API / Endpoints & Schemas" in rendered
+    assert "- **Files Modified:** `1 file` (+5 / -2 lines)" in rendered
+    assert "`backend/app/api/latest.py`" in rendered
+    assert "No complete bounded Python source" not in rendered
+    assert "Caller-supplied parser context" not in rendered
+    assert "- **Metadata Note:** Custom analysis note on modified routes" in rendered
+
+
+def test_audit_report_renders_coverage_caveats_when_present():
+    """Verify coverage caveats and partial coverage warnings are rendered in the final report markdown."""
+    raw_meta = (
+        "Files changed: 60; accepted hunks: 40; +120 added / -30 removed lines\n"
+        "Touched files:\n"
+        "- README.md\n"
+        "59 additional touched files omitted\n"
+        "- **Metadata Note:** Diff or hunk truncation was detected; affected line ranges are untrusted.\n"
+    )
+    report = format_audit_report(
+        pr_summary="Refactored documentation and omitted internal modules.",
+        findings=[],
+        confidence=90,
+        analysis_metadata=raw_meta,
+    )
+    assert "PR Summary" in report
+    assert "Broad" in report or "Partial Coverage" in report
+    assert "partial path coverage" in report or "additional paths omitted" in report
+    assert "- **Metadata Note:** Diff or hunk truncation was detected" in report
+
+    summary_pos = report.find("PR Summary")
+    overview_pos = report.find('<table width="100%">')
+    structural_pos = report.find("### 🔬 Structural & Blast Radius Analysis")
+    assert -1 < summary_pos < overview_pos < structural_pos
+
+
+def test_render_structural_analysis_strips_structural_fallback_noise():
+    """Verify structural fallback multi-line code excerpts, comments, and unsupported language blocks are stripped."""
+    raw_meta = (
+        "Files changed: 1; accepted hunks: 1; +10 added / -5 removed lines\n"
+        "Touched files:\n"
+        "- frontend/src/components/Header.tsx\n"
+        "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+        "AST parsing unsupported for TypeScript JSX file frontend/src/components/Header.tsx; using a bounded structural fallback that is not AST coverage. Changed-line anchor: 15; excerpt lines 1-30.\n"
+        "import React from 'react';\n"
+        "// implementation detail\n"
+        "/* multi-line comment block\n"
+        " * inside structural fallback\n"
+        " */\n"
+        "# script comment inside snippet\n"
+        "export const Header = () => <header>Banner</header>;\n"
+        "Header.displayName = 'Header';\n"
+        "```typescript\n"
+        "const internalCode = true;\n"
+        "// another code comment\n"
+        "```\n\n"
+        "- **Metadata Note:** Legitimate custom metadata note\n"
+    )
+    rendered = _render_structural_analysis(metadata=raw_meta)
+    assert "Header.tsx" in rendered
+    assert "Unsupported AST languages and bounded structural fallbacks" not in rendered
+    assert "AST parsing unsupported for" not in rendered
+    assert "export const Header" not in rendered
+    assert "const internalCode" not in rendered
+    assert "Header.displayName" not in rendered
+    assert "// implementation detail" not in rendered
+    assert "/* multi-line comment block" not in rendered
+    assert "inside structural fallback" not in rendered
+    assert "# script comment inside snippet" not in rendered
+    assert "// another code comment" not in rendered
+    assert (
+        "- **Coverage Caveat:** Structural analysis for TypeScript/non-Python files used bounded line-diff fallback."
+        in rendered
+    )
+    assert "- **Metadata Note:** Legitimate custom metadata note" in rendered
+
+    # Verify ZERO lines from the fallback block leak into metadata notes
+    meta_notes = [
+        line for line in rendered.splitlines() if line.startswith("- **Metadata Note:**")
+    ]
+    assert len(meta_notes) == 1
+    assert meta_notes[0] == "- **Metadata Note:** Legitimate custom metadata note"
+
+
+def test_audit_report_renders_typescript_ast_coverage_caveat():
+    """Verify format_audit_report renders clean coverage caveat when unsupported AST languages are present."""
+    raw_meta = (
+        "Files changed: 1; accepted hunks: 1; +10 added / -5 removed lines\n"
+        "Touched files:\n"
+        "- frontend/src/components/Header.tsx\n"
+        "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+        "AST parsing unsupported for TypeScript JSX file frontend/src/components/Header.tsx; using a bounded structural fallback that is not AST coverage. Changed-line anchor: 15; excerpt lines 1-30.\n"
+        "import React from 'react';\n"
+        "// implementation detail\n"
+        "export const Header = () => <header>Banner</header>;\n"
+    )
+    report = format_audit_report(
+        pr_summary="Update Header component.",
+        findings=[],
+        confidence=90,
+        analysis_metadata=raw_meta,
+    )
+    assert (
+        "- **Coverage Caveat:** Structural analysis for TypeScript/non-Python files used bounded line-diff fallback."
+        in report
+    )
+    assert "Coverage Caveat" in report
+    assert "bounded line-diff fallback" in report
+    assert "Unsupported AST languages and bounded structural fallbacks" not in report
+    assert "// implementation detail" not in report
+    assert "export const Header" not in report
+
+
+def test_format_audit_report_reconciles_status_with_notes():
+    """Verify format_audit_report reconciles 'Ready to Merge' to 'Looks Good to Merge' when notes exist."""
+    note_finding = _make_finding(
+        id="AUD-NOTE-01",
+        severity="NOTE",
+        confidence=90,
+        title="Minor Hardening Advice",
+    )
+    report = format_audit_report(
+        pr_summary="Refactor with notes.",
+        findings=[note_finding.to_report_dict()],
+        confidence=90,
+        status="✅ Great to Merge",
+    )
+    assert "👌 Looks Good to Merge" in report
+    assert "✅ Great to Merge" not in report
+
+
+def test_build_status_label_legacy_kwargs():
+    """Verify build_status_label supports legacy and aliased keyword arguments."""
+    from app.llm.prompts.audit_prompts import build_status_label
+
+    assert build_status_label(n_blockers=1, n_warnings=0) == "⛔ Must Not Merge"
+    assert build_status_label(n_blockers=0, n_warnings=2) == "⚠️ Merge Blocked (Changes Needed)"
+    assert build_status_label(must_fix_count=1) == "⛔ Must Not Merge"
+    assert build_status_label(should_fix_count=1) == "⚠️ Merge Blocked (Changes Needed)"
+    assert build_status_label(n_blockers=0, n_warnings=0, confidence=90, has_notes=True) == "👌 Looks Good to Merge"
+    assert build_status_label(n_blockers=0, n_warnings=0, confidence=90, has_notes=False) == "✅ Great to Merge"
+
+
+def test_publisher_pr_confidence_and_status_tier_mapping():
+    """Verify publisher and prompt formatters harmonize 0-10 confidence with 4 merge tiers."""
+    from app.llm.prompts.audit_prompts import (
+        build_status_from_score,
+        build_status_label,
+        calculate_pr_confidence_score,
+        format_audit_report,
+    )
+
+    # 1. Scores 9-10 yield '✅ Great to Merge'
+    for score in (9, 10):
+        assert build_status_from_score(score) == "✅ Great to Merge"
+        assert build_status_label(score=score) == "✅ Great to Merge"
+        report = format_audit_report(pr_summary="Test", findings=[], pr_score=score)
+        assert f"<b>{score}/10</b>" in report
+        assert '<td align="left">✅ Great to Merge</td>' in report
+
+    # 2. Scores 7-8 yield '👌 Looks Good to Merge'
+    for score in (7, 8):
+        assert build_status_from_score(score) == "👌 Looks Good to Merge"
+        assert build_status_label(score=score) == "👌 Looks Good to Merge"
+        report = format_audit_report(pr_summary="Test", findings=[], pr_score=score)
+        assert f"<b>{score}/10</b>" in report
+        assert '<td align="left">👌 Looks Good to Merge</td>' in report
+
+    # 3. Scores 5-6 yield '⚠️ Merge Blocked (Changes Needed)'
+    for score in (5, 6):
+        assert build_status_from_score(score) == "⚠️ Merge Blocked (Changes Needed)"
+        assert build_status_label(score=score) == "⚠️ Merge Blocked (Changes Needed)"
+        report = format_audit_report(pr_summary="Test", findings=[], pr_score=score)
+        assert f"<b>{score}/10</b>" in report
+        assert '<td align="left">⚠️ Merge Blocked (Changes Needed)</td>' in report
+
+    # 4. Scores 0-4 yield '⛔ Must Not Merge'
+    for score in range(5):
+        assert build_status_from_score(score) == "⛔ Must Not Merge"
+        assert build_status_label(score=score) == "⛔ Must Not Merge"
+        report = format_audit_report(pr_summary="Test", findings=[], pr_score=score)
+        assert f"<b>{score}/10</b>" in report
+        assert '<td align="left">⛔ Must Not Merge</td>' in report
+
+    # 5. Blockers always produce score <= 4 and '⛔ Must Not Merge'
+    for blockers in (1, 2, 4):
+        score = calculate_pr_confidence_score(must_fix=blockers)
+        assert 0 <= score <= 4
+        assert build_status_from_score(score) == "⛔ Must Not Merge"
+        assert build_status_label(must_fix=blockers) == "⛔ Must Not Merge"
+
+    # 6. Warnings always produce score 5-6 and '⚠️ Merge Blocked (Changes Needed)'
+    for warnings in (1, 2, 3):
+        score = calculate_pr_confidence_score(must_fix=0, should_fix=warnings)
+        assert 5 <= score <= 6
+        assert build_status_from_score(score) == "⚠️ Merge Blocked (Changes Needed)"
+        assert build_status_label(must_fix=0, should_fix=warnings) == "⚠️ Merge Blocked (Changes Needed)"
+
+    # 7. Suggestions produce score 7-8 and '👌 Looks Good to Merge'
+    for notes in (1, 2, 3):
+        score = calculate_pr_confidence_score(must_fix=0, should_fix=0, n_notes=notes)
+        assert 7 <= score <= 8
+        assert build_status_from_score(score) == "👌 Looks Good to Merge"
+
+    # 8. Clean PR produces score 9-10 and '✅ Great to Merge'
+    clean_score = calculate_pr_confidence_score(must_fix=0, should_fix=0, n_notes=0)
+    assert 9 <= clean_score <= 10
+    assert build_status_from_score(clean_score) == "✅ Great to Merge"
+    assert build_status_label(must_fix=0, should_fix=0, has_notes=False) == "✅ Great to Merge"
+
+
+def test_format_finding_comment_body_structure():
+    """Verify format_finding_comment_body formats title, location, explanation, and diff correctly."""
+    finding_blocker = _make_finding(
+        id="AUD-B1",
+        severity="BLOCKER",
+        file_path="backend/app/auth.py",
+        line_start=84,
+        line_end=84,
+        title="SQL Injection Vector",
+        description="Untrusted user input interpolated in query.",
+        suggested_fix="db.execute(select(User).where(User.id == user_id))",
+    )
+    body = format_finding_comment_body(finding_blocker)
+    assert "### ⛔ Must-Fix: SQL Injection Vector" in body
+    assert "**Location:** `backend/app/auth.py#84`" in body
+    assert "**What's Happening:**" in body
+    assert "Untrusted user input interpolated in query." in body
+    assert "**Actionable Remediation Code Diff:**" in body
+    assert "```diff" in body
+    assert "--- a/backend/app/auth.py" in body
+    assert "+++ b/backend/app/auth.py" in body
+    assert "+ db.execute" in body
+    assert "AUD-B1" in body
+
+    finding_suggestion = _make_finding(
+        id="AUD-S1",
+        severity="NOTE",
+        file_path="frontend/src/Logo.tsx",
+        line_start=12,
+        line_end=15,
+        title="Reduce Redundant Allocations",
+        description="Array.from in render creates per-render garbage.",
+        suggested_fix="const staticList = Array.from({length: 10});",
+    )
+    body_s = format_finding_comment_body(finding_suggestion)
+    assert "### 💡 Suggestion: Reduce Redundant Allocations" in body_s
+    assert "**Location:** `frontend/src/Logo.tsx#12-15`" in body_s
+
+    from app.github.audit_publisher import format_finding_comment
+    assert format_finding_comment(finding_blocker) == body
+    assert format_finding_comment(finding_suggestion) == body_s
+
+
+@pytest.mark.asyncio
+async def test_publish_finding_comments_calls_github_post_pr_comment():
+    """Verify publish_finding_comments publishes separate comments for findings."""
+    result = _make_audit_result(
+        confidence=90,
+        publish_allowed=True,
+        findings=[
+            _make_finding(id="AUD-1", confidence=90, line_start=84, line_end=84),
+            _make_finding(id="AUD-LOW", confidence=50, line_start=85, line_end=85),
+        ],
+    )
+    mock_post = AsyncMock(return_value={"id": 4001, "html_url": "https://github.com/test#issuecomment-4001"})
+    with patch("app.github.audit_publisher.github_client.post_pr_comment", mock_post):
+        resps = await publish_finding_comments(
+            result=result,
+            owner="octocat",
+            repo="hello-world",
+            pr_number=42,
+            token="ghs_test123",
+            min_confidence=75,
+        )
+
+    assert len(resps) == 1
+    assert resps[0]["id"] == 4001
+    mock_post.assert_awaited_once()
+    kwargs = mock_post.call_args.kwargs
+    assert kwargs["owner"] == "octocat"
+    assert kwargs["repo"] == "hello-world"
+    assert kwargs["pr_number"] == 42
+    assert "###" in kwargs["body"]
+    assert "AUD-1" in kwargs["body"]
+
+
+@pytest.mark.asyncio
+async def test_publish_audit_review_with_post_finding_comments():
+    """Verify publish_audit_review with post_finding_comments=True publishes finding comments."""
+    result = _make_audit_result(
+        confidence=90,
+        publish_allowed=True,
+        findings=[_make_finding(id="AUD-1", confidence=90, line_start=84, line_end=84)],
+    )
+    mock_review = AsyncMock(return_value={"id": 1005, "state": "COMMENTED"})
+    mock_finding_pub = AsyncMock(return_value=[{"id": 5001}])
+
+    with (
+        patch("app.github.audit_publisher.github_client.create_pr_review", mock_review),
+        patch("app.github.audit_publisher.publish_finding_comments", mock_finding_pub),
+    ):
+        outcome = await publish_audit_review(
+            result=result,
+            owner="octocat",
+            repo="hello-world",
+            pr_number=42,
+            head_sha="a" * 40,
+            diff_text=SAMPLE_DIFF,
+            token="ghs_test123",
+            post_finding_comments=True,
+        )
+
+    assert outcome.published is True
+    assert len(outcome.finding_comments) == 1
+    assert outcome.finding_comments[0]["id"] == 5001
+    mock_finding_pub.assert_awaited_once()
+
+
+
+def test_render_structural_analysis_strict_metadata_allowlist_prevents_code_leaks():
+    """Verify strict allowlist parsing prevents arbitrary JS/TS code, properties, or keywords from leaking into notes."""
+    raw_meta = (
+        "Files changed: 2; accepted hunks: 2; +25 added / -5 removed lines\n"
+        "Touched files:\n"
+        "- frontend/src/components/Header.tsx\n"
+        "- frontend/src/utils/helpers.ts\n"
+        "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+        "AST parsing unsupported for TypeScript JSX file frontend/src/components/Header.tsx\n"
+        "Header.displayName = 'Header';\n"
+        "React.useEffect(() => { doWork(); }, []);\n"
+        "const { data, error } = useQuery('key');\n"
+        "export default function Main() { return <div className='p-4'>Content</div>; }\n"
+        "type UserProps = { id: string; name: string };\n"
+        "interface State { count: number }\n"
+        "\n\n"
+        "Arbitrary unformatted text line\n"
+        "- **const:** invalid code keyword in key\n"
+        "- **export:** export const foo = 123\n"
+        "- **function:** () => console.log('leak')\n"
+        "- **Valid Note:** Bounded structural analysis completed.\n"
+        "- **Metadata Note:** Additional verification required.\n"
+    )
+    rendered = _render_structural_analysis(metadata=raw_meta)
+
+    # 1. Structural heading and core metrics present
+    assert "### 🔬 Structural & Blast Radius Analysis" in rendered
+    assert "<!-- Structural Analysis -->" not in rendered
+    assert "- **Impact Surface:**" in rendered
+    assert "- **Files Modified:** `2 files` (+25 / -5 lines)" in rendered
+    assert "- **Coverage Caveat:**" in rendered
+
+    # 2. None of the JS/TS code leaks into the rendered markdown
+    assert "Header.displayName" not in rendered
+    assert "React.useEffect" not in rendered
+    assert "const { data, error }" not in rendered
+    assert "export default function Main" not in rendered
+    assert "type UserProps" not in rendered
+    assert "interface State" not in rendered
+    assert "Arbitrary unformatted text line" not in rendered
+    assert "invalid code keyword in key" not in rendered
+    assert "export const foo" not in rendered
+    assert "() => console.log" not in rendered
+
+    # 3. Only the valid allowlisted metadata notes are rendered
+    assert "- **Valid Note:** Bounded structural analysis completed." in rendered
+    assert "- **Metadata Note:** Additional verification required." in rendered
+
+    meta_bullet_lines = [
+        line for line in rendered.splitlines()
+        if line.startswith("- **") and not line.startswith((
+            "- **Impact Surface:**",
+            "- **Files Modified:**",
+            "- **Touched Components:**",
+            "- **Risk Assessment:**",
+            "- **Coverage Caveat:**",
+        ))
+    ]
+    assert len(meta_bullet_lines) == 2
+    assert meta_bullet_lines[0] == "- **Valid Note:** Bounded structural analysis completed."
+    assert meta_bullet_lines[1] == "- **Metadata Note:** Additional verification required."
+
+
+def test_clean_pr_summary_strips_issue_and_verdict_boilerplate():
+    """Verify clean_pr_summary strips issue reports, verdicts, and failure boilerplate while preserving PR descriptions."""
+    from app.llm.prompts.audit_prompts import clean_pr_summary
+
+    # 1. Dirty summary with findings and perspective verdicts
+    dirty = (
+        "Security: No security issues identified. "
+        "Updates the login page branding and replaces static SVG logo with vector illustration component. "
+        "Potential correctness issue in viewBox dimensions. "
+        "0 perspective(s) failed and were excluded from actionable conclusions."
+    )
+    cleaned = clean_pr_summary(dirty)
+    assert cleaned == "Updates the login page branding and replaces static SVG logo with vector illustration component."
+    assert "No security issues" not in cleaned
+    assert "Potential correctness issue" not in cleaned
+    assert "perspective(s) failed" not in cleaned
+
+    # 2. Clean multi-sentence PR summary
+    multi = (
+        "Adds OAuth 2.0 authentication endpoints. "
+        "Refactors database connection pooling for Neon serverless postgres. "
+        "Adds unit tests for session lifecycle."
+    )
+    assert clean_pr_summary(multi) == multi
+
+    # 3. Summary with issue clause at end
+    clause = "JWT rotation implementation looks right except token comparison."
+    assert clean_pr_summary(clause) == "JWT rotation implementation looks right."
+
+    # 4. Fallback on empty or all-verdict summary
+    assert "updates and refactors application components" in clean_pr_summary("Clean.").lower()
+    assert "updates and refactors application components" in clean_pr_summary("").lower()
+
+
+def test_derive_blast_radius_all_categories_meet_word_count_and_bold_prefix():
+    """Verify all blast radius categories produce 15-30 words with bold category prefix."""
+    cases = [
+        # Empty / isolated
+        ([], False, "**Isolated (No Changes)**"),
+        # Omitted + Auth
+        (["backend/app/auth.py"], True, "**High (Auth & Data Layer)**"),
+        # Omitted + API
+        (["backend/app/routers/api.py"], True, "**Moderate (API & Endpoints)**"),
+        # Omitted fallback
+        (["frontend/src/index.ts"], True, "**Broad (Partial Coverage)**"),
+        # Docs
+        (["docs/guide.md", "README.md"], False, "**Isolated (Documentation)**"),
+        # Tests
+        (["tests/test_api.py", "backend/tests/test_auth.py"], False, "**Isolated (Test Suite)**"),
+        # Auth / DB
+        (["backend/app/models/user.py", "alembic/versions/001.py"], False, "**High (Auth & Data Layer)**"),
+        # API
+        (["backend/app/routers/webhook.py"], False, "**Moderate (API & Endpoints)**"),
+        # Frontend UI
+        (["frontend/src/components/Header.tsx", "frontend/src/logo.svg"], False, "**Moderate (Frontend UI)**"),
+        # Broad (>5 files)
+        ([f"backend/app/service_{i}.py" for i in range(6)], False, "**Broad (Cross-System)**"),
+        # Application Logic
+        (["backend/app/utils/crypto.py"], False, "**Moderate (Application Logic)**"),
+    ]
+
+    for paths, omitted, expected_prefix in cases:
+        badge, surface, risk = derive_blast_radius(paths, paths_omitted=omitted)
+        assert badge.startswith(expected_prefix), f"Expected prefix {expected_prefix} for paths={paths}, got {badge}"
+        assert badge.startswith("**"), f"Missing bold markdown prefix in {badge}"
+        words = len(badge.replace("**", "").split())
+        assert 15 <= words <= 30, f"Blast radius badge has {words} words (expected 15-30): {badge}"
+
+
+
+

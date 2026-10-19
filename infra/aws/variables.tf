@@ -27,7 +27,7 @@ variable "log_retention_days" {
 # ---------------------------------------------------------------------------
 
 variable "lambda_zip_path" {
-  description = "Path to the Lambda deployment zip file. Build with: cd backend && zip -r ../lambda.zip . -x '*.pyc' -x '__pycache__/*' -x '.venv/*' -x 'tests/*'"
+  description = "Path to the Lambda deployment zip file. Build ONLY with: cd backend && python rebuild_lambda_zip.py — never a bare 'zip -r', which omits Linux-compatible wheels and bundles backend/.env (live secrets). See redeploy.md."
   type        = string
   default     = "../../lambda.zip"
 }
@@ -243,4 +243,21 @@ variable "tinyfish_fetch_url" {
   default     = "https://api.fetch.tinyfish.ai"
 }
 
+
+# ---------------------------------------------------------------------------
+# Lambda concurrency cap (Issue #160)
+# Bounds concurrent 512MB x 15min executions so a CI-failure storm throttles
+# (HTTP 429 / queued async events) instead of exhausting the account limit.
+# ---------------------------------------------------------------------------
+
+variable "lambda_reserved_concurrent_executions" {
+  description = "Reserved concurrency for the orchestrator Lambda. Caps simultaneous executions; overflow throttles gracefully instead of starving the account limit."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.lambda_reserved_concurrent_executions >= 1 && var.lambda_reserved_concurrent_executions <= 100
+    error_message = "Must be 1-100: 0 disables the function, higher re-opens the storm hole."
+  }
+}
 

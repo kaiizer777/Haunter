@@ -393,5 +393,24 @@ describe("RunDetailClient (app/runs/detail/RunDetailClient.tsx)", () => {
         screen.queryByRole("region", { name: /run retry lineage/i })
       ).not.toBeInTheDocument();
     });
+
+    it("renders repository identity link and PR context in the header banner", async () => {
+      vi.mocked(api.getRunTrace).mockResolvedValue({
+        ...fullMockTrace,
+        run: {
+          ...fullMockTrace.run,
+          pr_title: "fix: solve memory leak in auth middleware",
+          pr_author: "octocat",
+          pr_branch: "fix/auth-leak",
+        },
+      });
+
+      render(<RunDetailClient />);
+
+      expect(await screen.findByText("acme/repo")).toBeInTheDocument();
+      expect(screen.getByText("fix: solve memory leak in auth middleware")).toBeInTheDocument();
+      expect(screen.getByText("@octocat")).toBeInTheDocument();
+      expect(screen.getAllByText("fix/auth-leak").length).toBeGreaterThanOrEqual(1);
+    });
   });
 });

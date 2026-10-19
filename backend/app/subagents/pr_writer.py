@@ -20,13 +20,14 @@ import logging
 import re
 import time
 import uuid
-from typing import Optional, Sequence, TypedDict
+from typing import Any, Optional, Sequence, TypedDict
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm import LLMClient
-from app.models import Attempt, Run, RunStep
+from app.models import Attempt, Run
+from app.services.token_accounting import make_run_step, normalize_usage
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-COST_PER_INPUT_TOKEN: float = 0.001 / 1_000
-COST_PER_OUTPUT_TOKEN: float = 0.002 / 1_000
+# Canonical pricing lives in app.services.token_accounting (issue #106);
+# this module no longer defines its own COST_PER_* copy.
 
 # Regex for validating the server-generated branch name.
 _BRANCH_SAFE_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9/_\-\.]+$")
@@ -68,6 +69,21 @@ class PROutput(BaseModel):
 # ---------------------------------------------------------------------------
 # Branch name — server-side only, never from LLM
 # ---------------------------------------------------------------------------
+
+
+def _is_issue_triggered_run(run: Run) -> bool:
+    """True for autonomous issue-triggered root runs (feat-125, D6).
+
+    Lazy import: app.orchestrator owns the predicate and this module is
+    imported lazily by the orchestrator pipeline body, so a module-level
+    import would cycle.
+    """
+    from app.orchestrator import is_issue_run
+
+    try:
+        return bool(is_issue_run(run))
+    except Exception:
+        return False
 
 
 def pr_branch_name(
@@ -232,12 +248,16 @@ async def _call_and_parse_pr(
 
     try:
         pr_output = PROutput.model_validate_json(retry_content)
-        # Combine token usage across both calls
-        u1 = response.get("usage", {})
-        u2 = retry_response.get("usage", {})
+        # Combine token usage across both calls. Normalize each
+        # per-call usage first so a ``None`` count cannot TypeError on
+        # ``+``, and a numeric-string count cannot silently concatenate
+        # into the wrong total (cubic#4297090217 — the canonical-usage
+        # rule this PR introduced must apply in the retry path too).
+        u1_in, u1_out = normalize_usage(response.get("usage"))
+        u2_in, u2_out = normalize_usage(retry_response.get("usage"))
         combined = {
-            "input_tokens": u1.get("input_tokens", 0) + u2.get("input_tokens", 0),
-            "output_tokens": u1.get("output_tokens", 0) + u2.get("output_tokens", 0),
+            "input_tokens": u1_in + u2_in,
+            "output_tokens": u1_out + u2_out,
         }
         return pr_output, {**retry_response, "usage": combined}
     except ValidationError as second_err:
@@ -250,6 +270,24 @@ async def _call_and_parse_pr(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def append_issue_closing_line(body: str, issue_number: Any) -> str:
+    """Append a deterministic `Fixes #<issue>` trailer (feat-125 D6).
+
+    Pure: the LLM prompt does not reliably emit the closing keyword and D6
+    acceptance is exact ("Opened PR references Fixes #n"), so the trailer is
+    appended deterministically rather than prompted for. No-op when the body
+    already carries the keyword or the number is not a positive int.
+    """
+    if (
+        isinstance(issue_number, int)
+        and not isinstance(issue_number, bool)
+        and issue_number > 0
+    ):
+        if f"fixes #{issue_number}" not in body.lower():
+            return body.rstrip() + f"\n\nFixes #{issue_number}"
+    return body
 
 
 async def generate_pr_text(
@@ -287,21 +325,16 @@ async def generate_pr_text(
     )
 
     latency_ms = int((time.monotonic() - t0) * 1000)
-    usage = response.get("usage", {})
-    input_tokens: int = usage.get("input_tokens", 0)
-    output_tokens: int = usage.get("output_tokens", 0)
+    # Canonical usage parsing + cost (issue #106): one formula, one place.
+    input_tokens, output_tokens = normalize_usage(response.get("usage"))
 
     # Persist RunStep trace — tokens + latency only, never PR content
-    cost = (input_tokens * COST_PER_INPUT_TOKEN) + (
-        output_tokens * COST_PER_OUTPUT_TOKEN
-    )
-    step = RunStep(
+    step = make_run_step(
         run_id=run.id,
         step_name="pr_writer",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        cost_estimate=round(cost, 8),
     )
     db.add(step)
     await db.commit()
@@ -315,7 +348,11 @@ async def generate_pr_text(
         len(pr_output.title),
     )
 
-    return {"title": pr_output.title, "body": pr_output.body}
+    pr_body = pr_output.body
+    if _is_issue_triggered_run(run):
+        pr_body = append_issue_closing_line(pr_body, run.reply_to_comment_id)
+
+    return {"title": pr_output.title, "body": pr_body}
 
 
 # ---------------------------------------------------------------------------

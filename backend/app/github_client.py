@@ -10,12 +10,14 @@ Security guarantees:
 - Enforces strict timeouts and handles HTTP error statuses cleanly.
 """
 
+import hashlib
 import io
 import json
 import logging
+import time
 import zipfile
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -40,6 +42,26 @@ REVIEW_COMMENTS_PER_PAGE = 100
 #: Hard ceiling on review-comment pages walked per fetch, so an unbounded thread
 #: cannot inflate the context window. 5 pages x 100 = 500 comments.
 MAX_REVIEW_COMMENT_PAGES = 5
+#: Page size for the linked-issue discussion-comment fetch. 15 is not a
+#: GitHub maximum — it is what one screen of an issue thread is worth to a code
+#: reviewer, sized against ``MAX_ISSUE_COMMENTS_PER_ISSUE`` in
+#: ``app.subagents.issue_context`` so the rendered block cannot overflow.
+ISSUE_COMMENTS_PER_PAGE = 15
+#: Exactly one page. The discussion stream is an unbounded, freely-writable
+#: surface, so it is sampled rather than paginated; a 400-comment thread costs
+#: the same one request as a quiet one. GitHub returns comments oldest-first,
+#: so the window is the *opening* exchange — the triage conversation, which is
+#: where the requester's intent and the maintainer's direction are actually
+#: stated — rather than the most recent 15 replies.
+MAX_ISSUE_COMMENT_PAGES = 1
+#: Page size for the linked-issue timeline fetch. 100 is the GitHub maximum: the
+#: timeline is mostly non-cross-reference events (labels, assignments, state
+#: changes), and a small page would spend the 5-page budget on noise.
+ISSUE_TIMELINE_PER_PAGE = 100
+#: Hard ceiling on timeline pages walked per fetch. 5 x 100 = 500 events, which
+#: is far past the number of cross-references a real issue accumulates, while
+#: still bounding a pathological timeline.
+MAX_ISSUE_TIMELINE_PAGES = 5
 #: Content types that promise a zip container. A body that fails to unzip under
 #: one of these is a broken or forged archive, never a log stream.
 ARCHIVE_CONTENT_TYPES: frozenset[str] = frozenset(
@@ -67,6 +89,20 @@ class GitHubAuthError(GitHubClientError):
 
 class GitHubResourceNotFoundError(GitHubClientError):
     """Raised on 404 Not Found from GitHub API."""
+
+
+class GitHubUnprocessableEntityError(GitHubClientError):
+    """Raised on 422 Unprocessable Entity from GitHub API.
+
+    The only 422 the write paths produce is "GitHub rejected this payload":
+    a review comment anchored to a line outside the diff, or a body past
+    GitHub's 65 536-character ceiling. It is the one GitHub status a caller can
+    act on by *changing the request* (drop the inline comments, clamp the body),
+    which is why it is a distinct type rather than the base error: retrying a
+    422 unchanged cannot succeed, while retrying an auth or network failure
+    sometimes can. Additive — every existing ``except GitHubClientError`` still
+    catches it.
+    """
 
 
 class GitHubRateLimitError(GitHubClientError):
@@ -99,6 +135,63 @@ class BoundedResponse:
         return json.loads(self.content)
 
 
+@dataclass
+class GitHubRequestBudget:
+    """Hard ceiling on the GitHub requests one caller may spend in total.
+
+    The page caps above (:data:`MAX_REVIEW_COMMENT_PAGES`,
+    :data:`ISSUE_TIMELINE_PAGES`) bound *one call*. A collection cap such as
+    ``MAX_LINKED_ISSUES`` bounds *how many subjects* are read. Neither can see
+    the other's total, so without a third limit the worst case is the product of
+    every individual cap — a number nobody wrote down and no test asserted. This
+    is that number: one mutable counter every call site charges, so the ceiling
+    is the sum rather than the product.
+
+    Reserve *before* the request, never after. A fetcher that charged itself on
+    return would still have issued the request that broke the cap, which is the
+    only outcome the cap exists to prevent. A refused reservation is not
+    retried by the fetcher either: it returns what it has and lets the caller
+    record the omission, because a step that silently keeps going after being
+    told "no" is not bounded by anything.
+
+    Mutable by design and deliberately not lock-guarded: one review step owns
+    one budget and walks it sequentially within a single event loop, so the
+    state cannot be raced. ``asyncio.Lock`` here would add a lock acquisition to
+    every request to protect something no caller can corrupt.
+    """
+
+    #: Total requests this budget may spend. Must be non-negative.
+    limit: int
+    #: Requests already claimed. Start at 0; the call sites move it.
+    spent: int = 0
+
+    def __post_init__(self) -> None:
+        if self.limit < 0:
+            raise ValueError("GitHub request budget limit must not be negative")
+
+    @property
+    def remaining(self) -> int:
+        """Requests still claimable, floored at 0 so an overspent budget reads 0."""
+        return max(0, self.limit - self.spent)
+
+    @property
+    def exhausted(self) -> bool:
+        """True once nothing can be claimed. The caller must record the omission."""
+        return self.remaining <= 0
+
+    def reserve(self) -> bool:
+        """Claim one request. Returns ``False``, having claimed nothing, if full.
+
+        All-or-nothing by construction: there is no partial state to reconcile,
+        because the unit is a single request and the answer a caller acts on is
+        "may I still go to GitHub".
+        """
+        if self.remaining <= 0:
+            return False
+        self.spent += 1
+        return True
+
+
 async def _bounded_get(
     client: httpx.AsyncClient,
     url: str,
@@ -112,6 +205,63 @@ async def _bounded_get(
     async with client.stream(
         "GET", url, headers=headers, params=params, follow_redirects=True
     ) as response:
+        raw_length = response.headers.get("content-length")
+        if raw_length is not None:
+            try:
+                content_length = int(raw_length)
+            except ValueError:
+                content_length = None
+        if content_length is not None and content_length > max_bytes:
+            logger.warning(
+                "github response_limit resource=http content_length=%d byte_cap=%d",
+                content_length,
+                max_bytes,
+            )
+            raise GitHubResponseLimitError(
+                f"GitHub response exceeded {max_bytes} bytes"
+            )
+        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+            if len(chunks) + len(chunk) > max_bytes:
+                logger.warning(
+                    "github response_limit resource=http streamed_bytes=%d byte_cap=%d",
+                    len(chunks) + len(chunk),
+                    max_bytes,
+                )
+                raise GitHubResponseLimitError(
+                    f"GitHub response exceeded {max_bytes} bytes"
+                )
+            chunks.extend(chunk)
+        return BoundedResponse(
+            status_code=response.status_code,
+            headers=response.headers,
+            content=bytes(chunks),
+        )
+
+
+async def _bounded_post(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    json: dict[str, Any],
+    max_bytes: int = MAX_API_RESPONSE_BYTES,
+) -> BoundedResponse:
+    """POST a JSON body with the same byte ceiling :func:`_bounded_get` applies.
+
+    A write path has no smaller response than a read path: a GraphQL endpoint
+    answers with an errors array whose messages come from the upstream service,
+    and a diff/media endpoint with a body this module streams. Binding the cap at
+    the transport rather than at the call site means no future caller can opt out
+    of it by accident.
+
+    Content-Length is treated as a hint, not a guarantee — it is checked first so
+    an oversized body is refused before it is transferred, but the streamed total
+    is what actually decides, because that is the only number a lying or absent
+    header cannot understate.
+    """
+    content_length = None
+    chunks = bytearray()
+    async with client.stream("POST", url, headers=headers, json=json) as response:
         raw_length = response.headers.get("content-length")
         if raw_length is not None:
             try:
@@ -824,6 +974,78 @@ async def post_pr_comment(
     return response.json()
 
 
+async def create_issue_comment(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    body: str,
+    token: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Create a comment on an issue or pull request via GitHub Issues API.
+    POST /repos/{owner}/{repo}/issues/{issue_number}/comments
+    """
+    return await post_pr_comment(
+        owner=owner, repo=repo, pr_number=issue_number, body=body, token=token
+    )
+
+
+async def fetch_pull_request_reviews(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Fetch pull request reviews via GitHub Pulls API.
+    GET /repos/{owner}/{repo}/pulls/{pr_number}/reviews
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/pulls/{quote(str(pr_number), safe='')}/reviews"
+    )
+    headers = _build_headers(token=token, accept="application/vnd.github+json")
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await _bounded_get(
+                client,
+                url,
+                headers=headers,
+                max_bytes=MAX_API_RESPONSE_BYTES,
+            )
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error fetching PR reviews for %s/%s PR #%s",
+                owner,
+                repo,
+                pr_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"PR reviews not found for {owner}/{repo} PR #{pr_number}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    try:
+        data = response.json()
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception as exc:
+        raise GitHubClientError("Invalid JSON returned for PR reviews") from exc
+
+
 async def fetch_pr_review_comments(
     owner: str,
     repo: str,
@@ -1092,6 +1314,460 @@ async def fetch_pull_request(
     return response.json()
 
 
+async def fetch_issue(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    token: Optional[str] = None,
+    allow_global_token: bool = True,
+) -> dict[str, Any]:
+    """
+    Fetch a single GitHub issue (title + body) via the Issues API.
+    GET /repos/{owner}/{repo}/issues/{issue_number}
+
+    Reads only.
+
+    **Permission prerequisite — read before trusting this in production.**
+    Per GitHub's *Permissions required for GitHub Apps* reference, the two
+    endpoints in this area are governed differently:
+
+    * ``GET /repos/{owner}/{repo}/issues/{n}`` appears exactly once, under
+      *Repository permissions for issues*: ``issues: read``, with no
+      alternative grant that would satisfy it.
+    * ``GET /repos/{owner}/{repo}/issues/{n}/comments`` appears twice, under
+      that heading **and** under *Repository permissions for pull requests*:
+      ``issues: read`` **or** ``pull_requests: read`` — either one suffices.
+
+    So a ``pull_requests`` grant carries the comments endpoint and not this
+    one. The permissions Haunter documents installing (``contents:write``,
+    ``pull_requests:write``, ``checks:read``, ``actions:read``; see
+    ``HAUNTER.md`` §7.2 "GitHub Credential Segregation") satisfy
+    ``pull_requests: read`` — GitHub's permission ladder is three-state (No
+    access / Read-only / Read & write), so ``write`` implies ``read`` — but do
+    **not** include ``issues: read``. On an installation that has not been
+    granted it this call answers 403 and the caller degrades to a review with
+    no issue context. Enabling the feature is therefore an operational step —
+    grant the App ``issues: read`` and re-install it — not something this
+    function can decide. It is spelled out here because the failure is a
+    silent no-op: a review still publishes, just without the context.
+
+    The non-obvious half, stated because it is what a reader debugging that
+    403 gets wrong: this is the endpoint that does not work. The comments
+    endpoint above — deliberately not implemented, see
+    :mod:`app.subagents.issue_context` for why — was authorized under the
+    permissions this repo already documents.
+
+    Mirrors :func:`fetch_pull_request` exactly — same bounded read, same error
+    ladder, same header construction — because a caller that handles one of
+    those failures must handle these identically, and a second shape would be a
+    second thing to get wrong. A rate limit is surfaced as
+    :class:`GitHubRateLimitError` rather than slept through, so the caller can
+    decide: the review pipeline runs under a 300s wall-clock bound it cannot
+    afford to spend on a backoff.
+
+    Raises:
+        GitHubNetworkError: Connection failure / timeout.
+        GitHubResponseLimitError: Response past ``MAX_API_RESPONSE_BYTES``.
+        GitHubResourceNotFoundError: 404 — the issue was deleted, or is in a
+            repository this installation cannot see.
+        GitHubRateLimitError: 429, or 401/403 whose body names a rate limit.
+        GitHubAuthError: 401/403 for any other reason — including the missing
+            ``issues: read`` grant described above.
+        GitHubClientError: Any other error status, or a 200 whose body is not
+            an issue object.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/issues/{quote(str(issue_number), safe='')}"
+    )
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await _bounded_get(
+                client,
+                url,
+                headers=headers,
+                max_bytes=MAX_API_RESPONSE_BYTES,
+            )
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error fetching issue %s/%s #%s",
+                owner,
+                repo,
+                issue_number,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Issue not found for {owner}/{repo} #{issue_number}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        # The same branch the other fetchers in this file already carry. Without
+        # it a 429 falls to the generic branch below and surfaces as a plain
+        # GitHubClientError, which this caller's loop treats as "skip this one"
+        # — so a throttled installation would keep issuing requests into the
+        # limit that is already rejecting them.
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+
+    data = response.json()
+    # A 200 is not proof of a payload. GitHub answers a GraphQL-shaped
+    # `{"errors": [...]}` body with 200 on some proxies and gateways, and a
+    # bare `{}` is what a truncated or wrong-content-type response decodes to;
+    # both would otherwise sail through as "an issue with no title".
+    if isinstance(data, dict) and data.get("errors"):
+        raise GitHubClientError("GitHub returned an error envelope for fetch-issue")
+    # `number` and `title` are `required` in GitHub's own Issue schema, so a
+    # response missing either is truncated or foreign rather than an issue that
+    # happens to have no title. `body` is `string or null` — null being a
+    # first-class state for an issue with no description — but the key is always
+    # present in a real response, so requiring a string or null catches a
+    # truncated body without rejecting a description-less issue. Rendering a
+    # payload that fails this would put a bare `### Issue #12` heading in front
+    # of the model as though the issue had been read.
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("html_url"), str)
+        or not isinstance(data.get("number"), int)
+        or isinstance(data.get("number"), bool)
+        or not isinstance(data.get("title"), str)
+        or "body" not in data
+        or not (data["body"] is None or isinstance(data["body"], str))
+    ):
+        raise GitHubClientError("Unexpected fetch-issue response structure from GitHub API")
+    return data
+
+
+@dataclass(frozen=True)
+class IssueCommentPage:
+    """One bounded page of ``GET /issues/{n}/comments``, plus what it hid.
+
+    ``truncated`` travels with the comments rather than being left for the
+    caller to reconstruct, because only the fetcher sees the ``Link:
+    rel="next"`` header and the omission has to reach the prompt: a model shown
+    the first 15 comments of a 400-comment thread and told nothing about the
+    rest reads them as the whole discussion. It means exactly "GitHub advertised
+    a further page this call did not walk" — never an estimate of how many
+    comments were left behind, which this endpoint cannot tell us without
+    spending the requests the budget refuses to spend.
+    """
+
+    comments: tuple[dict[str, Any], ...]
+    truncated: bool = False
+
+
+async def fetch_issue_comments(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    *,
+    budget: GitHubRequestBudget,
+    token: Optional[str] = None,
+    allow_global_token: bool = True,
+) -> IssueCommentPage:
+    """
+    Fetch the opening discussion on a linked issue (issue #123b).
+
+    GET /repos/{owner}/{repo}/issues/{issue_number}/comments?per_page=15
+
+    This is the endpoint :func:`fetch_issue` explicitly declined to read. Its
+    permission story is the reason, restated because it decides whether this
+    feature works at all in production: per GitHub's *Permissions required for
+    GitHub Apps*, this endpoint is listed under *Repository permissions for
+    issues* **and** under *Repository permissions for pull requests*, and
+    either ``issues: read`` or ``pull_requests: read`` satisfies it. Haunter's
+    documented install grants ``pull_requests:write`` (``HAUNTER.md`` §7.2),
+    which implies ``pull_requests: read``, so unlike the issue body this call is
+    already authorized. Everything fetched here still needs ``issues: read`` for
+    the *issue* it annotates, so the two permissions are required together in
+    practice — :func:`fetch_issue`'s note about the missing grant still governs
+    whether a linked issue is read at all.
+
+    One page only (:data:`MAX_ISSUE_COMMENT_PAGES`), and every page costs a
+    reservation from ``budget`` *before* the request. A refused reservation
+    returns an empty page: the discussion is a hint, and the caller records the
+    omission rather than this function deciding the budget is advisory.
+
+    Every comment body here is attacker-influenced text on its way into a
+    prompt that produces a review a human will act on, and the discussion is far
+    more freely writable than an issue description — anyone who can comment can.
+    This function does no redaction; that is
+    :mod:`app.subagents.issue_context`'s job at the render boundary, where it
+    cannot be forgotten.
+
+    Raises:
+        GitHubNetworkError: Connection failure / timeout.
+        GitHubResponseLimitError: Response past ``MAX_API_RESPONSE_BYTES``.
+        GitHubResourceNotFoundError: 404 — the issue is deleted or invisible.
+        GitHubRateLimitError: 429, or 401/403 whose body names a rate limit.
+        GitHubAuthError: 401/403 for any other reason.
+        GitHubClientError: Any other error status, or a body that is not JSON.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/issues/{quote(str(issue_number), safe='')}/comments"
+    )
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
+
+    collected: list[dict[str, Any]] = []
+    next_url: Optional[str] = url
+    pages = 0
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        while next_url and pages < MAX_ISSUE_COMMENT_PAGES:
+            if not budget.reserve():
+                logger.info(
+                    "github request_budget_exhausted resource=issue_comments "
+                    "repo=%s/%s issue=%s limit=%d",
+                    owner,
+                    repo,
+                    issue_number,
+                    budget.limit,
+                )
+                break
+            pages += 1
+            try:
+                response = await _bounded_get(
+                    client,
+                    next_url,
+                    headers=headers,
+                    params={"per_page": ISSUE_COMMENTS_PER_PAGE}
+                    if pages == 1
+                    else None,
+                    max_bytes=MAX_API_RESPONSE_BYTES,
+                )
+            except httpx.RequestError as exc:
+                logger.error(
+                    "Network error fetching comments for issue %s/%s #%s",
+                    owner,
+                    repo,
+                    issue_number,
+                )
+                raise GitHubNetworkError(
+                    f"Network error connecting to GitHub: {exc.__class__.__name__}"
+                ) from exc
+
+            if response.status_code == 404:
+                raise GitHubResourceNotFoundError(
+                    f"Issue comments not found for {owner}/{repo} #{issue_number}"
+                )
+            if response.status_code in (401, 403):
+                if "rate limit" in response.text.lower():
+                    raise GitHubRateLimitError("GitHub API rate limit exceeded")
+                raise GitHubAuthError(
+                    f"GitHub authentication failure ({response.status_code})"
+                )
+            if response.status_code == 429:
+                raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+            if response.is_error:
+                raise GitHubClientError(
+                    f"GitHub API returned error {response.status_code}"
+                )
+
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise GitHubClientError(
+                    "Invalid JSON returned for issue comments"
+                ) from exc
+            # A body that is not a list is a wrong-content-type or truncated
+            # response, not an issue with no discussion. It degrades to "no
+            # comments", the same reading :func:`fetch_pr_review_comments` takes,
+            # because the caller's degradation path is identical either way.
+            if isinstance(data, list):
+                collected.extend(item for item in data if isinstance(item, dict))
+            next_url = _parse_next_page_url(response.headers)
+
+    if next_url is not None:
+        logger.info(
+            "Issue comments for %s/%s #%s truncated at %d page(s) (%d comments)",
+            owner,
+            repo,
+            issue_number,
+            pages,
+            len(collected),
+        )
+    # `pages > 0` so a budget refusal before the first request cannot claim the
+    # endpoint "had more" — nothing was read, so nothing was withheld.
+    return IssueCommentPage(
+        comments=tuple(collected), truncated=pages > 0 and next_url is not None
+    )
+
+
+@dataclass(frozen=True)
+class IssueTimelinePage:
+    """One bounded window of ``GET /issues/{n}/timeline``, plus what it hid.
+
+    Raw events, deliberately unfiltered: cross-reference extraction is a parsing
+    rule with its own tests, and it belongs in
+    :mod:`app.subagents.issue_context` (pure, I/O-free) rather than in the
+    transport layer where it could not be tested without a wire. What comes back
+    is exactly what GitHub sent, bounded.
+    """
+
+    events: tuple[dict[str, Any], ...]
+    truncated: bool = False
+
+
+async def fetch_issue_timeline(
+    owner: str,
+    repo: str,
+    issue_number: int,
+    *,
+    budget: GitHubRequestBudget,
+    token: Optional[str] = None,
+    allow_global_token: bool = True,
+) -> IssueTimelinePage:
+    """
+    Fetch the issue timeline, whose ``cross-referenced`` events are GitHub's own
+    account of what an issue is linked to (issue #123b).
+
+    GET /repos/{owner}/{repo}/issues/{issue_number}/timeline?per_page=100
+
+    Walks up to :data:`MAX_ISSUE_TIMELINE_PAGES` pages, each behind its own
+    reservation from ``budget``, and stops the moment a reservation is refused.
+    ``application/vnd.github+json`` is the correct Accept header: the timeline
+    API graduated out of its ``mockingbird`` preview and the preview media type
+    is no longer accepted, so this is the documented current form rather than an
+    invention.
+
+    The timeline is the authoritative half of the cross-reference strategy. It
+    reports the links GitHub itself recognises, carries the *type* of each link
+    (issue vs pull request) in ``source.issue`` / ``source.pull_request``, and
+    cannot be fooled by prose. It is also mostly noise -- labels, assignments,
+    state changes, ``commented`` markers -- which is why the page size is the
+    GitHub maximum rather than something smaller: a small page would spend the
+    5-page budget on label churn and never reach the cross-references.
+
+    Same permission story as :func:`fetch_issue_comments` (``issues: read`` or
+    ``pull_requests: read``) and the same untrusted-input contract: the titles
+    inside are attacker-influenced and are redacted and bounded at the render
+    boundary in :mod:`app.subagents.issue_context`, never here.
+
+    Raises:
+        GitHubNetworkError: Connection failure / timeout.
+        GitHubResponseLimitError: Response past ``MAX_API_RESPONSE_BYTES``.
+        GitHubResourceNotFoundError: 404 -- the issue is deleted or invisible.
+        GitHubRateLimitError: 429, or 401/403 whose body names a rate limit.
+        GitHubAuthError: 401/403 for any other reason.
+        GitHubClientError: Any other error status, or a body that is not JSON.
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/issues/{quote(str(issue_number), safe='')}/timeline"
+    )
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
+
+    collected: list[dict[str, Any]] = []
+    next_url: Optional[str] = url
+    pages = 0
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        while next_url and pages < MAX_ISSUE_TIMELINE_PAGES:
+            if not budget.reserve():
+                logger.info(
+                    "github request_budget_exhausted resource=issue_timeline "
+                    "repo=%s/%s issue=%s limit=%d",
+                    owner,
+                    repo,
+                    issue_number,
+                    budget.limit,
+                )
+                break
+            pages += 1
+            try:
+                response = await _bounded_get(
+                    client,
+                    next_url,
+                    headers=headers,
+                    params={"per_page": ISSUE_TIMELINE_PER_PAGE}
+                    if pages == 1
+                    else None,
+                    max_bytes=MAX_API_RESPONSE_BYTES,
+                )
+            except httpx.RequestError as exc:
+                logger.error(
+                    "Network error fetching timeline for issue %s/%s #%s",
+                    owner,
+                    repo,
+                    issue_number,
+                )
+                raise GitHubNetworkError(
+                    f"Network error connecting to GitHub: {exc.__class__.__name__}"
+                ) from exc
+
+            if response.status_code == 404:
+                raise GitHubResourceNotFoundError(
+                    f"Issue timeline not found for {owner}/{repo} #{issue_number}"
+                )
+            if response.status_code in (401, 403):
+                if "rate limit" in response.text.lower():
+                    raise GitHubRateLimitError("GitHub API rate limit exceeded")
+                raise GitHubAuthError(
+                    f"GitHub authentication failure ({response.status_code})"
+                )
+            if response.status_code == 429:
+                raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+            if response.is_error:
+                raise GitHubClientError(
+                    f"GitHub API returned error {response.status_code}"
+                )
+
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise GitHubClientError(
+                    "Invalid JSON returned for issue timeline"
+                ) from exc
+            # Non-list degrades to "no events", matching the comments fetch and
+            # the existing review-comment fetch: a wrong-content-type or
+            # truncated response is indistinguishable, to the caller, from a
+            # quiet issue.
+            if isinstance(data, list):
+                collected.extend(item for item in data if isinstance(item, dict))
+            next_url = _parse_next_page_url(response.headers)
+
+    if next_url is not None:
+        logger.info(
+            "Issue timeline for %s/%s #%s truncated at %d page(s) (%d events)",
+            owner,
+            repo,
+            issue_number,
+            pages,
+            len(collected),
+        )
+    # `pages > 0` for the same reason as the comments fetch: a budget refusal
+    # before the first request read nothing, so it withheld nothing.
+    return IssueTimelinePage(
+        events=tuple(collected), truncated=pages > 0 and next_url is not None
+    )
+
+
 async def create_pr_review(
     owner: str,
     repo: str,
@@ -1148,6 +1824,26 @@ async def create_pr_review(
         if "rate limit" in response.text.lower():
             raise GitHubRateLimitError("GitHub API rate limit exceeded")
         raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 422:
+        # The 422 body is upstream-controlled text, and it names the offending
+        # field — which is the only thing that makes this error actionable. So it
+        # is logged, but through `sanitize_log_value` like every other new line in
+        # this module: a newline in the body forges a second log record, a
+        # zero-width or bidi character hides the offending field from the
+        # operator reading the line, a token-shaped literal in the echoed payload
+        # persists a credential outside every rotation path, and the body is
+        # unbounded. The exception message keeps the raw text because it is
+        # consumed as data by the retry classifier, not written to a log.
+        logger.error(
+            "GitHub API rejected the review payload for %s/%s PR #%s: %s",
+            owner,
+            repo,
+            pr_number,
+            sanitize_log_value(response.text),
+        )
+        raise GitHubUnprocessableEntityError(
+            f"GitHub API returned error 422: {response.text}"
+        )
     if response.is_error:
         logger.error(
             "GitHub API error %d submitting review: %s",
@@ -1335,6 +2031,413 @@ async def fetch_commits(
             }
         )
     return commits
+
+
+#: Review-thread pages walked per fetch. A thread is only resolvable while the
+#: PR is open, so this is bounded for the same reason MAX_REVIEW_COMMENT_PAGES
+#: is: an unbounded thread list must not be able to inflate a request.
+MAX_REVIEW_THREAD_PAGES = 5
+
+_REVIEW_THREADS_QUERY = """
+query HaunterReviewThreads(
+  $owner: String!
+  $repo: String!
+  $number: Int!
+  $cursor: String
+) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          isCollapsed
+          path
+          line
+          originalLine
+          comments(first: 1) {
+            nodes {
+              databaseId
+              author { login }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+#: GitHub's ``resolveReviewThread`` takes exactly one thread per mutation, so
+#: this is a per-thread round trip. Bounded so a PR with an unbounded number of
+#: open Haunter threads cannot turn one publish into an unbounded request storm.
+MAX_REVIEW_THREAD_RESOLVES = 25
+
+_RESOLVE_REVIEW_THREAD_MUTATION = """
+mutation HaunterResolveReviewThread($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}
+"""
+
+
+def _graphql_headers(token: Optional[str]) -> dict[str, str]:
+    resolved_token = token or settings.github_token
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Haunter-Autonomous-Agent/1.0",
+        "Content-Type": "application/json",
+    }
+    if resolved_token:
+        headers["Authorization"] = f"Bearer {resolved_token}"
+    return headers
+
+
+#: How long a resolved bot identity is reused, mirroring the model-discovery
+#: TTL the repo already relies on (``app/llm/discovery.py:37``): long enough that
+#: a PR reviewed N times costs one identity call rather than N, short enough that
+#: a rotated App bot login is picked up without a redeploy.
+BOT_IDENTITY_CACHE_TTL_SECONDS: float = 900.0
+
+#: Ceiling on the identity cache. Entries are keyed per credential, and GitHub
+#: expires installation tokens hourly, so this is a safety valve against
+#: unbounded growth rather than a policy.
+BOT_IDENTITY_CACHE_MAX_ENTRIES = 64
+
+#: token-fingerprint -> (expiry_monotonic, login). Only the fingerprint is kept;
+#: the credential itself is never stored, here or anywhere else.
+_bot_identity_cache: dict[str, tuple[float, str]] = {}
+
+
+def _identity_cache_key(token: Optional[str]) -> str:
+    """Stable per-credential cache key.
+
+    Keying per credential is what makes the cache sound: one warm Lambda
+    container serves many installations, and a single-slot cache would hand one
+    repo's identity to another repo's review — which would let it resolve threads
+    that are not its own. The key is a truncated SHA-256 of the token, a one-way
+    digest of a high-entropy secret, so the cache never holds the credential.
+    """
+    if not isinstance(token, str) or not token.strip():
+        return "no-token"
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()[:32]
+
+
+async def _request_bot_login(token: Optional[str]) -> str:
+    """``GET /user`` and return the bot login. Raises a typed client error."""
+    headers = _build_headers(token=token)
+    url = f"{GITHUB_API_BASE}/user"
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await _bounded_get(client, url, headers=headers)
+        except httpx.RequestError as exc:
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.is_error:
+        raise GitHubClientError(f"GitHub API returned error {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise GitHubClientError("GitHub GET /user returned a non-JSON body") from exc
+    if not isinstance(payload, dict):
+        raise GitHubClientError("GitHub GET /user returned a non-object body")
+    # An installation access token authenticates as the App's bot user, whose
+    # account type is "Bot". A personal access token (the dev fallback in
+    # `app.github.pr.get_installation_token`) also authenticates successfully
+    # here, and adopting a human's login would make the caller treat that human's
+    # own review threads as ours to resolve. Only a bot identity is ever accepted.
+    if payload.get("type") != "Bot":
+        raise GitHubAuthError(
+            "GitHub credential authenticates as a non-bot account type "
+            f"{sanitize_log_value(payload.get('type'), 64)!r}; refusing to treat a "
+            "human account as this pipeline's own identity"
+        )
+    login = payload.get("login")
+    if not isinstance(login, str) or not login.strip():
+        raise GitHubClientError("GitHub GET /user returned no login")
+    # GitHub logins are capped at 39 chars; the bound only stops a malformed
+    # body from smuggling an unbounded string into the cache and the log.
+    return login.strip()[:128]
+
+
+async def fetch_bot_identity(token: Optional[str] = None) -> Optional[str]:
+    """Resolve the login the given GitHub credential authenticates as.
+
+    There is no configured Haunter bot slug anywhere in this codebase, and none
+    is needed: an installation access token *is* the App's bot user, so
+    ``GET /user`` is the authoritative answer to "which account are we". That
+    also keeps the caller off ``login.endswith("[bot]")``, which would match
+    Dependabot, Codecov and every other bot whose threads are not ours.
+
+    The result is cached per credential for
+    :data:`BOT_IDENTITY_CACHE_TTL_SECONDS`, so a PR with several review runs
+    costs one identity call rather than one per run. The cache is written
+    without a lock on purpose: the value is idempotent, so the only thing a
+    concurrent pair can do is duplicate one identical ``GET /user``, and an
+    ``asyncio.Lock`` held across event loops is a hard ``RuntimeError`` — inside
+    a path that must never fail a review.
+
+    No ``force_refresh`` escape hatch, deliberately. This function's cache is keyed
+    per credential, so a rotated installation token is a different key and cannot
+    read a stale entry; the only staleness a caller could be defending against is
+    GitHub changing an existing bot's login, which is not a thing that happens.
+    A knob nothing passes is a knob nothing has reasoned about.
+
+    Returns the bot login, or ``None`` when it cannot be established. Never
+    raises: the caller skips thread resolution on ``None``, so a metadata
+    endpoint GitHub is refusing can never fail a review.
+    """
+    cache_key = _identity_cache_key(token)
+    now = time.monotonic()
+    cached = _bot_identity_cache.get(cache_key)
+    if cached is not None and now < cached[0]:
+        return cached[1]
+
+    try:
+        login = await _request_bot_login(token)
+    except Exception as exc:
+        # Not cached: a transient refusal must be able to clear on the next run
+        # rather than pinning this container to "no identity" for a full TTL.
+        logger.info(
+            "github bot_identity unavailable error_type=%s error=%s",
+            type(exc).__name__,
+            sanitize_log_value(exc),
+        )
+        return None
+
+    if len(_bot_identity_cache) >= BOT_IDENTITY_CACHE_MAX_ENTRIES:
+        for key in [
+            key
+            for key, (expires_at, _) in _bot_identity_cache.items()
+            if now >= expires_at
+        ]:
+            _bot_identity_cache.pop(key, None)
+        while len(_bot_identity_cache) >= BOT_IDENTITY_CACHE_MAX_ENTRIES:
+            oldest = min(_bot_identity_cache.items(), key=lambda item: item[1][0])
+            _bot_identity_cache.pop(oldest[0], None)
+    _bot_identity_cache[cache_key] = (
+        time.monotonic() + BOT_IDENTITY_CACHE_TTL_SECONDS,
+        login,
+    )
+    logger.info("github bot_identity resolved login=%s", sanitize_log_value(login, 128))
+    return login
+
+
+async def fetch_review_threads(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Fetch a PR's review threads through the GraphQL API.
+
+    ``GET /pulls/{n}/comments`` returns ``PullRequestReviewComment`` rows, and a
+    comment's ``node_id`` is **not** a ``PullRequestReviewThread`` id — they are
+    different node types, and passing one where the other is expected fails the
+    mutation. Resolving a thread is only possible with the real thread id, so
+    the thread list has to come from GraphQL.
+
+    Returns raw thread dicts (``id``, ``isResolved``, ``isOutdated``, ``path``,
+    ``line``, ``originalLine``, and the first comment's ``databaseId`` /
+    ``author.login``). Returns ``[]`` on any failure: thread resolution is a
+    courtesy to the reviewer, and must never fail a publish. Raises nothing.
+    """
+    url = "https://api.github.com/graphql"
+    headers = _graphql_headers(token)
+    variables: dict[str, Any] = {
+        "owner": owner,
+        "repo": repo,
+        "number": int(pr_number),
+    }
+
+    threads: list[dict[str, Any]] = []
+    cursor: Optional[str] = None
+    pages = 0
+    # One client for the whole walk, not one per page: the pages are sequential
+    # and the connection is reused between them, and a client-per-page loop makes
+    # the number of TLS handshakes scale with the page cap for no benefit.
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        while pages < MAX_REVIEW_THREAD_PAGES:
+            pages += 1
+            try:
+                response = await _bounded_post(
+                    client,
+                    url,
+                    headers=headers,
+                    json={
+                        "query": _REVIEW_THREADS_QUERY,
+                        "variables": {**variables, "cursor": cursor},
+                    },
+                )
+            except (httpx.RequestError, GitHubResponseLimitError) as exc:
+                logger.warning(
+                    "github review_threads fetch_error repo=%s pr=%s error_type=%s",
+                    owner,
+                    repo,
+                    type(exc).__name__,
+                )
+                return []
+            if response.is_error:
+                logger.warning(
+                    "github review_threads http_error repo=%s pr=%s status=%s",
+                    owner,
+                    repo,
+                    pr_number,
+                    response.status_code,
+                )
+                return []
+            try:
+                payload = response.json()
+            except ValueError:
+                logger.warning(
+                    "github review_threads malformed_body repo=%s pr=%s", owner, repo
+                )
+                return []
+            if not isinstance(payload, dict):
+                return []
+            if payload.get("errors"):
+                logger.warning(
+                    "github review_threads graphql_errors repo=%s pr=%s",
+                    owner,
+                    repo,
+                )
+                return []
+            try:
+                connection = payload["data"]["repository"]["pullRequest"][
+                    "reviewThreads"
+                ]
+                nodes = connection["nodes"]
+            except (KeyError, TypeError):
+                logger.warning(
+                    "github review_threads unexpected_shape repo=%s pr=%s", owner, repo
+                )
+                return []
+            threads.extend(node for node in nodes if isinstance(node, dict))
+            page_info = connection.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                break
+    if len(threads) >= MAX_REVIEW_THREAD_PAGES * 100:
+        logger.info(
+            "github review_threads truncated repo=%s pr=%s threads=%d",
+            owner,
+            repo,
+            len(threads),
+        )
+    return threads
+
+
+async def resolve_review_threads(
+    owner: str,
+    repo: str,
+    thread_ids: Sequence[str],
+    token: Optional[str] = None,
+) -> int:
+    """Resolve review threads through the GraphQL ``resolveReviewThread`` mutation.
+
+    ``thread_ids`` must be real ``PullRequestReviewThread`` ids — see
+    :func:`fetch_review_threads` for why a review-comment id will not do.
+
+    Returns the number of threads GitHub confirmed resolved. Never raises: a
+    failed resolve leaves the thread open, which is the state the reviewer can
+    still act on, so it is strictly better than failing the publish.
+    """
+    unique_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in thread_ids:
+        thread_id = str(raw or "").strip()
+        if thread_id and thread_id not in seen:
+            seen.add(thread_id)
+            unique_ids.append(thread_id)
+    if not unique_ids:
+        return 0
+    if len(unique_ids) > MAX_REVIEW_THREAD_RESOLVES:
+        logger.info(
+            "github resolve_review_threads bounded repo=%s requested=%d cap=%d",
+            owner,
+            len(unique_ids),
+            MAX_REVIEW_THREAD_RESOLVES,
+        )
+        unique_ids = unique_ids[:MAX_REVIEW_THREAD_RESOLVES]
+
+    url = "https://api.github.com/graphql"
+    headers = _graphql_headers(token)
+    resolved = 0
+    # One client for the whole sweep: `resolveReviewThread` takes a single thread
+    # per mutation, so this is a per-thread round trip and a client-per-thread
+    # loop pays a fresh TLS handshake for every one of them, bounded at
+    # MAX_REVIEW_THREAD_RESOLVES. Reusing the connection changes nothing
+    # observable.
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        for thread_id in unique_ids:
+            try:
+                response = await _bounded_post(
+                    client,
+                    url,
+                    headers=headers,
+                    json={
+                        "query": _RESOLVE_REVIEW_THREAD_MUTATION,
+                        "variables": {"threadId": thread_id},
+                    },
+                )
+            except (httpx.RequestError, GitHubResponseLimitError) as exc:
+                logger.warning(
+                    "github resolve_review_threads fetch_error repo=%s error_type=%s",
+                    owner,
+                    type(exc).__name__,
+                )
+                return resolved
+            if response.is_error:
+                logger.warning(
+                    "github resolve_review_threads http_error repo=%s status=%s",
+                    owner,
+                    response.status_code,
+                )
+                return resolved
+            try:
+                payload = response.json()
+            except ValueError:
+                logger.warning(
+                    "github resolve_review_threads malformed_body repo=%s", owner
+                )
+                return resolved
+            if not isinstance(payload, dict):
+                return resolved
+            if payload.get("errors"):
+                # The id, not `len(thread_id)`. A GraphQL node id is a public,
+                # non-secret handle on a review thread, so it is safe to log and is
+                # the one thing an operator needs to act on the failure; its
+                # length identifies nothing. Bounded and sanitized anyway, because
+                # the value is echoed back from an upstream response.
+                logger.warning(
+                    "github resolve_review_threads graphql_errors repo=%s thread_id=%s",
+                    owner,
+                    sanitize_log_value(thread_id, 64),
+                )
+                return resolved
+            thread = ((payload.get("data") or {}).get("resolveReviewThread") or {}).get(
+                "thread"
+            )
+            if isinstance(thread, dict) and thread.get("isResolved") is True:
+                resolved += 1
+    return resolved
 
 
 async def fetch_blame(
@@ -1638,6 +2741,72 @@ async def create_blob(
     return sha
 
 
+async def fetch_commit_tree_sha(
+    owner: str,
+    repo: str,
+    commit_sha: str,
+    installation_token: Optional[str] = None,
+) -> str:
+    """
+    Resolve a commit SHA to its root tree SHA via GitHub Git Data API.
+
+    GET /repos/{owner}/{repo}/git/commits/{commit_sha}
+    Returns the tree SHA.
+
+    Raises:
+        GitHubAuthError, GitHubRateLimitError, GitHubResourceNotFoundError, GitHubClientError.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/commits/{quote(commit_sha, safe='')}"
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error fetching git commit for %s/%s @ %s",
+                owner,
+                repo,
+                commit_sha,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Commit not found for {owner}/{repo} @ {commit_sha}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
+
+    data = response.json()
+    if not isinstance(data, dict):
+        raise GitHubClientError(
+            f"Invalid commit response payload for {owner}/{repo} @ {commit_sha}"
+        )
+    tree = data.get("tree")
+    if isinstance(tree, dict) and tree.get("sha") and isinstance(tree["sha"], str) and tree["sha"].strip():
+        return tree["sha"].strip()
+    if isinstance(tree, str) and tree.strip():
+        return tree.strip()
+    raise GitHubClientError(
+        f"Tree SHA not found in commit object for {owner}/{repo} @ {commit_sha}"
+    )
+
+
 async def create_git_tree(
     owner: str,
     repo: str,
@@ -1755,14 +2924,25 @@ async def update_branch_ref(
     PATCH /repos/{owner}/{repo}/git/refs/heads/{branch}
 
     Raises:
-        GitHubResourceNotFoundError: Branch not found (404).
+        GitHubResourceNotFoundError: Branch not found (404) or reference does not exist (422).
         GitHubAuthError, GitHubRateLimitError, GitHubClientError.
     """
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{branch}"
+    if force:
+        raise GitHubClientError("Force update is not permitted")
+
+    clean_branch = branch.removeprefix("refs/heads/")
+    from app.schemas import is_protected_branch
+
+    if is_protected_branch(clean_branch):
+        raise GitHubClientError(
+            f"Cannot target protected branch {branch!r} directly"
+        )
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
     headers = _build_headers(
         token=installation_token, accept="application/vnd.github+json"
     )
-    payload = {"sha": commit_sha, "force": force}
+    payload = {"sha": commit_sha, "force": False}
 
     async with httpx.AsyncClient(
         timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
@@ -1782,7 +2962,114 @@ async def update_branch_ref(
 
     if response.status_code == 404:
         raise GitHubResourceNotFoundError(
-            f"Branch ref not found: {owner}/{repo}/heads/{branch}"
+            f"Branch ref not found: {owner}/{repo}/heads/{clean_branch}"
+        )
+    if response.status_code == 422:
+        error_msg = response.text
+        if (
+            "reference does not exist" in error_msg.lower()
+            or "not found" in error_msg.lower()
+        ):
+            raise GitHubResourceNotFoundError(
+                f"Branch ref not found (422): {owner}/{repo}/heads/{clean_branch}"
+            )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
+
+
+async def restore_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    commit_sha: str,
+    installation_token: Optional[str] = None,
+    expected_sha: Optional[str] = None,
+) -> bool:
+    """
+    Rollback / restore a non-protected branch ref to a prior commit SHA.
+    Explicitly rejects protected branches and sends force=True to allow rewinding.
+    If expected_sha is provided, verifies that the branch ref still matches before updating.
+    """
+    clean_branch = branch.removeprefix("refs/heads/")
+    from app.schemas import is_protected_branch
+
+    if is_protected_branch(clean_branch):
+        raise GitHubClientError(
+            f"Cannot target protected branch {branch!r} directly"
+        )
+
+    if expected_sha is not None:
+        try:
+            current_sha = await fetch_branch_sha(
+                owner=owner,
+                repo=repo,
+                branch=clean_branch,
+                token=installation_token,
+            )
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github_client: restore_branch_ref skipped for %s/%s:%s; SHA %s != expected %s",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            logger.warning(
+                "github_client: restore_branch_ref skipped for %s/%s:%s; branch not found",
+                owner,
+                repo,
+                clean_branch,
+            )
+            return False
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
+    payload = {"sha": commit_sha, "force": True}
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.patch(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error restoring branch ref for %s/%s branch %s",
+                owner,
+                repo,
+                branch,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Branch {branch!r} not found on {owner}/{repo}"
+        )
+    if response.status_code == 422:
+        error_msg = response.text
+        if (
+            "reference does not exist" in error_msg.lower()
+            or "not found" in error_msg.lower()
+        ):
+            raise GitHubResourceNotFoundError(
+                f"Branch {branch!r} not found (422) on {owner}/{repo}"
+            )
+        raise GitHubClientError(
+            f"Failed to restore ref heads/{clean_branch} (422): {error_msg[:200]}"
         )
     if response.status_code in (401, 403):
         if "rate limit" in response.text.lower():
@@ -1794,6 +3081,79 @@ async def update_branch_ref(
         raise GitHubClientError(
             f"GitHub API returned error {response.status_code}: {response.text[:200]}"
         )
+    return True
+
+
+async def delete_branch_ref(
+    owner: str,
+    repo: str,
+    branch: str,
+    installation_token: Optional[str] = None,
+    expected_sha: Optional[str] = None,
+) -> bool:
+    """
+    Delete a branch ref.
+
+    DELETE /repos/{owner}/{repo}/git/refs/heads/{branch}
+    If expected_sha is provided, verifies that the branch ref still matches before deleting.
+    """
+    clean_branch = branch.removeprefix("refs/heads/")
+
+    if expected_sha is not None:
+        try:
+            current_sha = await fetch_branch_sha(
+                owner=owner,
+                repo=repo,
+                branch=clean_branch,
+                token=installation_token,
+            )
+            if current_sha != expected_sha:
+                logger.warning(
+                    "github_client: delete_branch_ref skipped for %s/%s:%s; SHA %s != expected %s",
+                    owner,
+                    repo,
+                    clean_branch,
+                    current_sha,
+                    expected_sha,
+                )
+                return False
+        except GitHubResourceNotFoundError:
+            return True
+
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/{clean_branch}"
+    headers = _build_headers(
+        token=installation_token, accept="application/vnd.github+json"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.delete(url, headers=headers)
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error deleting branch ref for %s/%s branch %s",
+                owner,
+                repo,
+                branch,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code in (204, 404):
+        return True
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 429:
+        raise GitHubRateLimitError("GitHub API rate limit exceeded (429)")
+    if response.is_error:
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text[:200]}"
+        )
+    return True
 
 
 async def create_pull_request(

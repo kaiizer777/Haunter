@@ -147,6 +147,49 @@ async def test_get_hosting_adapter_aws():
     assert isinstance(adapter, AWSHostingAdapter)
 
 
+@pytest.mark.asyncio
+async def test_get_hosting_adapter_explicit_aws_skips_db_read():
+    """Explicit provider='aws' returns AWSHostingAdapter without a DB read (#140)."""
+    invalidate_provider_cache()
+    with patch(
+        "app.adapters.hosting._get_provider_config",
+        new=AsyncMock(return_value="aws"),
+    ) as mock_cfg:
+        adapter = await get_hosting_adapter(provider="aws")
+    assert isinstance(adapter, AWSHostingAdapter)
+    mock_cfg.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_hosting_adapter_unknown_provider_raises():
+    """Explicit unknown provider raises instead of silently returning AWS (#140)."""
+    invalidate_provider_cache()
+    with (
+        patch(
+            "app.adapters.hosting._get_provider_config",
+            new=AsyncMock(return_value="aws"),
+        ) as mock_cfg,
+        pytest.raises(ValueError, match="unsupported hosting provider"),
+    ):
+        await get_hosting_adapter(provider="something-else")
+    mock_cfg.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_hosting_adapter_uses_live_config_read():
+    """Omitted provider resolves via the live hosting_provider config read (#140)."""
+    from app.config import settings
+
+    invalidate_provider_cache()
+    with patch(
+        "app.adapters.hosting._get_provider_config",
+        new=AsyncMock(return_value="aws"),
+    ) as mock_cfg:
+        adapter = await get_hosting_adapter()
+    assert isinstance(adapter, AWSHostingAdapter)
+    mock_cfg.assert_awaited_once_with("hosting_provider", settings.hosting_provider)
+
+
 # ---------------------------------------------------------------------------
 # Test 6: GET /config/hosting unauthenticated -> 401
 # ---------------------------------------------------------------------------

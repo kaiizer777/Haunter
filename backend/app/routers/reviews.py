@@ -5,6 +5,7 @@ Exposes:
   GET /repos/{repo_id}/reviews — Paginated list of code reviews for a specific repo.
   GET /reviews                 — Filterable, paginated list of code reviews across all user's repos.
   GET /reviews/{review_id}     — Detail view for a specific code review.
+  GET /reviews/{review_id}/associated-pr — On-demand associated-PR lookup for a review.
 
 Security invariants:
 - Requires authentication via get_current_user.
@@ -15,18 +16,25 @@ Security invariants:
 from __future__ import annotations
 
 from datetime import datetime
+import asyncio
 import logging
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
+from urllib.parse import quote
 import uuid
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
-from sqlalchemy import func, select
+from pydantic import BaseModel, Field
+from sqlalchemy import ColumnElement, and_, case, cast, column, func, literal, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth import get_current_user
+from app.config import settings
 from app.db import get_db
+from app.github.pr import get_installation_token
+from app.github_client import GITHUB_API_BASE, _bounded_get, _build_headers
 from app.models import CodeReview, Repo, User
 
 logger = logging.getLogger(__name__)
@@ -63,19 +71,112 @@ class CodeReviewOut(BaseModel):
     failure_reason: Optional[str] = None
     input_tokens: int
     output_tokens: int
+    applied_review_prefs: Optional[dict[str, Any]] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
 class CodeReviewListOut(BaseModel):
+    """
+    A page of reviews plus the size of the whole matching result set.
+
+    ``total`` counts every review matching the request's filters across all
+    pages, never the length of ``reviews``: the dashboard paginates on it
+    (``frontend/src/app/reviews/page.tsx`` — ``totalCount`` at :432, the
+    pagination block rendered only while ``totalCount > PAGE_SIZE`` at :661,
+    ``Next`` disabled at ``(page + 1) * PAGE_SIZE >= totalCount`` at :679).
+    """
+
     reviews: list[CodeReviewOut]
     total: int
+
+
+class AssociatedPROut(BaseModel):
+    number: int
+    url: str
+    title: Optional[str] = None
+
+
+class AssociatedPRResponse(BaseModel):
+    associated_pr: Optional[AssociatedPROut] = None
+
+
+class AssociatedPRBatchRequest(BaseModel):
+    """One dashboard page worth of associated-PR lookups (issue #116)."""
+
+    # Bounded: one page of dashboard rows per call, no per-row fan-out.
+    review_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
+
+
+class AssociatedPRBatchItem(BaseModel):
+    review_id: uuid.UUID
+    associated_pr: Optional[AssociatedPROut] = None
+
+
+class AssociatedPRBatchResponse(BaseModel):
+    """Batch response as a list; unknown/unowned ids are omitted (no oracle)."""
+
+    items: list[AssociatedPRBatchItem]
+
+
+class AssociatedPRBatchDictResponse(BaseModel):
+    """Map of requested review id to its PR (null when none can be established)."""
+
+    associated_prs: dict[uuid.UUID, Optional[AssociatedPROut]]
 
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
+
+def _severity_predicate(severity: str) -> ColumnElement[bool]:
+    """
+    SQL predicate for "this review has at least one finding of ``severity``".
+
+    ``severity`` sits one key deep inside the ``findings`` JSONB array
+    (app/models.py:438-440), so it is not a column comparison. Postgres can still
+    evaluate it *before* LIMIT/OFFSET — the only place a count of matching
+    reviews can be produced — by expanding the array and testing each element,
+    so this needs no new column, no migration and no backfill.
+
+    The normalisation mirrors the Python post-filter this replaced
+    (``any(f.severity.lower() == severity.lower())`` over findings built by
+    :func:`_map_review_to_out`, where a missing key becomes ``"low"``):
+
+    * ``severity.lower()`` — the caller's value, case-insensitive;
+    * ``lower(... ->> 'severity')`` — the stored value, case-insensitive;
+    * ``coalesce(..., 'low')`` — a finding with no severity counts as low;
+    * ``jsonb_typeof(finding) = 'object'`` — non-dict elements are skipped
+      rather than matched, mirroring ``isinstance(f, dict)``;
+    * ``jsonb_typeof(findings) = 'array'`` — a non-array value is skipped, which
+      is what the Python filter did with a non-list ``findings``: no findings,
+      no match.
+
+    The array expansion substitutes ``'[]'`` for a non-array value rather than
+    relying on the guard above to be evaluated first: Postgres does not promise
+    an evaluation order for ``AND`` operands, and ``jsonb_array_elements`` on a
+    jsonb scalar is an error, not an empty set.
+    """
+    finding = func.jsonb_array_elements(
+        case(
+            (func.jsonb_typeof(CodeReview.findings) == "array", CodeReview.findings),
+            else_=cast(literal("[]"), JSONB),
+        )
+    ).table_valued(column("finding", JSONB), name="sev_finding")
+    element = finding.c["finding"]
+    return and_(
+        func.jsonb_typeof(CodeReview.findings) == "array",
+        select(literal(1))
+        .select_from(finding)
+        .where(
+            func.jsonb_typeof(element) == "object",
+            func.lower(func.coalesce(element["severity"].astext, "low"))
+            == severity.lower(),
+        )
+        .exists(),
+    )
 
 
 def _map_review_to_out(
@@ -114,7 +215,152 @@ def _map_review_to_out(
         failure_reason=getattr(review, "failure_reason", None),
         input_tokens=review.input_tokens,
         output_tokens=review.output_tokens,
+        applied_review_prefs=getattr(review, "applied_review_prefs", None),
         created_at=review.created_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Associated-PR lookup
+# ---------------------------------------------------------------------------
+
+
+#: Timeout for the on-demand associated-PR GitHub call (seconds). Deliberately
+#: short: this endpoint backs a per-row dashboard call, so a slow GitHub
+#: answers ``null`` instead of stalling the page.
+_ASSOCIATED_PR_TIMEOUT_SECONDS = 5.0
+
+#: Timeout for minting the repo-scoped installation token before the lookup
+#: (seconds). The mint path (``get_installation_token``) uses the 30s
+#: ``DEFAULT_TIMEOUT_SECONDS`` transport, which would blow the 5s lookup
+#: budget above on a cold cache + slow GitHub/SSM; a slow mint answers
+#: ``None`` so the caller falls through to the server PAT / null path.
+_MINT_TIMEOUT_SECONDS = 3.0
+_BATCH_LOOKUP_CONCURRENCY = 10
+
+#: Max concurrent installation-token mints per batch call. Mints are
+#: I/O-bound (GitHub/SSM); bounding keeps a cold-cache page with many
+#: distinct repos from opening dozens of TLS sessions at once.
+_BATCH_MINT_CONCURRENCY = 5
+
+#: Shared time budget (seconds) across all token mints in one batch call.
+#: Per-mint timeouts bound each mint, but without an overall budget a page
+#: with many distinct slow-mint repos still stalls past the ~30s browser
+#: timeout before any commit lookup starts; when the budget trips the whole
+#: mint phase degrades to the PAT/null path instead.
+_BATCH_MINT_BUDGET_S = 10.0
+
+
+async def _lookup_commit_pr(
+    owner: str, repo: str, sha: str, token: Optional[str] = None
+) -> Optional[AssociatedPROut]:
+    """
+    Return the PR associated with ``sha`` via
+    ``GET /repos/{owner}/{repo}/commits/{sha}/pulls``.
+
+    Auth prefers the caller's ``token`` — a repo-scoped installation token
+    minted by :func:`app.github.pr.get_installation_token` — and falls back to
+    the server ``settings.github_token`` PAT for local dev. This mirrors the
+    try-installation-then-PAT pattern ``app/routers/sessions.py`` uses
+    (:200-202, :459-461, :714-716, :830-832, :983-985); :func:`_build_headers`
+    applies the same fallback internally, so there is one HTTP convention.
+
+    Never raises: a missing token, any non-200 status, a network/timeout
+    failure, an over-large body, or an unparseable body all answer ``None``
+    so the caller renders the row as a plain push. No DB writes. The 5s
+    timeout keeps a slow GitHub from stalling the page.
+
+    Log levels: auth/rate-limit/server failures (401/403/429/5xx) log at
+    warning — those signal a fixable credential or quota problem; expected
+    misses (404/422), a missing token, timeouts, and unparseable bodies log
+    at debug — this endpoint backs a per-row dashboard call, so a warning
+    per row would spam the logs.
+    """
+    effective_token = token or settings.github_token
+    if not effective_token or not effective_token.strip():
+        logger.debug(
+            "associated-pr lookup skipped (no token) for %s/%s @ %s",
+            owner,
+            repo,
+            sha,
+        )
+        return None
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/commits/{quote(sha, safe='')}/pulls"
+    )
+    headers = _build_headers(token=effective_token)
+    try:
+        async with httpx.AsyncClient(timeout=_ASSOCIATED_PR_TIMEOUT_SECONDS) as client:
+            response = await _bounded_get(client, url, headers=headers)
+    except httpx.RequestError as exc:
+        logger.debug(
+            "associated-pr lookup network error for %s/%s @ %s: %s",
+            owner,
+            repo,
+            sha,
+            type(exc).__name__,
+        )
+        return None
+    except Exception as exc:
+        logger.debug(
+            "associated-pr lookup degraded for %s/%s @ %s: %s",
+            owner,
+            repo,
+            sha,
+            type(exc).__name__,
+        )
+        return None
+    if response.status_code != 200:
+        if response.status_code in (401, 403, 429) or response.status_code >= 500:
+            logger.warning(
+                "associated-pr lookup GitHub status %s for %s/%s @ %s",
+                response.status_code,
+                owner,
+                repo,
+                sha,
+            )
+        else:
+            logger.debug(
+                "associated-pr lookup GitHub status %s for %s/%s @ %s",
+                response.status_code,
+                owner,
+                repo,
+                sha,
+            )
+        return None
+    try:
+        items = response.json()
+    except ValueError:
+        logger.debug(
+            "associated-pr lookup unparseable body for %s/%s @ %s",
+            owner,
+            repo,
+            sha,
+        )
+        return None
+    if not isinstance(items, list) or not items:
+        return None
+    candidates = [
+        p for p in items if isinstance(p, dict) and isinstance(p.get("number"), int)
+    ]
+    if not candidates:
+        return None
+    open_prs = [p for p in candidates if p.get("state") == "open"]
+    pick = max(open_prs or candidates, key=lambda p: p["number"])
+    number = pick["number"]
+    html_url = pick.get("html_url")
+    pr_url = (
+        html_url
+        if isinstance(html_url, str) and html_url
+        else f"https://github.com/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/pull/{number}"
+    )
+    title = pick.get("title")
+    return AssociatedPROut(
+        number=number,
+        url=pr_url,
+        title=title if isinstance(title, str) else None,
     )
 
 
@@ -155,6 +401,15 @@ async def get_repo_reviews(
         base_query = base_query.where(CodeReview.risk_score >= min_risk)
         count_query = count_query.where(CodeReview.risk_score >= min_risk)
 
+    if severity:
+        predicate = _severity_predicate(severity)
+        base_query = base_query.where(predicate)
+        count_query = count_query.where(predicate)
+
+    # `total` is the number of reviews matching every filter above, counted by
+    # the COUNT query — not the length of the page below. The severity predicate
+    # is on both statements, so the two cannot disagree, and the dashboard (which
+    # renders pagination only while total > PAGE_SIZE) can still reach page 2.
     total = await db.scalar(count_query) or 0
 
     query = (
@@ -166,15 +421,10 @@ async def get_repo_reviews(
     res = await db.execute(query)
     reviews = res.scalars().all()
 
+    # The severity predicate lives in SQL (``_severity_predicate`` on both the
+    # page and COUNT queries above): it is the single source of truth, so every
+    # row the database returned already matches and must reach the client.
     mapped_reviews = [_map_review_to_out(r, repo=repo) for r in reviews]
-
-    if severity:
-        sev_lower = severity.lower()
-        mapped_reviews = [
-            r
-            for r in mapped_reviews
-            if any(f.severity.lower() == sev_lower for f in r.findings)
-        ]
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
 
@@ -217,6 +467,14 @@ async def list_all_reviews(
         base_query = base_query.where(CodeReview.risk_score >= min_risk)
         count_query = count_query.where(CodeReview.risk_score >= min_risk)
 
+    if severity:
+        predicate = _severity_predicate(severity)
+        base_query = base_query.where(predicate)
+        count_query = count_query.where(predicate)
+
+    # Same contract as get_repo_reviews: `total` counts every matching review
+    # across all pages, and the severity predicate is on the COUNT as well as the
+    # page, so the count and the rows cannot contradict each other.
     total = await db.scalar(count_query) or 0
 
     query = (
@@ -228,15 +486,9 @@ async def list_all_reviews(
     res = await db.execute(query)
     reviews = res.scalars().all()
 
+    # Same single-source-of-truth contract as get_repo_reviews: the SQL
+    # severity predicate already decided which rows match.
     mapped_reviews = [_map_review_to_out(r) for r in reviews]
-
-    if severity:
-        sev_lower = severity.lower()
-        mapped_reviews = [
-            r
-            for r in mapped_reviews
-            if any(f.severity.lower() == sev_lower for f in r.findings)
-        ]
 
     return CodeReviewListOut(reviews=mapped_reviews, total=total)
 
@@ -265,3 +517,288 @@ async def get_review_detail(
         )
 
     return _map_review_to_out(review)
+
+
+@router.get("/reviews/{review_id}/associated-pr", response_model=AssociatedPRResponse)
+async def get_review_associated_pr(
+    review_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AssociatedPRResponse:
+    """
+    On-demand associated-PR lookup for a single code review.
+
+    Read-only: no DB writes, no ingestion/dedup side effects. Answers
+    ``{"associated_pr": null}`` (HTTP 200) whenever no PR can be established —
+    direct-to-main pushes genuinely have none — so the dashboard row keeps
+    rendering as a plain push instead of failing the page.
+
+    Resolution order: the row's own ``pr_number`` first (no GitHub call),
+    else ``GET /repos/{owner}/{repo}/commits/{sha}/pulls`` with the repo
+    installation token (server PAT fallback), preferring the highest open PR
+    number and falling back to the highest PR number.
+    """
+    stmt = (
+        select(CodeReview)
+        .join(Repo, CodeReview.repo_id == Repo.id)
+        .options(selectinload(CodeReview.repo))
+        .where(CodeReview.id == review_id, Repo.user_id == current_user.id)
+    )
+    res = await db.execute(stmt)
+    review = res.scalars().first()
+
+    if not review:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Code review not found"
+        )
+
+    repo = review.repo
+    owner = repo.owner if repo is not None else None
+    name = repo.name if repo is not None else None
+
+    if review.pr_number is not None and owner and name:
+        return AssociatedPRResponse(
+            associated_pr=AssociatedPROut(
+                number=review.pr_number,
+                url=(
+                    f"https://github.com/{quote(owner, safe='')}"
+                    f"/{quote(name, safe='')}/pull/{review.pr_number}"
+                ),
+                title=None,
+            )
+        )
+    if not owner or not name or not review.commit_sha:
+        return AssociatedPRResponse(associated_pr=None)
+    # Prefer the repo-scoped installation token, as the sibling sessions
+    # router does; get_installation_token already falls back to the server PAT
+    # in dev. The mint runs under a shorter timeout than the lookup itself:
+    # its transport allows 30s (DEFAULT_TIMEOUT_SECONDS), which would blow
+    # the 5s lookup budget on a cold cache — a slow mint answers None so the
+    # lookup falls through to the PAT / null path instead of stalling the row.
+    try:
+        gh_token: Optional[str] = await asyncio.wait_for(
+            get_installation_token(repo), timeout=_MINT_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        logger.debug(
+            "associated-pr lookup installation-token mint timed out after %.1fs",
+            _MINT_TIMEOUT_SECONDS,
+        )
+        gh_token = None
+    except Exception as exc:
+        logger.debug(
+            "associated-pr lookup installation-token mint failed: %s",
+            type(exc).__name__,
+        )
+        gh_token = None
+    associated = await _lookup_commit_pr(owner, name, review.commit_sha, token=gh_token)
+    return AssociatedPRResponse(associated_pr=associated)
+
+
+async def _mint_repo_tokens(repos: list[Repo]) -> dict[uuid.UUID, Optional[str]]:
+    """Mint one repo-scoped token per distinct repo, concurrently (issue #116).
+
+    Bounded: at most ``_BATCH_MINT_CONCURRENCY`` mints in flight and
+    ``_BATCH_MINT_BUDGET_S`` overall. A cold token cache over N repos therefore
+    waits at most about one mint timeout instead of 3s x N. Per-mint timeout
+    with ``None`` fallback is preserved; a tripped budget degrades the whole
+    mint phase to the PAT/null path instead of stalling the page past the
+    ~30s browser timeout.
+    """
+    if not repos:
+        return {}
+    _mint_sem = asyncio.Semaphore(_BATCH_MINT_CONCURRENCY)
+
+    async def _mint(r: Repo) -> tuple[uuid.UUID, Optional[str]]:
+        async with _mint_sem:
+            try:
+                tok = await asyncio.wait_for(
+                    get_installation_token(r), timeout=_MINT_TIMEOUT_SECONDS
+                )
+                return r.id, tok
+            except Exception as exc:
+                logger.debug(
+                    "associated-prs batch mint token failed for repo %s: %s",
+                    r.id,
+                    type(exc).__name__,
+                )
+                return r.id, None
+
+    try:
+        minted_tokens = await asyncio.wait_for(
+            asyncio.gather(*[_mint(r) for r in repos]),
+            timeout=_BATCH_MINT_BUDGET_S,
+        )
+    except asyncio.TimeoutError:
+        logger.debug(
+            "associated-prs batch mint budget (%.1fs) exceeded; "
+            "falling back to PAT/null tokens",
+            _BATCH_MINT_BUDGET_S,
+        )
+        minted_tokens = []
+    return dict(minted_tokens)
+
+
+async def _resolve_push_prs(
+    push_rows: list[tuple[uuid.UUID, str, Repo]],
+) -> dict[uuid.UUID, Optional[AssociatedPROut]]:
+    """Resolve push rows concurrently through the commit-pulls lookup.
+
+    Shares one bounded mint phase per distinct repo, then ``_lookup_commit_pr``
+    per row under ``_BATCH_LOOKUP_CONCURRENCY`` — the same lookup the
+    single-row endpoint uses.
+    """
+    if not push_rows:
+        return {}
+    unique_repos = list({repo.id: repo for _, _, repo in push_rows}.values())
+    tokens_by_repo_id = await _mint_repo_tokens(unique_repos)
+    sem = asyncio.Semaphore(_BATCH_LOOKUP_CONCURRENCY)
+
+    async def _resolve_one(
+        rid: uuid.UUID, sha: str, r: Repo
+    ) -> tuple[uuid.UUID, Optional[AssociatedPROut]]:
+        async with sem:
+            tok = tokens_by_repo_id.get(r.id)
+            pr = await _lookup_commit_pr(r.owner, r.name, sha, token=tok)
+            return rid, pr
+
+    return dict(
+        await asyncio.gather(
+            *[_resolve_one(rid, sha, r) for rid, sha, r in push_rows]
+        )
+    )
+
+
+def _direct_pr_out(owner: str, name: str, pr_number: int) -> AssociatedPROut:
+    """PR pill for a row carrying its own ``pr_number`` (no GitHub call)."""
+    return AssociatedPROut(
+        number=pr_number,
+        url=(
+            f"https://github.com/{quote(owner, safe='')}"
+            f"/{quote(name, safe='')}/pull/{pr_number}"
+        ),
+        title=None,
+    )
+
+
+@router.post(
+    "/reviews/associated-pr/batch", response_model=AssociatedPRBatchDictResponse
+)
+async def batch_review_associated_pr(
+    payload: AssociatedPRBatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AssociatedPRBatchDictResponse:
+    """
+    Batched associated-PR lookup for a dashboard page (issue #116).
+
+    One ownership-scoped ``SELECT ... WHERE id IN (...)`` answers every row
+    the database can (``pr_number`` set resolves directly, no GitHub call);
+    the rest resolve concurrently through the same commit-pulls lookup the
+    single-row endpoint uses. Unknown or unowned ids answer ``null`` (never
+    404) so one bad id cannot fail the page. Read-only: no DB writes.
+    """
+    ordered_ids: list[uuid.UUID] = list(dict.fromkeys(payload.review_ids))
+    resolved: dict[uuid.UUID, Optional[AssociatedPROut]] = {}
+    if not ordered_ids:
+        return AssociatedPRBatchDictResponse(associated_prs=resolved)
+
+    stmt = (
+        select(CodeReview)
+        .join(Repo, CodeReview.repo_id == Repo.id)
+        .options(selectinload(CodeReview.repo))
+        .where(CodeReview.id.in_(ordered_ids), Repo.user_id == current_user.id)
+    )
+    res = await db.execute(stmt)
+    rows = res.scalars().all()
+    by_id = {row.id: row for row in rows}
+
+    pending: list[tuple[uuid.UUID, str, Repo]] = []
+    for rid in ordered_ids:
+        review = by_id.get(rid)
+        if review is None:
+            resolved[rid] = None
+            continue
+        repo = review.repo
+        owner = repo.owner if repo is not None else None
+        name = repo.name if repo is not None else None
+        if review.pr_number is not None and owner and name:
+            resolved[rid] = _direct_pr_out(owner, name, review.pr_number)
+        elif not owner or not name or not review.commit_sha:
+            resolved[rid] = None
+        else:
+            pending.append((rid, review.commit_sha, repo))
+
+    for rid, pr in (await _resolve_push_prs(pending)).items():
+        resolved[rid] = pr
+    for rid, _, _ in pending:
+        resolved.setdefault(rid, None)
+
+    return AssociatedPRBatchDictResponse(associated_prs=resolved)
+
+
+@router.post("/reviews/associated-prs", response_model=AssociatedPRBatchResponse)
+async def get_reviews_associated_prs(
+    body: AssociatedPRBatchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AssociatedPRBatchResponse:
+    """
+    Batch associated-PR lookup for a page of dashboard rows.
+
+    One ownership-scoped SELECT answers the whole page (the per-row GET above
+    fans out to N calls plus up to N GitHub requests per render). Rows carrying
+    their own ``pr_number`` answer directly from DB without GitHub calls.
+    For push rows where ``pr_number`` is None, commit-SHA resolution is performed
+    concurrently via GitHub API with installation token minting batched per unique repo.
+    Unknown or non-owned ids are omitted (no existence oracle).
+    """
+    if not body.review_ids:
+        return AssociatedPRBatchResponse(items=[])
+
+    stmt = (
+        select(
+            CodeReview.id,
+            CodeReview.pr_number,
+            CodeReview.commit_sha,
+            Repo,
+        )
+        .join(Repo, CodeReview.repo_id == Repo.id)
+        .where(
+            CodeReview.id.in_(body.review_ids),
+            Repo.user_id == current_user.id,
+        )
+    )
+    res = await db.execute(stmt)
+    rows = res.all()
+
+    # Identify push rows needing commit-SHA lookup
+    push_rows: list[tuple[uuid.UUID, str, Repo]] = []
+    for review_id, pr_number, commit_sha, repo in rows:
+        if (
+            pr_number is None
+            and commit_sha
+            and repo is not None
+            and repo.owner
+            and repo.name
+        ):
+            push_rows.append((review_id, commit_sha, repo))
+
+    # Bounded concurrent mint + lookup shared with the dict-shaped batch route
+    # above (one helper, one behavior, no parallel implementations).
+    push_prs = await _resolve_push_prs(push_rows)
+
+    items: list[AssociatedPRBatchItem] = []
+    for review_id, pr_number, _commit_sha, repo in rows:
+        owner = repo.owner if repo is not None else None
+        name = repo.name if repo is not None else None
+        pr: Optional[AssociatedPROut] = None
+        if pr_number is not None and owner and name:
+            pr = _direct_pr_out(owner, name, pr_number)
+        elif review_id in push_prs:
+            pr = push_prs[review_id]
+
+        items.append(
+            AssociatedPRBatchItem(review_id=review_id, associated_pr=pr)
+        )
+    return AssociatedPRBatchResponse(items=items)

@@ -13,7 +13,7 @@ from urllib.parse import urljoin
 
 import httpx
 
-from app.config import settings
+from app.config import DEFAULT_GROQ_MODEL, settings
 from app.llm.exceptions import LLMAuthenticationError, LLMError
 from app.llm.retry import execute_with_retry
 
@@ -33,7 +33,7 @@ class GroqProvider:
         raw_base_url = base_url or settings.groq_base_url
         self.base_url = raw_base_url.rstrip("/") + "/"
         self._api_key = api_key or settings.groq_api_key
-        self.default_model = model or settings.groq_model_name or "openai/gpt-oss-120b"
+        self.default_model = model or settings.groq_model_name or DEFAULT_GROQ_MODEL
         self.timeout = timeout
 
     async def complete(
@@ -54,6 +54,7 @@ class GroqProvider:
                 "usage": {"input_tokens": int, "output_tokens": int},
                 "latency_ms": int,
                 "model": str,
+                "finish_reason": str | None,
             }
         """
         if not self._api_key:
@@ -107,6 +108,10 @@ class GroqProvider:
             message = first_choice.get("message", {})
             content = message.get("content")
             tool_calls = message.get("tool_calls")
+            # Reported verbatim so a caller can tell a complete generation from
+            # one the provider cut off at the token budget. Never synthesized:
+            # absent means unknown, not "stop".
+            finish_reason = first_choice.get("finish_reason")
 
             usage_data = data.get("usage", {})
             input_tokens = usage_data.get("prompt_tokens", 0)
@@ -122,6 +127,7 @@ class GroqProvider:
                 },
                 "latency_ms": latency_ms,
                 "model": returned_model,
+                "finish_reason": finish_reason,
             }
 
         return await execute_with_retry(_make_request)

@@ -65,7 +65,8 @@ describe("sidebar.tsx", () => {
     const brandLink = screen.getByRole("link", { name: /haunter autonomous ci/i });
     expect(brandLink).toHaveAttribute("href", "/sessions");
     expect(screen.getByText("v1.0")).toBeInTheDocument();
-    expect(screen.getByText("Pipeline Live")).toBeInTheDocument();
+    expect(screen.getByText("System Status")).toBeInTheDocument();
+    expect(screen.getByText("System Ready")).toBeInTheDocument();
     await screen.findByTitle("claude-sonnet-4-5");
   });
 

@@ -26,3 +26,9 @@ output "lambda_cloudwatch_log_group" {
   description = "CloudWatch log group name for Lambda function logs."
   value       = aws_cloudwatch_log_group.lambda.name
 }
+
+output "lambda_reserved_concurrent_executions" {
+  description = "Reserved concurrency cap on the orchestrator Lambda (Issue #160 storm guard)."
+  value       = var.lambda_reserved_concurrent_executions
+}
+

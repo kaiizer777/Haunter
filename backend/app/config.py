@@ -21,6 +21,12 @@ def _to_asyncpg_url(url: str) -> str:
     return url
 
 
+#: Single source of truth for the Groq fallback model. Every Groq call site
+#: falls back to this when no model is configured explicitly or via env, so a
+#: retired model ID is replaced in exactly one place instead of N hardcodes.
+DEFAULT_GROQ_MODEL: str = "openai/gpt-oss-120b"
+
+
 class Settings(BaseSettings):
     database_url: str
     database_url_unpooled: str
@@ -69,6 +75,15 @@ class Settings(BaseSettings):
     # the dashboard is in a steady state.
     rate_limit_per_minute: int = 1000
 
+    # Webhook ingress throttling (issue #161): max deliveries accepted per
+    # sliding window, tracked per repository + sender bucket. A looping or
+    # malicious sender past this budget gets 429 + Retry-After instead of
+    # scheduling more pipeline work. Generous default so legitimate GitHub
+    # delivery bursts (redeliveries, multi-workflow fan-out) pass through;
+    # tighten per environment via WEBHOOK_RATE_LIMIT_MAX_DELIVERIES.
+    webhook_rate_limit_max_deliveries: int = 120
+    webhook_rate_limit_window_seconds: int = 60
+
     # LLM Provider Configuration (Phase 4)
     # OpenCode Zen API key (Secret Manager / .env only). Injected at request time, never logged.
     opencode_zen_api_key: Optional[str] = None
@@ -95,7 +110,7 @@ class Settings(BaseSettings):
     groq_api_key: Optional[str] = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model_name: Optional[str] = Field(
-        default="openai/gpt-oss-120b",
+        default=DEFAULT_GROQ_MODEL,
         description="Default Groq model name from env",
     )
 
@@ -151,13 +166,18 @@ class Settings(BaseSettings):
     # so the private key never enters Terraform state, .env, or lambda.zip.
     github_sandbox_org: str = "haunter-sandboxes"
     github_sandbox_repo: str = "haunter-sandbox-runner"
+    # Issue #164 — extra sandbox mirror repos (comma-separated bare names).
+    # The effective pool is [github_sandbox_repo] + these extras; runs spread
+    # across the pool so parallel verifications stop contending on one repo's
+    # rate-limit budget. Empty (default) = today's single mirror.
+    github_sandbox_repo_pool: str = ""
     github_sandbox_app_id: Optional[str] = None
     github_sandbox_installation_id: Optional[str] = None
     github_sandbox_app_private_key_ssm_path: str = (
         "/haunter/GITHUB_SANDBOX_APP_PRIVATE_KEY"
     )
     github_sandbox_poll_interval_seconds: float = 10.0
-    github_sandbox_poll_timeout_seconds: float = 120.0
+    github_sandbox_poll_timeout_seconds: float = 600.0
     github_sandbox_workflow_filename_py: str = "haunter-test-py.yml"
     github_sandbox_workflow_filename_ts: str = "haunter-test-ts.yml"
     # Language packs. One template per detect_language() key; the key set is
@@ -209,6 +229,25 @@ class Settings(BaseSettings):
     max_attempts: int = Field(
         default=3,
         validation_alias=AliasChoices("max_attempts", "HAUNTER_MAX_ATTEMPTS"),
+    )
+
+    # Issue #157 — pipeline-outbox sweeper horizons. A run still `pending`
+    # past `pipeline_pending_timeout_s` never started (its async self-invoke
+    # failed/crashed) and is redriven; past `pipeline_pending_exhaust_after_s`
+    # it is marked `error` (exhausted) so redrives stay bounded when the child
+    # keeps crashing post-accept. Override per environment via
+    # PIPELINE_PENDING_TIMEOUT_S / PIPELINE_PENDING_EXHAUST_AFTER_S.
+    pipeline_pending_timeout_s: float = Field(
+        default=300.0,
+        validation_alias=AliasChoices(
+            "pipeline_pending_timeout_s", "PIPELINE_PENDING_TIMEOUT_S"
+        ),
+    )
+    pipeline_pending_exhaust_after_s: float = Field(
+        default=3600.0,
+        validation_alias=AliasChoices(
+            "pipeline_pending_exhaust_after_s", "PIPELINE_PENDING_EXHAUST_AFTER_S"
+        ),
     )
 
     # NICE-3: cap on the number of files Haunter seeds from the user's failing

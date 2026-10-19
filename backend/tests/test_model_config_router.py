@@ -142,21 +142,33 @@ async def test_put_model_config_unauthenticated(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_put_model_config_open_access_allows_any_authenticated_user(
+async def test_put_global_model_config_forbidden_for_non_admin(
     db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
 ):
-    """PUT /config/model is open to any authenticated user (future.md §3.2 Issue 2).
-
-    Regression: the old admin gate returned 403 for normal users. Any
-    authenticated user can now switch the global model freely.
-    """
+    """PUT /config/model (global) without admin privileges returns 403 Forbidden."""
     await truncate_all(db)
-    user = await user_factory()
-    client = make_auth_client(user.id)
+    non_admin_user = await user_factory(role="user")
+    client = make_auth_client(non_admin_user.id)
 
-    # Even with ADMIN_USER_ID pinned to somebody else, a normal user succeeds.
-    configured_admin_id = str(uuid.uuid4())
-    monkeypatch.setattr(settings, "admin_user_id", configured_admin_id)
+    # Set ADMIN_USER_ID to a different user ID
+    monkeypatch.setattr(settings, "admin_user_id", str(uuid.uuid4()))
+
+    payload = {"provider": "opencode_zen", "model_name": "nemotron-3.5-lightning-free"}
+    async with client:
+        resp = await client.put("/config/model", json=payload)
+
+    assert resp.status_code == 403
+    assert "Admin permissions required" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_put_global_model_config_allowed_for_admin(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """PUT /config/model (global) succeeds for admin user."""
+    await truncate_all(db)
+    admin_user = await user_factory(role="admin")
+    client = make_auth_client(admin_user.id)
 
     payload = {"provider": "opencode_zen", "model_name": "nemotron-3.5-lightning-free"}
     async with client:
@@ -175,7 +187,7 @@ async def test_put_model_config_invalid_provider_returns_422(
 ):
     """PUT /config/model with invalid provider (e.g. 'gcp') returns 422."""
     await truncate_all(db)
-    admin_user = await user_factory()
+    admin_user = await user_factory(role="admin")
     client = make_auth_client(admin_user.id)
 
     monkeypatch.setattr(settings, "admin_user_id", str(admin_user.id))
@@ -198,7 +210,7 @@ async def test_put_model_config_invalid_model_returns_422(
     - anthropic must be in ANTHROPIC_MODELS
     """
     await truncate_all(db)
-    admin_user = await user_factory()
+    admin_user = await user_factory(role="admin")
     client = make_auth_client(admin_user.id)
 
     monkeypatch.setattr(settings, "admin_user_id", str(admin_user.id))
@@ -236,7 +248,7 @@ async def test_put_model_config_active_row_invariant(
     2. Deactivates existing active rows (single active-row invariant).
     """
     await truncate_all(db)
-    admin_user = await user_factory()
+    admin_user = await user_factory(role="admin")
     client = make_auth_client(admin_user.id)
 
     monkeypatch.setattr(settings, "admin_user_id", str(admin_user.id))
@@ -246,6 +258,7 @@ async def test_put_model_config_active_row_invariant(
         provider="opencode_zen",
         model_name="nemotron-3.5-lightning-free",
         base_url="https://opencode.ai/zen/v1",
+        scope="global",
         is_active=True,
     )
     db.add(initial_config)
@@ -265,6 +278,7 @@ async def test_put_model_config_active_row_invariant(
     new_id = data["id"]
 
     # Verify active-row invariant in DB
+    await db.rollback()
     db.expire_all()
     result = await db.execute(select(ModelConfig))
     all_configs = result.scalars().all()

@@ -9,6 +9,7 @@ import json
 import logging
 import random
 import re
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.github.auditor import get_auditor_installation_token
+from app.github.pr import REVIEWABLE_PR_ACTIONS
 from app.models import AuditJob, Repo, RepoSettings
 from app.self_invocation import (
     KIND_AUDIT,
@@ -34,14 +36,138 @@ logger = logging.getLogger(__name__)
 
 AuditType = Literal["pr_audit", "ci_failure_audit", "ci_success_audit", "manual_audit"]
 
-AUDIT_PR_ACTIONS = frozenset({"opened", "synchronize"})
+#: Actions that make a PR's diff reviewable. Shared with the code-review
+#: webhook branch (app.webhooks) so the two can never disagree about which
+#: delivery is reviewable work — see app.github.pr.REVIEWABLE_PR_ACTIONS.
+AUDIT_PR_ACTIONS = REVIEWABLE_PR_ACTIONS
 AUDIT_WORKFLOW_CONCLUSIONS = frozenset({"failure", "success"})
 AUDIT_TYPES = frozenset(
     {"pr_audit", "ci_failure_audit", "ci_success_audit", "manual_audit"}
 )
 
-_MANUAL_MENTION = "@haunter"
+#: Manual-audit trigger handle. A single handle, not "@haunter" plus a word:
+#: "@haunter audit" notifies the real GitHub user `haunter`, so the manual
+#: trigger is "@haunter-auditor" plus the whole word `audit`. Bare "@haunter
+#: audit" bodies never dispatch.
+#:
+#: The handle uses the same complete-mention boundary as the Q&A route
+#: (`has_auditor_mention` in app.webhooks): the optional `[bot]` suffix is
+#: allowed, but a longer handle (`@haunter-auditor-extra`,
+#: `@haunter-auditorbot`) is a different account and never dispatches.
+_MANUAL_MENTION_RE: re.Pattern[str] = re.compile(
+    r"@haunter-auditor(?:\[bot\])?(?![A-Za-z0-9_-])", re.IGNORECASE
+)
 _MANUAL_AUDIT_WORD_RE = re.compile(r"\baudit\b", re.IGNORECASE)
+#: Words before `audit` that mark noun use ("this audit trail", "the audit
+#: log"): a question about audits, not an instruction to run one. Such bodies
+#: stay on the Q&A path even when they name the auditor handle.
+_AUDIT_NOUN_PRECEDERS = frozenset(
+    {
+        "this",
+        "that",
+        "these",
+        "those",
+        "the",
+        "a",
+        "an",
+        "your",
+        "our",
+        "its",
+        "their",
+        "his",
+        "her",
+        "my",
+        "last",
+        "latest",
+        "previous",
+        "current",
+        "full",
+        "entire",
+        "recent",
+    }
+)
+#: Words before `audit` that mark an explicit request to run one (`please
+#: audit ...`, `kindly audit ...`): an instruction verb even when the word
+#: after `audit` is a noun (`please audit reports from this PR` audits the
+#: reports — the direct object — rather than asking about them).
+_AUDIT_IMPERATIVE_PRECEDERS = frozenset({"please", "kindly"})
+#: Fragments of the `@haunter-auditor[bot]` handle itself: never a real
+#: preceder. The word before `audit` in `@haunter-auditor audit ...` is
+#: `auditor`, which is the mention — not a noun-phrase determiner — so such
+#: an `audit` is sentence-initial, i.e. the instruction verb.
+_AUDIT_HANDLE_WORDS = frozenset({"haunter", "auditor", "bot"})
+#: Openers of a capability question (`what can you audit?`): answered on the
+#: Q&A path, never queued. A specific target (`can you audit this PR?`)
+#: keeps the command reading — see _AUDIT_COMMAND_TARGET_RE.
+_AUDIT_INTERROGATIVES = frozenset(
+    {
+        "what",
+        "which",
+        "how",
+        "can",
+        "could",
+        "does",
+        "do",
+        "is",
+        "are",
+        "would",
+        "should",
+        "will",
+        "when",
+        "where",
+        "who",
+    }
+)
+#: Phrases that pin an audit request to a concrete target. A question that
+#: names one (`can you audit this PR?`, `can you audit the security of my
+#: fork?`) is a command; one that names none (`what can you audit?`) asks
+#: what the auditor is capable of. Matched only inside the audit-request
+#: sentence (see _is_capability_question), never across the whole comment.
+_AUDIT_COMMAND_TARGET_RE = re.compile(
+    r"\b(this|that|these|those|my|your|our|the)\s+"
+    r"(prs?|pull|diffs?|code|commits?|changes?|branch(?:es)?|repo|repos|"
+    r"repositor(?:y|ies)|fork|forks|securit(?:y|ies)|vulnerabilit(?:y|ies))\b"
+    r"|\bpull\s+requests?\b"
+    r"|\bfork(?:s)?\b"
+    r"|\bsecurit(?:y|ies)\b"
+    r"|\bvulnerabilit(?:y|ies)\b",
+    re.IGNORECASE,
+)
+#: Words that open a question about *categories* of coverage (`what types
+#: of security can you audit?`, `which kinds of vulnerabilities do you
+#: audit?`): a capability question even when the category names a target
+#: domain. Checked before the target veto in `_is_capability_question`, so a
+#: domain word (`security`, `vulnerabilities`, `fork`) inside the category
+#: phrase cannot flip the question into a command. Openers are deliberately
+#: `what`/`which` only: `can you audit the security of my fork?` takes the
+#: domain as the audit's direct object and stays a command.
+_AUDIT_CAPABILITY_CATEGORY_RE = re.compile(
+    r"\b(what|which)\b[^?!]*\b(types?|kinds?|sorts?|categor(?:y|ies))\b[^?!]*\bof\b",
+    re.IGNORECASE,
+)
+#: Words after `audit` that mark a noun compound ("audit trail", "audit log"):
+#: likewise a question about audits, not an audit request — unless the
+#: preceder is an explicit request marker or `audit` is the sentence verb
+#: (see _is_imperative_audit_use).
+_AUDIT_NOUN_FOLLOWERS = frozenset(
+    {
+        "trail",
+        "trails",
+        "log",
+        "logs",
+        "report",
+        "reports",
+        "history",
+        "histories",
+        "result",
+        "results",
+        "finding",
+        "findings",
+        "record",
+        "records",
+    }
+)
+_WORD_RE = re.compile(r"[A-Za-z]+")
 _AUDIT_ID_RE = re.compile(r"^audit-[0-9a-f]{12}$", re.ASCII)
 _REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,255}$", re.ASCII)
 _DELIVERY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$", re.ASCII)
@@ -62,11 +188,50 @@ AUDIT_RETRY_MAX_S = 300.0
 AUDIT_DISPATCH_BATCH_SIZE = 10
 AUDIT_DISPATCH_WORKER_COUNT = 2
 AUDIT_DISPATCH_POLL_S = 1.0
+#: Max idle delay between dispatch polls when the queue stays empty.
+#: The worker backs off exponentially from AUDIT_DISPATCH_POLL_S up to this
+#: cap, so an idle worker issues ~0 queries/sec instead of 1/sec.
+AUDIT_DISPATCH_IDLE_BACKOFF_S = 30.0
+#: Minimum interval between expired-lease recovery sweeps inside the worker
+#: loop. Leases are 30s; sweeping every minute is ample and avoids two
+#: UPDATEs per idle poll.
+AUDIT_DISPATCH_RECOVERY_INTERVAL_S = 60.0
 #: `audit_jobs.last_error` recorded when the per-repo kill switch refuses a job.
 #: Bounded by the column width and never carries attacker-controlled text.
 AUDITOR_DISABLED_ERROR = "AuditorDisabled"
 
 _audit_dispatch_workers: set[asyncio.Task[None]] = set()
+
+#: Event-driven wakeup for dispatch workers. Set whenever a new audit job is
+#: enqueued in-process so an idly-backed-off worker wakes in milliseconds
+#: (<2s) instead of sleeping through its full backoff. Cross-process wakeup
+#: (Lambda scheduled dispatcher) needs no event — it invokes
+#: dispatch_audit_jobs directly once per schedule.
+_audit_dispatch_wakeup: asyncio.Event = asyncio.Event()
+
+#: Monotonic timestamp (time.monotonic) of the last lease-recovery sweep
+#: performed by any worker. Throttles recover_expired_audit_leases so idle
+#: polls don't burn two UPDATEs per second.
+_audit_dispatch_last_recovery_monotonic: float = 0.0
+
+
+def notify_audit_dispatch() -> None:
+    """Wake dispatch workers blocked in idle backoff (best-effort, never raises)."""
+    try:
+        _audit_dispatch_wakeup.set()
+    except Exception:
+        pass
+
+
+def _audit_dispatch_idle_delay_s(empty_streak: int) -> float:
+    """Exponential idle backoff: 1s, 2s, 4s, … capped at IDLE_BACKOFF_S."""
+    if empty_streak <= 0:
+        return AUDIT_DISPATCH_POLL_S
+    try:
+        delay = float(AUDIT_DISPATCH_POLL_S) * (2.0 ** (empty_streak - 1))
+    except OverflowError:
+        return float(AUDIT_DISPATCH_IDLE_BACKOFF_S)
+    return min(delay, float(AUDIT_DISPATCH_IDLE_BACKOFF_S))
 
 
 @dataclass(frozen=True)
@@ -141,7 +306,13 @@ class AuditTarget:
 
 @dataclass(frozen=True)
 class AuditExecutionOutcome:
-    status: Literal["completed", "skipped_no_diff"]
+    #: ``publish_failed`` is a *terminal* outcome, not a transient failure: the
+    #: audit itself ran and its report exists, but GitHub refused to accept it.
+    #: It is deliberately distinct from ``completed`` because a job that recorded
+    #: no GitHub output is not a completed audit, and distinct from a raised
+    #: exception because re-running it would re-run the model to produce the same
+    #: report and hit the same rejection.
+    status: Literal["completed", "skipped_no_diff", "publish_failed"]
     result: Any = None
 
 
@@ -262,12 +433,186 @@ def is_workflow_audit_conclusion(conclusion: Optional[str]) -> bool:
     return conclusion in AUDIT_WORKFLOW_CONCLUSIONS
 
 
-def is_manual_audit_comment(body: Optional[str]) -> bool:
-    if not body:
-        return False
+def _is_abbrev_dot(body: str, idx: int) -> bool:
+    """True when the `.` at `idx` belongs to an abbreviation, not a boundary.
+
+    Sentence splitting must not cut at the dots in `e.g.`, `i.e.`, `etc.`,
+    or `vs.` — cutting `@haunter-auditor can you audit e.g. this PR?` after
+    `e` re-scopes the audit sentence to `can you audit e`, which then reads
+    as a capability question and the command is lost. Both dots of the
+    two-letter forms are covered: the terminal dot (`e.g|i.e|etc|vs.`) and
+    the first dot (`e.|i.` before `g.|e.`).
+    """
+    before = body[max(0, idx - 4) : idx]
+    if re.search(r"(?i)\b(e\.g|i\.e|etc|vs)\.$", before + "."):
+        return True
     return (
-        _MANUAL_MENTION in body.lower()
-        and _MANUAL_AUDIT_WORD_RE.search(body) is not None
+        re.search(r"(?i)\b[ei]$", before) is not None
+        and re.match(r"(?i)[eg]\.", body[idx + 1 : idx + 3]) is not None
+    )
+
+
+def _is_url_dot(body: str, idx: int) -> bool:
+    """True when the `.` at `idx` sits inside a URL token, not a boundary.
+
+    A dot with non-whitespace on both sides inside a `scheme://` or `www.`
+    token (`https://example.com/a.b`) never ends a sentence. A dot ending
+    the token (`see https://example.com.`) still does.
+    """
+    start = idx
+    while start > 0 and not body[start - 1].isspace():
+        start -= 1
+    head = body[start:idx]
+    if "://" not in head and not head.lower().startswith("www."):
+        return False
+    return idx + 1 < len(body) and not body[idx + 1].isspace()
+
+
+def _prev_sentence_dot(body: str, start: int) -> int:
+    """Rightmost sentence-ending `.` before `start`, or -1 when none."""
+    idx = body.rfind(".", 0, start)
+    while idx != -1 and (_is_abbrev_dot(body, idx) or _is_url_dot(body, idx)):
+        idx = body.rfind(".", 0, idx)
+    return idx
+
+
+def _next_sentence_dot(body: str, end: int) -> int:
+    """Leftmost sentence-ending `.` at or after `end`, or -1 when none."""
+    idx = body.find(".", end)
+    while idx != -1 and (_is_abbrev_dot(body, idx) or _is_url_dot(body, idx)):
+        idx = body.find(".", idx + 1)
+    return idx
+
+
+def _audit_request_sentence(body: str, match: re.Match[str]) -> tuple[str, int]:
+    """The sentence containing one `audit` occurrence, plus its start offset.
+
+    The sentence runs from after the previous `.`/`!`/`?`/newline to the next
+    one (inclusive), or the body edges when no boundary exists. The offset lets
+    callers slice the sentence-local prefix before the match.
+    """
+    start = match.start()
+    prev = max(
+        _prev_sentence_dot(body, start),
+        body.rfind("!", 0, start),
+        body.rfind("?", 0, start),
+        body.rfind("\n", 0, start),
+    )
+    sent_start = prev + 1
+    end = match.end()
+    nexts = [
+        index
+        for index in (
+            _next_sentence_dot(body, end),
+            body.find("!", end),
+            body.find("?", end),
+            body.find("\n", end),
+        )
+        if index != -1
+    ]
+    sent_end = min(nexts) + 1 if nexts else len(body)
+    return body[sent_start:sent_end], sent_start
+
+
+def _is_capability_question(body: str, match: re.Match[str]) -> bool:
+    """True when an `audit` occurrence sits inside a capability question.
+
+    `what can you audit?` asks what the auditor is capable of and belongs on
+    the Q&A path; `can you audit this PR?` (or `can you audit the security of
+    my fork?`) names a concrete target and stays a command. Every signal is
+    scoped to the sentence holding the `audit` occurrence: a target named in
+    another sentence (`what can you audit? I am reviewing this PR`) must not
+    flip the question into a command, and a question mark in another sentence
+    must not flip a command into a question. Fires only when an interrogative
+    opener precedes `audit` within its sentence, no target phrase is named in
+    that same sentence — except a `what/which types|kinds|sorts|categories
+    of X` category phrase, which stays a capability question even when X
+    names a target domain (`what types of security can you audit?`) — and the
+    sentence reads as a question (a question mark,
+    or an interrogative-first sentence) — so plain modals (`you can audit
+    now`) never trip it.
+    """
+    sentence, sent_start = _audit_request_sentence(body, match)
+    before = sentence[: match.start() - sent_start]
+    words = [word.group(0).lower() for word in _WORD_RE.finditer(before)]
+    real = [word for word in words if word not in _AUDIT_HANDLE_WORDS]
+    if not any(word in _AUDIT_INTERROGATIVES for word in real):
+        return False
+    if _AUDIT_CAPABILITY_CATEGORY_RE.search(sentence) is not None:
+        # `what types of security can you audit?` asks about categories of
+        # coverage — a capability question even though `security` names a
+        # target domain. Decided before the target veto below, which would
+        # otherwise flip it into a queued audit. Same question discipline as
+        # the general case: a question mark, or an interrogative-first
+        # sentence, so a flat statement never trips it.
+        if "?" in sentence:
+            return True
+        return bool(real) and real[0] in _AUDIT_INTERROGATIVES
+    if _AUDIT_COMMAND_TARGET_RE.search(sentence) is not None:
+        return False
+    if "?" in sentence:
+        return True
+    return bool(real) and real[0] in _AUDIT_INTERROGATIVES
+
+
+def _is_imperative_audit_use(body: str, match: re.Match[str]) -> bool:
+    """True when one `audit` occurrence is an instruction verb, not a noun.
+
+    Noun uses ("this audit trail", "the audit log", "audit-trail") are
+    questions *about* audits and must stay on the Q&A path: if manual audits
+    are disabled such a question would otherwise be ignored, and if enabled
+    an audit would be queued instead of an answer. Verb uses ("audit this
+    PR", "please audit", "can you audit this?", "please audit reports from
+    this PR") dispatch.
+
+    The noun-follower veto ("audit reports" reads as a noun compound) yields
+    when the preceder is an explicit request marker ("please", "kindly") or
+    when `audit` is the sentence verb — i.e. nothing precedes it once the
+    `@haunter-auditor[bot]` handle itself is skipped — because there `audit`
+    takes the follower as its direct object ("audit reports from this PR"
+    audits the reports). Capability questions are rejected first.
+    """
+    after = body[match.end() :]
+    if after.startswith("-"):
+        # Hyphenated compound (`audit-trail`, `audit-log`): noun.
+        return False
+    if _is_capability_question(body, match):
+        return False
+    follower = _WORD_RE.match(after.lstrip())
+    follower_is_noun = (
+        follower is not None and follower.group(0).lower() in _AUDIT_NOUN_FOLLOWERS
+    )
+    before = body[: match.start()].rstrip()
+    preceder: Optional[re.Match[str]] = None
+    for word in _WORD_RE.finditer(before):
+        if word.group(0).lower() in _AUDIT_HANDLE_WORDS:
+            continue
+        preceder = word
+    if preceder is not None and preceder.group(0).lower() in _AUDIT_NOUN_PRECEDERS:
+        return False
+    if follower_is_noun:
+        if preceder is None or preceder.group(0).lower() in _AUDIT_IMPERATIVE_PRECEDERS:
+            return True
+        return False
+    return True
+
+
+def is_manual_audit_comment(body: Optional[str]) -> bool:
+    """True only for an imperative audit request addressed to @haunter-auditor.
+
+    Both halves are bounded: the handle needs the complete-mention boundary
+    (mirroring the Q&A route, so `@haunter-auditor-extra` and
+    `@haunter-auditorbot` never match), and `audit` must read as an
+    instruction verb (see `_is_imperative_audit_use`), not a noun inside
+    "audit trail" / "the audit log" / a question about audits.
+    """
+    if not isinstance(body, str) or not body:
+        return False
+    if _MANUAL_MENTION_RE.search(body) is None:
+        return False
+    return any(
+        _is_imperative_audit_use(body, match)
+        for match in _MANUAL_AUDIT_WORD_RE.finditer(body)
     )
 
 
@@ -316,7 +661,7 @@ def evaluate_manual_comment(
     if action != "created":
         return AuditDecision(False, f"unsupported comment action: {action}")
     if not is_manual_audit_comment(body):
-        return AuditDecision(False, "no @haunter audit request")
+        return AuditDecision(False, "no @haunter-auditor audit request")
     return AuditDecision(True, "manual-mention trigger matched", "manual_audit")
 
 
@@ -565,6 +910,7 @@ async def claim_audit_delivery(
         inserted_audit_id = result.scalar_one_or_none()
         if inserted_audit_id is not None:
             await db.commit()
+            notify_audit_dispatch()
             return AuditDeliveryClaim(audit_id=inserted_audit_id, claimed=True)
         existing = (
             await db.execute(
@@ -797,6 +1143,9 @@ async def execute_audit_job(
         # `fetch_audit_diff` raises a typed error for every non-success status,
         # so "no changes" here means GitHub was asked and reported none.
         return AuditExecutionOutcome(status="skipped_no_diff")
+    filtered_diff, _ = auditor.filter_audit_diff_noise(diff_text)
+    if not filtered_diff.strip():
+        return AuditExecutionOutcome(status="skipped_no_diff")
     if resolved_pr is not None:
         await _fetch_pr_target(
             repo=repo,
@@ -809,7 +1158,7 @@ async def execute_audit_job(
     source_contexts = await auditor.fetch_audit_source_contexts(
         owner=owner,
         repo=name,
-        diff_text=diff_text,
+        diff_text=filtered_diff,
         sha=target.head_sha,
         token=token,
     )
@@ -822,7 +1171,7 @@ async def execute_audit_job(
             token=token,
         )
     ast_context = await auditor.build_ast_diff_summary_async(
-        diff_text,
+        filtered_diff,
         source_contexts,
     )
     repository_context = "\n".join(
@@ -852,21 +1201,41 @@ async def execute_audit_job(
     try:
         from app.github.audit_publisher import publish_audit_review
 
-        await publish_audit_review(
+        published = await publish_audit_review(
             result=result,
             owner=owner,
             repo=name,
             head_sha=target.head_sha,
             pr_number=resolved_pr,
-            diff_text=diff_text,
+            diff_text=filtered_diff,
             token=token,
         )
     except Exception as pub_exc:
+        # The publisher raises only when asked to (`raise_on_error=True`), but the
+        # import and the call itself can still fail. Recorded as a terminal
+        # publish failure for the same reason a returned PublishResult(status=
+        # "error") is: the audit ran, GitHub did not receive it.
         logger.warning(
-            "audit publish_failed audit_id=%s error_type=%s",
+            "audit publish_raised audit_id=%s error_type=%s",
             audit_id,
             type(pub_exc).__name__,
         )
+        return AuditExecutionOutcome(status="publish_failed", result=result)
+    if not getattr(published, "published", False):
+        # `publish_audit_review` converts every GitHub failure into a returned
+        # PublishResult rather than raising, so discarding the return value is
+        # what made a 422 (typically an oversized body) indistinguishable from a
+        # successful audit. `skipped`/`suppressed` are policy outcomes, not
+        # failures: publish_allowed=False and a sub-threshold confidence are both
+        # deliberate, and both already say so on the result.
+        publish_status = getattr(published, "status", "error")
+        if publish_status not in ("suppressed", "skipped"):
+            logger.warning(
+                "audit publish_failed audit_id=%s publish_status=%s",
+                audit_id,
+                publish_status,
+            )
+            return AuditExecutionOutcome(status="publish_failed", result=result)
     return AuditExecutionOutcome(status="completed", result=result)
 
 
@@ -1214,7 +1583,9 @@ async def _claim_processing_job(
 async def _finish_audit_job(
     audit_id: str,
     attempt: int,
-    status: Literal["completed", "skipped_no_diff"],
+    status: Literal["completed", "skipped_no_diff", "failed"],
+    *,
+    last_error: Optional[str] = None,
 ) -> bool:
     from app.db import async_session_maker
 
@@ -1232,7 +1603,7 @@ async def _finish_audit_job(
                     status=status,
                     next_attempt_at=now,
                     lease_expires_at=None,
-                    last_error=None,
+                    last_error=last_error,
                 )
                 .returning(AuditJob.audit_id)
             )
@@ -1250,6 +1621,21 @@ async def _complete_audit_job(audit_id: str, attempt: int) -> bool:
 
 async def _skip_audit_job(audit_id: str, attempt: int) -> bool:
     return await _finish_audit_job(audit_id, attempt, "skipped_no_diff")
+
+
+async def _fail_publish_audit_job(audit_id: str, attempt: int) -> bool:
+    """Close out a job whose audit ran but whose GitHub publish did not land.
+
+    Terminal by design, and deliberately not routed through
+    :func:`_retry_or_fail_audit_job`: the expensive, non-deterministic part (the
+    model call that produced the report) already succeeded, so a retry would burn
+    the same tokens to produce the same report and be rejected the same way. The
+    report itself is not lost — it is on the returned ``AuditExecutionOutcome``,
+    which the caller logs and which the dashboard reads from the job row.
+    """
+    return await _finish_audit_job(
+        audit_id, attempt, "failed", last_error="PublishFailed"
+    )
 
 
 async def _retry_or_fail_audit_job(
@@ -1382,7 +1768,7 @@ async def process_audit_job(audit_id: str, dispatch_fence_token: str) -> bool:
             RuntimeError("InvalidAuditExecutionOutcome"),
         )
         return False
-    if outcome.status not in ("completed", "skipped_no_diff"):
+    if outcome.status not in ("completed", "skipped_no_diff", "publish_failed"):
         await _record_processing_failure(
             audit_id,
             attempt,
@@ -1392,6 +1778,10 @@ async def process_audit_job(audit_id: str, dispatch_fence_token: str) -> bool:
     try:
         if outcome.status == "skipped_no_diff":
             state_updated = await _skip_audit_job(audit_id, attempt)
+        elif outcome.status == "publish_failed":
+            # A known, terminal outcome — not an invalid one. Retrying it would
+            # re-run the model to rebuild a report GitHub has already refused.
+            state_updated = await _fail_publish_audit_job(audit_id, attempt)
         else:
             state_updated = await _complete_audit_job(audit_id, attempt)
     except asyncio.CancelledError:
@@ -1417,11 +1807,15 @@ async def dispatch_audit_jobs(
     *,
     batch_size: int = AUDIT_DISPATCH_BATCH_SIZE,
     local_execute: bool = False,
+    recover_leases: bool = True,
 ) -> AuditDispatchSummary:
     if isinstance(batch_size, bool) or not 1 <= batch_size <= 100:
         raise ValueError("audit dispatch batch size is invalid")
-    running_recovered, dispatch_recovered = await recover_expired_audit_leases()
-    recovered = running_recovered + dispatch_recovered
+    if recover_leases:
+        running_recovered, dispatch_recovered = await recover_expired_audit_leases()
+        recovered = running_recovered + dispatch_recovered
+    else:
+        recovered = 0
     adapter = None
     if not local_execute:
         try:
@@ -1499,13 +1893,24 @@ async def _audit_dispatch_worker(
     local_execute: bool,
     max_cycles: Optional[int] = None,
 ) -> None:
+    global _audit_dispatch_last_recovery_monotonic
     cycles = 0
+    empty_streak = 0
     while max_cycles is None or cycles < max_cycles:
+        now = time.monotonic()
+        should_recover = (
+            cycles == 0
+            or (now - _audit_dispatch_last_recovery_monotonic)
+            >= AUDIT_DISPATCH_RECOVERY_INTERVAL_S
+        )
         try:
             summary = await dispatch_audit_jobs(
                 batch_size=AUDIT_DISPATCH_BATCH_SIZE,
                 local_execute=local_execute,
+                recover_leases=should_recover,
             )
+            if should_recover:
+                _audit_dispatch_last_recovery_monotonic = time.monotonic()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1517,12 +1922,26 @@ async def _audit_dispatch_worker(
         cycles += 1
         if max_cycles is not None and cycles >= max_cycles:
             return
-        delay = (
-            0.0
-            if summary.claimed == AUDIT_DISPATCH_BATCH_SIZE
-            else AUDIT_DISPATCH_POLL_S
-        )
-        await asyncio.sleep(delay)
+        if summary.claimed >= AUDIT_DISPATCH_BATCH_SIZE:
+            empty_streak = 0
+            delay = 0.0
+        elif summary.claimed > 0 or summary.recovered > 0:
+            empty_streak = 0
+            delay = AUDIT_DISPATCH_POLL_S
+        else:
+            empty_streak += 1
+            delay = _audit_dispatch_idle_delay_s(empty_streak)
+        if delay <= 0:
+            continue
+        try:
+            await asyncio.wait_for(_audit_dispatch_wakeup.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            try:
+                _audit_dispatch_wakeup.clear()
+            except Exception:
+                pass
 
 
 def start_audit_dispatch_workers() -> int:

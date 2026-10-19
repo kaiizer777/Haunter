@@ -50,14 +50,13 @@ infra/aws/tfplan
 *.tfvars.json
 !*.tfvars.example
 
-# Project root markdown files (ignore any .md file in project root except readme, license, aws, haunter)
+# Project root markdown files (ignore any .md file in project root except readme, license, redeploy, haunter)
 /*.md
 !/README.md
 !/readme.md
 !/LICENSE.md
 !/license.md
-!/aws.md
-!/AWS.md
+!/redeploy.md
 !/HAUNTER.md
 !/haunter.md
 

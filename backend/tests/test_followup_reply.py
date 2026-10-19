@@ -70,6 +70,12 @@ from tests.fake_audit_db import (  # noqa: F401
     fake_audit_user_factory,
 )
 
+# `patch("app.llm.LLMClient.complete", ...)` below targets the package
+# re-export, which *is* the process-wide client class, so a subagent-scoped
+# subclass cannot intercept it on its own. `scoped_llm_client` rebinds
+# `app.llm` as well - see tests/conftest.py and issue #146.
+pytestmark = pytest.mark.usefixtures("scoped_llm_client")
+
 PR_BRANCH = "haunter/fix-aabbccdd-1"
 TRIGGER_COMMENT_ID = 778899
 

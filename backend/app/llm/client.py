@@ -21,9 +21,13 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.config import DEFAULT_GROQ_MODEL, settings
 from app.llm.anthropic import AnthropicAdapter
-from app.llm.config import default_base_url_for_provider, get_active_model_config
+from app.llm.config import (
+    ResolvedModelConfig,
+    default_base_url_for_provider,
+    get_active_model_config,
+)
 from app.llm.discovery import BOOTSTRAP_FREE_MODELS, get_dynamic_free_models
 from app.llm.exceptions import (
     LLMAuthenticationError,
@@ -62,6 +66,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         db: AsyncSession | None = None,
         repo_id: uuid.UUID | None = None,
+        model_config: ResolvedModelConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """
@@ -84,6 +89,10 @@ class LLMClient:
             tools: Optional tool definitions for tool-calling agents.
             db: Optional database session to resolve active model config.
             repo_id: Optional repo UUID to apply per-repo model overrides.
+            model_config: Pre-resolved active model config. When provided, the
+              DB lookup is skipped entirely — fan-out callers (e.g. the
+              4-perspective audit) resolve once and share it so N concurrent
+              completions cost one lookup instead of N sessions.
             **kwargs: Extra parameters (temperature, max_tokens, tool_choice, response_format, …)
 
         Returns:
@@ -93,8 +102,17 @@ class LLMClient:
                 - ``usage`` (dict): ``{"input_tokens": int, "output_tokens": int}``
                 - ``latency_ms`` (int): Execution latency in milliseconds
                 - ``model`` (str): Model identifier that produced the response
+                - ``finish_reason`` (str | None): The provider's verbatim reason for
+                  ending generation (``stop``/``length`` for OpenAI-compatible
+                  providers, ``end_turn``/``max_tokens`` for Anthropic, which names
+                  the field ``stop_reason`` and is normalised here). The key is
+                  always present; ``None`` means the provider did not report one,
+                  never "stopped cleanly". Callers that parse structured output must
+                  treat ``None`` as unknown and cross-check ``usage.output_tokens``
+                  against the ``max_tokens`` they requested — a response truncated at
+                  the budget is otherwise indistinguishable from a complete one.
         """
-        config = await get_active_model_config(db=db, repo_id=repo_id)
+        config = model_config or await get_active_model_config(db=db, repo_id=repo_id)
         target_provider = kwargs.pop("provider", config.provider)
         explicit_model = kwargs.pop("model", None)
         response_format = kwargs.get("response_format")
@@ -104,7 +122,7 @@ class LLMClient:
 
         if target_provider == "groq":
             groq_model = (
-                explicit_model or settings.groq_model_name or "openai/gpt-oss-120b"
+                explicit_model or settings.groq_model_name or DEFAULT_GROQ_MODEL
             )
             provider = GroqProvider(
                 base_url=settings.groq_base_url,
@@ -331,19 +349,20 @@ class LLMClient:
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Fall back to Groq provider when OpenCode Zen is unavailable, exhausted, or blocked."""
+        fallback_model = settings.groq_model_name or DEFAULT_GROQ_MODEL
         logger.warning(
             "All OpenCode Zen models failed/blocked. Falling back to Groq provider with model=%s",
-            settings.groq_model_name,
+            fallback_model,
         )
         provider = GroqProvider(
             base_url=settings.groq_base_url,
             api_key=settings.groq_api_key,
-            model=settings.groq_model_name,
+            model=fallback_model,
             timeout=self.timeout,
         )
         return await provider.complete(
             messages=messages,
-            model=settings.groq_model_name,
+            model=fallback_model,
             tools=tools,
             **kwargs,
         )

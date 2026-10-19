@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
+from app.llm.config import invalidate_model_config_cache
 from app.llm.discovery import get_dynamic_free_models
 from app.models import ModelConfig, ModelConfigScope, Repo, User
 from app.schemas import (
@@ -142,6 +143,22 @@ async def get_active_model_config_endpoint(
     )
 
 
+def _require_admin(current_user: User) -> None:
+    """Raise 403 if caller is not an admin."""
+    is_admin = current_user.is_admin or bool(
+        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
+    )
+    if not is_admin:
+        logger.warning(
+            "model_config: non-admin user %s attempted global model config write",
+            current_user.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin permissions required to update global model config",
+        )
+
+
 @router.put("", response_model=ModelConfigOut)
 async def update_model_config_endpoint(
     body: ModelConfigUpdate,
@@ -149,9 +166,9 @@ async def update_model_config_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ModelConfigOut:
     """
-    Update active model configuration. Open to any authenticated user (Phase 3.2 Issue 2).
+    Update active model configuration.
     - If body.repo_id is supplied: updates model config for that repo (enforces ownership).
-    - If body.repo_id is null: updates global active model config.
+    - If body.repo_id is null: updates global active model config (admin-only).
     """
     base_url = _base_url_for_provider(body.provider)
     if not base_url:
@@ -209,6 +226,9 @@ async def update_model_config_endpoint(
             repo.active_model_config_id = config.id
 
         await db.commit()
+        # Invalidate before the refresh() await (#134-3): same stale-window
+        # rationale as the repo-settings write paths.
+        invalidate_model_config_cache(body.repo_id)
         await db.refresh(config)
         logger.info(
             "Repo model config updated: user=%s repo=%s provider=%s model=%s",
@@ -219,8 +239,9 @@ async def update_model_config_endpoint(
         )
         return ModelConfigOut.model_validate(config)
 
-    # 2. Global model config update — open to any authenticated user
-    # (Phase 3.2 Issue 2: admin gate removed; auth is enforced by get_current_user).
+    # 2. Global model config update — admin-only (matching hosting_config.py)
+    _require_admin(current_user)
+
     # Deactivate currently active global configs only — repo overrides
     # (scope='repo') must survive global switches.
     await db.execute(
@@ -244,6 +265,8 @@ async def update_model_config_endpoint(
     db.add(new_config)
     await db.flush()
     await db.commit()
+    # Invalidate before the refresh() await (#134-3).
+    invalidate_model_config_cache()
     await db.refresh(new_config)
 
     logger.info(

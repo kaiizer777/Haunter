@@ -23,6 +23,7 @@ Security:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -31,19 +32,20 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.github_client import (
-    GitHubClientError,
-    fetch_file_content,
-)
+from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
 from app.models import AgentSession
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.recon import (
+    _count_diff_lines,
+    _is_staged_creation,
+    _is_staged_deletion,
     _validate_file_path,
+    resolve_read_content,
     tool_glob_files,
     tool_grep_search,
     tool_list_directory,
@@ -77,6 +79,7 @@ from app.services.session_tools.planning import (
 )
 from app.services.session_tools.checkpoints import (
     create_checkpoint,
+    tool_checkpoint_list,
     tool_checkpoint_restore,
     tool_scan_security_vulnerabilities,
 )
@@ -106,6 +109,7 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "read_file",
             "description": (
                 "Read the content of a source file from the repository at the session branch. "
+                "Reflects live staged patches and local workspace edits. "
                 "Use this to inspect code before proposing a patch."
             ),
             "parameters": {
@@ -117,6 +121,21 @@ _TOOLS: list[dict[str, Any]] = [
                     }
                 },
                 "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_staged_files",
+            "description": (
+                "List all file paths currently staged with in-memory uncommitted modifications, "
+                "creations, or deletions in the session."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
                 "additionalProperties": False,
             },
         },
@@ -174,7 +193,8 @@ _TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "grep_search",
             "description": (
-                "Search for a regex or substring query across repository source files at the session commit. "
+                "Search for a regex or substring query across repository source files. "
+                "Reflects live staged changes, newly staged files, and excludes staged deleted files. "
                 "Returns formatted matches: 'file_path:line_number: content' capped at max_results. "
                 "Use this to locate function definitions, variable usages, or error strings."
             ),
@@ -209,6 +229,7 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "glob_files",
             "description": (
                 "Find file paths in the repository matching a wildcard pattern (e.g. '**/*auth*.py', 'src/components/**/*.tsx'). "
+                "Reflects staged new files and excludes staged deleted files. "
                 "Use this to discover file locations before reading or editing."
             ),
             "parameters": {
@@ -234,6 +255,7 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "read_file_slice",
             "description": (
                 "Read a specific line range from a file (1-based, inclusive). "
+                "Reflects live staged patches and local workspace edits. "
                 "Returns line-numbered lines (e.g. '42: def foo():'). "
                 "Use this instead of read_file for large files to avoid blowing the context window."
             ),
@@ -264,6 +286,7 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "list_directory",
             "description": (
                 "List contents of a directory in the repository up to a given depth. "
+                "Reflects staged new files and directory hierarchy changes. "
                 "Returns directories and files relative to the specified path."
             ),
             "parameters": {
@@ -394,6 +417,7 @@ _TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Return a compact structural outline of a source file — classes, methods, "
                 "function signatures, and docstrings — without loading implementation bodies. "
+                "Reflects live staged patches and local workspace edits. "
                 "Use this to understand a file's structure before reading or editing it. "
                 "Supported extensions: .py, .ts, .tsx, .js, .jsx."
             ),
@@ -416,7 +440,8 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "find_symbol",
             "description": (
                 "Locate definitions of functions, classes, interfaces, or types across "
-                "repository source files. Returns path:line: signature for each match. "
+                "repository source files. Reflects live staged modifications and newly created files. "
+                "Returns path:line: signature for each match. "
                 "Use this to find where a symbol is defined before reading or editing it."
             ),
             "parameters": {
@@ -444,6 +469,7 @@ _TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Find all call sites and usages of a symbol across repository source files "
                 "using word-boundary matching (so 'user' matches 'user.id' but NOT 'username'). "
+                "Reflects live staged modifications and newly created files. "
                 "Use this before renaming or refactoring a symbol to inspect all callers. "
                 "Results capped at 50 to avoid context bloat."
             ),
@@ -746,10 +772,29 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "checkpoint_list",
+            "description": (
+                "List all available checkpoints for the current session. "
+                "Returns each checkpoint's ID, turn number, timestamp, description, "
+                "and number of staged files. Use this before calling checkpoint_restore "
+                "to inspect available rollback points."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "checkpoint_restore",
             "description": (
                 "Restore the session state to a prior checkpoint by its checkpoint_id. "
                 "Reverts staged patches and conversation history to the snapshotted state. "
+                "Use 'latest' to restore the most recent checkpoint, or use "
+                "checkpoint_list to find a specific checkpoint ID. "
                 "Use this when a change direction was wrong and needs to be rolled back."
             ),
             "parameters": {
@@ -757,7 +802,10 @@ _TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "checkpoint_id": {
                         "type": "string",
-                        "description": "The checkpoint ID to restore to (e.g. 'cp_a1b2c3d4').",
+                        "description": (
+                            "The checkpoint ID to restore to (e.g. 'cp_a1b2c3d4'), "
+                            "or 'latest' for the most recent checkpoint."
+                        ),
                     },
                 },
                 "required": ["checkpoint_id"],
@@ -862,7 +910,7 @@ _TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "git_diff",
             "description": (
-                "Show a unified diff between two refs (branch names, commit SHAs, or tags), "
+                "Show a unified diff or diffstat between two refs (branch names, commit SHAs, or tags), "
                 "or between a ref and the local working tree (use head='working' or head='staged'). "
                 "Use this to inspect uncommitted edits, staged patches, or compare the session branch against main."
             ),
@@ -875,7 +923,15 @@ _TOOLS: list[dict[str, Any]] = [
                     },
                     "head": {
                         "type": "string",
-                        "description": "Head ref (branch, SHA, or tag) — the 'after' side of the diff.",
+                        "description": "Head ref (branch, SHA, or tag) — the 'after' side of the diff (or 'working' / 'staged').",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Optional file path to restrict the diff output to a single file.",
+                    },
+                    "stat_only": {
+                        "type": "boolean",
+                        "description": "Whether to return git-style diffstat summary lines instead of full patch (default false).",
                     },
                 },
                 "required": ["base", "head"],
@@ -953,11 +1009,69 @@ def _build_system_prompt(
     branch_name: str,
     base_sha: str,
     staged_patches: dict[str, str],
+    checkpoints: list[dict[str, Any]] | None = None,
 ) -> str:
     """Construct the system message injected at the start of every LLM call."""
     staged_summary = (
         "\n".join(f"  - {path}" for path in staged_patches)
         if staged_patches
+        else "  (none)"
+    )
+    from app.lambda_runtime import is_lambda_runtime
+
+    _is_lambda = is_lambda_runtime()
+    if _is_lambda:
+        verification_instruction = (
+            "For cloud-native verification, call `verify_in_ci_sandbox` to dispatch staged patches to the isolated "
+            "GitHub Actions mirror — it streams CI logs live and returns pass/fail with tracebacks for self-healing. "
+            "Re-run it after each fix until CI passes.\n"
+            "Self-healing loop: on FAILED, inspect the returned CI logs/traceback, apply a targeted fix "
+            "with `str_replace`, then re-run `verify_in_ci_sandbox`; repeat up to 3 attempts before declaring completion.\n"
+            "Note: In the AWS Lambda serverless runtime, local terminal commands, linters, and test runners are unavailable; "
+            "use `verify_in_ci_sandbox` as the primary verification engine.\n"
+        )
+        subagent_instruction = (
+            "Always validate patches with sandbox_verifier (via verify_in_ci_sandbox) after any feature_architect or bug_hunter run.\n"
+        )
+    else:
+        verification_instruction = (
+            "After proposing changes with `str_replace` or `create_file`, always run `run_targeted_tests` "
+            "on the affected test files to verify your fix before declaring completion (or use `verify_in_ci_sandbox` for cloud CI verification). "
+            "If tests fail, read the traceback, correct the code with `str_replace`, and re-run until they pass.\n"
+            "For cloud-native verification, call `verify_in_ci_sandbox` to dispatch staged patches to the isolated "
+            "GitHub Actions mirror — it streams CI logs live and returns pass/fail with tracebacks for self-healing. "
+            "Re-run it after each fix until CI passes.\n"
+            "Self-healing loop: on FAILED, inspect the returned CI logs/traceback, apply a targeted fix "
+            "with `str_replace`, then re-run `verify_in_ci_sandbox`; repeat up to 3 attempts before declaring completion.\n"
+            "When running tests in multi-directory repositories (e.g. backend/ or frontend/), use `run_targeted_tests` "
+            "with specific existing test paths (or explore available tests first with `glob_files('**/*test*')`), "
+            "or use `run_terminal_command` with `cd <dir> && ...` or `cwd`.\n"
+        )
+        subagent_instruction = (
+            "Always validate patches with sandbox_verifier or run_targeted_tests after any feature_architect or bug_hunter run.\n"
+        )
+
+    if _is_lambda:
+        local_tools_block = (
+            " 15. `run_terminal_command(command, timeout_sec, cwd)` — UNAVAILABLE in AWS Lambda serverless runtime; do not call, use `verify_in_ci_sandbox` instead.\n"
+            " 16. `run_linter(paths, linter, cwd)` — UNAVAILABLE in AWS Lambda serverless runtime; do not call, use `verify_in_ci_sandbox` instead.\n"
+            " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — UNAVAILABLE in AWS Lambda serverless runtime; do not call, use `verify_in_ci_sandbox` instead.\n"
+        )
+    else:
+        local_tools_block = (
+            " 15. `run_terminal_command(command, timeout_sec, cwd)` — run a shell command and return stdout/stderr/exit code. Supports chained commands (&&, ;) and directory navigation (cd). Output streams live to the terminal drawer.\n"
+            " 16. `run_linter(paths, linter, cwd)` — run ruff/eslint on the specified files and get diagnostics.\n"
+            " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — run pytest or vitest on specific test files and capture tracebacks.\n"
+        )
+
+    checkpoints_summary = (
+        "\n".join(
+            f"  - {cp.get('checkpoint_id')} (Turn {cp.get('turn')}): "
+            f"{cp.get('description', 'No description')} "
+            f"({len(cp.get('staged_patches', {}))} file(s) staged)"
+            for cp in (checkpoints or [])
+        )
+        if checkpoints
         else "  (none)"
     )
     return (
@@ -979,22 +1093,22 @@ def _build_system_prompt(
         " 12. `get_file_outline(path)` — return signatures, classes, and docstrings of a file without implementation bodies (saves context tokens).\n"
         " 13. `find_symbol(name, kind)` — locate definitions of functions, classes, interfaces, or types across the codebase.\n"
         " 14. `find_references(symbol, path)` — find all call sites and usages of a symbol (word-boundary matched, capped at 50).\n"
-        " 15. `run_terminal_command(command, timeout_sec, cwd)` — run a shell command and return stdout/stderr/exit code. Supports chained commands (&&, ;) and directory navigation (cd). Output streams live to the terminal drawer.\n"
-        " 16. `run_linter(paths, linter, cwd)` — run ruff/eslint on the specified files and get diagnostics.\n"
-        " 17. `run_targeted_tests(test_targets, timeout_sec, cwd)` — run pytest or vitest on specific test files and capture tracebacks.\n"
+        f"{local_tools_block}"
         " 18. `verify_in_ci_sandbox(workflow_file, timeout_sec)` — dispatch staged patches to the isolated GitHub Actions CI sandbox mirror, stream CI logs live, and return pass/fail with tracebacks for self-healing.\n"
         " 19. `search_web_docs(query, domain, max_results)` — search live web/docs via TinyFish for up-to-date library APIs, breaking changes, and migration guides.\n"
         " 20. `fetch_web_content(url, format)` — fetch and render a public documentation page or GitHub issue as clean Markdown via TinyFish.\n"
         " 21. `fetch_package_metadata(ecosystem, package_name)` — check official latest version, license, and dependencies from PyPI or npm.\n"
         " 22. `update_plan(tasks)` — update and render a live multi-step task checklist (statuses: pending, in_progress, completed, failed).\n"
         " 23. `ask_user_clarification(question, options)` — pause execution and ask the user to pick between trade-offs or design decisions.\n"
-        " 24. `checkpoint_restore(checkpoint_id)` — restore session state to a prior checkpoint, reverting staged patches and conversation history.\n"
-        " 25. `scan_security_vulnerabilities(paths)` — scan staged files for secrets and injection flaws before committing.\n"
-        " 26. `git_log(path, limit)` — list commit history on the session branch (optionally scoped to a file). Returns sha, date, author, message.\n"
-        " 27. `git_blame(path)` — annotate each line range of a file with the commit that last modified it (author, date, sha, message).\n"
-        " 28. `git_show(commit_sha)` — show full metadata and unified diff for a single commit.\n"
-        " 29. `git_diff(base, head)` — unified diff between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
-        " 30. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
+        " 24. `checkpoint_list()` - list all checkpoints with IDs, turns, timestamps, descriptions, and staged files.\n"
+        " 25. `checkpoint_restore(checkpoint_id)` - restore session state to a prior checkpoint by ID (or 'latest'), reverting staged patches and conversation history.\n"
+        " 26. `scan_security_vulnerabilities(paths)` - scan staged files for secrets and injection flaws before committing.\n"
+        " 27. `git_log(path, limit)` - list commit history on the session branch (optionally scoped to a file). Returns sha, date, author, message.\n"
+        " 28. `git_blame(path)` - annotate each line range of a file with the commit that last modified it (author, date, sha, message).\n"
+        " 29. `git_show(commit_sha)` - show full metadata and unified diff for a single commit.\n"
+        " 30. `git_diff(base, head, path?, stat_only?)` - unified diff or diffstat between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
+        " 31. `list_staged_files()` - list all file paths currently staged with in-memory uncommitted modifications, creations, or deletions in the session.\n"
+        " 32. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
         "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n\n"
         "For multi-step requests, start by calling update_plan to outline your steps. "
         "Update task statuses as you progress. If you encounter ambiguous architectural trade-offs, "
@@ -1005,17 +1119,7 @@ def _build_system_prompt(
         "For code modifications, prefer `str_replace` over `stage_patch`. "
         "Always provide enough surrounding lines in `old_str` so it matches uniquely — "
         "the tool will reject the edit if `old_str` is ambiguous or missing.\n"
-        "After proposing changes with `str_replace` or `create_file`, always run `run_targeted_tests` "
-        "on the affected test files to verify your fix before declaring completion. "
-        "If tests fail, read the traceback, correct the code with `str_replace`, and re-run until they pass.\n"
-        "For cloud-native verification, call `verify_in_ci_sandbox` to dispatch staged patches to the isolated "
-        "GitHub Actions mirror — it streams CI logs live and returns pass/fail with tracebacks for self-healing. "
-        "Re-run it after each fix until CI passes.\n"
-        "Self-healing loop: on FAILED, inspect the returned CI logs/traceback, apply a targeted fix "
-        "with `str_replace`, then re-run `verify_in_ci_sandbox`; repeat up to 3 attempts before declaring completion.\n"
-        "When running tests in multi-directory repositories (e.g. backend/ or frontend/), use `run_targeted_tests` "
-        "with specific existing test paths (or explore available tests first with `glob_files('**/*test*')`), "
-        "or use `run_terminal_command` with `cd <dir> && ...` or `cwd`.\n"
+        f"{verification_instruction}"
         "To prevent context-window bloat, prefer `get_file_outline` over reading entire files, "
         "and use `grep_search`, `glob_files`, `read_file_slice` for targeted exploration.\n"
         "Use `find_references` before renaming or refactoring a function to inspect all callers.\n"
@@ -1025,7 +1129,8 @@ def _build_system_prompt(
         "Do not declare the task complete if violations are found — fix them first.\n\n"
         "You are the Lead Architect of this session. For complex tasks, delegate via invoke_subagent rather than doing everything yourself. "
         "Standard implementation chain: invoke repo_navigator first on large codebases → then feature_architect → then sandbox_verifier. "
-        "Always validate patches with sandbox_verifier or run_targeted_tests after any feature_architect or bug_hunter run.\n"
+        f"{subagent_instruction}"
+        f"Available checkpoints:\n{checkpoints_summary}\n\n"
         f"Currently staged files:\n{staged_summary}"
     )
 
@@ -1048,6 +1153,308 @@ def _infer_provider(model: str) -> str | None:
     if m.endswith("-free") or "nemotron" in m:
         return "opencode_zen"
     return None
+
+
+# ------------------------------------------------------------------
+# Issue #105 — JSONB growth caps for agent_sessions.
+#
+# conversation_history and staged_patches are rewritten on every turn.
+# _prune_conversation_history only trims the in-prompt LLM context, never
+# the DB write, so both columns grew linearly with attempt count
+# (multi-MB rows, TOAST churn). The caps below bound what is persisted:
+# history is windowed + per-entry truncated (lossy transcript is fine),
+# staged patches are gated at stage time with an explicit error (they are
+# authoritative user changes — never silently dropped).
+# ------------------------------------------------------------------
+
+# Sliding window: keep only the most recent N history entries in the DB.
+MAX_HISTORY_ENTRIES = 200
+# Per-entry content ceiling for persisted history entries.
+MAX_HISTORY_ENTRY_CHARS = 8_000
+# Verbatim tool outputs are compacted to head+tail at this size.
+MAX_TOOL_RESULT_CHARS = 8_000
+# Total serialized byte ceiling for the persisted conversation_history.
+MAX_HISTORY_BYTES = 256 * 1024
+# Staged-patch bounds: file count and total serialized bytes.
+MAX_STAGED_FILES = 100
+MAX_STAGED_TOTAL_BYTES = 2 * 1024 * 1024
+
+
+def _compact_text(text: str, max_chars: int) -> str:
+    """Compact long text to head+tail, dropping the middle.
+
+    Short inputs are returned unchanged. Non-string inputs are coerced via
+    str(). Idempotence is owned by the caller via the structured
+    ``_compacted`` entry flag (see ``_compact_history_for_storage``); this
+    function does NOT pattern-match the marker in user/tool content
+    because a legitimate tool result that happens to contain the literal
+    ``"[...compacted "`` would otherwise bypass the storage cap.
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    if len(text) <= max_chars:
+        return text
+    head = max_chars * 3 // 4
+    tail = max_chars - head
+    omitted = len(text) - max_chars
+    return (
+        text[:head]
+        + f"\n\n[...compacted {omitted} chars for storage; full output was sent to the model]\n\n"
+        + text[len(text) - tail :]
+    )
+
+
+def _history_size_bytes(history: list[dict[str, Any]]) -> int:
+    """Serialized size of a history list, mirroring the JSONB column cost."""
+    try:
+        return len(json.dumps(history, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return sum(len(str(m.get("content", ""))) for m in history)
+
+
+def _split_into_turns(
+    history: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Split a history list into per-user turns (each starts at a 'user' entry).
+
+    A "turn" is one user message plus every assistant/tool/system message that
+    follows it up to (but not including) the next user message. The first
+    element of the returned list is the leading fragment preceding the first
+    user message (may be empty); subsequent elements are complete turns.
+    """
+    turns: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for entry in history:
+        if entry.get("role") == "user" and current:
+            turns.append(current)
+            current = []
+        current.append(entry)
+    if current:
+        turns.append(current)
+    return turns
+
+
+def _compact_history_for_storage(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bound a conversation history for DB persistence.
+
+    1. Truncate each entry's `content` (tool outputs via
+       MAX_TOOL_RESULT_CHARS, everything else via MAX_HISTORY_ENTRY_CHARS).
+    2. Keep only the most recent MAX_HISTORY_ENTRIES (sliding window).
+    3. Evict oldest complete turns until serialized size fits
+       MAX_HISTORY_BYTES, anchored on user-message boundaries so tool
+       calls and their results are never split. If the window leaves a
+       leading fragment with no user message, synthesize a minimal user
+       placeholder so the persisted tail always begins with a user entry
+       (LLM APIs reject orphan tool results). Always retain at least
+       the newest entry.
+
+    Returns a new list; input entries are never mutated. Idempotent.
+    """
+    compacted: list[dict[str, Any]] = []
+    for entry in history:
+        entry = dict(entry)
+        content = entry.get("content", "")
+        if isinstance(content, str) and content:
+            cap = (
+                MAX_TOOL_RESULT_CHARS
+                if entry.get("role") == "tool"
+                else MAX_HISTORY_ENTRY_CHARS
+            )
+            # Idempotence via a structured metadata flag — never pattern-match
+            # the compaction marker in user/tool content (see greptile#4296862877
+            # and cubic#4296866375: a literal "[...compacted " in a tool result
+            # would otherwise disable the storage cap entirely).
+            if not entry.get("_compacted"):
+                entry["content"] = _compact_text(content, cap)
+                if len(content) > cap:
+                    entry["_compacted"] = True
+        compacted.append(entry)
+
+    # 2. Sliding window — keep the most recent MAX_HISTORY_ENTRIES entries,
+    #    aligned on a user-message boundary so the persisted tail starts with
+    #    a user entry (LLM APIs reject orphan tool results). Walking forward
+    #    past any leading assistant/tool entry drops at most one partial
+    #    turn — well within the MAX_HISTORY_ENTRIES budget.
+    if len(compacted) > MAX_HISTORY_ENTRIES:
+        compacted = compacted[-MAX_HISTORY_ENTRIES:]
+        # Align the window on the next user entry. If the window happened to
+        # cut mid-turn, drop the partial leading turn entirely.
+        while compacted and compacted[0].get("role") != "user":
+            compacted = compacted[1:]
+
+    # 3. Byte-based eviction in whole turns. A "turn" is anchored on a user
+    #    message, so evicting the oldest turn never splits a tool_call from
+    #    its tool_results.
+    while len(compacted) > 1 and _history_size_bytes(compacted) > MAX_HISTORY_BYTES:
+        turns = _split_into_turns(compacted)
+        if len(turns) <= 1:
+            # The window starts with a user message and contains a single
+            # turn — the turn is too large to fit. Drop it entirely except
+            # for the very last entry, which the spec mandates we keep.
+            last_entry = compacted[-1]
+            compacted = [last_entry]
+            break
+        # Drop the oldest turn; the remainder preserves user/tool integrity.
+        compacted = [item for turn in turns[1:] for item in turn]
+
+    # If compaction left a tail with no user message (only assistant/tool/
+    # system), the LLM API will reject it as orphan tool results. Synthesize
+    # a minimal user placeholder so the persisted history always begins with
+    # a user entry while keeping all real content intact.
+    if compacted and compacted[0].get("role") != "user":
+        compacted = [
+            {"role": "user", "content": "[earlier turns evicted by storage cap]"}
+        ] + compacted
+
+    return compacted
+
+
+def _staged_patches_size_bytes(patches: dict[str, str]) -> int:
+    """Serialized size of the staged_patches dict."""
+    try:
+        return len(json.dumps(patches, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        return sum(len(str(k)) + len(str(v)) for k, v in patches.items())
+
+
+def _check_staged_capacity(
+    patches: dict[str, str], path: str, diff: str
+) -> str | None:
+    """Enforce staged-patch caps before upserting a new/updated diff.
+
+    Returns an error string when the upsert would breach MAX_STAGED_FILES
+    or MAX_STAGED_TOTAL_BYTES, else None. Replacing an existing path does
+    not count as a new file.
+    """
+    if path not in patches and len(patches) >= MAX_STAGED_FILES:
+        return (
+            f"Error: staged file limit reached ({MAX_STAGED_FILES} files). "
+            "Discard an obsolete patch with discard_patch before staging more."
+        )
+    # Issue #105 — measure the post-write size with the SAME serializer used
+    # by `_staged_patches_size_bytes` (json.dumps). The previous raw-UTF-8 +
+    # 16-byte padding projection undercounted multiline diffs and Unicode
+    # escapes, so near the cap we accepted patches whose serialized size
+    # exceeded MAX_STAGED_TOTAL_BYTES (see greptile#4296862870 /
+    # cubic#4296866371).
+    candidate: dict[str, str] = dict(patches)
+    candidate[path] = diff
+    projected = _staged_patches_size_bytes(candidate)
+    if projected > MAX_STAGED_TOTAL_BYTES:
+        return (
+            "Error: staged changes exceed the session cap "
+            f"({MAX_STAGED_TOTAL_BYTES // 1024} KB total). "
+            "Discard an obsolete patch with discard_patch before staging more."
+        )
+    return None
+
+
+class StagedPatchCapacityError(Exception):
+    """Raised when a staged-patch write would breach session caps.
+
+    Carries the human-readable error string returned by
+    ``_check_staged_capacity`` so editor wrappers can surface it to the
+    LLM as a normal tool error.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _stage_diff_into(patches: dict[str, str], path: str, diff: str) -> None:
+    """Single entry point for any write into ``staged_patches``.
+
+    Centralizes the capacity check so editor tools (create_file,
+    str_replace, delete_file, apply_multi_patch, stage_patch) cannot
+    bypass ``MAX_STAGED_FILES`` / ``MAX_STAGED_TOTAL_BYTES``. Raises
+    ``StagedPatchCapacityError`` (which carries the human-readable
+    error) on breach; callers are expected to catch and return the
+    message to the LLM as a normal tool error.
+    """
+    capacity_error = _check_staged_capacity(patches, path, diff)
+    if capacity_error is not None:
+        raise StagedPatchCapacityError(capacity_error)
+    patches[path] = diff
+
+
+class _GuardedStagedPatches:
+    """dict-like wrapper that routes every ``__setitem__`` through the
+    staged-patch capacity check.
+
+    Editor helpers (create_file, str_replace, delete_file,
+    apply_multi_patch) write into ``staged_patches`` directly inside
+    their own code paths. The orchestrator cannot intercept those
+    internal writes without modifying the helpers, so it wraps the
+    dict it passes in. Read access and ``__delitem__`` /
+    ``.update()`` / etc. fall through to the underlying dict; only
+    assignment goes through ``_stage_diff_into`` so a capacity breach
+    raises ``StagedPatchCapacityError`` before any disk write occurs.
+    """
+
+    __slots__ = ("_target",)
+
+    def __init__(self, target: dict[str, str]) -> None:
+        self._target = target
+
+    def __setitem__(self, path: str, diff: str) -> None:
+        _stage_diff_into(self._target, path, diff)
+
+    def __delitem__(self, path: str) -> None:
+        del self._target[path]
+
+    def __getitem__(self, path: str) -> str:
+        return self._target[path]
+
+    def __contains__(self, path: object) -> bool:
+        return path in self._target
+
+    def __iter__(self):
+        return iter(self._target)
+
+    def __len__(self) -> int:
+        return len(self._target)
+
+    def get(self, path: str, default: str | None = None) -> str | None:
+        return self._target.get(path, default)
+
+    def pop(self, path: str, *args: Any) -> Any:
+        return self._target.pop(path, *args)
+
+    def clear(self) -> None:
+        self._target.clear()
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        # Route each assignment through __setitem__ so the capacity
+        # check applies to bulk updates too.
+        merged: dict[str, str] = {}
+        if args:
+            for arg in args:
+                if isinstance(arg, dict):
+                    merged.update(arg)
+                else:
+                    merged.update(dict(arg))
+        if kwargs:
+            merged.update(kwargs)
+        for key, value in merged.items():
+            self.__setitem__(key, value)
+
+    def items(self):
+        return self._target.items()
+
+    def keys(self):
+        return self._target.keys()
+
+    def values(self):
+        return self._target.values()
+
+    def setdefault(self, path: str, default: str | None = None) -> str | None:
+        if path in self._target:
+            return self._target[path]
+        self.__setitem__(path, default if default is not None else "")
+        return self._target[path]
 
 
 def _prune_conversation_history(
@@ -1100,9 +1507,83 @@ class SessionBusyError(Exception):
     """Raised when a concurrent prompt is already in flight for this session."""
 
 
+def _is_lock_conflict(exc: Exception) -> bool:
+    """Check if exception represents a DB row lock contention (e.g. Postgres 55P03 / lock_not_available)."""
+    orig = getattr(exc, "orig", exc)
+    code = (
+        getattr(orig, "pgcode", None)
+        or getattr(orig, "sqlstate", None)
+        or getattr(exc, "pgcode", None)
+        or getattr(exc, "sqlstate", None)
+    )
+    if code and str(code).upper() == "55P03":
+        return True
+
+    orig_cls_name = type(orig).__name__
+    if "LockNotAvailable" in orig_cls_name:
+        return True
+
+    msg = f"{exc} {orig}".lower()
+    if any(
+        s in msg
+        for s in (
+            "55p03",
+            "lock_not_available",
+            "could not obtain lock",
+            "database is locked",
+        )
+    ):
+        return True
+
+    return False
+
+
 # ------------------------------------------------------------------
 # Main orchestrator
 # ------------------------------------------------------------------
+
+#: Max mirrored SSE events buffered before a single bulk commit. Batching
+#: commits avoids a high-frequency INSERT+COMMIT per streaming SSE token.
+_MIRROR_BATCH_MAX = 50
+
+#: Max seconds before a partial batch of mirrored events is flushed to DB,
+#: ensuring bounded replay latency even under continuous rapid streaming.
+_MIRROR_FLUSH_INTERVAL_S = 1.0
+
+#: Prior-turn stream events below this count are left in place at turn start;
+#: they are pruned once accumulation crosses the threshold. Bounds the
+#: session_stream_events table per session without a DELETE on every turn.
+_STREAM_PRUNE_THRESHOLD = 500
+
+
+def _with_interrupted_turn(
+    history: list[dict[str, Any]], user_message: str
+) -> list[dict[str, Any]]:
+    """Return history with the user message + interruption notice appended.
+
+    Idempotent across retries of the same message: the user entry is matched
+    on role+content (not content alone), and the filler notice is only added
+    when the last entry is not already such a notice.
+    """
+    updated = list(history)
+    if not (
+        updated
+        and updated[-1].get("role") == "user"
+        and updated[-1].get("content") == user_message
+    ):
+        updated.append({"role": "user", "content": user_message})
+    if not (
+        updated
+        and updated[-1].get("role") == "assistant"
+        and str(updated[-1].get("content") or "").startswith("Turn interrupted")
+    ):
+        updated.append(
+            {
+                "role": "assistant",
+                "content": "Turn interrupted by internal error. Your prior state has been preserved.",
+            }
+        )
+    return updated
 
 
 class SessionOrchestrator:
@@ -1117,11 +1598,240 @@ class SessionOrchestrator:
         session_id: uuid.UUID,
         db: AsyncSession,
         gh_token: str | None = None,
+        turn_id: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.db = db
         self.gh_token = gh_token
+        self.turn_id = turn_id
         self._llm = LLMClient(timeout=120.0)
+        self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
+        self._mirror_worker_task: asyncio.Task | None = None
+
+    async def _flush_mirror_batch(
+        self, batch: list[tuple[int, str, str]]
+    ) -> None:
+        """Persist one buffered batch of mirrored events in a single commit,
+        with per-event fallback on error to prevent dropping up to 50 replay events."""
+        if not batch:
+            return
+        from app.db import async_session_maker
+        from app.models import SessionStreamEvent
+
+        items_to_persist = list(batch)
+        batch.clear()
+
+        try:
+            async with async_session_maker() as mirror_db:
+                bind = getattr(mirror_db, "bind", None)
+                dialect = getattr(bind, "dialect", None)
+                dialect_name = getattr(dialect, "name", "")
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                    stmt = (
+                        pg_insert(SessionStreamEvent)
+                        .values(
+                            [
+                                {
+                                    "session_id": self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "event_id": event_id,
+                                    "event": event,
+                                    "chunk": chunk,
+                                }
+                                for event_id, event, chunk in items_to_persist
+                            ]
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=["session_id", "turn_id", "event_id"]
+                        )
+                    )
+                    await mirror_db.execute(stmt)
+                elif dialect_name == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                    stmt = (
+                        sqlite_insert(SessionStreamEvent)
+                        .values(
+                            [
+                                {
+                                    "session_id": self.session_id,
+                                    "turn_id": self.turn_id,
+                                    "event_id": event_id,
+                                    "event": event,
+                                    "chunk": chunk,
+                                }
+                                for event_id, event, chunk in items_to_persist
+                            ]
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=["session_id", "turn_id", "event_id"]
+                        )
+                    )
+                    await mirror_db.execute(stmt)
+                else:
+                    mirror_db.add_all(
+                        [
+                            SessionStreamEvent(
+                                session_id=self.session_id,
+                                turn_id=self.turn_id,
+                                event_id=event_id,
+                                event=event,
+                                chunk=chunk,
+                            )
+                            for event_id, event, chunk in items_to_persist
+                        ]
+                    )
+                await mirror_db.commit()
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: batch commit of %d mirror events failed for session=%s (%s); "
+                "attempting per-event fallback insert",
+                len(items_to_persist),
+                self.session_id,
+                exc,
+            )
+            # Fall back to per-event insert so one bad row or transient issue
+            # doesn't drop the entire batch of replay events. Handles duplicate
+            # collisions idempotently so retries after ambiguous commit failures.
+            # One shared session for the whole batch (issue #142): under NullPool
+            # each session is a fresh TCP+TLS connection, so one session per event
+            # would cost up to _MIRROR_BATCH_MAX connections exactly when the
+            # database is already unhealthy. Each event still gets its own
+            # transaction: rollback() after any per-event failure isolates the
+            # poisoned transaction so the rest of the batch is still attempted.
+            try:
+                async with async_session_maker() as fallback_db:
+                    fb_bind = getattr(fallback_db, "bind", None)
+                    fb_dialect_obj = getattr(fb_bind, "dialect", None)
+                    fb_dialect = getattr(fb_dialect_obj, "name", "")
+                    for event_id, event, chunk in items_to_persist:
+                        try:
+                            if fb_dialect == "postgresql":
+                                from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                                fb_stmt = (
+                                    pg_insert(SessionStreamEvent)
+                                    .values(
+                                        session_id=self.session_id,
+                                        turn_id=self.turn_id,
+                                        event_id=event_id,
+                                        event=event,
+                                        chunk=chunk,
+                                    )
+                                    .on_conflict_do_nothing(
+                                        index_elements=["session_id", "turn_id", "event_id"]
+                                    )
+                                )
+                                await fallback_db.execute(fb_stmt)
+                            elif fb_dialect == "sqlite":
+                                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                                fb_stmt = (
+                                    sqlite_insert(SessionStreamEvent)
+                                    .values(
+                                        session_id=self.session_id,
+                                        turn_id=self.turn_id,
+                                        event_id=event_id,
+                                        event=event,
+                                        chunk=chunk,
+                                    )
+                                    .on_conflict_do_nothing(
+                                        index_elements=["session_id", "turn_id", "event_id"]
+                                    )
+                                )
+                                await fallback_db.execute(fb_stmt)
+                            else:
+                                fallback_db.add(
+                                    SessionStreamEvent(
+                                        session_id=self.session_id,
+                                        turn_id=self.turn_id,
+                                        event_id=event_id,
+                                        event=event,
+                                        chunk=chunk,
+                                    )
+                                )
+                            await fallback_db.commit()
+                        except Exception as ind_exc:
+                            try:
+                                await fallback_db.rollback()
+                            except Exception as rb_exc:
+                                logger.warning(
+                                    "session_orchestrator: fallback rollback failed "
+                                    "for event_id=%d session=%s: %s",
+                                    event_id,
+                                    self.session_id,
+                                    rb_exc,
+                                )
+                            logger.error(
+                                "session_orchestrator: fallback mirror failed for event_id=%d session=%s: %s",
+                                event_id,
+                                self.session_id,
+                                ind_exc,
+                            )
+            except Exception as sess_exc:
+                logger.error(
+                    "session_orchestrator: fallback mirror session failed for session=%s: %s",
+                    self.session_id,
+                    sess_exc,
+                )
+
+    async def _mirror_worker(self) -> None:
+        """Serialize event mirroring, flushing in batches.
+        Enforces a hard deadline (_MIRROR_FLUSH_INTERVAL_S from the first event
+        enqueued in the current batch) so continuous rapid events (<1s apart)
+        cannot defer committing partial batches until 50 events accumulate or turn ends."""
+        import time
+
+        batch: list[tuple[int, str, str]] = []
+        batch_first_enqueued_at: float | None = None
+
+        while True:
+            timeout: float
+            if batch and batch_first_enqueued_at is not None:
+                elapsed = time.monotonic() - batch_first_enqueued_at
+                timeout = max(0.0, _MIRROR_FLUSH_INTERVAL_S - elapsed)
+            else:
+                timeout = _MIRROR_FLUSH_INTERVAL_S
+
+            try:
+                item = await asyncio.wait_for(
+                    self._mirror_queue.get(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                if batch:
+                    await self._flush_mirror_batch(batch)
+                    batch_first_enqueued_at = None
+                continue
+
+            if item is None:
+                self._mirror_queue.task_done()
+                break
+
+            if not batch:
+                batch_first_enqueued_at = time.monotonic()
+
+            batch.append(item)
+            self._mirror_queue.task_done()
+
+            # Flush if max batch reached or deadline exceeded
+            assert batch_first_enqueued_at is not None
+            if (
+                len(batch) >= _MIRROR_BATCH_MAX
+                or (time.monotonic() - batch_first_enqueued_at) >= _MIRROR_FLUSH_INTERVAL_S
+            ):
+                await self._flush_mirror_batch(batch)
+                batch_first_enqueued_at = None
+
+        await self._flush_mirror_batch(batch)
+
+    async def _drain_mirror_queue(self) -> None:
+        """Wait for all pending mirrored events to commit to DB and shut down the worker."""
+        if self._mirror_worker_task and not self._mirror_worker_task.done():
+            await self._mirror_queue.put(None)
+            await self._mirror_worker_task
+            self._mirror_worker_task = None
 
     async def run(
         self,
@@ -1148,6 +1858,11 @@ class SessionOrchestrator:
         All exceptions are caught here; an `error` SSE event is emitted and
         the queue is closed so the HTTP response terminates cleanly.
         """
+        if not self.turn_id:
+            self.turn_id = str(uuid.uuid4())
+        queue.mirror_sink = self._mirror_event
+        self._mirror_worker_task = asyncio.create_task(self._mirror_worker())
+
         try:
             await self._execute(user_message, queue, model=model, provider=provider)
         except SessionBusyError:
@@ -1162,11 +1877,45 @@ class SessionOrchestrator:
                 self.session_id,
                 exc,
             )
+            # Ensure interrupted turn is recorded in session history so it is never silently lost
+            try:
+                try:
+                    await self.db.rollback()
+                except Exception:
+                    pass
+                try:
+                    session = await self._load_session()
+                except Exception:
+                    session = None
+                if session is None:
+                    # The request-scoped session may be closed; load via a
+                    # fresh session so the interruption record still persists.
+                    session = await self._load_session_fallback()
+                if session:
+                    history = _with_interrupted_turn(
+                        list(session.conversation_history or []), user_message
+                    )
+                    await self._persist(session, history, dict(session.staged_patches or {}))
+            except Exception as persist_exc:
+                logger.warning(
+                    "session_orchestrator: failed to persist error fallback state: %s",
+                    persist_exc,
+                )
             await queue.put_error(
                 "An internal error occurred while processing your request.",
                 "INTERNAL_ERROR",
             )
             await queue.close()
+        finally:
+            # Drain any pending database mirror commits before concluding the turn
+            try:
+                await self._drain_mirror_queue()
+            except Exception as drain_exc:
+                logger.warning(
+                    "session_orchestrator: error draining mirror queue for session=%s: %s",
+                    self.session_id,
+                    drain_exc,
+                )
 
     async def _execute(
         self,
@@ -1188,6 +1937,54 @@ class SessionOrchestrator:
             )
             await queue.close()
             return
+
+        # Record this turn as the session's active_turn_id for cross-environment resumption
+        session.active_turn_id = self.turn_id
+        # Keep row lock held on self.db throughout turn execution (do not commit self.db here).
+        # We publish the new turn immediately into session_stream_events and prune prior turn
+        # events via a separate isolated transaction so cross-env workers discover the new turn_id
+        # immediately without lock conflict with self.db's FOR NO KEY UPDATE row lock.
+        from app.db import async_session_maker
+        from app.models import SessionStreamEvent
+        from sqlalchemy import delete
+
+        try:
+            async with async_session_maker() as meta_db:
+                # Prune prior turn events only when they accumulate past the
+                # threshold, so the common case (a few hundred rows from the
+                # last turn) skips the negated DELETE entirely. Accumulation
+                # stays bounded: any skipped rows count toward the next check.
+                stale_count = await meta_db.scalar(
+                    select(func.count())
+                    .select_from(SessionStreamEvent)
+                    .where(
+                        SessionStreamEvent.session_id == self.session_id,
+                        SessionStreamEvent.turn_id != self.turn_id,
+                    )
+                )
+                if (stale_count or 0) > _STREAM_PRUNE_THRESHOLD:
+                    del_stmt = delete(SessionStreamEvent).where(
+                        SessionStreamEvent.session_id == self.session_id,
+                        SessionStreamEvent.turn_id != self.turn_id,
+                    )
+                    await meta_db.execute(del_stmt)
+
+                # Publish turn_start initialization event (event_id=0) so other workers immediately
+                # discover this active turn in session_stream_events
+                init_event = SessionStreamEvent(
+                    session_id=self.session_id,
+                    turn_id=self.turn_id,
+                    event_id=0,
+                    event="turn_start",
+                    chunk="",
+                )
+                meta_db.add(init_event)
+                await meta_db.commit()
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: failed to publish turn_start / prune events in meta_db: %s",
+                exc,
+            )
 
         repo = session.repo  # selectinloaded by _load_session
 
@@ -1228,6 +2025,9 @@ class SessionOrchestrator:
             session.conversation_history or []
         )
         staged_patches: dict[str, str] = dict(session.staged_patches or {})
+        # Issue #106: pre-turn snapshot so the persist step can ship only the
+        # staged-patch delta (``||`` / ``jsonb_set``) instead of the full doc.
+        patches_before: dict[str, str] = dict(staged_patches)
 
         system_msg: dict[str, Any] = {
             "role": "system",
@@ -1237,6 +2037,7 @@ class SessionOrchestrator:
                 branch_name=session.branch_name,
                 base_sha=session.base_sha,
                 staged_patches=staged_patches,
+                checkpoints=list(session.checkpoints or []),
             ),
         }
         user_msg: dict[str, Any] = {"role": "user", "content": user_message}
@@ -1247,10 +2048,27 @@ class SessionOrchestrator:
         new_entries: list[dict[str, Any]] = [user_msg]
         # Track the actual model that produced the final response (updated each LLM call).
         actual_model_used: str = model or ""
+        # Issue #106: accumulate normalized per-call usage so the turn's token
+        # spend is accounted with the canonical estimator (telemetry below).
+        turn_input_tokens: int = 0
+        turn_output_tokens: int = 0
 
         # 3. Tool-calling loop — max 10 iterations to prevent runaway loops.
         MAX_ITERATIONS = 10
         for iteration in range(MAX_ITERATIONS):
+            # Dynamically regenerate system prompt so in-turn staged/discarded patches are immediately visible to LLM
+            messages[0] = {
+                "role": "system",
+                "content": _build_system_prompt(
+                    repo_owner=repo.owner,
+                    repo_name=repo.name,
+                    branch_name=session.branch_name,
+                    base_sha=session.base_sha,
+                    staged_patches=staged_patches,
+                    checkpoints=list(session.checkpoints or []),
+                ),
+            }
+
             # Emit a heartbeat thought so the stream doesn't idle on large prompts.
             if iteration == 0:
                 await queue.put_thought("Analyzing your request…")
@@ -1276,6 +2094,26 @@ class SessionOrchestrator:
                     iteration,
                     exc,
                 )
+                # The generic run() recovery never sees this branch (it
+                # returns normally), so persist the interrupted turn here.
+                # Persist the local in-progress staged_patches: tools mutate
+                # that copy during the turn while session.staged_patches still
+                # holds the stale pre-turn snapshot — persisting the snapshot
+                # would silently drop patches staged before the LLM failure.
+                try:
+                    interrupted_history = _with_interrupted_turn(
+                        list(session.conversation_history or []), user_message
+                    )
+                    await self._persist(
+                        session,
+                        interrupted_history,
+                        dict(staged_patches),
+                    )
+                except Exception as persist_exc:
+                    logger.warning(
+                        "session_orchestrator: failed to persist LLM-error fallback state: %s",
+                        persist_exc,
+                    )
                 await queue.put_error(
                     "LLM request failed. Please try again.", "LLM_ERROR"
                 )
@@ -1286,6 +2124,13 @@ class SessionOrchestrator:
             tool_calls: list[dict[str, Any]] | None = response.get("tool_calls")
             # Capture the actual model that responded (may differ from requested due to fallback).
             actual_model_used = response.get("model") or actual_model_used
+            # Issue #106: canonical per-call usage accounting
+            # (normalize_usage is total — never raises on odd payloads).
+            from app.services.token_accounting import normalize_usage as _norm_usage
+
+            _turn_in, _turn_out = _norm_usage(response.get("usage"))
+            turn_input_tokens += _turn_in
+            turn_output_tokens += _turn_out
 
             # Emit any assistant text as thought deltas.
             if content:
@@ -1326,7 +2171,59 @@ class SessionOrchestrator:
                     staged_patches=staged_patches,
                     queue=queue,
                     session=session,
+                    conversation_history=conversation_history,
                 )
+
+                if tool_name == "checkpoint_restore":
+                    # Checkpoint restore state synchronization:
+                    # Only synchronize staged_patches and conversation_history if the restore operation actually succeeded (not on error/failure).
+                    if not tool_result.startswith("Error"):
+                        staged_patches.clear()
+                        staged_patches.update(dict(session.staged_patches or {}))
+                        conversation_history = list(session.conversation_history or [])
+
+                        # Reset the patch baseline to the post-restore snapshot so
+                        # subsequent in-turn mutations (e.g. discard_patch) compare
+                        # against what is actually in the DB right now — otherwise
+                        # a discard back to the pre-turn value would compute an
+                        # empty delta, the hot-path UPDATE would emit no removal,
+                        # and the restored patch would silently remain saved
+                        # (greptile#4297093156 / cubic#4297090237).
+                        patches_before = dict(staged_patches)
+
+                        # Truncate current-turn intermediate tool entries in new_entries
+                        # (retaining only the user message and the checkpoint restore tool interaction)
+                        # so intermediate rolled-back tool executions are not left in conversation history.
+                        user_entry = new_entries[0] if new_entries else {"role": "user", "content": user_message}
+                        restore_tc = [
+                            c
+                            for c in assistant_entry.get("tool_calls", [])
+                            if c.get("id") == tc_id
+                            or c.get("function", {}).get("name") == "checkpoint_restore"
+                        ]
+                        restore_assistant_entry: dict[str, Any] = {
+                            "role": "assistant",
+                            "content": assistant_entry.get("content", ""),
+                            "tool_calls": restore_tc or assistant_entry.get("tool_calls", []),
+                        }
+                        new_entries.clear()
+                        new_entries.extend([user_entry, restore_assistant_entry])
+
+                        # Rebuild messages LLM context from the restored session.conversation_history
+                        # so subsequent iterations in the turn use the restored history.
+                        restored_system_msg: dict[str, Any] = {
+                            "role": "system",
+                            "content": _build_system_prompt(
+                                repo_owner=repo.owner,
+                                repo_name=repo.name,
+                                branch_name=session.branch_name,
+                                base_sha=session.base_sha,
+                                staged_patches=staged_patches,
+                                checkpoints=list(session.checkpoints or []),
+                            ),
+                        }
+                        restored_pruned_history = _prune_conversation_history(conversation_history)
+                        messages = [restored_system_msg] + restored_pruned_history + list(new_entries)
 
                 if tool_name == "ask_user_clarification":
                     paused_for_clarification = True
@@ -1415,18 +2312,48 @@ class SessionOrchestrator:
             )
 
         # 5. Persist updated state to DB atomically.
-        updated_history = conversation_history + new_entries
+        # Issue #105 — window/truncate history before storage so the JSONB
+        # column stays bounded regardless of attempt count. In-turn `messages`
+        # above keep full fidelity for the LLM; only the DB copy is compacted.
+        # Compute the uncompacted length BEFORE compaction so checkpoint
+        # identity stays stable across compaction (otherwise the window
+        # slides and `history_length` / `turn` drift off the real
+        # conversation position — see greptile#4296862867 / cubic#4296866332).
+        # Issue #106: when the in-turn history was only appended (no checkpoint
+        # restore rewrote it), the persist step ships only the delta via
+        # ``||``/``jsonb_set`` instead of rebinding the full JSONB documents.
+        uncompacted_history = conversation_history + new_entries
+        uncompacted_history_length = len(uncompacted_history)
+        updated_history = _compact_history_for_storage(uncompacted_history)
         session.conversation_history = updated_history
         session.staged_patches = staged_patches
+        from app.services.token_accounting import (
+            estimate_cost as _estimate_cost,
+            patch_delta as _patch_delta,
+        )
+
+        patch_upserts, patch_removed = _patch_delta(patches_before, staged_patches)
 
         # Auto-checkpoint after each turn if staged_patches were modified.
-        turn_number = len(updated_history)
+        # `turn_number` is the monotonic length of the uncompacted history —
+        # it grows by exactly one user turn regardless of compaction, so
+        # restore-by-turn picks the unique matching snapshot.
+        turn_number = uncompacted_history_length
         if staged_patches:
-            cp = create_checkpoint(
-                session=session,
-                description=f"Turn {turn_number}: {user_message[:80]}",
-                turn=turn_number,
-            )
+            # Briefly expose the uncompacted history on the session so
+            # create_checkpoint records the uncompacted `history_length`.
+            # create_checkpoint only reads `len(session.conversation_history)`
+            # and stores the value, so the swap is safe and is undone
+            # immediately after the call.
+            session.conversation_history = uncompacted_history
+            try:
+                cp = create_checkpoint(
+                    session=session,
+                    description=f"Turn {turn_number}: {user_message[:80]}",
+                    turn=turn_number,
+                )
+            finally:
+                session.conversation_history = updated_history
             try:
                 await queue.put_checkpoint_created(cp)
             except Exception as cp_exc:
@@ -1435,7 +2362,29 @@ class SessionOrchestrator:
                     cp_exc,
                 )
 
-        await self._persist(session, updated_history, staged_patches)
+        await self._persist(
+            session,
+            updated_history,
+            staged_patches,
+            base_history=conversation_history,
+            new_entries=new_entries,
+            patch_upserts=patch_upserts,
+            patch_removed=patch_removed,
+        )
+
+        # Canonical turn-level token accounting (issue #106): one estimator,
+        # computed from the same turn payload that was just persisted.
+        turn_cost = _estimate_cost(turn_input_tokens, turn_output_tokens)
+        logger.info(
+            "session_orchestrator: session=%s turn=%s input_tokens=%d "
+            "output_tokens=%d cost_estimate=%.8f model=%s",
+            self.session_id,
+            self.turn_id,
+            turn_input_tokens,
+            turn_output_tokens,
+            turn_cost,
+            actual_model_used,
+        )
 
         # 6. Signal stream end.
         await queue.put_done(
@@ -1458,6 +2407,7 @@ class SessionOrchestrator:
         staged_patches: dict[str, str],
         queue: SseQueue,
         session: AgentSession | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
     ) -> str:
         """
         Execute a single tool call and return a string result for the LLM.
@@ -1477,6 +2427,8 @@ class SessionOrchestrator:
                 staged_patches=staged_patches,
                 session_id=session_id,
             )
+        elif tool_name == "list_staged_files":
+            return self._tool_list_staged_files(staged_patches=staged_patches)
         elif tool_name == "stage_patch":
             return await self._tool_stage_patch(
                 args=args,
@@ -1501,6 +2453,8 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "glob_files":
             return await self._tool_glob_files(
@@ -1508,6 +2462,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
             )
         elif tool_name == "read_file_slice":
             return await self._tool_read_file_slice(
@@ -1515,6 +2470,8 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "list_directory":
             return await self._tool_list_directory(
@@ -1522,6 +2479,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
             )
         elif tool_name == "str_replace":
             return await self._tool_str_replace(
@@ -1569,6 +2527,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 base_sha=base_sha,
                 staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "find_symbol":
             return await self._tool_find_symbol(
@@ -1577,6 +2536,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 base_sha=base_sha,
                 staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "find_references":
             return await self._tool_find_references(
@@ -1585,6 +2545,7 @@ class SessionOrchestrator:
                 repo_name=repo_name,
                 base_sha=base_sha,
                 staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "run_terminal_command":
             return await self._tool_run_terminal_command(
@@ -1643,11 +2604,19 @@ class SessionOrchestrator:
             return await self._tool_ask_user_clarification(
                 args=args, session=session, queue=queue
             )
+        elif tool_name == "checkpoint_list":
+            if session is None:
+                return "Error: Session context is required for checkpoint_list."
+            return self._tool_checkpoint_list(session=session)
         elif tool_name == "checkpoint_restore":
             if session is None:
                 return "Error: Session context is required for checkpoint_restore."
             return await self._tool_checkpoint_restore(
-                args=args, session=session, queue=queue
+                args=args,
+                session=session,
+                queue=queue,
+                staged_patches=staged_patches,
+                conversation_history=conversation_history,
             )
         elif tool_name == "scan_security_vulnerabilities":
             if session is None:
@@ -1685,6 +2654,7 @@ class SessionOrchestrator:
                 repo_owner=repo_owner,
                 repo_name=repo_name,
                 staged_patches=staged_patches,
+                session_id=session_id,
             )
         elif tool_name == "invoke_subagent":
             if session is None:
@@ -1718,6 +2688,23 @@ class SessionOrchestrator:
             )
             return f"Unknown tool: {tool_name!r}"
 
+    def _tool_list_staged_files(self, staged_patches: dict[str, str]) -> str:
+        """List all file paths currently staged in the session with modification status."""
+        if not staged_patches:
+            return "No staged files currently in session."
+        lines = [f"Staged files ({len(staged_patches)}):"]
+        for p in sorted(staged_patches.keys()):
+            d = staged_patches[p]
+            if _is_staged_deletion(d):
+                status = "deleted"
+            elif _is_staged_creation(d):
+                status = "created"
+            else:
+                status = "modified"
+            ins, dels = _count_diff_lines(d)
+            lines.append(f"  - {p} ({status}, +{ins}/-{dels})")
+        return "\n".join(lines)
+
     async def _tool_read_file(
         self,
         args: dict[str, Any],
@@ -1737,67 +2724,30 @@ class SessionOrchestrator:
         except ValueError as exc:
             return f"Error: {exc}"
 
-        # If file is staged for deletion, report deleted
-        if staged_patches and path in staged_patches:
-            diff = staged_patches[path]
-            if "+++ /dev/null" in diff:
-                return f"File not found: {path!r} (deleted in staged changes)"
-
-        content: str | None = None
-
-        # 1. Check local checkout if available
-        if repo_name and repo_name.strip():
+        effective_sid = session_id
+        if effective_sid is None:
             try:
-                from app.services.session_tools.sandbox import resolve_repo_dir
-                effective_sid = session_id
-                if effective_sid is None:
-                    try:
-                        effective_sid = str(self.session_id) if self.session_id else None
-                    except Exception:
-                        effective_sid = None
-                repo_root, _ = resolve_repo_dir(
-                    repo_name=repo_name, repo_owner=repo_owner, session_id=effective_sid
-                )
-                if repo_root:
-                    real_root = os.path.realpath(repo_root)
-                    local_path = os.path.normpath(os.path.join(real_root, path))
-                    real_target = os.path.realpath(local_path)
-                    # Symlink / traversal check
-                    if os.path.commonpath([real_root, real_target]) == real_root:
-                        if os.path.isfile(real_target):
-                            with open(real_target, "r", encoding="utf-8", errors="replace") as f:
-                                content = f.read()
-            except Exception as e:
-                logger.debug("Failed reading file from local checkout: %s", e)
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
 
-        # 2. If not on local disk, fetch from GitHub
+        content = await resolve_read_content(
+            path=path,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            base_sha=base_sha,
+            staged_patches=staged_patches,
+            gh_token=self.gh_token,
+            session_id=effective_sid,
+        )
+
         if content is None:
-            try:
-                content = await fetch_file_content(
-                    owner=repo_owner,
-                    repo=repo_name,
-                    path=path,
-                    sha=base_sha,
-                    token=self.gh_token,
-                )
-            except GitHubClientError as exc:
-                logger.warning(
-                    "session_orchestrator: read_file GitHub error for path=%s: %s",
-                    path,
-                    exc,
-                )
-                if not (staged_patches and path in staged_patches):
-                    return f"Error reading file: {exc}"
-
-            # If fetched from GitHub and staged_patches has an entry, overlay via apply_unified_diff
             if staged_patches and path in staged_patches:
-                from app.sandbox.mirror import apply_unified_diff
                 diff = staged_patches[path]
-                if content is None and "--- /dev/null" not in diff:
+                if _is_staged_deletion(diff):
+                    return f"File not found: {path!r} (deleted in staged changes)"
+                if not _is_staged_creation(diff):
                     return f"Error reading file: base content for {path!r} is unavailable."
-                content = apply_unified_diff(content or "", diff)
-
-        if content is None:
             return f"File not found: {path!r}"
 
         # Truncate very large files to avoid bloating the context window.
@@ -1809,7 +2759,6 @@ class SessionOrchestrator:
             )
 
         return content
-
     async def _tool_stage_patch(
         self,
         args: dict[str, Any],
@@ -1844,8 +2793,18 @@ class SessionOrchestrator:
         if len(diff.encode("utf-8")) > MAX_PATCH_BYTES:
             return "Error: diff exceeds maximum size (512 KB)."
 
-        # Stage the patch (upsert).
-        staged_patches[path] = diff
+        # Issue #105 — bound staged_patches growth: reject (never silently
+        # drop) when the upsert would breach the session-wide caps.
+        # _stage_diff_into centralizes the check; every other editor tool
+        # path funnels through it via the guarded-dict wrapper, so this is
+        # the only place the write itself is gated for stage_patch.
+        try:
+            _stage_diff_into(staged_patches, path, diff)
+        except StagedPatchCapacityError as exc:
+            return exc.message
+
+        # Note: staged_patches[path] = diff has already happened inside
+        # _stage_diff_into (which ran the capacity check first).
 
         # If a local checkout exists, sync to disk immediately
         if repo_name:
@@ -1993,7 +2952,7 @@ class SessionOrchestrator:
             else:
                 # File missing on disk (e.g. staged deletion synced): the
                 # inverted diff applied to empty reconstructs the base.
-                if "+++ /dev/null" in staged_diff:
+                if _is_staged_deletion(staged_diff):
                     restored = apply_unified_diff("", inverted)
                     if restored:
                         os.makedirs(os.path.dirname(target_file), exist_ok=True)
@@ -2036,7 +2995,7 @@ class SessionOrchestrator:
 
         if path in staged_patches:
             staged_diff = staged_patches[path]
-            is_creation = "--- /dev/null" in staged_diff or not staged_diff.strip()
+            is_creation = _is_staged_creation(staged_diff) or not staged_diff.strip()
             if repo_name:
                 try:
                     import subprocess
@@ -2110,6 +3069,8 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         query: str = str(args.get("query", ""))
         path_prefix: str = str(args.get("path_prefix", ""))
@@ -2118,6 +3079,13 @@ class SessionOrchestrator:
             max_results: int = int(args.get("max_results", 25))
         except (TypeError, ValueError):
             max_results = 25
+
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
 
         try:
             return await tool_grep_search(
@@ -2128,7 +3096,9 @@ class SessionOrchestrator:
                 owner=repo_owner,
                 repo=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
                 token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2139,6 +3109,7 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
     ) -> str:
         pattern: str = str(args.get("pattern", ""))
         exclude_hidden: bool = bool(args.get("exclude_hidden", True))
@@ -2149,6 +3120,7 @@ class SessionOrchestrator:
                 owner=repo_owner,
                 repo=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
                 token=self.gh_token,
             )
             return (
@@ -2165,6 +3137,8 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         path: str = str(args.get("path", ""))
         try:
@@ -2172,6 +3146,13 @@ class SessionOrchestrator:
             end_line: int = int(args.get("end_line", 1))
         except (TypeError, ValueError):
             return "Error: start_line and end_line must be valid integers."
+
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
 
         try:
             return await tool_read_file_slice(
@@ -2181,7 +3162,9 @@ class SessionOrchestrator:
                 owner=repo_owner,
                 repo=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
                 token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2192,6 +3175,7 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         base_sha: str,
+        staged_patches: dict[str, str] | None = None,
     ) -> str:
         path: str = str(args.get("path", "."))
         try:
@@ -2206,6 +3190,7 @@ class SessionOrchestrator:
                 owner=repo_owner,
                 repo=repo_name,
                 base_sha=base_sha,
+                staged_patches=staged_patches,
                 token=self.gh_token,
             )
             return (
@@ -2235,18 +3220,27 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_str_replace(
-            path=path,
-            old_str=old_str,
-            new_str=new_str,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            staged_patches=staged_patches,
-            queue=queue,
-            gh_token=self.gh_token,
-            session_id=effective_sid,
-        )
+        # Issue #105 — route every staged-patch write through the
+        # capacity gate so str_replace cannot bypass MAX_STAGED_FILES /
+        # MAX_STAGED_TOTAL_BYTES. tool_str_replace writes the diff inside
+        # the helper; the guard converts any breach into an error string
+        # returned to the LLM (no disk write, no DB write).
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_str_replace(
+                path=path,
+                old_str=old_str,
+                new_str=new_str,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=guarded,
+                queue=queue,
+                gh_token=self.gh_token,
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_create_file(
         self,
@@ -2266,15 +3260,20 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_create_file(
-            path=path,
-            content=content,
-            staged_patches=staged_patches,
-            queue=queue,
-            repo_owner=repo_owner or "",
-            repo_name=repo_name or "",
-            session_id=effective_sid,
-        )
+        # Issue #105 — capacity gate via guarded-dict wrapper. See _tool_str_replace.
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_create_file(
+                path=path,
+                content=content,
+                staged_patches=guarded,
+                queue=queue,
+                repo_owner=repo_owner or "",
+                repo_name=repo_name or "",
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_delete_file(
         self,
@@ -2293,16 +3292,21 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_delete_file(
-            path=path,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            staged_patches=staged_patches,
-            queue=queue,
-            gh_token=self.gh_token,
-            session_id=effective_sid,
-        )
+        # Issue #105 — capacity gate via guarded-dict wrapper. See _tool_str_replace.
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_delete_file(
+                path=path,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=guarded,
+                queue=queue,
+                gh_token=self.gh_token,
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_apply_multi_patch(
         self,
@@ -2323,16 +3327,21 @@ class SessionOrchestrator:
                 effective_sid = str(self.session_id) if self.session_id else None
             except Exception:
                 effective_sid = None
-        return await tool_apply_multi_patch(
-            patches=patches,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            base_sha=base_sha,
-            staged_patches=staged_patches,
-            queue=queue,
-            gh_token=self.gh_token,
-            session_id=effective_sid,
-        )
+        # Issue #105 — capacity gate via guarded-dict wrapper. See _tool_str_replace.
+        guarded = _GuardedStagedPatches(staged_patches)
+        try:
+            return await tool_apply_multi_patch(
+                patches=patches,
+                repo_owner=repo_owner,
+                repo_name=repo_name,
+                base_sha=base_sha,
+                staged_patches=guarded,
+                queue=queue,
+                gh_token=self.gh_token,
+                session_id=effective_sid,
+            )
+        except StagedPatchCapacityError as exc:
+            return exc.message
 
     async def _tool_get_file_outline(
         self,
@@ -2341,8 +3350,15 @@ class SessionOrchestrator:
         repo_name: str,
         base_sha: str,
         staged_patches: dict[str, str],
+        session_id: str | None = None,
     ) -> str:
         path: str = str(args.get("path", ""))
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         try:
             return await tool_get_file_outline(
                 path=path,
@@ -2351,6 +3367,7 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 gh_token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2362,9 +3379,16 @@ class SessionOrchestrator:
         repo_name: str,
         base_sha: str,
         staged_patches: dict[str, str],
+        session_id: str | None = None,
     ) -> str:
         name: str = str(args.get("name", ""))
         kind: str | None = args.get("kind") or None
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         try:
             return await tool_find_symbol(
                 name=name,
@@ -2374,6 +3398,7 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 gh_token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2385,9 +3410,16 @@ class SessionOrchestrator:
         repo_name: str,
         base_sha: str,
         staged_patches: dict[str, str],
+        session_id: str | None = None,
     ) -> str:
         symbol: str = str(args.get("symbol", ""))
         path: str | None = args.get("path") or None
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         try:
             return await tool_find_references(
                 symbol=symbol,
@@ -2397,6 +3429,7 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 gh_token=self.gh_token,
+                session_id=effective_sid,
             )
         except (ValueError, GitHubClientError) as exc:
             return f"Error: {exc}"
@@ -2461,11 +3494,16 @@ class SessionOrchestrator:
             db=self.db,
         )
 
+    def _tool_checkpoint_list(self, session: AgentSession) -> str:
+        return tool_checkpoint_list(session=session)
+
     async def _tool_checkpoint_restore(
         self,
         args: dict[str, Any],
         session: AgentSession,
         queue: SseQueue,
+        staged_patches: dict[str, str] | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
     ) -> str:
         checkpoint_id: str = str(args.get("checkpoint_id", "")).strip()
         if not checkpoint_id:
@@ -2475,6 +3513,8 @@ class SessionOrchestrator:
             session=session,
             queue=queue,
             db=self.db,
+            staged_patches=staged_patches,
+            conversation_history=conversation_history,
         )
 
     def _tool_scan_security_vulnerabilities(
@@ -2738,19 +3778,31 @@ class SessionOrchestrator:
         repo_owner: str,
         repo_name: str,
         staged_patches: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Inspect unified diff between git refs or local working tree / staged patches."""
         base: str = str(args.get("base", ""))
         head: str = str(args.get("head", ""))
+        path: str | None = args.get("path") or None
+        stat_only: bool = bool(args.get("stat_only", False))
         if not base or not head:
             return "Error: 'base' and 'head' are both required for git_diff."
+        effective_sid = session_id
+        if effective_sid is None:
+            try:
+                effective_sid = str(self.session_id) if self.session_id else None
+            except Exception:
+                effective_sid = None
         return await tool_git_diff(
             base=base,
             head=head,
+            path=path,
+            stat_only=stat_only,
             owner=repo_owner,
             repo=repo_name,
             token=self.gh_token,
             staged_patches=staged_patches,
+            session_id=effective_sid,
         )
 
     async def _tool_invoke_subagent(
@@ -2836,32 +3888,211 @@ class SessionOrchestrator:
         """
         Load the AgentSession with its repo relationship.
 
+        Enforces concurrency locking via with_for_update(nowait=True).
         Returns None if the session does not exist or is not active.
+        Raises SessionBusyError if another transaction is currently holding the lock.
         Note: object-level auth (user_id check) is enforced at the endpoint;
         this layer only checks existence and status.
         """
         from sqlalchemy.orm import selectinload
+        from sqlalchemy.exc import DBAPIError, OperationalError
 
-        stmt = (
-            select(AgentSession)
-            .options(selectinload(AgentSession.repo))
-            .where(
-                AgentSession.id == self.session_id,
-                AgentSession.status == "active",
+        try:
+            stmt = (
+                select(AgentSession)
+                .options(selectinload(AgentSession.repo))
+                .where(
+                    AgentSession.id == self.session_id,
+                    AgentSession.status == "active",
+                )
+                .with_for_update(nowait=True, key_share=True)
             )
-        )
-        result = await self.db.execute(stmt)
-        return result.scalars().first()
+            result = await self.db.execute(stmt)
+            return result.scalars().first()
+        except (OperationalError, DBAPIError) as exc:
+            if not _is_lock_conflict(exc):
+                raise
+            logger.warning(
+                "session_orchestrator: session=%s lock conflict: %s",
+                self.session_id,
+                exc,
+            )
+            raise SessionBusyError(
+                f"Session {self.session_id} is currently busy with another operation."
+            ) from exc
+
+    async def _load_session_fallback(self) -> AgentSession | None:
+        """Load the session row via a fresh DB session (no row lock).
+
+        Used on error paths when the request-scoped self.db may be closed or
+        otherwise unusable. Returns a detached row; only column attributes
+        (history, patches, status) are safe to read from it.
+        """
+        from app.db import async_session_maker
+
+        async with async_session_maker() as fresh_db:
+            stmt = select(AgentSession).where(AgentSession.id == self.session_id)
+            res = await fresh_db.execute(stmt)
+            row = res.scalars().first()
+            if row is None:
+                return None
+            fresh_db.expunge(row)
+            return row
+
+    @staticmethod
+    def _plan_delta_statements(
+        session: AgentSession,
+        *,
+        base_history: list[dict[str, Any]] | None,
+        updated_history: list[dict[str, Any]],
+        new_entries: list[dict[str, Any]] | None,
+        patch_upserts: dict[str, str] | None,
+        patch_removed: list[str] | None,
+    ) -> list[Any]:
+        """Plan server-side JSONB delta UPDATEs for a pure-append turn.
+
+        Returns [] unless the update is exactly ``base + new_entries`` plus
+        staged-patch upserts/removals — history suffix via ``||``, a lone
+        patch key via ``jsonb_set``, multi-key changes via ``||`` merge,
+        removals via ``-``. Never raises: any anomaly means "not plannable"
+        and the caller takes the legacy full-document write.
+        """
+        try:
+            if (
+                base_history is None
+                or new_entries is None
+                or patch_upserts is None
+                or patch_removed is None
+            ):
+                return []
+            from app.services import token_accounting as _ta
+
+            suffix = _ta.history_suffix(base_history, updated_history)
+            if suffix is None or len(suffix) != len(new_entries):
+                # Not a pure append (e.g. checkpoint restore rewrote history
+                # mid-turn) — full write.
+                return []
+            if len(patch_upserts) == 1 and not patch_removed:
+                key = next(iter(patch_upserts))
+                patch_stmt = _ta.set_patch_key_stmt(
+                    session.id, key, patch_upserts[key]
+                )
+            else:
+                patch_stmt = _ta.merge_patches_stmt(session.id, patch_upserts)
+            stmts = [
+                _ta.append_history_stmt(session.id, suffix),
+                patch_stmt,
+                _ta.delete_patch_keys_stmt(session.id, patch_removed),
+            ]
+            return [stmt for stmt in stmts if stmt is not None]
+        except Exception:
+            return []
 
     async def _persist(
         self,
         session: AgentSession,
         updated_history: list[dict[str, Any]],
         updated_patches: dict[str, str],
+        *,
+        base_history: list[dict[str, Any]] | None = None,
+        new_entries: list[dict[str, Any]] | None = None,
+        patch_upserts: dict[str, str] | None = None,
+        patch_removed: list[str] | None = None,
     ) -> None:
-        """Atomically persist conversation_history and staged_patches."""
+        """Atomically persist conversation_history and staged_patches.
+
+        Issue #105: `updated_history` is compacted (windowed + truncated) so
+        the JSONB column stays bounded regardless of attempt count. This is
+        the choke point — every persist path funnels through here.
+
+        Issue #106 fast path: when the caller supplies the turn's delta
+        (``base_history`` + ``new_entries`` + ``patch_upserts`` +
+        ``patch_removed``) and it describes a pure append, only the delta
+        ships — history suffix via ``||``, a lone patch key via
+        ``jsonb_set``, multi-key changes via ``||`` merge, removals via
+        ``-`` — instead of rebinding both full JSONB documents. Anything
+        else (no delta args, a mid-turn history rewrite, or any failure)
+        takes the legacy full-document write below — correctness first.
+        """
+        # Compact here as well (idempotent) so early-exit persist paths
+        # (interrupt / LLM-error fallbacks) are bounded too.
+        updated_history = _compact_history_for_storage(updated_history)
+        # Snapshot every ORM attribute the fallback path needs BEFORE the
+        # commit attempt. rollback() expires all persistent state, so reading
+        # session.id / status / ... after rollback can trigger refresh I/O on
+        # a broken session and fail the recovery outright.
+        fallback_session_id = session.id
+        fallback_status = session.status
+        fallback_checkpoints = session.checkpoints
+        fallback_plan = session.plan
+        fallback_waiting_input = session.waiting_input
+        fallback_active_turn_id = getattr(session, "active_turn_id", None) or self.turn_id
+        try:
+            session.active_turn_id = fallback_active_turn_id
+        except Exception:
+            pass
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
-        await self.db.commit()
-        await self.db.refresh(session)
+        delta_stmts = self._plan_delta_statements(
+            session,
+            base_history=base_history,
+            updated_history=updated_history,
+            new_entries=new_entries,
+            patch_upserts=patch_upserts,
+            patch_removed=patch_removed,
+        )
+        try:
+            if not getattr(self.db, "is_active", True):
+                raise RuntimeError("self.db is closed or inactive")
+            if delta_stmts:
+                # Expire the full-document attrs (assigned above for
+                # in-memory consistency): expired is not dirty, so the
+                # commit below flushes everything EXCEPT the full rewrites.
+                # The post-commit refresh() reloads server truth.
+                expired = self.db.expire(
+                    session, ["conversation_history", "staged_patches"]
+                )
+                if asyncio.iscoroutine(expired):
+                    await expired
+                for stmt in delta_stmts:
+                    await self.db.execute(stmt)
+            await self.db.commit()
+            await self.db.refresh(session)
+        except Exception as exc:
+            logger.warning(
+                "session_orchestrator: committing with self.db failed (%s), rolling back and attempting fallback persist",
+                exc,
+            )
+            # Release any row lock / failed transaction on the original
+            # session first: otherwise the fallback UPDATE on the same row
+            # can block on that lock and hang instead of saving.
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            from app.db import async_session_maker
+            async with async_session_maker() as fallback_db:
+                stmt = select(AgentSession).where(
+                    AgentSession.id == fallback_session_id
+                )
+                res = await fallback_db.execute(stmt)
+                db_session = res.scalars().first()
+                if db_session:
+                    db_session.active_turn_id = fallback_active_turn_id
+                    db_session.conversation_history = updated_history
+                    db_session.staged_patches = updated_patches
+                    db_session.updated_at = datetime.now(timezone.utc)
+                    db_session.status = fallback_status
+                    db_session.checkpoints = fallback_checkpoints
+                    db_session.plan = fallback_plan
+                    db_session.waiting_input = fallback_waiting_input
+                    await fallback_db.commit()
+
+    async def _mirror_event(self, event_id: int, event: str, chunk: str) -> None:
+        """Mirror an emitted SSE event to PostgreSQL for cross-environment resumption via sequential worker."""
+        if not self.turn_id:
+            return
+        await self._mirror_queue.put((event_id, event, chunk))
+
+    run_turn = run

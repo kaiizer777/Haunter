@@ -113,6 +113,11 @@ export interface RunSummaryOut {
   // undefined until the issue is created; then the link to the issue.
   fallback_issue_url?: string | null;
   fallback_issue_number?: number | null;
+  pr_title?: string | null;
+  pr_author?: string | null;
+  pr_author_avatar?: string | null;
+  head_branch?: string | null;
+  base_branch?: string | null;
 }
 
 export interface TraceOut {
@@ -147,6 +152,8 @@ export interface ReviewFindingOut {
   severity: "low" | "medium" | "high" | "critical" | string;
   critique: string;
   suggested_patch?: string | null;
+  symbol_name?: string | null;
+  ast_type?: string | null;
 }
 
 export interface CodeReviewOut {
@@ -156,6 +163,14 @@ export interface CodeReviewOut {
   repo_name?: string | null;
   commit_sha: string;
   pr_number?: number | null;
+  pr_title?: string | null;
+  pr_author?: string | null;
+  pr_author_avatar?: string | null;
+  head_branch?: string | null;
+  base_branch?: string | null;
+  pr_url?: string | null;
+  failure_reason?: string | null;
+  diff_stats?: { additions: number; deletions: number; files_changed: number } | null;
   risk_score: number;
   summary: string;
   findings: ReviewFindingOut[];
@@ -168,6 +183,35 @@ export interface CodeReviewOut {
 export interface CodeReviewListOut {
   reviews: CodeReviewOut[];
   total: number;
+}
+
+/** Single PR associated with a review, via GET /reviews/{id}/associated-pr. */
+export interface AssociatedPROut {
+  number: number;
+  url: string;
+  title: string | null;
+}
+
+export interface AssociatedPRResponse {
+  associated_pr: AssociatedPROut | null;
+}
+/** Batched associated-PR lookup, via POST /reviews/associated-pr/batch (issue #116). */
+export interface AssociatedPRBatchResponse {
+  associated_prs: Record<string, AssociatedPROut | null>;
+}
+
+export interface AssociatedPRBatchRequest {
+  review_ids: string[];
+}
+
+export interface AssociatedPRBatchItem {
+  review_id: string;
+  associated_pr: AssociatedPROut | null;
+}
+
+/** List-shaped batch response, via POST /reviews/associated-prs. */
+export interface AssociatedPRsBatchResponse {
+  items: AssociatedPRBatchItem[];
 }
 
 
@@ -369,6 +413,10 @@ export interface RepoSettingsOut {
   ignore_draft_prs: boolean;
   max_cost_per_run_cents: number;
   model_override_scope: string;
+  review_guidelines_text?: string | null;
+  review_strictness?: string;
+  review_focus_areas?: string[];
+  review_checklist?: string[];
   settings_version: number;
   created_at?: string | null;
   updated_at?: string | null;
@@ -395,6 +443,10 @@ export interface RepoSettingsUpdate {
   ignore_draft_prs?: boolean;
   max_cost_per_run_cents?: number;
   model_override_scope?: string;
+  review_guidelines_text?: string | null;
+  review_strictness?: string;
+  review_focus_areas?: string[];
+  review_checklist?: string[];
   features?: Record<string, boolean>;
   audit_triggers?: Record<string, boolean>;
 }
@@ -498,6 +550,33 @@ export function isGithubTokenError(detail: unknown): boolean {
   return false;
 }
 
+export function getStoredToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem("haunter_token");
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredToken(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem("haunter_token", token);
+  } catch {
+    // ignore
+  }
+}
+
+export function removeStoredToken(): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem("haunter_token");
+  } catch {
+    // ignore
+  }
+}
+
 type RequestOptions = RequestInit & { silent?: boolean };
 
 async function request<T>(
@@ -510,6 +589,13 @@ async function request<T>(
   const headers = new Headers(fetchOptions.headers || {});
   if (!headers.has("Content-Type") && fetchOptions.body && typeof fetchOptions.body === "string") {
     headers.set("Content-Type", "application/json");
+  }
+
+  if (!headers.has("Authorization")) {
+    const token = getStoredToken();
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
   }
 
   // 30s timeout covers Lambda cold starts; idempotent GETs get one retry on timeout.
@@ -668,7 +754,13 @@ export const api = {
 
   // Auth endpoints
   getMe: () => api.get<AuthUser>("/auth/me", { silent: true }),
-  logout: () => api.post<{ detail: string }>("/auth/logout"),
+  logout: async () => {
+    try {
+      return await api.post<{ detail: string }>("/auth/logout");
+    } finally {
+      removeStoredToken();
+    }
+  },
 
   // Repos endpoints
   getRepos: () => api.get<RepoOut[]>("/repos"),
@@ -756,6 +848,16 @@ export const api = {
 
   getReviewDetail: (reviewId: string) =>
     api.get<CodeReviewOut>(`/reviews/${reviewId}`),
+
+  getAssociatedPr: (reviewId: string) =>
+    api.get<AssociatedPRResponse>(`/reviews/${reviewId}/associated-pr`),
+  getAssociatedPrs: (reviewIds: string[]) =>
+    api.post<AssociatedPRBatchResponse>(`/reviews/associated-pr/batch`, {
+      review_ids: reviewIds,
+    }),
+
+  getAssociatedPrsBatch: (reviewIds: string[]) =>
+    api.post<AssociatedPRsBatchResponse>("/reviews/associated-prs", { review_ids: reviewIds }),
 
   // Session endpoints (Phase 3 -- Cloud Agentic Live Session)
   listSessions: (params?: { status?: string; limit?: number; offset?: number }) => {

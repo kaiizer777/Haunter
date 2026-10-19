@@ -614,7 +614,9 @@ async def test_non_haunter_branch_is_ignored(
 ):
     """A fix request on someone else's branch must not touch it."""
     _, root_run = await seed(fake_audit_db, fake_audit_user_factory)
-    payload = review_comment_payload(head_ref="feature/someone-elses-work")
+    payload = review_comment_payload(
+        body="@haunter test-fix", head_ref="feature/someone-elses-work"
+    )
 
     resp = await post_comment(
         client,
