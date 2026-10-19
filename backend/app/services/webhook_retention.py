@@ -43,6 +43,26 @@ id subquery (an index-friendly range scan on ix_webhook_deliveries_created_at),
 commits it, and stops after `max_batches` iterations. The ceiling means one
 invocation can never run unbounded, however much has accumulated.
 
+PAYLOAD BOUND (TWO NUMBERS, ON PURPOSE)
+--------------------------------------
+Two different caps bound the stored payload, and they are not the same number:
+
+  * 174,764 base64 characters — what the general health-log path writes. The
+    encoder refuses a body over `_WEBHOOK_PAYLOAD_MAX_BYTES` (128 KiB raw) and
+    stores anything larger as `payload = NULL`, so the row still reports
+    `replayable = false`.
+  * 2,796,204 bytes — the database-level CHECK
+    (`ck_webhook_deliveries_payload_octet_length`, migration d5e6f7a8b9c0). That
+    is base64 of `MAX_PAYLOAD_SIZE_BYTES` (2 MiB), the ingestion cap, because the
+    auditor ack paths deliberately lift the python-side cap
+    (`retain_full_payload=True`) so an accepted audit is never recorded
+    unreplayable. The CHECK is therefore the ingestion-cap backstop, not the
+    128 KiB rule.
+
+The CHECK has to admit the widest value the app can legitimately write; a
+tighter bound rejects valid auditor-ack rows with an IntegrityError, which the
+webhook path turns into a 503 and GitHub answers with a redelivery.
+
 SCHEDULING
 ----------
 There is no in-process scheduler — the backend is Lambda behind a Function URL
