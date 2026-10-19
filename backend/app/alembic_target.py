@@ -277,15 +277,17 @@ def prepare_migration_target(
                     "Refusing to migrate a database that differs from the "
                     "configured unpooled target. If this is intentional (for "
                     "example a scratch or test database on another host), set "
-                    f"{_MISMATCH_BYPASS_ENV}=1 and re-run. Both live and test "
-                    "migration targets must use a direct (non-pooler) endpoint."
+                    f"{_MISMATCH_BYPASS_ENV}=1 for that single command and "
+                    "re-run. Both live and test migration targets must use a "
+                    "direct (non-pooler) endpoint."
                 )
             mismatch_bypassed = True
             print(
                 f"[alembic] WARNING: {_MISMATCH_BYPASS_ENV}=1 - migrating "
                 f"{resolved.descriptor} ({source}) while {_FALLBACK_SOURCE} "
                 f"points at {fallback.descriptor}. Target mismatch explicitly "
-                "allowed.",
+                f"allowed. Scope {_MISMATCH_BYPASS_ENV} to this single command "
+                "and unset it afterwards.",
                 file=stderr,
                 flush=True,
             )
