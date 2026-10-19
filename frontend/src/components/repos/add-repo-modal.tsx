@@ -9,6 +9,7 @@ import { api, AvailableRepoOut, RepoOut, ApiError, isGithubTokenError } from "@/
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
+  AlertTriangle,
   Loader2,
   Search,
   Lock,
@@ -61,6 +62,7 @@ export function AddRepoModal({ isOpen, onClose, onSuccess }: AddRepoModalProps) 
   const [visibilityFilter, setVisibilityFilter] = useState<"all" | "public" | "private">("all");
   const [connecting, setConnecting] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [conflictRepo, setConflictRepo] = useState<RepoOut | null>(null);
 
   const fetchRepos = useCallback(async () => {
     setLoading(true);
@@ -86,6 +88,7 @@ export function AddRepoModal({ isOpen, onClose, onSuccess }: AddRepoModalProps) 
       setSearch("");
       setVisibilityFilter("all");
       setConnectError(null);
+      setConflictRepo(null);
       fetchRepos();
     }
   }, [isOpen, fetchRepos]);
@@ -101,7 +104,14 @@ export function AddRepoModal({ isOpen, onClose, onSuccess }: AddRepoModalProps) 
         language_hint: repo.language?.toLowerCase() ?? null,
       });
       onSuccess(newRepo);
-      onClose();
+      if (newRepo.registration_conflict) {
+        // Keep the modal open so the registration-time warning is visible,
+        // then refresh the list so the new repo reads as Connected.
+        setConflictRepo(newRepo);
+        void fetchRepos();
+      } else {
+        onClose();
+      }
     } catch (err) {
       setConnectError(err instanceof Error ? err.message : "Failed to connect repository.");
     } finally {
@@ -139,6 +149,41 @@ export function AddRepoModal({ isOpen, onClose, onSuccess }: AddRepoModalProps) 
       className="max-w-2xl bg-[#0f0f13] border-zinc-800 shadow-[0_16px_48px_rgba(0,0,0,0.8),inset_0_1px_0_0_rgba(255,255,255,0.05)]"
     >
       <div className="space-y-3.5">
+        {/* Registration-time conflict warning (post-create) */}
+        {conflictRepo && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-lg border border-amber-900/80 bg-amber-950/30 p-3 text-xs text-amber-300 shadow-md"
+          >
+            <AlertTriangle
+              className="h-4 w-4 shrink-0 text-amber-400 mt-0.5"
+              aria-hidden="true"
+            />
+            <div className="flex-1 space-y-1">
+              <p className="font-semibold text-amber-200">
+                Connected, but CI deliveries are paused
+              </p>
+              <p>
+                Another workspace tracks{" "}
+                <span className="font-mono text-amber-200">
+                  {conflictRepo.owner}/{conflictRepo.name}
+                </span>
+                . Deliveries are refused until only one registration remains.
+                Disconnect a duplicate registration to resume processing.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={onClose}
+              className="h-7 px-2.5 text-[11px] font-mono text-amber-200 hover:text-white hover:bg-amber-900/40 cursor-pointer shrink-0"
+            >
+              Done
+            </Button>
+          </div>
+        )}
+
         {/* Row-level connect error */}
         {connectError && (
           <div className="flex items-center gap-2 rounded-lg border border-red-900/80 bg-red-950/40 p-3 text-xs text-red-300 shadow-md">
