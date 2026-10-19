@@ -266,6 +266,7 @@ def test_fallback_source_skips_the_mismatch_guard() -> None:
         "postgresql://user:secret@ep-test.neon.tech:notaport/testdb",
         "postgresql:///testdb",
         "postgresql://user:secret@/testdb",
+        "postgresql://user:secret@[::1/testdb",
         "sqlite+aiosqlite:///haunter.db",
         "postgresql://user:secret@ep-test.neon.tech:0/testdb",
     ],
