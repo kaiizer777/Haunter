@@ -147,7 +147,7 @@ async def seed_repo(
 
 SAMPLE_DIFF = """--- a/calculator.py
 +++ b/calculator.py
-@@ -1,2 +1,2 @@
+@@ -1,1 +1,1 @@
 -def add(a, b): return a - b
 +def add(a, b): return a + b
 """
@@ -454,3 +454,214 @@ async def test_auto_fix_commit_patch_failure(
     mock_comment.assert_called_once()
     assert "Failed to apply remediation" in mock_comment.call_args.kwargs["body"]
     assert "Protected branch" in mock_comment.call_args.kwargs["body"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #61: malformed remediation diffs are rejected, never applied.
+# ---------------------------------------------------------------------------
+
+MALFORMED_REMEDIATION_TEXTS = (
+    pytest.param(
+        "Run cd backend && python scripts/check_test_count.py --write",
+        id="prose",
+    ),
+    pytest.param(
+        "*** Begin Patch\n*** Update File: calculator.py\n*** End Patch",
+        id="patch-envelope",
+    ),
+    pytest.param(
+        "--- a/calculator.py\n"
+        "+++ b/calculator.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-def add(a, b): return a - b\n"
+        "+def add(a, b): return a + b\n",
+        id="truncated-hunk",
+    ),
+    pytest.param(
+        "--- a/../etc/passwd\n"
+        "+++ b/../etc/passwd\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-root\n"
+        "+toor\n",
+        id="path-traversal",
+    ),
+)
+
+
+def test_extract_diff_rejects_patch_envelope():
+    """A `*** Begin Patch` envelope is not a unified diff and is never returned."""
+    from app.webhooks import _extract_remediation_diff_from_body
+
+    body = (
+        "### 🛠️ Remediation Unified Diff\n"
+        "```diff\n"
+        "*** Begin Patch\n"
+        "*** Update File: calculator.py\n"
+        f"{SAMPLE_DIFF}"
+        "*** End Patch\n"
+        "```\n"
+    )
+
+    assert _extract_remediation_diff_from_body(body) is None
+
+
+def test_extract_diff_rejects_prose_synthesized_hunk():
+    """The old publisher's fake hunk (added lines with a non-matching old count) is rejected."""
+    from app.webhooks import _extract_remediation_diff_from_body
+
+    body = (
+        "### 🛠️ Remediation Unified Diff\n"
+        "```diff\n"
+        "--- a/calculator.py\n"
+        "+++ b/calculator.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "+Run cd backend && python scripts/check_test_count.py --write\n"
+        "```\n"
+    )
+
+    assert _extract_remediation_diff_from_body(body) is None
+
+
+def test_extract_diff_skips_invalid_block_and_returns_valid_one():
+    """A malformed fence does not hide a later, valid remediation diff."""
+    from app.webhooks import _extract_remediation_diff_from_body
+
+    body = (
+        "### 🛠️ Remediation Unified Diff\n"
+        "```diff\n"
+        "--- a/calculator.py\n"
+        "+++ b/calculator.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "+not applicable\n"
+        "```\n\n"
+        "A second proposal:\n"
+        "```diff\n"
+        f"{SAMPLE_DIFF}"
+        "```\n"
+    )
+
+    extracted = _extract_remediation_diff_from_body(body)
+
+    assert extracted == SAMPLE_DIFF
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suggested_fix", MALFORMED_REMEDIATION_TEXTS)
+async def test_auto_fix_rejects_malformed_db_finding_without_commit(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    suggested_fix: str,
+):
+    """Prose/envelope/truncated/traversal DB findings surface as no_patch, not a commit."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+
+    code_review = CodeReview(
+        repo_id=repo.id,
+        commit_sha="d" * 40,
+        pr_number=PR_NUMBER,
+        risk_score=50,
+        summary="Malformed remediation",
+        findings=[
+            {
+                "file_path": "calculator.py",
+                "line_start": 1,
+                "line_end": 1,
+                "suggested_fix": suggested_fix,
+            }
+        ],
+        status="completed",
+    )
+    fake_audit_db.add(code_review)
+    await fake_audit_db.commit()
+
+    payload = review_comment_payload(body="@haunter fix", head_ref=USER_BRANCH)
+
+    with (
+        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_tok,
+        patch(
+            "app.github_client.fetch_pull_request_reviews", new_callable=AsyncMock
+        ) as mock_reviews,
+        patch("app.github.pr.commit_patch", new_callable=AsyncMock) as mock_commit,
+        patch("app.github_client.create_issue_comment", new_callable=AsyncMock) as mock_comment,
+    ):
+        mock_tok.return_value = "ghs_mock_token_123"
+        mock_reviews.return_value = []
+        mock_comment.return_value = {"id": 12350}
+
+        resp = await client.post(
+            "/webhooks/github",
+            content=json.dumps(payload).encode("utf-8"),
+            headers={
+                "X-GitHub-Event": "pull_request_review_comment",
+                "X-GitHub-Delivery": str(uuid.uuid4()),
+                "X-Hub-Signature-256": signed(TEST_SECRET, payload),
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "no_patch"
+    mock_commit.assert_not_called()
+    mock_comment.assert_called_once()
+    assert (
+        "No actionable remediation diff was found"
+        in mock_comment.call_args.kwargs["body"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("diff_text", MALFORMED_REMEDIATION_TEXTS)
+async def test_auto_fix_rejects_malformed_review_body_without_commit(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    diff_text: str,
+):
+    """Prose/envelope/truncated/traversal review blocks surface as no_patch."""
+    await seed_repo(fake_audit_db, fake_audit_user_factory)
+
+    review_body = (
+        "### 🛠️ Remediation Unified Diff\n"
+        "```diff\n"
+        f"{diff_text}\n"
+        "```\n"
+    )
+    payload = review_comment_payload(body="@haunter address", head_ref=USER_BRANCH)
+
+    with (
+        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_tok,
+        patch(
+            "app.github_client.fetch_pull_request_reviews", new_callable=AsyncMock
+        ) as mock_reviews,
+        patch("app.github.pr.commit_patch", new_callable=AsyncMock) as mock_commit,
+        patch("app.github_client.create_issue_comment", new_callable=AsyncMock) as mock_comment,
+    ):
+        mock_tok.return_value = "ghs_mock_token_123"
+        mock_reviews.return_value = [
+            {
+                "id": 9992,
+                "user": {"login": "haunter-auditor[bot]"},
+                "body": review_body,
+                "state": "COMMENTED",
+            }
+        ]
+        mock_comment.return_value = {"id": 12351}
+
+        resp = await client.post(
+            "/webhooks/github",
+            content=json.dumps(payload).encode("utf-8"),
+            headers={
+                "X-GitHub-Event": "pull_request_review_comment",
+                "X-GitHub-Delivery": str(uuid.uuid4()),
+                "X-Hub-Signature-256": signed(TEST_SECRET, payload),
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "no_patch"
+    mock_commit.assert_not_called()
+    mock_comment.assert_called_once()
+    assert (
+        "No actionable remediation diff was found"
+        in mock_comment.call_args.kwargs["body"]
+    )

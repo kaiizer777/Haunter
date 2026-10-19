@@ -72,6 +72,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
+from app.diff_validation import (
+    InvalidUnifiedDiffError,
+    coerce_unified_diff,
+    validate_unified_diff,
+)
 from app.github.pr import REVIEWABLE_PR_ACTIONS, is_reviewable_pr_action
 from app.llm import LLMClient
 from app.llm.prompts.audit_prompts import (
@@ -1688,41 +1693,32 @@ def _audit_queued_payload(
     }
 
 
+_REMEDIATION_FENCE_RE = re.compile(r"```(?:diff)?[ \t]*\r?\n([\s\S]*?)```")
+
+
 def _extract_remediation_diff_from_body(body: str) -> Optional[str]:
-    """Extract unified diff from PR review body (e.g. from haunter-auditor[bot])."""
+    """Extract a validated unified diff from a PR review body.
+
+    Returns only text that passes :func:`validate_unified_diff`; prose,
+    ``*** Begin Patch`` envelopes and truncated hunks are not patches and are
+    ignored, so a review can never hand a malformed block to the commit path.
+    """
     if not body:
         return None
-    match = re.search(
-        r"Remediation Unified Diff[\s\S]*?```(?:diff)?\s*\r?\n([\s\S]*?)```",
-        body,
-    )
-    diff_text = None
-    if match:
-        diff_text = match.group(1).strip()
-    else:
-        for block in re.finditer(r"```(?:diff)?\s*\r?\n([\s\S]*?)```", body):
-            candidate = block.group(1).strip()
-            if "--- " in candidate and "+++ " in candidate and "@@" in candidate:
-                diff_text = candidate
-                break
 
-    if not diff_text:
-        return None
+    blocks = [match.group(1) for match in _REMEDIATION_FENCE_RE.finditer(body)]
+    ordered: list[str] = []
+    heading = re.search(r"Remediation Unified Diff", body)
+    if heading:
+        after_heading = _REMEDIATION_FENCE_RE.search(body, heading.end())
+        if after_heading:
+            ordered.append(after_heading.group(1))
+    ordered.extend(blocks)
 
-    normalized_lines: list[str] = []
-    for line in diff_text.splitlines():
-        line = line.strip("\r")
-        if line.startswith("+-"):
-            normalized_lines.append("-" + line[2:])
-        elif line.startswith("++") and not line.startswith("+++"):
-            normalized_lines.append("+" + line[2:])
-        elif line.startswith("+@@"):
-            normalized_lines.append(line[1:])
-        else:
-            normalized_lines.append(line)
-    cleaned = "\n".join(normalized_lines).strip()
-    if "--- " in cleaned and "+++ " in cleaned and "@@" in cleaned:
-        return cleaned + "\n"
+    for block in ordered:
+        validated = coerce_unified_diff(block)
+        if validated is not None:
+            return validated
     return None
 
 
@@ -1813,32 +1809,23 @@ async def _handle_review_auto_fix_command(
         findings = rev.findings or []
         diff_chunks: list[str] = []
         for finding in findings:
-            patch = finding.get("suggested_patch") or finding.get("suggested_fix")
-            if not patch:
+            if not isinstance(finding, dict):
                 continue
-            patch = patch.strip()
-            if "--- " in patch and "+++ " in patch and "@@" in patch:
-                diff_chunks.append(patch)
-            elif finding.get("file_path"):
-                fp = finding["file_path"]
-                ls = finding.get("line_start", 1)
-                le = finding.get("line_end", ls)
-                lc = max(1, le - ls + 1)
-                diff_lines = [
-                    f"+{line}" if not line.startswith(("+", "-")) else line
-                    for line in patch.splitlines()
-                ]
-                sec = (
-                    f"--- a/{fp}\n"
-                    f"+++ b/{fp}\n"
-                    f"@@ -{ls},{lc} +{ls},{len(diff_lines)} @@\n"
-                    + "\n".join(diff_lines)
-                )
-                diff_chunks.append(sec)
+            patch = finding.get("suggested_patch") or finding.get("suggested_fix")
+            if not isinstance(patch, str):
+                continue
+            file_path = finding.get("file_path")
+            candidate = coerce_unified_diff(
+                patch,
+                file_path=file_path if isinstance(file_path, str) else None,
+            )
+            if candidate is None:
+                # Prose or a malformed hunk is not actionable. Never synthesize
+                # a replacement hunk from arbitrary suggested-fix text.
+                continue
+            diff_chunks.append(candidate)
         if diff_chunks:
-            valid_patch = "\n\n".join(diff_chunks)
-            if not valid_patch.endswith("\n"):
-                valid_patch += "\n"
+            valid_patch = "".join(diff_chunks)
             break
 
     # 2. Or fetch latest review from GitHub API and extract remediation diff
@@ -1864,6 +1851,23 @@ async def _handle_review_auto_fix_command(
                 pr_number,
                 gh_err,
             )
+
+    # 3. Defence in depth: every source above already validates, but the value
+    # that reaches commit_patch is re-checked so a future source cannot bypass
+    # the gate. A rejected patch is the existing "no actionable diff" UX, not a
+    # generic commit error.
+    if valid_patch:
+        try:
+            validate_unified_diff(valid_patch)
+        except InvalidUnifiedDiffError as exc:
+            logger.warning(
+                "Rejected malformed remediation diff for %s/%s PR #%d: %s",
+                repo_owner,
+                repo_name,
+                pr_number,
+                exc,
+            )
+            valid_patch = None
 
     # If no patch found
     if not valid_patch:
