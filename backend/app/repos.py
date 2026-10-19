@@ -196,15 +196,22 @@ async def _has_registration_conflict(db: AsyncSession, repo: Repo) -> bool:
     """
     Single-round-trip conflict check for one repo the caller already owns.
 
-    Reuses the correlated predicate from ``list_repos`` so the list and
-    single-row responses can never disagree about what counts as a conflict.
+    Same semantics as ``_registration_conflict_predicate`` (exact-case
+    owner/name, different tenant), expressed as a projection + LIMIT 1 so the
+    row is found without an EXISTS subquery: the shared hermetic fake session
+    used by the auditor-install tests models that shape, and LIMIT 1 keeps the
+    read bounded on the real database too.
     """
     result = await db.execute(
-        select(_registration_conflict_predicate(repo.user_id)).where(
-            Repo.id == repo.id
+        select(Repo.id)
+        .where(
+            Repo.owner == repo.owner,
+            Repo.name == repo.name,
+            Repo.user_id != repo.user_id,
         )
+        .limit(1)
     )
-    return bool(result.scalar_one_or_none())
+    return result.first() is not None
 
 
 def _repo_out(repo: Repo, registration_conflict: bool) -> RepoOut:
