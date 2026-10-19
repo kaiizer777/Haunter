@@ -1,12 +1,14 @@
-"""Uniform HMAC-SHA256 authentication for Lambda self-invocation payloads.
+"""Uniform HMAC-SHA256 authentication for internal machine-triggered calls.
 
-Every internal Lambda self-invocation (CI pipeline, code review, audit worker)
-is authenticated with the same dedicated secret and the same construction:
+Every internal machine-triggered call (Lambda self-invocation for the CI
+pipeline, the code reviewer and the audit worker; the retention cron against
+the sweeper endpoint) is authenticated with the same dedicated secret and the
+same construction:
 
     token = HMAC-SHA256(secret, "<kind>:<identifier>")
 
-`kind` domain-separates the three invocation classes so a token minted for one
-class can never authenticate another. The secret is the dedicated
+`kind` domain-separates the invocation classes so a token minted for one class
+can never authenticate another. The secret is the dedicated
 `audit_self_invoke_secret` setting, which must be non-empty; the previous
 webhook/session secret fallbacks were removed because a leaked webhook signing
 key must not grant the ability to trigger paid LLM pipeline work.
@@ -14,6 +16,13 @@ key must not grant the ability to trigger paid LLM pipeline work.
 `resolve_self_invocation_secret` is the single source of truth for that
 requirement — the audit fence and child tokens in `app.services.audit_pipeline`
 resolve their key through it rather than through a second copy of the rule.
+
+Reusing one secret for the retention kind is deliberate. The alternative — a
+dedicated secret per kind — would add an operator-provisioned credential whose
+blank default would silently disable the sweeper, while the retention token can
+do strictly less than any of the other three: it triggers one idempotent
+retention pass and cannot mint LLM work, delete a run, or touch another
+tenant's rows.
 
 Verification never raises: it returns False for any malformed input, missing
 secret, or mismatched token so callers fail closed.
@@ -29,8 +38,11 @@ from typing import Optional
 KIND_PIPELINE = "pipeline"
 KIND_REVIEW = "review"
 KIND_AUDIT = "audit"
+KIND_RETENTION = "retention"
 
-SELF_INVOCATION_KINDS = frozenset({KIND_PIPELINE, KIND_REVIEW, KIND_AUDIT})
+SELF_INVOCATION_KINDS = frozenset(
+    {KIND_PIPELINE, KIND_REVIEW, KIND_AUDIT, KIND_RETENTION}
+)
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _MAX_IDENTIFIER_LEN = 256
