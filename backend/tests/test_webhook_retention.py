@@ -61,9 +61,18 @@ DB_PAYLOAD_MAX_BYTES = 2_796_204
 
 NOW = datetime(2026, 10, 2, 12, 0, 0, tzinfo=timezone.utc)
 
+# The sweep endpoint calls verify_self_invocation without an explicit secret, so
+# it resolves settings.audit_self_invoke_secret at request time. That setting is
+# optional and CI does not set it (a developer .env may), so a test that minted
+# its token from a literal fallback would 401 in CI while passing locally.
+# Pin it for every test in this module instead; mirrors the autouse fixture in
+# tests/test_audit_webhook_routing.py.
+TEST_SELF_INVOKE_SECRET = "retention-test-self-invoke-secret"
 
-def _secret() -> str:
-    return settings.audit_self_invoke_secret or "test_self_invoke_secret"
+
+@pytest.fixture(autouse=True)
+def self_invoke_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "audit_self_invoke_secret", TEST_SELF_INVOKE_SECRET)
 
 
 def _windows(**overrides) -> RetentionWindows:
@@ -204,7 +213,7 @@ def test_settings_accept_equal_windows():
 
 def test_retention_token_is_domain_separated_from_other_kinds():
     """A token minted for another kind must not authenticate the sweep."""
-    secret = _secret()
+    secret = TEST_SELF_INVOKE_SECRET
     audit_token = self_invocation_token(KIND_AUDIT, RETENTION_SWEEP_IDENTIFIER, secret)
     retention_token = self_invocation_token(
         KIND_RETENTION, RETENTION_SWEEP_IDENTIFIER, secret
@@ -224,7 +233,11 @@ def test_retention_token_is_domain_separated_from_other_kinds():
     )
 
 
-def test_retention_verifier_fails_closed_without_a_secret():
+def test_retention_verifier_fails_closed_without_a_secret(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An unset secret verifies False, never raises — override the module fixture."""
+    monkeypatch.setattr(settings, "audit_self_invoke_secret", None)
     assert (
         verify_self_invocation(KIND_RETENTION, RETENTION_SWEEP_IDENTIFIER, "a" * 64, None)
         is False
@@ -265,7 +278,9 @@ async def test_sweep_endpoint_rejects_audit_kind_token(
     touched when the caller is unauthenticated.
     """
     row = await _insert(db, age_days=500, marker="wrongkind")
-    token = self_invocation_token(KIND_AUDIT, RETENTION_SWEEP_IDENTIFIER, _secret())
+    token = self_invocation_token(
+        KIND_AUDIT, RETENTION_SWEEP_IDENTIFIER, TEST_SELF_INVOKE_SECRET
+    )
 
     response = await client.post(
         SWEEP_PATH, headers={"X-Haunter-Retention-Token": token}
@@ -473,7 +488,9 @@ async def test_sweep_endpoint_runs_the_sweep_when_authenticated(
     client: httpx.AsyncClient, db: AsyncSession
 ):
     row = await _insert(db, age_days=200, marker="endpoint")
-    token = self_invocation_token(KIND_RETENTION, RETENTION_SWEEP_IDENTIFIER, _secret())
+    token = self_invocation_token(
+        KIND_RETENTION, RETENTION_SWEEP_IDENTIFIER, TEST_SELF_INVOKE_SECRET
+    )
 
     response = await client.post(
         SWEEP_PATH, headers={"X-Haunter-Retention-Token": token}
