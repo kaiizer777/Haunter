@@ -292,6 +292,33 @@ async def test_sweep_endpoint_rejects_audit_kind_token(
     assert survivor.payload is not None
 
 
+@pytest.mark.asyncio
+async def test_sweep_endpoint_fails_closed_when_secret_is_unset(
+    client: httpx.AsyncClient, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+):
+    """An unconfigured deployment must 401, never run an open sweep.
+
+    Reproduces the exact condition behind the original CI failure: the caller
+    presents a well-formed token, but `settings.audit_self_invoke_secret` is
+    None because the environment does not set it. Auth must fail (401) instead
+    of raising or letting the sweep through, and no row may be touched.
+    """
+    monkeypatch.setattr(settings, "audit_self_invoke_secret", None)
+    row = await _insert(db, age_days=500, marker="nosecret")
+    token = self_invocation_token(
+        KIND_RETENTION, RETENTION_SWEEP_IDENTIFIER, TEST_SELF_INVOKE_SECRET
+    )
+
+    response = await client.post(
+        SWEEP_PATH, headers={"X-Haunter-Retention-Token": token}
+    )
+
+    assert response.status_code == 401
+    survivor = await _reload(db, row.id)
+    assert survivor is not None, "an unset secret must not leave the sweep open"
+    assert survivor.payload is not None
+
+
 # ---------------------------------------------------------------------------
 # DB tests (require TEST_DATABASE_URL)
 # ---------------------------------------------------------------------------
