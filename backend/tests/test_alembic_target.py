@@ -8,6 +8,7 @@ connection is opened.
 from __future__ import annotations
 
 import io
+import traceback
 
 import pytest
 
@@ -301,3 +302,76 @@ def test_override_does_not_bypass_fallback_parsing_for_the_guard() -> None:
         )
 
     assert "DATABASE_URL_UNPOOLED" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Credentials never leak — message, stderr, or chained exception
+# ---------------------------------------------------------------------------
+
+# Fragments of the credentials embedded in the malformed URLs below. A URL
+# whose authority was truncated (``postgresql://user:pa/ss@host:5432/db``)
+# used to leak the password prefix through the chained ``ValueError`` and the
+# password suffix through the printed descriptor.
+_PASSWORD_FRAGMENTS = ("pa", "ss", "user")
+
+
+@pytest.mark.parametrize(
+    "malformed_url",
+    [
+        # Password prefix: the '/' inside the password truncates the authority,
+        # so the password prefix was parsed as the port and echoed by the
+        # chained ValueError.
+        "postgresql://user:pa/ss@host:5432/db",
+        # Password suffix: the '@' lands in the path, so the userinfo was
+        # mistaken for the host and the password for the database name.
+        "postgresql://user:12/ss@host/db",
+        # Two delimiters in the authority — the userinfo is ambiguous.
+        "postgresql://user:pa@ss@host:5432/db",
+        # A truncated authority followed by a second path segment.
+        "postgresql://user:12/ss/db",
+    ],
+)
+def test_malformed_url_never_leaks_credentials(
+    malformed_url: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(AlembicTargetError) as exc_info:
+        prepare_migration_target(
+            settings_obj=_FakeSettings(_LIVE_URL),
+            environ={"ALEMBIC_DATABASE_URL": malformed_url},
+        )
+
+    message = str(exc_info.value)
+    stderr = capsys.readouterr().err
+
+    for output in (message, stderr):
+        for fragment in _PASSWORD_FRAGMENTS:
+            assert fragment not in output
+        assert "@" not in output
+        assert "://" not in output
+        assert malformed_url not in output
+
+    # The original parse error must never be chained: its text can embed a
+    # fragment of the URL (for example the offending port).
+    assert exc_info.value.__cause__ is None
+    assert (
+        exc_info.value.__context__ is None
+        or exc_info.value.__suppress_context__ is True
+    )
+    rendered = "".join(traceback.format_exception(exc_info.value))
+    assert "The above exception" not in rendered
+    assert "direct cause" not in rendered
+    assert malformed_url not in rendered
+
+
+def test_password_is_never_part_of_the_descriptor_or_announcement() -> None:
+    url = "postgresql://app_user:app_password@db.internal:5432/appdb"
+    target, stderr = _prepare({"ALEMBIC_DATABASE_URL": url}, unpooled_url=url)
+
+    assert target.descriptor == "db.internal:5432/appdb"
+    for output in (target.descriptor, stderr):
+        assert "app_user" not in output
+        assert "app_password" not in output
+        assert "password" not in output
+        assert "@" not in output
+        assert "://" not in output
