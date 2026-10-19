@@ -1170,9 +1170,8 @@ async def test_auditor_mention_redelivery_while_running_is_duplicate_without_res
             assert bg_mock.await_count == 1
             # Simulate the scheduled worker starting: it appends an
             # `auditor_running` row. Collapsed into the queued row's status
-            # here because the hermetic store cannot order latest-wins
-            # (ORDER BY ... DESC sorts as ASC — see the xfail tests below);
-            # the worker's own append behavior is covered by
+            # here to keep this test focused on the dedup branch; the worker's
+            # own append behavior is covered by
             # test_background_worker_records_running_row.
             queued_row = (
                 await fake_audit_db.execute(
@@ -1316,8 +1315,8 @@ async def test_background_worker_records_running_row(
 
     The running row is what tells a redelivery "work started, stay
     deduplicated" apart from "queued but no worker ever ran, recover". Both
-    rows are appended; latest-wins ordering is real-Postgres behavior (see
-    the xfail tests below), so this asserts the appended set only.
+    rows are appended; latest-wins ordering is covered by the redelivery
+    tests, so this asserts the appended set only.
     """
     from sqlalchemy import select
 
@@ -1355,12 +1354,6 @@ async def test_background_worker_records_running_row(
     }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Hermetic FakeStore sorts ORDER BY ... DESC as ASC "
-    "(tests/fake_audit_db.py _order compares the SQLAlchemy 2.x desc_op "
-    "modifier against the string 'desc'); latest-wins needs real Postgres.",
-)
 @pytest.mark.asyncio
 async def test_auditor_redelivery_after_error_requeues(
     client: httpx.AsyncClient,
@@ -1409,19 +1402,29 @@ async def test_auditor_redelivery_after_error_requeues(
             delivery_id=delivery_id,
         )
 
-    # Pin wall-clock order: the fake store defaults both rows to ~now, which
-    # can tie; the regression is about latest-wins, so make it explicit.
+    # Pin wall-clock order for every row the request and worker appended:
+    # queued -> running -> error. The worker's `auditor_running` liveness row
+    # is in the dedup set, so it must not stay later than the retryable
+    # `error` row or latest-wins would answer `duplicate` again.
     rows = (
         await fake_audit_db.execute(
             select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
         )
     ).scalars().all()
-    assert {getattr(r, "status", "") for r in rows} >= {"auditor_queued", "error"}
+    assert {getattr(r, "status", "") for r in rows} >= {
+        "auditor_queued",
+        "auditor_running",
+        "error",
+    }
+    pinned_at = {
+        "auditor_queued": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "auditor_running": datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
+        "error": datetime(2026, 1, 2, tzinfo=timezone.utc),
+    }
     for r in rows:
-        if getattr(r, "status", "") == "auditor_queued":
-            r.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        elif getattr(r, "status", "") == "error":
-            r.created_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        status = getattr(r, "status", "")
+        if status in pinned_at:
+            r.created_at = pinned_at[status]
 
     patches2 = _no_auditor_side_effects()
     with patches2[0], patches2[1], patches2[2], patches2[3], patches2[4], patches2[5], patches2[6]:
@@ -1436,12 +1439,6 @@ async def test_auditor_redelivery_after_error_requeues(
     bg_mock.assert_awaited_once()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Hermetic FakeStore sorts ORDER BY ... DESC as ASC "
-    "(tests/fake_audit_db.py _order compares the SQLAlchemy 2.x desc_op "
-    "modifier against the string 'desc'); latest-wins needs real Postgres.",
-)
 @pytest.mark.asyncio
 async def test_stale_queued_row_does_not_shadow_fresh_error(
     client: httpx.AsyncClient,
