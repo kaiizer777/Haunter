@@ -268,6 +268,7 @@ Also confirm `/login`, `/runs`, `/eval`, `/config` return 200 and the main JS as
 - [ ] `zip` contains **no `.env*`** (§3 step 3)
 - [ ] Frontend returns 200; bundle has the correct API URL and **zero** `localhost:7555`
 - [ ] Function URL unchanged (code-only deploy) — so **no** GitHub webhook / OAuth edits needed
+- [ ] If migrations ran: `alembic current` reports head against the intended direct endpoint, and the printed `[alembic] target:` host/source were checked (§10)
 - [ ] Note `npm audit` findings separately; they do not block a deploy
 
 ---
@@ -339,7 +340,7 @@ Injected via `infra/aws/lambda.tf` `environment` block from `terraform.tfvars`.
 | `HOSTING_PROVIDER` | `aws` — Lambda async self-invoke for post-response pipeline work |
 | `SANDBOX_PROVIDER` | `github_actions` — CI verification via mirror repos |
 | `DATABASE_URL` | pooled Neon URL (app uses `NullPool`) |
-| `DATABASE_URL_UNPOOLED` | direct Neon URL — Alembic migrations only |
+| `DATABASE_URL_UNPOOLED` | direct Neon URL — Alembic migrations target this by default (see §10) |
 
 > **`SESSION_SECRET_KEY`:** the prod value comes from `var.session_secret_key`
 > (`lambda.tf:174`). `backend/.env` is local-only — a cookie signed with the local value
@@ -348,3 +349,139 @@ Injected via `infra/aws/lambda.tf` `environment` block from `terraform.tfvars`.
 > **New settings added to `config.py` need no tfvars change if they declare a default.**
 > Check before assuming a redeploy requires infra edits:
 > `git diff <old>..<new> -- backend/app/config.py | Select-String '^\+.*:.*='`
+
+---
+
+## 10. Database migrations (Alembic)
+
+Alembic runs from `backend/`. It must never silently target a different database than
+the operator intended. `backend/alembic/env.py` resolves every target through
+`backend/app/alembic_target.py`; online and `--sql` (offline) modes share the same
+resolution and guard.
+
+### 10.1 Resolution order
+
+The first non-empty value wins:
+
+1. `ALEMBIC_DATABASE_URL` — explicit per-command override (process env **or** `backend/.env`)
+2. `TARGET_DATABASE_URL` — older override name, still honoured
+3. `DATABASE_URL_UNPOOLED` — the configured direct Neon endpoint (default)
+
+`alembic/env.py` calls bare `load_dotenv()`, so a variable in `backend/.env` also takes
+effect. A process-level variable beats `.env` because python-dotenv does not override an
+existing process variable. Empty strings are skipped.
+
+### 10.2 Direct-endpoint rule
+
+Both live and test migration targets must use a **direct, non-pooler** endpoint. Neon
+pooler hosts contain `-pooler`; `DATABASE_URL` is the pooled app URL, while
+`DATABASE_URL_UNPOOLED` is the direct migration URL. Migrations need session-scoped
+behaviour (advisory locks, DDL transaction semantics) that a transaction pooler does not
+provide. Never point an Alembic override at the pooled URL.
+
+### 10.3 What migration commands print
+
+Every command that loads the Alembic environment (`upgrade`, `downgrade`, `current`,
+`--sql`) prints one line to **stderr** (stdout is reserved for `alembic ... --sql`).
+Metadata-only commands such as `heads` and `history` never load `env.py`, so they do
+not print it:
+
+```
+[alembic] target: <host>:<port>/<database> (source: ALEMBIC_DATABASE_URL|TARGET_DATABASE_URL|DATABASE_URL_UNPOOLED)
+```
+
+Credentials, userinfo, and query parameters are never printed. A green exit code is not
+proof of the target — read this line around every upgrade or downgrade. If the command
+fails, the line is still printed before the guard error.
+
+### 10.4 Mismatch guard and escape hatch
+
+If an override wins and its `(host, port)` differs from `DATABASE_URL_UNPOOLED`, Alembic
+exits **before connecting**:
+
+```
+AlembicTargetError: Alembic target mismatch: ALEMBIC_DATABASE_URL resolves to
+<h1>:<port>/<db>, but DATABASE_URL_UNPOOLED resolves to <h2>:<port>/<db>. Refusing ...
+```
+
+- Fix the stale override, or
+- For an intentional scratch/test database on another host only, opt in for that single
+  command: `$env:ALEMBIC_ALLOW_DB_MISMATCH = "1"`. The exact value `1` is required
+  (`true` / `yes` are rejected), and a WARNING naming both redacted targets is printed.
+- Different database **names** on the same host/port are not blocked (the guard compares
+  host/port only), so verify the database name in the printed descriptor.
+- Malformed URLs (missing host, non-postgres scheme, invalid port) fail closed with an
+  error naming the source; the raw URL and credentials are never echoed.
+
+### 10.5 Preflight
+
+```powershell
+cd C:\Users\bari2\Desktop\Haunter\backend
+.\.venv\Scripts\Activate.ps1
+
+# 1. Expect exactly one migration head (no merge revision needed).
+alembic heads
+
+# 2. Read the resolved target; confirm the host is the intended DIRECT endpoint
+#    and the source is the one you expected.
+alembic current
+
+# 3. Look for a stale .env override before touching a live database. Never print
+#    values; rely on the redacted target line from step 2.
+Select-String -Path .env -Pattern '^(ALEMBIC_DATABASE_URL|TARGET_DATABASE_URL|DATABASE_URL_UNPOOLED)='
+
+# 4. Before any destructive migration (downgrade, drop, rewrite, backfill), take a
+#    Neon branch/snapshot, or pg_dump the direct endpoint:
+#    pg_dump "<direct URL>" -Fc -f "backups\pre-migration-<date>.dump"
+```
+
+Do not skip step 4 for a downgrade. For a plain additive `upgrade`, a Neon snapshot or
+branch is still cheap insurance if the migration rewrites or drops anything.
+
+### 10.6 Upgrade / downgrade
+
+```powershell
+# Normal deployment: apply all pending revisions to the intended direct DB.
+alembic upgrade head
+# Confirm the printed target and final revision.
+alembic current
+
+# One revision back (destructive — back up first).
+alembic downgrade -1
+alembic current
+
+# Full reset (CI-style check only; destructive — never on live without approval).
+alembic downgrade base
+alembic upgrade head
+```
+
+For a one-off test database, pass the override in the process environment instead of
+editing `.env`:
+
+```powershell
+$env:ALEMBIC_DATABASE_URL = "<direct test Neon URL>"
+alembic upgrade head
+Remove-Item Env:\ALEMBIC_DATABASE_URL
+```
+
+```bash
+ALEMBIC_DATABASE_URL="<direct test Neon URL>" alembic upgrade head
+```
+
+If the test database is on a different host from the live `DATABASE_URL_UNPOOLED`, add
+`ALEMBIC_ALLOW_DB_MISMATCH=1` for that invocation. Hand-editing `.env` for a one-off
+migration is forbidden — it recreates the silent misdirection bug this runbook exists to
+prevent.
+
+### 10.7 Verification
+
+- [ ] `alembic current` prints the expected direct host and ends with `(head)`.
+- [ ] The `[alembic] target:` line names the expected source.
+- [ ] Schema spot-check (expected table/column) or app `/health` after deploy.
+- [ ] No migration ran against a `-pooler` host.
+- [ ] Any bypass WARNING was intentional and recorded.
+
+CI runs `alembic upgrade head`, `downgrade base`, and `upgrade head` against the local
+Postgres service in `.github/workflows/ci.yml`. The workflow sets only `DATABASE_URL` /
+`DATABASE_URL_UNPOOLED`, so the fallback path is exercised and the mismatch guard stays
+inactive.
