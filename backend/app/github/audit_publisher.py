@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Sequence
 
 from app import github_client
+from app.diff_validation import coerce_unified_diff
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
     MAX_CATEGORY_CHARS,
@@ -243,55 +244,30 @@ def format_finding_comment_body(
         "",
         f"**What's Happening:**\n{clean_desc}",
         "",
-        "**Actionable Remediation Code Diff:**",
     ]
 
-    diff_body = ""
     if suggested_fix:
         clean_fix = redact_sensitive_text(str(suggested_fix)).strip()
-        if clean_fix.startswith("```"):
-            fence_lines = clean_fix.splitlines()
-            if (
-                len(fence_lines) >= 2
-                and fence_lines[0].startswith("```")
-                and fence_lines[-1].strip() == "```"
-            ):
-                clean_fix = "\n".join(fence_lines[1:-1]).strip()
-
-        stripped_fix = clean_fix.lstrip()
-        if stripped_fix.startswith(("diff --git", "--- ", "+++ ")):
-            diff_body = clean_fix
-        elif stripped_fix.startswith("@@"):
-            diff_body = f"--- a/{clean_path}\n+++ b/{clean_path}\n{clean_fix}"
+        validated_diff = coerce_unified_diff(clean_fix, file_path=clean_path)
+        if validated_diff is not None:
+            bounded_diff = sanitize_output_text(
+                validated_diff, MAX_SUGGESTED_FIX_CHARS
+            )
+            lines.append("**Actionable Remediation Code Diff:**")
+            lines.append(f"```diff\n{bounded_diff}\n```")
         else:
-            snippet_lines = clean_fix.splitlines()
-            has_diff_markers = any(line.startswith(("-", "+")) for line in snippet_lines)
-            if has_diff_markers:
-                diff_body = (
-                    f"--- a/{clean_path}\n"
-                    f"+++ b/{clean_path}\n"
-                    f"@@ -{line_start},1 +{line_start},1 @@\n"
-                    + clean_fix
-                )
-            else:
-                diff_lines = [
-                    f"--- a/{clean_path}",
-                    f"+++ b/{clean_path}",
-                    f"@@ -{line_start},1 +{line_start},{max(1, len(snippet_lines))} @@",
-                ]
-                for s_line in snippet_lines:
-                    diff_lines.append(f"+ {s_line}")
-                diff_body = "\n".join(diff_lines)
+            # Prose is not a patch. Emit it as text so a diff-scraping
+            # auto-fix command can never mistake it for an applicable hunk.
+            bounded_fix = sanitize_output_text(clean_fix, MAX_SUGGESTED_FIX_CHARS)
+            lines.append("**Suggested Remediation (manual):**")
+            lines.append(f"```text\n{bounded_fix}\n```")
     else:
-        diff_body = (
-            f"--- a/{clean_path}\n"
-            f"+++ b/{clean_path}\n"
-            f"@@ -{line_start},1 +{line_start},1 @@\n"
-            f"# Manual remediation recommended for {clean_path} at line {line_ref}."
+        lines.append("**Suggested Remediation (manual):**")
+        lines.append(
+            "```text\n"
+            f"Manual remediation recommended for {clean_path} at line {line_ref}."
+            "\n```"
         )
-
-    bounded_diff = sanitize_output_text(diff_body, MAX_SUGGESTED_FIX_CHARS)
-    lines.append(f"```diff\n{bounded_diff}\n```")
 
     if finding_id:
         lines.append("")
