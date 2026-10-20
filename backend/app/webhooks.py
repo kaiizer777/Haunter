@@ -7,7 +7,15 @@ Handles incoming GitHub webhook events with strict security controls:
    on raw request bytes (401) — before any JSON parsing or routing.
 3. Delivery-id deduplication backed by DB unique constraint to close race windows.
 4. Repository tenant validation against registered repos.
-5. Immediate 2xx response (<200ms) with async pipeline scheduling via BackgroundTasks.
+5. Ingress response latency contract: under local memory rate limiting or
+   warm PostgreSQL operations, ingress response is immediate (<200ms) with
+   async pipeline scheduling via BackgroundTasks. Under shared PostgreSQL rate
+   limiting (WEBHOOK_RATE_LIMIT_BACKEND="postgres"), database round-trips
+   (advisory lock, prune, and record hit) are bounded by
+   STORE_ROUND_TRIP_TIMEOUT_SECONDS = 5.0s, comfortably below GitHub's
+   10-second webhook timeout limit. If a database call exceeds 5.0s (or fails),
+   degraded fallback trips immediately so subsequent deliveries return in
+   <200ms using in-memory rate limiting.
 6. Phase 5.1 (future02 §1.5) Auditor Mode trigger filter: pull_request
    (opened/synchronize), workflow_run.completed (failure/success), and
    issue_comment.created (@haunter-auditor audit) are evaluated against
@@ -929,6 +937,16 @@ async def _consume_webhook_rate_limit(
     open for misconfiguration, never fail closed on legitimate traffic), and
     that check happens HERE rather than inside a backend so it costs nothing
     and cannot be bypassed by whichever store is deployed.
+    Latency characteristics:
+      - Under local memory rate limiting or warm PostgreSQL operations, ingress
+        response is immediate (<200ms).
+      - Under shared PostgreSQL rate limiting (`WEBHOOK_RATE_LIMIT_BACKEND="postgres"`),
+        database round-trips for advisory lock, prune, and insert are bounded by
+        `STORE_ROUND_TRIP_TIMEOUT_SECONDS = 5.0s`, comfortably below GitHub's
+        10-second webhook timeout limit.
+      - If a database call exceeds 5.0s, degraded fallback trips immediately so
+        subsequent deliveries return in <200ms using in-memory rate limiting.
+
     `now` is a clock override for deterministic tests only.
     """
     maximum = settings.webhook_rate_limit_max_deliveries
@@ -2437,6 +2455,17 @@ async def github_webhook(
     The Repo pin is read from `_replay_repo_id_var`, never from a parameter: a
     plain parameter on this route would be an attacker-controlled query
     parameter on a public, signature-only endpoint. See that ContextVar.
+
+    Latency & timeout contract:
+      - Under local memory rate limiting or warm PostgreSQL operations, ingress
+        response is immediate (<200ms) with async pipeline scheduling via
+        BackgroundTasks.
+      - Under shared PostgreSQL rate limiting (`WEBHOOK_RATE_LIMIT_BACKEND="postgres"`),
+        database round-trips for advisory lock, prune, and insert are bounded by
+        `STORE_ROUND_TRIP_TIMEOUT_SECONDS = 5.0s`, comfortably below GitHub's
+        10-second webhook timeout limit.
+      - If a database call exceeds 5.0s, degraded fallback trips immediately so
+        subsequent deliveries return in <200ms using in-memory rate limiting.
     """
     replay_repo_id = _replay_repo_id_var.get()
     # 1. Early Content-Length check (cheap reject; not trusted on its own)
