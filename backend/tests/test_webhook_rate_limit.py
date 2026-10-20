@@ -308,7 +308,8 @@ def test_lambda_strict_flag_enforces_postgres_even_on_workers(
 def test_webhook_rate_limit_backend_selection_follows_setting(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
-    """The setting picks the store, and an unknown value degrades to memory."""
+    """The setting picks the store. Boot-time config fails closed (raising
+    ValidationError on typos), while the runtime factory provides defense-in-depth."""
     assert isinstance(
         rate_limit.build_rate_limit_backend("postgres"), PostgresRateLimitBackend
     )
@@ -322,8 +323,14 @@ def test_webhook_rate_limit_backend_selection_follows_setting(
         PostgresRateLimitBackend,
     )
 
-    # A typo must not silently switch the control off, and must not 5xx either:
-    # it degrades loudly (ERROR, alertable) to the in-memory limiter.
+    # Note: Invalid backend names in environment configuration fail closed at boot time
+    # with a pydantic ValidationError (see test_backend_selector_normalizes_and_rejects_at_load),
+    # preventing accidental misconfigurations from booting or silently falling back.
+    # If an unknown backend value is bypassed or injected directly into the runtime builder
+    # (as simulated here via monkeypatching), the runtime factory acts as a defense-in-depth
+    # fallback: it logs loudly (ERROR, alertable) and falls back to in-memory rather than
+    # raising a 5xx on requests or silently switching the rate limit control off.
+
     monkeypatch.setattr(settings, "webhook_rate_limit_backend", "rediss")
     with caplog.at_level("ERROR", logger="app.services.rate_limit"):
         assert isinstance(
@@ -336,7 +343,7 @@ def test_webhook_rate_limit_backend_selection_follows_setting(
 @pytest.mark.fast
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_blank_backend_name_degrades_to_memory(blank: str):
-    """The likeliest misconfiguration (empty env var) fails safe, not silent."""
+    """Runtime factory defense-in-depth: blank backend strings fall back to memory if bypassed past boot validation."""
     assert isinstance(
         rate_limit.build_rate_limit_backend(blank), InMemoryRateLimitBackend
     )
