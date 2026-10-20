@@ -342,12 +342,68 @@ def test_webhook_rate_limit_backend_selection_follows_setting(
 
 
 @pytest.mark.fast
-@pytest.mark.parametrize("blank", ["", "   "])
-def test_blank_backend_name_degrades_to_memory(blank: str):
-    """Runtime factory defense-in-depth: blank backend strings fall back to memory if bypassed past boot validation."""
-    assert isinstance(
-        rate_limit.build_rate_limit_backend(blank), InMemoryRateLimitBackend
-    )
+@pytest.mark.parametrize("invalid_name", ["", "   ", "redis", "unknown_v2"])
+def test_blank_backend_name_degrades_to_memory(
+    invalid_name: str, caplog: pytest.LogCaptureFixture
+):
+    """Runtime factory defense-in-depth: blank or unknown backend strings fall back to memory
+    and emit an alertable ERROR log if bypassed past boot validation."""
+    with caplog.at_level("ERROR", logger="app.services.rate_limit"):
+        backend = rate_limit.build_rate_limit_backend(invalid_name)
+    assert isinstance(backend, InMemoryRateLimitBackend)
+    assert "Unknown webhook rate limit backend" in caplog.text
+
+
+@pytest.mark.fast
+def test_unknown_backend_logging_deduplication(caplog: pytest.LogCaptureFixture):
+    """Verify log deduplication latch for unknown backend names.
+
+    a. Calling build_rate_limit_backend("invalid_a"): verify 1 log emitted and fallback to InMemoryRateLimitBackend.
+    b. Calling build_rate_limit_backend("invalid_a") again: verify NO second log is emitted (count remains 1).
+    c. Calling build_rate_limit_backend("invalid_b"): verify a new log is emitted (count becomes 2).
+    """
+    with caplog.at_level("ERROR", logger="app.services.rate_limit"):
+        # a. First call with invalid_a: 1 log emitted, fallback to InMemoryRateLimitBackend
+        backend_a1 = rate_limit.build_rate_limit_backend("invalid_a")
+        assert isinstance(backend_a1, InMemoryRateLimitBackend)
+        errors = [
+            r
+            for r in caplog.records
+            if r.name == "app.services.rate_limit" and r.levelname == "ERROR"
+        ]
+        assert len(errors) == 1
+        assert "Unknown webhook rate limit backend 'invalid_a'" in errors[0].getMessage()
+
+        # b. Second call with same invalid_a: NO new log emitted (count stays 1)
+        backend_a2 = rate_limit.build_rate_limit_backend("invalid_a")
+        assert isinstance(backend_a2, InMemoryRateLimitBackend)
+        errors = [
+            r
+            for r in caplog.records
+            if r.name == "app.services.rate_limit" and r.levelname == "ERROR"
+        ]
+        assert len(errors) == 1
+
+        # Normalized duplicate call (whitespace / casing) must also be suppressed by the latch
+        backend_a_norm = rate_limit.build_rate_limit_backend("  INVALID_A  ")
+        assert isinstance(backend_a_norm, InMemoryRateLimitBackend)
+        errors = [
+            r
+            for r in caplog.records
+            if r.name == "app.services.rate_limit" and r.levelname == "ERROR"
+        ]
+        assert len(errors) == 1
+
+        # c. Third call with different invalid_b: new log emitted (count becomes 2)
+        backend_b = rate_limit.build_rate_limit_backend("invalid_b")
+        assert isinstance(backend_b, InMemoryRateLimitBackend)
+        errors = [
+            r
+            for r in caplog.records
+            if r.name == "app.services.rate_limit" and r.levelname == "ERROR"
+        ]
+        assert len(errors) == 2
+        assert "Unknown webhook rate limit backend 'invalid_b'" in errors[1].getMessage()
 
 
 @pytest.mark.fast

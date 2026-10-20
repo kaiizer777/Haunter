@@ -496,6 +496,8 @@ _BACKENDS: dict[str, type[RateLimitBackend]] = {
 }
 
 _unknown_backend_names_logged: set[str] = set()
+#: Backwards-compatible alias for log deduplication latch inspection.
+_unknown_name_logged: set[str] = _unknown_backend_names_logged
 
 _resolved_name: Optional[str] = None
 _resolved: Optional[RateLimitBackend] = None
