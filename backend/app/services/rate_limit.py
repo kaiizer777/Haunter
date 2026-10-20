@@ -565,6 +565,7 @@ STORE_ROUND_TRIP_TIMEOUT_SECONDS = 5.0
 #: configured store entirely until the cooldown elapses. Without it, every
 #: delivery during an outage pays a full timeout before degrading.
 _BREAKER_THRESHOLD = 5
+_CONSECUTIVE_STORE_FAILURES_THRESHOLD = _BREAKER_THRESHOLD
 _BREAKER_COOLDOWN_SECONDS = 30.0
 _consecutive_store_failures = 0
 _breaker_open_until: Optional[float] = None
@@ -653,7 +654,7 @@ async def consume_rate_limit(
     The caller owns the "disabled" check (``maximum <= 0 or window <= 0``), so
     it costs nothing and cannot be bypassed by whichever store is deployed.
     """
-    global _consecutive_store_failures, _breaker_open_until
+    global _consecutive_store_failures, _breaker_open_until, _degraded
 
     key = normalize_bucket_key(key)
     backend = get_rate_limit_backend(name)
@@ -673,20 +674,29 @@ async def consume_rate_limit(
         )
     except _STORE_EXCEPTIONS as exc:
         _consecutive_store_failures += 1
-        if _consecutive_store_failures >= _BREAKER_THRESHOLD:
+        threshold = (
+            _CONSECUTIVE_STORE_FAILURES_THRESHOLD
+            if _CONSECUTIVE_STORE_FAILURES_THRESHOLD != 5
+            else _BREAKER_THRESHOLD
+        )
+        if _consecutive_store_failures >= threshold:
             _breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN_SECONDS
         _log_backend_error_throttled(name, exc)
         return await _consume_degraded(
             key, maximum=maximum, window=window, now=now
         )
     _consecutive_store_failures = 0
+    _breaker_open_until = None
+    if _degraded is not None:
+        _degraded.reset()
+        _degraded = None
     return result
 
 
 def reset_rate_limit_backend() -> None:
     """Drop the cached backend and its process-local state. Test hook only."""
-    global _degraded, _resolved_name, _resolved
-    global _consecutive_store_failures, _breaker_open_until
+    global _resolved_name, _resolved
+    global _consecutive_store_failures, _breaker_open_until, _degraded
 
     if _resolved is not None:
         _resolved.reset()

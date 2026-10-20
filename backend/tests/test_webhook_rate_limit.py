@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import time
 import uuid
 
 import httpx
@@ -568,6 +569,71 @@ async def test_breaker_skips_the_store_after_consecutive_failures(
     for i in range(5):
         assert await _consume_webhook_rate_limit("brk/brk|s", now=1000.0 + i) == 0
     assert calls["n"] == 3, f"breaker did not open: store hit {calls['n']}x"
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_breaker_cooldown_expiration_and_success_reset(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """After cooldown expires, a successful store operation cleanly resets the breaker."""
+    from app.webhooks import _consume_webhook_rate_limit
+
+    simulated_mono = 1000.0
+    monkeypatch.setattr(time, "monotonic", lambda: simulated_mono)
+
+    calls = {"n": 0}
+    failing = True
+
+    class _RecoverableStore:
+        async def consume(self, key, *, maximum, window, now=None):
+            calls["n"] += 1
+            if failing:
+                raise OSError("connection refused")
+            return 0
+
+    monkeypatch.setattr(settings, "webhook_rate_limit_backend", "postgres")
+    monkeypatch.setattr(settings, "webhook_rate_limit_max_deliveries", 100)
+    monkeypatch.setattr(settings, "webhook_rate_limit_window_seconds", 60)
+    monkeypatch.setattr(
+        rate_limit, "get_rate_limit_backend", lambda name: _RecoverableStore()
+    )
+
+    threshold = rate_limit._CONSECUTIVE_STORE_FAILURES_THRESHOLD
+    cooldown = rate_limit._BREAKER_COOLDOWN_SECONDS
+
+    # a. Trip circuit breaker open by driving consecutive store failures to the threshold
+    for i in range(threshold):
+        assert await _consume_webhook_rate_limit("recover/test|s", now=1000.0 + i) == 0
+
+    assert calls["n"] == threshold
+    assert rate_limit._consecutive_store_failures == threshold
+    assert rate_limit._breaker_open_until is not None
+    assert rate_limit._degraded is not None
+
+    # b. Verify breaker is open and subsequent calls route to degraded mode without querying primary store
+    calls_before = calls["n"]
+    for i in range(3):
+        assert await _consume_webhook_rate_limit("recover/test|s", now=1010.0 + i) == 0
+    assert calls["n"] == calls_before
+
+    # c. Advance simulated time past cooldown period
+    simulated_mono += cooldown + 1.0
+
+    # d. Execute a successful consume call against primary store
+    failing = False
+    assert await _consume_webhook_rate_limit("recover/test|s", now=2000.0) == 0
+    assert calls["n"] == calls_before + 1
+
+    # e. Assert breaker state cleanly resets:
+    assert rate_limit._consecutive_store_failures == 0
+    assert rate_limit._breaker_open_until is None
+    assert rate_limit._degraded is None
+
+    # f. Verify subsequent calls continue to use primary store normally
+    for i in range(3):
+        assert await _consume_webhook_rate_limit("recover/test|s", now=2001.0 + i) == 0
+    assert calls["n"] == calls_before + 1 + 3
 
 
 @pytest.mark.fast
