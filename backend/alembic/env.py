@@ -28,8 +28,8 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
+from app.alembic_target import prepare_migration_target  # noqa: E402
 from app.models import Base  # noqa: E402
-from app.config import settings  # noqa: E402
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -53,18 +53,10 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    from app.config import _to_asyncpg_url
+    target = prepare_migration_target()
 
-    target_url = (
-        os.environ.get("ALEMBIC_DATABASE_URL")
-        or os.environ.get("TARGET_DATABASE_URL")
-        or settings.async_database_url_unpooled
-    )
-    target_url = _to_asyncpg_url(target_url)
-
-    url = target_url
     context.configure(
-        url=url,
+        url=target.url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -86,17 +78,10 @@ async def run_async_migrations() -> None:
     and associate a connection with the context.
 
     """
-    from app.config import _to_asyncpg_url
-
-    target_url = (
-        os.environ.get("ALEMBIC_DATABASE_URL")
-        or os.environ.get("TARGET_DATABASE_URL")
-        or settings.async_database_url_unpooled
-    )
-    target_url = _to_asyncpg_url(target_url)
+    target = prepare_migration_target()
 
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = target_url
+    configuration["sqlalchemy.url"] = target.url
 
     connectable = async_engine_from_config(
         configuration,
