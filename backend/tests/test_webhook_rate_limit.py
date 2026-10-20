@@ -484,6 +484,96 @@ async def test_webhook_rate_limit_degrades_on_database_exceptions(
     assert rate_limit._consecutive_store_failures == 3
 
 
+# Finding 12 (review comment 4305214471): verify store outage survives through webhook HTTP endpoint
+@pytest.mark.fast
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        lambda: pytest.importorskip("sqlalchemy.exc").OperationalError(
+            "Neon connection refused", params=None, orig=Exception("connection refused")
+        ),
+        lambda: TimeoutError("Neon store connection timed out"),
+    ],
+    ids=["operational_error", "timeout_error"],
+)
+async def test_webhook_endpoint_survives_store_outage_in_degraded_mode(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error_factory,
+):
+    """Webhook HTTP endpoint survives shared store outage without returning HTTP 500.
+
+    When the shared store raises an infrastructure error (e.g. Neon connection refused,
+    timeout), the HTTP webhook endpoint (/webhooks/github) must:
+    1. Not raise unhandled exceptions or return HTTP 500.
+    2. Fall back to the in-process degraded limiter, returning HTTP 200 (ignored ping)
+       for deliveries within the degraded budget.
+    3. Throttling kicks in once the degraded budget is exhausted, returning HTTP 429
+       with a valid Retry-After header.
+    4. Confirm that logs record degraded mode engagement and the relaxed ceiling warning.
+    """
+    exc_to_raise = error_factory()
+
+    class _OutageStore:
+        async def consume(self, key, *, maximum, window, now=None):
+            raise exc_to_raise
+
+    monkeypatch.setattr(settings, "webhook_rate_limit_backend", "postgres")
+    monkeypatch.setattr(settings, "webhook_rate_limit_max_deliveries", 2)
+    monkeypatch.setattr(settings, "webhook_rate_limit_window_seconds", 60)
+    monkeypatch.setattr(
+        rate_limit, "get_rate_limit_backend", lambda name: _OutageStore()
+    )
+
+    with caplog.at_level("WARNING", logger="app.services.rate_limit"):
+        # 1. First delivery within budget: survives store outage, returns HTTP 200 (not 500)
+        resp1 = await _post_ping(client, "outage-org", "outage-repo", "outage-sender")
+        assert resp1.status_code == 200
+        assert resp1.json()["status"] == "ignored"
+
+        # 2. Second delivery within budget: also succeeds with HTTP 200
+        resp2 = await _post_ping(client, "outage-org", "outage-repo", "outage-sender")
+        assert resp2.status_code == 200
+        assert resp2.json()["status"] == "ignored"
+
+        # 3. Third delivery exceeds degraded budget (maximum=2): throttled with HTTP 429
+        resp3 = await _post_ping(client, "outage-org", "outage-repo", "outage-sender")
+        assert resp3.status_code == 429
+        assert "Retry-After" in resp3.headers
+        retry_after = int(resp3.headers["Retry-After"])
+        assert retry_after > 0
+        assert "rate limit" in resp3.json()["detail"].lower()
+
+        # 4. A different sender has its own independent degraded budget and still returns HTTP 200
+        resp_other = await _post_ping(client, "outage-org", "outage-repo", "quiet-sender")
+        assert resp_other.status_code == 200
+        assert resp_other.json()["status"] == "ignored"
+
+    # 5. Verify structured logging recorded degraded mode engagement and throttled decision
+    errors = [
+        r for r in caplog.records
+        if r.levelname == "ERROR" and r.name == "app.services.rate_limit"
+    ]
+    assert len(errors) == 1
+    assert "throttling with the in-process limiter" in errors[0].getMessage()
+
+    degraded_warnings = [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and r.name == "app.services.rate_limit"
+    ]
+    assert len(degraded_warnings) == 1
+    assert "operating in degraded in-memory mode with per-instance budget (relaxed global ceiling)" in degraded_warnings[0].getMessage()
+
+    webhook_decision_warnings = [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and r.name == "app.webhooks"
+    ]
+    assert len(webhook_decision_warnings) == 1
+    assert "status=throttled" in webhook_decision_warnings[0].getMessage()
+
+
 @pytest.mark.fast
 @pytest.mark.asyncio
 async def test_breaker_skips_the_store_after_consecutive_sqlalchemy_errors(
