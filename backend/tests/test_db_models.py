@@ -3,11 +3,14 @@ Database schema, model invariants, migrations, and connection pool tests (test_d
 """
 
 import hashlib
+import io
 
 import pytest
 from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from alembic.script import ScriptDirectory
-from sqlalchemy import select
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.pool import NullPool
@@ -25,6 +28,7 @@ from app.models import (
     RunStep,
     User,
     WebhookDelivery,
+    WebhookRateLimitHit,
 )
 from app.routers.traces import build_retry_child
 from tests.conftest import truncate_all
@@ -359,6 +363,126 @@ def test_issue_110_composite_indexes_match_models():
             f"upgrade-recovery op.drop_index call #{i} must set "
             "postgresql_concurrently=True"
         )
+
+
+def test_shared_webhook_rate_limit_migration_ddl_and_execution():
+    """Verify revision a2b3c4d5e6f7 upgrade() and downgrade() DDL and execution.
+
+    Finding 8 (PR 176): Revision DDL for
+    `a2b3c4d5e6f7_add_shared_webhook_rate_limit_store.py` must be compiled
+    and executed against SQLAlchemy engines/dialects to verify:
+    1. PostgreSQL dialect compilation produces valid DDL for table creation,
+       composite index (bucket_key, hit_at), standalone index (hit_at), and
+       clean downgrade drop_index / drop_table statements.
+    2. Alembic Operations execution against an active engine creates table
+       `webhook_rate_limit_hits` with expected columns, primary key, and indexes.
+    3. Downgrade execution cleanly drops both indexes and the table with zero dialect errors.
+    4. Table schema aligns with the SQLAlchemy WebhookRateLimitHit model.
+    """
+    cfg = Config("alembic.ini")
+    script = ScriptDirectory.from_config(cfg)
+    rev = script.get_revision("a2b3c4d5e6f7")
+    assert rev is not None, "Revision a2b3c4d5e6f7 not found in alembic script directory"
+    migration = rev.module
+
+    assert migration.revision == "a2b3c4d5e6f7"
+    assert migration.TABLE == "webhook_rate_limit_hits"
+    assert migration.TABLE == WebhookRateLimitHit.__tablename__
+
+    # ----- 1. PostgreSQL dialect offline DDL compilation -----
+    buf_upgrade = io.StringIO()
+    ctx_pg_up = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": buf_upgrade},
+    )
+    with Operations.context(ctx_pg_up):
+        migration.upgrade()
+
+    pg_upgrade_sql = buf_upgrade.getvalue()
+    assert "CREATE TABLE webhook_rate_limit_hits" in pg_upgrade_sql
+    assert "bucket_key VARCHAR(200) NOT NULL" in pg_upgrade_sql
+    assert "hit_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL" in pg_upgrade_sql
+    assert "PRIMARY KEY (id)" in pg_upgrade_sql
+    assert (
+        "CREATE INDEX ix_webhook_rate_limit_hits_key_hit_at ON webhook_rate_limit_hits (bucket_key, hit_at)"
+        in pg_upgrade_sql
+    )
+    assert (
+        "CREATE INDEX ix_webhook_rate_limit_hits_hit_at ON webhook_rate_limit_hits (hit_at)"
+        in pg_upgrade_sql
+    )
+
+    buf_downgrade = io.StringIO()
+    ctx_pg_down = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": buf_downgrade},
+    )
+    with Operations.context(ctx_pg_down):
+        migration.downgrade()
+
+    pg_downgrade_sql = buf_downgrade.getvalue()
+    assert "DROP INDEX ix_webhook_rate_limit_hits_hit_at" in pg_downgrade_sql
+    assert "DROP INDEX ix_webhook_rate_limit_hits_key_hit_at" in pg_downgrade_sql
+    assert "DROP TABLE webhook_rate_limit_hits" in pg_downgrade_sql
+
+    # ----- 2. Live execution against engine & schema validation -----
+    engine = create_engine("sqlite:///:memory:")
+    with engine.connect() as conn:
+        ctx_sqlite = MigrationContext.configure(conn)
+        with Operations.context(ctx_sqlite):
+            # Baseline: table does not exist yet
+            insp = inspect(conn)
+            assert "webhook_rate_limit_hits" not in insp.get_table_names()
+
+            # Execute upgrade()
+            migration.upgrade()
+
+            # Verify table exists
+            insp = inspect(conn)
+            assert "webhook_rate_limit_hits" in insp.get_table_names()
+
+            # Verify columns (names, primary key, nullability)
+            cols = {c["name"]: c for c in insp.get_columns("webhook_rate_limit_hits")}
+            assert set(cols.keys()) == {"id", "bucket_key", "hit_at"}
+            assert cols["id"]["primary_key"] == 1
+            assert cols["id"]["nullable"] is False
+            assert cols["bucket_key"]["nullable"] is False
+            assert cols["hit_at"]["nullable"] is False
+
+            # Verify indexes (names, column lists, uniqueness)
+            indexes = {
+                idx["name"]: idx
+                for idx in insp.get_indexes("webhook_rate_limit_hits")
+            }
+            assert "ix_webhook_rate_limit_hits_key_hit_at" in indexes
+            assert indexes["ix_webhook_rate_limit_hits_key_hit_at"]["column_names"] == [
+                "bucket_key",
+                "hit_at",
+            ]
+            assert not indexes["ix_webhook_rate_limit_hits_key_hit_at"]["unique"]
+
+            assert "ix_webhook_rate_limit_hits_hit_at" in indexes
+            assert indexes["ix_webhook_rate_limit_hits_hit_at"]["column_names"] == ["hit_at"]
+            assert not indexes["ix_webhook_rate_limit_hits_hit_at"]["unique"]
+
+            # Verify schema alignment against SQLAlchemy model
+            model_cols = [c.name for c in WebhookRateLimitHit.__table__.columns]
+            assert set(cols.keys()) == set(model_cols)
+
+            model_indexes = {
+                idx.name: [c.name for c in idx.columns]
+                for idx in WebhookRateLimitHit.__table__.indexes
+            }
+            for idx_name, idx_cols in model_indexes.items():
+                assert idx_name in indexes
+                assert indexes[idx_name]["column_names"] == idx_cols
+
+            # Execute downgrade()
+            migration.downgrade()
+
+            # Verify table and indexes are cleanly dropped
+            insp_after = inspect(conn)
+            assert "webhook_rate_limit_hits" not in insp_after.get_table_names()
 
 
 def test_to_asyncpg_url_variants():
