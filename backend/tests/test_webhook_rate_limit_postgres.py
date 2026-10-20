@@ -23,9 +23,10 @@ silently drop the whole 429 regression suite from the default run.
 """
 
 import asyncio
+from datetime import datetime
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import WebhookRateLimitHit
@@ -171,11 +172,72 @@ async def test_live_bucket_is_bounded_by_pruning_on_every_consume(
     # this bucket under `maximum`.
     backend = PostgresRateLimitBackend(prune_interval_seconds=10_000.0)
     key = "cycling/cycling|s"
+
+    async def _query_bucket_count() -> int:
+        res = await db.execute(
+            text("SELECT count(*) FROM webhook_rate_limit_hits WHERE bucket_key = :key"),
+            {"key": key},
+        )
+        return int(res.scalar_one())
+
+    async def _query_bucket_hit_times() -> list[datetime]:
+        res = await db.execute(
+            text(
+                "SELECT hit_at FROM webhook_rate_limit_hits "
+                "WHERE bucket_key = :key ORDER BY hit_at ASC"
+            ),
+            {"key": key},
+        )
+        return list(res.scalars().all())
+
     for cycle in range(5):
         base = 4000.0 + cycle * 100.0
-        for offset in range(3):
+
+        if cycle > 0:
+            # Before the new cycle's first consume, the previous cycle's 3 expired
+            # rows still physically exist in Postgres.
+            prior_count = await _query_bucket_count()
+            assert prior_count == 3, f"cycle {cycle}: expected 3 prior rows before consume, found {prior_count}"
+
+            # Consume the first hit in the new window. The per-consume DELETE in
+            # _consume_locked must physically delete all 3 expired rows from Postgres
+            # and insert exactly 1 new row.
+            assert await backend.consume(key, maximum=3, window=10, now=base) == 0
+
+            # Verify physical deletion: total rows in table for key MUST now strictly be 1.
+            # If the per-consume DELETE statement is removed or disabled, this assertion
+            # fails immediately (either because admission is refused leaving 3 stale rows,
+            # or if admitted without prune, accumulating to 4 rows).
+            first_count = await _query_bucket_count()
+            assert first_count == 1, (
+                f"cycle {cycle}: expired rows were not physically pruned on consume: "
+                f"expected 1 active row, found {first_count}"
+            )
+            hit_times = await _query_bucket_hit_times()
+            assert hit_times == [_to_utc_datetime(base)], (
+                f"cycle {cycle}: table contains stale timestamps: {hit_times}"
+            )
+
+            start_offset = 1
+        else:
+            start_offset = 0
+
+        for offset in range(start_offset, 3):
             assert await backend.consume(key, maximum=3, window=10, now=base + offset) == 0
-        assert await _row_count(db, key) == 3, f"cycle {cycle} leaked rows"
+            expected_current_count = offset + 1
+            current_count = await _query_bucket_count()
+            assert current_count == expected_current_count, (
+                f"cycle {cycle} offset {offset}: expected {expected_current_count} rows, found {current_count}"
+            )
+
+        # Total rows in the table strictly reflects only the active window hits (3 rows)
+        final_count = await _query_bucket_count()
+        assert final_count == 3, f"cycle {cycle} leaked rows: expected 3, found {final_count}"
+        expected_times = [_to_utc_datetime(base + off) for off in range(3)]
+        actual_times = await _query_bucket_hit_times()
+        assert actual_times == expected_times, (
+            f"cycle {cycle}: rows do not strictly match active window hits: {actual_times}"
+        )
 
 
 @pytest.mark.asyncio
