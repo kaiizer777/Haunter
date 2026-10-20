@@ -268,6 +268,15 @@ class PostgresRateLimitBackend:
     says under Lambda, where ten execution environments would otherwise each get
     their own budget.
 
+    Degraded Mode Trade-off:
+    When Postgres rate limiting fails or times out, :func:`consume_rate_limit`
+    degrades to :class:`InMemoryRateLimitBackend`. This trades off strict global
+    rate limiting for availability by enforcing local per-environment budgets
+    during store outages. While this prevents dropping or 5xx-ing webhooks, it
+    temporarily relaxes the security posture from a global aggregate ceiling
+    across all Lambda execution environments back to an isolated per-environment
+    ceiling (e.g. 10 Lambdas = up to a 10x multiplier on allowed deliveries).
+
     Uses a wall clock (:func:`time.time`) rather than :func:`time.monotonic`,
     because these rows are shared between processes and must be ordered against
     a clock they all agree on. Clock skew between machines therefore shows up as
@@ -571,7 +580,15 @@ _last_backend_error_log_at: dict[str, float] = {}
 async def _consume_degraded(
     key: str, *, maximum: int, window: int, now: Optional[float] = None
 ) -> int:
-    """Consume from the reused process-local limiter. Degraded mode only."""
+    """Consume from the reused process-local limiter. Degraded mode only.
+
+    Degraded mode trades off strict global rate limiting for availability by
+    enforcing local per-environment budgets during store outages. While this
+    prevents dropping or failing webhooks when the primary store is down, it
+    temporarily relaxes the security posture from a global aggregate ceiling
+    across all Lambda execution environments back to an isolated per-environment
+    ceiling (e.g. 10 Lambdas = up to a 10x delivery multiplier).
+    """
     global _degraded
 
     key = normalize_bucket_key(key)
@@ -601,6 +618,10 @@ def _log_backend_error_throttled(name: str, exc: BaseException) -> None:
         type(exc).__name__,
         _consecutive_store_failures,
     )
+    logger.warning(
+        "Postgres rate limit store unavailable; operating in degraded in-memory mode "
+        "with per-instance budget (relaxed global ceiling)"
+    )
 
 
 async def consume_rate_limit(
@@ -610,13 +631,20 @@ async def consume_rate_limit(
 
     Degrades to the process-local store when the configured one fails with a
     store/infrastructure error (``SQLAlchemyError``, ``OSError``, or a store
-    round-trip timeout). Anything else — a programming error in the backend
-    itself — propagates: degrading on those would turn every bug into silently
-    weaker throttling, which is exactly the failure mode the ERROR log exists
-    to surface. The throttler is a guard rail, not the product: a store outage
-    must not turn every webhook delivery into a 5xx, but a down limiter is
-    silently weaker than the operator believes it is and that has to stay
-    alertable, hence the throttled ERROR rather than silence.
+    round-trip timeout). Degraded mode trades off strict global rate limiting for
+    availability by enforcing local per-environment budgets during store outages.
+    While this prevents dropping or failing webhooks, it temporarily relaxes the
+    security posture from a global aggregate ceiling across all Lambda execution
+    environments back to an isolated per-environment ceiling (e.g. 10 Lambdas =
+    up to a 10x multiplier).
+
+    Anything else — a programming error in the backend itself — propagates:
+    degrading on those would turn every bug into silently weaker throttling, which
+    is exactly the failure mode the ERROR log exists to surface. The throttler is
+    a guard rail, not the product: a store outage must not turn every webhook
+    delivery into a 5xx, but a down limiter is silently weaker than the operator
+    believes it is and that has to stay alertable, hence the throttled ERROR and
+    relaxed ceiling WARNING rather than silence.
 
     Past ``_BREAKER_THRESHOLD`` consecutive failures the breaker opens and
     deliveries skip the store until the cooldown elapses, so an outage costs a

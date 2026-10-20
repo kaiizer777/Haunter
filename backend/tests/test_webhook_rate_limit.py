@@ -593,7 +593,7 @@ async def test_wedged_store_call_is_abandoned_after_the_timeout(
     assert rate_limit._consecutive_store_failures == 0
     assert rate_limit._degraded is None
 
-    with caplog.at_level("ERROR", logger="app.services.rate_limit"):
+    with caplog.at_level("WARNING", logger="app.services.rate_limit"):
         # First delivery: store hangs -> timeout triggers degraded mode.
         # InMemoryRateLimitBackend admits delivery (allowed=True, returns 0).
         # Remaining budget in degraded bucket decreases from 2 to 1.
@@ -626,9 +626,51 @@ async def test_wedged_store_call_is_abandoned_after_the_timeout(
     assert "throttling with the in-process limiter" in errors[0].getMessage()
     assert "TimeoutError" in errors[0].getMessage()
 
+    # Finding 9 (review comment 4305214461): verify degraded mode logs relaxed ceiling warning
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "operating in degraded in-memory mode with per-instance budget (relaxed global ceiling)" in warnings[0].getMessage()
+
 
 # Review comment 4305214447 alias: verify degraded mode enforces memory budget and does not fail open
 test_store_timeout_triggers_degraded_mode = test_wedged_store_call_is_abandoned_after_the_timeout
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_degraded_mode_logs_warning_about_relaxed_ceiling(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """When store degradation is triggered, log explicit warning on relaxed ceiling.
+
+    Degraded mode falls back to InMemoryRateLimitBackend, relaxing the global
+    aggregate ceiling to an isolated per-environment budget. Operators must
+    receive an explicit structured warning in logs.
+    """
+    from app.webhooks import _consume_webhook_rate_limit
+
+    class _FailingStore:
+        async def consume(self, key, *, maximum, window, now=None):
+            raise OSError("Postgres connection dropped")
+
+    monkeypatch.setattr(settings, "webhook_rate_limit_backend", "postgres")
+    monkeypatch.setattr(settings, "webhook_rate_limit_max_deliveries", 2)
+    monkeypatch.setattr(settings, "webhook_rate_limit_window_seconds", 10)
+    monkeypatch.setattr(
+        rate_limit, "get_rate_limit_backend", lambda name: _FailingStore()
+    )
+
+    with caplog.at_level("WARNING", logger="app.services.rate_limit"):
+        retry = await _consume_webhook_rate_limit("degraded/relaxed|s", now=1000.0)
+        assert retry == 0
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "Postgres rate limit store unavailable" in msg
+    assert "degraded in-memory mode" in msg
+    assert "per-instance budget" in msg
+    assert "relaxed global ceiling" in msg
 
 
 @pytest.mark.fast
