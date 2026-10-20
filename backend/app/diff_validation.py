@@ -128,6 +128,7 @@ def validate_unified_diff(patch_text: str) -> None:
     in_file = False
     file_hunks = 0
     saw_hunk = False
+    seen_paths: set[str] = set()
     # [old lines still expected, new lines still expected]
     hunk: Optional[list[int]] = None
 
@@ -150,7 +151,13 @@ def validate_unified_diff(patch_text: str) -> None:
         if hunk is not None:
             if line.startswith("@@"):
                 _fail(f"line {index}: hunk ended before its declared counts were met")
-            if line.startswith(("--- ", "+++ ", "diff --git ")):
+            # A removal (`--- legacy comment`) or addition (`+++ marker`)
+            # line is only a file split when it would split the commit-time
+            # parser: `diff --git`, or `--- ` directly followed by `+++ `.
+            next_line = lines[index].replace("\r", "") if index < len(lines) else ""
+            if line.startswith("diff --git ") or (
+                line.startswith("--- ") and next_line.startswith("+++ ")
+            ):
                 _fail(f"line {index}: file header appeared inside an open hunk")
             if line.startswith(" ") or line == "":
                 # An empty line inside a hunk is an empty *context* line:
@@ -175,6 +182,17 @@ def validate_unified_diff(patch_text: str) -> None:
             _fail(f"line {index}: invalid hunk body line")
 
         if line == "":
+            if in_file and file_hunks:
+                following = next(
+                    (
+                        later.replace("\r", "")
+                        for later in lines[index:]
+                        if later.strip()
+                    ),
+                    None,
+                )
+                if following is not None and following.startswith("@@"):
+                    _fail(f"line {index}: blank line between hunks of one file")
             continue
 
         if line.startswith("diff --git "):
@@ -201,10 +219,14 @@ def validate_unified_diff(patch_text: str) -> None:
         if line.startswith("+++ "):
             if pending_old is None:
                 _fail(f"line {index}: '+++' header without a preceding '---' header")
-            old_dev_null, _ = pending_old
-            new_dev_null, _ = _parse_header_path(line, "+++ ")
+            old_dev_null, old_path = pending_old
+            new_dev_null, new_path = _parse_header_path(line, "+++ ")
             if old_dev_null and new_dev_null:
                 _fail(f"line {index}: file has no old or new path")
+            file_path = old_path if new_dev_null else new_path
+            if file_path in seen_paths:
+                _fail(f"line {index}: duplicate file section for '{file_path}'")
+            seen_paths.add(file_path)
             pending_old = None
             in_file = True
             file_hunks = 0

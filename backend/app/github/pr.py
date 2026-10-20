@@ -1046,6 +1046,10 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
         # Must contain at least one hunk header @@
         if "@@" not in content:
             continue
+        if file_path in files:
+            raise GitHubPRValidationError(
+                "Refusing to apply remediation diff: duplicate file section."
+            )
         # Store the full per-file patch (header + body) for applier
         files[file_path] = (m.group(0) + content).strip()
     return files
@@ -1086,7 +1090,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
         if m:
             # Parse old start and length
             old_start = int(m.group(1))
-            _old_len = int(m.group(2)) if m.group(2) else 1
+            old_len = int(m.group(2)) if m.group(2) else 1
+            new_len = int(m.group(4)) if m.group(4) else 1
             # new_start = int(m.group(3))  # not needed for apply
             # Advance orig_idx to hunk start (1-based to 0-based)
             # old_start is 1-based line number in original
@@ -1095,9 +1100,16 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
             while orig_idx < target_idx and orig_idx < len(orig_lines):
                 new_lines.append(orig_lines[orig_idx])
                 orig_idx += 1
+            old_remaining = old_len
+            new_remaining = new_len
             i += 1
-            # Process hunk body until next @@ or EOF
+            # Process hunk body until next @@, EOF, or declared counts met.
+            # A blank line between hunks belongs to no hunk: once the body
+            # fulfills its counts the hunk ends, so stray lines can never
+            # leak into the output as spurious context.
             while i < len(lines) and not lines[i].startswith("@@"):
+                if old_remaining <= 0 and new_remaining <= 0:
+                    break
                 hunk_line = lines[i]
                 if hunk_line.startswith(" "):
                     # Context — must match original
@@ -1108,6 +1120,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                         return None
                     new_lines.append(orig_lines[orig_idx])
                     orig_idx += 1
+                    old_remaining -= 1
+                    new_remaining -= 1
                 elif hunk_line.startswith("-"):
                     # Deletion — must match original then skip
                     if (
@@ -1116,9 +1130,11 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                     ):
                         return None
                     orig_idx += 1
+                    old_remaining -= 1
                 elif hunk_line.startswith("+"):
                     # Addition — insert
                     new_lines.append(hunk_line[1:])
+                    new_remaining -= 1
                 elif hunk_line.startswith("\\"):
                     # No newline at end of file marker — ignore
                     pass
@@ -1129,6 +1145,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                         orig_idx += 1
                     else:
                         new_lines.append("")
+                    old_remaining -= 1
+                    new_remaining -= 1
                 else:
                     # Unknown prefix — bail
                     return None
