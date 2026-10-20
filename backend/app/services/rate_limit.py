@@ -49,6 +49,25 @@ from typing import Any, Optional, Protocol, runtime_checkable
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
+try:
+    import asyncpg
+
+    _STORE_EXCEPTIONS: tuple[type[BaseException], ...] = (
+        SQLAlchemyError,
+        OSError,
+        TimeoutError,
+        asyncio.TimeoutError,
+        asyncpg.PostgresError,
+        asyncpg.InterfaceError,
+    )
+except ImportError:  # pragma: no cover
+    _STORE_EXCEPTIONS = (
+        SQLAlchemyError,
+        OSError,
+        TimeoutError,
+        asyncio.TimeoutError,
+    )
+
 from app.models import WebhookRateLimitHit
 
 logger = logging.getLogger(__name__)
@@ -583,7 +602,7 @@ async def consume_rate_limit(
             backend.consume(key, maximum=maximum, window=window, now=now),
             timeout=STORE_ROUND_TRIP_TIMEOUT_SECONDS,
         )
-    except (SQLAlchemyError, OSError, asyncio.TimeoutError) as exc:
+    except _STORE_EXCEPTIONS as exc:
         _consecutive_store_failures += 1
         if _consecutive_store_failures >= _BREAKER_THRESHOLD:
             _breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN_SECONDS

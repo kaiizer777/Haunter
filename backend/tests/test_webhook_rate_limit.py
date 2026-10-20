@@ -425,6 +425,86 @@ async def test_webhook_rate_limit_degrades_when_the_store_raises(
 
 @pytest.mark.fast
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        lambda: pytest.importorskip("sqlalchemy.exc").OperationalError(
+            "connection closed", params=None, orig=Exception("connection closed")
+        ),
+        lambda: pytest.importorskip("sqlalchemy.exc").SQLAlchemyError("query failed"),
+        lambda: pytest.importorskip("sqlalchemy.exc").DBAPIError(
+            "dbapi failure", params=None, orig=Exception("dbapi error")
+        ),
+        lambda: pytest.importorskip("asyncpg").PostgresError("connection terminated"),
+    ],
+    ids=["operational_error", "sqlalchemy_error", "dbapi_error", "asyncpg_postgres_error"],
+)
+async def test_webhook_rate_limit_degrades_on_database_exceptions(
+    monkeypatch: pytest.MonkeyPatch, error_factory
+):
+    """Real database and driver connection drops degrade gracefully to in-memory store."""
+    from app.webhooks import _consume_webhook_rate_limit
+
+    exc_to_raise = error_factory()
+
+    class _DatabaseFailingStore:
+        async def consume(self, key, *, maximum, window, now=None):
+            raise exc_to_raise
+
+    monkeypatch.setattr(settings, "webhook_rate_limit_backend", "postgres")
+    monkeypatch.setattr(settings, "webhook_rate_limit_max_deliveries", 2)
+    monkeypatch.setattr(settings, "webhook_rate_limit_window_seconds", 10)
+    monkeypatch.setattr(
+        rate_limit, "get_rate_limit_backend", lambda name: _DatabaseFailingStore()
+    )
+
+    assert rate_limit._consecutive_store_failures == 0
+    # First delivery: allowed, breaker failure counter increments to 1
+    assert await _consume_webhook_rate_limit("db-deg/repo|s", now=1000.0) == 0
+    assert rate_limit._consecutive_store_failures == 1
+
+    # Second delivery: allowed, breaker failure counter increments to 2
+    assert await _consume_webhook_rate_limit("db-deg/repo|s", now=1001.0) == 0
+    assert rate_limit._consecutive_store_failures == 2
+
+    # Third delivery: in-memory fallback store budget exhausted, returns Retry-After 9
+    assert await _consume_webhook_rate_limit("db-deg/repo|s", now=1002.0) == 9
+    assert rate_limit._consecutive_store_failures == 3
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_breaker_skips_the_store_after_consecutive_sqlalchemy_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Consecutive SQLAlchemyErrors trip the circuit breaker open."""
+    from sqlalchemy.exc import SQLAlchemyError
+    from app.webhooks import _consume_webhook_rate_limit
+
+    calls = {"n": 0}
+
+    class _SqlWedgedStore:
+        async def consume(self, key, *, maximum, window, now=None):
+            calls["n"] += 1
+            raise SQLAlchemyError("connection pool exhausted")
+
+    monkeypatch.setattr(settings, "webhook_rate_limit_backend", "postgres")
+    monkeypatch.setattr(settings, "webhook_rate_limit_max_deliveries", 100)
+    monkeypatch.setattr(settings, "webhook_rate_limit_window_seconds", 60)
+    monkeypatch.setattr(
+        rate_limit, "get_rate_limit_backend", lambda name: _SqlWedgedStore()
+    )
+    monkeypatch.setattr(rate_limit, "_BREAKER_THRESHOLD", 3)
+    monkeypatch.setattr(rate_limit, "_BREAKER_COOLDOWN_SECONDS", 3600.0)
+
+    for i in range(5):
+        assert await _consume_webhook_rate_limit("sqlbrk/sqlbrk|s", now=1000.0 + i) == 0
+    assert calls["n"] == 3, f"breaker did not open: store hit {calls['n']}x"
+    assert rate_limit._breaker_open_until is not None
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
 async def test_programming_error_in_the_store_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ):

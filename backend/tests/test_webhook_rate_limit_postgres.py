@@ -345,3 +345,152 @@ async def test_postgres_rate_limit_surrogate_key_degrades_gracefully(db: AsyncSe
         "postgres", surrogate_key, maximum=2, window=10, now=1000.0
     )
     assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_postgres_rate_limit_degrades_on_operational_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """OperationalError (e.g. PgBouncer drop, connection reset) degrades to in-memory store."""
+    from sqlalchemy.exc import OperationalError
+    from app.services import rate_limit
+    from app.services.rate_limit import consume_rate_limit
+
+    async def _mock_execute(*args, **kwargs):
+        raise OperationalError(
+            "connection closed", params=None, orig=Exception("connection closed")
+        )
+
+    monkeypatch.setattr(AsyncSession, "execute", _mock_execute)
+
+    key = "operr/test|s"
+    # First consume: DB fails, degraded in-memory limiter admits, breaker failure count is 1
+    assert await consume_rate_limit("postgres", key, maximum=2, window=10, now=1000.0) == 0
+    assert rate_limit._consecutive_store_failures == 1
+    assert rate_limit._breaker_open_until is None
+
+    # Second consume: degraded limiter admits, breaker failure count is 2
+    assert await consume_rate_limit("postgres", key, maximum=2, window=10, now=1001.0) == 0
+    assert rate_limit._consecutive_store_failures == 2
+
+    # Third consume: degraded limiter budget exhausted, returns Retry-After 9
+    retry_after = await consume_rate_limit("postgres", key, maximum=2, window=10, now=1002.0)
+    assert retry_after == 9
+    assert rate_limit._consecutive_store_failures == 3
+
+
+@pytest.mark.asyncio
+async def test_postgres_rate_limit_degrades_on_sqlalchemy_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Generic SQLAlchemyError degrades to in-memory store and increments breaker counter."""
+    from sqlalchemy.exc import SQLAlchemyError
+    from app.services import rate_limit
+    from app.services.rate_limit import consume_rate_limit
+
+    async def _mock_execute(*args, **kwargs):
+        raise SQLAlchemyError("query failed")
+
+    monkeypatch.setattr(AsyncSession, "execute", _mock_execute)
+
+    key = "sqlerr/test|s"
+    assert await consume_rate_limit("postgres", key, maximum=2, window=10, now=1000.0) == 0
+    assert rate_limit._consecutive_store_failures == 1
+    assert rate_limit._breaker_open_until is None
+
+
+@pytest.mark.asyncio
+async def test_postgres_rate_limit_degrades_on_dbapi_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """DBAPIError degrades to in-memory store and increments breaker counter."""
+    from sqlalchemy.exc import DBAPIError
+    from app.services import rate_limit
+    from app.services.rate_limit import consume_rate_limit
+
+    async def _mock_execute(*args, **kwargs):
+        raise DBAPIError(
+            "statement execution failed", params=None, orig=Exception("dbapi error")
+        )
+
+    monkeypatch.setattr(AsyncSession, "execute", _mock_execute)
+
+    key = "dbapi/test|s"
+    assert await consume_rate_limit("postgres", key, maximum=2, window=10, now=1000.0) == 0
+    assert rate_limit._consecutive_store_failures == 1
+    assert rate_limit._breaker_open_until is None
+
+
+@pytest.mark.asyncio
+async def test_postgres_rate_limit_degrades_on_asyncpg_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Direct asyncpg.PostgresError degrades to in-memory store and increments breaker counter."""
+    import asyncpg
+    from app.services import rate_limit
+    from app.services.rate_limit import consume_rate_limit
+
+    async def _mock_execute(*args, **kwargs):
+        raise asyncpg.PostgresError("terminating connection due to administrator command")
+
+    monkeypatch.setattr(AsyncSession, "execute", _mock_execute)
+
+    key = "asyncpg/test|s"
+    assert await consume_rate_limit("postgres", key, maximum=2, window=10, now=1000.0) == 0
+    assert rate_limit._consecutive_store_failures == 1
+    assert rate_limit._breaker_open_until is None
+
+
+@pytest.mark.asyncio
+async def test_postgres_rate_limit_breaker_trips_on_consecutive_sqlalchemy_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Consecutive SQLAlchemyErrors trip the breaker open and subsequent calls skip the store."""
+    from sqlalchemy.exc import SQLAlchemyError
+    from app.services import rate_limit
+    from app.services.rate_limit import consume_rate_limit
+
+    calls = {"count": 0}
+
+    async def _mock_execute(*args, **kwargs):
+        calls["count"] += 1
+        raise SQLAlchemyError("pool connection exhausted")
+
+    monkeypatch.setattr(AsyncSession, "execute", _mock_execute)
+    threshold = rate_limit._BREAKER_THRESHOLD
+
+    key = "brk-sql/test|s"
+    for i in range(threshold):
+        res = await consume_rate_limit("postgres", key, maximum=100, window=60, now=2000.0 + i)
+        assert res == 0
+        assert rate_limit._consecutive_store_failures == i + 1
+
+    # Breaker is now tripped open
+    assert rate_limit._breaker_open_until is not None
+    calls_after_tripped = calls["count"]
+
+    # Next call skips store entirely
+    res = await consume_rate_limit(
+        "postgres", key, maximum=100, window=60, now=2000.0 + threshold
+    )
+    assert res == 0
+    assert calls["count"] == calls_after_tripped, "store was queried while circuit breaker was open"
+
+
+@pytest.mark.asyncio
+async def test_postgres_rate_limit_backend_consume_propagates_operational_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """PostgresRateLimitBackend.consume propagates OperationalError so caller orchestrator handles it."""
+    from sqlalchemy.exc import OperationalError
+
+    async def _mock_execute(*args, **kwargs):
+        raise OperationalError(
+            "connection closed", params=None, orig=Exception("connection closed")
+        )
+
+    monkeypatch.setattr(AsyncSession, "execute", _mock_execute)
+
+    backend = PostgresRateLimitBackend()
+    with pytest.raises(OperationalError, match="connection closed"):
+        await backend.consume("raw/test|s", maximum=2, window=10, now=1000.0)
