@@ -447,7 +447,7 @@ alembic current
 
 # 3. Look for a stale .env override before touching a live database. Never print
 #    values; rely on the redacted target line from step 2.
-Select-String -Path .env -Pattern '^(ALEMBIC_DATABASE_URL|TARGET_DATABASE_URL|DATABASE_URL_UNPOOLED)='
+(Select-String -Path .env -Pattern '^(ALEMBIC_DATABASE_URL|TARGET_DATABASE_URL)=').Matches.Value
 
 # 4. Before any destructive migration (downgrade, drop, rewrite, backfill), take a
 #    Neon branch/snapshot, or pg_dump the direct endpoint:
