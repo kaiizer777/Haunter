@@ -202,54 +202,119 @@ async def test_global_prune_reclaims_buckets_that_never_post_again(
 
 
 @pytest.mark.asyncio
-async def test_global_prune_is_interval_throttled(db: AsyncSession):
-    """The prune does not run on every new key.
+async def test_global_prune_is_interval_throttled(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+):
+    """The global prune execution is strictly gated by the interval.
 
     Unthrottled, every fresh attacker-chosen key would trigger a table-wide
-    DELETE on the request path.
+    DELETE on the request path. We spy on `_run_global_prune` to strictly verify
+    that the query execution obeys the interval gate rather than relying only on
+    row counts (which can be masked by per-bucket pruning or unexpired rows).
     """
     backend = PostgresRateLimitBackend()  # default 30s interval
+    prune_calls = 0
+    real_run_global_prune = backend._run_global_prune
+
+    async def _spy_run_global_prune(*args, **kwargs):
+        nonlocal prune_calls
+        prune_calls += 1
+        return await real_run_global_prune(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "_run_global_prune", _spy_run_global_prune)
 
     # First ever key: the pass runs, and there is nothing expired to reclaim.
     assert await backend.consume("gate/k1|s", maximum=5, window=10, now=5000.0) == 0
+    assert prune_calls == 1, "global prune query should execute on the first call"
     assert await _total_rows(db) == 1
 
-    # A different, never-seen key 10s later must NOT prune. `now` is 5010.0, not
-    # 5001.0, and that is the whole point: the pass reclaims `hit_at <= now - window`,
-    # so at now=5010.0 the cutoff is 5000.0 and the row written at 5000.0 IS expired
-    # and WOULD be reclaimed if the pass ran -- the assertion below would see 1 row,
-    # not 2. At now=5001.0 the cutoff is 4991.0, nothing is expired, and the
-    # assertion is satisfied whether the pass ran or not: it cannot see the throttle.
-    assert await backend.consume("gate/k2|s", maximum=5, window=10, now=5010.0) == 0
-    assert await _total_rows(db) == 2, "prune ran despite the interval not elapsing"
+    # Multiple subsequent calls across various keys within PRUNE_INTERVAL must NOT
+    # execute global prune again; the interval gate must skip execution.
+    for i, key in enumerate(("gate/k2|s", "gate/k3|s", "gate/k4|s", "gate/k1|s")):
+        assert (
+            await backend.consume(
+                key, maximum=5, window=10, now=5000.0 + 2.0 * (i + 1)
+            )
+            == 0
+        )
+        assert (
+            prune_calls == 1
+        ), f"global prune executed despite interval gate not elapsing on {key}"
 
-    # Past the interval it does: the two older rows are now outside the window.
+    # Past the interval it does: older rows outside the window are reclaimed.
     assert (
         await backend.consume(
-            "gate/k3|s",
+            "gate/k5|s",
             maximum=5,
             window=10,
             now=5000.0 + POSTGRES_PRUNE_INTERVAL_SECONDS,
         )
         == 0
     )
-    assert await _total_rows(db) == 1, "prune did not run after the interval elapsed"
+    assert (
+        prune_calls == 2
+    ), "global prune query did not execute after interval elapsed"
 
-    # ...and the interval resets, so the next new key is throttled again. 10s later,
-    # not 1s: if `_last_prune` had NOT been reset by the pass above, the pass would
-    # run again here (5040 - 5000 = 40 >= 30) with cutoff 5030.0, reclaiming the row
-    # written at 5030.0 and leaving one row instead of two. That difference is what
-    # this assertion now measures.
+    # ...and the interval resets, so the next new key is throttled again.
     assert (
         await backend.consume(
-            "gate/k4|s",
+            "gate/k6|s",
             maximum=5,
             window=10,
             now=5000.0 + POSTGRES_PRUNE_INTERVAL_SECONDS + 10.0,
         )
         == 0
     )
-    assert await _total_rows(db) == 2
+    assert (
+        prune_calls == 2
+    ), "global prune query ran within second interval"
+
+
+@pytest.mark.asyncio
+async def test_global_prune_interval_gate_call_count_strict(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Strictly verify global prune query execution count obeys the interval gate.
+
+    Verifies:
+    1. Call count = 1 on the first call.
+    2. Multiple subsequent calls across various keys within PRUNE_INTERVAL stay at 1.
+    3. Advancing simulated time past PRUNE_INTERVAL increments call count to 2.
+    4. Removing/bypassing the interval gate causes immediate test failure.
+    """
+    backend = PostgresRateLimitBackend(prune_interval_seconds=30.0)
+    prune_calls = 0
+
+    async def _mock_run_global_prune(db, *, now, window):
+        nonlocal prune_calls
+        prune_calls += 1
+
+    monkeypatch.setattr(backend, "_run_global_prune", _mock_run_global_prune)
+    dummy_db = None
+
+    # Initial call: prune runs once.
+    await backend._prune_expired_if_due(dummy_db, key="initial/key|s", now=1000.0, window=10)
+    assert prune_calls == 1
+
+    # Multiple subsequent calls across various keys within PRUNE_INTERVAL (30s) stay at 1.
+    keys_within_interval = ["sub/k1|s", "sub/k2|s", "sub/k3|s", "initial/key|s"]
+    for i, k in enumerate(keys_within_interval):
+        await backend._prune_expired_if_due(
+            dummy_db, key=k, now=1000.0 + 5.0 * (i + 1), window=10
+        )
+        assert prune_calls == 1, f"global prune executed unexpectedly on {k} within interval"
+
+    # Advance simulated time past PRUNE_INTERVAL (1000.0 + 30.0 = 1030.0): increments to 2.
+    await backend._prune_expired_if_due(
+        dummy_db, key="past/interval|s", now=1031.0, window=10
+    )
+    assert prune_calls == 2, "global prune did not execute after interval elapsed"
+
+    # Subsequent call within the new interval stays at 2.
+    await backend._prune_expired_if_due(
+        dummy_db, key="second/interval|s", now=1040.0, window=10
+    )
+    assert prune_calls == 2, "global prune executed during second interval"
 
 
 @pytest.mark.asyncio

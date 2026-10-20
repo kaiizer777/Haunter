@@ -387,6 +387,9 @@ class PostgresRateLimitBackend:
         # Claim the slot before running, so a prune that keeps failing cannot be
         # retried into a hot loop by every subsequent new key.
         self._last_prune = now
+        await self._run_global_prune(db, now=now, window=window)
+
+    async def _run_global_prune(self, db: Any, *, now: float, window: int) -> None:
         try:
             # Batched through an id subquery rather than a bare DELETE ... LIMIT:
             # the bound is what keeps this pass's row-lock set and its WAL small
