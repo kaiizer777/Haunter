@@ -1314,11 +1314,12 @@ def test_format_finding_comment_body_structure():
     assert "**Location:** `backend/app/auth.py#84`" in body
     assert "**What's Happening:**" in body
     assert "Untrusted user input interpolated in query." in body
-    assert "**Actionable Remediation Code Diff:**" in body
-    assert "```diff" in body
-    assert "--- a/backend/app/auth.py" in body
-    assert "+++ b/backend/app/auth.py" in body
-    assert "+ db.execute" in body
+    # A prose suggestion is not a diff: it is rendered as manual remediation,
+    # never under a ```diff fence that auto-fix could scrape and apply.
+    assert "**Suggested Remediation (manual):**" in body
+    assert "```text" in body
+    assert "```diff" not in body
+    assert "db.execute(select(User).where(User.id == user_id))" in body
     assert "AUD-B1" in body
 
     finding_suggestion = _make_finding(

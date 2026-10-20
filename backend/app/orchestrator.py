@@ -1459,10 +1459,15 @@ async def _orchestrator_pipeline_body(
                             generate_pr_text,
                             pr_branch_name,
                         )
+                        from app.diff_validation import (
+                            InvalidUnifiedDiffError,
+                            validate_unified_diff,
+                        )
                         from app.github.pr import (
-                            get_installation_token,
-                            create_branch,
+                            GitHubPRValidationError,
                             commit_patch,
+                            create_branch,
+                            get_installation_token,
                             open_pr,
                         )
 
@@ -1480,6 +1485,16 @@ async def _orchestrator_pipeline_body(
                             default_branch=repo.default_branch,
                         )
                         base_branch = repo.default_branch or "main"
+
+                        # Validate before create_branch: an invalid patch must
+                        # not leave an orphan branch pointing at HEAD.
+                        try:
+                            validate_unified_diff(attempt.patch_text)
+                        except InvalidUnifiedDiffError as invalid_patch:
+                            raise GitHubPRValidationError(
+                                "Verified fix patch is not a valid unified diff: "
+                                f"{invalid_patch}"
+                            ) from invalid_patch
 
                         await create_branch(
                             owner=repo.owner,
