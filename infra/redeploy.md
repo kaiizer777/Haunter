@@ -487,16 +487,16 @@ Remove-Item Env:\ALEMBIC_DATABASE_URL
 ALEMBIC_DATABASE_URL="<direct test Neon URL>" alembic upgrade head
 ```
 
-If the test database is on a different host from the live `DATABASE_URL_UNPOOLED`, add
-`ALEMBIC_ALLOW_DB_MISMATCH=1` for that invocation — scoped the same way as §10.4, so the
-bypass cannot outlive the command:
+If the test database is on a different host from the live `DATABASE_URL_UNPOOLED`, pass
+both the target URL and `ALEMBIC_ALLOW_DB_MISMATCH=1` for that invocation — scoped the
+same way as §10.4, so neither override outlives the command:
 
 ```powershell
-$env:ALEMBIC_ALLOW_DB_MISMATCH = "1"; alembic upgrade head; Remove-Item Env:\ALEMBIC_ALLOW_DB_MISMATCH
+$env:ALEMBIC_DATABASE_URL = "<direct test Neon URL>"; $env:ALEMBIC_ALLOW_DB_MISMATCH = "1"; alembic upgrade head; Remove-Item Env:\ALEMBIC_ALLOW_DB_MISMATCH; Remove-Item Env:\ALEMBIC_DATABASE_URL
 ```
 
 ```bash
-ALEMBIC_ALLOW_DB_MISMATCH=1 alembic upgrade head
+ALEMBIC_DATABASE_URL="<direct test Neon URL>" ALEMBIC_ALLOW_DB_MISMATCH=1 alembic upgrade head
 ```
 
 Hand-editing `.env` for a one-off migration is forbidden — it recreates the silent
