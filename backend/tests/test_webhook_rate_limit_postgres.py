@@ -138,9 +138,30 @@ async def test_concurrent_consume_never_overshoots_the_budget(db: AsyncSession):
     one per colliding pair. pg_advisory_xact_lock on the bucket key is what
     closes that window, and it has to close it for a key whose first delivery
     has no row to SELECT ... FOR UPDATE yet.
+
+    To ensure transactions strictly overlap at the advisory lock boundary rather
+    than accidentally serializing due to pool checkout or event loop turns,
+    all 10 tasks synchronize on a barrier before acquiring the lock. The task
+    holding the advisory lock then briefly yields so all 9 contending coroutines
+    issue their lock acquisition and queue in Postgres before any task finishes.
     """
     key = "race/race|s"
-    instances = [PostgresRateLimitBackend() for _ in range(10)]
+    barrier = asyncio.Barrier(10)
+
+    async def _before_lock():
+        await barrier.wait()
+
+    async def _after_lock():
+        # Yield to allow contending coroutines to reach and queue on pg_advisory_xact_lock
+        await asyncio.sleep(0.05)
+
+    instances = [
+        PostgresRateLimitBackend(
+            _before_lock_hook=_before_lock,
+            _after_lock_hook=_after_lock,
+        )
+        for _ in range(10)
+    ]
 
     results = await asyncio.gather(
         *(
@@ -151,6 +172,56 @@ async def test_concurrent_consume_never_overshoots_the_budget(db: AsyncSession):
     admitted = [r for r in results if r == 0]
     assert len(admitted) == 5, f"expected exactly 5 admissions, got {results}"
     assert await _row_count(db, key) == 5
+
+
+@pytest.mark.asyncio
+async def test_concurrent_consume_without_advisory_lock_overshoots_budget(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify that without pg_advisory_xact_lock, concurrent transactions overshoot the budget.
+
+    Using the exact same synchronized barrier at the transaction boundary, bypassing
+    the advisory lock causes contending coroutines under READ COMMITTED to read
+    the stale count (< 5) concurrently and over-admit beyond the budget ceiling.
+    """
+    key = "race/no-lock|s"
+    barrier = asyncio.Barrier(10)
+
+    async def _before_lock():
+        await barrier.wait()
+
+    async def _after_lock():
+        await asyncio.sleep(0.05)
+
+    # Monkeypatch the advisory lock to a no-op to verify the race condition
+    from sqlalchemy.ext.asyncio import AsyncSession as SqlAsyncSession
+
+    original_execute = SqlAsyncSession.execute
+
+    async def _mock_execute(self, statement, *args, **kwargs):
+        if "pg_advisory_xact_lock" in str(statement):
+            return None
+        return await original_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(SqlAsyncSession, "execute", _mock_execute)
+
+    instances = [
+        PostgresRateLimitBackend(
+            _before_lock_hook=_before_lock,
+            _after_lock_hook=_after_lock,
+        )
+        for _ in range(10)
+    ]
+
+    results = await asyncio.gather(
+        *(
+            instance.consume(key, maximum=5, window=60, now=3000.0)
+            for instance in instances
+        )
+    )
+    admitted = [r for r in results if r == 0]
+    assert len(admitted) > 5, f"expected race condition overshooting budget, got {results}"
+    assert await _row_count(db, key) == len(admitted)
 
 
 @pytest.mark.asyncio

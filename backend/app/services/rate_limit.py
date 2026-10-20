@@ -43,6 +43,7 @@ import hashlib
 import logging
 import time
 from collections import OrderedDict, deque
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -284,9 +285,15 @@ class PostgresRateLimitBackend:
     """
 
     def __init__(
-        self, *, prune_interval_seconds: float = POSTGRES_PRUNE_INTERVAL_SECONDS
+        self,
+        *,
+        prune_interval_seconds: float = POSTGRES_PRUNE_INTERVAL_SECONDS,
+        _before_lock_hook: Optional[Callable[[], Awaitable[None]]] = None,
+        _after_lock_hook: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         self._prune_interval = prune_interval_seconds
+        self._before_lock_hook = _before_lock_hook
+        self._after_lock_hook = _after_lock_hook
         # Insertion-ordered so the oldest-first eviction mirrors the in-memory
         # store's dict ordering. Bounded, or it would trade a leak in the table
         # for a leak in process memory.
@@ -366,10 +373,15 @@ class PostgresRateLimitBackend:
         order) — is closed on the prune side with SELECT ... FOR UPDATE
         SKIP LOCKED, so the global pass never waits on a row lock at all.
         """
+        if self._before_lock_hook is not None:
+            await self._before_lock_hook()
+
         await db.execute(
             text("SELECT pg_advisory_xact_lock(:lock_id)"),
             {"lock_id": bucket_lock_id(key)},
         )
+        if self._after_lock_hook is not None:
+            await self._after_lock_hook()
 
         cutoff_at = current_at - timedelta(seconds=window)
         await db.execute(
