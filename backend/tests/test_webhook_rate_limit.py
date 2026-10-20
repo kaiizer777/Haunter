@@ -645,3 +645,76 @@ def test_bucket_lock_ids_are_stable_and_key_scoped():
     assert bucket_lock_id("acme/acme-repo|some-sender") != bucket_lock_id(
         "acme/acme-repo|some-sender "
     )
+
+
+@pytest.mark.fast
+def test_bucket_lock_id_lone_surrogates():
+    """Lone surrogates must not raise UnicodeEncodeError and must hash deterministically.
+
+    Malicious or malformed payloads can supply lone surrogate code points
+    (\\ud800 - \\udfff) in repo names or user logins. Hashing with errors="replace"
+    ensures bucket_lock_id never throws UnicodeEncodeError and always produces
+    a valid, deterministic signed 64-bit integer.
+    """
+    surrogate_keys = [
+        "\ud800",
+        "\udfff",
+        "repo/\ud83d\ude00/user\ud800",
+        "repo/\ud800|user\udfff",
+        "\ud83d\ude00\ud800\udfff",
+    ]
+    for key in surrogate_keys:
+        lock_id_1 = bucket_lock_id(key)
+        lock_id_2 = bucket_lock_id(key)
+
+        # Determinism: calling twice with the same surrogate string returns the exact same int
+        assert lock_id_1 == lock_id_2
+
+        # Valid signed 64-bit integer range (pg_advisory_xact_lock range)
+        assert -(2**63) <= lock_id_1 < 2**63
+        assert isinstance(lock_id_1, int)
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_consume_rate_limit_with_surrogate_key():
+    """Consuming with a key containing lone surrogates succeeds without crashing."""
+    backend = InMemoryRateLimitBackend()
+    surrogate_key = "repo/\ud800|user\udfff"
+
+    assert await backend.consume(surrogate_key, maximum=2, window=10, now=1000.0) == 0
+    assert await backend.consume(surrogate_key, maximum=2, window=10, now=1001.0) == 0
+    assert await backend.consume(surrogate_key, maximum=2, window=10, now=1002.0) == 9
+
+    # Via consume_rate_limit entry point
+    assert (
+        await rate_limit.consume_rate_limit(
+            "memory", surrogate_key, maximum=2, window=10, now=1000.0
+        )
+        == 0
+    )
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_webhook_rate_limit_with_surrogate_payload_end_to_end(
+    client: httpx.AsyncClient,
+):
+    """End-to-end webhook request with surrogate characters in repo/sender."""
+    raw_body = (
+        b'{"zen": "surrogate test", '
+        b'"repository": {"name": "repo\\ud800", "full_name": "owner/repo\\ud800", "owner": {"login": "owner"}}, '
+        b'"sender": {"login": "user\\udfff", "type": "User"}}'
+    )
+    resp = await client.post(
+        "/webhooks/github",
+        headers={
+            "X-GitHub-Event": "ping",
+            "X-GitHub-Delivery": str(uuid.uuid4()),
+            "X-Hub-Signature-256": _sign(raw_body),
+            "Content-Type": "application/json",
+        },
+        content=raw_body,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ignored"

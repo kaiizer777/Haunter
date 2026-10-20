@@ -333,3 +333,15 @@ async def test_retry_after_survives_the_microsecond_round_trip(db: AsyncSession)
     # Computed from what the DATABASE returned — not from the float that was
     # sent — and still a whole number of seconds.
     assert await backend.consume(key, maximum=1, window=10, now=7002.123456) == 9
+
+
+@pytest.mark.asyncio
+async def test_postgres_rate_limit_surrogate_key_degrades_gracefully(db: AsyncSession):
+    """A bucket key with lone surrogates does not crash with unhandled UnicodeEncodeError."""
+    from app.services.rate_limit import consume_rate_limit
+
+    surrogate_key = "surrogate-org/surrogate-\ud800|user-\udfff"
+    result = await consume_rate_limit(
+        "postgres", surrogate_key, maximum=2, window=10, now=1000.0
+    )
+    assert result == 0

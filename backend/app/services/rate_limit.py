@@ -176,11 +176,17 @@ def bucket_lock_id(key: str) -> int:
     ``signed=True`` maps the digest into the signed 64-bit range that
     ``pg_advisory_xact_lock(bigint)`` accepts.
 
+    ``errors="replace"`` ensures strings containing lone surrogate characters
+    (e.g., malformed or adversarial inputs) do not raise UnicodeEncodeError
+    and produce a deterministic 64-bit signed integer.
+
     A collision is harmless: it over-serialises two unrelated buckets for the
     lifetime of one transaction. It does not merge their budgets, which is the
     only thing that would be a correctness bug.
     """
-    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    digest = hashlib.blake2b(
+        key.encode("utf-8", errors="replace"), digest_size=8
+    ).digest()
     return int.from_bytes(digest, "big", signed=True)
 
 
