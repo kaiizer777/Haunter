@@ -87,6 +87,27 @@ GIT_DIFF = (
             " line3\n",
             id="empty-context-line",
         ),
+        pytest.param(
+            "--- a/query.sql\n"
+            "+++ b/query.sql\n"
+            "@@ -1,2 +1,2 @@\n"
+            " SELECT 1\n"
+            "--- legacy comment\n"
+            "+-- new comment\n",
+            id="remove-sql-comment-line",
+        ),
+        pytest.param(
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1,1 +1,2 @@\n"
+            " line\n"
+            "+++ marker\n",
+            id="add-plus-plus-line",
+        ),
+        pytest.param(
+            MODIFY_DIFF + "\n" + CREATE_DIFF,
+            id="blank-line-between-file-sections",
+        ),
     ],
 )
 def test_valid_diffs_are_accepted(patch: str) -> None:
@@ -241,6 +262,22 @@ def test_valid_diffs_are_accepted(patch: str) -> None:
             "\n"
             "+one\n",
             id="empty-context-line-in-addition-only-hunk",
+        ),
+        pytest.param(
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-a\n"
+            "+b\n"
+            "\n"
+            "@@ -3,1 +3,1 @@\n"
+            "-c\n"
+            "+d\n",
+            id="blank-line-between-hunks",
+        ),
+        pytest.param(
+            MODIFY_DIFF + MODIFY_DIFF,
+            id="duplicate-file-section",
         ),
     ],
 )

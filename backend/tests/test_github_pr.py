@@ -33,6 +33,7 @@ from app.github.pr import (
     _build_jwt,
     _clear_pem_cache_for_tests,
     _escape_pr_text,
+    _apply_unified_diff_to_content,
     _parse_patch_files,
     _resolve_app_credentials,
     _resolve_write_credentials,
@@ -608,6 +609,41 @@ def test_parse_patch_files_with_deletion() -> None:
     parsed = _parse_patch_files(patch_text)
     assert "deleted_file.py" in parsed
     assert "+++ /dev/null" in parsed["deleted_file.py"]
+
+
+def test_parse_patch_files_duplicate_section_raises() -> None:
+    """A repeated file section must fail closed instead of last-wins."""
+    patch_text = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -2,1 +2,1 @@\n"
+        "-old2\n"
+        "+new2\n"
+    )
+    with pytest.raises(GitHubPRValidationError, match="duplicate"):
+        _parse_patch_files(patch_text)
+
+
+def test_apply_unified_diff_ignores_blank_line_between_hunks() -> None:
+    """A blank line between hunks must not apply as spurious context."""
+    original = "a\nb\nc\nd\n"
+    file_patch = (
+        "--- a/file.txt\n"
+        "+++ b/file.txt\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-a\n"
+        "+A\n"
+        "\n"
+        "@@ -3,1 +3,1 @@\n"
+        "-c\n"
+        "+C\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "A\nb\nC\nd\n"
 
 
 @pytest.mark.anyio
