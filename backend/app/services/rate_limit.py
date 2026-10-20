@@ -48,22 +48,27 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Protocol, runtime_checkable
 
 from sqlalchemy import delete, func, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 
 try:
     import asyncpg
+    from asyncpg.exceptions import PostgresError, UndefinedTableError
 
     _STORE_EXCEPTIONS: tuple[type[BaseException], ...] = (
         SQLAlchemyError,
+        ProgrammingError,
         OSError,
         TimeoutError,
         asyncio.TimeoutError,
-        asyncpg.PostgresError,
+        PostgresError,
+        UndefinedTableError,
         asyncpg.InterfaceError,
     )
 except ImportError:  # pragma: no cover
+    UndefinedTableError = None  # type: ignore[assignment, misc]
     _STORE_EXCEPTIONS = (
         SQLAlchemyError,
+        ProgrammingError,
         OSError,
         TimeoutError,
         asyncio.TimeoutError,
@@ -637,6 +642,21 @@ def _log_backend_error_throttled(name: str, exc: BaseException) -> None:
         "Postgres rate limit store unavailable; operating in degraded in-memory mode "
         "with per-instance budget (relaxed global ceiling)"
     )
+    orig = getattr(exc, "orig", None)
+    is_missing_table = (
+        isinstance(exc, ProgrammingError)
+        or (UndefinedTableError is not None and isinstance(exc, UndefinedTableError))
+        or (UndefinedTableError is not None and isinstance(orig, UndefinedTableError))
+        or "does not exist" in str(exc).lower()
+        or "undefinedtable" in type(exc).__name__.lower()
+        or (orig is not None and "undefinedtable" in type(orig).__name__.lower())
+    )
+    if is_missing_table:
+        logger.warning(
+            "Webhook rate limit table 'webhook_rate_limit_hits' does not exist "
+            "(migration a2b3c4d5e6f7 pending?); run 'alembic upgrade head'. "
+            "Operating in degraded in-memory mode."
+        )
 
 
 async def consume_rate_limit(

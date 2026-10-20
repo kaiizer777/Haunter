@@ -210,6 +210,16 @@ resource "aws_lambda_function" "haunter" {
       # reserved_concurrent_executions environments enforce ONE budget. Left as
       # "memory" each environment would enforce its own copy — 10x the
       # configured ceiling — and every cold start would reset the buckets.
+      #
+      # MANDATORY DEPLOYMENT SEQUENCE:
+      # Alembic migration a2b3c4d5e6f7 (a2b3c4d5e6f7_add_shared_webhook_rate_limit_store.py)
+      # MUST be applied (`alembic upgrade head`) BEFORE deploying Lambda with
+      # WEBHOOK_RATE_LIMIT_BACKEND="postgres". If Terraform is applied prior to running
+      # the migration, the orchestrator boots before the `webhook_rate_limit_hits` table
+      # exists; the rate limiter will detect the missing table (ProgrammingError /
+      # UndefinedTableError) and degrade gracefully to in-memory mode with a clear warning
+      # rather than returning 500, but true shared cross-Lambda rate limiting requires
+      # the migration to have run first.
       WEBHOOK_RATE_LIMIT_BACKEND        = var.webhook_rate_limit_backend
       WEBHOOK_RATE_LIMIT_MAX_DELIVERIES = tostring(var.webhook_rate_limit_max_deliveries)
       WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = tostring(var.webhook_rate_limit_window_seconds)

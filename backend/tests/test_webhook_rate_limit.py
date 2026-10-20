@@ -504,8 +504,19 @@ async def test_webhook_rate_limit_degrades_when_the_store_raises(
             "dbapi failure", params=None, orig=Exception("dbapi error")
         ),
         lambda: pytest.importorskip("asyncpg").PostgresError("connection terminated"),
+        lambda: pytest.importorskip("sqlalchemy.exc").ProgrammingError(
+            "SELECT count(*) FROM webhook_rate_limit_hits",
+            params=None,
+            orig=Exception('relation "webhook_rate_limit_hits" does not exist'),
+        ),
     ],
-    ids=["operational_error", "sqlalchemy_error", "dbapi_error", "asyncpg_postgres_error"],
+    ids=[
+        "operational_error",
+        "sqlalchemy_error",
+        "dbapi_error",
+        "asyncpg_postgres_error",
+        "programming_error_missing_table",
+    ],
 )
 async def test_webhook_rate_limit_degrades_on_database_exceptions(
     monkeypatch: pytest.MonkeyPatch, error_factory
@@ -628,6 +639,88 @@ async def test_webhook_endpoint_survives_store_outage_in_degraded_mode(
     ]
     assert len(webhook_decision_warnings) == 1
     assert "status=throttled" in webhook_decision_warnings[0].getMessage()
+
+
+# Finding 15 (review comment 4305214478): verify missing table (ProgrammingError / UndefinedTableError) degrades gracefully
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_webhook_rate_limit_degrades_on_missing_table_programming_error(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    """Missing table (ProgrammingError / UndefinedTableError) degrades to in-memory mode.
+
+    Simulates Terraform deploying WEBHOOK_RATE_LIMIT_BACKEND="postgres" before
+    the Alembic migration a2b3c4d5e6f7_add_shared_webhook_rate_limit_store.py
+    has executed against the database.
+    Querying the non-existent table throws ProgrammingError wrapping
+    UndefinedTableError ('relation "webhook_rate_limit_hits" does not exist').
+
+    The rate limiter must:
+    1. Cleanly degrade to in-memory limiter without returning a 500 error to GitHub.
+    2. Enforce the degraded budget (200 on initial deliveries, 429 when exhausted).
+    3. Log clear warnings about the missing table / pending migration and relaxed ceiling.
+    """
+    from sqlalchemy.exc import ProgrammingError
+
+    try:
+        from asyncpg.exceptions import UndefinedTableError
+        orig_err = UndefinedTableError('relation "webhook_rate_limit_hits" does not exist')
+    except ImportError:
+        orig_err = Exception('relation "webhook_rate_limit_hits" does not exist')
+
+    missing_table_exc = ProgrammingError(
+        "SELECT pg_advisory_xact_lock(:lock_id)",
+        params={"lock_id": 12345},
+        orig=orig_err,
+    )
+
+    class _MissingTableStore:
+        async def consume(self, key, *, maximum, window, now=None):
+            raise missing_table_exc
+
+    monkeypatch.setattr(settings, "webhook_rate_limit_backend", "postgres")
+    monkeypatch.setattr(settings, "webhook_rate_limit_max_deliveries", 2)
+    monkeypatch.setattr(settings, "webhook_rate_limit_window_seconds", 60)
+    monkeypatch.setattr(
+        rate_limit, "get_rate_limit_backend", lambda name: _MissingTableStore()
+    )
+
+    with caplog.at_level("WARNING", logger="app.services.rate_limit"):
+        # 1. First delivery within budget: survives missing table, returns HTTP 200 (not 500)
+        resp1 = await _post_ping(client, "mig-org", "mig-repo", "mig-sender")
+        assert resp1.status_code == 200
+        assert resp1.json()["status"] == "ignored"
+
+        # 2. Second delivery within budget: also succeeds with HTTP 200
+        resp2 = await _post_ping(client, "mig-org", "mig-repo", "mig-sender")
+        assert resp2.status_code == 200
+        assert resp2.json()["status"] == "ignored"
+
+        # 3. Third delivery exceeds degraded budget (maximum=2): throttled with HTTP 429
+        resp3 = await _post_ping(client, "mig-org", "mig-repo", "mig-sender")
+        assert resp3.status_code == 429
+        assert "Retry-After" in resp3.headers
+        assert int(resp3.headers["Retry-After"]) > 0
+        assert "rate limit" in resp3.json()["detail"].lower()
+
+    # 4. Verify structured logs record both the relaxed ceiling warning and the explicit missing table warning
+    errors = [
+        r for r in caplog.records
+        if r.levelname == "ERROR" and r.name == "app.services.rate_limit"
+    ]
+    assert len(errors) == 1
+    assert "ProgrammingError" in errors[0].getMessage()
+    assert "throttling with the in-process limiter" in errors[0].getMessage()
+
+    warnings = [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and r.name == "app.services.rate_limit"
+    ]
+    warning_msgs = [w.getMessage() for w in warnings]
+    assert any("relaxed global ceiling" in m for m in warning_msgs)
+    assert any("webhook_rate_limit_hits" in m and "a2b3c4d5e6f7" in m for m in warning_msgs)
 
 
 @pytest.mark.fast
