@@ -29,13 +29,17 @@ from pydantic import ValidationError
 import app.config
 import app.db
 from app.config import settings
+from app.models import MAX_BUCKET_KEY_LENGTH, WebhookRateLimitHit
 from app.services import rate_limit
 from app.services.rate_limit import (
+    BUCKET_KEY_MAX_LENGTH,
     InMemoryRateLimitBackend,
     PostgresRateLimitBackend,
+    bound_bucket_key,
     bucket_lock_id,
+    normalize_bucket_key,
 )
-from app.webhooks import _reset_webhook_rate_limiter
+from app.webhooks import _WEBHOOK_RATE_KEY_MAX_CHARS, _reset_webhook_rate_limiter
 
 TEST_SECRET = settings.github_webhook_secret or "test_webhook_secret_key_12345"
 
@@ -837,3 +841,96 @@ async def test_webhook_rate_limit_with_surrogate_payload_end_to_end(
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "ignored"
+
+
+@pytest.mark.fast
+def test_max_bucket_key_length_constants_and_model_alignment():
+    """Verify MAX_BUCKET_KEY_LENGTH is 200 and matches model and webhook definitions."""
+    from app.models import MAX_BUCKET_KEY_LENGTH as MODEL_MAX_KEY
+    from app.models import BUCKET_KEY_MAX_LENGTH as MODEL_MAX_KEY_ALIAS
+    from app.services.rate_limit import MAX_BUCKET_KEY_LENGTH as SERVICE_MAX_KEY
+    from app.services.rate_limit import BUCKET_KEY_MAX_LENGTH as SERVICE_MAX_KEY_ALIAS
+
+    assert MODEL_MAX_KEY == 200
+    assert MODEL_MAX_KEY_ALIAS == 200
+    assert SERVICE_MAX_KEY == 200
+    assert SERVICE_MAX_KEY_ALIAS == 200
+    assert _WEBHOOK_RATE_KEY_MAX_CHARS == 200
+
+    # Ensure WebhookRateLimitHit.bucket_key column length matches the constant exactly
+    assert WebhookRateLimitHit.bucket_key.type.length == 200
+    assert WebhookRateLimitHit.bucket_key.type.length == MODEL_MAX_KEY
+    assert WebhookRateLimitHit.bucket_key.type.length == SERVICE_MAX_KEY
+
+
+@pytest.mark.fast
+def test_normalize_bucket_key_bounds_oversized_keys():
+    """Verify keys are bounded to <= MAX_BUCKET_KEY_LENGTH characters."""
+    # Under or equal to max length: preserved verbatim
+    short_key = "owner/repo|sender"
+    assert normalize_bucket_key(short_key) == short_key
+    assert bound_bucket_key(short_key) == short_key
+
+    exact_200_key = "a" * 200
+    assert normalize_bucket_key(exact_200_key) == exact_200_key
+    assert len(normalize_bucket_key(exact_200_key)) == 200
+
+    # Oversized keys: 201, 300, 500, 2000 chars are bounded to <= MAX_BUCKET_KEY_LENGTH
+    for length in (201, 250, 300, 500, 2000):
+        oversized = "x" * length
+        bounded = normalize_bucket_key(oversized)
+        assert len(bounded) <= MAX_BUCKET_KEY_LENGTH
+        assert bound_bucket_key(oversized) == bounded
+        # Deterministic
+        assert normalize_bucket_key(oversized) == bounded
+
+    # Distinct oversized keys sharing a prefix produce distinct bounded keys (hash prevents collisions)
+    key_a = "prefix" * 40 + "_variant_a"
+    key_b = "prefix" * 40 + "_variant_b"
+    assert len(key_a) > 200
+    assert len(key_b) > 200
+    bounded_a = normalize_bucket_key(key_a)
+    bounded_b = normalize_bucket_key(key_b)
+    assert len(bounded_a) <= 200
+    assert len(bounded_b) <= 200
+    assert bounded_a != bounded_b
+
+    # Lone surrogates in oversized keys are handled safely
+    surrogate_oversized = "org/repo" + "\ud800" * 300
+    bounded_surrogate = normalize_bucket_key(surrogate_oversized)
+    assert len(bounded_surrogate) <= 200
+
+
+@pytest.mark.fast
+@pytest.mark.asyncio
+async def test_in_memory_backend_with_oversized_keys():
+    """In-memory rate limiter seamlessly handles keys longer than 200 chars."""
+    backend = InMemoryRateLimitBackend()
+    key_300 = "org/oversized-repository-name-that-is-exceptionally-long" * 5 + "|user"
+    assert len(key_300) > 200
+
+    assert await backend.consume(key_300, maximum=2, window=10, now=1000.0) == 0
+    assert await backend.consume(key_300, maximum=2, window=10, now=1001.0) == 0
+    # Throttled on third attempt
+    assert await backend.consume(key_300, maximum=2, window=10, now=1002.0) == 9
+
+    # Via consume_rate_limit entry point
+    assert (
+        await rate_limit.consume_rate_limit(
+            "memory", key_300, maximum=2, window=10, now=1000.0
+        )
+        == 0
+    )
+
+
+@pytest.mark.fast
+def test_bucket_lock_id_with_oversized_key():
+    """Advisory lock ID computation works deterministically with oversized keys."""
+    key_500 = "long_key_" * 55
+    assert len(key_500) > 200
+
+    lock_id_1 = bucket_lock_id(key_500)
+    lock_id_2 = bucket_lock_id(key_500)
+    assert lock_id_1 == lock_id_2
+    assert -(2**63) <= lock_id_1 < 2**63
+

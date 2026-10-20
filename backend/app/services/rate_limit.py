@@ -68,7 +68,40 @@ except ImportError:  # pragma: no cover
         asyncio.TimeoutError,
     )
 
-from app.models import WebhookRateLimitHit
+from app.models import (
+    BUCKET_KEY_MAX_LENGTH,
+    MAX_BUCKET_KEY_LENGTH,
+    WebhookRateLimitHit,
+)
+
+#: Authoritative ceiling on bucket key length (re-exported from app.models).
+MAX_BUCKET_KEY_LENGTH: int = MAX_BUCKET_KEY_LENGTH
+BUCKET_KEY_MAX_LENGTH: int = BUCKET_KEY_MAX_LENGTH
+
+
+def normalize_bucket_key(key: str) -> str:
+    """Ensure a bucket key does not exceed MAX_BUCKET_KEY_LENGTH characters.
+
+    If len(key) <= MAX_BUCKET_KEY_LENGTH, return key unchanged.
+    Otherwise, deterministically bound the key using a truncated prefix and
+    a SHA-256 digest so that:
+    1. The result is strictly <= MAX_BUCKET_KEY_LENGTH characters.
+    2. Insertion into WebhookRateLimitHit.bucket_key never raises Postgres DataError.
+    3. Distinct oversized keys that share a prefix do not collide into the same bucket.
+    4. Strings with lone surrogates are encoded safely with errors="replace".
+    """
+    if len(key) <= MAX_BUCKET_KEY_LENGTH:
+        return key
+
+    digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()
+    prefix_len = MAX_BUCKET_KEY_LENGTH - len(digest) - 1
+    prefix = key[:prefix_len] if prefix_len > 0 else ""
+    if prefix:
+        return f"{prefix}:{digest}"
+    return digest[:MAX_BUCKET_KEY_LENGTH]
+
+
+bound_bucket_key = normalize_bucket_key
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +199,7 @@ class InMemoryRateLimitBackend:
     async def consume(
         self, key: str, *, maximum: int, window: int, now: Optional[float] = None
     ) -> int:
+        key = normalize_bucket_key(key)
         current = now if now is not None else time.monotonic()
         async with self._lock:
             bucket = self._buckets.get(key)
@@ -203,6 +237,7 @@ def bucket_lock_id(key: str) -> int:
     lifetime of one transaction. It does not merge their budgets, which is the
     only thing that would be a correctness bug.
     """
+    key = normalize_bucket_key(key)
     digest = hashlib.blake2b(
         key.encode("utf-8", errors="replace"), digest_size=8
     ).digest()
@@ -252,6 +287,7 @@ class PostgresRateLimitBackend:
     async def consume(
         self, key: str, *, maximum: int, window: int, now: Optional[float] = None
     ) -> int:
+        key = normalize_bucket_key(key)
         current = now if now is not None else time.time()
         current_at = _to_utc_datetime(current)
 
@@ -538,6 +574,7 @@ async def _consume_degraded(
     """Consume from the reused process-local limiter. Degraded mode only."""
     global _degraded
 
+    key = normalize_bucket_key(key)
     if _degraded is None:
         _degraded = InMemoryRateLimitBackend()
     return await _degraded.consume(key, maximum=maximum, window=window, now=now)
@@ -590,6 +627,7 @@ async def consume_rate_limit(
     """
     global _consecutive_store_failures, _breaker_open_until
 
+    key = normalize_bucket_key(key)
     backend = get_rate_limit_backend(name)
     if _breaker_open_until is not None and time.monotonic() < _breaker_open_until:
         logger.debug(

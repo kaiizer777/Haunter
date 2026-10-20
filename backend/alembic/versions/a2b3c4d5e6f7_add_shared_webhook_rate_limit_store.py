@@ -15,7 +15,7 @@ buckets. One row per accepted delivery makes the budget a count over shared
 state instead of a per-process counter.
 
 bucket_key is the same `repo-full-name|sender-login` string the in-memory
-limiter used, VARCHAR(200) to match the truncation in `_webhook_rate_limit_key`
+limiter used, VARCHAR(200) to match MAX_BUCKET_KEY_LENGTH in app.models / app.services.rate_limit
 so no code path can produce a key the column cannot hold. It is an opaque
 throttle key derived from an attacker-influenced payload, never a tenant
 boundary, so this table carries no foreign key and no row written here is ever
@@ -63,6 +63,7 @@ def upgrade() -> None:
     op.create_table(
         TABLE,
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
+        # Length 200 matches MAX_BUCKET_KEY_LENGTH in app.models / app.services.rate_limit
         sa.Column("bucket_key", sa.String(length=200), nullable=False),
         sa.Column(
             "hit_at",

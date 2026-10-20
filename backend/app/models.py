@@ -929,6 +929,13 @@ class WebhookDelivery(Base):
     )
 
 
+#: Single authoritative ceiling on the length of a webhook rate limit bucket key.
+#: Matches the VARCHAR column size on WebhookRateLimitHit.bucket_key across the
+#: database migration, SQLAlchemy model, and the rate limiting service.
+MAX_BUCKET_KEY_LENGTH: int = 200
+BUCKET_KEY_MAX_LENGTH: int = MAX_BUCKET_KEY_LENGTH
+
+
 class WebhookRateLimitHit(Base):
     """
     Shared sliding-window buckets for webhook ingress throttling (issue #161).
@@ -959,10 +966,12 @@ class WebhookRateLimitHit(Base):
     __tablename__ = "webhook_rate_limit_hits"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    # 200 chars matches _WEBHOOK_RATE_KEY_MAX_CHARS in app/webhooks.py, which
-    # truncates the key before it ever reaches a store. Postgres VARCHAR counts
-    # characters and Python len() counts code points, so the two agree.
-    bucket_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    # MAX_BUCKET_KEY_LENGTH chars bounds the key across all stores and migrations.
+    # ensuring that no code path can exceed this column width.
+    # Postgres VARCHAR counts characters and Python len() counts code points, so the two agree.
+    bucket_key: Mapped[str] = mapped_column(
+        String(MAX_BUCKET_KEY_LENGTH), nullable=False
+    )
     hit_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

@@ -88,7 +88,15 @@ from app.llm.prompts.audit_prompts import (
     sanitize_output_markdown,
 )
 from app.log_hygiene import sanitize_log_value
-from app.models import AuditJob, CodeReview, Repo, Run, User, WebhookDelivery
+from app.models import (
+    AuditJob,
+    CodeReview,
+    MAX_BUCKET_KEY_LENGTH,
+    Repo,
+    Run,
+    User,
+    WebhookDelivery,
+)
 from app.schemas import (
     IssueCommentWebhookPayload,
     IssuesOpenedWebhookPayload,
@@ -158,7 +166,7 @@ _REPLAY_COOLDOWN_SECONDS = 30
 #
 # What stays here is the key builder, which must stay pure and synchronous: it
 # runs on the raw body before any JSON parse and must never raise.
-_WEBHOOK_RATE_KEY_MAX_CHARS = 200
+_WEBHOOK_RATE_KEY_MAX_CHARS = MAX_BUCKET_KEY_LENGTH
 
 # Decision reasons for a delivery that does not resolve to exactly one repos row.
 # Kept as two distinct strings because they are two different operational

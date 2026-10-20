@@ -29,11 +29,12 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import WebhookRateLimitHit
+from app.models import MAX_BUCKET_KEY_LENGTH, WebhookRateLimitHit
 from app.services.rate_limit import (
     POSTGRES_PRUNE_INTERVAL_SECONDS,
     PostgresRateLimitBackend,
     _to_utc_datetime,
+    normalize_bucket_key,
 )
 
 
@@ -621,3 +622,42 @@ async def test_postgres_rate_limit_backend_consume_propagates_operational_error(
     backend = PostgresRateLimitBackend()
     with pytest.raises(OperationalError, match="connection closed"):
         await backend.consume("raw/test|s", maximum=2, window=10, now=1000.0)
+
+
+@pytest.mark.asyncio
+async def test_postgres_rate_limit_backend_handles_oversized_keys_without_data_error(
+    db: AsyncSession,
+):
+    """Consuming with keys > 200 chars does not raise DataError and bounds rows safely."""
+    backend = PostgresRateLimitBackend()
+    oversized_key = "very-large-organization/" + "nested-subrepo-name-" * 15 + "|malicious-user"
+    assert len(oversized_key) > 200
+
+    # 1. First consume succeeds with 0, inserting a row without Postgres DataError
+    res1 = await backend.consume(oversized_key, maximum=2, window=10, now=5000.0)
+    assert res1 == 0
+
+    # 2. Second consume succeeds with 0
+    res2 = await backend.consume(oversized_key, maximum=2, window=10, now=5001.0)
+    assert res2 == 0
+
+    # 3. Third consume triggers 429 Retry-After (9 seconds)
+    res3 = await backend.consume(oversized_key, maximum=2, window=10, now=5002.0)
+    assert res3 == 9
+
+    # Verify rows in database
+    expected_bounded_key = normalize_bucket_key(oversized_key)
+    assert len(expected_bounded_key) <= MAX_BUCKET_KEY_LENGTH
+
+    rows = (
+        await db.execute(
+            select(WebhookRateLimitHit).where(
+                WebhookRateLimitHit.bucket_key == expected_bounded_key
+            )
+        )
+    ).scalars().all()
+
+    assert len(rows) == 2
+    for r in rows:
+        assert len(r.bucket_key) <= MAX_BUCKET_KEY_LENGTH
+        assert r.bucket_key == expected_bounded_key
