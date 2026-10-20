@@ -122,6 +122,36 @@ describe("ReposPage (app/repos/page.tsx)", () => {
     expect(githubLinks[1]).toHaveAttribute("href", "https://github.com/acme/backend-service");
   });
 
+  it("shows an accessible warning badge for a cross-tenant registration conflict", async () => {
+    vi.mocked(api.getRepos).mockResolvedValue([
+      { ...mockRepos[0], registration_conflict: true },
+      mockRepos[1],
+    ]);
+
+    render(<ReposPage />);
+
+    expect(await screen.findByText("acme/frontend-app")).toBeInTheDocument();
+    const badges = screen.getAllByText(/shared registration/i);
+    expect(badges).toHaveLength(1);
+
+    const badge = screen.getByRole("note", {
+      name: /registration conflict: another workspace tracks this repository/i,
+    });
+    expect(badge).toHaveTextContent(/deliveries are refused/i);
+    expect(badge.getAttribute("title")).toMatch(/workspace tracks this repository/i);
+  });
+
+  it("does not show the conflict badge when the flag is false", async () => {
+    vi.mocked(api.getRepos).mockResolvedValue(
+      mockRepos.map((repo) => ({ ...repo, registration_conflict: false }))
+    );
+
+    render(<ReposPage />);
+
+    expect(await screen.findByText("acme/backend-service")).toBeInTheDocument();
+    expect(screen.queryByText(/shared registration/i)).not.toBeInTheDocument();
+  });
+
   it("opens AddRepoModal when 'Connect Repository' button is clicked", async () => {
     const user = userEvent.setup();
     render(<ReposPage />);

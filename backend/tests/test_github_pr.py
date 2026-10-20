@@ -33,6 +33,7 @@ from app.github.pr import (
     _build_jwt,
     _clear_pem_cache_for_tests,
     _escape_pr_text,
+    _apply_unified_diff_to_content,
     _parse_patch_files,
     _resolve_app_credentials,
     _resolve_write_credentials,
@@ -610,6 +611,41 @@ def test_parse_patch_files_with_deletion() -> None:
     assert "+++ /dev/null" in parsed["deleted_file.py"]
 
 
+def test_parse_patch_files_duplicate_section_raises() -> None:
+    """A repeated file section must fail closed instead of last-wins."""
+    patch_text = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -2,1 +2,1 @@\n"
+        "-old2\n"
+        "+new2\n"
+    )
+    with pytest.raises(GitHubPRValidationError, match="duplicate"):
+        _parse_patch_files(patch_text)
+
+
+def test_apply_unified_diff_ignores_blank_line_between_hunks() -> None:
+    """A blank line between hunks must not apply as spurious context."""
+    original = "a\nb\nc\nd\n"
+    file_patch = (
+        "--- a/file.txt\n"
+        "+++ b/file.txt\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-a\n"
+        "+A\n"
+        "\n"
+        "@@ -3,1 +3,1 @@\n"
+        "-c\n"
+        "+C\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "A\nb\nC\nd\n"
+
+
 @pytest.mark.anyio
 async def test_commit_patch_with_deletion_produces_null_sha_tree_entry() -> None:
     """commit_patch for deleted file creates tree entry with sha=None without creating blob."""
@@ -674,8 +710,8 @@ async def test_commit_patch_with_deletion_produces_null_sha_tree_entry() -> None
 
 
 @pytest.mark.anyio
-async def test_commit_patch_with_deletion_mismatched_hunk_falls_back() -> None:
-    """commit_patch with mismatched deletion hunk falls back to haunter.patch."""
+async def test_commit_patch_with_deletion_mismatched_hunk_raises() -> None:
+    """A hunk that does not match the file is refused — never committed as haunter.patch."""
     import base64
 
     deletion_patch = (
@@ -685,14 +721,8 @@ async def test_commit_patch_with_deletion_mismatched_hunk_falls_back() -> None:
         "-expected_code_1\n"
         "-expected_code_2\n"
     )
-    captured_tree_payload = []
 
-    def _mock_trees(request: httpx.Request) -> httpx.Response:
-        data = json.loads(request.content)
-        captured_tree_payload.append(data)
-        return httpx.Response(201, json={"sha": "new_tree_sha_fallback"})
-
-    with respx.mock(base_url="https://api.github.com") as rx:
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
         rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
             return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
         )
@@ -705,33 +735,54 @@ async def test_commit_patch_with_deletion_mismatched_hunk_falls_back() -> None:
                 json={"content": base64.b64encode(b"completely_different_code\n").decode("ascii")},
             )
         )
-        rx.post("/repos/test-org/test-repo/git/blobs").mock(
+        blob_route = rx.post("/repos/test-org/test-repo/git/blobs").mock(
             return_value=httpx.Response(201, json={"sha": "blob_sha_fallback"})
         )
-        rx.post("/repos/test-org/test-repo/git/trees").mock(
-            side_effect=_mock_trees
+        tree_route = rx.post("/repos/test-org/test-repo/git/trees").mock(
+            return_value=httpx.Response(201, json={"sha": "new_tree_sha_fallback"})
         )
-        rx.post("/repos/test-org/test-repo/git/commits").mock(
+        commit_route = rx.post("/repos/test-org/test-repo/git/commits").mock(
             return_value=httpx.Response(201, json={"sha": "new_commit_fallback"})
         )
-        rx.patch("/repos/test-org/test-repo/git/refs/heads/haunter/fix-test").mock(
-            return_value=httpx.Response(200, json={"object": {"sha": "new_commit_fallback"}})
-        )
 
-        commit_sha = await commit_patch(
-            owner="test-org",
-            repo="test-repo",
-            branch="haunter/fix-test",
-            patch_text=deletion_patch,
-            commit_msg="chore: delete obsolete module",
-            token="fake_token",
-        )
+        with pytest.raises(GitHubPRValidationError, match="does not match"):
+            await commit_patch(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-test",
+                patch_text=deletion_patch,
+                commit_msg="chore: delete obsolete module",
+                token="fake_token",
+            )
 
-    assert commit_sha == "new_commit_fallback"
-    assert len(captured_tree_payload) == 1
-    tree_entries = captured_tree_payload[0]["tree"]
-    assert len(tree_entries) == 1
-    assert tree_entries[0]["path"] == "haunter.patch"
+    # No blob, tree, commit, or ref mutation may happen for a patch that did
+    # not apply. In particular the raw diff must never be written as a file.
+    assert not blob_route.called
+    assert not tree_route.called
+    assert not commit_route.called
+
+
+@pytest.mark.anyio
+async def test_commit_patch_rejects_malformed_diff_before_http() -> None:
+    """Malformed patches raise before the first GitHub request."""
+    malformed_patch = (
+        "*** Begin Patch\n"
+        "*** Update File: obsolete_module.py\n"
+        "*** End Patch\n"
+    )
+
+    with respx.mock(assert_all_called=False) as rx:
+        with pytest.raises(GitHubPRValidationError, match="malformed"):
+            await commit_patch(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-test",
+                patch_text=malformed_patch,
+                commit_msg="fix: something",
+                token="fake_token",
+            )
+
+    assert len(rx.calls) == 0
 
 
 @pytest.mark.anyio

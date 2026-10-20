@@ -339,6 +339,164 @@ async def test_post_repo_same_owner_name_different_user(
 
 
 @pytest.mark.asyncio
+async def test_registration_conflict_visible_on_post_and_list(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """
+    A cross-tenant duplicate flags both tenants while staying tenant-scoped:
+    the first registration is clean, the second reports the conflict, and each
+    GET /repos sees only its own row — now flagged true.
+    """
+    await truncate_all(db)
+    user_a = await user_factory(github_id=720, username="conflict_user_a")
+    user_b = await user_factory(github_id=721, username="conflict_user_b")
+    client_a = make_auth_client(user_a.id)
+    client_b = make_auth_client(user_b.id)
+
+    async with client_a:
+        resp_a = await client_a.post(
+            "/repos", json={"owner": "shared-org", "name": "shared-repo"}
+        )
+        assert resp_a.status_code == 201
+        assert resp_a.json()["registration_conflict"] is False
+
+        list_a_before = (await client_a.get("/repos")).json()
+        assert len(list_a_before) == 1
+        assert list_a_before[0]["registration_conflict"] is False
+
+        async with client_b:
+            resp_b = await client_b.post(
+                "/repos", json={"owner": "shared-org", "name": "shared-repo"}
+            )
+            assert resp_b.status_code == 201
+            assert resp_b.json()["registration_conflict"] is True
+
+            list_b = (await client_b.get("/repos")).json()
+            assert len(list_b) == 1
+            assert list_b[0]["registration_conflict"] is True
+
+        list_a_after = (await client_a.get("/repos")).json()
+    assert len(list_a_after) == 1
+    assert list_a_after[0]["registration_conflict"] is True
+
+    # Both registrations survive: this is visibility, not a new uniqueness rule.
+    assert list_a_after[0]["id"] != list_b[0]["id"]
+    assert list_a_after[0]["owner"] == list_b[0]["owner"] == "shared-org"
+    assert list_a_after[0]["name"] == list_b[0]["name"] == "shared-repo"
+
+
+@pytest.mark.asyncio
+async def test_registration_conflict_false_for_sole_registration(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """A repo tracked by only one tenant is never flagged, on POST or GET."""
+    await truncate_all(db)
+    user = await user_factory(github_id=722, username="sole_registration_user")
+    client = make_auth_client(user.id)
+
+    async with client:
+        resp = await client.post(
+            "/repos", json={"owner": "private-org", "name": "only-tenant"}
+        )
+        assert resp.status_code == 201
+        assert resp.json()["registration_conflict"] is False
+
+        listed = (await client.get("/repos")).json()
+        assert len(listed) == 1
+        assert listed[0]["registration_conflict"] is False
+
+
+@pytest.mark.asyncio
+async def test_registration_conflict_is_exact_case(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """
+    Case variants are distinct to the webhook resolver (exact equality), so
+    they must not be reported as a conflict.
+    """
+    await truncate_all(db)
+    user_a = await user_factory(github_id=723, username="case_user_a")
+    user_b = await user_factory(github_id=724, username="case_user_b")
+    client_a = make_auth_client(user_a.id)
+    client_b = make_auth_client(user_b.id)
+
+    async with client_a:
+        resp_a = await client_a.post(
+            "/repos", json={"owner": "Case-Org", "name": "Case-Repo"}
+        )
+        assert resp_a.status_code == 201
+        assert resp_a.json()["registration_conflict"] is False
+
+        async with client_b:
+            resp_b = await client_b.post(
+                "/repos", json={"owner": "case-org", "name": "case-repo"}
+            )
+            assert resp_b.status_code == 201
+            assert resp_b.json()["registration_conflict"] is False
+
+            list_b = (await client_b.get("/repos")).json()
+            assert len(list_b) == 1
+            assert list_b[0]["registration_conflict"] is False
+
+        list_a = (await client_a.get("/repos")).json()
+    assert len(list_a) == 1
+    assert list_a[0]["registration_conflict"] is False
+
+
+@pytest.mark.asyncio
+async def test_patch_repo_auditor_install_returns_registration_conflict(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """
+    PATCH /repos/{id}/auditor-install carries the derived conflict flag too:
+    true for a cross-tenant duplicate, false for a sole registration, and the
+    existing 404-on-non-owner contract still holds.
+    """
+    await truncate_all(db)
+    user_a = await user_factory(github_id=725, username="patch_user_a")
+    user_b = await user_factory(github_id=726, username="patch_user_b")
+
+    conflicted_repo = Repo(
+        user_id=user_a.id, owner="patch-org", name="conflicted-repo"
+    )
+    unique_repo = Repo(user_id=user_a.id, owner="patch-org", name="unique-repo")
+    other_tenant_repo = Repo(
+        user_id=user_b.id, owner="patch-org", name="conflicted-repo"
+    )
+    db.add_all([conflicted_repo, unique_repo, other_tenant_repo])
+    await db.commit()
+    await db.refresh(conflicted_repo)
+    await db.refresh(unique_repo)
+    await db.refresh(other_tenant_repo)
+
+    client_a = make_auth_client(user_a.id)
+
+    async with client_a:
+        resp_conflicted = await client_a.patch(
+            f"/repos/{conflicted_repo.id}/auditor-install",
+            json={"auditor_github_install_id": 4242},
+        )
+        assert resp_conflicted.status_code == 200
+        body = resp_conflicted.json()
+        assert body["auditor_github_install_id"] == 4242
+        assert body["registration_conflict"] is True
+
+        resp_unique = await client_a.patch(
+            f"/repos/{unique_repo.id}/auditor-install",
+            json={"auditor_github_install_id": 4343},
+        )
+        assert resp_unique.status_code == 200
+        assert resp_unique.json()["registration_conflict"] is False
+
+        resp_non_owned = await client_a.patch(
+            f"/repos/{other_tenant_repo.id}/auditor-install",
+            json={"auditor_github_install_id": 4444},
+        )
+        assert resp_non_owned.status_code == 404
+        assert resp_non_owned.json() == {"detail": "Repo not found"}
+
+
+@pytest.mark.asyncio
 async def test_post_repo_missing_required_fields(
     db: AsyncSession, user_factory, make_auth_client
 ):

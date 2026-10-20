@@ -1,7 +1,7 @@
 """issue 161: shared webhook ingress rate limit store
 
 Revision ID: a2b3c4d5e6f7
-Revises: c2d3e4f5a6b7
+Revises: d5e6f7a8b9c0
 Create Date: 2026-10-17 00:00:00.000000
 
 Adds webhook_rate_limit_hits, the cross-execution-environment backing store
@@ -52,7 +52,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a2b3c4d5e6f7"
-down_revision: Union[str, Sequence[str], None] = "c2d3e4f5a6b7"
+down_revision: Union[str, Sequence[str], None] = "d5e6f7a8b9c0"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -73,6 +73,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
+from app.diff_validation import (
+    InvalidUnifiedDiffError,
+    coerce_unified_diff,
+    validate_unified_diff,
+)
 from app.github.pr import REVIEWABLE_PR_ACTIONS, is_reviewable_pr_action
 from app.llm import LLMClient
 from app.llm.prompts.audit_prompts import (
@@ -90,6 +95,7 @@ from app.schemas import (
     PullRequestReviewCommentWebhookPayload,
     WorkflowRunWebhookPayload,
 )
+from app.self_invocation import KIND_RETENTION, verify_self_invocation
 from app.services import audit_pipeline, feature_enforcement
 from app.services.followup_commands import (
     FEEDBACK_CONCLUSION,
@@ -102,6 +108,11 @@ from app.services.rate_limit import consume_rate_limit, reset_rate_limit_backend
 from app.services.review_orchestrator import (
     REVIEW_STATUS_COMPLETED,
     REVIEW_STATUS_SUPPRESSED,
+)
+from app.services.webhook_retention import (
+    RETENTION_SWEEP_IDENTIFIER,
+    RetentionSweepResult,
+    sweep_webhook_delivery_retention,
 )
 
 logger = logging.getLogger(__name__)
@@ -1233,6 +1244,28 @@ class WebhookReplayResultOut(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class WebhookRetentionSweepOut(BaseModel):
+    """Result of one retention sweep — counts only, never any stored content."""
+
+    payloads_cleared: int
+    rows_deleted: int
+    payload_cutoff: datetime
+    row_cutoff: datetime
+    batches_run: int
+
+    model_config = ConfigDict(extra="forbid")
+
+    @classmethod
+    def from_result(cls, result: RetentionSweepResult) -> "WebhookRetentionSweepOut":
+        return cls(
+            payloads_cleared=result.payloads_cleared,
+            rows_deleted=result.rows_deleted,
+            payload_cutoff=result.payload_cutoff,
+            row_cutoff=result.row_cutoff,
+            batches_run=result.batches_run,
+        )
+
+
 def _owned_repo_ids(user_id: uuid.UUID):
     """Subquery of repo ids owned by `user_id` — the single tenant boundary.
 
@@ -1636,6 +1669,62 @@ async def replay_webhook_delivery(
     )
 
 
+@router.post(
+    "/deliveries/retention-sweep",
+    response_model=WebhookRetentionSweepOut,
+    status_code=status.HTTP_200_OK,
+)
+async def sweep_webhook_deliveries(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    x_haunter_retention_token: Annotated[
+        Optional[str], Header(alias="X-Haunter-Retention-Token")
+    ] = None,
+) -> WebhookRetentionSweepOut:
+    """Apply the split retention windows to `webhook_deliveries`.
+
+    Machine-triggered, NOT a user-facing endpoint: there is no UI for it and no
+    dashboard button should ever be added — it NULLs payloads and deletes rows,
+    which is an operator/lifecycle action, not something a tenant user gets to
+    trigger at will.
+
+    Auth is the self-invocation HMAC (`app.self_invocation`) under the
+    `retention` kind, NOT a session cookie. Two reasons:
+
+      * The Function URL this backend is served from is public
+        (`authorization_type = "NONE"`, infra/aws/lambda.tf). A cookie-gated
+        variant would be a session-authenticated destructive endpoint on a
+        public origin, and the cron would have to be handed a real user's
+        long-lived session cookie to call it.
+      * The token is domain-separated, so it cannot be exchanged for a token
+        that mints LLM work or for access to another tenant's deliveries. Its
+        worst case is "trigger one idempotent retention pass again".
+
+    `verify_self_invocation` returns False for a missing header, a malformed
+    token, AND an unconfigured `AUDIT_SELF_INVOKE_SECRET`, so an unconfigured
+    deployment fails closed instead of running an unauthenticated sweep. The
+    response carries counts and cutoffs only — never a stored payload.
+    """
+    if not verify_self_invocation(
+        KIND_RETENTION, RETENTION_SWEEP_IDENTIFIER, x_haunter_retention_token
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing retention sweep token",
+        )
+
+    result = await sweep_webhook_delivery_retention(db)
+    logger.info(
+        "webhook_retention_sweep payloads_cleared=%d rows_deleted=%d batches=%d "
+        "payload_cutoff=%s row_cutoff=%s",
+        result.payloads_cleared,
+        result.rows_deleted,
+        result.batches_run,
+        result.payload_cutoff.isoformat(),
+        result.row_cutoff.isoformat(),
+    )
+    return WebhookRetentionSweepOut.from_result(result)
+
+
 async def _read_limited_body(request: Request) -> bytes:
     """Read the request body, aborting as soon as the cap is exceeded.
 
@@ -1683,41 +1772,32 @@ def _audit_queued_payload(
     }
 
 
+_REMEDIATION_FENCE_RE = re.compile(r"```(?:diff)?[ \t]*\r?\n([\s\S]*?)```")
+
+
 def _extract_remediation_diff_from_body(body: str) -> Optional[str]:
-    """Extract unified diff from PR review body (e.g. from haunter-auditor[bot])."""
+    """Extract a validated unified diff from a PR review body.
+
+    Returns only text that passes :func:`validate_unified_diff`; prose,
+    ``*** Begin Patch`` envelopes and truncated hunks are not patches and are
+    ignored, so a review can never hand a malformed block to the commit path.
+    """
     if not body:
         return None
-    match = re.search(
-        r"Remediation Unified Diff[\s\S]*?```(?:diff)?\s*\r?\n([\s\S]*?)```",
-        body,
-    )
-    diff_text = None
-    if match:
-        diff_text = match.group(1).strip()
-    else:
-        for block in re.finditer(r"```(?:diff)?\s*\r?\n([\s\S]*?)```", body):
-            candidate = block.group(1).strip()
-            if "--- " in candidate and "+++ " in candidate and "@@" in candidate:
-                diff_text = candidate
-                break
 
-    if not diff_text:
-        return None
+    blocks = [match.group(1) for match in _REMEDIATION_FENCE_RE.finditer(body)]
+    ordered: list[str] = []
+    heading = re.search(r"Remediation Unified Diff", body)
+    if heading:
+        after_heading = _REMEDIATION_FENCE_RE.search(body, heading.end())
+        if after_heading:
+            ordered.append(after_heading.group(1))
+    ordered.extend(blocks)
 
-    normalized_lines: list[str] = []
-    for line in diff_text.splitlines():
-        line = line.strip("\r")
-        if line.startswith("+-"):
-            normalized_lines.append("-" + line[2:])
-        elif line.startswith("++") and not line.startswith("+++"):
-            normalized_lines.append("+" + line[2:])
-        elif line.startswith("+@@"):
-            normalized_lines.append(line[1:])
-        else:
-            normalized_lines.append(line)
-    cleaned = "\n".join(normalized_lines).strip()
-    if "--- " in cleaned and "+++ " in cleaned and "@@" in cleaned:
-        return cleaned + "\n"
+    for block in ordered:
+        validated = coerce_unified_diff(block)
+        if validated is not None:
+            return validated
     return None
 
 
@@ -1808,32 +1888,23 @@ async def _handle_review_auto_fix_command(
         findings = rev.findings or []
         diff_chunks: list[str] = []
         for finding in findings:
-            patch = finding.get("suggested_patch") or finding.get("suggested_fix")
-            if not patch:
+            if not isinstance(finding, dict):
                 continue
-            patch = patch.strip()
-            if "--- " in patch and "+++ " in patch and "@@" in patch:
-                diff_chunks.append(patch)
-            elif finding.get("file_path"):
-                fp = finding["file_path"]
-                ls = finding.get("line_start", 1)
-                le = finding.get("line_end", ls)
-                lc = max(1, le - ls + 1)
-                diff_lines = [
-                    f"+{line}" if not line.startswith(("+", "-")) else line
-                    for line in patch.splitlines()
-                ]
-                sec = (
-                    f"--- a/{fp}\n"
-                    f"+++ b/{fp}\n"
-                    f"@@ -{ls},{lc} +{ls},{len(diff_lines)} @@\n"
-                    + "\n".join(diff_lines)
-                )
-                diff_chunks.append(sec)
+            patch = finding.get("suggested_patch") or finding.get("suggested_fix")
+            if not isinstance(patch, str):
+                continue
+            file_path = finding.get("file_path")
+            candidate = coerce_unified_diff(
+                patch,
+                file_path=file_path if isinstance(file_path, str) else None,
+            )
+            if candidate is None:
+                # Prose or a malformed hunk is not actionable. Never synthesize
+                # a replacement hunk from arbitrary suggested-fix text.
+                continue
+            diff_chunks.append(candidate)
         if diff_chunks:
-            valid_patch = "\n\n".join(diff_chunks)
-            if not valid_patch.endswith("\n"):
-                valid_patch += "\n"
+            valid_patch = "".join(diff_chunks)
             break
 
     # 2. Or fetch latest review from GitHub API and extract remediation diff
@@ -1859,6 +1930,23 @@ async def _handle_review_auto_fix_command(
                 pr_number,
                 gh_err,
             )
+
+    # 3. Defence in depth: every source above already validates, but the value
+    # that reaches commit_patch is re-checked so a future source cannot bypass
+    # the gate. A rejected patch is the existing "no actionable diff" UX, not a
+    # generic commit error.
+    if valid_patch:
+        try:
+            validate_unified_diff(valid_patch)
+        except InvalidUnifiedDiffError as exc:
+            logger.warning(
+                "Rejected malformed remediation diff for %s/%s PR #%d: %s",
+                repo_owner,
+                repo_name,
+                pr_number,
+                exc,
+            )
+            valid_patch = None
 
     # If no patch found
     if not valid_patch:

@@ -53,7 +53,8 @@ async def test_alembic_head_and_migration_check():
     assert script.get_revision("e1f2a3b4c5d6").down_revision == "b8c9d0e1f2a3"
     assert script.get_revision("d1e2f3a4b5c6").down_revision == "e1f2a3b4c5d6"
     assert script.get_revision("c2d3e4f5a6b7").down_revision == "d1e2f3a4b5c6"
-    assert script.get_revision("a2b3c4d5e6f7").down_revision == "c2d3e4f5a6b7"
+    assert script.get_revision("d5e6f7a8b9c0").down_revision == "c2d3e4f5a6b7"
+    assert script.get_revision("a2b3c4d5e6f7").down_revision == "d5e6f7a8b9c0"
 
 
 def test_issue_110_composite_indexes_match_models():

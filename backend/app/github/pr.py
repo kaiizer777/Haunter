@@ -32,6 +32,10 @@ from typing import Any, Optional
 import httpx
 
 from app.config import settings
+from app.diff_validation import (
+    InvalidUnifiedDiffError,
+    validate_unified_diff,
+)
 from app.github_client import GitHubResourceNotFoundError
 from app.schemas import _PROTECTED_BRANCHES, is_protected_branch, validate_repo_ident
 
@@ -1042,6 +1046,10 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
         # Must contain at least one hunk header @@
         if "@@" not in content:
             continue
+        if file_path in files:
+            raise GitHubPRValidationError(
+                "Refusing to apply remediation diff: duplicate file section."
+            )
         # Store the full per-file patch (header + body) for applier
         files[file_path] = (m.group(0) + content).strip()
     return files
@@ -1082,7 +1090,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
         if m:
             # Parse old start and length
             old_start = int(m.group(1))
-            _old_len = int(m.group(2)) if m.group(2) else 1
+            old_len = int(m.group(2)) if m.group(2) else 1
+            new_len = int(m.group(4)) if m.group(4) else 1
             # new_start = int(m.group(3))  # not needed for apply
             # Advance orig_idx to hunk start (1-based to 0-based)
             # old_start is 1-based line number in original
@@ -1091,9 +1100,16 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
             while orig_idx < target_idx and orig_idx < len(orig_lines):
                 new_lines.append(orig_lines[orig_idx])
                 orig_idx += 1
+            old_remaining = old_len
+            new_remaining = new_len
             i += 1
-            # Process hunk body until next @@ or EOF
+            # Process hunk body until next @@, EOF, or declared counts met.
+            # A blank line between hunks belongs to no hunk: once the body
+            # fulfills its counts the hunk ends, so stray lines can never
+            # leak into the output as spurious context.
             while i < len(lines) and not lines[i].startswith("@@"):
+                if old_remaining <= 0 and new_remaining <= 0:
+                    break
                 hunk_line = lines[i]
                 if hunk_line.startswith(" "):
                     # Context — must match original
@@ -1104,6 +1120,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                         return None
                     new_lines.append(orig_lines[orig_idx])
                     orig_idx += 1
+                    old_remaining -= 1
+                    new_remaining -= 1
                 elif hunk_line.startswith("-"):
                     # Deletion — must match original then skip
                     if (
@@ -1112,9 +1130,11 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                     ):
                         return None
                     orig_idx += 1
+                    old_remaining -= 1
                 elif hunk_line.startswith("+"):
                     # Addition — insert
                     new_lines.append(hunk_line[1:])
+                    new_remaining -= 1
                 elif hunk_line.startswith("\\"):
                     # No newline at end of file marker — ignore
                     pass
@@ -1125,6 +1145,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                         orig_idx += 1
                     else:
                         new_lines.append("")
+                    old_remaining -= 1
+                    new_remaining -= 1
                 else:
                     # Unknown prefix — bail
                     return None
@@ -1156,12 +1178,14 @@ async def commit_patch(
     Apply `patch_text` as a single commit on `branch` using the Git Data API.
 
     Strategy:
-      1. Parse patch into per-file segments via _parse_patch_files.
-      2. For each file, fetch current content via Contents API, apply hunks locally
+      1. Validate the patch as a strict unified diff before any HTTP call.
+      2. Parse patch into per-file segments via _parse_patch_files.
+      3. For each file, fetch current content via Contents API, apply hunks locally
          via _apply_unified_diff_to_content, create blob for new content.
-      3. Create tree with updated blobs → create commit → update branch ref.
-      Fallback: if parsing fails or any file apply fails, commits the raw diff as
-      haunter.patch (legacy placeholder) so the PR still contains the diff artifact.
+      4. Create tree with updated blobs → create commit → update branch ref.
+
+    A patch that does not apply raises. It is never committed verbatim as a
+    file: an unapplied diff on the user's branch is worse than a failed attempt.
 
     Args:
         owner:      Repository owner.
@@ -1173,10 +1197,21 @@ async def commit_patch(
 
     Returns:
         The new commit SHA.
+
+    Raises:
+        GitHubPRValidationError: patch is malformed or does not apply cleanly.
+        GitHubPRError: a GitHub API call failed.
     """
     _validate_ident(owner, "owner")
     _validate_ident(repo, "repo")
     _validate_branch(branch, allow_protected=False)
+
+    try:
+        validate_unified_diff(patch_text)
+    except InvalidUnifiedDiffError as exc:
+        raise GitHubPRValidationError(
+            f"Refusing to apply malformed remediation diff: {exc}"
+        ) from exc
 
     headers = _build_auth_headers(token)
     api = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
@@ -1216,175 +1251,130 @@ async def commit_patch(
             )
         base_tree_sha = commit_resp.json()["tree"]["sha"]
 
-        # 3. Try to parse and apply patch per-file
+        # 3. Parse and apply the patch per file
         tree_entries: list[dict[str, Any]] = []
         per_file_patches = _parse_patch_files(patch_text)
-        use_fallback = False
+        if not per_file_patches:
+            raise GitHubPRValidationError(
+                "Refusing to apply remediation diff: no applicable file sections."
+            )
 
-        if per_file_patches:
-            for file_path, file_patch in per_file_patches.items():
-                # Validate branch-safe file path
-                if len(file_path) > 255 or not _BRANCH_RE.match(
-                    file_path.replace("/", "_")
+        for file_path, file_patch in per_file_patches.items():
+            # The shared validator already rejects traversal and absolute
+            # paths; this is the last line of defence before the tree API.
+            if len(file_path) > 255 or not _BRANCH_RE.match(
+                file_path.replace("/", "_")
+            ):
+                if (
+                    ".." in file_path
+                    or file_path.startswith("/")
+                    or "//" in file_path
                 ):
-                    # Use looser check for file paths: allow slashes, dots, underscores, hyphens
-                    if (
-                        ".." in file_path
-                        or file_path.startswith("/")
-                        or "//" in file_path
-                    ):
-                        logger.warning(
-                            "github.pr: skipping invalid file path %r from patch",
-                            file_path,
-                        )
-                        use_fallback = True
-                        break
-
-                # Check for explicit file deletion
-                is_deletion = False
-                patch_lines = file_patch.splitlines()
-                if len(patch_lines) >= 2:
-                    second_line = patch_lines[1].strip()
-                    if (
-                        second_line in (
-                            "+++ /dev/null",
-                            "+++ b/dev/null",
-                            "+++ b//dev/null",
-                            "+++ dev/null",
-                        )
-                        or "/dev/null" in second_line
-                    ):
-                        is_deletion = True
-
-                # Fetch current file content (may be new file → 404)
-                content_resp = await client.get(
-                    f"{api}/contents/{file_path}",
-                    headers=headers,
-                    params={"ref": head_sha},
-                )
-                if content_resp.status_code == 404:
-                    if is_deletion:
-                        logger.info(
-                            "github.pr: deletion target %r not found (404) — already absent, skipping without fallback",
-                            file_path,
-                        )
-                        continue
-                    original_text = ""
-                elif content_resp.is_error:
-                    logger.warning(
-                        "github.pr: failed to fetch %r for branch %s: HTTP %d — fallback to haunter.patch",
-                        file_path,
-                        branch,
-                        content_resp.status_code,
+                    raise GitHubPRValidationError(
+                        "Refusing to apply remediation diff: invalid file path."
                     )
-                    use_fallback = True
-                    break
-                else:
-                    try:
-                        data = content_resp.json()
-                        # Contents API returns base64-encoded content (may be list for dir)
-                        if isinstance(data, list):
-                            logger.warning(
-                                "github.pr: path %r is a directory — fallback",
-                                file_path,
-                            )
-                            use_fallback = True
-                            break
-                        b64 = data.get("content", "")
-                        # Content may contain newlines; GitHub wraps at 60 chars
-                        b64_clean = "".join(b64.split())
-                        original_text = (
-                            base64.b64decode(b64_clean).decode(
-                                "utf-8", errors="replace"
-                            )
-                            if b64_clean
-                            else ""
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "github.pr: decode failed for %r: %s — fallback",
-                            file_path,
-                            exc,
-                        )
-                        use_fallback = True
-                        break
 
-                new_text = _apply_unified_diff_to_content(original_text, file_patch)
-                if new_text is None:
-                    logger.warning(
-                        "github.pr: hunk apply failed for %r — fallback to haunter.patch",
-                        file_path,
+            # Check for explicit file deletion
+            is_deletion = False
+            patch_lines = file_patch.splitlines()
+            if len(patch_lines) >= 2:
+                second_line = patch_lines[1].strip()
+                if (
+                    second_line in (
+                        "+++ /dev/null",
+                        "+++ b/dev/null",
+                        "+++ b//dev/null",
+                        "+++ dev/null",
                     )
-                    use_fallback = True
-                    break
+                    or "/dev/null" in second_line
+                ):
+                    is_deletion = True
 
+            # Fetch current file content (may be new file → 404)
+            content_resp = await client.get(
+                f"{api}/contents/{file_path}",
+                headers=headers,
+                params={"ref": head_sha},
+            )
+            if content_resp.status_code == 404:
                 if is_deletion:
-                    tree_entries.append(
-                        {
-                            "path": file_path,
-                            "mode": "100644",
-                            "type": "blob",
-                            "sha": None,
-                        }
+                    logger.info(
+                        "github.pr: deletion target already absent — skipping"
                     )
                     continue
-
-                # Create blob for new file content
-                blob_resp = await client.post(
-                    f"{api}/git/blobs",
-                    headers=headers,
-                    json={"content": new_text, "encoding": "utf-8"},
+                original_text = ""
+            elif content_resp.is_error:
+                raise GitHubPRError(
+                    "Cannot fetch file contents for the patch target: "
+                    f"HTTP {content_resp.status_code}"
                 )
-                if blob_resp.is_error:
-                    logger.warning(
-                        "github.pr: blob creation failed for %r: HTTP %d — fallback",
-                        file_path,
-                        blob_resp.status_code,
+            else:
+                try:
+                    data = content_resp.json()
+                    # Contents API returns base64-encoded content (may be list for dir)
+                    if isinstance(data, list):
+                        raise GitHubPRError(
+                            "Patch target resolves to a directory, not a file."
+                        )
+                    b64 = data.get("content", "")
+                    # Content may contain newlines; GitHub wraps at 60 chars
+                    b64_clean = "".join(b64.split())
+                    original_text = (
+                        base64.b64decode(b64_clean).decode(
+                            "utf-8", errors="replace"
+                        )
+                        if b64_clean
+                        else ""
                     )
-                    use_fallback = True
-                    break
-                blob_sha = blob_resp.json()["sha"]
+                except GitHubPRError:
+                    raise
+                except Exception as exc:
+                    raise GitHubPRError(
+                        "Cannot decode the current file contents for the patch target."
+                    ) from exc
+
+            new_text = _apply_unified_diff_to_content(original_text, file_patch)
+            if new_text is None:
+                raise GitHubPRValidationError(
+                    "Refusing to apply remediation diff: hunk context does not "
+                    "match the target file."
+                )
+
+            if is_deletion:
                 tree_entries.append(
                     {
                         "path": file_path,
                         "mode": "100644",
                         "type": "blob",
-                        "sha": blob_sha,
+                        "sha": None,
                     }
                 )
+                continue
 
-            # If per-file parsing succeeded but yielded no entries, fallback
-            if not use_fallback and not tree_entries:
-                use_fallback = True
-        else:
-            use_fallback = True
-
-        if use_fallback:
-            # Legacy fallback: commit raw diff as haunter.patch artifact
-            logger.info(
-                "github.pr: falling back to haunter.patch artifact for %s/%s:%s",
-                owner,
-                repo,
-                branch,
-            )
+            # Create blob for new file content
             blob_resp = await client.post(
                 f"{api}/git/blobs",
                 headers=headers,
-                json={"content": patch_text, "encoding": "utf-8"},
+                json={"content": new_text, "encoding": "utf-8"},
             )
             if blob_resp.is_error:
                 raise GitHubPRError(
                     f"Failed to create blob: HTTP {blob_resp.status_code}"
                 )
             blob_sha = blob_resp.json()["sha"]
-            tree_entries = [
+            tree_entries.append(
                 {
-                    "path": "haunter.patch",
+                    "path": file_path,
                     "mode": "100644",
                     "type": "blob",
                     "sha": blob_sha,
                 }
-            ]
+            )
+
+        if not tree_entries:
+            raise GitHubPRError(
+                "Remediation diff produced no file changes to commit."
+            )
 
         # 4. Create a tree containing the updated files
         tree_resp = await client.post(

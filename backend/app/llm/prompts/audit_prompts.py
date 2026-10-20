@@ -9,6 +9,8 @@ import unicodedata
 from pathlib import PurePosixPath
 from typing import Any, Literal, Mapping, Optional, Sequence, TypedDict
 
+from app.diff_validation import is_valid_unified_diff
+
 PerspectiveName = Literal["security", "correctness", "performance", "architecture"]
 AuditSeverity = Literal["BLOCKER", "WARNING", "NOTE"]
 
@@ -1563,15 +1565,29 @@ def format_audit_report(
 
         if cleaned_diff and "(no automated remediation" not in cleaned_diff:
             if effective_allowed:
-                rendered.extend([
-                    "",
-                    "---",
-                    "### 🛠️ Remediation Unified Diff",
-                    "<details open>\n"
-                    "<summary>🛠️ <b>Proposed Remediation Unified Diff</b> (Click to inspect)</summary>\n\n"
-                    + _fenced_block("diff", _sanitize_code(cleaned_diff, MAX_REMEDIATION_DIFF_CHARS))
-                    + "\n</details>",
-                ])
+                if is_valid_unified_diff(cleaned_diff):
+                    rendered.extend([
+                        "",
+                        "---",
+                        "### 🛠️ Remediation Unified Diff",
+                        "<details open>\n"
+                        "<summary>🛠️ <b>Proposed Remediation Unified Diff</b> (Click to inspect)</summary>\n\n"
+                        + _fenced_block("diff", _sanitize_code(cleaned_diff, MAX_REMEDIATION_DIFF_CHARS))
+                        + "\n</details>",
+                    ])
+                else:
+                    # Non-diff text is prose, not a patch. It must never carry a
+                    # ```diff label that an auto-fix command could scrape and
+                    # apply as a unified diff.
+                    rendered.extend([
+                        "",
+                        "---",
+                        "### 🛠️ Suggested Remediation Notes",
+                        _fenced_block(
+                            "text",
+                            _sanitize_code(cleaned_diff, MAX_REMEDIATION_DIFF_CHARS),
+                        ),
+                    ])
             else:
                 rendered.extend([
                     "",

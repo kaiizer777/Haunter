@@ -27,6 +27,7 @@ from pydantic import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.diff_validation import coerce_unified_diff
 from app.llm import LLMClient, ResolvedModelConfig, get_active_model_config
 from app.llm.prompts.audit_prompts import (
     AUDIT_STATUS_LABELS,
@@ -1650,37 +1651,33 @@ def synthesize_findings(
 
 
 def build_remediation_diff(findings: Sequence[AuditFinding]) -> str:
+    """Render validated unified-diff remediation for the report.
+
+    Prose suggestions are not diffs and are never wrapped in a synthetic hunk:
+    they remain the finding's own remediation text. Only model-authored text
+    that already parses as a strict unified diff is emitted here, and a section
+    that does not fit the report budget is dropped whole rather than clipped
+    mid-hunk.
+    """
     sections: list[str] = []
     used = 0
     for finding in findings:
         if finding.informational_only:
             continue
         suggested = _redact_audit_secrets(finding.suggested_fix or "").strip()
-        if not suggested:
+        if not suggested or len(suggested) > MAX_SUGGESTED_FIX_CHARS:
             continue
-        suggested = _clip(suggested, MAX_SUGGESTED_FIX_CHARS)
-        if "--- " in suggested and "+++ " in suggested and "@@" in suggested:
-            section = suggested
-        else:
-            line_count = max(1, finding.line_end - finding.line_start + 1)
-            section = (
-                f"--- a/{finding.file_path}\n"
-                f"+++ b/{finding.file_path}\n"
-                f"@@ -{finding.line_start},{line_count} +{finding.line_start},{line_count} @@\n"
-                + "\n".join(
-                    f"+{line}" if line.strip() else "+"
-                    for line in suggested.splitlines()
-                )
-            )
-        remaining = MAX_REMEDIATION_DIFF_CHARS - used
-        if remaining <= 0:
-            break
-        section = _clip(section, remaining)
+        section = coerce_unified_diff(suggested, file_path=finding.file_path)
+        if section is None:
+            continue
+        if used + len(section) > MAX_REMEDIATION_DIFF_CHARS:
+            # Never clip a diff mid-hunk: skip the section instead.
+            continue
         sections.append(section)
-        used += len(section) + 1
+        used += len(section)
     if not sections:
         return "(no automated remediation suggested; see findings above)"
-    return "\n".join(sections)
+    return "".join(sections)
 
 
 def _synthesize_executive_summary(
