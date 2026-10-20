@@ -478,7 +478,9 @@ class FakeStore:
         for clause in reversed(list(statement._order_by_clauses or ())):
             reverse = False
             if isinstance(clause, UnaryExpression):
-                reverse = clause.modifier == "desc"
+                # SQLAlchemy 2.x stores ``operators.desc_op``/``asc_op`` here,
+                # never the rendered string, so compare by identity.
+                reverse = clause.modifier is operators.desc_op
                 clause = clause.element
             matched.sort(
                 key=lambda bound, element=clause: _sort_key(
