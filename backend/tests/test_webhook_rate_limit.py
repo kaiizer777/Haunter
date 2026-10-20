@@ -562,9 +562,15 @@ async def test_breaker_skips_the_store_after_consecutive_failures(
 @pytest.mark.fast
 @pytest.mark.asyncio
 async def test_wedged_store_call_is_abandoned_after_the_timeout(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
-    """A store that never answers costs the timeout, not the delivery."""
+    """A store that never answers costs the timeout, not the delivery.
+
+    Not just 'it returned': the degraded store must actually be spending the
+    budget. A blanket `except Exception: return 0` satisfies a single-call
+    assertion and would leave the limiter completely off during an outage.
+    Degraded mode must actively enforce the in-memory rate limit and not fail open.
+    """
     from app.webhooks import _consume_webhook_rate_limit
 
     class _HangingStore:
@@ -580,12 +586,45 @@ async def test_wedged_store_call_is_abandoned_after_the_timeout(
     )
     monkeypatch.setattr(rate_limit, "STORE_ROUND_TRIP_TIMEOUT_SECONDS", 0.01)
 
-    # Not just "it returned": the degraded store must actually be spending the
-    # budget. A blanket `except Exception: return 0` satisfies a single-call
-    # assertion and would leave the limiter completely off during an outage.
-    assert await _consume_webhook_rate_limit("hang/hang|s", now=1000.0) == 0
-    assert await _consume_webhook_rate_limit("hang/hang|s", now=1001.0) == 0
-    assert await _consume_webhook_rate_limit("hang/hang|s", now=1002.0) == 9
+    assert rate_limit._consecutive_store_failures == 0
+    assert rate_limit._degraded is None
+
+    with caplog.at_level("ERROR", logger="app.services.rate_limit"):
+        # First delivery: store hangs -> timeout triggers degraded mode.
+        # InMemoryRateLimitBackend admits delivery (allowed=True, returns 0).
+        # Remaining budget in degraded bucket decreases from 2 to 1.
+        retry_1 = await _consume_webhook_rate_limit("hang/hang|s", now=1000.0)
+        assert retry_1 == 0, "first request should be allowed (returns retry_after=0)"
+        assert rate_limit._consecutive_store_failures == 1
+        assert rate_limit._degraded is not None
+        assert isinstance(rate_limit._degraded, rate_limit.InMemoryRateLimitBackend)
+        assert len(rate_limit._degraded._buckets["hang/hang|s"]) == 1
+
+        # Second delivery: store hangs -> timeout. Degraded limiter admits delivery (allowed=True).
+        # Remaining budget in degraded bucket reaches 0 (maximum 2 exhausted).
+        retry_2 = await _consume_webhook_rate_limit("hang/hang|s", now=1001.0)
+        assert retry_2 == 0, "second request should be allowed (returns retry_after=0)"
+        assert rate_limit._consecutive_store_failures == 2
+        assert len(rate_limit._degraded._buckets["hang/hang|s"]) == 2
+
+        # Third delivery (limit + 1 within window): store hangs -> timeout.
+        # Degraded limiter must actively enforce the in-memory rate limit and NOT fail open.
+        # Bucket budget is exhausted -> allowed is False (throttled with retry_after=9).
+        retry_3 = await _consume_webhook_rate_limit("hang/hang|s", now=1002.0)
+        assert retry_3 == 9, "third request (limit + 1) must be throttled with retry_after > 0"
+        assert rate_limit._consecutive_store_failures == 3
+        # Bucket count remains 2 (rejected delivery is not appended)
+        assert len(rate_limit._degraded._buckets["hang/hang|s"]) == 2
+
+    # Verify log indicates degraded mode / in-process limiter was used on timeout
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "throttling with the in-process limiter" in errors[0].getMessage()
+    assert "TimeoutError" in errors[0].getMessage()
+
+
+# Review comment 4305214447 alias: verify degraded mode enforces memory budget and does not fail open
+test_store_timeout_triggers_degraded_mode = test_wedged_store_call_is_abandoned_after_the_timeout
 
 
 @pytest.mark.fast
