@@ -479,6 +479,9 @@ resource "aws_lambda_function" "audit_dispatcher" {
 
       TOKEN_ENCRYPTION_KEY = var.token_encryption_key
 
+      # Sibling background workers do not serve incoming webhooks and are exempt
+      # from WEBHOOK_RATE_LIMIT_BACKEND = "postgres" (they default to process-local "memory").
+
       # The dispatcher schedules audit children on the main function, not on
       # itself. Without this, resolve_lambda_function_name() would resolve to
       # the dispatcher and every child invoke would land in the wrong function.
@@ -682,6 +685,9 @@ resource "aws_lambda_function" "pipeline_outbox_sweeper" {
       SANDBOX_PROVIDER = var.sandbox_provider
 
       TOKEN_ENCRYPTION_KEY = var.token_encryption_key
+
+      # Sibling background workers do not serve incoming webhooks and are exempt
+      # from WEBHOOK_RATE_LIMIT_BACKEND = "postgres" (they default to process-local "memory").
 
       # The sweeper redrives pipeline children on the main function, not on
       # itself — same alias rule as the audit dispatcher. Must stay

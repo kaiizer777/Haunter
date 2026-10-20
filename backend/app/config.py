@@ -352,19 +352,42 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_shared_store_on_lambda(self) -> "Settings":
-        """Fail closed at startup when Lambda would run the per-env limiter.
+        """Fail closed at startup when the orchestrator Lambda would run the per-env limiter.
 
         infra/aws sets WEBHOOK_RATE_LIMIT_BACKEND=postgres on the orchestrator;
         if that wiring is ever lost, the "memory" default would silently restore
         per-execution-environment budgets (10x the ceiling at the default
-        concurrency) and reset them on every cold start. AWS_LAMBDA_FUNCTION_NAME
-        is injected by the Lambda runtime itself, so its presence means this
-        process IS the deployment.
+        concurrency) and reset them on every cold start.
+
+        AWS_LAMBDA_FUNCTION_NAME is injected by the Lambda runtime into every
+        function execution environment. Sibling background worker Lambdas
+        (e.g. audit-dispatcher, pipeline-outbox-sweeper) do not serve webhook
+        ingress and are exempt unless WEBHOOK_RATE_LIMIT_STRICT_LAMBDA is set.
         """
-        if (
-            os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
-            and self.webhook_rate_limit_backend != "postgres"
-        ):
+        raw_fn_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        if not raw_fn_name or not raw_fn_name.strip():
+            return self
+
+        fn_name = raw_fn_name.strip().lower()
+        strict = os.environ.get("WEBHOOK_RATE_LIMIT_STRICT_LAMBDA", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
+        # Background worker lambdas do not serve webhook ingress
+        is_worker = any(
+            token in fn_name for token in ("dispatcher", "sweeper", "outbox")
+        )
+        is_orchestrator = "orchestrator" in fn_name
+
+        # Enforce if strictly requested, or explicitly the orchestrator,
+        # or any non-worker function running on Lambda.
+        requires_postgres = strict or is_orchestrator or (not is_worker)
+        if is_worker and not strict and not is_orchestrator:
+            requires_postgres = False
+
+        if requires_postgres and self.webhook_rate_limit_backend != "postgres":
             raise ValueError(
                 "WEBHOOK_RATE_LIMIT_BACKEND must be 'postgres' on Lambda: "
                 "'memory' enforces the budget per execution environment."

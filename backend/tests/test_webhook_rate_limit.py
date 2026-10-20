@@ -250,10 +250,49 @@ def test_backend_selector_normalizes_and_rejects_at_load(
 def test_lambda_refuses_to_boot_with_the_per_process_limiter(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Lost Terraform wiring fails the deploy, not silently 10x the budget."""
+    """Lost Terraform wiring on the orchestrator fails the deploy, not silently 10x the budget."""
     monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "haunter-orchestrator")
 
     monkeypatch.delenv("WEBHOOK_RATE_LIMIT_BACKEND", raising=False)
+    with pytest.raises(ValidationError, match="must be 'postgres' on Lambda"):
+        app.config.Settings()
+
+    monkeypatch.setenv("WEBHOOK_RATE_LIMIT_BACKEND", "postgres")
+    assert app.config.Settings().webhook_rate_limit_backend == "postgres"
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize(
+    "worker_function_name",
+    [
+        "haunter-audit-dispatcher",
+        "haunter-pipeline-outbox-sweeper",
+        "haunter-outbox-sweeper",
+        "HAUNTER-AUDIT-DISPATCHER",
+        "HAUNTER-PIPELINE-OUTBOX-SWEEPER",
+    ],
+)
+def test_lambda_sibling_workers_boot_with_memory_backend(
+    monkeypatch: pytest.MonkeyPatch, worker_function_name: str
+):
+    """Sibling background workers do not serve webhooks and boot cleanly with default memory backend."""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", worker_function_name)
+    monkeypatch.delenv("WEBHOOK_RATE_LIMIT_BACKEND", raising=False)
+    monkeypatch.delenv("WEBHOOK_RATE_LIMIT_STRICT_LAMBDA", raising=False)
+
+    s = app.config.Settings()
+    assert s.webhook_rate_limit_backend == "memory"
+
+
+@pytest.mark.fast
+def test_lambda_strict_flag_enforces_postgres_even_on_workers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When WEBHOOK_RATE_LIMIT_STRICT_LAMBDA is set, even worker functions require postgres."""
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "haunter-audit-dispatcher")
+    monkeypatch.delenv("WEBHOOK_RATE_LIMIT_BACKEND", raising=False)
+    monkeypatch.setenv("WEBHOOK_RATE_LIMIT_STRICT_LAMBDA", "1")
+
     with pytest.raises(ValidationError, match="must be 'postgres' on Lambda"):
         app.config.Settings()
 

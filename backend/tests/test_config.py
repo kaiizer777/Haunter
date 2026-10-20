@@ -412,3 +412,31 @@ def test_placeholder_guard_does_not_raise_under_pytest(
     reloaded = importlib.reload(app.config)
     assert reloaded.settings.github_client_id == "REPLACE_ME"
     assert reloaded._find_placeholder_credential() == "GITHUB_CLIENT_ID"
+
+def test_require_shared_store_on_lambda_scopes_to_orchestrator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Orchestrator requires postgres; sibling worker lambdas boot with memory."""
+    from pydantic import ValidationError
+
+    # Orchestrator with memory -> raises ValidationError
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "haunter-orchestrator")
+    monkeypatch.delenv("WEBHOOK_RATE_LIMIT_BACKEND", raising=False)
+    monkeypatch.delenv("WEBHOOK_RATE_LIMIT_STRICT_LAMBDA", raising=False)
+    with pytest.raises(ValidationError, match="must be 'postgres' on Lambda"):
+        Settings()
+
+    # Orchestrator with postgres -> passes
+    monkeypatch.setenv("WEBHOOK_RATE_LIMIT_BACKEND", "postgres")
+    assert Settings().webhook_rate_limit_backend == "postgres"
+
+    # Sibling background workers with memory -> passes
+    monkeypatch.delenv("WEBHOOK_RATE_LIMIT_BACKEND", raising=False)
+    for worker_fn in [
+        "haunter-audit-dispatcher",
+        "haunter-pipeline-outbox-sweeper",
+        "haunter-outbox-sweeper",
+        "HAUNTER-AUDIT-DISPATCHER",
+    ]:
+        monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", worker_fn)
+        assert Settings().webhook_rate_limit_backend == "memory"
