@@ -74,6 +74,12 @@ describe("add-repo-modal.tsx", () => {
     created_at: new Date().toISOString(),
   };
 
+  const mockConflictedRepo: RepoOut = {
+    ...mockAddedRepo,
+    id: "repo_new_100",
+    registration_conflict: true,
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getAvailableRepos).mockResolvedValue(mockAvailableRepos);
@@ -206,6 +212,37 @@ describe("add-repo-modal.tsx", () => {
     });
 
     expect(mockOnSuccess).toHaveBeenCalledWith(mockAddedRepo);
+    expect(mockOnClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a registration-time warning and stays open when the new repo conflicts", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.addRepo).mockResolvedValue(mockConflictedRepo);
+
+    const { container } = render(
+      <AddRepoModal
+        isOpen={true}
+        onClose={mockOnClose}
+        onSuccess={mockOnSuccess}
+      />
+    );
+
+    await screen.findByText("owner1/haunter-core");
+    const connectBtn = container.querySelector("#connect-owner1-haunter-core") as HTMLButtonElement;
+    expect(connectBtn).not.toBeNull();
+
+    await user.click(connectBtn);
+
+    const warning = await screen.findByRole("alert");
+    expect(warning).toHaveTextContent(/connected, but ci deliveries are paused/i);
+    expect(warning).toHaveTextContent(/another workspace tracks/i);
+    expect(warning).toHaveTextContent(/only one registration remains/i);
+    expect(warning.textContent).not.toMatch(/one other workspace|1 other workspace/i);
+
+    expect(mockOnSuccess).toHaveBeenCalledWith(mockConflictedRepo);
+    expect(mockOnClose).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Done" }));
     expect(mockOnClose).toHaveBeenCalledTimes(1);
   });
 

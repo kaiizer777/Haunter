@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import { SelectDropdown } from "@/components/ui/select-dropdown";
 import { AddRepoModal } from "@/components/repos/add-repo-modal";
 import { api, RepoOut } from "@/lib/api";
@@ -22,6 +23,7 @@ import {
   ShieldCheck,
   Sliders,
   FolderGit2,
+  AlertTriangle,
   ArrowUpRight,
   RefreshCw,
   Clock,
@@ -519,7 +521,7 @@ export default function ReposPage() {
                       {/* Repository Name & Links */}
                       <TableCell className="pl-4 py-3.5">
                         <div className="flex flex-col gap-1.5">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <FolderGit2 className="h-4 w-4 text-amber-400/80 shrink-0" />
                             <div className="flex items-center gap-1 font-mono text-xs">
                               <span className="font-bold text-zinc-100 group-hover:text-amber-300 transition-colors">
@@ -535,6 +537,18 @@ export default function ReposPage() {
                             >
                               <ExternalLink className="h-3 w-3" />
                             </a>
+                            {repo.registration_conflict && (
+                              <Badge
+                                variant="warning"
+                                role="note"
+                                className="shrink-0 font-mono text-[10px]"
+                                title="Another workspace tracks this repository. CI deliveries are refused until only one registration remains."
+                                aria-label="Registration conflict: another workspace tracks this repository, so CI deliveries are refused until only one registration remains."
+                              >
+                                <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+                                Shared registration — deliveries are refused
+                              </Badge>
+                            )}
                           </div>
 
                           <div className="flex items-center gap-2 text-[11px] pl-6">

@@ -158,6 +158,12 @@ class RepoOut(BaseModel):
     github_install_id: Optional[int] = None
     auditor_github_install_id: Optional[int] = None
     created_at: datetime
+    # Derived, tenant-visible state: another tenant independently registered
+    # the same exact-case owner/name. Deliveries for the pair are refused while
+    # both rows exist. Existence only — never the other tenant's identity or a
+    # count. Defaults to False for callers that build RepoOut without the
+    # correlated lookup (e.g. schema tests).
+    registration_conflict: bool = False
 
     model_config = {"from_attributes": True}
 

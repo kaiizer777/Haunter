@@ -21,6 +21,8 @@ export interface RepoOut {
   language_hint: string | null;
   active_model_config_id: string | null;
   created_at: string;
+  /** True when another workspace tracks the same owner/name. Existence only. */
+  registration_conflict?: boolean;
 }
 
 export interface RepoCreate {
