@@ -78,6 +78,15 @@ GIT_DIFF = (
             "+created\n",
             id="git-new-file",
         ),
+        pytest.param(
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " line1\n"
+            "\n"
+            " line3\n",
+            id="empty-context-line",
+        ),
     ],
 )
 def test_valid_diffs_are_accepted(patch: str) -> None:
@@ -224,6 +233,14 @@ def test_valid_diffs_are_accepted(patch: str) -> None:
             "-old\n"
             "+new\n",
             id="blank-line-inside-hunk",
+        ),
+        pytest.param(
+            "--- /dev/null\n"
+            "+++ b/new.py\n"
+            "@@ -0,0 +1,2 @@\n"
+            "\n"
+            "+one\n",
+            id="empty-context-line-in-addition-only-hunk",
         ),
     ],
 )

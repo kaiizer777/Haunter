@@ -152,7 +152,11 @@ def validate_unified_diff(patch_text: str) -> None:
                 _fail(f"line {index}: hunk ended before its declared counts were met")
             if line.startswith(("--- ", "+++ ", "diff --git ")):
                 _fail(f"line {index}: file header appeared inside an open hunk")
-            if line.startswith(" "):
+            if line.startswith(" ") or line == "":
+                # An empty line inside a hunk is an empty *context* line:
+                # `git apply`, app.sandbox.mirror.apply_unified_diff and
+                # app.github.pr._apply_unified_diff_to_content all count it
+                # as one old + one new line.
                 if hunk[0] <= 0 or hunk[1] <= 0:
                     _fail(f"line {index}: hunk body exceeds its declared counts")
                 hunk[0] -= 1
