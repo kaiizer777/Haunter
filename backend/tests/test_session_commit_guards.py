@@ -451,6 +451,36 @@ async def test_non_active_session_rejected_before_token_mint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_blank_title_rejected_before_token_mint() -> None:
+    """Catches minting a credential for a request the publisher will reject on shape."""
+    user, session = _make_mock_user_and_session(
+        staged_patches={"app/x.py": "--- a/app/x.py\n+++ b/app/x.py\n@@ -1 +1 @@\n-a\n+b\n"}
+    )
+    mock_db = _make_mock_db(session)
+    resolver = AsyncMock(return_value="tok")
+    perms = AsyncMock()
+
+    with (
+        patch("app.services.session_commit.get_installation_token", resolver),
+        patch("app.services.session_commit._verify_user_repo_permission", perms),
+        _no_github_writes() as (stack, mocks),
+    ):
+        with stack:
+            with pytest.raises(HTTPException) as exc_info:
+                await commit_session(
+                    session_id=session.id,
+                    body=SessionCommitIn(title="   "),
+                    current_user=user,
+                    db=mock_db,
+                )
+
+    assert exc_info.value.status_code == 400
+    resolver.assert_not_called()
+    perms.assert_not_called()
+    _assert_no_github_writes(mocks)
+
+
+@pytest.mark.asyncio
 async def test_protected_branch_rejected_before_token_mint() -> None:
     """Catches the router-mints-first regression: main is rejected with no credential work."""
     user, session = _make_mock_user_and_session(
