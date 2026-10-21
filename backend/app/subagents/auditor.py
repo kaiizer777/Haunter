@@ -120,6 +120,13 @@ _ENGINE_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,160}$", re.ASCII)
 MAX_RAW_DIFF_CHARS = 2_000_000
 MAX_AST_SOURCE_FILE_CHARS = 100_000
 MAX_AST_SOURCE_FILES = 8
+#: Section headers emitted by the AST summary builder when at least one file
+#: yielded source-backed context. Shared with the degraded-analysis sniff
+#: helper so the "analysis actually ran" contract lives in one place.
+_PARSER_BACKED_SECTION_HEADER = "Parser-backed Python AST context:"
+_STRUCTURAL_FALLBACK_SECTION_HEADER = (
+    "Unsupported AST languages and bounded structural fallbacks (not AST):"
+)
 MAX_CI_CONTEXT_CHARS = 20_000
 MAX_DIFF_HUNK_LINES = 20_000
 AST_ANALYSIS_TIMEOUT_S = 3.0
@@ -1165,10 +1172,34 @@ def _redact_preserving_line_anchors(value: str) -> str:
     return redact_sensitive_text_preserving_lines(value)
 
 
-def _build_ast_diff_summary_sync(
+@dataclass(frozen=True)
+class AstDiffCoverage:
+    """How many changed source files the AST summary could actually analyze.
+
+    `files_requested` counts groundable changed files with a structural
+    source suffix; `files_with_context` counts those for which usable file
+    source produced emitted context. A diff with `files_requested > 0` and
+    `files_with_context == 0` had no parser- or fallback-backed analysis at
+    all -- the structurally-dead state behind issue #60.
+    """
+
+    files_requested: int = 0
+    files_with_context: int = 0
+
+
+def _summary_has_source_backed_context(summary: str) -> bool:
+    """Whether an AST summary carries file-source-backed analysis sections."""
+    text = str(summary or "")
+    return (
+        _PARSER_BACKED_SECTION_HEADER in text
+        or _STRUCTURAL_FALLBACK_SECTION_HEADER in text
+    )
+
+
+def _build_ast_diff_summary_with_coverage_sync(
     diff_text: str,
     file_contexts: Optional[Mapping[str, str]] = None,
-) -> str:
+) -> tuple[str, AstDiffCoverage]:
     text, clipped = _diff_prefix(str(diff_text or ""), AUDIT_MAX_DIFF_CHARS)
     grounding = build_diff_grounding(
         diff_text,
@@ -1216,7 +1247,12 @@ def _build_ast_diff_summary_sync(
     # — is in `valid_paths` but has no line in `line_index`, and indexing it here
     # is what used to raise KeyError on `min(line_index[path])`.
     groundable = [path for path in files if grounding.line_index.get(path)]
+    files_requested = 0
+    files_with_context = 0
     for path in groundable[:MAX_AST_SOURCE_FILES]:
+        if not path.endswith(STRUCTURAL_SOURCE_SUFFIXES):
+            continue
+        files_requested += 1
         # Parsed raw, never pre-redacted: redaction is applied to the rendered
         # snippet below, with a line-preserving redactor. Redacting first would
         # either break the parse (a secret inside a string literal) or report
@@ -1250,6 +1286,7 @@ def _build_ast_diff_summary_sync(
                 parsed_contexts.append(
                     _redact_preserving_line_anchors(format_ast_context(frame, context))
                 )
+                files_with_context += 1
         elif PurePosixPath(path).suffix in (".ts", ".tsx", ".js", ".jsx"):
             structural_contexts.append(
                 _redact_preserving_line_anchors(
@@ -1260,9 +1297,11 @@ def _build_ast_diff_summary_sync(
                     )
                 )
             )
+            files_with_context += 1
     if parsed_contexts:
         parts.append(
-            "Parser-backed Python AST context:\n"
+            _PARSER_BACKED_SECTION_HEADER
+            + "\n"
             + "\n\n".join(parsed_contexts[:MAX_AST_SOURCE_FILES])
         )
     else:
@@ -1271,7 +1310,8 @@ def _build_ast_diff_summary_sync(
         )
     if structural_contexts:
         parts.append(
-            "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+            _STRUCTURAL_FALLBACK_SECTION_HEADER
+            + "\n"
             + "\n\n".join(structural_contexts[:MAX_AST_SOURCE_FILES])
         )
 
@@ -1298,7 +1338,18 @@ def _build_ast_diff_summary_sync(
     # Defence in depth over the whole rendered summary, still line-preserving so
     # a residual secret cannot move the scope anchors the snippets just declared.
     clean_summary = _redact_preserving_line_anchors("\n".join(parts))
-    return _clip(clean_summary, MAX_AST_CONTEXT_CHARS)
+    return _clip(clean_summary, MAX_AST_CONTEXT_CHARS), AstDiffCoverage(
+        files_requested=files_requested,
+        files_with_context=files_with_context,
+    )
+
+
+def _build_ast_diff_summary_sync(
+    diff_text: str,
+    file_contexts: Optional[Mapping[str, str]] = None,
+) -> str:
+    summary, _ = _build_ast_diff_summary_with_coverage_sync(diff_text, file_contexts)
+    return summary
 
 
 def build_ast_diff_summary(
@@ -1315,6 +1366,20 @@ async def build_ast_diff_summary_async(
     return await asyncio.wait_for(
         asyncio.to_thread(
             _build_ast_diff_summary_sync,
+            diff_text,
+            file_contexts,
+        ),
+        timeout=AST_ANALYSIS_TIMEOUT_S,
+    )
+
+
+async def _build_ast_diff_summary_with_coverage_async(
+    diff_text: str,
+    file_contexts: Optional[Mapping[str, str]] = None,
+) -> tuple[str, AstDiffCoverage]:
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            _build_ast_diff_summary_with_coverage_sync,
             diff_text,
             file_contexts,
         ),
