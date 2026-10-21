@@ -999,13 +999,13 @@ _TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "create_pull_request",
             "description": (
-                "Publish this session: commit every staged patch to a "
-                "`haunter/session-*` topic branch, push it, and open a pull request "
-                "against the repository default branch. This is a WRITE OPERATION — "
-                "it pushes to GitHub immediately and marks the session completed. "
-                "Call it only when the user explicitly asks you to publish or open a "
-                "pull request, and only after verification passes. It cannot target "
-                "a protected or default branch."
+                "Publish this session: commit every staged patch to a dedicated "
+                "`haunter/session-<session-id>` topic branch, push it, and open a "
+                "pull request against the repository default branch. This is a WRITE "
+                "OPERATION — it pushes to GitHub immediately and marks the session "
+                "completed. Call it only when the user explicitly asks you to publish "
+                "or open a pull request, and only after verification passes. It cannot "
+                "target a protected or default branch."
             ),
             "parameters": {
                 "type": "object",
@@ -3941,9 +3941,12 @@ class SessionOrchestrator:
         Publish the session through the shared commit publisher.
 
         Structural safety: the tool accepts only a title/body — it can never
-        choose a branch, repository, or token. The publisher mints the topic
-        branch, rejects protected/default branches, and re-verifies write
-        access before any Git write.
+        choose a branch, repository, or token. A dedicated ``haunter/session-*``
+        branch is minted from the session id and passed explicitly, so a
+        user-controlled ``session.branch_name`` (including ``main``) can never
+        become the publish target. The publisher re-validates the branch,
+        rejects protected/default branches, and re-verifies write access before
+        any Git write.
         """
         from app.services.session_commit import (
             SessionCommitError,
@@ -3990,7 +3993,7 @@ class SessionOrchestrator:
                 body=body,
                 current_user=current_user,
                 db=self.db,
-                target_branch=None,
+                target_branch=f"haunter/session-{str(session.id)[:8]}",
                 gh_token=self.gh_token,
             )
         except SessionCommitError as exc:

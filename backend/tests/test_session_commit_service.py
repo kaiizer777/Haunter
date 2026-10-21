@@ -350,6 +350,52 @@ async def test_mints_session_branch_when_none_configured() -> None:
     assert session.branch_name == expected_branch
 
 
+@pytest.mark.asyncio
+async def test_explicit_topic_branch_overrides_user_controlled_session_branch() -> None:
+    """Catches the tool-adopts-session-branch bug at the ref-creation boundary.
+
+    The agent passes an explicit ``haunter/session-*`` branch; the publisher
+    must create that ref and open the PR with that head, never the session's
+    user-controlled ``feat/x`` value.
+    """
+    repo = _make_repo(default_branch="main")
+    session = _make_session(repo, branch_name="feat/x")
+    expected_branch = f"haunter/session-{str(session.id)[:8]}"
+    mock_create_branch = AsyncMock()
+    mock_create_pr = AsyncMock(
+        return_value={"html_url": "https://github.com/o/r/pull/8", "number": 8}
+    )
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=AsyncMock(side_effect=GitHubResourceNotFoundError("missing")),
+            create_branch=mock_create_branch,
+            update_ref=AsyncMock(),
+            create_pr=mock_create_pr,
+        )
+        result = await publish_session_patches(
+            session=session,
+            repo=repo,
+            title="Fix",
+            body=None,
+            current_user=_make_user(),
+            db=_make_db(),
+            target_branch=expected_branch,
+            gh_token="tok",
+        )
+
+    created = mock_create_branch.await_args.kwargs
+    assert created["branch"] == expected_branch
+    assert created["branch"] != "feat/x"
+    assert mock_create_pr.await_args.kwargs["head"] == expected_branch
+    assert result.branch_name == expected_branch
+    assert session.branch_name == expected_branch
+
+
 # ---------------------------------------------------------------------------
 # Write access
 # ---------------------------------------------------------------------------

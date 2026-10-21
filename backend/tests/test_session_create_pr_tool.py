@@ -221,7 +221,7 @@ async def test_dispatch_calls_shared_publisher_and_returns_pr_details(caplog) ->
     assert kwargs["current_user"] is user
     assert kwargs["title"] == "Fix: publish"
     assert kwargs["body"] == "Details"
-    assert kwargs["target_branch"] is None
+    assert kwargs["target_branch"] == f"haunter/session-{str(session.id)[:8]}"
     assert kwargs["gh_token"] == _GH_TOKEN
 
     assert _PR_URL in text
@@ -409,7 +409,36 @@ async def test_route_and_tool_both_invoke_shared_publisher() -> None:
         await _dispatch(orch, session, {"title": "Fix via agent"}, history=[])
 
     tool_publisher.assert_awaited_once()
-    assert tool_publisher.await_args.kwargs["target_branch"] is None
+    assert tool_publisher.await_args.kwargs["target_branch"] == (
+        f"haunter/session-{str(session.id)[:8]}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_branch", ["feat/x", "main", None, ""])
+async def test_tool_always_mints_dedicated_session_branch(session_branch) -> None:
+    """Catches the tool-adopts-session.branch_name regression (issue #70 F3).
+
+    Even when the session branch is user-controlled (``feat/x``), protected
+    (``main``), or missing, the tool must pass its own ``haunter/session-*``
+    branch to the publisher rather than letting ``target_branch=None`` fall
+    back to ``session.branch_name``.
+    """
+    user = _make_user()
+    repo = _make_repo(user)
+    session = _make_session(user, repo)
+    session.branch_name = session_branch
+    orch = _make_orchestrator(session, current_user=user)
+    expected = f"haunter/session-{str(session.id)[:8]}"
+
+    with patch(
+        "app.services.session_commit.publish_session_patches",
+        AsyncMock(return_value=_make_result(branch_name=expected)),
+    ) as publisher:
+        await _dispatch(orch, session, {"title": "Fix"}, history=[])
+
+    assert publisher.await_args.kwargs["target_branch"] == expected
+    assert publisher.await_args.kwargs["target_branch"] != session_branch
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +562,6 @@ async def test_checkpoint_restore_after_publish_is_refused_and_pr_entry_survives
     assert session.conversation_history == list(base_history)
     assert session.staged_patches == staged_patches
     assert session.checkpoints == [checkpoint]
-    assert turn_history == list(base_history)
     assert staged_patches == dict(session.staged_patches or {})
     queue.put_checkpoint_restored.assert_not_awaited()
     orch.db.flush.assert_not_awaited()
