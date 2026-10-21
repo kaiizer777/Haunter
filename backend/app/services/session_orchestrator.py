@@ -994,6 +994,39 @@ _TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_pull_request",
+            "description": (
+                "Publish this session: commit every staged patch to a "
+                "`haunter/session-*` topic branch, push it, and open a pull request "
+                "against the repository default branch. This is a WRITE OPERATION — "
+                "it pushes to GitHub immediately and marks the session completed. "
+                "Call it only when the user explicitly asks you to publish or open a "
+                "pull request, and only after verification passes. It cannot target "
+                "a protected or default branch."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Pull request and commit title (1-255 characters).",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": (
+                            "Optional pull request description in Markdown "
+                            "(max 65535 characters)."
+                        ),
+                    },
+                },
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+        },
+    },
     TOOL_RUN_AUDIT_SCAN,
 ]
 
@@ -1109,7 +1142,9 @@ def _build_system_prompt(
         " 30. `git_diff(base, head, path?, stat_only?)` - unified diff or diffstat between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
         " 31. `list_staged_files()` - list all file paths currently staged with in-memory uncommitted modifications, creations, or deletions in the session.\n"
         " 32. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
-        "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n\n"
+        "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n"
+        " 33. `create_pull_request(title, body?)` — publish the session: commit all staged patches to a `haunter/session-*` topic branch and open a pull request immediately (write operation; marks the session completed).\n"
+        "     Call this LAST, only when the user explicitly asks you to publish or open a pull request, and only after verification passes. It cannot target protected or default branches.\n\n"
         "For multi-step requests, start by calling update_plan to outline your steps. "
         "Update task statuses as you progress. If you encounter ambiguous architectural trade-offs, "
         "call ask_user_clarification to let the user decide.\n"
@@ -2682,6 +2717,15 @@ class SessionOrchestrator:
                 staged_patches=staged_patches,
                 queue=queue,
             )
+        elif tool_name == "create_pull_request":
+            if session is None:
+                return "Error: Session context is required for create_pull_request."
+            return await self._tool_create_pull_request(
+                args=args,
+                session=session,
+                staged_patches=staged_patches,
+                conversation_history=conversation_history,
+            )
         else:
             logger.warning(
                 "session_orchestrator: unknown tool_name=%r in session=%s",
@@ -3884,6 +3928,85 @@ class SessionOrchestrator:
             llm=self._llm,
             gh_token=self.gh_token,
             db=self.db,
+        )
+
+    async def _tool_create_pull_request(
+        self,
+        args: dict[str, Any],
+        session: AgentSession,
+        staged_patches: dict[str, str],
+        conversation_history: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """
+        Publish the session through the shared commit publisher.
+
+        Structural safety: the tool accepts only a title/body — it can never
+        choose a branch, repository, or token. The publisher mints the topic
+        branch, rejects protected/default branches, and re-verifies write
+        access before any Git write.
+        """
+        from app.services.session_commit import (
+            SessionCommitError,
+            publish_session_patches,
+        )
+
+        title = args.get("title")
+        body = args.get("body")
+        if not isinstance(title, str) or not title.strip():
+            return "Error: 'title' is required and must be a non-empty string."
+        if len(title.strip()) > 255:
+            return "Error: 'title' must be 255 characters or fewer."
+        if body is not None and not isinstance(body, str):
+            return "Error: 'body' must be a string when provided."
+        if isinstance(body, str) and len(body) > 65535:
+            return "Error: 'body' must be 65535 characters or fewer."
+
+        repo = getattr(session, "repo", None)
+        if repo is None:
+            return "Error: session repository context is missing."
+
+        current_user = self.current_user
+        if current_user is None:
+            try:
+                current_user = await self.db.get(User, session.user_id)
+            except Exception:
+                current_user = None
+        if current_user is None:
+            return (
+                "Error: could not resolve the session owner to verify repository "
+                "write access."
+            )
+
+        # The turn-local dict is canonical while a turn runs; the ORM attribute
+        # still holds the pre-turn snapshot. Sync it before publishing so
+        # patches staged in this turn are included.
+        session.staged_patches = dict(staged_patches)
+
+        try:
+            result = await publish_session_patches(
+                session=session,
+                repo=repo,
+                title=title,
+                body=body,
+                current_user=current_user,
+                db=self.db,
+                target_branch=None,
+                gh_token=self.gh_token,
+            )
+        except SessionCommitError as exc:
+            return f"Error: {exc}"
+
+        # `_persist` rewrites conversation_history from the turn-local copy at
+        # the end of the turn. Append the identical entry or it would erase the
+        # PR record the publisher just saved.
+        if conversation_history is not None:
+            conversation_history.append(result.history_entry)
+
+        return (
+            f"Pull request opened: {result.pr_url}\n"
+            f"Branch: {result.branch_name}\n"
+            f"Commit: {result.commit_sha}\n"
+            "Session marked completed."
         )
 
     async def _load_session(self) -> AgentSession | None:
