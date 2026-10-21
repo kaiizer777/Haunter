@@ -1256,6 +1256,53 @@ def test_normalize_bucket_key_bounds_oversized_keys():
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize(
+    "key",
+    [
+        "owner/repo|sender\ud83d",
+        "org/repo|sender\udc80",
+        "owner/repo\U0001F600|sender",
+        "a" * 130 + "\ud83d" + "b" * 100,
+        "evil/repo\udc80x",
+    ],
+    ids=[
+        "high_surrogate_short_path",
+        "low_surrogate_short_path",
+        "valid_emoji_short_path",
+        "surrogate_in_prefix_oversized",
+        "attacker_json_escape_path",
+    ],
+)
+def test_normalize_bucket_key_output_is_utf8_encodable(key):
+    """Every normalized bucket key is UTF-8 encodable (asyncpg bind precondition).
+
+    Lone surrogate code points (e.g. from json.loads of an invalid \\uXXXX
+    escape, as GitHub payload keys can carry) previously escaped
+    normalize_bucket_key and crashed the Postgres bind with
+    UnicodeEncodeError, an error class outside _STORE_EXCEPTIONS.
+    """
+    bounded = normalize_bucket_key(key)
+    assert len(bounded) <= MAX_BUCKET_KEY_LENGTH
+
+    # Core contract: the value must be bindable as UTF-8, i.e. it must not
+    # contain lone surrogate code points and must not raise on encode.
+    assert all(not (0xD800 <= ord(char) <= 0xDFFF) for char in bounded)
+    bounded.encode("utf-8")  # must not raise
+
+    if not any(0xD800 <= ord(char) <= 0xDFFF for char in key):
+        # Behavior preservation: clean keys are returned unchanged.
+        assert bounded == key
+
+    if len(key) <= MAX_BUCKET_KEY_LENGTH:
+        # Each lone surrogate maps to exactly one replacement char, so the
+        # length contract is preserved on the short path too.
+        assert len(bounded) == len(key)
+    else:
+        # prefix (135 chars) + separator (1) + digest (64) == 200 exactly.
+        assert len(bounded) == MAX_BUCKET_KEY_LENGTH
+
+
+@pytest.mark.fast
 @pytest.mark.asyncio
 async def test_in_memory_backend_with_oversized_keys():
     """In-memory rate limiter seamlessly handles keys longer than 200 chars."""

@@ -88,7 +88,9 @@ BUCKET_KEY_MAX_LENGTH: int = BUCKET_KEY_MAX_LENGTH
 def normalize_bucket_key(key: str) -> str:
     """Ensure a bucket key does not exceed MAX_BUCKET_KEY_LENGTH characters.
 
-    If len(key) <= MAX_BUCKET_KEY_LENGTH, return key unchanged.
+    The key is first sanitized for lone surrogates with errors="replace";
+    if the sanitized key is at most MAX_BUCKET_KEY_LENGTH characters, it is
+    returned as-is.
     Otherwise, deterministically bound the key using a truncated prefix and
     a SHA-256 digest so that:
     1. The result is strictly <= MAX_BUCKET_KEY_LENGTH characters.
@@ -96,12 +98,13 @@ def normalize_bucket_key(key: str) -> str:
     3. Distinct oversized keys that share a prefix do not collide into the same bucket.
     4. Strings with lone surrogates are encoded safely with errors="replace".
     """
-    if len(key) <= MAX_BUCKET_KEY_LENGTH:
-        return key
+    sanitized = key.encode("utf-8", errors="replace").decode("utf-8")
+    if len(sanitized) <= MAX_BUCKET_KEY_LENGTH:
+        return sanitized
 
-    digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()
+    digest = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
     prefix_len = MAX_BUCKET_KEY_LENGTH - len(digest) - 1
-    prefix = key[:prefix_len] if prefix_len > 0 else ""
+    prefix = sanitized[:prefix_len] if prefix_len > 0 else ""
     if prefix:
         return f"{prefix}:{digest}"
     return digest[:MAX_BUCKET_KEY_LENGTH]
