@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
-from app.models import AgentSession
+from app.models import AgentSession, User
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.recon import (
     _count_diff_lines,
@@ -1599,11 +1599,13 @@ class SessionOrchestrator:
         db: AsyncSession,
         gh_token: str | None = None,
         turn_id: str | None = None,
+        current_user: User | None = None,
     ) -> None:
         self.session_id = session_id
         self.db = db
         self.gh_token = gh_token
         self.turn_id = turn_id
+        self.current_user = current_user
         self._llm = LLMClient(timeout=120.0)
         self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
         self._mirror_worker_task: asyncio.Task | None = None

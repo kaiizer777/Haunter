@@ -1063,6 +1063,7 @@ async def chat_session(
         session_id=session_id,
         db=db,
         gh_token=gh_token,
+        current_user=current_user,
     )
 
     # Launch the orchestrator in a background task so the StreamingResponse
