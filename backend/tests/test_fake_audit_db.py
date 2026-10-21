@@ -199,3 +199,18 @@ async def _ordered_attempt_numbers(
     statement = select(Attempt).order_by(*ordering)
     rows = (await session.execute(statement)).scalars().all()
     return [row.attempt_number for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_order_by_ascending_places_nulls_last(
+    audit_store: FakeStore,
+) -> None:
+    """PostgreSQL sorts NULL above every value, so ASC ends with NULL rows."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.asc()
+    ) == [3, 2, 1]
