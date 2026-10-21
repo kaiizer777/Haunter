@@ -121,6 +121,27 @@ diff --git a/backend/app/routers/tokens.py b/backend/app/routers/tokens.py
 """
 
 
+# File sources covering SAMPLE_DIFF's grounded lines (issue #60). Passing
+# these keeps the audit out of the degraded path so full-confidence
+# expectations keep meaning "structural analysis ran", not "the analyzer
+# was never given input".
+_SAMPLE_FILE_CONTEXTS = {
+    "backend/app/auth.py": (
+        "\n" * 79
+        + "import time\n"
+        + "\n"
+        + "def verify_token(token: str, stored_token: str):\n"
+        + "    return token == stored_token\n"
+    ),
+    "backend/app/routers/tokens.py": (
+        "\n" * 27
+        + "async def list_sessions():\n"
+        + "    sessions = db.query(Session).all()\n"
+        + "    return sessions\n"
+    ),
+}
+
+
 def _finding(
     file_path: str = "backend/app/auth.py",
     severity: str = "WARNING",
@@ -221,6 +242,7 @@ async def test_four_perspectives_emit_findings_with_shared_client():
             repo_full_name="audit-org/audit-repo",
             ref="feature/audit-test",
             audit_id="audit-111111111111",
+            file_contexts=_SAMPLE_FILE_CONTEXTS,
         )
     finally:
         patcher.stop()
@@ -282,7 +304,11 @@ async def test_severity_aggregation_orders_blocker_first():
 async def test_low_confidence_finding_demoted_to_informational_note():
     patcher, _, _ = _patched_llm(_four_perspective_router({"correctness": 60}))
     try:
-        result = await run_audit(diff_text=SAMPLE_DIFF, audit_id="audit-333333333333")
+        result = await run_audit(
+            diff_text=SAMPLE_DIFF,
+            audit_id="audit-333333333333",
+            file_contexts=_SAMPLE_FILE_CONTEXTS,
+        )
     finally:
         patcher.stop()
 
@@ -2504,6 +2530,7 @@ async def test_four_perspectives_execute_concurrently_with_fixed_bound():
     result = await run_audit(
         diff_text=SAMPLE_DIFF,
         llm_client=_mock_llm_client(complete),
+        file_contexts=_SAMPLE_FILE_CONTEXTS,
     )
 
     assert complete.await_count == 4
@@ -6226,6 +6253,7 @@ async def test_run_audit_large_diff_over_2mb_completes_gracefully():
         result = await run_audit(
             diff_text=full_diff,
             audit_id="audit-888888888888",
+            file_contexts=_SAMPLE_FILE_CONTEXTS,
         )
         assert result.confidence >= 75
         assert result.audit_id == "audit-888888888888"
@@ -6288,6 +6316,7 @@ async def test_run_audit_large_non_noise_diff_budgeted_gracefully():
         result = await run_audit(
             diff_text=large_code,
             audit_id="audit-999999999999",
+            file_contexts=_SAMPLE_FILE_CONTEXTS,
         )
         assert result.confidence >= 75
         assert "Budget limits affected" in result.analysis_metadata
