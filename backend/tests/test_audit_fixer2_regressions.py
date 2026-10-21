@@ -252,6 +252,7 @@ async def test_orchestrator_syncs_state_on_checkpoint_restore() -> None:
 
     mock_session = MagicMock()
     mock_session.id = session_id
+    mock_session.status = "active"
     mock_session.base_sha = "a" * 40
     mock_session.staged_patches = {"lib/core.py": "+modified"}
     mock_session.conversation_history = [
@@ -409,6 +410,7 @@ async def test_checkpoint_restore_failure_does_not_sync_orchestrator_state() -> 
 
     mock_session = MagicMock()
     mock_session.id = session_id
+    mock_session.status = "active"
     mock_session.branch_name = "feat/test"
     mock_session.base_sha = "a" * 40
     mock_session.staged_patches = {"restored.py": "+restored"}
@@ -470,6 +472,7 @@ async def test_checkpoint_restore_success_rebuilds_messages_context() -> None:
 
     mock_session = MagicMock()
     mock_session.id = session_id
+    mock_session.status = "active"
     mock_session.branch_name = "feat/test"
     mock_session.base_sha = "a" * 40
     mock_session.staged_patches = {"bloat.py": "+bloat"}
@@ -686,6 +689,7 @@ async def test_checkpoint_restore_truncates_current_turn_intermediate_tool_entri
 
     mock_session = MagicMock()
     mock_session.id = session_id
+    mock_session.status = "active"
     mock_session.branch_name = "feat/test"
     mock_session.base_sha = "a" * 40
     mock_session.staged_patches = dict(cp_patches)
@@ -762,6 +766,7 @@ async def test_checkpoint_restore_truncates_current_turn_intermediate_tool_entri
 async def test_checkpoint_restore_flushes_without_committing_mid_turn() -> None:
     """tool_checkpoint_restore must use db.flush() instead of db.commit() to avoid releasing row locks mid-turn."""
     session = MagicMock()
+    session.status = "active"
     session.staged_patches = {"bad.py": "+bad"}
     session.conversation_history = [{"role": "user", "content": "1"}, {"role": "assistant", "content": "2"}]
     cp_id = "cp_flush_test"

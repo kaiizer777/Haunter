@@ -194,6 +194,7 @@ def test_system_prompt_advertises_create_pull_request() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_calls_shared_publisher_and_returns_pr_details(caplog) -> None:
+    """Catches a tool bypassing the shared publisher or leaking the token."""
     user = _make_user()
     repo = _make_repo(user)
     session = _make_session(user, repo)

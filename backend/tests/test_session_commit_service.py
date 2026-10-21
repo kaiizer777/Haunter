@@ -135,6 +135,7 @@ def _install_pipeline(
 
 @pytest.mark.asyncio
 async def test_empty_staged_patches_rejected_422() -> None:
+    """Catches guard reordering: empty sessions must fail before any GitHub work."""
     repo = _make_repo()
     session = _make_session(repo, staged_patches={})
     db = _make_db()
@@ -159,6 +160,7 @@ async def test_empty_staged_patches_rejected_422() -> None:
 
 @pytest.mark.asyncio
 async def test_non_active_session_rejected_400() -> None:
+    """Catches publishing a completed/closed row after it was already published."""
     repo = _make_repo()
     session = _make_session(repo, status="completed")
 
@@ -490,6 +492,7 @@ _BAD_PATHS = [
 async def test_unsafe_staged_paths_rejected_before_any_github_call(
     bad_path: str,
 ) -> None:
+    """Catches normalized DB paths reaching contents/blob/tree/PR API calls."""
     repo = _make_repo()
     session = _make_session(repo, staged_patches={bad_path: _SAMPLE_PATCH})
     mock_fetch = AsyncMock()
@@ -523,6 +526,7 @@ async def test_unsafe_staged_paths_rejected_before_any_github_call(
 
 @pytest.mark.asyncio
 async def test_duplicate_paths_after_normalization_rejected() -> None:
+    """Catches ``x`` and ``./x`` collapsing into one tree entry overwriting another."""
     repo = _make_repo()
     session = _make_session(
         repo,
@@ -682,6 +686,46 @@ async def test_publish_creates_branch_in_order_and_persists_result() -> None:
     assert session.status == "completed"
     assert session.conversation_history[-1] is result.history_entry
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tool_path_does_not_write_history_inside_publisher() -> None:
+    """Catches two writers: the agent tool lets _persist own history ordering.
+
+    With ``persist_history=False`` the publisher still marks the row completed
+    and returns the entry, but must not append it to conversation_history.
+    """
+    repo = _make_repo()
+    session = _make_session(repo, branch_name="feat/history")
+    session.conversation_history = [{"role": "user", "content": "pre-turn"}]
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=AsyncMock(return_value="origsha"),
+            create_branch=AsyncMock(),
+            update_ref=AsyncMock(),
+            create_pr=AsyncMock(
+                return_value={"html_url": "https://github.com/o/r/pull/12", "number": 12}
+            ),
+        )
+        result = await publish_session_patches(
+            session=session,
+            repo=repo,
+            title="Fix",
+            body=None,
+            current_user=_make_user(),
+            db=_make_db(),
+            gh_token="tok",
+            persist_history=False,
+        )
+
+    assert session.status == "completed"
+    assert session.conversation_history == [{"role": "user", "content": "pre-turn"}]
+    assert result.history_entry["pr_url"] == "https://github.com/o/r/pull/12"
 
 
 @pytest.mark.asyncio
