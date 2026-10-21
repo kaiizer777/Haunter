@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +26,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentSession, Repo, User
@@ -457,6 +459,83 @@ async def test_restore_endpoint_refuses_published_session() -> None:
     assert session.conversation_history == [pr_entry]
     assert session.checkpoints == [checkpoint]
     assert session.staged_patches == {}
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restore_endpoint_locks_session_row() -> None:
+    """Catches the read-check-then-write race: restore must take FOR UPDATE NOWAIT."""
+    user = User(
+        id=uuid.uuid4(),
+        github_id=91002,
+        github_username="restore-lock-user",
+        role="user",
+    )
+    repo = Repo(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        owner="test-org",
+        name="restore-lock-repo",
+        default_branch="main",
+    )
+    checkpoint = {
+        "checkpoint_id": "cp_lock",
+        "turn": 1,
+        "timestamp": "2026-10-22T00:00:00+00:00",
+        "description": "lock",
+        "staged_patches": {},
+        "history_length": 0,
+    }
+    session = _make_session(user, repo, checkpoints=[checkpoint])
+    session.id = uuid.uuid4()
+    session.created_at = datetime.now(timezone.utc)
+    session.updated_at = datetime.now(timezone.utc)
+    session.repo = repo
+
+    mock_db = MagicMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = session
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.commit = AsyncMock()
+    mock_db.refresh = AsyncMock()
+
+    await restore_checkpoint(
+        session_id=uuid.uuid4(),
+        checkpoint_id="cp_lock",
+        current_user=user,
+        db=mock_db,
+    )
+
+    stmt = mock_db.execute.await_args.args[0]
+    assert stmt._for_update_arg is not None
+    assert stmt._for_update_arg.nowait is True
+
+
+@pytest.mark.asyncio
+async def test_restore_endpoint_lock_conflict_returns_409_without_commit() -> None:
+    """A concurrent publish holding the row lock must not let restore mutate state."""
+    user = User(
+        id=uuid.uuid4(),
+        github_id=91003,
+        github_username="restore-conflict-user",
+        role="user",
+    )
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(
+        side_effect=OperationalError("SELECT", {}, Exception("row is locked"))
+    )
+    mock_db.commit = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await restore_checkpoint(
+            session_id=uuid.uuid4(),
+            checkpoint_id="cp_any",
+            current_user=user,
+            db=mock_db,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "locking this session" in exc_info.value.detail
     mock_db.commit.assert_not_awaited()
 
 

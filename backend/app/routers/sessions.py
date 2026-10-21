@@ -1413,16 +1413,30 @@ async def restore_checkpoint(
     - Reverts staged_patches and truncates conversation_history to the checkpoint snapshot.
     - Commits changes and returns updated SessionOut.
     """
-    stmt = (
-        select(AgentSession)
-        .options(selectinload(AgentSession.repo))
-        .where(
-            AgentSession.id == session_id,
-            AgentSession.user_id == current_user.id,
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    try:
+        stmt = (
+            select(AgentSession)
+            .options(selectinload(AgentSession.repo))
+            .where(
+                AgentSession.id == session_id,
+                AgentSession.user_id == current_user.id,
+            )
+            .with_for_update(nowait=True)
         )
-    )
-    result = await db.execute(stmt)
-    session: Optional[AgentSession] = result.scalars().first()
+        result = await db.execute(stmt)
+        session: Optional[AgentSession] = result.scalars().first()
+    except (OperationalError, DBAPIError) as exc:
+        logger.warning(
+            "sessions/restore_checkpoint: session %s lock conflict: %s",
+            session_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another operation is currently locking this session. Please retry.",
+        ) from exc
 
     if not session:
         raise HTTPException(
