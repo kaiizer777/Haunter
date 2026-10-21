@@ -22,6 +22,7 @@ from app.models import Attempt, WebhookDelivery
 from tests.fake_audit_db import (  # noqa: F401
     FakeAsyncSession,
     FakeStore,
+    UnsupportedStatementError,
     audit_store,
 )
 
@@ -262,3 +263,113 @@ async def test_null_placement_applies_per_clause_in_multi_column_order(
         Attempt.verification_status.desc(),
         Attempt.attempt_number.asc(),
     ) == [1, 2, 4, 3]
+
+
+@pytest.mark.asyncio
+async def test_order_by_bare_nulls_first_places_nulls_first(
+    audit_store: FakeStore,
+) -> None:
+    """A bare ``NULLS FIRST`` is implicit ASC with NULLs ahead of values."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.nulls_first()
+    ) == [1, 3, 2]
+
+
+@pytest.mark.asyncio
+async def test_order_by_asc_nulls_first_places_nulls_first(
+    audit_store: FakeStore,
+) -> None:
+    """``ASC NULLS FIRST`` overrides PostgreSQL's ASC default of NULLs last."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.asc().nulls_first()
+    ) == [1, 3, 2]
+
+
+@pytest.mark.asyncio
+async def test_order_by_desc_nulls_last_places_nulls_last(
+    audit_store: FakeStore,
+) -> None:
+    """``DESC NULLS LAST`` overrides PostgreSQL's DESC default of NULLs first."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.desc().nulls_last()
+    ) == [2, 3, 1]
+
+
+@pytest.mark.asyncio
+async def test_order_by_nulls_last_before_desc_places_nulls_last(
+    audit_store: FakeStore,
+) -> None:
+    """Modifier order is irrelevant: outer DESC over inner NULLS LAST."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.nulls_last().desc()
+    ) == [2, 3, 1]
+
+
+@pytest.mark.asyncio
+async def test_explicit_null_modifiers_override_direction_defaults(
+    audit_store: FakeStore,
+) -> None:
+    """Explicit modifiers flip both direction defaults to their opposite."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.nulls_first().asc()
+    ) == [1, 3, 2]
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.desc().nulls_last()
+    ) == [2, 3, 1]
+
+
+@pytest.mark.asyncio
+async def test_multi_column_order_honours_explicit_nulls_modifier(
+    audit_store: FakeStore,
+) -> None:
+    """A clause's explicit NULLS LAST must not leak into later clauses."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    session.add(_attempt(row_id=uuid.UUID(int=4), attempt_number=4, status="pass"))
+
+    assert await _ordered_attempt_numbers(
+        session,
+        Attempt.verification_status.desc().nulls_last(),
+        Attempt.attempt_number.asc(),
+    ) == [2, 4, 3, 1]
+
+
+@pytest.mark.asyncio
+async def test_unmodelled_order_by_modifier_fails_loud(
+    audit_store: FakeStore,
+) -> None:
+    """A non-ordering modifier must raise, never silently default to ASC."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+
+    with pytest.raises(UnsupportedStatementError):
+        await session.execute(
+            select(Attempt).order_by(Attempt.verification_status.distinct())
+        )
