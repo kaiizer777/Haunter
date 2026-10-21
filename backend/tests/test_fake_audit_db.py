@@ -214,3 +214,18 @@ async def test_order_by_ascending_places_nulls_last(
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.asc()
     ) == [3, 2, 1]
+
+
+@pytest.mark.asyncio
+async def test_order_by_descending_places_nulls_first(
+    audit_store: FakeStore,
+) -> None:
+    """Reversing an ascending sort of "NULL largest" puts NULL rows first."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.desc()
+    ) == [1, 2, 3]
