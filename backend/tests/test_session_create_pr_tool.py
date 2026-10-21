@@ -231,8 +231,8 @@ async def test_dispatch_calls_shared_publisher_and_returns_pr_details(caplog) ->
     assert _GH_TOKEN not in text
     assert _GH_TOKEN not in caplog.text
 
-    assert history == [result.history_entry]
-    assert history[0] is result.history_entry
+    assert history == []
+    assert orch._pr_history_entry is result.history_entry
 
 
 @pytest.mark.asyncio
@@ -442,49 +442,125 @@ async def test_tool_always_mints_dedicated_session_branch(session_branch) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Persistence trap: _persist must not erase the PR history entry
+# Persistence: order + exactly-once, including publish -> restore
 # ---------------------------------------------------------------------------
 
 
+def _realistic_base_history() -> list[dict[str, object]]:
+    """Prior turns a real session would already have in conversation_history."""
+    return [
+        {"role": "user", "content": "Investigate the checkout timeout."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "grep_search", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "app/checkout.py:42: while True:",
+        },
+        {"role": "assistant", "content": "The retry loop never updates the deadline."},
+    ]
+
+
+def _current_turn_entries() -> list[dict[str, object]]:
+    """The user message + assistant/tool entries produced by the publish turn."""
+    return [
+        {"role": "user", "content": "Open the PR with that fix."},
+        {
+            "role": "assistant",
+            "content": "Publishing.",
+            "tool_calls": [
+                {
+                    "id": "call_pr",
+                    "type": "function",
+                    "function": {
+                        "name": "create_pull_request",
+                        "arguments": '{"title": "Fix checkout timeout"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_pr",
+            "content": f"Pull request opened: {_PR_URL}",
+        },
+        {"role": "assistant", "content": "The PR is open."},
+    ]
+
+
 @pytest.mark.asyncio
-async def test_persist_keeps_pr_history_entry_exactly_once() -> None:
+async def test_pr_entry_is_appended_after_turn_entries_exactly_once() -> None:
+    """Catches the PR-entry-before-the-user-message regression (issue #70 F5).
+
+    The tool only buffers ``result.history_entry``; ``_persist`` appends it
+    after every entry produced by the publish turn. A tool that appends to the
+    pre-turn history copy, or a second writer, fails the exact-order assertion.
+    """
     user = _make_user()
     repo = _make_repo(user)
     session = _make_session(user, repo)
+    base_history = _realistic_base_history()
+    current_turn = _current_turn_entries()
+    session.conversation_history = list(base_history)
     orch = _make_orchestrator(session, current_user=user)
-    history: list[dict[str, object]] = [{"role": "user", "content": "publish it"}]
     result = _make_result()
 
-    async def _fake_publish(**kwargs: object) -> SessionCommitResult:
-        # Mirror the real publisher: persist the entry on the ORM session.
-        kwargs["session"].status = "completed"  # type: ignore[union-attr]
-        kwargs["session"].conversation_history = [  # type: ignore[union-attr]
-            *list(kwargs["session"].conversation_history or []),  # type: ignore[union-attr]
-            result.history_entry,
-        ]
+    async def _fake_publish(**_kwargs: object) -> SessionCommitResult:
+        # Mirrors the tool path: status changes, history is left to _persist.
+        session.status = "completed"
         return result
 
     with patch(
         "app.services.session_commit.publish_session_patches",
         AsyncMock(side_effect=_fake_publish),
-    ):
-        text = await _dispatch(orch, session, {"title": "Publish"}, history=history)
+    ) as publisher:
+        text = await _dispatch(
+            orch,
+            session,
+            {"title": "Fix checkout timeout"},
+            history=base_history,
+        )
 
     assert "Session marked completed." in text
-    # The handler appended the identical entry to the in-turn history copy.
-    assert history[-1] is result.history_entry
+    assert publisher.await_args.kwargs["persist_history"] is False
+    # The pre-turn copy is not touched; the entry waits in the orchestrator.
+    assert base_history == _realistic_base_history()
+    assert orch._pr_history_entry is result.history_entry
 
-    # End-of-turn persist uses the in-turn copy; it must not clobber the entry.
-    await orch._persist(session, list(history), dict(session.staged_patches or {}))
+    await orch._persist(
+        session,
+        list(base_history) + current_turn,
+        dict(session.staged_patches or {}),
+        base_history=base_history,
+        new_entries=current_turn,
+    )
 
-    pr_entries = [
+    expected = [*base_history, *current_turn, result.history_entry]
+    assert session.conversation_history == expected
+    assert session.conversation_history[-1]["content"] == result.history_entry["content"]
+    assert [
         entry
         for entry in session.conversation_history
         if isinstance(entry, dict) and entry.get("pr_url") == _PR_URL
-    ]
-    assert len(pr_entries) == 1
+    ] == [result.history_entry]
     assert session.status == "completed"
-    assert session.conversation_history[0]["content"] == "publish it"
+
+    # A second persist call must not duplicate the buffered entry.
+    await orch._persist(
+        session,
+        list(session.conversation_history),
+        dict(session.staged_patches or {}),
+    )
+    assert session.conversation_history == expected
 
 
 @pytest.mark.asyncio
@@ -494,15 +570,13 @@ async def test_checkpoint_restore_after_publish_is_refused_and_pr_entry_survives
 
     Publishing is irreversible, so restore must refuse before pruning
     checkpoints, reverting patches, or truncating history. The end-of-turn
-    persist then keeps the PR entry exactly once.
+    persist then writes the PR entry after the trigger message, exactly once.
     """
     user = _make_user()
     repo = _make_repo(user)
     session = _make_session(user, repo)
-    base_history: list[dict[str, object]] = [
-        {"role": "user", "content": "Fix the failing test."},
-        {"role": "assistant", "content": "Staged a fix in app/utils.py."},
-    ]
+    base_history = _realistic_base_history()
+    current_turn = _current_turn_entries()
     session.conversation_history = list(base_history)
     checkpoint = {
         "checkpoint_id": "cp_before_publish",
@@ -519,9 +593,6 @@ async def test_checkpoint_restore_after_publish_is_refused_and_pr_entry_survives
     queue = AsyncMock()
     staged_patches = dict(session.staged_patches or {})
     turn_history = list(base_history)
-    new_entries: list[dict[str, object]] = [
-        {"role": "user", "content": "Only when store_id is provided."}
-    ]
 
     async def _fake_publish(**_kwargs: object) -> SessionCommitResult:
         # The real publisher marks the session completed; history persistence
@@ -562,23 +633,24 @@ async def test_checkpoint_restore_after_publish_is_refused_and_pr_entry_survives
     assert session.conversation_history == list(base_history)
     assert session.staged_patches == staged_patches
     assert session.checkpoints == [checkpoint]
-    assert staged_patches == dict(session.staged_patches or {})
+    assert turn_history == list(base_history)
     queue.put_checkpoint_restored.assert_not_awaited()
     orch.db.flush.assert_not_awaited()
     orch.db.commit.assert_not_awaited()
 
-    # The end-of-turn persist keeps the PR entry exactly once.
+    # The end-of-turn persist writes the PR entry after the trigger message.
     await orch._persist(
         session,
-        list(turn_history) + new_entries,
+        list(turn_history) + current_turn,
         dict(staged_patches),
         base_history=base_history,
-        new_entries=new_entries,
+        new_entries=current_turn,
     )
-    pr_entries = [
+    expected = [*base_history, *current_turn, result.history_entry]
+    assert session.conversation_history == expected
+    assert session.status == "completed"
+    assert [
         entry
         for entry in session.conversation_history
         if isinstance(entry, dict) and entry.get("pr_url") == _PR_URL
-    ]
-    assert len(pr_entries) == 1
-    assert session.status == "completed"
+    ] == [result.history_entry]

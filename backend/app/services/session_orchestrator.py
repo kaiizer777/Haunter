@@ -1642,6 +1642,11 @@ class SessionOrchestrator:
         self.turn_id = turn_id
         self.current_user = current_user
         self._llm = LLMClient(timeout=120.0)
+        # Set by create_pull_request on success. `_persist` appends it after the
+        # turn's entries exactly once (the publisher does not write history from
+        # the tool path) so the PR record never precedes the message that asked
+        # for it.
+        self._pr_history_entry: dict[str, Any] | None = None
         self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
         self._mirror_worker_task: asyncio.Task | None = None
 
@@ -2724,7 +2729,6 @@ class SessionOrchestrator:
                 args=args,
                 session=session,
                 staged_patches=staged_patches,
-                conversation_history=conversation_history,
             )
         else:
             logger.warning(
@@ -3935,7 +3939,6 @@ class SessionOrchestrator:
         args: dict[str, Any],
         session: AgentSession,
         staged_patches: dict[str, str],
-        conversation_history: list[dict[str, Any]] | None = None,
     ) -> str:
         """
         Publish the session through the shared commit publisher.
@@ -3995,15 +3998,15 @@ class SessionOrchestrator:
                 db=self.db,
                 target_branch=f"haunter/session-{str(session.id)[:8]}",
                 gh_token=self.gh_token,
+                persist_history=False,
             )
         except SessionCommitError as exc:
             return f"Error: {exc}"
 
-        # `_persist` rewrites conversation_history from the turn-local copy at
-        # the end of the turn. Append the identical entry or it would erase the
-        # PR record the publisher just saved.
-        if conversation_history is not None:
-            conversation_history.append(result.history_entry)
+        # `_persist` owns conversation_history for this turn. Buffer the entry
+        # instead of appending it to the pre-turn list: otherwise it would land
+        # before the user message and assistant/tool entries that earned it.
+        self._pr_history_entry = result.history_entry
 
         return (
             f"Pull request opened: {result.pr_url}\n"
@@ -4144,6 +4147,19 @@ class SessionOrchestrator:
         """
         # Compact here as well (idempotent) so early-exit persist paths
         # (interrupt / LLM-error fallbacks) are bounded too.
+        #
+        # The PR history entry is appended here, after the turn's entries, and
+        # cleared immediately so retries/fallbacks cannot duplicate it. Doing it
+        # in this choke point makes publish-then-error paths persist it too.
+        pending_pr_entry = self._pr_history_entry
+        if pending_pr_entry is not None:
+            self._pr_history_entry = None
+            if not any(entry is pending_pr_entry for entry in updated_history):
+                updated_history = [*updated_history, pending_pr_entry]
+            if new_entries is not None and not any(
+                entry is pending_pr_entry for entry in new_entries
+            ):
+                new_entries = [*new_entries, pending_pr_entry]
         updated_history = _compact_history_for_storage(updated_history)
         # Snapshot every ORM attribute the fallback path needs BEFORE the
         # commit attempt. rollback() expires all persistent state, so reading
