@@ -629,6 +629,41 @@ def test_parse_patch_files_duplicate_section_raises() -> None:
         _parse_patch_files(patch_text)
 
 
+@pytest.mark.anyio
+async def test_commit_patch_rejects_duplicate_file_sections_before_http() -> None:
+    """Two sections for one path must fail closed before any GitHub request.
+
+    Pre-fix (3cf6902^) validate_unified_diff accepted this patch and
+    _parse_patch_files kept only the second section, so commit_patch would
+    commit half the reviewed remediation (issue #185).
+    """
+    duplicate_patch = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -3,1 +3,1 @@\n"
+        "-old2\n"
+        "+new2\n"
+    )
+
+    with respx.mock(assert_all_called=False) as rx:
+        with pytest.raises(GitHubPRValidationError, match="duplicate file section"):
+            await commit_patch(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-test",
+                patch_text=duplicate_patch,
+                commit_msg="fix: duplicate sections",
+                token="fake_token",
+            )
+
+    assert len(rx.calls) == 0
+
+
 def test_apply_unified_diff_ignores_blank_line_between_hunks() -> None:
     """A blank line between hunks must not apply as spurious context."""
     original = "a\nb\nc\nd\n"
