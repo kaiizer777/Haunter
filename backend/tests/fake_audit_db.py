@@ -212,14 +212,16 @@ def _sort_key(
     reverse: bool,
     nulls_first: bool | None,
 ) -> tuple[int, Any]:
-    """Rank rows by PostgreSQL NULL semantics; keep mixed types comparable.
+    """Rank rows by PostgreSQL NULL semantics; bucket types for comparison.
 
     PostgreSQL sorts NULL as if it were larger than every non-NULL value, so
     ``ASC`` places NULLs last and ``DESC`` places them first. ``_order`` gets
     the descending case by reversing this ascending key, so NULL must rank
     above every value here, unless an explicit ``NULLS FIRST``/``NULLS LAST``
-    modifier overrides that default. Non-NULL values fall back to
-    ``str()``/``float()`` so heterogeneous Python types stay comparable.
+    modifier overrides that default. Non-NULL values share rank 1 but split
+    into buckets: ``bool`` and every non-numeric value use their ``str()``
+    form, numbers use ``float()``. The buckets are not mutually comparable,
+    so a column must not mix them.
     """
     if value is None:
         # With no explicit modifier, DESC (``reverse=True``) mirrors ASC and
