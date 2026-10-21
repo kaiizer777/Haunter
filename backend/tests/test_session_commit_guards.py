@@ -518,6 +518,42 @@ async def test_custom_default_branch_rejected_before_token_mint() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "bad_path",
+    ["foo/./bar.py", "foo//bar.py", " dir/x.py", "dir/", "x.py/", "."],
+)
+async def test_non_canonical_path_rejected_before_token_mint(bad_path: str) -> None:
+    """Catches normalization-retargeting: paths are rejected before credentials or writes."""
+    user, session = _make_mock_user_and_session(
+        staged_patches={
+            bad_path: "--- /dev/null\n+++ b/x.py\n@@ -0,0 +1 @@\n+x\n"
+        }
+    )
+    mock_db = _make_mock_db(session)
+    resolver = AsyncMock(return_value="tok")
+    perms = AsyncMock()
+
+    with (
+        patch("app.services.session_commit.get_installation_token", resolver),
+        patch("app.services.session_commit._verify_user_repo_permission", perms),
+        _no_github_writes() as (stack, mocks),
+    ):
+        with stack:
+            with pytest.raises(HTTPException) as exc_info:
+                await commit_session(
+                    session_id=session.id,
+                    body=SessionCommitIn(title="Fix"),
+                    current_user=user,
+                    db=mock_db,
+                )
+
+    assert exc_info.value.status_code == 422
+    resolver.assert_not_called()
+    perms.assert_not_called()
+    _assert_no_github_writes(mocks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("status_code", "expected"),
     [(403, 403), (502, 503)],
 )

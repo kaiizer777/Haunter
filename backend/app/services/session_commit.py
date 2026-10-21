@@ -92,10 +92,13 @@ def _validated_staged_paths(staged_patches: Any) -> dict[str, str]:
     """
     Re-validate every staged path against the same rules the tools use.
 
-    Returns the mapping keyed by normalized relative paths so every downstream
-    GitHub call (contents read, blob, tree entry) sees exactly one path. Rejects
-    the whole commit when any path is absolute, traverses (``..``), contains a
-    drive letter, NUL/control characters, or collides after normalization.
+    Returns the mapping keyed by the exact staged relative paths. A key must
+    already be canonical: :func:`_normalize_rel_path` may not change it. This
+    prevents a commit from writing to a different path than the one the user
+    reviewed. Rejects the whole commit when any path is empty, ``.``, absolute,
+    drive-qualified, traverses (``..``), contains a backslash, NUL/control
+    characters, a trailing slash, an empty path segment, or collides after
+    normalization.
     """
     if not isinstance(staged_patches, dict):
         raise SessionCommitError("Staged patches are corrupted; cannot publish.", 422)
@@ -108,13 +111,11 @@ def _validated_staged_paths(staged_patches: Any) -> dict[str, str]:
             offenders.append(repr(raw_path))
             continue
         try:
-            _validate_file_path(raw_path)
-            safe_path = _normalize_rel_path(raw_path)
-            _validate_file_path(safe_path)
+            safe_path = _validated_staged_path(raw_path)
         except ValueError:
             offenders.append(raw_path)
             continue
-        if not safe_path or safe_path in normalized:
+        if safe_path in normalized:
             offenders.append(raw_path)
             continue
         normalized[safe_path] = patch_text
@@ -128,6 +129,24 @@ def _validated_staged_paths(staged_patches: Any) -> dict[str, str]:
         )
 
     return normalized
+
+
+def _validated_staged_path(raw_path: str) -> str:
+    """Return ``raw_path`` only when it is already the canonical relative path."""
+    _validate_file_path(raw_path)
+    if not raw_path or raw_path == ".":
+        raise ValueError(f"Empty file path rejected: {raw_path!r}")
+    if "\\" in raw_path:
+        raise ValueError(f"Non-canonical file path rejected: {raw_path!r}")
+    if len(raw_path) >= 2 and raw_path[1] == ":" and raw_path[0].isalpha():
+        raise ValueError(f"Drive-qualified file path rejected: {raw_path!r}")
+    if raw_path.startswith("/") or raw_path.endswith("/"):
+        raise ValueError(f"Absolute or directory file path rejected: {raw_path!r}")
+    if raw_path != _normalize_rel_path(raw_path):
+        raise ValueError(f"Non-canonical file path rejected: {raw_path!r}")
+    if any(segment in ("", ".", "..") for segment in raw_path.split("/")):
+        raise ValueError(f"Invalid path segment in {raw_path!r}")
+    return raw_path
 
 
 def _resolve_publish_branch(

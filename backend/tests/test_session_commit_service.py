@@ -469,7 +469,18 @@ _BAD_PATHS = [
     "../etc/passwd",
     "/abs.py",
     "C:\\x.py",
+    "C:/x.py",
     "a\x00b.py",
+    " x.py",
+    "x.py ",
+    "foo/./bar.py",
+    "foo//bar.py",
+    "./app/utils.py",
+    ".",
+    "",
+    "dir/",
+    "x.py/",
+    "foo\\bar.py",
 ]
 
 
@@ -540,6 +551,44 @@ async def test_duplicate_paths_after_normalization_rejected() -> None:
     assert exc_info.value.status_code == 422
     perms.assert_not_called()
     mock_create_blob.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_canonical_staged_path_is_used_verbatim() -> None:
+    """Catches a normalizer that rewrites a legitimate key and writes elsewhere."""
+    repo = _make_repo()
+    canonical_path = "app/space name.py"
+    session = _make_session(
+        repo,
+        staged_patches={canonical_path: _SAMPLE_PATCH},
+    )
+    mock_fetch = AsyncMock(return_value="old\n")
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=AsyncMock(return_value="origsha"),
+            create_branch=AsyncMock(),
+            update_ref=AsyncMock(),
+            create_pr=AsyncMock(
+                return_value={"html_url": "https://github.com/o/r/pull/13", "number": 13}
+            ),
+        )
+        stack.enter_context(patch(f"{_GH}.fetch_file_content", mock_fetch))
+        await publish_session_patches(
+            session=session,
+            repo=repo,
+            title="Fix",
+            body=None,
+            current_user=_make_user(),
+            db=_make_db(),
+            gh_token="tok",
+        )
+
+    assert mock_fetch.await_args.kwargs["path"] == canonical_path
 
 
 # ---------------------------------------------------------------------------
