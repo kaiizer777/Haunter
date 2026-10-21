@@ -1004,6 +1004,11 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     Returns {filepath: file_patch_text} where filepath is the target path (or source path for deletions).
     Returns {} if parsing fails or no valid hunks found.
     Validates each path against _REPO_IDENT_RE traversal checks — invalid paths are skipped.
+
+    Raises:
+        GitHubPRValidationError: two sections target the same path. Duplicate
+            sections are rejected fail-closed rather than merged, so committed
+            content can never diverge from the validated diff.
     """
     files: dict[str, str] = {}
     # Split on diff --git markers to isolate per-file sections; fallback to global scan if absent
