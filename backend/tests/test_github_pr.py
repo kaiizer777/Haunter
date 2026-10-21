@@ -650,8 +650,30 @@ async def test_commit_patch_rejects_duplicate_file_sections_before_http() -> Non
         "+new2\n"
     )
 
-    with respx.mock(assert_all_called=False) as rx:
-        with pytest.raises(GitHubPRValidationError, match="duplicate file section"):
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
+        ref_route = rx.get(
+            "/repos/test-org/test-repo/git/ref/heads/haunter/fix-test"
+        ).mock(return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}}))
+        head_commit_route = rx.get(
+            "/repos/test-org/test-repo/git/commits/head_sha_111"
+        ).mock(return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}}))
+        contents_route = rx.get(
+            "/repos/test-org/test-repo/contents/app.py?ref=head_sha_111"
+        ).mock(return_value=httpx.Response(200, json={"content": ""}))
+        blob_route = rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha"})
+        )
+        tree_route = rx.post("/repos/test-org/test-repo/git/trees").mock(
+            return_value=httpx.Response(201, json={"sha": "tree_sha"})
+        )
+        create_commit_route = rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "commit_sha"})
+        )
+        update_ref_route = rx.patch(
+            "/repos/test-org/test-repo/git/refs/heads/haunter/fix-test"
+        ).mock(return_value=httpx.Response(200, json={"object": {"sha": "commit_sha"}}))
+
+        with pytest.raises(GitHubPRValidationError) as exc_info:
             await commit_patch(
                 owner="test-org",
                 repo="test-repo",
@@ -661,7 +683,18 @@ async def test_commit_patch_rejects_duplicate_file_sections_before_http() -> Non
                 token="fake_token",
             )
 
-    assert len(rx.calls) == 0
+        # respx clears this log on __exit__, so snapshot it while the mock is live.
+        http_calls_inside = len(rx.calls)
+
+    assert "duplicate file section" in str(exc_info.value)
+    assert http_calls_inside == 0
+    assert not ref_route.called
+    assert not head_commit_route.called
+    assert not contents_route.called
+    assert not blob_route.called
+    assert not tree_route.called
+    assert not create_commit_route.called
+    assert not update_ref_route.called
 
 
 def test_apply_unified_diff_ignores_blank_line_between_hunks() -> None:
