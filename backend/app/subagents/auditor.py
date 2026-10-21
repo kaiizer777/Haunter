@@ -450,6 +450,9 @@ class AuditResult:
     output_tokens: int = 0
     latency_ms: int = 0
     publish_allowed: bool = False
+    ast_files_requested: int = 0
+    ast_files_with_context: int = 0
+    analysis_degraded: bool = False
 
     @property
     def severity_counts(self) -> dict[str, int]:
@@ -495,6 +498,9 @@ class AuditResult:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "latency_ms": self.latency_ms,
+            "ast_files_requested": self.ast_files_requested,
+            "ast_files_with_context": self.ast_files_with_context,
+            "analysis_degraded": self.analysis_degraded,
         }
 
 
