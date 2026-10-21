@@ -323,6 +323,24 @@ async def test_dispatch_rejects_invalid_arguments_without_publishing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("args", [None, [], "title", 42])
+async def test_dispatch_non_dict_arguments_returns_structured_error(args) -> None:
+    """Catches a crash on malformed tool arguments (issue #70 F8)."""
+    user = _make_user()
+    repo = _make_repo(user)
+    session = _make_session(user, repo)
+    orch = _make_orchestrator(session, current_user=user)
+
+    with patch(
+        "app.services.session_commit.publish_session_patches", AsyncMock()
+    ) as publisher:
+        text = await _dispatch(orch, session, args)  # type: ignore[arg-type]
+
+    assert text == "Error: 'create_pull_request' arguments must be a JSON object."
+    publisher.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_resolves_user_from_db_when_ctor_has_none() -> None:
     user = _make_user()
     repo = _make_repo(user)

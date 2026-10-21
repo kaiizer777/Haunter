@@ -3956,6 +3956,9 @@ class SessionOrchestrator:
             publish_session_patches,
         )
 
+        if not isinstance(args, dict):
+            return "Error: 'create_pull_request' arguments must be a JSON object."
+
         title = args.get("title")
         body = args.get("body")
         if not isinstance(title, str) or not title.strip():
