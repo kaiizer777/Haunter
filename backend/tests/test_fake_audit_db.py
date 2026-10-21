@@ -229,3 +229,36 @@ async def test_order_by_descending_places_nulls_first(
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.desc()
     ) == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_order_by_bare_nullable_column_places_nulls_last(
+    audit_store: FakeStore,
+) -> None:
+    """A bare column is implicit ASC, so it inherits NULLS LAST."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status
+    ) == [3, 2, 1]
+
+
+@pytest.mark.asyncio
+async def test_null_placement_applies_per_clause_in_multi_column_order(
+    audit_store: FakeStore,
+) -> None:
+    """Each clause keeps its own NULL placement; later clauses break ties."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    session.add(_attempt(row_id=uuid.UUID(int=4), attempt_number=4, status="pass"))
+
+    assert await _ordered_attempt_numbers(
+        session,
+        Attempt.verification_status.desc(),
+        Attempt.attempt_number.asc(),
+    ) == [1, 2, 4, 3]
