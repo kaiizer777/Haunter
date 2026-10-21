@@ -6324,4 +6324,178 @@ async def test_run_audit_large_non_noise_diff_budgeted_gracefully():
         patcher.stop()
 
 
+# ---------------------------------------------------------------------------
+# 11. Issue #60 - degraded AST analysis gates confidence and publication
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_degraded_audit_caps_confidence_and_blocks_publish():
+    """No file sources means the AST stage is structurally dead.
+
+    The aggregate score must not claim full structural analysis: it is
+    capped below the informational threshold so neither an Excellent health
+    label nor publication is reachable, and the degraded state is explicit.
+    """
+    complete = AsyncMock(
+        return_value=_llm_response(_perspective_payload("clean", 100, []))
+    )
+    result = await run_audit(
+        diff_text=SAMPLE_DIFF,
+        audit_id="audit-600000000001",
+        llm_client=_mock_llm_client(complete),
+    )
+
+    assert result.analysis_degraded is True
+    assert result.ast_files_requested == 2
+    assert result.ast_files_with_context == 0
+    # Uncapped this would be 100; the degraded cap pulls it under the
+    # informational threshold so the dashboard cannot label it Excellent.
+    assert result.confidence == 74
+    assert result.informational_only is True
+    assert result.publish_allowed is False
+    assert result.status == "\U0001F44C Looks Good to Merge"
+    assert "- **AST Coverage:** degraded" in result.analysis_metadata
+    assert "No complete bounded Python source" in result.analysis_metadata
+    assert "AST Coverage" in result.report_markdown
+    payload = result.to_dict()
+    assert payload["analysis_degraded"] is True
+    assert payload["ast_files_requested"] == 2
+    assert payload["ast_files_with_context"] == 0
+
+
+@pytest.mark.asyncio
+async def test_degraded_audit_preserves_diff_grounded_finding_severities():
+    """The cap applies to the aggregate claim, not to grounded findings.
+
+    Finding severities are produced from diff-grounded perspectives (which
+    did run), so a BLOCKER stays a BLOCKER; only the top-level confidence
+    -- the number that implies structural analysis -- is capped.
+    """
+    patcher, _, _ = _patched_llm(_four_perspective_router())
+    try:
+        result = await run_audit(
+            diff_text=SAMPLE_DIFF,
+            audit_id="audit-600000000002",
+        )
+    finally:
+        patcher.stop()
+
+    assert result.analysis_degraded is True
+    assert [f.severity for f in result.findings] == [
+        "BLOCKER",
+        "WARNING",
+        "WARNING",
+        "NOTE",
+    ]
+    assert result.confidence == 74
+    assert result.publish_allowed is False
+    assert result.status == "\u26D4 Must Not Merge"
+
+
+@pytest.mark.asyncio
+async def test_full_context_audit_is_not_degraded():
+    """Supplied file sources restore the full-confidence verdict."""
+    patcher, _, _ = _patched_llm(_four_perspective_router())
+    try:
+        result = await run_audit(
+            diff_text=SAMPLE_DIFF,
+            audit_id="audit-600000000003",
+            file_contexts=_SAMPLE_FILE_CONTEXTS,
+        )
+    finally:
+        patcher.stop()
+
+    assert result.analysis_degraded is False
+    assert result.ast_files_requested == 2
+    assert result.ast_files_with_context == 2
+    assert result.confidence == 89
+    assert result.publish_allowed is True
+    assert "Parser-backed Python AST context" in result.analysis_metadata
+    assert "- **AST Coverage:** degraded" not in result.analysis_metadata
+
+
+@pytest.mark.asyncio
+async def test_supplied_parser_context_keeps_non_degraded_verdict():
+    """A caller that ran its own source fetch keeps its verdict.
+
+    The pipeline path computes ast_context with real sources before calling
+    run_audit; the parser-section sniff recognizes that analysis ran even
+    though this call received no file_contexts of its own.
+    """
+    supplied = build_ast_diff_summary(SAMPLE_DIFF, _SAMPLE_FILE_CONTEXTS)
+    assert "Parser-backed Python AST context" in supplied
+    complete = AsyncMock(
+        return_value=_llm_response(_perspective_payload("clean", 100, []))
+    )
+    result = await run_audit(
+        diff_text=SAMPLE_DIFF,
+        ast_context=supplied,
+        audit_id="audit-600000000004",
+        llm_client=_mock_llm_client(complete),
+    )
+
+    assert result.analysis_degraded is False
+    assert result.ast_files_requested == 2
+    assert result.ast_files_with_context == 0
+    assert result.confidence == 100
+    assert result.publish_allowed is True
+    assert result.status == "\u2705 Great to Merge"
+
+
+@pytest.mark.asyncio
+async def test_empty_source_mapping_is_degraded():
+    """A failed source fetch (empty mapping) degrades exactly like None."""
+    complete = AsyncMock(
+        return_value=_llm_response(_perspective_payload("clean", 100, []))
+    )
+    result = await run_audit(
+        diff_text=SAMPLE_DIFF,
+        audit_id="audit-600000000005",
+        llm_client=_mock_llm_client(complete),
+        file_contexts={},
+    )
+
+    assert result.analysis_degraded is True
+    assert result.confidence == 74
+    assert result.publish_allowed is False
+
+
+def test_ast_coverage_counts_requested_and_parsed():
+    summary, coverage = auditor._build_ast_diff_summary_with_coverage_sync(
+        SAMPLE_DIFF
+    )
+    assert (coverage.files_requested, coverage.files_with_context) == (2, 0)
+    assert "No complete bounded Python source" in summary
+    summary, coverage = auditor._build_ast_diff_summary_with_coverage_sync(
+        SAMPLE_DIFF, _SAMPLE_FILE_CONTEXTS
+    )
+    assert (coverage.files_requested, coverage.files_with_context) == (2, 2)
+    assert "Parser-backed Python AST context" in summary
+
+
+def test_degraded_marker_renders_in_structural_section():
+    metadata = (
+        "Files changed: 1; accepted hunks: 1; +1 added / -0 removed lines.\n"
+        "Touched files:\n- app.py\n"
+        "- **AST Coverage:** degraded - parser-backed analysis covered 0 of 1 "
+        "changed source file "
+        "(no usable file sources were supplied to the analyzer).\n"
+    )
+    report = format_audit_report(
+        executive_summary="Degraded probe.",
+        findings=[],
+        confidence=74,
+        status=build_status_label(0, 0, 74),
+        audit_target="PR #1",
+        engine="test-engine",
+        remediation_diff="(none)",
+        publish_allowed=False,
+        analysis_metadata=metadata,
+    )
+    assert "### \U0001F52C Structural & Blast Radius Analysis" in report
+    assert "AST Coverage" in report
+    assert "`app.py`" in report
+
+
 
