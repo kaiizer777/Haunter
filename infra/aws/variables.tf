@@ -264,30 +264,28 @@ variable "lambda_reserved_concurrent_executions" {
 # ---------------------------------------------------------------------------
 # Webhook ingress rate limit store
 #
-# "memory" keeps the sliding-window buckets in module state, which under Lambda
-# means one copy PER EXECUTION ENVIRONMENT — the budget would then be enforced
-# reserved_concurrent_executions times over (10x on the default above) and reset
-# on every cold start. "postgres" keeps them in webhook_rate_limit_hits so every
-# environment shares one budget. Postgres is the correct setting for this
-# function and needs no extra IAM: the role above grants self-invoke plus one
-# SSM read and explicitly denies every other service, and DATABASE_URL already
-# reaches Neon.
+# "postgres" keeps sliding-window buckets in webhook_rate_limit_hits so every
+# environment shares one budget. Postgres is the only valid setting for this
+# function: app/config.py enforces this via _require_shared_store_on_lambda and
+# will fail startup closed if configured as "memory" on Lambda. Postgres needs no
+# extra IAM: the role above grants self-invoke plus one SSM read and explicitly
+# denies every other service, and DATABASE_URL already reaches Neon.
 #
 # Note the deliberate asymmetry with app/config.py, where the default is
-# "memory": Terraform only ever provisions the Lambda, where "postgres" is the
-# correct answer, while the Python default must keep the hermetic test suite and
-# local dev working with no database at all.
+# "memory": Terraform only ever provisions the Lambda, where "postgres" is
+# required, while the Python default keeps the hermetic test suite and local dev
+# working with no database at all.
 # ---------------------------------------------------------------------------
 
 variable "webhook_rate_limit_backend" {
-  description = "Store for the webhook ingress sliding-window buckets: 'memory' (process-local) or 'postgres' (shared across execution environments)."
+  description = "Store for the webhook ingress sliding-window buckets: 'postgres' (required on Lambda) or 'memory' (causes Lambda startup validation failure)."
   type        = string
   default     = "postgres"
   nullable    = false
 
   validation {
     condition     = contains(["memory", "postgres"], var.webhook_rate_limit_backend)
-    error_message = "Must be 'memory' or 'postgres'; anything else is rejected at plan time rather than silently falling back per-request."
+    error_message = "Must be 'memory' or 'postgres'; note that 'memory' triggers a fatal startup validation error in app/config.py on Lambda."
   }
 }
 
