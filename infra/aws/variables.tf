@@ -261,3 +261,53 @@ variable "lambda_reserved_concurrent_executions" {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Webhook ingress rate limit store
+#
+# "postgres" keeps sliding-window buckets in webhook_rate_limit_hits so every
+# environment shares one budget. Postgres is the only valid setting for this
+# function: app/config.py enforces this via _require_shared_store_on_lambda and
+# will fail startup closed if configured as "memory" on Lambda. Postgres needs no
+# extra IAM: the role above grants self-invoke plus one SSM read and explicitly
+# denies every other service, and DATABASE_URL already reaches Neon.
+#
+# Note the deliberate asymmetry with app/config.py, where the default is
+# "memory": Terraform only ever provisions the Lambda, where "postgres" is
+# required, while the Python default keeps the hermetic test suite and local dev
+# working with no database at all.
+# ---------------------------------------------------------------------------
+
+variable "webhook_rate_limit_backend" {
+  description = "Store for the webhook ingress sliding-window buckets: 'postgres' (required on Lambda) or 'memory' (causes Lambda startup validation failure)."
+  type        = string
+  default     = "postgres"
+  nullable    = false
+
+  validation {
+    condition     = contains(["memory", "postgres"], var.webhook_rate_limit_backend)
+    error_message = "Must be 'memory' or 'postgres'; note that 'memory' triggers a fatal startup validation error in app/config.py on Lambda."
+  }
+}
+
+variable "webhook_rate_limit_max_deliveries" {
+  description = "Max webhook deliveries accepted per sliding window per repository/sender bucket before a 429 + Retry-After."
+  type        = number
+  default     = 120
+
+  validation {
+    condition     = var.webhook_rate_limit_max_deliveries >= 0 && var.webhook_rate_limit_max_deliveries == floor(var.webhook_rate_limit_max_deliveries)
+    error_message = "Must be a non-negative integer; 0 disables webhook throttling."
+  }
+}
+
+variable "webhook_rate_limit_window_seconds" {
+  description = "Sliding-window length for the webhook ingress rate limit, in seconds."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.webhook_rate_limit_window_seconds >= 0 && var.webhook_rate_limit_window_seconds == floor(var.webhook_rate_limit_window_seconds)
+    error_message = "Must be a non-negative integer number of seconds; 0 disables webhook throttling."
+  }
+}
+

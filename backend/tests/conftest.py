@@ -184,6 +184,19 @@ async def truncate_all(db: AsyncSession) -> None:
     for stmt in (
         "DELETE FROM system_configs",
         "DELETE FROM webhook_deliveries",
+        # No FKs in either direction, so its position in this FK-ordered list is
+        # not load-bearing; it sits next to webhook_deliveries because that is
+        # the other webhook_* table the ingress path writes to (the path also
+        # writes runs/code_reviews, both already listed below).
+        "DELETE FROM webhook_rate_limit_hits",
+        # NOTE: this clears the TABLE only. The limiter's module-global state
+        # (app/services/rate_limit.py: store cache, _degraded,
+        # _consecutive_store_failures, _breaker_open_until) is not reachable from
+        # truncate_all -- add a suite-wide autouse fixture in tests/conftest.py
+        # that calls _reset_webhook_rate_limiter() before and after each test,
+        # then drop the now-redundant _clean_rate_limiter and _reset_cached_backend
+        # module-local copies. See the reset-hook docstring in app/webhooks.py for
+        # why this hook is process-local by contract.
         "DELETE FROM repo_settings",
         "DELETE FROM audit_jobs",
         "DELETE FROM code_reviews",

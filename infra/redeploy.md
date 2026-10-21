@@ -341,6 +341,7 @@ Injected via `infra/aws/lambda.tf` `environment` block from `terraform.tfvars`.
 | `SANDBOX_PROVIDER` | `github_actions` — CI verification via mirror repos |
 | `DATABASE_URL` | pooled Neon URL (app uses `NullPool`) |
 | `DATABASE_URL_UNPOOLED` | direct Neon URL — Alembic migrations target this by default (see §10) |
+| `WEBHOOK_RATE_LIMIT_BACKEND` | `postgres` — shared sliding-window rate limit store in `webhook_rate_limit_hits`. **MANDATORY ORDER**: Alembic migration `a2b3c4d5e6f7` (`a2b3c4d5e6f7_add_shared_webhook_rate_limit_store.py`) MUST be applied (`alembic upgrade head`) before deploying Lambda with `WEBHOOK_RATE_LIMIT_BACKEND="postgres"`. If deployed before the migration, the rate limiter degrades safely to in-memory mode on `ProgrammingError` / `UndefinedTableError`, but global shared-budget enforcement requires the table. |
 
 > **`SESSION_SECRET_KEY`:** the prod value comes from `var.session_secret_key`
 > (`lambda.tf:174`). `backend/.env` is local-only — a cookie signed with the local value
@@ -458,6 +459,14 @@ Do not skip step 4 for a downgrade. For a plain additive `upgrade`, a Neon snaps
 branch is still cheap insurance if the migration rewrites or drops anything.
 
 ### 10.6 Upgrade / downgrade
+
+> **Mandatory Deployment Sequence for Shared Webhook Rate Limit Store:**
+> Alembic migration `a2b3c4d5e6f7_add_shared_webhook_rate_limit_store.py` adds the
+> `webhook_rate_limit_hits` table. This migration MUST be applied (`alembic upgrade head`)
+> **before** deploying Lambda with `WEBHOOK_RATE_LIMIT_BACKEND="postgres"`.
+> While the rate limiter will gracefully degrade to in-memory mode on `ProgrammingError`
+> / `UndefinedTableError` (avoiding 500 errors to GitHub webhooks), shared cross-instance
+> enforcement is inactive until the table exists.
 
 ```powershell
 # Normal deployment: apply all pending revisions to the intended direct DB.

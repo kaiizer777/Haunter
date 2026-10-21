@@ -204,6 +204,25 @@ resource "aws_lambda_function" "haunter" {
       # GitHub webhook + API
       GITHUB_WEBHOOK_SECRET               = var.github_webhook_secret
       GITHUB_TOKEN                        = var.github_token
+
+      # Webhook ingress throttling (issue #161, shared store follow-up).
+      # "postgres" keeps the sliding-window buckets in the database so all
+      # reserved_concurrent_executions environments enforce ONE budget. Left as
+      # "memory" each environment would enforce its own copy — 10x the
+      # configured ceiling — and every cold start would reset the buckets.
+      #
+      # MANDATORY DEPLOYMENT SEQUENCE:
+      # Alembic migration a2b3c4d5e6f7 (a2b3c4d5e6f7_add_shared_webhook_rate_limit_store.py)
+      # MUST be applied (`alembic upgrade head`) BEFORE deploying Lambda with
+      # WEBHOOK_RATE_LIMIT_BACKEND="postgres". If Terraform is applied prior to running
+      # the migration, the orchestrator boots before the `webhook_rate_limit_hits` table
+      # exists; the rate limiter will detect the missing table (ProgrammingError /
+      # UndefinedTableError) and degrade gracefully to in-memory mode with a clear warning
+      # rather than returning 500, but true shared cross-Lambda rate limiting requires
+      # the migration to have run first.
+      WEBHOOK_RATE_LIMIT_BACKEND        = var.webhook_rate_limit_backend
+      WEBHOOK_RATE_LIMIT_MAX_DELIVERIES = tostring(var.webhook_rate_limit_max_deliveries)
+      WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = tostring(var.webhook_rate_limit_window_seconds)
       # Write-capable App for PR writes (backend/app/github/pr.py). Only the
       # App ID travels as an env var — the ~1.6KB PEM is read at runtime from
       # SSM (GITHUB_APP_PRIVATE_KEY_SSM_PATH) to stay under the Lambda
@@ -470,6 +489,9 @@ resource "aws_lambda_function" "audit_dispatcher" {
 
       TOKEN_ENCRYPTION_KEY = var.token_encryption_key
 
+      # Sibling background workers do not serve incoming webhooks and are exempt
+      # from WEBHOOK_RATE_LIMIT_BACKEND = "postgres" (they default to process-local "memory").
+
       # The dispatcher schedules audit children on the main function, not on
       # itself. Without this, resolve_lambda_function_name() would resolve to
       # the dispatcher and every child invoke would land in the wrong function.
@@ -673,6 +695,9 @@ resource "aws_lambda_function" "pipeline_outbox_sweeper" {
       SANDBOX_PROVIDER = var.sandbox_provider
 
       TOKEN_ENCRYPTION_KEY = var.token_encryption_key
+
+      # Sibling background workers do not serve incoming webhooks and are exempt
+      # from WEBHOOK_RATE_LIMIT_BACKEND = "postgres" (they default to process-local "memory").
 
       # The sweeper redrives pipeline children on the main function, not on
       # itself — same alias rule as the audit dispatcher. Must stay

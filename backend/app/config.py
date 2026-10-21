@@ -1,9 +1,10 @@
 import logging
+import os
 import sys
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,35 @@ class Settings(BaseSettings):
     # tighten per environment via WEBHOOK_RATE_LIMIT_MAX_DELIVERIES.
     webhook_rate_limit_max_deliveries: int = 120
     webhook_rate_limit_window_seconds: int = 60
+    # Where the sliding-window buckets above are kept: "memory" (process-local,
+    # the behaviour before issue #161 was fixed) or "postgres" (rows in
+    # webhook_rate_limit_hits, shared by every process that can see the DB).
+    #
+    # Defaults to "memory" because it needs no database round trip, and because
+    # local dev and the hermetic test suite must work with no database at all.
+    # It is NOT the right default for the Lambda deployment: the orchestrator is
+    # served with reserved_concurrent_executions = 10, so ten execution
+    # environments would each enforce their own copy of the budget above - ten
+    # times the documented ceiling - and every cold start would reset all
+    # buckets. infra/aws sets WEBHOOK_RATE_LIMIT_BACKEND=postgres on the
+    # orchestrator function for exactly that reason.
+    #
+    # Postgres needs no new IAM permissions: the function role's inline policy
+    # grants only self-invoke plus one SSM read and explicitly denies every other
+    # service, and reaching Postgres adds none. An unrecognised value is
+    # rejected at startup by the Literal below; a value smuggled past
+    # validation at runtime still logs at ERROR and falls back to "memory"
+    # rather than refusing deliveries - see
+    # app.services.rate_limit.build_rate_limit_backend.
+    webhook_rate_limit_backend: Literal["memory", "postgres"] = "memory"
+
+    @field_validator("webhook_rate_limit_backend", mode="before")
+    @classmethod
+    def _normalize_rate_limit_backend(cls, v: object) -> object:
+        """Accept "  POSTGRES " etc. from the environment; the Literal pins the set."""
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
 
     # LLM Provider Configuration (Phase 4)
     # OpenCode Zen API key (Secret Manager / .env only). Injected at request time, never logged.
@@ -263,8 +293,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("seed_max_files", "HAUNTER_SEED_MAX_FILES"),
     )
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
     # Feature 8 — retention windows for `webhook_deliveries`.
     #
     # ROW retention and PAYLOAD retention are separate knobs on purpose. The row
@@ -319,6 +347,52 @@ class Settings(BaseSettings):
             "HAUNTER_WEBHOOK_RETENTION_SWEEP_MAX_BATCHES",
         ),
     )
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @model_validator(mode="after")
+    def _require_shared_store_on_lambda(self) -> "Settings":
+        """Fail closed at startup when the orchestrator Lambda would run the per-env limiter.
+
+        infra/aws sets WEBHOOK_RATE_LIMIT_BACKEND=postgres on the orchestrator;
+        if that wiring is ever lost, the "memory" default would silently restore
+        per-execution-environment budgets (10x the ceiling at the default
+        concurrency) and reset them on every cold start.
+
+        AWS_LAMBDA_FUNCTION_NAME is injected by the Lambda runtime into every
+        function execution environment. Sibling background worker Lambdas
+        (e.g. audit-dispatcher, pipeline-outbox-sweeper) do not serve webhook
+        ingress and are exempt unless WEBHOOK_RATE_LIMIT_STRICT_LAMBDA is set.
+        """
+        raw_fn_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        if not raw_fn_name or not raw_fn_name.strip():
+            return self
+
+        fn_name = raw_fn_name.strip().lower()
+        strict = os.environ.get("WEBHOOK_RATE_LIMIT_STRICT_LAMBDA", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
+        # Background worker lambdas do not serve webhook ingress
+        is_worker = any(
+            token in fn_name for token in ("dispatcher", "sweeper", "outbox")
+        )
+        is_orchestrator = "orchestrator" in fn_name
+
+        # Enforce if strictly requested, or explicitly the orchestrator,
+        # or any non-worker function running on Lambda.
+        requires_postgres = strict or is_orchestrator or (not is_worker)
+        if is_worker and not strict and not is_orchestrator:
+            requires_postgres = False
+
+        if requires_postgres and self.webhook_rate_limit_backend != "postgres":
+            raise ValueError(
+                "WEBHOOK_RATE_LIMIT_BACKEND must be 'postgres' on Lambda: "
+                "'memory' enforces the budget per execution environment."
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_webhook_retention_windows(self) -> "Settings":
