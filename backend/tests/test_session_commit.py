@@ -152,7 +152,7 @@ async def test_commit_success(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="mock-gh-token",
         ),
@@ -260,7 +260,7 @@ async def test_commit_empty_patches_rejected(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -389,7 +389,7 @@ async def test_commit_protected_branch_rejected_with_zero_ref_calls(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -454,7 +454,7 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -549,7 +549,7 @@ async def test_commit_pr_failure_reverts_existing_branch(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -656,7 +656,7 @@ async def test_commit_pr_failure_skips_rollback_if_concurrent_writer_advanced_br
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -739,7 +739,7 @@ async def test_commit_without_repo_write_access_forbidden(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),

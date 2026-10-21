@@ -12,6 +12,7 @@ Trust boundaries enforced here, before any GitHub write:
   4. Staged-patch paths: re-validated at commit time. The database is a trust
      boundary; staging-time validation alone is not enough.
   5. Repository write access: verified against the caller's OAuth token.
+  6. GitHub installation token: minted only after every guard above passes.
 
 The caller owns the session row lock (the endpoint takes ``FOR UPDATE`` and a
 turn holds its own lock). This module never opens a nested transaction lock.
@@ -28,6 +29,7 @@ from fastapi import HTTPException
 
 from app import github_client
 from app.github import pr as github_pr
+from app.github.pr import get_installation_token
 from app.repos import _verify_user_repo_permission
 from app.schemas import _validate_git_branch
 from app.services import patch_applier
@@ -272,14 +274,16 @@ async def publish_session_patches(
 
     await _require_write_access(current_user, repo)
 
-    session.branch_name = branch_name
-    session_id = session.id
-
+    # Token minting is deliberately last: a request rejected for a bad branch,
+    # unsafe path, or missing write access must never trigger credential work.
     if gh_token is None:
         try:
-            gh_token = await github_pr.get_installation_token(repo)
+            gh_token = await get_installation_token(repo)
         except Exception:
             gh_token = None
+
+    session.branch_name = branch_name
+    session_id = session.id
 
     # ------------------------------------------------------------------
     # Apply patches: fetch base content, apply diff, create blobs.

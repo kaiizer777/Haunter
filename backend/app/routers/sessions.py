@@ -1287,17 +1287,11 @@ async def commit_session(
     repo = session.repo
 
     # ------------------------------------------------------------------
-    # 3. Resolve GitHub installation token (kept patchable at this module).
-    # ------------------------------------------------------------------
-    try:
-        gh_token: Optional[str] = await get_installation_token(repo)
-    except Exception:
-        gh_token = None
-
-    # ------------------------------------------------------------------
-    # 4-9. Shared publisher: branch safety, write access, patch application,
-    #      commit, ref update, PR, and persistence all live in one place so the
-    #      session agent and this endpoint cannot drift apart.
+    # 3-8. Shared publisher: branch safety, path revalidation, write access,
+    #      token minting, patch application, commit, ref update, PR, and
+    #      persistence all live in one place so the session agent and this
+    #      endpoint cannot drift apart. The publisher mints the installation
+    #      token only after every guard passes.
     # ------------------------------------------------------------------
     try:
         result = await publish_session_patches(
@@ -1308,7 +1302,6 @@ async def commit_session(
             current_user=current_user,
             db=db,
             target_branch=body.branch_name,
-            gh_token=gh_token,
         )
     except SessionCommitError as exc:
         raise HTTPException(

@@ -372,7 +372,7 @@ async def test_commit_session_blocks_existing_protected_branch() -> None:
     mock_create_commit = AsyncMock(return_value="commit_sha")
 
     with (
-        patch("app.routers.sessions.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="a\n"),
         patch("app.services.patch_applier.apply_unified_diff", return_value="b\n"),
         patch("app.github_client.create_blob", mock_create_blob),
