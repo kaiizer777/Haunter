@@ -2003,6 +2003,21 @@ async def fetch_audit_diff(
         ) from exc
 
 
+def _degraded_coverage_notice(files_requested: int) -> str:
+    """Render the degraded-analysis marker embedded in analysis_metadata.
+
+    Shaped as a `- **Key:** value` note so the report renderer surfaces it in
+    the Structural section instead of stripping it with the raw AST noise
+    patterns.
+    """
+    noun = "file" if files_requested == 1 else "files"
+    return (
+        "- **AST Coverage:** degraded - parser-backed analysis covered 0 of "
+        f"{files_requested} changed source {noun} "
+        "(no usable file sources were supplied to the analyzer)."
+    )
+
+
 async def run_audit(
     *,
     diff_text: str,
@@ -2104,13 +2119,30 @@ async def run_audit(
     clean_diff = _redact_preserving_line_anchors(budgeted_diff)
     was_truncated = raw_clipped or budget_truncated
 
-    ast_summary = await build_ast_diff_summary_async(clean_diff, file_contexts)
+    ast_summary, ast_coverage = await _build_ast_diff_summary_with_coverage_async(
+        clean_diff, file_contexts
+    )
     supplied_ast = _redact_audit_secrets(str(ast_context or ""))
     if supplied_ast.strip():
         supplied_ast = _clip(supplied_ast, MAX_AST_CONTEXT_CHARS // 2)
         ast_summary = f"{ast_summary}\n\nCaller-supplied parser context:\n{supplied_ast}"
+    # Degraded when the diff had analyzable source files but neither this
+    # call's file_contexts nor caller-supplied context produced source-backed
+    # analysis (issue #60). A caller that ran its own source fetch keeps its
+    # verdict via the marker sniff below, but the file-level counts still
+    # describe only the sources available to this call -- such callers should
+    # also forward file_contexts so the counts are exact.
+    analysis_degraded = (
+        ast_coverage.files_requested > 0
+        and ast_coverage.files_with_context == 0
+        and not _summary_has_source_backed_context(supplied_ast)
+    )
 
     notices: list[str] = []
+    if analysis_degraded:
+        notices.append(
+            _degraded_coverage_notice(ast_coverage.files_requested)
+        )
     if was_truncated:
         if raw_clipped:
             trunc_msg = f"Input diff exceeded {MAX_SPLIT_DIFF_CHARS} characters and was bounded."
@@ -2254,6 +2286,15 @@ async def run_audit(
         ),
         timeout=AST_ANALYSIS_TIMEOUT_S,
     )
+    if analysis_degraded:
+        # The aggregate score otherwise claims structural analysis that never
+        # ran: every perspective only ever saw the degraded notice. Cap the
+        # aggregate claim AFTER finding synthesis so diff-grounded finding
+        # severities (which did run) are preserved; the capped score flows
+        # into the status label, pr_score, publish_allowed and the report.
+        overall_confidence = min(
+            overall_confidence, INFORMATIONAL_CONFIDENCE_THRESHOLD - 1
+        )
     counts = Counter(finding.severity for finding in findings)
     status = build_status_label(
         counts.get("BLOCKER", 0),
@@ -2291,6 +2332,9 @@ async def run_audit(
         output_tokens=sum(res.output_tokens for res in executed_perspectives),
         latency_ms=int((time.monotonic() - started) * 1000),
         publish_allowed=publish_allowed,
+        ast_files_requested=ast_coverage.files_requested,
+        ast_files_with_context=ast_coverage.files_with_context,
+        analysis_degraded=analysis_degraded,
     )
     pr_score = calculate_pr_confidence_score(
         confidence=result.confidence,
@@ -2331,6 +2375,9 @@ async def run_audit(
         output_tokens=result.output_tokens,
         latency_ms=result.latency_ms,
         publish_allowed=result.publish_allowed,
+        ast_files_requested=result.ast_files_requested,
+        ast_files_with_context=result.ast_files_with_context,
+        analysis_degraded=result.analysis_degraded,
     )
     logger.info(
         "auditor complete audit_id=%s type=%s repo=%s findings=%d blockers=%d warnings=%d confidence=%d latency_ms=%d",
