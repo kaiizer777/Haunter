@@ -24,6 +24,17 @@ from app.github_client import GitHubClientError, GitHubResourceNotFoundError
 from app.models import AgentSession, Repo, User
 
 
+@pytest.fixture(autouse=True)
+def _allow_repo_write_access():
+    """These DB tests exercise commit behaviour, not GitHub user permissions."""
+    with patch(
+        "app.services.session_commit._verify_user_repo_permission",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers (mirrors pattern in test_sessions_api.py)
 # ---------------------------------------------------------------------------

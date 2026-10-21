@@ -23,6 +23,17 @@ from app.github_client import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _allow_repo_write_access():
+    """Pipeline tests exercise commit behaviour, not GitHub user permissions."""
+    with patch(
+        "app.services.session_commit._verify_user_repo_permission",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        yield
+
+
 def _make_mock_db(session: AgentSession) -> MagicMock:
     """Create a mock database session that returns `session` on execute()."""
     mock_db = MagicMock()
