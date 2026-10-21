@@ -779,6 +779,107 @@ async def test_pr_already_exists_does_not_delete_or_rewind_branch() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_text",
+    [
+        "GitHub API returned error 422: Validation Failed: base branch already exists",
+        "GitHub API returned error 422: pull request body is invalid",
+        "GitHub API returned error 422: A pull request is not mergeable",
+    ],
+)
+async def test_unrelated_422_still_rolls_back_branch(error_text: str) -> None:
+    """Catches the over-broad matcher that treats any 422/"already exists" as a live PR.
+
+    Only GitHub's exact "A pull request already exists for <head>" means the
+    branch belongs to a real PR; everything else must delete the ref it made.
+    """
+    repo = _make_repo()
+    session = _make_session(repo, branch_name="haunter/session-new")
+    mock_get_ref = AsyncMock(
+        side_effect=[GitHubResourceNotFoundError("missing"), "commit1"]
+    )
+    mock_create_branch = AsyncMock()
+    mock_delete_ref = AsyncMock()
+    mock_restore_ref = AsyncMock()
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=mock_get_ref,
+            create_branch=mock_create_branch,
+            update_ref=AsyncMock(),
+            create_pr=AsyncMock(side_effect=GitHubClientError(error_text)),
+            delete_ref=mock_delete_ref,
+            restore_ref=mock_restore_ref,
+        )
+        with pytest.raises(SessionCommitError) as exc_info:
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=_make_db(),
+                gh_token="tok",
+            )
+
+    assert exc_info.value.status_code == 502
+    mock_delete_ref.assert_awaited_once_with(
+        owner=_OWNER,
+        repo=_REPO,
+        branch="haunter/session-new",
+        token="tok",
+        expected_sha="commit1",
+    )
+    mock_restore_ref.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pr_already_exists_json_payload_matches_without_rollback() -> None:
+    """GitHub's real JSON 422 body (not just the plain phrase) maps to 409."""
+    repo = _make_repo()
+    session = _make_session(repo, branch_name="haunter/session-deadbeef")
+    mock_get_ref = AsyncMock(side_effect=GitHubResourceNotFoundError("missing"))
+    mock_delete_ref = AsyncMock()
+    mock_create_pr = AsyncMock(
+        side_effect=GitHubClientError(
+            'GitHub API returned error 422: {"message":"Validation Failed",'
+            '"errors":[{"message":"A pull request already exists for '
+            'test-owner:haunter/session-deadbeef."}]}'
+        )
+    )
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=mock_get_ref,
+            create_branch=AsyncMock(),
+            update_ref=AsyncMock(),
+            create_pr=mock_create_pr,
+            delete_ref=mock_delete_ref,
+        )
+        with pytest.raises(SessionCommitError) as exc_info:
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=_make_db(),
+                gh_token="tok",
+            )
+
+    assert exc_info.value.status_code == 409
+    mock_delete_ref.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_pr_failure_deletes_newly_created_branch() -> None:
     repo = _make_repo()
     session = _make_session(repo, branch_name="haunter/session-new")

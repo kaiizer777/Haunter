@@ -21,6 +21,7 @@ turn holds its own lock). This module never opens a nested transaction lock.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -239,12 +240,19 @@ async def _require_write_access(current_user: User | None, repo: Repo) -> None:
         ) from exc
 
 
+_PR_ALREADY_EXISTS_RE = re.compile(
+    r"a pull request already exists for\s+\S+", re.IGNORECASE
+)
+
+
 def _is_pr_already_exists_error(exc: Exception) -> bool:
-    """Detect GitHub's 422 "A pull request already exists for owner:branch"."""
-    message = str(exc).lower()
-    if "already exists" in message:
-        return True
-    return "422" in message and "pull request" in message
+    """Detect GitHub's 422 "A pull request already exists for owner:branch".
+
+    Only that exact validation message skips rollback. Broader matches (any
+    "already exists", or any 422 mentioning pull requests) would strand a
+    branch created for a PR that was never opened.
+    """
+    return _PR_ALREADY_EXISTS_RE.search(str(exc)) is not None
 
 
 async def publish_session_patches(
