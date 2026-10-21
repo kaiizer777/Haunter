@@ -460,12 +460,6 @@ branch is still cheap insurance if the migration rewrites or drops anything.
 
 ### 10.6 Upgrade / downgrade
 
-```powershell
-# Normal deployment: apply all pending revisions to the intended direct DB.
-alembic upgrade head
-# Confirm the printed target and final revision.
-alembic current
-
 > **Mandatory Deployment Sequence for Shared Webhook Rate Limit Store:**
 > Alembic migration `a2b3c4d5e6f7_add_shared_webhook_rate_limit_store.py` adds the
 > `webhook_rate_limit_hits` table. This migration MUST be applied (`alembic upgrade head`)
@@ -473,6 +467,12 @@ alembic current
 > While the rate limiter will gracefully degrade to in-memory mode on `ProgrammingError`
 > / `UndefinedTableError` (avoiding 500 errors to GitHub webhooks), shared cross-instance
 > enforcement is inactive until the table exists.
+
+```powershell
+# Normal deployment: apply all pending revisions to the intended direct DB.
+alembic upgrade head
+# Confirm the printed target and final revision.
+alembic current
 
 # One revision back (destructive — back up first).
 alembic downgrade -1
