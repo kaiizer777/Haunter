@@ -207,7 +207,14 @@ def _eval_predicate(node: Any, bound: Mapping[Any, Any]) -> Optional[bool]:
 
 
 def _sort_key(value: Any) -> tuple[int, Any]:
-    """PostgreSQL `ASC` puts NULLs first; keep mixed types comparable."""
+    """Rank rows by PostgreSQL NULL semantics; keep mixed types comparable.
+
+    PostgreSQL sorts NULL as if it were larger than every non-NULL value, so
+    ``ASC`` places NULLs last and ``DESC`` places them first. ``_order`` gets
+    the descending case by reversing this ascending key, so NULL must rank
+    above every value here. Non-NULL values fall back to ``str()``/``float()``
+    so heterogeneous Python types stay comparable.
+    """
     if value is None:
         return (0, "")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
