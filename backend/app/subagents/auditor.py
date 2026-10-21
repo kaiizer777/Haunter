@@ -2014,6 +2014,7 @@ async def run_audit(
     engine: str = "",
     llm_client: Optional[LLMClient] = None,
     perspectives: Optional[Sequence[PerspectiveName]] = None,
+    file_contexts: Optional[Mapping[str, str]] = None,
 ) -> AuditResult:
     """Run four fixed, bounded perspectives and return a synthesized read-only report."""
     started = time.monotonic()
@@ -2097,7 +2098,7 @@ async def run_audit(
     clean_diff = _redact_preserving_line_anchors(budgeted_diff)
     was_truncated = raw_clipped or budget_truncated
 
-    ast_summary = await build_ast_diff_summary_async(clean_diff)
+    ast_summary = await build_ast_diff_summary_async(clean_diff, file_contexts)
     supplied_ast = _redact_audit_secrets(str(ast_context or ""))
     if supplied_ast.strip():
         supplied_ast = _clip(supplied_ast, MAX_AST_CONTEXT_CHARS // 2)
