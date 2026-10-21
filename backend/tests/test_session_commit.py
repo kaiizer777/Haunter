@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -708,3 +709,62 @@ async def test_commit_pr_failure_skips_rollback_if_concurrent_writer_advanced_br
     # mock_restore_ref and mock_delete_ref must NOT be called when ref was advanced by another writer
     mock_restore_ref.assert_not_called()
     mock_delete_ref.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 9: caller without repository write access -> 403 (fails closed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_without_repo_write_access_forbidden(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """
+    A GitHub write-access denial surfaces as 403 before any Git Data write,
+    and the session remains active so the user can retry or close it.
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=99091)
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch="feat/no-write-access",
+    )
+
+    mock_create_blob = AsyncMock()
+
+    with (
+        patch(
+            "app.routers.sessions.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.services.session_commit._verify_user_repo_permission",
+            new_callable=AsyncMock,
+            side_effect=HTTPException(status_code=403, detail="no write access"),
+        ),
+        patch("app.github_client.create_blob", mock_create_blob),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "No access"},
+            )
+
+    assert resp.status_code == 403, resp.text
+    assert "write access" in resp.json()["detail"].lower()
+    mock_create_blob.assert_not_called()
+
+    await db.commit()
+    db.expire_all()
+    result = await db.execute(
+        select(AgentSession).where(AgentSession.id == session.id)
+    )
+    persisted = result.scalars().first()
+    assert persisted is not None
+    assert persisted.status == "active"
