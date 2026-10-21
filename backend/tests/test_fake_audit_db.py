@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from app.models import WebhookDelivery
+from app.models import Attempt, WebhookDelivery
 
 # Fixtures only — importing registers them for this module.
 from tests.fake_audit_db import (  # noqa: F401
@@ -172,3 +172,30 @@ async def test_order_by_created_at_desc_then_id_asc(
         uuid.UUID(int=1),
         uuid.UUID(int=4),
     ]
+
+
+_RUN_ID = uuid.UUID(int=99)
+
+
+def _attempt(
+    *,
+    row_id: uuid.UUID,
+    attempt_number: int,
+    status: str | None,
+) -> Attempt:
+    """Build an attempt row; the fake store does not enforce foreign keys."""
+    return Attempt(
+        id=row_id,
+        run_id=_RUN_ID,
+        attempt_number=attempt_number,
+        patch_text="",
+        verification_status=status,
+    )
+
+
+async def _ordered_attempt_numbers(
+    session: FakeAsyncSession, *ordering: Any
+) -> list[int]:
+    statement = select(Attempt).order_by(*ordering)
+    rows = (await session.execute(statement)).scalars().all()
+    return [row.attempt_number for row in rows]
