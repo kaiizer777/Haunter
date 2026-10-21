@@ -456,3 +456,101 @@ async def test_persist_keeps_pr_history_entry_exactly_once() -> None:
     assert len(pr_entries) == 1
     assert session.status == "completed"
     assert session.conversation_history[0]["content"] == "publish it"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_after_publish_is_refused_and_pr_entry_survives() -> None:
+    """Catches the broken variant where publish -> checkpoint_restore -> persist
+    drops the PR history entry while leaving status=completed (issue #70 F1).
+
+    Publishing is irreversible, so restore must refuse before pruning
+    checkpoints, reverting patches, or truncating history. The end-of-turn
+    persist then keeps the PR entry exactly once.
+    """
+    user = _make_user()
+    repo = _make_repo(user)
+    session = _make_session(user, repo)
+    base_history: list[dict[str, object]] = [
+        {"role": "user", "content": "Fix the failing test."},
+        {"role": "assistant", "content": "Staged a fix in app/utils.py."},
+    ]
+    session.conversation_history = list(base_history)
+    checkpoint = {
+        "checkpoint_id": "cp_before_publish",
+        "turn": 1,
+        "timestamp": "2026-10-22T00:00:00+00:00",
+        "description": "before publish",
+        "staged_patches": {},
+        "history_length": 0,
+    }
+    session.checkpoints = [checkpoint]
+
+    result = _make_result()
+    orch = _make_orchestrator(session, current_user=user)
+    queue = AsyncMock()
+    staged_patches = dict(session.staged_patches or {})
+    turn_history = list(base_history)
+    new_entries: list[dict[str, object]] = [
+        {"role": "user", "content": "Only when store_id is provided."}
+    ]
+
+    async def _fake_publish(**_kwargs: object) -> SessionCommitResult:
+        # The real publisher marks the session completed; history persistence
+        # belongs to the caller (the handler buffers it, _persist writes it).
+        session.status = "completed"
+        return result
+
+    with patch(
+        "app.services.session_commit.publish_session_patches",
+        AsyncMock(side_effect=_fake_publish),
+    ):
+        await _dispatch(
+            orch,
+            session,
+            {"title": "Publish"},
+            history=turn_history,
+            patches=staged_patches,
+        )
+        assert session.status == "completed"
+
+        text = await orch._dispatch_tool(
+            tool_name="checkpoint_restore",
+            args={"checkpoint_id": "cp_before_publish"},
+            repo_owner="test-owner",
+            repo_name="test-repo",
+            base_sha="a" * 40,
+            staged_patches=staged_patches,
+            queue=queue,
+            session=session,
+            conversation_history=turn_history,
+        )
+
+    assert (
+        text
+        == "Error: Cannot restore a checkpoint after the session has been published."
+    )
+    # Restore mutated nothing: not the ORM row, the turn-local copies, or the DB.
+    assert session.conversation_history == list(base_history)
+    assert session.staged_patches == staged_patches
+    assert session.checkpoints == [checkpoint]
+    assert turn_history == list(base_history)
+    assert staged_patches == dict(session.staged_patches or {})
+    queue.put_checkpoint_restored.assert_not_awaited()
+    orch.db.flush.assert_not_awaited()
+    orch.db.commit.assert_not_awaited()
+
+    # The end-of-turn persist keeps the PR entry exactly once.
+    await orch._persist(
+        session,
+        list(turn_history) + new_entries,
+        dict(staged_patches),
+        base_history=base_history,
+        new_entries=new_entries,
+    )
+    pr_entries = [
+        entry
+        for entry in session.conversation_history
+        if isinstance(entry, dict) and entry.get("pr_url") == _PR_URL
+    ]
+    assert len(pr_entries) == 1
+    assert session.status == "completed"

@@ -1436,6 +1436,17 @@ async def restore_checkpoint(
             status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
         )
 
+    # Publishing is irreversible: the publisher marks the session completed and
+    # records the PR in conversation_history. Restoring would erase that record,
+    # so refuse before touching checkpoints, patches, or history.
+    if session.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Cannot restore a checkpoint after the session has been published."
+            ),
+        )
+
     # Verify checkpoint exists before calling restore.
     checkpoints: list[dict[str, Any]] = list(session.checkpoints or [])
     cp = next((c for c in checkpoints if c.get("checkpoint_id") == checkpoint_id), None)

@@ -23,10 +23,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentSession, Repo, User
+from app.routers.sessions import restore_checkpoint
 from app.services.session_orchestrator import SessionOrchestrator, _build_system_prompt
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.checkpoints import (
@@ -168,6 +170,7 @@ def test_checkpoint_cap_at_20() -> None:
 async def test_checkpoint_restore_success() -> None:
     """tool_checkpoint_restore reverts staged_patches and truncates conversation_history."""
     session = MagicMock(spec=AgentSession)
+    session.status = "active"
     session.staged_patches = {"new_file.py": "+new line"}
     session.conversation_history = [
         {"role": "user", "content": "msg1"},
@@ -225,6 +228,7 @@ async def test_checkpoint_restore_success() -> None:
 async def test_checkpoint_restore_not_found() -> None:
     """tool_checkpoint_restore returns descriptive error for unknown checkpoint_id."""
     session = MagicMock(spec=AgentSession)
+    session.status = "active"
     session.staged_patches = {}
     session.conversation_history = []
     session.checkpoints = []
@@ -388,6 +392,75 @@ def test_security_scan_partial_staged_reports_accurate_counts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restore_endpoint_refuses_published_session() -> None:
+    """Catches the broken variant where REST restore erases a published PR record.
+
+    Publishing marks the session completed; the endpoint must reject the
+    restore before pruning checkpoints, reverting patches, truncating history,
+    or committing (issue #70 F1).
+    """
+    user = User(
+        id=uuid.uuid4(),
+        github_id=91001,
+        github_username="restore-user",
+        role="user",
+    )
+    repo = Repo(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        owner="test-org",
+        name="restore-repo",
+        default_branch="main",
+    )
+    pr_entry = {
+        "role": "system",
+        "content": "Commit published. PR #42 opened: https://github.com/o/r/pull/42",
+        "pr_url": "https://github.com/o/r/pull/42",
+        "pr_number": 42,
+        "commit_sha": "c" * 40,
+    }
+    checkpoint = {
+        "checkpoint_id": "cp_before_publish",
+        "turn": 1,
+        "timestamp": "2026-10-22T00:00:00+00:00",
+        "description": "before publish",
+        "staged_patches": {},
+        "history_length": 0,
+    }
+    session = _make_session(
+        user,
+        repo,
+        conversation_history=[pr_entry],
+        checkpoints=[checkpoint],
+    )
+    session.status = "completed"
+
+    mock_db = MagicMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = session
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.commit = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await restore_checkpoint(
+            session_id=uuid.uuid4(),
+            checkpoint_id="cp_before_publish",
+            current_user=user,
+            db=mock_db,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert (
+        "Cannot restore a checkpoint after the session has been published."
+        in exc_info.value.detail
+    )
+    assert session.conversation_history == [pr_entry]
+    assert session.checkpoints == [checkpoint]
+    assert session.staged_patches == {}
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_restore_endpoint_success(
     db: AsyncSession,
     make_auth_client,
@@ -535,6 +608,7 @@ def test_checkpoint_list_with_checkpoints() -> None:
 async def test_checkpoint_restore_latest() -> None:
     """tool_checkpoint_restore('latest') rewinds to the most recent checkpoint."""
     session = MagicMock(spec=AgentSession)
+    session.status = "active"
     session.staged_patches = {"current.py": "+current"}
     session.conversation_history = [{"role": "user", "content": "1"}] * 6
     session.checkpoints = [
@@ -585,6 +659,7 @@ async def test_checkpoint_restore_latest() -> None:
 async def test_checkpoint_restore_mutates_turn_local_structures() -> None:
     """tool_checkpoint_restore directly updates turn-local staged_patches and conversation_history."""
     session = MagicMock(spec=AgentSession)
+    session.status = "active"
     cp_id = "cp_local_sync"
     session.checkpoints = [
         {
@@ -665,6 +740,7 @@ def test_build_system_prompt_surfaces_available_checkpoints() -> None:
 async def test_checkpoint_restore_invalidates_subsequent_checkpoints() -> None:
     """Restoring an earlier checkpoint invalidates/prunes all checkpoints created after it."""
     session = MagicMock(spec=AgentSession)
+    session.status = "active"
     session.staged_patches = {"current.py": "+current"}
     session.conversation_history = [{"role": "user", "content": "1"}] * 6
     session.checkpoints = [
