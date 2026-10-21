@@ -216,7 +216,7 @@ def _sort_key(value: Any) -> tuple[int, Any]:
     so heterogeneous Python types stay comparable.
     """
     if value is None:
-        return (0, "")
+        return (2, "")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return (1, str(value))
     return (1, float(value))
