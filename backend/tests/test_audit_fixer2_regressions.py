@@ -26,6 +26,7 @@ from sqlalchemy.exc import OperationalError, DBAPIError
 
 from app.github.pr import GitHubPRValidationError
 from app.github_client import GitHubResourceNotFoundError
+from app.models import AgentSession
 from app.routers.sessions import commit_session, create_session
 from app.schemas import SessionCommitIn, SessionCreateIn
 
@@ -250,7 +251,7 @@ async def test_orchestrator_syncs_state_on_checkpoint_restore() -> None:
     cp_patches = {"lib/core.py": "--- a/lib/core.py\n+++ b/lib/core.py\n@@ -1 +1 @@\n-old\n+restored\n"}
     cp_history = [{"role": "user", "content": "initial request"}]
 
-    mock_session = MagicMock()
+    mock_session = MagicMock(spec=AgentSession)
     mock_session.id = session_id
     mock_session.status = "active"
     mock_session.base_sha = "a" * 40
@@ -352,7 +353,7 @@ async def test_commit_session_blocks_existing_protected_branch() -> None:
     mock_repo.name = "test-repo"
     mock_repo.default_branch = "dev"  # default_branch is dev
 
-    mock_session = MagicMock()
+    mock_session = MagicMock(spec=AgentSession)
     mock_session.id = session_id
     mock_session.user_id = user_id
     mock_session.status = "active"
@@ -408,7 +409,7 @@ async def test_checkpoint_restore_failure_does_not_sync_orchestrator_state() -> 
     session_id = uuid.uuid4()
     mock_db = AsyncMock()
 
-    mock_session = MagicMock()
+    mock_session = MagicMock(spec=AgentSession)
     mock_session.id = session_id
     mock_session.status = "active"
     mock_session.branch_name = "feat/test"
@@ -470,7 +471,7 @@ async def test_checkpoint_restore_success_rebuilds_messages_context() -> None:
     cp_id = "cp_good"
     cp_patches = {"restored.py": "+restored_code"}
 
-    mock_session = MagicMock()
+    mock_session = MagicMock(spec=AgentSession)
     mock_session.id = session_id
     mock_session.status = "active"
     mock_session.branch_name = "feat/test"
@@ -687,7 +688,7 @@ async def test_checkpoint_restore_truncates_current_turn_intermediate_tool_entri
     cp_patches = {"clean.py": "+clean"}
     initial_history = [{"role": "user", "content": "turn 0"}]
 
-    mock_session = MagicMock()
+    mock_session = MagicMock(spec=AgentSession)
     mock_session.id = session_id
     mock_session.status = "active"
     mock_session.branch_name = "feat/test"
@@ -765,7 +766,7 @@ async def test_checkpoint_restore_truncates_current_turn_intermediate_tool_entri
 @pytest.mark.asyncio
 async def test_checkpoint_restore_flushes_without_committing_mid_turn() -> None:
     """tool_checkpoint_restore must use db.flush() instead of db.commit() to avoid releasing row locks mid-turn."""
-    session = MagicMock()
+    session = MagicMock(spec=AgentSession)
     session.status = "active"
     session.staged_patches = {"bad.py": "+bad"}
     session.conversation_history = [{"role": "user", "content": "1"}, {"role": "assistant", "content": "2"}]
