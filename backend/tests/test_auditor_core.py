@@ -6499,3 +6499,72 @@ def test_degraded_marker_renders_in_structural_section():
 
 
 
+def test_ast_coverage_counts_source_files_before_file_cap():
+    """Non-source files sorting first must not starve the coverage gate.
+
+    Bot P1s on PR #191: the 8-file cap was applied before the
+    structural-suffix filter, so eight non-Python files sorting first
+    yielded files_requested == 0 and the degraded gate passed silently.
+    Requestable source is now filtered and counted before the cap.
+    """
+    md_hunks = "".join(
+        f"diff --git a/a{i:02d}.md b/a{i:02d}.md\n"
+        f"--- a/a{i:02d}.md\n"
+        f"+++ b/a{i:02d}.md\n"
+        "@@ -1,1 +1,2 @@\n"
+        " line1\n"
+        f"+added{i}\n"
+        for i in range(8)
+    )
+    _, coverage = auditor._build_ast_diff_summary_with_coverage_sync(
+        md_hunks + SAMPLE_DIFF
+    )
+    assert (coverage.files_requested, coverage.files_with_context) == (2, 0)
+
+
+def test_ast_coverage_cap_bounds_parsed_files_but_not_demand_count():
+    """Demand counts every requestable file; parsing work stays capped."""
+    hunks = "".join(
+        f"diff --git a/mod{i:02d}.py b/mod{i:02d}.py\n"
+        f"--- a/mod{i:02d}.py\n"
+        f"+++ b/mod{i:02d}.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " oldline\n"
+        f"+x{i:02d} = 1\n"
+        for i in range(10)
+    )
+    contexts = {
+        f"mod{i:02d}.py": f"oldline\nx{i:02d} = 1\n" for i in range(10)
+    }
+    _, coverage = auditor._build_ast_diff_summary_with_coverage_sync(
+        hunks, contexts
+    )
+    assert coverage.files_requested == 10
+    assert coverage.files_with_context == auditor.MAX_AST_SOURCE_FILES
+
+
+@pytest.mark.asyncio
+async def test_long_supplied_parser_context_avoids_false_degraded():
+    """A header pushed past the supplied-context clip bound still counts.
+
+    Bot P1 on PR #191: the degraded sniff ran on the clipped
+    caller-supplied text, so a long preamble pushed the section header
+    past the cutoff and a healthy analysis read as degraded. The sniff
+    now runs on the pre-clip text.
+    """
+    supplied = build_ast_diff_summary(SAMPLE_DIFF, _SAMPLE_FILE_CONTEXTS)
+    assert "Parser-backed Python AST context" in supplied
+    long_supplied = "context-prologue " * 400 + "\n" + supplied
+    assert len(long_supplied) > audit_prompts.MAX_AST_CONTEXT_CHARS // 2
+    complete = AsyncMock(
+        return_value=_llm_response(_perspective_payload("clean", 100, []))
+    )
+    result = await run_audit(
+        diff_text=SAMPLE_DIFF,
+        ast_context=long_supplied,
+        audit_id="audit-600000000006",
+        llm_client=_mock_llm_client(complete),
+    )
+
+    assert result.analysis_degraded is False
+    assert result.publish_allowed is True
