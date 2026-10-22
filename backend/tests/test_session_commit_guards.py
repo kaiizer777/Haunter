@@ -22,6 +22,7 @@ from app.github_client import (
     GitHubClientError,
     GitHubResourceNotFoundError,
 )
+from app.services.session_tools.recon import _MAX_PATH_LEN, _validate_file_path
 
 
 @pytest.fixture(autouse=True)
@@ -553,7 +554,16 @@ async def test_custom_default_branch_rejected_before_token_mint() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad_path",
-    ["foo/./bar.py", "foo//bar.py", " dir/x.py", "dir/", "x.py/", "."],
+    [
+        "foo/./bar.py",
+        "foo//bar.py",
+        " dir/x.py",
+        "dir/",
+        "x.py/",
+        ".",
+        "x" * 501 + ".py",
+        "y" * 600,
+    ],
 )
 async def test_non_canonical_path_rejected_before_token_mint(bad_path: str) -> None:
     """Catches normalization-retargeting: paths are rejected before credentials or writes."""
@@ -584,6 +594,15 @@ async def test_non_canonical_path_rejected_before_token_mint(bad_path: str) -> N
     resolver.assert_not_called()
     perms.assert_not_called()
     _assert_no_github_writes(mocks)
+
+
+def test_path_length_boundary_allows_max_chars() -> None:
+    """Pins the recon length boundary the rejection cases above depend on."""
+    ok_path = "x" * (_MAX_PATH_LEN - 3) + ".py"
+    assert len(ok_path) == _MAX_PATH_LEN
+    assert _validate_file_path(ok_path) == ok_path
+    with pytest.raises(ValueError, match="maximum length"):
+        _validate_file_path(ok_path + "x")
 
 
 @pytest.mark.asyncio
