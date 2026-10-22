@@ -226,4 +226,4 @@ async def test_verify_rejects_malformed_github_payload_shapes(
     ).mock(return_value=httpx.Response(200, json=payload))
     with pytest.raises(HTTPException) as exc_info:
         await _verify_user_repo_permission(user, "org", "shaped-repo")
-    assert exc_info.value.status_code in (403, 502)
+    assert exc_info.value.status_code == 502
