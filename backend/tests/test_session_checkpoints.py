@@ -26,6 +26,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -572,8 +573,18 @@ async def test_restore_endpoint_locks_session_row() -> None:
     )
 
     stmt = mock_db.execute.await_args.args[0]
-    assert stmt._for_update_arg is not None
-    assert stmt._for_update_arg.nowait is True
+    compiled = str(
+        stmt.compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    ).upper()
+    assert "FOR UPDATE" in compiled
+    assert "NOWAIT" in compiled
+    # Private-attr pin kept only as a fallback for dialects that render
+    # the lock clause differently.
+    for_update_arg = getattr(stmt, "_for_update_arg", None)
+    if for_update_arg is not None:
+        assert for_update_arg.nowait is True
 
 
 @pytest.mark.asyncio
