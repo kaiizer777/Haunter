@@ -703,9 +703,11 @@ async def test_commit_patch_rejects_parser_level_duplicate_after_reads() -> None
 
     A deletion whose source header is 'b/x' derives parser path 'b/x', while
     the shared validator normalises the same header to 'x'. A normal modify of
-    'b/x' then collides only in _parse_patch_files, after the two expected
-    ref/commit reads. No blob, tree, commit or ref mutation may follow, so no
-    half-reviewed remediation can be committed (issue #185).
+    'b/x' then collides only in _parse_patch_files. This validator/parser
+    normalization gap is a known follow-up (both shapes should reject before
+    any request); this test pins only the fail-closed outcome, not the gap.
+    No blob, tree, commit or ref mutation may follow, so no half-reviewed
+    remediation can be committed (issue #185).
     """
     import base64
 
@@ -762,8 +764,10 @@ async def test_commit_patch_rejects_parser_level_duplicate_after_reads() -> None
         http_calls_inside = len(rx.calls)
 
     assert "duplicate file section" in str(exc_info.value)
-    # The ref and head-commit reads are expected; nothing beyond them is.
-    assert http_calls_inside == 2
+    # Read count is incidental: ref/head-commit reads happen before the
+    # parser-level duplicate check, and unifying path normalization may move
+    # this rejection before any request. Pin only the safety invariant.
+    assert http_calls_inside <= 2
     assert ref_route.called
     assert head_commit_route.called
     assert not contents_route.called
