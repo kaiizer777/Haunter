@@ -1253,12 +1253,17 @@ def _build_ast_diff_summary_with_coverage_sync(
     # — is in `valid_paths` but has no line in `line_index`, and indexing it here
     # is what used to raise KeyError on `min(line_index[path])`.
     groundable = [path for path in files if grounding.line_index.get(path)]
-    files_requested = 0
+    # Filter to usable source types before the per-call budget cap: files
+    # is alphabetically sorted, so non-source files sorting first could
+    # otherwise consume the cap and hide real demand from the coverage gate.
+    # The count describes total demand (uncapped); the loop below stays
+    # capped, mirroring fetch_audit_source_contexts.
+    requestable: list[str] = [
+        path for path in groundable if path.endswith(STRUCTURAL_SOURCE_SUFFIXES)
+    ]
+    files_requested = len(requestable)
     files_with_context = 0
-    for path in groundable[:MAX_AST_SOURCE_FILES]:
-        if not path.endswith(STRUCTURAL_SOURCE_SUFFIXES):
-            continue
-        files_requested += 1
+    for path in requestable[:MAX_AST_SOURCE_FILES]:
         # Parsed raw, never pre-redacted: redaction is applied to the rendered
         # snippet below, with a line-preserving redactor. Redacting first would
         # either break the parse (a secret inside a string literal) or report
@@ -2123,6 +2128,10 @@ async def run_audit(
         clean_diff, file_contexts
     )
     supplied_ast = _redact_audit_secrets(str(ast_context or ""))
+    # Sniff the header before clipping: a long caller-supplied context can
+    # push the section header past the clip bound, and sniffing the clipped
+    # text would then report a degraded analysis that actually ran.
+    supplied_has_context: bool = _summary_has_source_backed_context(supplied_ast)
     if supplied_ast.strip():
         supplied_ast = _clip(supplied_ast, MAX_AST_CONTEXT_CHARS // 2)
         ast_summary = f"{ast_summary}\n\nCaller-supplied parser context:\n{supplied_ast}"
@@ -2135,7 +2144,7 @@ async def run_audit(
     analysis_degraded = (
         ast_coverage.files_requested > 0
         and ast_coverage.files_with_context == 0
-        and not _summary_has_source_backed_context(supplied_ast)
+        and not supplied_has_context
     )
 
     notices: list[str] = []
