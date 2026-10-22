@@ -1102,6 +1102,8 @@ async def test_pr_failure_skips_rollback_when_writer_advanced_branch() -> None:
 async def test_installation_token_never_logged_or_returned(caplog) -> None:
     repo = _make_repo()
     session = _make_session(repo, branch_name="feat/secret-check")
+    # Intentionally fake ghs-shaped canary: it exercises the real token
+    # shape yet cannot collide with a redaction filter's "[REDACTED]" output.
     secret = "ghs_supersecrettoken"
     mock_create_pr = AsyncMock(
         return_value={"html_url": "https://github.com/o/r/pull/11", "number": 11}
@@ -1129,9 +1131,6 @@ async def test_installation_token_never_logged_or_returned(caplog) -> None:
             gh_token=secret,
         )
 
-    assert secret not in caplog.text
-    assert secret not in repr(result)
-    assert secret not in str(result.history_entry)
     assert secret not in caplog.text
     assert secret not in repr(result)
     assert secret not in str(result.history_entry)
