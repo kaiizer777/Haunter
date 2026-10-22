@@ -196,6 +196,27 @@ def _attempt(
     )
 
 
+def _seed_attempts(
+    session: FakeAsyncSession,
+    *,
+    with_twin: bool = False,
+    failure_reason_2: str | None = None,
+) -> None:
+    """Seed the canonical attempt rows; opt into the status twin or a reason."""
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(
+        _attempt(
+            row_id=uuid.UUID(int=2),
+            attempt_number=2,
+            status="pass",
+            failure_reason=failure_reason_2,
+        )
+    )
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    if with_twin:
+        session.add(_attempt(row_id=uuid.UUID(int=4), attempt_number=4, status="pass"))
+
+
 async def _ordered_attempt_numbers(
     session: FakeAsyncSession, *ordering: Any
 ) -> list[int]:
@@ -210,9 +231,7 @@ async def test_order_by_ascending_places_nulls_last(
 ) -> None:
     """PostgreSQL sorts NULL above every value, so ASC ends with NULL rows."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    _seed_attempts(session)
 
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.asc()
@@ -225,9 +244,7 @@ async def test_order_by_descending_places_nulls_first(
 ) -> None:
     """Reversing an ascending sort of "NULL largest" puts NULL rows first."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    _seed_attempts(session)
 
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.desc()
@@ -240,9 +257,7 @@ async def test_order_by_bare_nullable_column_places_nulls_last(
 ) -> None:
     """A bare column is implicit ASC, so it inherits NULLS LAST."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    _seed_attempts(session)
 
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status
@@ -255,10 +270,7 @@ async def test_null_placement_applies_per_clause_in_multi_column_order(
 ) -> None:
     """Each clause keeps its own NULL placement; later clauses break ties."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
-    session.add(_attempt(row_id=uuid.UUID(int=4), attempt_number=4, status="pass"))
+    _seed_attempts(session, with_twin=True)
 
     assert await _ordered_attempt_numbers(
         session,
@@ -273,9 +285,7 @@ async def test_order_by_bare_nulls_first_places_nulls_first(
 ) -> None:
     """A bare ``NULLS FIRST`` is implicit ASC with NULLs ahead of values."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    _seed_attempts(session)
 
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.nulls_first()
@@ -288,9 +298,7 @@ async def test_order_by_asc_nulls_first_places_nulls_first(
 ) -> None:
     """``ASC NULLS FIRST`` overrides PostgreSQL's ASC default of NULLs last."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    _seed_attempts(session)
 
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.asc().nulls_first()
@@ -303,9 +311,7 @@ async def test_order_by_desc_nulls_last_places_nulls_last(
 ) -> None:
     """``DESC NULLS LAST`` overrides PostgreSQL's DESC default of NULLs first."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    _seed_attempts(session)
 
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.desc().nulls_last()
@@ -318,9 +324,7 @@ async def test_explicit_restatements_match_direction_defaults(
 ) -> None:
     """Agreeing modifiers restate the PostgreSQL direction defaults."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    _seed_attempts(session)
 
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.desc().nulls_first()
@@ -336,9 +340,7 @@ async def test_nulls_modifier_inside_direction_fails_loud(
 ) -> None:
     """nulls_last().desc() renders NULLS LAST DESC, which PostgreSQL rejects."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    _seed_attempts(session)
 
     with pytest.raises(UnsupportedStatementError, match="ORDER BY modifier"):
         await session.execute(
@@ -356,9 +358,7 @@ async def test_explicit_null_modifiers_override_direction_defaults(
 ) -> None:
     """Explicit modifiers flip both direction defaults to their opposite."""
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+    _seed_attempts(session)
 
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.asc().nulls_first()
@@ -378,17 +378,7 @@ async def test_multi_column_order_honours_explicit_nulls_modifier(
     default is NULLS FIRST, so a leak would flip the tied pair to [2, 4].
     """
     session = FakeAsyncSession(audit_store)
-    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(
-        _attempt(
-            row_id=uuid.UUID(int=2),
-            attempt_number=2,
-            status="pass",
-            failure_reason="b",
-        )
-    )
-    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
-    session.add(_attempt(row_id=uuid.UUID(int=4), attempt_number=4, status="pass"))
+    _seed_attempts(session, with_twin=True, failure_reason_2="b")
 
     assert await _ordered_attempt_numbers(
         session,
