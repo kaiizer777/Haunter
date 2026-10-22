@@ -547,16 +547,37 @@ async def publish_session_patches(
             )
             branch_was_created = True
         except Exception as exc:
-            logger.error(
-                "session_commit: create_branch failed for session %s branch %s: %s",
-                session_id,
+            # A concurrent creator may have won the race between our 404 and
+            # this create (422 already-exists). Re-read once; if the branch
+            # now resolves, continue down the update path instead of 502.
+            reread_sha: str | None = None
+            try:
+                reread_sha = await github_pr.get_branch_ref(
+                    owner=repo.owner,
+                    repo=repo.name,
+                    branch=branch_name,
+                    token=gh_token,
+                )
+            except Exception:
+                reread_sha = None
+            if not reread_sha:
+                logger.error(
+                    "session_commit: create_branch failed for session %s branch %s: %s",
+                    session_id,
+                    branch_name,
+                    exc,
+                )
+                raise SessionCommitError(
+                    f"Failed to create branch ref via GitHub API: {exc}", 502
+                ) from exc
+            logger.warning(
+                "session_commit: branch %s appeared mid-publish for session %s; "
+                "taking the update path",
                 branch_name,
-                exc,
+                session_id,
             )
-            raise SessionCommitError(
-                f"Failed to create branch ref via GitHub API: {exc}", 502
-            ) from exc
-    else:
+            original_target_sha = reread_sha
+    if not branch_was_created:
         try:
             await github_pr.update_branch_ref(
                 owner=repo.owner,

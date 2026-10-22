@@ -1361,3 +1361,90 @@ async def test_truncation_of_existing_file_to_empty_rejected_422() -> None:
     mock_blob.assert_not_awaited()
     assert session.status == "active"
     db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_branch_create_race_recovers_via_update_path() -> None:
+    """A 404-then-422 race (concurrent creator) re-reads once and updates."""
+    repo = _make_repo()
+    session = _make_session(repo, branch_name="haunter/session-race")
+    mock_get_ref = AsyncMock(
+        side_effect=[GitHubResourceNotFoundError("missing"), "concurrent-sha"]
+    )
+    mock_create_branch = AsyncMock(
+        side_effect=GitHubClientError("Reference already exists")
+    )
+    mock_update_ref = AsyncMock()
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=mock_get_ref,
+            create_branch=mock_create_branch,
+            update_ref=mock_update_ref,
+            create_pr=AsyncMock(
+                return_value={"html_url": "https://github.com/o/r/pull/9", "number": 9}
+            ),
+        )
+        result = await publish_session_patches(
+            session=session,
+            repo=repo,
+            title="Fix",
+            body=None,
+            current_user=_make_user(),
+            db=_make_db(),
+            gh_token="tok",
+        )
+
+    assert session.status == "completed"
+    assert result.pr_number == 9
+    assert mock_get_ref.await_count == 2
+    mock_update_ref.assert_awaited_once_with(
+        owner=_OWNER,
+        repo=_REPO,
+        branch="haunter/session-race",
+        sha="commit1",
+        token="tok",
+        force=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_branch_create_failure_without_race_raises_502() -> None:
+    """A genuine create failure (branch still absent on re-read) stays a 502."""
+    repo = _make_repo()
+    session = _make_session(repo, branch_name="haunter/session-race")
+    mock_get_ref = AsyncMock(side_effect=GitHubResourceNotFoundError("missing"))
+    mock_create_branch = AsyncMock(
+        side_effect=GitHubClientError("Failed to create ref")
+    )
+    mock_update_ref = AsyncMock()
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=mock_get_ref,
+            create_branch=mock_create_branch,
+            update_ref=mock_update_ref,
+            create_pr=AsyncMock(),
+        )
+        with pytest.raises(SessionCommitError) as exc_info:
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=_make_db(),
+                gh_token="tok",
+            )
+
+    assert exc_info.value.status_code == 502
+    mock_update_ref.assert_not_awaited()
+    assert session.status == "active"
