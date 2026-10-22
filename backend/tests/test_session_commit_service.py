@@ -302,6 +302,47 @@ async def test_exact_default_branch_rejected_even_when_not_protected() -> None:
     mock_create_blob.assert_not_called()
 
 
+_GIT_SPECIFIC_BRANCHES = [
+    "feat/component.lock",
+    "feat/trailing-dot.",
+    "feat/double..dot",
+    ".leading-dot",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_branch", _GIT_SPECIFIC_BRANCHES)
+@respx.mock
+async def test_git_specific_branch_rejections_use_single_error_dialect(
+    target_branch: str,
+) -> None:
+    """Stricter git-specific rejections share the ref helper's error dialect."""
+    repo = _make_repo(default_branch="main")
+    session = _make_session(repo, branch_name=target_branch)
+    mock_create_blob = AsyncMock()
+
+    with (
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()) as perms,
+        patch(f"{_GH}.create_blob", mock_create_blob),
+    ):
+        with pytest.raises(SessionCommitError) as exc_info:
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=_make_db(),
+                gh_token="tok",
+            )
+
+    assert exc_info.value.status_code == 400
+    assert "contains invalid characters" in str(exc_info.value)
+    perms.assert_not_called()
+    assert len(respx.calls) == 0
+    mock_create_blob.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_mints_session_branch_when_none_configured() -> None:
     repo = _make_repo(default_branch="main")

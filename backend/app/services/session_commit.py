@@ -178,9 +178,16 @@ def _resolve_publish_branch(
     try:
         # Then the stricter schema validator: repeated refs/heads/ prefixes,
         # ".." components, trailing dots, and .lock components.
+        # Precedence: the ref helper above owns the public error contract, so
+        # these stricter git-specific rejections are normalized into its
+        # message style (defense in depth, one error dialect).
         branch_name = _validate_git_branch(raw_branch, allow_protected=False)
     except ValueError as exc:
-        raise SessionCommitError(str(exc), 400) from exc
+        raise SessionCommitError(
+            f"Branch name {raw_branch!r} contains invalid characters. "
+            r"Only [a-zA-Z0-9/_\-.] are allowed.",
+            400,
+        ) from exc
     if not branch_name:
         raise SessionCommitError(
             "A non-empty branch name is required to publish a pull request.", 400
