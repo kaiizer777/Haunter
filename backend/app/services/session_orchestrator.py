@@ -3985,6 +3985,8 @@ class SessionOrchestrator:
                 "Error: could not resolve the session owner to verify repository "
                 "write access."
             )
+        if current_user.id != session.user_id:
+            return "Error: session owner mismatch; refusing to publish."
 
         # The turn-local dict is canonical while a turn runs; the ORM attribute
         # still holds the pre-turn snapshot. Sync it before publishing so

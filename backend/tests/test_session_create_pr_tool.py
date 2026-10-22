@@ -379,6 +379,25 @@ async def test_dispatch_errors_when_user_cannot_be_resolved() -> None:
     publisher.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_dispatch_refuses_publish_when_user_mismatches_session_owner() -> None:
+    """Catches an orchestrator reused across sessions publishing as the wrong identity."""
+    user = _make_user()
+    repo = _make_repo(user)
+    session = _make_session(user, repo)
+    other_user = _make_user()
+    orch = _make_orchestrator(session, current_user=other_user)
+
+    with patch(
+        "app.services.session_commit.publish_session_patches", AsyncMock()
+    ) as publisher:
+        text = await _dispatch(orch, session, {"title": "Fix"})
+
+    assert text.startswith("Error:")
+    assert "mismatch" in text
+    publisher.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Agent and UI share one implementation
 # ---------------------------------------------------------------------------
