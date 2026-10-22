@@ -420,11 +420,9 @@ async def test_route_and_tool_both_invoke_shared_publisher() -> None:
     mock_db.execute = AsyncMock(return_value=mock_result)
     mock_db.commit = AsyncMock()
 
+    # NOTE: the endpoint never mints by construction (minting moved into the
+    # shared publisher, mocked below), so no token patch belongs here.
     with (
-        patch(
-            "app.routers.sessions.get_installation_token",
-            AsyncMock(return_value="tok"),
-        ),
         patch(
             "app.services.session_commit.publish_session_patches",
             AsyncMock(return_value=result),
