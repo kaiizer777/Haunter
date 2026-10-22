@@ -120,6 +120,13 @@ _ENGINE_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,160}$", re.ASCII)
 MAX_RAW_DIFF_CHARS = 2_000_000
 MAX_AST_SOURCE_FILE_CHARS = 100_000
 MAX_AST_SOURCE_FILES = 8
+#: Section headers emitted by the AST summary builder when at least one file
+#: yielded source-backed context. Shared with the degraded-analysis sniff
+#: helper so the "analysis actually ran" contract lives in one place.
+_PARSER_BACKED_SECTION_HEADER = "Parser-backed Python AST context:"
+_STRUCTURAL_FALLBACK_SECTION_HEADER = (
+    "Unsupported AST languages and bounded structural fallbacks (not AST):"
+)
 MAX_CI_CONTEXT_CHARS = 20_000
 MAX_DIFF_HUNK_LINES = 20_000
 AST_ANALYSIS_TIMEOUT_S = 3.0
@@ -443,6 +450,9 @@ class AuditResult:
     output_tokens: int = 0
     latency_ms: int = 0
     publish_allowed: bool = False
+    ast_files_requested: int = 0
+    ast_files_with_context: int = 0
+    analysis_degraded: bool = False
 
     @property
     def severity_counts(self) -> dict[str, int]:
@@ -488,6 +498,9 @@ class AuditResult:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "latency_ms": self.latency_ms,
+            "ast_files_requested": self.ast_files_requested,
+            "ast_files_with_context": self.ast_files_with_context,
+            "analysis_degraded": self.analysis_degraded,
         }
 
 
@@ -1165,10 +1178,34 @@ def _redact_preserving_line_anchors(value: str) -> str:
     return redact_sensitive_text_preserving_lines(value)
 
 
-def _build_ast_diff_summary_sync(
+@dataclass(frozen=True)
+class AstDiffCoverage:
+    """How many changed source files the AST summary could actually analyze.
+
+    `files_requested` counts groundable changed files with a structural
+    source suffix; `files_with_context` counts those for which usable file
+    source produced emitted context. A diff with `files_requested > 0` and
+    `files_with_context == 0` had no parser- or fallback-backed analysis at
+    all -- the structurally-dead state behind issue #60.
+    """
+
+    files_requested: int = 0
+    files_with_context: int = 0
+
+
+def _summary_has_source_backed_context(summary: str) -> bool:
+    """Whether an AST summary carries file-source-backed analysis sections."""
+    text = str(summary or "")
+    return (
+        _PARSER_BACKED_SECTION_HEADER in text
+        or _STRUCTURAL_FALLBACK_SECTION_HEADER in text
+    )
+
+
+def _build_ast_diff_summary_with_coverage_sync(
     diff_text: str,
     file_contexts: Optional[Mapping[str, str]] = None,
-) -> str:
+) -> tuple[str, AstDiffCoverage]:
     text, clipped = _diff_prefix(str(diff_text or ""), AUDIT_MAX_DIFF_CHARS)
     grounding = build_diff_grounding(
         diff_text,
@@ -1216,7 +1253,17 @@ def _build_ast_diff_summary_sync(
     # — is in `valid_paths` but has no line in `line_index`, and indexing it here
     # is what used to raise KeyError on `min(line_index[path])`.
     groundable = [path for path in files if grounding.line_index.get(path)]
-    for path in groundable[:MAX_AST_SOURCE_FILES]:
+    # Filter to usable source types before the per-call budget cap: files
+    # is alphabetically sorted, so non-source files sorting first could
+    # otherwise consume the cap and hide real demand from the coverage gate.
+    # The count describes total demand (uncapped); the loop below stays
+    # capped, mirroring fetch_audit_source_contexts.
+    requestable: list[str] = [
+        path for path in groundable if path.endswith(STRUCTURAL_SOURCE_SUFFIXES)
+    ]
+    files_requested = len(requestable)
+    files_with_context = 0
+    for path in requestable[:MAX_AST_SOURCE_FILES]:
         # Parsed raw, never pre-redacted: redaction is applied to the rendered
         # snippet below, with a line-preserving redactor. Redacting first would
         # either break the parse (a secret inside a string literal) or report
@@ -1250,6 +1297,7 @@ def _build_ast_diff_summary_sync(
                 parsed_contexts.append(
                     _redact_preserving_line_anchors(format_ast_context(frame, context))
                 )
+                files_with_context += 1
         elif PurePosixPath(path).suffix in (".ts", ".tsx", ".js", ".jsx"):
             structural_contexts.append(
                 _redact_preserving_line_anchors(
@@ -1260,9 +1308,11 @@ def _build_ast_diff_summary_sync(
                     )
                 )
             )
+            files_with_context += 1
     if parsed_contexts:
         parts.append(
-            "Parser-backed Python AST context:\n"
+            _PARSER_BACKED_SECTION_HEADER
+            + "\n"
             + "\n\n".join(parsed_contexts[:MAX_AST_SOURCE_FILES])
         )
     else:
@@ -1271,7 +1321,8 @@ def _build_ast_diff_summary_sync(
         )
     if structural_contexts:
         parts.append(
-            "Unsupported AST languages and bounded structural fallbacks (not AST):\n"
+            _STRUCTURAL_FALLBACK_SECTION_HEADER
+            + "\n"
             + "\n\n".join(structural_contexts[:MAX_AST_SOURCE_FILES])
         )
 
@@ -1298,7 +1349,18 @@ def _build_ast_diff_summary_sync(
     # Defence in depth over the whole rendered summary, still line-preserving so
     # a residual secret cannot move the scope anchors the snippets just declared.
     clean_summary = _redact_preserving_line_anchors("\n".join(parts))
-    return _clip(clean_summary, MAX_AST_CONTEXT_CHARS)
+    return _clip(clean_summary, MAX_AST_CONTEXT_CHARS), AstDiffCoverage(
+        files_requested=files_requested,
+        files_with_context=files_with_context,
+    )
+
+
+def _build_ast_diff_summary_sync(
+    diff_text: str,
+    file_contexts: Optional[Mapping[str, str]] = None,
+) -> str:
+    summary, _ = _build_ast_diff_summary_with_coverage_sync(diff_text, file_contexts)
+    return summary
 
 
 def build_ast_diff_summary(
@@ -1315,6 +1377,20 @@ async def build_ast_diff_summary_async(
     return await asyncio.wait_for(
         asyncio.to_thread(
             _build_ast_diff_summary_sync,
+            diff_text,
+            file_contexts,
+        ),
+        timeout=AST_ANALYSIS_TIMEOUT_S,
+    )
+
+
+async def _build_ast_diff_summary_with_coverage_async(
+    diff_text: str,
+    file_contexts: Optional[Mapping[str, str]] = None,
+) -> tuple[str, AstDiffCoverage]:
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            _build_ast_diff_summary_with_coverage_sync,
             diff_text,
             file_contexts,
         ),
@@ -1932,6 +2008,21 @@ async def fetch_audit_diff(
         ) from exc
 
 
+def _degraded_coverage_notice(files_requested: int) -> str:
+    """Render the degraded-analysis marker embedded in analysis_metadata.
+
+    Shaped as a `- **Key:** value` note so the report renderer surfaces it in
+    the Structural section instead of stripping it with the raw AST noise
+    patterns.
+    """
+    noun = "file" if files_requested == 1 else "files"
+    return (
+        "- **AST Coverage:** degraded - parser-backed analysis covered 0 of "
+        f"{files_requested} changed source {noun} "
+        "(no usable file sources were supplied to the analyzer)."
+    )
+
+
 async def run_audit(
     *,
     diff_text: str,
@@ -1949,6 +2040,7 @@ async def run_audit(
     engine: str = "",
     llm_client: Optional[LLMClient] = None,
     perspectives: Optional[Sequence[PerspectiveName]] = None,
+    file_contexts: Optional[Mapping[str, str]] = None,
 ) -> AuditResult:
     """Run four fixed, bounded perspectives and return a synthesized read-only report."""
     started = time.monotonic()
@@ -2032,13 +2124,34 @@ async def run_audit(
     clean_diff = _redact_preserving_line_anchors(budgeted_diff)
     was_truncated = raw_clipped or budget_truncated
 
-    ast_summary = await build_ast_diff_summary_async(clean_diff)
+    ast_summary, ast_coverage = await _build_ast_diff_summary_with_coverage_async(
+        clean_diff, file_contexts
+    )
     supplied_ast = _redact_audit_secrets(str(ast_context or ""))
+    # Sniff the header before clipping: a long caller-supplied context can
+    # push the section header past the clip bound, and sniffing the clipped
+    # text would then report a degraded analysis that actually ran.
+    supplied_has_context: bool = _summary_has_source_backed_context(supplied_ast)
     if supplied_ast.strip():
         supplied_ast = _clip(supplied_ast, MAX_AST_CONTEXT_CHARS // 2)
         ast_summary = f"{ast_summary}\n\nCaller-supplied parser context:\n{supplied_ast}"
+    # Degraded when the diff had analyzable source files but neither this
+    # call's file_contexts nor caller-supplied context produced source-backed
+    # analysis (issue #60). A caller that ran its own source fetch keeps its
+    # verdict via the marker sniff below, but the file-level counts still
+    # describe only the sources available to this call -- such callers should
+    # also forward file_contexts so the counts are exact.
+    analysis_degraded = (
+        ast_coverage.files_requested > 0
+        and ast_coverage.files_with_context == 0
+        and not supplied_has_context
+    )
 
     notices: list[str] = []
+    if analysis_degraded:
+        notices.append(
+            _degraded_coverage_notice(ast_coverage.files_requested)
+        )
     if was_truncated:
         if raw_clipped:
             trunc_msg = f"Input diff exceeded {MAX_SPLIT_DIFF_CHARS} characters and was bounded."
@@ -2182,6 +2295,15 @@ async def run_audit(
         ),
         timeout=AST_ANALYSIS_TIMEOUT_S,
     )
+    if analysis_degraded:
+        # The aggregate score otherwise claims structural analysis that never
+        # ran: every perspective only ever saw the degraded notice. Cap the
+        # aggregate claim AFTER finding synthesis so diff-grounded finding
+        # severities (which did run) are preserved; the capped score flows
+        # into the status label, pr_score, publish_allowed and the report.
+        overall_confidence = min(
+            overall_confidence, INFORMATIONAL_CONFIDENCE_THRESHOLD - 1
+        )
     counts = Counter(finding.severity for finding in findings)
     status = build_status_label(
         counts.get("BLOCKER", 0),
@@ -2219,6 +2341,9 @@ async def run_audit(
         output_tokens=sum(res.output_tokens for res in executed_perspectives),
         latency_ms=int((time.monotonic() - started) * 1000),
         publish_allowed=publish_allowed,
+        ast_files_requested=ast_coverage.files_requested,
+        ast_files_with_context=ast_coverage.files_with_context,
+        analysis_degraded=analysis_degraded,
     )
     pr_score = calculate_pr_confidence_score(
         confidence=result.confidence,
@@ -2259,6 +2384,9 @@ async def run_audit(
         output_tokens=result.output_tokens,
         latency_ms=result.latency_ms,
         publish_allowed=result.publish_allowed,
+        ast_files_requested=result.ast_files_requested,
+        ast_files_with_context=result.ast_files_with_context,
+        analysis_degraded=result.analysis_degraded,
     )
     logger.info(
         "auditor complete audit_id=%s type=%s repo=%s findings=%d blockers=%d warnings=%d confidence=%d latency_ms=%d",
