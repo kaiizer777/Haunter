@@ -1011,7 +1011,7 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
             content can never diverge from the validated diff.
     """
     files: dict[str, str] = {}
-    # Split on diff --git markers to isolate per-file sections; fallback to global scan if absent
+    # Split on ---/+++ header pairs to isolate per-file sections; return {} if absent
     # Use regex to find --- a/... / +++ b/... pairs
     import re as _re
 
