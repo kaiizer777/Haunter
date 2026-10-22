@@ -733,6 +733,9 @@ async def test_tool_path_does_not_write_history_inside_publisher() -> None:
 
     With ``persist_history=False`` the publisher still marks the row completed
     and returns the entry, but must not append it to conversation_history.
+
+    Counterpart test_pr_entry_is_appended_after_turn_entries_exactly_once
+    proves ordering given the completed state produced here.
     """
     repo = _make_repo()
     session = _make_session(repo, branch_name="feat/history")

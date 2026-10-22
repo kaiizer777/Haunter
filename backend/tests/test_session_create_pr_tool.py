@@ -556,6 +556,7 @@ async def test_pr_entry_is_appended_after_turn_entries_exactly_once() -> None:
 
     async def _fake_publish(**_kwargs: object) -> SessionCommitResult:
         # Mirrors the tool path: status changes, history is left to _persist.
+        # Counterpart: test_tool_path_does_not_write_history_inside_publisher pins the real half.
         session.status = "completed"
         return result
 
