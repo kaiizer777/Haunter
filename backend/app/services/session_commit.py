@@ -658,8 +658,29 @@ async def publish_session_patches(
             f"Failed to open pull request via GitHub API: {exc}", 502
         ) from exc
 
-    pr_url: str = pr_data.get("html_url", "") if isinstance(pr_data, dict) else ""
-    pr_number: int = pr_data.get("number", 0) if isinstance(pr_data, dict) else 0
+    pr_url = pr_data.get("html_url", "") if isinstance(pr_data, dict) else ""
+    pr_number = pr_data.get("number", 0) if isinstance(pr_data, dict) else 0
+
+    # A 200 with an unexpected shape ({} or an error envelope) must not be
+    # recorded as a completed publish: the PR exists on GitHub but the
+    # record is unusable, and the status gate would block any republish.
+    if (
+        not isinstance(pr_url, str)
+        or not pr_url
+        or not isinstance(pr_number, int)
+        or isinstance(pr_number, bool)
+        or pr_number <= 0
+    ):
+        logger.error(
+            "session_commit: unexpected pull request response for session %s: %r",
+            session_id,
+            pr_data,
+        )
+        raise SessionCommitError(
+            "GitHub returned an unexpected pull request response. "
+            "The branch was left unchanged.",
+            502,
+        )
 
     # ------------------------------------------------------------------
     # Persist: mark the session completed and record PR metadata.

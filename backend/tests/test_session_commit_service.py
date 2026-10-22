@@ -1093,3 +1093,48 @@ async def test_installation_token_never_logged_or_returned(caplog) -> None:
     assert secret not in caplog.text
     assert secret not in repr(result)
     assert secret not in str(result.history_entry)
+    assert secret not in caplog.text
+    assert secret not in repr(result)
+    assert secret not in str(result.history_entry)
+
+
+# ---------------------------------------------------------------------------
+# Malformed PR response
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_response", [{}, {"html_url": "", "number": 0}])
+async def test_malformed_pr_response_rejected_502(bad_response: dict) -> None:
+    """A 200 with an unexpected shape must not be recorded as completed."""
+    repo = _make_repo()
+    session = _make_session(repo)
+    db = _make_db()
+    mock_create_pr = AsyncMock(return_value=bad_response)
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=AsyncMock(return_value="origsha"),
+            create_branch=AsyncMock(),
+            update_ref=AsyncMock(),
+            create_pr=mock_create_pr,
+        )
+        with pytest.raises(SessionCommitError) as exc_info:
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=db,
+                gh_token="tok",
+            )
+
+    assert exc_info.value.status_code == 502
+    assert "unexpected pull request response" in str(exc_info.value).lower()
+    assert session.status == "active"
+    db.commit.assert_not_awaited()
