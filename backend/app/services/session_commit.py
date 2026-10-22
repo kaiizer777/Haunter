@@ -308,8 +308,20 @@ async def publish_session_patches(
     if gh_token is None:
         try:
             gh_token = await get_installation_token(repo)
-        except Exception:
-            gh_token = None
+        except Exception as exc:
+            # Fail closed: a mint outage must never become an unauthenticated
+            # run. Proceeding with None would silently fall back to the
+            # global PAT on write calls and send `Bearer None` on ref calls.
+            logger.error(
+                "session_commit: installation token mint failed in session %s: %s",
+                session.id,
+                exc,
+            )
+            raise SessionCommitError(
+                "Could not mint a GitHub installation token for publishing. "
+                "Try again later.",
+                503,
+            ) from exc
 
     session.branch_name = branch_name
     session_id = session.id
