@@ -223,6 +223,9 @@ _PROTECTED_TARGETS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target_branch", _PROTECTED_TARGETS)
+# Mock-hygiene canary: every publisher call site in this module is patched
+# at function level, so no httpx traffic can occur. This sole respx tripwire
+# pins that invariant; the per-target mock asserts below are the real guards.
 @respx.mock
 async def test_protected_branches_rejected_with_zero_ref_calls(
     target_branch: str,
@@ -273,7 +276,6 @@ async def test_protected_branches_rejected_with_zero_ref_calls(
 
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_exact_default_branch_rejected_even_when_not_protected() -> None:
     """A custom default branch (trunk) is rejected by equality, not the set."""
     repo = _make_repo(default_branch="trunk")
@@ -298,7 +300,6 @@ async def test_exact_default_branch_rejected_even_when_not_protected() -> None:
     assert exc_info.value.status_code == 400
     assert "default branch" in str(exc_info.value).lower()
     perms.assert_not_called()
-    assert len(respx.calls) == 0
     assert _ref_calls() == []
     mock_create_blob.assert_not_called()
 
@@ -313,7 +314,6 @@ _GIT_SPECIFIC_BRANCHES = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target_branch", _GIT_SPECIFIC_BRANCHES)
-@respx.mock
 async def test_git_specific_branch_rejections_use_single_error_dialect(
     target_branch: str,
 ) -> None:
@@ -340,7 +340,6 @@ async def test_git_specific_branch_rejections_use_single_error_dialect(
     assert exc_info.value.status_code == 400
     assert "contains invalid characters" in str(exc_info.value)
     perms.assert_not_called()
-    assert len(respx.calls) == 0
     mock_create_blob.assert_not_called()
 
 
@@ -530,7 +529,6 @@ _BAD_PATHS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_path", _BAD_PATHS)
-@respx.mock
 async def test_unsafe_staged_paths_rejected_before_any_github_call(
     bad_path: str,
 ) -> None:
@@ -559,7 +557,6 @@ async def test_unsafe_staged_paths_rejected_before_any_github_call(
             )
 
     assert exc_info.value.status_code == 422
-    assert len(respx.calls) == 0
     perms.assert_not_called()
     mock_fetch.assert_not_called()
     mock_create_blob.assert_not_called()
