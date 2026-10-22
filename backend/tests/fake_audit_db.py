@@ -206,10 +206,28 @@ def _eval_predicate(node: Any, bound: Mapping[Any, Any]) -> Optional[bool]:
     raise _unsupported(node)
 
 
-def _sort_key(value: Any) -> tuple[int, Any]:
-    """PostgreSQL `ASC` puts NULLs first; keep mixed types comparable."""
+def _sort_key(
+    value: Any,
+    *,
+    reverse: bool,
+    nulls_first: bool | None,
+) -> tuple[int, Any]:
+    """Rank rows by PostgreSQL NULL semantics; bucket types for comparison.
+
+    PostgreSQL sorts NULL as if it were larger than every non-NULL value, so
+    ``ASC`` places NULLs last and ``DESC`` places them first. ``_order`` gets
+    the descending case by reversing this ascending key, so NULL must rank
+    above every value here, unless an explicit ``NULLS FIRST``/``NULLS LAST``
+    modifier overrides that default. Non-NULL values share rank 1 but split
+    into buckets: ``bool`` and every non-numeric value use their ``str()``
+    form, numbers use ``float()``. The buckets are not mutually comparable,
+    so a column must not mix them.
+    """
     if value is None:
-        return (0, "")
+        # With no explicit modifier, DESC (``reverse=True``) mirrors ASC and
+        # puts NULLs first. An explicit modifier wins over that default.
+        effective_nulls_first = reverse if nulls_first is None else nulls_first
+        return (0 if effective_nulls_first != reverse else 2, "")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return (1, str(value))
     return (1, float(value))
@@ -477,14 +495,54 @@ class FakeStore:
     def _order(matched: list[dict[Any, Any]], statement: Select) -> None:
         for clause in reversed(list(statement._order_by_clauses or ())):
             reverse = False
-            if isinstance(clause, UnaryExpression):
-                # SQLAlchemy 2.x stores ``operators.desc_op``/``asc_op`` here,
-                # never the rendered string, so compare by identity.
-                reverse = clause.modifier is operators.desc_op
+            nulls_first: bool | None = None
+            seen_direction = False
+            while isinstance(clause, UnaryExpression):
+                # SQLAlchemy 2.x stores ``operators.desc_op`` and friends here,
+                # never the rendered string, so compare by identity. ASC/DESC
+                # may wrap or be wrapped by a NULLS modifier, so peel the whole
+                # chain rather than only the outermost node.
+                modifier = clause.modifier
+                if modifier is operators.desc_op:
+                    reverse = True
+                    seen_direction = True
+                elif modifier is operators.asc_op:
+                    reverse = False
+                    seen_direction = True
+                elif modifier is operators.nulls_first_op:
+                    if seen_direction:
+                        raise UnsupportedStatementError(
+                            'fake audit store rejects this ORDER BY '
+                            'modifier chain: NULLS ordering inside ASC/DESC '
+                            'renders before the direction, which PostgreSQL '
+                            'rejects; apply the direction first '
+                            '(e.g. .desc().nulls_last())'
+                        )
+                    nulls_first = True
+                elif modifier is operators.nulls_last_op:
+                    if seen_direction:
+                        raise UnsupportedStatementError(
+                            'fake audit store rejects this ORDER BY '
+                            'modifier chain: NULLS ordering inside ASC/DESC '
+                            'renders before the direction, which PostgreSQL '
+                            'rejects; apply the direction first '
+                            '(e.g. .desc().nulls_last())'
+                        )
+                    nulls_first = False
+                else:
+                    raise UnsupportedStatementError(
+                        "fake audit store does not model this ORDER BY "
+                        f"modifier: {modifier!r}"
+                    )
                 clause = clause.element
             matched.sort(
-                key=lambda bound, element=clause: _sort_key(
-                    _eval_value(element, bound)
+                key=lambda bound,
+                element=clause,
+                direction=reverse,
+                nulls=nulls_first: _sort_key(
+                    _eval_value(element, bound),
+                    reverse=direction,
+                    nulls_first=nulls,
                 ),
                 reverse=reverse,
             )
