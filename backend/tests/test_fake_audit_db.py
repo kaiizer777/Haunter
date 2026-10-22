@@ -313,6 +313,24 @@ async def test_order_by_desc_nulls_last_places_nulls_last(
 
 
 @pytest.mark.asyncio
+async def test_explicit_restatements_match_direction_defaults(
+    audit_store: FakeStore,
+) -> None:
+    """Agreeing modifiers restate the PostgreSQL direction defaults."""
+    session = FakeAsyncSession(audit_store)
+    session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
+    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
+
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.desc().nulls_first()
+    ) == [1, 2, 3]
+    assert await _ordered_attempt_numbers(
+        session, Attempt.verification_status.asc().nulls_last()
+    ) == [3, 2, 1]
+
+
+@pytest.mark.asyncio
 async def test_order_by_nulls_last_before_desc_places_nulls_last(
     audit_store: FakeStore,
 ) -> None:
