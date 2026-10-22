@@ -14,8 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.models import AgentSession, Repo, User
-from app.routers.sessions import SessionCommitIn, commit_session
-from app.schemas import SESSION_PR_BODY_MAX_LEN, SESSION_PR_TITLE_MAX_LEN
+from app.schemas import SESSION_PR_BODY_MAX_LEN, SESSION_PR_TITLE_MAX_LEN, SessionCommitIn
 from app.services.session_commit import SessionCommitError, SessionCommitResult
 from app.services.session_orchestrator import (
     SessionOrchestrator,
@@ -406,6 +405,10 @@ async def test_dispatch_refuses_publish_when_user_mismatches_session_owner() -> 
 
 @pytest.mark.asyncio
 async def test_route_and_tool_both_invoke_shared_publisher() -> None:
+    # Router import lives here so only the parity test depends on the
+    # endpoint's import graph; the rest of this module tests the tool path.
+    from app.routers.sessions import commit_session
+
     user = _make_user()
     repo = _make_repo(user)
     session = _make_session(user, repo)
