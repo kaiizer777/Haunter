@@ -152,7 +152,30 @@ async def _verify_user_repo_permission(
             detail="Invalid response from GitHub",
         ) from exc
 
+    if not isinstance(data, dict):
+        logger.warning(
+            "GitHub returned non-object JSON during repo permission check for %s/%s user %s",
+            owner,
+            name,
+            current_user.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid response from GitHub",
+        )
+
     perms = data.get("permissions") or {}
+    if not isinstance(perms, dict):
+        logger.warning(
+            "GitHub returned non-object permissions during repo permission check for %s/%s user %s",
+            owner,
+            name,
+            current_user.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid response from GitHub",
+        )
     has_push = bool(perms.get("push"))
     has_admin = bool(perms.get("admin"))
     if not (has_push or has_admin):
