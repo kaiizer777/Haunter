@@ -382,7 +382,7 @@ async def test_unmodelled_order_by_modifier_fails_loud(
     session = FakeAsyncSession(audit_store)
     session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
 
-    with pytest.raises(UnsupportedStatementError):
+    with pytest.raises(UnsupportedStatementError, match="ORDER BY modifier"):
         await session.execute(
             select(Attempt).order_by(Attempt.verification_status.distinct())
         )
