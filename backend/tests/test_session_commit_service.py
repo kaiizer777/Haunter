@@ -1263,3 +1263,101 @@ async def test_installation_token_failure_fails_closed_503() -> None:
         mock.assert_not_awaited()
     assert session.status == "active"
     db.commit.assert_not_awaited()
+
+
+_CREATION_EMPTY_PATCH = (
+    "--- /dev/null\n"
+    "+++ b/pkg/__init__.py\n"
+    "@@ -0,0 +0,0 @@\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_creation_patch_may_introduce_empty_file() -> None:
+    """A creation patch may legitimately produce empty content (empty __init__.py)."""
+    repo = _make_repo()
+    session = _make_session(repo, staged_patches={"pkg/__init__.py": _CREATION_EMPTY_PATCH})
+    db = _make_db()
+    mock_blob = AsyncMock(return_value="blobsha")
+
+    async def _get_ref(**kwargs):
+        raise GitHubResourceNotFoundError("missing")
+
+    async def _pr(**kwargs):
+        return {"html_url": "https://github.com/o/r/pull/9", "number": 9}
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        stack.enter_context(patch(f"{_GH}.fetch_file_content", AsyncMock(return_value=None)))
+        stack.enter_context(
+            patch(
+                "app.services.session_commit.patch_applier.apply_unified_diff",
+                return_value="",
+            )
+        )
+        stack.enter_context(patch(f"{_GH}.create_blob", mock_blob))
+        stack.enter_context(
+            patch(f"{_GH}.fetch_commit_tree_sha", AsyncMock(return_value="basetree"))
+        )
+        stack.enter_context(
+            patch(f"{_GH}.create_git_tree", AsyncMock(return_value="newtree"))
+        )
+        stack.enter_context(
+            patch(f"{_GH}.create_git_commit", AsyncMock(return_value="commit1"))
+        )
+        stack.enter_context(patch(f"{_GP}.get_branch_ref", AsyncMock(side_effect=_get_ref)))
+        stack.enter_context(patch(f"{_GP}.create_branch", AsyncMock()))
+        stack.enter_context(patch(f"{_GP}.update_branch_ref", AsyncMock()))
+        stack.enter_context(patch(f"{_GH}.create_pull_request", AsyncMock(side_effect=_pr)))
+
+        result = await publish_session_patches(
+            session=session,
+            repo=repo,
+            title="Add empty init",
+            body=None,
+            current_user=_make_user(),
+            db=db,
+            gh_token="tok",
+        )
+
+    mock_blob.assert_awaited_once()
+    assert mock_blob.await_args.kwargs["content"] == ""
+    assert session.status == "completed"
+    assert result.pr_number == 9
+
+
+@pytest.mark.asyncio
+async def test_truncation_of_existing_file_to_empty_rejected_422() -> None:
+    """Emptying an existing file is still refused even though empty creation is allowed."""
+    repo = _make_repo()
+    session = _make_session(repo)
+    db = _make_db()
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+        patch(f"{_GH}.fetch_file_content", AsyncMock(return_value="old\n")),
+        patch(
+            "app.services.session_commit.patch_applier.apply_unified_diff",
+            return_value="",
+        ),
+        patch(f"{_GH}.create_blob", AsyncMock()) as mock_blob,
+    ):
+        with pytest.raises(SessionCommitError) as exc_info:
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Truncate",
+                body=None,
+                current_user=_make_user(),
+                db=db,
+                gh_token="tok",
+            )
+
+    assert exc_info.value.status_code == 422
+    assert "truncate" in str(exc_info.value).lower()
+    mock_blob.assert_not_awaited()
+    assert session.status == "active"
+    db.commit.assert_not_awaited()

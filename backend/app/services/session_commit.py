@@ -399,15 +399,18 @@ async def publish_session_patches(
             )
             continue
 
-        if not patched_content:
+        # A creation patch may legitimately introduce an empty file; only a
+        # truncation of an existing file to empty is rejected.
+        is_creation_patch = base_content is None
+        if not patched_content and not is_creation_patch:
             logger.error(
-                "session_commit: patched content is empty for '%s' in session %s",
+                "session_commit: truncating patch empties '%s' in session %s",
                 file_path,
                 session_id,
             )
             raise SessionCommitError(
                 f"Patched content for '{file_path}' is empty. "
-                "0-byte files cannot be committed.",
+                "Existing files cannot be truncated to 0 bytes.",
                 422,
             )
 

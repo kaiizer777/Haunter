@@ -147,10 +147,14 @@ async def test_commit_missing_base_raises_422() -> None:
 
 @pytest.mark.asyncio
 async def test_commit_empty_patched_content_raises_422() -> None:
-    """Issue #63: sessions.py rejects empty patched_content rather than creating a 0-byte blob."""
+    """Issue #63: truncating an existing file to empty is rejected, not a 0-byte blob.
+
+    Empty content from a *creation* patch is allowed (see
+    test_creation_patch_may_introduce_empty_file); this test pins the truncation side.
+    """
     user, session = _make_mock_user_and_session(
         staged_patches={
-            "app/empty.py": "--- /dev/null\n+++ b/app/empty.py\n"
+            "app/empty.py": "--- a/app/empty.py\n+++ b/app/empty.py\n@@ -1 +0,0 @@\n-old\n"
         }
     )
     mock_db = _make_mock_db(session)
@@ -158,7 +162,7 @@ async def test_commit_empty_patched_content_raises_422() -> None:
 
     with (
         patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
-        patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value=None),
+        patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="old\n"),
         patch("app.services.patch_applier.apply_unified_diff", return_value=""),
     ):
         with pytest.raises(HTTPException) as exc_info:
