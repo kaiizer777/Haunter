@@ -1255,6 +1255,19 @@ async def commit_session(
         result = await db.execute(stmt)
         session: Optional[AgentSession] = result.scalars().first()
     except (OperationalError, DBAPIError) as exc:
+        # Only NOWAIT lock contention (Postgres 55P03) is retryable. Any
+        # other DB failure must not masquerade as a lock conflict, or
+        # clients would retry a non-transient error forever.
+        if not _is_row_lock_conflict(exc):
+            logger.error(
+                "sessions/commit: session %s DB error (not a lock conflict): %s",
+                session_id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to access the session. Please try again.",
+            ) from exc
         logger.warning("sessions/commit: session %s lock conflict: %s", session_id, exc)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1451,6 +1464,19 @@ async def restore_checkpoint(
         result = await db.execute(stmt)
         session: Optional[AgentSession] = result.scalars().first()
     except (OperationalError, DBAPIError) as exc:
+        # Only NOWAIT lock contention (Postgres 55P03) is retryable. Any
+        # other DB failure must not masquerade as a lock conflict, or
+        # clients would retry a non-transient error forever.
+        if not _is_row_lock_conflict(exc):
+            logger.error(
+                "sessions/restore_checkpoint: session %s DB error (not a lock conflict): %s",
+                session_id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to access the session. Please try again.",
+            ) from exc
         logger.warning(
             "sessions/restore_checkpoint: session %s lock conflict: %s",
             session_id,

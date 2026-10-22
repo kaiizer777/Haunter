@@ -520,9 +520,13 @@ async def test_restore_endpoint_lock_conflict_returns_409_without_commit() -> No
         github_username="restore-conflict-user",
         role="user",
     )
+    lock_orig = Exception(
+        'could not obtain lock on relation "agent_sessions"'
+    )
+    lock_orig.pgcode = "55P03"
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(
-        side_effect=OperationalError("SELECT", {}, Exception("row is locked"))
+        side_effect=OperationalError("SELECT", {}, lock_orig)
     )
     mock_db.commit = AsyncMock()
 
@@ -536,6 +540,34 @@ async def test_restore_endpoint_lock_conflict_returns_409_without_commit() -> No
 
     assert exc_info.value.status_code == 409
     assert "locking this session" in exc_info.value.detail
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restore_endpoint_non_lock_db_error_returns_500_without_commit() -> None:
+    """A non-lock DB failure must not masquerade as a retryable lock conflict."""
+    user = User(
+        id=uuid.uuid4(),
+        github_id=91004,
+        github_username="restore-dberror-user",
+        role="user",
+    )
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(
+        side_effect=OperationalError("SELECT", {}, Exception("connection lost"))
+    )
+    mock_db.commit = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await restore_checkpoint(
+            session_id=uuid.uuid4(),
+            checkpoint_id="cp_any",
+            current_user=user,
+            db=mock_db,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "failed to access" in exc_info.value.detail.lower()
     mock_db.commit.assert_not_awaited()
 
 
