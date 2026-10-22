@@ -183,6 +183,7 @@ def _attempt(
     row_id: uuid.UUID,
     attempt_number: int,
     status: str | None,
+    failure_reason: str | None = None,
 ) -> Attempt:
     """Build an attempt row; the fake store does not enforce foreign keys."""
     return Attempt(
@@ -191,6 +192,7 @@ def _attempt(
         attempt_number=attempt_number,
         patch_text="",
         verification_status=status,
+        failure_reason=failure_reason,
     )
 
 
@@ -347,18 +349,29 @@ async def test_explicit_null_modifiers_override_direction_defaults(
 async def test_multi_column_order_honours_explicit_nulls_modifier(
     audit_store: FakeStore,
 ) -> None:
-    """A clause's explicit NULLS LAST must not leak into later clauses."""
+    """A clause's explicit NULLS LAST must not leak into later clauses.
+
+    The tiebreaker sorts the nullable failure_reason DESC, whose PostgreSQL
+    default is NULLS FIRST, so a leak would flip the tied pair to [2, 4].
+    """
     session = FakeAsyncSession(audit_store)
     session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
-    session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
+    session.add(
+        _attempt(
+            row_id=uuid.UUID(int=2),
+            attempt_number=2,
+            status="pass",
+            failure_reason="b",
+        )
+    )
     session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
     session.add(_attempt(row_id=uuid.UUID(int=4), attempt_number=4, status="pass"))
 
     assert await _ordered_attempt_numbers(
         session,
         Attempt.verification_status.desc().nulls_last(),
-        Attempt.attempt_number.asc(),
-    ) == [2, 4, 3, 1]
+        Attempt.failure_reason.desc(),
+    ) == [4, 2, 3, 1]
 
 
 @pytest.mark.asyncio
