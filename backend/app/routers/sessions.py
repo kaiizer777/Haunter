@@ -1225,15 +1225,10 @@ async def commit_session(
     - staged_patches must be non-empty (422 if empty).
     - Returns 404 for unowned/non-existent sessions.
 
-    Commit pipeline:
-    1. Fetch base file content at session.base_sha for each staged file.
-    2. Apply unified diff via patch_applier.apply_unified_diff.
-    3. Create Git blob for each patched file.
-    4. Create a Git tree rooted at session.base_sha.
-    5. Create a Git commit.
-    6. Update the session branch ref.
-    7. Open a PR against the repo default branch.
-    8. Mark session status="completed", record PR metadata in conversation_history.
+    Commit pipeline: delegates to `publish_session_patches` (see its docstring
+    for the branch/path/write-access/mint/patch/commit/ref/PR/rollback steps).
+    This endpoint only owns auth, the row lock, fast guards, the
+    session-namespace branch check, and error mapping.
     """
     from app.services.session_commit import SessionCommitError, publish_session_patches
 
