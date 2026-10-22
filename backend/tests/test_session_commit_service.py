@@ -1093,6 +1093,49 @@ async def test_pr_failure_skips_rollback_when_writer_advanced_branch() -> None:
     mock_delete_ref.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_db_commit_failure_after_pr_open_leaves_half_completed_publish() -> None:
+    """Pins current behavior: if db.commit() raises after the PR is open,
+    GitHub already holds a live PR+branch while the row still says active.
+
+    The raw error propagates without the PR URL, so a retry 409s toward a PR
+    this same session created. Surfacing the URL or persisting a
+    publish_attempt marker needs design sign-off (tracked follow-up).
+    """
+    repo = _make_repo()
+    session = _make_session(repo)
+    db = _make_db()
+    db.commit = AsyncMock(side_effect=RuntimeError("db down"))
+    mock_create_pr = AsyncMock(
+        return_value={"html_url": "https://github.com/o/r/pull/7", "number": 7}
+    )
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=AsyncMock(side_effect=GitHubResourceNotFoundError("missing")),
+            create_branch=AsyncMock(),
+            update_ref=AsyncMock(),
+            create_pr=mock_create_pr,
+        )
+        with pytest.raises(RuntimeError, match="db down"):
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=db,
+                gh_token="tok",
+            )
+
+    # The PR is live on GitHub even though persistence failed.
+    mock_create_pr.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
