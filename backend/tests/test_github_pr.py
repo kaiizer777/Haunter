@@ -629,6 +629,41 @@ def test_parse_patch_files_duplicate_section_raises() -> None:
         _parse_patch_files(patch_text)
 
 
+def test_parse_patch_files_strips_a_or_b_prefix_symmetrically() -> None:
+    """Both headers strip a-/b- prefixes, exactly like the validator."""
+    for src, target in [
+        ("x", "x"),
+        ("a/x", "a/x"),
+        ("a/x", "b/x"),
+        ("b/x", "b/x"),
+    ]:
+        patch_text = (
+            f"--- {src}\n"
+            f"+++ {target}\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+        assert list(_parse_patch_files(patch_text)) == ["x"]
+
+
+def test_parse_patch_files_mixed_prefix_duplicate_raises() -> None:
+    """A b/-prefixed deletion plus an a-/b- modify of one path must collide."""
+    patch_text = (
+        "--- b/x\n"
+        "+++ /dev/null\n"
+        "@@ -1,1 +0,0 @@\n"
+        "-old\n"
+        "--- a/x\n"
+        "+++ b/x\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old2\n"
+        "+new2\n"
+    )
+    with pytest.raises(GitHubPRValidationError, match="duplicate"):
+        _parse_patch_files(patch_text)
+
+
 @pytest.mark.anyio
 async def test_commit_patch_rejects_duplicate_file_sections_before_http() -> None:
     """Two sections for one path must fail closed before any GitHub request.
@@ -705,26 +740,24 @@ async def test_commit_patch_rejects_duplicate_file_sections_before_http() -> Non
 
 
 @pytest.mark.anyio
-async def test_commit_patch_rejects_parser_level_duplicate_after_reads() -> None:
-    """Prefix asymmetry must still fail closed at the parser boundary.
+async def test_commit_patch_rejects_unified_duplicate_before_reads() -> None:
+    """Unified prefix normalization rejects duplicates before any request.
 
-    A deletion whose source header is 'b/x' derives parser path 'b/x', while
-    the shared validator normalises the same header to 'x'. A normal modify of
-    'b/x' then collides only in _parse_patch_files. This validator/parser
-    normalization gap is a known follow-up (both shapes should reject before
-    any request); this test pins only the fail-closed outcome, not the gap.
-    No blob, tree, commit or ref mutation may follow, so no half-reviewed
-    remediation can be committed (issue #185).
+    Parser and validator both strip a-/b- from either header now, so a
+    deletion of 'b/x' plus a modify of 'a/x'/'b/x' is one path ('x') in
+    both layers. validate_unified_diff rejects it before any GitHub
+    request. No blob, tree, commit or ref mutation may follow, so no
+    half-reviewed remediation can be committed (issue #185).
     """
     import base64
 
-    asymmetric_patch = (
+    unified_duplicate_patch = (
         "--- b/x\n"
         "+++ /dev/null\n"
         "@@ -1,1 +0,0 @@\n"
         "-old\n"
-        "--- a/b/x\n"
-        "+++ b/b/x\n"
+        "--- a/x\n"
+        "+++ b/x\n"
         "@@ -1,1 +1,1 @@\n"
         "-old2\n"
         "+new2\n"
@@ -738,7 +771,7 @@ async def test_commit_patch_rejects_parser_level_duplicate_after_reads() -> None
             "/repos/test-org/test-repo/git/commits/head_sha_111"
         ).mock(return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}}))
         contents_route = rx.get(
-            "/repos/test-org/test-repo/contents/b/x?ref=head_sha_111"
+            "/repos/test-org/test-repo/contents/x?ref=head_sha_111"
         ).mock(
             return_value=httpx.Response(
                 200,
@@ -763,20 +796,17 @@ async def test_commit_patch_rejects_parser_level_duplicate_after_reads() -> None
                 owner="test-org",
                 repo="test-repo",
                 branch="haunter/fix-test",
-                patch_text=asymmetric_patch,
-                commit_msg="fix: asymmetric duplicate sections",
+                patch_text=unified_duplicate_patch,
+                commit_msg="fix: unified duplicate sections",
                 token="fake_token",
             )
 
         http_calls_inside = len(rx.calls)
 
     assert "duplicate file section" in str(exc_info.value)
-    # Read count is incidental: ref/head-commit reads happen before the
-    # parser-level duplicate check, and unifying path normalization may move
-    # this rejection before any request. Pin only the safety invariant.
-    assert http_calls_inside <= 2
-    assert ref_route.called
-    assert head_commit_route.called
+    assert http_calls_inside == 0
+    assert not ref_route.called
+    assert not head_commit_route.called
     assert not contents_route.called
     assert not blob_route.called
     assert not tree_route.called

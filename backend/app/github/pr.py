@@ -1017,7 +1017,7 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
 
     # Pattern for file headers: --- a/path  or  --- /dev/null, then +++ b/path  or  +++ /dev/null
     header_re = _re.compile(
-        r"^---\s+(?:a/)?([^\n]+)\n\+\+\+\s+(?:b/)?([^\n]+)", _re.MULTILINE
+        r"^---\s+(?:[ab]/)?([^\n]+)\n\+\+\+\s+(?:[ab]/)?([^\n]+)", _re.MULTILINE
     )
     # Find all header positions
     matches = list(header_re.finditer(patch_text))
