@@ -1004,15 +1004,19 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     Returns {filepath: file_patch_text} where filepath is the target path (or source path for deletions).
     Returns {} if parsing fails or no valid hunks found.
     Validates each path against _REPO_IDENT_RE traversal checks — invalid paths are skipped.
+
+    Raises:
+        GitHubPRValidationError: two sections target the same path. Duplicate
+            sections are rejected fail-closed rather than merged, so committed
+            content can never diverge from the validated diff.
     """
     files: dict[str, str] = {}
-    # Split on diff --git markers to isolate per-file sections; fallback to global scan if absent
+    # Split on ---/+++ header pairs to isolate per-file sections; return {} if absent
     # Use regex to find --- a/... / +++ b/... pairs
-    import re as _re
 
     # Pattern for file headers: --- a/path  or  --- /dev/null, then +++ b/path  or  +++ /dev/null
-    header_re = _re.compile(
-        r"^---\s+(?:a/)?([^\n]+)\n\+\+\+\s+(?:b/)?([^\n]+)", _re.MULTILINE
+    header_re = re.compile(
+        r"^---\s+(?:[ab]/)?([^\n]+)\n\+\+\+\s+(?:[ab]/)?([^\n]+)", re.MULTILINE
     )
     # Find all header positions
     matches = list(header_re.finditer(patch_text))
@@ -1067,9 +1071,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
     had_trailing_newline = original_text.endswith("\n") if original_text else True
 
     # Extract hunks: each @@ header + body lines
-    import re as _re
 
-    hunk_header_re = _re.compile(r"^@@\s+-(\d+),?(\d*)\s+\+(\d+),?(\d*)\s+@@")
+    hunk_header_re = re.compile(r"^@@\s+-(\d+),?(\d*)\s+\+(\d+),?(\d*)\s+@@")
     lines = file_patch.splitlines()
     # Skip file header lines (---/+++) until first @@
     hunk_start = None

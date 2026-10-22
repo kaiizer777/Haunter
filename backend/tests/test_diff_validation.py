@@ -279,6 +279,18 @@ def test_valid_diffs_are_accepted(patch: str) -> None:
             MODIFY_DIFF + MODIFY_DIFF,
             id="duplicate-file-section",
         ),
+        pytest.param(
+            "--- a/app.py\n"
+            "+++ /dev/null\n"
+            "@@ -1,1 +0,0 @@\n"
+            "-old\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old2\n"
+            "+new2\n",
+            id="duplicate-delete-then-modify-section",
+        ),
     ],
 )
 def test_invalid_diffs_are_rejected(patch: str) -> None:

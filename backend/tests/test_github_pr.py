@@ -629,6 +629,191 @@ def test_parse_patch_files_duplicate_section_raises() -> None:
         _parse_patch_files(patch_text)
 
 
+def test_parse_patch_files_strips_a_or_b_prefix_symmetrically() -> None:
+    """Both headers strip a-/b- prefixes, exactly like the validator."""
+    for src, target in [
+        ("x", "x"),
+        ("a/x", "a/x"),
+        ("a/x", "b/x"),
+        ("b/x", "b/x"),
+    ]:
+        patch_text = (
+            f"--- {src}\n"
+            f"+++ {target}\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+        assert list(_parse_patch_files(patch_text)) == ["x"]
+
+
+def test_parse_patch_files_mixed_prefix_duplicate_raises() -> None:
+    """A b/-prefixed deletion plus an a-/b- modify of one path must collide."""
+    patch_text = (
+        "--- b/x\n"
+        "+++ /dev/null\n"
+        "@@ -1,1 +0,0 @@\n"
+        "-old\n"
+        "--- a/x\n"
+        "+++ b/x\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old2\n"
+        "+new2\n"
+    )
+    with pytest.raises(GitHubPRValidationError, match="duplicate"):
+        _parse_patch_files(patch_text)
+
+
+@pytest.mark.anyio
+async def test_commit_patch_rejects_duplicate_file_sections_before_http() -> None:
+    """Two sections for one path must fail closed before any GitHub request.
+
+    Pre-fix (3cf6902^) validate_unified_diff accepted this patch and
+    _parse_patch_files kept only the second section, so commit_patch would
+    commit half the reviewed remediation (issue #185).
+    """
+    import base64
+
+    duplicate_patch = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -3,1 +3,1 @@\n"
+        "-old2\n"
+        "+new2\n"
+    )
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
+        ref_route = rx.get(
+            "/repos/test-org/test-repo/git/ref/heads/haunter/fix-test"
+        ).mock(return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}}))
+        head_commit_route = rx.get(
+            "/repos/test-org/test-repo/git/commits/head_sha_111"
+        ).mock(return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}}))
+        contents_route = rx.get(
+            "/repos/test-org/test-repo/contents/app.py?ref=head_sha_111"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"old\n").decode("ascii")},
+            )
+        )
+        blob_route = rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha"})
+        )
+        tree_route = rx.post("/repos/test-org/test-repo/git/trees").mock(
+            return_value=httpx.Response(201, json={"sha": "tree_sha"})
+        )
+        create_commit_route = rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "commit_sha"})
+        )
+        update_ref_route = rx.patch(
+            "/repos/test-org/test-repo/git/refs/heads/haunter/fix-test"
+        ).mock(return_value=httpx.Response(200, json={"object": {"sha": "commit_sha"}}))
+
+        with pytest.raises(GitHubPRValidationError) as exc_info:
+            await commit_patch(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-test",
+                patch_text=duplicate_patch,
+                commit_msg="fix: duplicate sections",
+                token="fake_token",
+            )
+
+        # respx clears this log on __exit__, so snapshot it while the mock is live.
+        http_calls_inside = len(rx.calls)
+
+    assert "duplicate file section" in str(exc_info.value)
+    assert http_calls_inside == 0
+    assert not ref_route.called
+    assert not head_commit_route.called
+    assert not contents_route.called
+    assert not blob_route.called
+    assert not tree_route.called
+    assert not create_commit_route.called
+    assert not update_ref_route.called
+
+
+@pytest.mark.anyio
+async def test_commit_patch_rejects_unified_duplicate_before_reads() -> None:
+    """Unified prefix normalization rejects duplicates before any request.
+
+    Parser and validator both strip a-/b- from either header now, so a
+    deletion of 'b/x' plus a modify of 'a/x'/'b/x' is one path ('x') in
+    both layers. validate_unified_diff rejects it before any GitHub
+    request. No blob, tree, commit or ref mutation may follow, so no
+    half-reviewed remediation can be committed (issue #185).
+    """
+    import base64
+
+    unified_duplicate_patch = (
+        "--- b/x\n"
+        "+++ /dev/null\n"
+        "@@ -1,1 +0,0 @@\n"
+        "-old\n"
+        "--- a/x\n"
+        "+++ b/x\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old2\n"
+        "+new2\n"
+    )
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
+        ref_route = rx.get(
+            "/repos/test-org/test-repo/git/ref/heads/haunter/fix-test"
+        ).mock(return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}}))
+        head_commit_route = rx.get(
+            "/repos/test-org/test-repo/git/commits/head_sha_111"
+        ).mock(return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}}))
+        contents_route = rx.get(
+            "/repos/test-org/test-repo/contents/x?ref=head_sha_111"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"old2\n").decode("ascii")},
+            )
+        )
+        blob_route = rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha"})
+        )
+        tree_route = rx.post("/repos/test-org/test-repo/git/trees").mock(
+            return_value=httpx.Response(201, json={"sha": "tree_sha"})
+        )
+        create_commit_route = rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "commit_sha"})
+        )
+        update_ref_route = rx.patch(
+            "/repos/test-org/test-repo/git/refs/heads/haunter/fix-test"
+        ).mock(return_value=httpx.Response(200, json={"object": {"sha": "commit_sha"}}))
+
+        with pytest.raises(GitHubPRValidationError) as exc_info:
+            await commit_patch(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-test",
+                patch_text=unified_duplicate_patch,
+                commit_msg="fix: unified duplicate sections",
+                token="fake_token",
+            )
+
+        http_calls_inside = len(rx.calls)
+
+    assert "duplicate file section" in str(exc_info.value)
+    assert http_calls_inside == 0
+    assert not ref_route.called
+    assert not head_commit_route.called
+    assert not contents_route.called
+    assert not blob_route.called
+    assert not tree_route.called
+    assert not create_commit_route.called
+    assert not update_ref_route.called
+
+
 def test_apply_unified_diff_ignores_blank_line_between_hunks() -> None:
     """A blank line between hunks must not apply as spurious context."""
     original = "a\nb\nc\nd\n"
