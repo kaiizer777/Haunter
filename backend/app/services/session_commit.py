@@ -32,7 +32,11 @@ from app import github_client
 from app.github import pr as github_pr
 from app.github.pr import get_installation_token
 from app.repos import _verify_user_repo_permission
-from app.schemas import _validate_git_branch
+from app.schemas import (
+    SESSION_PR_BODY_MAX_LEN,
+    SESSION_PR_TITLE_MAX_LEN,
+    _validate_git_branch,
+)
 from app.services import patch_applier
 from app.services.session_tools.recon import _normalize_rel_path, _validate_file_path
 
@@ -43,8 +47,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TITLE_MAX_LEN = 255
-_BODY_MAX_LEN = 65535
+_TITLE_MAX_LEN = SESSION_PR_TITLE_MAX_LEN
+_BODY_MAX_LEN = SESSION_PR_BODY_MAX_LEN
 
 
 class SessionCommitError(Exception):

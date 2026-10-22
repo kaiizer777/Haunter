@@ -15,6 +15,7 @@ import pytest
 
 from app.models import AgentSession, Repo, User
 from app.routers.sessions import SessionCommitIn, commit_session
+from app.schemas import SESSION_PR_BODY_MAX_LEN, SESSION_PR_TITLE_MAX_LEN
 from app.services.session_commit import SessionCommitError, SessionCommitResult
 from app.services.session_orchestrator import (
     SessionOrchestrator,
@@ -299,9 +300,9 @@ async def test_dispatch_requires_session_context() -> None:
         {"title": None},
         {"title": 123},
         {"title": "   "},
-        {"title": "x" * 256},
+        {"title": "x" * (SESSION_PR_TITLE_MAX_LEN + 1)},
         {"title": "ok", "body": 42},
-        {"title": "ok", "body": "y" * 65536},
+        {"title": "ok", "body": "y" * (SESSION_PR_BODY_MAX_LEN + 1)},
     ],
 )
 async def test_dispatch_rejects_invalid_arguments_without_publishing(

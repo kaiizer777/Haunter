@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from app.github_client import GitHubClientError, GitHubResourceNotFoundError
 from app.models import AgentSession, Repo, User
+from app.schemas import SESSION_PR_TITLE_MAX_LEN
 from app.services.session_commit import SessionCommitError, publish_session_patches
 
 _OWNER = "test-owner"
@@ -182,7 +183,7 @@ async def test_non_active_session_rejected_400() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("title", ["", "   ", "x" * 256])
+@pytest.mark.parametrize("title", ["", "   ", "x" * (SESSION_PR_TITLE_MAX_LEN + 1)])
 async def test_invalid_title_rejected_400(title: str) -> None:
     repo = _make_repo()
     session = _make_session(repo)

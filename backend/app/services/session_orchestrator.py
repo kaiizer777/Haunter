@@ -39,6 +39,7 @@ from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
 from app.models import AgentSession, User
+from app.schemas import SESSION_PR_BODY_MAX_LEN, SESSION_PR_TITLE_MAX_LEN
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.recon import (
     _count_diff_lines,
@@ -1012,13 +1013,16 @@ _TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "title": {
                         "type": "string",
-                        "description": "Pull request and commit title (1-255 characters).",
+                        "description": (
+                            "Pull request and commit title "
+                            f"(1-{SESSION_PR_TITLE_MAX_LEN} characters)."
+                        ),
                     },
                     "body": {
                         "type": "string",
                         "description": (
                             "Optional pull request description in Markdown "
-                            "(max 65535 characters)."
+                            f"(max {SESSION_PR_BODY_MAX_LEN} characters)."
                         ),
                     },
                 },
@@ -3963,12 +3967,12 @@ class SessionOrchestrator:
         body = args.get("body")
         if not isinstance(title, str) or not title.strip():
             return "Error: 'title' is required and must be a non-empty string."
-        if len(title.strip()) > 255:
-            return "Error: 'title' must be 255 characters or fewer."
+        if len(title.strip()) > SESSION_PR_TITLE_MAX_LEN:
+            return f"Error: 'title' must be {SESSION_PR_TITLE_MAX_LEN} characters or fewer."
         if body is not None and not isinstance(body, str):
             return "Error: 'body' must be a string when provided."
-        if isinstance(body, str) and len(body) > 65535:
-            return "Error: 'body' must be 65535 characters or fewer."
+        if isinstance(body, str) and len(body) > SESSION_PR_BODY_MAX_LEN:
+            return f"Error: 'body' must be {SESSION_PR_BODY_MAX_LEN} characters or fewer."
 
         repo = getattr(session, "repo", None)
         if repo is None:
