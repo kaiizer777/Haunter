@@ -637,6 +637,8 @@ async def test_commit_patch_rejects_duplicate_file_sections_before_http() -> Non
     _parse_patch_files kept only the second section, so commit_patch would
     commit half the reviewed remediation (issue #185).
     """
+    import base64
+
     duplicate_patch = (
         "--- a/app.py\n"
         "+++ b/app.py\n"
@@ -659,7 +661,12 @@ async def test_commit_patch_rejects_duplicate_file_sections_before_http() -> Non
         ).mock(return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}}))
         contents_route = rx.get(
             "/repos/test-org/test-repo/contents/app.py?ref=head_sha_111"
-        ).mock(return_value=httpx.Response(200, json={"content": ""}))
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"old\n").decode("ascii")},
+            )
+        )
         blob_route = rx.post("/repos/test-org/test-repo/git/blobs").mock(
             return_value=httpx.Response(201, json={"sha": "blob_sha"})
         )
