@@ -1172,3 +1172,53 @@ async def test_failed_tool_path_publish_leaves_branch_name_untouched() -> None:
     assert session.branch_name == "feat/original"
     assert session.status == "active"
     db.commit.assert_not_awaited()
+    assert session.branch_name == "feat/original"
+    assert session.status == "active"
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_installation_token_failure_fails_closed_503() -> None:
+    """A mint outage must fail closed with zero GitHub calls, never None-token writes."""
+    repo = _make_repo()
+    session = _make_session(repo)
+    db = _make_db()
+
+    targets = [
+        f"{_GH}.fetch_file_content",
+        f"{_GH}.create_blob",
+        f"{_GH}.fetch_commit_tree_sha",
+        f"{_GH}.create_git_tree",
+        f"{_GH}.create_git_commit",
+        f"{_GH}.create_pull_request",
+        f"{_GP}.get_branch_ref",
+        f"{_GP}.create_branch",
+        f"{_GP}.update_branch_ref",
+    ]
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        mocks = [stack.enter_context(patch(t, AsyncMock())) for t in targets]
+        stack.enter_context(
+            patch(
+                "app.services.session_commit.get_installation_token",
+                AsyncMock(side_effect=Exception("mint outage")),
+            )
+        )
+        with pytest.raises(SessionCommitError) as exc_info:
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=db,
+            )
+
+    assert exc_info.value.status_code == 503
+    assert "installation token" in str(exc_info.value).lower()
+    for mock in mocks:
+        mock.assert_not_awaited()
+    assert session.status == "active"
+    db.commit.assert_not_awaited()
