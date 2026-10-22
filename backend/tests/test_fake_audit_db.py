@@ -331,18 +331,23 @@ async def test_explicit_restatements_match_direction_defaults(
 
 
 @pytest.mark.asyncio
-async def test_order_by_nulls_last_before_desc_places_nulls_last(
+async def test_nulls_modifier_inside_direction_fails_loud(
     audit_store: FakeStore,
 ) -> None:
-    """Modifier order is irrelevant: outer DESC over inner NULLS LAST."""
+    """nulls_last().desc() renders NULLS LAST DESC, which PostgreSQL rejects."""
     session = FakeAsyncSession(audit_store)
     session.add(_attempt(row_id=uuid.UUID(int=1), attempt_number=1, status=None))
     session.add(_attempt(row_id=uuid.UUID(int=2), attempt_number=2, status="pass"))
     session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
 
-    assert await _ordered_attempt_numbers(
-        session, Attempt.verification_status.nulls_last().desc()
-    ) == [2, 3, 1]
+    with pytest.raises(UnsupportedStatementError, match="ORDER BY modifier"):
+        await session.execute(
+            select(Attempt).order_by(Attempt.verification_status.nulls_last().desc())
+        )
+    with pytest.raises(UnsupportedStatementError, match="ORDER BY modifier"):
+        await session.execute(
+            select(Attempt).order_by(Attempt.verification_status.nulls_first().asc())
+        )
 
 
 @pytest.mark.asyncio
@@ -356,7 +361,7 @@ async def test_explicit_null_modifiers_override_direction_defaults(
     session.add(_attempt(row_id=uuid.UUID(int=3), attempt_number=3, status="fail"))
 
     assert await _ordered_attempt_numbers(
-        session, Attempt.verification_status.nulls_first().asc()
+        session, Attempt.verification_status.asc().nulls_first()
     ) == [1, 3, 2]
     assert await _ordered_attempt_numbers(
         session, Attempt.verification_status.desc().nulls_last()

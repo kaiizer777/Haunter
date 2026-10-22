@@ -496,6 +496,7 @@ class FakeStore:
         for clause in reversed(list(statement._order_by_clauses or ())):
             reverse = False
             nulls_first: bool | None = None
+            seen_direction = False
             while isinstance(clause, UnaryExpression):
                 # SQLAlchemy 2.x stores ``operators.desc_op`` and friends here,
                 # never the rendered string, so compare by identity. ASC/DESC
@@ -504,11 +505,29 @@ class FakeStore:
                 modifier = clause.modifier
                 if modifier is operators.desc_op:
                     reverse = True
+                    seen_direction = True
                 elif modifier is operators.asc_op:
                     reverse = False
+                    seen_direction = True
                 elif modifier is operators.nulls_first_op:
+                    if seen_direction:
+                        raise UnsupportedStatementError(
+                            'fake audit store rejects this ORDER BY '
+                            'modifier chain: NULLS ordering inside ASC/DESC '
+                            'renders before the direction, which PostgreSQL '
+                            'rejects; apply the direction first '
+                            '(e.g. .desc().nulls_last())'
+                        )
                     nulls_first = True
                 elif modifier is operators.nulls_last_op:
+                    if seen_direction:
+                        raise UnsupportedStatementError(
+                            'fake audit store rejects this ORDER BY '
+                            'modifier chain: NULLS ordering inside ASC/DESC '
+                            'renders before the direction, which PostgreSQL '
+                            'rejects; apply the direction first '
+                            '(e.g. .desc().nulls_last())'
+                        )
                     nulls_first = False
                 else:
                     raise UnsupportedStatementError(
