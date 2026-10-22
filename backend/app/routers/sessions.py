@@ -1286,6 +1286,29 @@ async def commit_session(
 
     repo = session.repo
 
+    # Dashboard branch override must stay inside this session's namespace.
+    # The agent tool path always mints haunter/session-<id8>; an arbitrary
+    # override (e.g. a teammate's feat/ branch) would publish onto a foreign
+    # ref, so only the minted name (or the already-minted session value)
+    # is accepted here.
+    if body.branch_name is not None:
+        minted_branch = f"haunter/session-{str(session.id)[:8]}"
+        namespaced_current = (
+            isinstance(session.branch_name, str)
+            and session.branch_name.startswith("haunter/session-")
+        )
+        if body.branch_name != minted_branch and not (
+            namespaced_current and body.branch_name == session.branch_name
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Invalid branch_name {body.branch_name!r}: the commit "
+                    "endpoint only publishes to this session's branch "
+                    f"({minted_branch})."
+                ),
+            )
+
     # ------------------------------------------------------------------
     # 3-8. Shared publisher: branch safety, path revalidation, write access,
     #      token minting, patch application, commit, ref update, PR, and

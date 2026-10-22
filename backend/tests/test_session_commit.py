@@ -768,3 +768,138 @@ async def test_commit_without_repo_write_access_forbidden(
     persisted = result.scalars().first()
     assert persisted is not None
     assert persisted.status == "active"
+
+
+# ---------------------------------------------------------------------------
+# Test 10: foreign branch_name override rejected before any GitHub ref work
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_foreign_branch_override_rejected(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """
+    A dashboard caller guessing another branch (e.g. a teammate's feat/ work)
+    receives 400 and no branch ref is read or written.
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=99092)
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch="feat/session-branch",
+    )
+
+    mock_get_ref = AsyncMock(return_value="existing_sha")
+    mock_update_ref = AsyncMock()
+    mock_create_branch = AsyncMock()
+    mock_create_blob = AsyncMock()
+
+    with (
+        patch(
+            "app.services.session_commit.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch("app.github.pr.get_branch_ref", mock_get_ref),
+        patch("app.github.pr.update_branch_ref", mock_update_ref),
+        patch("app.github.pr.create_branch", mock_create_branch),
+        patch("app.github_client.create_blob", mock_create_blob),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "Hijack attempt", "branch_name": "feat/teammate-work"},
+            )
+
+    assert resp.status_code == 400, resp.text
+    assert "only publishes to this session's branch" in resp.json()["detail"]
+    mock_get_ref.assert_not_called()
+    mock_update_ref.assert_not_called()
+    mock_create_branch.assert_not_called()
+    mock_create_blob.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_commit_minted_branch_override_accepted(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """
+    Passing this session's own minted haunter/session-<id8> name is accepted
+    past the namespace guard (the pipeline then runs; a forced PR failure
+    proves the guard did not reject it).
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=99093)
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch="feat/session-branch",
+    )
+    minted = f"haunter/session-{str(session.id)[:8]}"
+
+    with (
+        patch(
+            "app.services.session_commit.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.github_client.create_blob",
+            new_callable=AsyncMock,
+            return_value="blob" + "b" * 36,
+        ),
+        patch(
+            "app.github_client.fetch_commit_tree_sha",
+            new_callable=AsyncMock,
+            return_value="resolved_tree_" + "a" * 26,
+        ),
+        patch(
+            "app.github_client.create_git_tree",
+            new_callable=AsyncMock,
+            return_value="tree" + "c" * 36,
+        ),
+        patch(
+            "app.github_client.create_git_commit",
+            new_callable=AsyncMock,
+            return_value="cmmt" + "d" * 36,
+        ),
+        patch(
+            "app.github_client.fetch_file_content",
+            new_callable=AsyncMock,
+            return_value=_ORIGINAL_FILE,
+        ),
+        patch(
+            "app.github.pr.get_branch_ref",
+            new_callable=AsyncMock,
+            side_effect=[
+                GitHubResourceNotFoundError("Branch does not exist"),
+                "cmmt" + "d" * 36,
+            ],
+        ),
+        patch(
+            "app.github.pr.create_branch",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "app.github_client.create_pull_request",
+            new_callable=AsyncMock,
+            side_effect=GitHubClientError("Simulated PR creation failure"),
+        ),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "Own branch", "branch_name": minted},
+            )
+
+    assert resp.status_code == 502, resp.text
+    assert "only publishes to this session's branch" not in resp.text
