@@ -306,7 +306,7 @@ async def test_exact_default_branch_rejected_even_when_not_protected() -> None:
 async def test_mints_session_branch_when_none_configured() -> None:
     repo = _make_repo(default_branch="main")
     session = _make_session(repo, branch_name="")
-    expected_branch = f"haunter/session-{str(session.id)[:8]}"
+    expected_branch = f"haunter/session-{str(session.id)[:12]}"
 
     mock_get_ref = AsyncMock(side_effect=GitHubResourceNotFoundError("missing"))
     mock_create_branch = AsyncMock()
@@ -362,7 +362,7 @@ async def test_explicit_topic_branch_overrides_user_controlled_session_branch() 
     """
     repo = _make_repo(default_branch="main")
     session = _make_session(repo, branch_name="feat/x")
-    expected_branch = f"haunter/session-{str(session.id)[:8]}"
+    expected_branch = f"haunter/session-{str(session.id)[:12]}"
     mock_create_branch = AsyncMock()
     mock_create_pr = AsyncMock(
         return_value={"html_url": "https://github.com/o/r/pull/8", "number": 8}

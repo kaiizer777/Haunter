@@ -165,7 +165,7 @@ def _resolve_publish_branch(
     raw_branch = (
         target_branch
         or session.branch_name
-        or f"haunter/session-{str(session.id)[:8]}"
+        or f"haunter/session-{str(session.id)[:12]}"
     )
 
     try:

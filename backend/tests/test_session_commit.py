@@ -843,7 +843,7 @@ async def test_commit_minted_branch_override_accepted(
         staged_patches={"app/utils.py": _SAMPLE_PATCH},
         branch="feat/session-branch",
     )
-    minted = f"haunter/session-{str(session.id)[:8]}"
+    minted = f"haunter/session-{str(session.id)[:12]}"
 
     with (
         patch(

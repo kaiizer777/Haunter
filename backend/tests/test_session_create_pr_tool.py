@@ -222,7 +222,7 @@ async def test_dispatch_calls_shared_publisher_and_returns_pr_details(caplog) ->
     assert kwargs["current_user"] is user
     assert kwargs["title"] == "Fix: publish"
     assert kwargs["body"] == "Details"
-    assert kwargs["target_branch"] == f"haunter/session-{str(session.id)[:8]}"
+    assert kwargs["target_branch"] == f"haunter/session-{str(session.id)[:12]}"
     assert kwargs["gh_token"] == _GH_TOKEN
 
     assert _PR_URL in text
@@ -429,7 +429,7 @@ async def test_route_and_tool_both_invoke_shared_publisher() -> None:
 
     tool_publisher.assert_awaited_once()
     assert tool_publisher.await_args.kwargs["target_branch"] == (
-        f"haunter/session-{str(session.id)[:8]}"
+        f"haunter/session-{str(session.id)[:12]}"
     )
 
 
@@ -448,7 +448,7 @@ async def test_tool_always_mints_dedicated_session_branch(session_branch) -> Non
     session = _make_session(user, repo)
     session.branch_name = session_branch
     orch = _make_orchestrator(session, current_user=user)
-    expected = f"haunter/session-{str(session.id)[:8]}"
+    expected = f"haunter/session-{str(session.id)[:12]}"
 
     with patch(
         "app.services.session_commit.publish_session_patches",

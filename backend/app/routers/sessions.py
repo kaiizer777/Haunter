@@ -206,7 +206,7 @@ async def create_session(
         branch_name: str = body.branch_name
         ref_to_fetch: str = branch_name
     else:
-        branch_name = f"haunter/session-{str(session_id)[:8]}"
+        branch_name = f"haunter/session-{str(session_id)[:12]}"
         ref_to_fetch = repo.default_branch or "main"
 
     # Resolve base SHA via GitHub App installation token.
@@ -1300,7 +1300,7 @@ async def commit_session(
     # ref, so only the minted name (or the already-minted session value)
     # is accepted here.
     if body.branch_name is not None:
-        minted_branch = f"haunter/session-{str(session.id)[:8]}"
+        minted_branch = f"haunter/session-{str(session.id)[:12]}"
         namespaced_current = (
             isinstance(session.branch_name, str)
             and session.branch_name.startswith("haunter/session-")

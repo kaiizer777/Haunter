@@ -3999,7 +3999,7 @@ class SessionOrchestrator:
                 body=body,
                 current_user=current_user,
                 db=self.db,
-                target_branch=f"haunter/session-{str(session.id)[:8]}",
+                target_branch=f"haunter/session-{str(session.id)[:12]}",
                 gh_token=self.gh_token,
                 persist_history=False,
             )
