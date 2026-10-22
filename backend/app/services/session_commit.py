@@ -323,7 +323,6 @@ async def publish_session_patches(
                 503,
             ) from exc
 
-    session.branch_name = branch_name
     session_id = session.id
 
     # ------------------------------------------------------------------
@@ -685,6 +684,10 @@ async def publish_session_patches(
     # ------------------------------------------------------------------
     # Persist: mark the session completed and record PR metadata.
     # ------------------------------------------------------------------
+    # Record the resolved branch only after the PR is open: assigning it
+    # before any network call would leak through the tool path's later
+    # commit even when publishing fails midway.
+    session.branch_name = branch_name
     now = datetime.now(timezone.utc)
     history_entry: dict[str, Any] = {
         "role": "system",

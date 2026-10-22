@@ -1138,3 +1138,37 @@ async def test_malformed_pr_response_rejected_502(bad_response: dict) -> None:
     assert "unexpected pull request response" in str(exc_info.value).lower()
     assert session.status == "active"
     db.commit.assert_not_awaited()
+    assert exc_info.value.status_code == 502
+    assert "unexpected pull request response" in str(exc_info.value).lower()
+    assert session.status == "active"
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_path_publish_leaves_branch_name_untouched() -> None:
+    """A mid-pipeline failure must not dirty branch_name for the tool path's later commit."""
+    repo = _make_repo()
+    session = _make_session(repo, branch_name="feat/original")
+    db = _make_db()
+
+    with patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()):
+        with patch(
+            f"{_GH}.fetch_file_content",
+            AsyncMock(side_effect=GitHubClientError("boom")),
+        ):
+            with pytest.raises(GitHubClientError):
+                await publish_session_patches(
+                    session=session,
+                    repo=repo,
+                    title="Fix",
+                    body=None,
+                    current_user=_make_user(),
+                    db=db,
+                    target_branch="feat/attempted",
+                    persist_history=False,
+                    gh_token="tok",
+                )
+
+    assert session.branch_name == "feat/original"
+    assert session.status == "active"
+    db.commit.assert_not_awaited()
