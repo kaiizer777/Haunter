@@ -220,6 +220,7 @@ async def test_commit_resolves_tree_sha_from_commit() -> None:
         repo="test-repo",
         commit_sha="commit_sha_12345",
         installation_token="tok",
+        allow_global_token=False,
     )
     mock_create_tree.assert_called_once_with(
         owner="test-owner",
@@ -227,6 +228,7 @@ async def test_commit_resolves_tree_sha_from_commit() -> None:
         tree=[{"path": "app/valid.py", "mode": "100644", "type": "blob", "sha": "blob_1"}],
         base_tree=fake_tree_sha,
         installation_token="tok",
+        allow_global_token=False,
     )
 
 
@@ -300,6 +302,7 @@ async def test_commit_deletion_patch_creates_tree_entry_with_null_sha() -> None:
         tree=[{"path": "app/deleted.py", "type": "blob"}],
         base_tree="base_tree_sha",
         installation_token="tok",
+        allow_global_token=False,
     )
 
 

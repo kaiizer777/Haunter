@@ -348,6 +348,7 @@ async def publish_session_patches(
             path=file_path,
             sha=session.base_sha,
             token=gh_token,
+            allow_global_token=False,
         )
         if base_content is None:
             # A creation patch legitimately has no base content; anything else
@@ -425,6 +426,7 @@ async def publish_session_patches(
                 content=patched_content,
                 encoding="utf-8",
                 installation_token=gh_token,
+                allow_global_token=False,
             )
         except github_client.GitHubClientError as exc:
             logger.error(
@@ -456,6 +458,7 @@ async def publish_session_patches(
             repo=repo.name,
             commit_sha=session.base_sha,
             installation_token=gh_token,
+            allow_global_token=False,
         )
     except github_client.GitHubClientError as exc:
         logger.error(
@@ -477,6 +480,7 @@ async def publish_session_patches(
             tree=tree_entries,
             base_tree=base_tree_sha,
             installation_token=gh_token,
+            allow_global_token=False,
         )
     except github_client.GitHubClientError as exc:
         logger.error(
@@ -503,6 +507,7 @@ async def publish_session_patches(
             tree_sha=tree_sha,
             parents=[session.base_sha],
             installation_token=gh_token,
+            allow_global_token=False,
         )
     except github_client.GitHubClientError as exc:
         logger.error(
@@ -614,6 +619,7 @@ async def publish_session_patches(
             base=default_branch,
             body=clean_body,
             installation_token=gh_token,
+            allow_global_token=False,
         )
     except Exception as exc:
         logger.error(
