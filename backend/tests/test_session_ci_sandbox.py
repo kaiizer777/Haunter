@@ -92,6 +92,17 @@ def test_tool_definition_present() -> None:
     assert "600" in props["timeout_sec"]["description"]
 
 
+def test_create_pull_request_registered_exactly_once() -> None:
+    from app.services.session_orchestrator import _TOOLS
+
+    defs = [
+        t for t in _TOOLS if t.get("function", {}).get("name") == "create_pull_request"
+    ]
+    assert len(defs) == 1, (
+        "create_pull_request must be registered exactly once in _TOOLS"
+    )
+
+
 def test_system_prompt_advertises_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services.session_orchestrator import _build_system_prompt
 

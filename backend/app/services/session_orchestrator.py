@@ -38,7 +38,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
-from app.models import AgentSession
+from app.models import AgentSession, User
+from app.schemas import SESSION_PR_BODY_MAX_LEN, SESSION_PR_TITLE_MAX_LEN
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.recon import (
     _count_diff_lines,
@@ -994,6 +995,42 @@ _TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_pull_request",
+            "description": (
+                "Publish this session: commit every staged patch to a dedicated "
+                "`haunter/session-<session-id>` topic branch, push it, and open a "
+                "pull request against the repository default branch. This is a WRITE "
+                "OPERATION — it pushes to GitHub immediately and marks the session "
+                "completed. Call it only when the user explicitly asks you to publish "
+                "or open a pull request, and only after verification passes. It cannot "
+                "target a protected or default branch."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "Pull request and commit title "
+                            f"(1-{SESSION_PR_TITLE_MAX_LEN} characters)."
+                        ),
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": (
+                            "Optional pull request description in Markdown "
+                            f"(max {SESSION_PR_BODY_MAX_LEN} characters)."
+                        ),
+                    },
+                },
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+        },
+    },
     TOOL_RUN_AUDIT_SCAN,
 ]
 
@@ -1109,7 +1146,9 @@ def _build_system_prompt(
         " 30. `git_diff(base, head, path?, stat_only?)` - unified diff or diffstat between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
         " 31. `list_staged_files()` - list all file paths currently staged with in-memory uncommitted modifications, creations, or deletions in the session.\n"
         " 32. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
-        "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n\n"
+        "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n"
+        " 33. `create_pull_request(title, body?)` — publish the session: commit all staged patches to a `haunter/session-*` topic branch and open a pull request immediately (write operation; marks the session completed).\n"
+        "     Call this LAST, only when the user explicitly asks you to publish or open a pull request, and only after verification passes. It cannot target protected or default branches.\n\n"
         "For multi-step requests, start by calling update_plan to outline your steps. "
         "Update task statuses as you progress. If you encounter ambiguous architectural trade-offs, "
         "call ask_user_clarification to let the user decide.\n"
@@ -1599,12 +1638,19 @@ class SessionOrchestrator:
         db: AsyncSession,
         gh_token: str | None = None,
         turn_id: str | None = None,
+        current_user: User | None = None,
     ) -> None:
         self.session_id = session_id
         self.db = db
         self.gh_token = gh_token
         self.turn_id = turn_id
+        self.current_user = current_user
         self._llm = LLMClient(timeout=120.0)
+        # Set by create_pull_request on success. `_persist` appends it after the
+        # turn's entries exactly once (the publisher does not write history from
+        # the tool path) so the PR record never precedes the message that asked
+        # for it.
+        self._pr_history_entry: dict[str, Any] | None = None
         self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
         self._mirror_worker_task: asyncio.Task | None = None
 
@@ -2679,6 +2725,14 @@ class SessionOrchestrator:
                 base_sha=base_sha,
                 staged_patches=staged_patches,
                 queue=queue,
+            )
+        elif tool_name == "create_pull_request":
+            if session is None:
+                return "Error: Session context is required for create_pull_request."
+            return await self._tool_create_pull_request(
+                args=args,
+                session=session,
+                staged_patches=staged_patches,
             )
         else:
             logger.warning(
@@ -3884,6 +3938,93 @@ class SessionOrchestrator:
             db=self.db,
         )
 
+    async def _tool_create_pull_request(
+        self,
+        args: dict[str, Any],
+        session: AgentSession,
+        staged_patches: dict[str, str],
+    ) -> str:
+        """
+        Publish the session through the shared commit publisher.
+
+        Structural safety: the tool accepts only a title/body — it can never
+        choose a branch, repository, or token. A dedicated ``haunter/session-*``
+        branch is minted from the session id and passed explicitly, so a
+        user-controlled ``session.branch_name`` (including ``main``) can never
+        become the publish target. The publisher re-validates the branch,
+        rejects protected/default branches, and re-verifies write access before
+        any Git write.
+        """
+        from app.services.session_commit import (
+            SessionCommitError,
+            minted_session_branch,
+            publish_session_patches,
+        )
+
+        if not isinstance(args, dict):
+            return "Error: 'create_pull_request' arguments must be a JSON object."
+
+        title = args.get("title")
+        body = args.get("body")
+        if not isinstance(title, str) or not title.strip():
+            return "Error: 'title' is required and must be a non-empty string."
+        if len(title.strip()) > SESSION_PR_TITLE_MAX_LEN:
+            return f"Error: 'title' must be {SESSION_PR_TITLE_MAX_LEN} characters or fewer."
+        if body is not None and not isinstance(body, str):
+            return "Error: 'body' must be a string when provided."
+        if isinstance(body, str) and len(body) > SESSION_PR_BODY_MAX_LEN:
+            return f"Error: 'body' must be {SESSION_PR_BODY_MAX_LEN} characters or fewer."
+
+        repo = getattr(session, "repo", None)
+        if repo is None:
+            return "Error: session repository context is missing."
+
+        current_user = self.current_user
+        if current_user is None:
+            try:
+                current_user = await self.db.get(User, session.user_id)
+            except Exception:
+                current_user = None
+        if current_user is None:
+            return (
+                "Error: could not resolve the session owner to verify repository "
+                "write access."
+            )
+        if current_user.id != session.user_id:
+            return "Error: session owner mismatch; refusing to publish."
+
+        # The turn-local dict is canonical while a turn runs; the ORM attribute
+        # still holds the pre-turn snapshot. Sync it before publishing so
+        # patches staged in this turn are included.
+        session.staged_patches = dict(staged_patches)
+
+        try:
+            result = await publish_session_patches(
+                session=session,
+                repo=repo,
+                title=title,
+                body=body,
+                current_user=current_user,
+                db=self.db,
+                target_branch=minted_session_branch(session.id),
+                gh_token=self.gh_token,
+                persist_history=False,
+            )
+        except SessionCommitError as exc:
+            return f"Error: {exc}"
+
+        # `_persist` owns conversation_history for this turn. Buffer the entry
+        # instead of appending it to the pre-turn list: otherwise it would land
+        # before the user message and assistant/tool entries that earned it.
+        self._pr_history_entry = result.history_entry
+
+        return (
+            f"Pull request opened: {result.pr_url}\n"
+            f"Branch: {result.branch_name}\n"
+            f"Commit: {result.commit_sha}\n"
+            "Session marked completed."
+        )
+
     async def _load_session(self) -> AgentSession | None:
         """
         Load the AgentSession with its repo relationship.
@@ -4016,6 +4157,19 @@ class SessionOrchestrator:
         """
         # Compact here as well (idempotent) so early-exit persist paths
         # (interrupt / LLM-error fallbacks) are bounded too.
+        #
+        # The PR history entry is appended here, after the turn's entries, and
+        # cleared immediately so retries/fallbacks cannot duplicate it. Doing it
+        # in this choke point makes publish-then-error paths persist it too.
+        pending_pr_entry = self._pr_history_entry
+        if pending_pr_entry is not None:
+            self._pr_history_entry = None
+            if not any(entry is pending_pr_entry for entry in updated_history):
+                updated_history = [*updated_history, pending_pr_entry]
+            if new_entries is not None and not any(
+                entry is pending_pr_entry for entry in new_entries
+            ):
+                new_entries = [*new_entries, pending_pr_entry]
         updated_history = _compact_history_for_storage(updated_history)
         # Snapshot every ORM attribute the fallback path needs BEFORE the
         # commit attempt. rollback() expires all persistent state, so reading

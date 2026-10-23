@@ -16,12 +16,24 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import _sign_user_id
 from app.github_client import GitHubClientError, GitHubResourceNotFoundError
 from app.models import AgentSession, Repo, User
+
+
+@pytest.fixture()
+def _allow_repo_write_access():
+    """Opt-in stub: tests exercising commit behaviour past the write-access guard."""
+    with patch(
+        "app.services.session_commit._verify_user_repo_permission",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +122,7 @@ def foo():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_success(
     db: AsyncSession,
     make_auth_client,
@@ -140,7 +153,7 @@ async def test_commit_success(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="mock-gh-token",
         ),
@@ -227,6 +240,7 @@ async def test_commit_success(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_empty_patches_rejected(
     db: AsyncSession,
     make_auth_client,
@@ -248,7 +262,7 @@ async def test_commit_empty_patches_rejected(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -272,6 +286,7 @@ async def test_commit_empty_patches_rejected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_unauthorized_user_forbidden(
     db: AsyncSession,
     make_auth_client,
@@ -309,6 +324,7 @@ async def test_commit_unauthorized_user_forbidden(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_closed_session_rejected(
     db: AsyncSession,
     make_auth_client,
@@ -349,6 +365,7 @@ async def test_commit_closed_session_rejected(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protected_branch", ["main", "master", "dev", "develop"])
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_protected_branch_rejected_with_zero_ref_calls(
     db: AsyncSession,
     make_auth_client,
@@ -377,7 +394,7 @@ async def test_commit_protected_branch_rejected_with_zero_ref_calls(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -414,6 +431,7 @@ async def test_commit_protected_branch_rejected_with_zero_ref_calls(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_pr_failure_cleans_up_newly_created_branch(
     db: AsyncSession,
     make_auth_client,
@@ -442,7 +460,7 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -507,6 +525,7 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_pr_failure_reverts_existing_branch(
     db: AsyncSession,
     make_auth_client,
@@ -537,7 +556,7 @@ async def test_commit_pr_failure_reverts_existing_branch(
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -612,6 +631,7 @@ async def test_commit_pr_failure_reverts_existing_branch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_pr_failure_skips_rollback_if_concurrent_writer_advanced_branch(
     db: AsyncSession,
     make_auth_client,
@@ -644,7 +664,7 @@ async def test_commit_pr_failure_skips_rollback_if_concurrent_writer_advanced_br
 
     with (
         patch(
-            "app.routers.sessions.get_installation_token",
+            "app.services.session_commit.get_installation_token",
             new_callable=AsyncMock,
             return_value="tok",
         ),
@@ -697,3 +717,199 @@ async def test_commit_pr_failure_skips_rollback_if_concurrent_writer_advanced_br
     # mock_restore_ref and mock_delete_ref must NOT be called when ref was advanced by another writer
     mock_restore_ref.assert_not_called()
     mock_delete_ref.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 9: caller without repository write access -> 403 (fails closed)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_commit_without_repo_write_access_forbidden(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """
+    A GitHub write-access denial surfaces as 403 before any Git Data write,
+    and the session remains active so the user can retry or close it.
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=99091)
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch="feat/no-write-access",
+    )
+
+    mock_create_blob = AsyncMock()
+
+    with (
+        patch(
+            "app.services.session_commit.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.services.session_commit._verify_user_repo_permission",
+            new_callable=AsyncMock,
+            side_effect=HTTPException(status_code=403, detail="no write access"),
+        ),
+        patch("app.github_client.create_blob", mock_create_blob),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "No access"},
+            )
+
+    assert resp.status_code == 403, resp.text
+    assert "write access" in resp.json()["detail"].lower()
+    mock_create_blob.assert_not_called()
+
+    await db.commit()
+    db.expire_all()
+    result = await db.execute(
+        select(AgentSession).where(AgentSession.id == session.id)
+    )
+    persisted = result.scalars().first()
+    assert persisted is not None
+    assert persisted.status == "active"
+
+
+# ---------------------------------------------------------------------------
+# Test 10: foreign branch_name override rejected before any GitHub ref work
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
+async def test_commit_foreign_branch_override_rejected(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """
+    A dashboard caller guessing another branch (e.g. a teammate's feat/ work)
+    receives 400 and no branch ref is read or written.
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=99092)
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch="feat/session-branch",
+    )
+
+    mock_get_ref = AsyncMock(return_value="existing_sha")
+    mock_update_ref = AsyncMock()
+    mock_create_branch = AsyncMock()
+    mock_create_blob = AsyncMock()
+
+    with (
+        patch(
+            "app.services.session_commit.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch("app.github.pr.get_branch_ref", mock_get_ref),
+        patch("app.github.pr.update_branch_ref", mock_update_ref),
+        patch("app.github.pr.create_branch", mock_create_branch),
+        patch("app.github_client.create_blob", mock_create_blob),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "Hijack attempt", "branch_name": "feat/teammate-work"},
+            )
+
+    assert resp.status_code == 400, resp.text
+    assert "only publishes to this session's branch" in resp.json()["detail"]
+    mock_get_ref.assert_not_called()
+    mock_update_ref.assert_not_called()
+    mock_create_branch.assert_not_called()
+    mock_create_blob.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
+async def test_commit_minted_branch_override_accepted(
+    db: AsyncSession,
+    make_auth_client,
+) -> None:
+    """
+    Passing this session's own minted haunter/session-<id hex[:12]> name is accepted
+    past the namespace guard (the pipeline then runs; a forced PR failure
+    proves the guard did not reject it).
+    """
+    user, repo = await _seed_user_and_repo(db, github_id=99093)
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="active",
+        staged_patches={"app/utils.py": _SAMPLE_PATCH},
+        branch="feat/session-branch",
+    )
+    minted = f"haunter/session-{session.id.hex[:12]}"
+
+    with (
+        patch(
+            "app.services.session_commit.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="tok",
+        ),
+        patch(
+            "app.github_client.create_blob",
+            new_callable=AsyncMock,
+            return_value="blob" + "b" * 36,
+        ),
+        patch(
+            "app.github_client.fetch_commit_tree_sha",
+            new_callable=AsyncMock,
+            return_value="resolved_tree_" + "a" * 26,
+        ),
+        patch(
+            "app.github_client.create_git_tree",
+            new_callable=AsyncMock,
+            return_value="tree" + "c" * 36,
+        ),
+        patch(
+            "app.github_client.create_git_commit",
+            new_callable=AsyncMock,
+            return_value="cmmt" + "d" * 36,
+        ),
+        patch(
+            "app.github_client.fetch_file_content",
+            new_callable=AsyncMock,
+            return_value=_ORIGINAL_FILE,
+        ),
+        patch(
+            "app.github.pr.get_branch_ref",
+            new_callable=AsyncMock,
+            side_effect=[
+                GitHubResourceNotFoundError("Branch does not exist"),
+                "cmmt" + "d" * 36,
+            ],
+        ),
+        patch(
+            "app.github.pr.create_branch",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "app.github_client.create_pull_request",
+            new_callable=AsyncMock,
+            side_effect=GitHubClientError("Simulated PR creation failure"),
+        ),
+    ):
+        async with _auth_client(make_auth_client, user) as ac:
+            resp = await ac.post(
+                f"/sessions/{session.id}/commit",
+                json={"title": "Own branch", "branch_name": minted},
+            )
+
+    assert resp.status_code == 502, resp.text
+    assert "only publishes to this session's branch" not in resp.text
