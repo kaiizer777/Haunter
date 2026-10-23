@@ -200,13 +200,15 @@ async def create_session(
 
     # Resolve target branch:
     # When branch_name is omitted (null), never default to repo.default_branch as a writable target.
-    # Mint a dedicated topic branch (e.g. haunter/session-{id[:8]}) and resolve base_sha from repo default_branch.
+    # Mint a dedicated topic branch (e.g. haunter/session-{id.hex[:12]}) and resolve base_sha from repo default_branch.
     session_id: uuid.UUID = uuid.uuid4()
     if body.branch_name:
         branch_name: str = body.branch_name
         ref_to_fetch: str = branch_name
     else:
-        branch_name = f"haunter/session-{str(session_id)[:12]}"
+        from app.services.session_commit import minted_session_branch
+
+        branch_name = minted_session_branch(session_id)
         ref_to_fetch = repo.default_branch or "main"
 
     # Resolve base SHA via GitHub App installation token.
@@ -1230,7 +1232,11 @@ async def commit_session(
     This endpoint only owns auth, the row lock, fast guards, the
     session-namespace branch check, and error mapping.
     """
-    from app.services.session_commit import SessionCommitError, publish_session_patches
+    from app.services.session_commit import (
+        SessionCommitError,
+        minted_session_branch,
+        publish_session_patches,
+    )
 
     # ------------------------------------------------------------------
     # 1. Load session with repo join -- object-level auth + concurrency lock.
@@ -1295,12 +1301,12 @@ async def commit_session(
     repo = session.repo
 
     # Dashboard branch override must stay inside this session's namespace.
-    # The agent tool path always mints haunter/session-<id8>; an arbitrary
+    # The agent tool path always mints haunter/session-<id hex[:12]>; an arbitrary
     # override (e.g. a teammate's feat/ branch) would publish onto a foreign
     # ref, so only the minted name (or the already-minted session value)
     # is accepted here.
     if body.branch_name is not None:
-        minted_branch = f"haunter/session-{str(session.id)[:12]}"
+        minted_branch = minted_session_branch(session.id)
         namespaced_current = (
             isinstance(session.branch_name, str)
             and session.branch_name.startswith("haunter/session-")

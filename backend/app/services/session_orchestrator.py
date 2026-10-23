@@ -3957,6 +3957,7 @@ class SessionOrchestrator:
         """
         from app.services.session_commit import (
             SessionCommitError,
+            minted_session_branch,
             publish_session_patches,
         )
 
@@ -4005,7 +4006,7 @@ class SessionOrchestrator:
                 body=body,
                 current_user=current_user,
                 db=self.db,
-                target_branch=f"haunter/session-{str(session.id)[:12]}",
+                target_branch=minted_session_branch(session.id),
                 gh_token=self.gh_token,
                 persist_history=False,
             )
