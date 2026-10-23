@@ -154,6 +154,25 @@ def _validated_staged_path(raw_path: str) -> str:
     return raw_path
 
 
+def minted_session_branch(session_id: object) -> str:
+    """
+    Mint the dedicated ``haunter/session-*`` topic branch for a session.
+
+    Single source of truth for every mint site (session creation, the
+    shared publisher fallback, the agent tool path, and the endpoint
+    namespace check). Uses 12 hyphen-free hex chars (48 bits) from the
+    session id: slicing ``str(uuid)`` directly would embed the
+    ``8-4-4-4-12`` hyphen and carry only 11 hex chars, so hyphens are
+    stripped first (``UUID.hex`` when available).
+    """
+    hex_id = getattr(session_id, "hex", None)
+    if isinstance(hex_id, str):
+        compact = hex_id
+    else:
+        compact = str(session_id).replace("-", "")
+    return f"haunter/session-{compact[:12]}"
+
+
 def _resolve_publish_branch(
     session: AgentSession, repo: Repo, target_branch: str | None
 ) -> tuple[str, str]:
@@ -169,7 +188,7 @@ def _resolve_publish_branch(
     raw_branch = (
         target_branch
         or session.branch_name
-        or f"haunter/session-{str(session.id)[:12]}"
+        or minted_session_branch(session.id)
     )
 
     try:

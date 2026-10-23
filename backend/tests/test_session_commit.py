@@ -840,7 +840,7 @@ async def test_commit_minted_branch_override_accepted(
     make_auth_client,
 ) -> None:
     """
-    Passing this session's own minted haunter/session-<id8> name is accepted
+    Passing this session's own minted haunter/session-<id hex[:12]> name is accepted
     past the namespace guard (the pipeline then runs; a forced PR failure
     proves the guard did not reject it).
     """
@@ -853,7 +853,7 @@ async def test_commit_minted_branch_override_accepted(
         staged_patches={"app/utils.py": _SAMPLE_PATCH},
         branch="feat/session-branch",
     )
-    minted = f"haunter/session-{str(session.id)[:12]}"
+    minted = f"haunter/session-{session.id.hex[:12]}"
 
     with (
         patch(
