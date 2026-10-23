@@ -1491,11 +1491,17 @@ async def restore_checkpoint(
     # records the PR in conversation_history. Restoring would erase that record,
     # so refuse before touching checkpoints, patches, or history.
     if session.status != "active":
+        if session.status == "completed":
+            restore_detail = (
+                "Cannot restore a checkpoint after the session has been published."
+            )
+        else:
+            restore_detail = (
+                f"Cannot restore a checkpoint while the session is {session.status}."
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Cannot restore a checkpoint after the session has been published."
-            ),
+            detail=restore_detail,
         )
 
     # Verify checkpoint exists before calling restore.

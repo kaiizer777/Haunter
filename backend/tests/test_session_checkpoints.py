@@ -26,6 +26,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -251,6 +252,33 @@ async def test_checkpoint_restore_not_found() -> None:
     db.commit.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_checkpoint_restore_refusal_names_non_published_status() -> None:
+    """Only a completed session was published; other statuses must say so."""
+    cases = (
+        ("completed", "has been published"),
+        ("expired", "while the session is expired"),
+        ("failed", "while the session is failed"),
+    )
+    for cur_status, fragment in cases:
+        session = MagicMock(spec=AgentSession)
+        session.status = cur_status
+        queue = MagicMock(spec=SseQueue)
+        db = AsyncMock(spec=AsyncSession)
+
+        result = await tool_checkpoint_restore(
+            checkpoint_id="cp1",
+            session=session,
+            queue=queue,
+            db=db,
+        )
+
+        assert result.startswith("Error:")
+        assert fragment in result
+        queue.put_checkpoint_restored.assert_not_called()
+        db.commit.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Test 5: security scan detects AWS key
 # ---------------------------------------------------------------------------
@@ -463,6 +491,44 @@ async def test_restore_endpoint_refuses_published_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restore_endpoint_refusal_names_non_published_status() -> None:
+    """An expired session was never published; the 409 must say so."""
+    user = User(
+        id=uuid.uuid4(),
+        github_id=91003,
+        github_username="restore-expired-user",
+        role="user",
+    )
+    repo = Repo(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        owner="test-org",
+        name="restore-repo",
+        default_branch="main",
+    )
+    session = _make_session(user, repo)
+    session.status = "expired"
+
+    mock_db = MagicMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = session
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.commit = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await restore_checkpoint(
+            session_id=uuid.uuid4(),
+            checkpoint_id="cp_before_publish",
+            current_user=user,
+            db=mock_db,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "while the session is expired" in exc_info.value.detail
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_restore_endpoint_locks_session_row() -> None:
     """Catches the read-check-then-write race: restore must take FOR UPDATE NOWAIT."""
     user = User(
@@ -507,8 +573,18 @@ async def test_restore_endpoint_locks_session_row() -> None:
     )
 
     stmt = mock_db.execute.await_args.args[0]
-    assert stmt._for_update_arg is not None
-    assert stmt._for_update_arg.nowait is True
+    compiled = str(
+        stmt.compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    ).upper()
+    assert "FOR UPDATE" in compiled
+    assert "NOWAIT" in compiled
+    # Private-attr pin kept only as a fallback for dialects that render
+    # the lock clause differently.
+    for_update_arg = getattr(stmt, "_for_update_arg", None)
+    if for_update_arg is not None:
+        assert for_update_arg.nowait is True
 
 
 @pytest.mark.asyncio

@@ -2696,6 +2696,7 @@ async def create_blob(
     content: str,
     encoding: str = "utf-8",
     installation_token=None,
+    allow_global_token: bool = True,
 ) -> str:
     """
     Create a Git blob for a single file content.
@@ -2710,7 +2711,9 @@ async def create_blob(
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/blobs"
     headers = _build_headers(
-        token=installation_token, accept="application/vnd.github+json"
+        token=installation_token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
     )
     payload = {"content": content, "encoding": encoding}
 
@@ -2746,6 +2749,7 @@ async def fetch_commit_tree_sha(
     repo: str,
     commit_sha: str,
     installation_token: Optional[str] = None,
+    allow_global_token: bool = True,
 ) -> str:
     """
     Resolve a commit SHA to its root tree SHA via GitHub Git Data API.
@@ -2758,7 +2762,9 @@ async def fetch_commit_tree_sha(
     """
     url = f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/commits/{quote(commit_sha, safe='')}"
     headers = _build_headers(
-        token=installation_token, accept="application/vnd.github+json"
+        token=installation_token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
     )
 
     async with httpx.AsyncClient(
@@ -2813,6 +2819,7 @@ async def create_git_tree(
     tree: list,
     base_tree=None,
     installation_token=None,
+    allow_global_token: bool = True,
 ) -> str:
     """
     Create a Git tree object.
@@ -2827,7 +2834,9 @@ async def create_git_tree(
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees"
     headers = _build_headers(
-        token=installation_token, accept="application/vnd.github+json"
+        token=installation_token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
     )
     payload = {"tree": tree}
     if base_tree is not None:
@@ -2867,6 +2876,7 @@ async def create_git_commit(
     tree_sha: str,
     parents: list,
     installation_token=None,
+    allow_global_token: bool = True,
 ) -> str:
     """
     Create a Git commit object.
@@ -2879,7 +2889,9 @@ async def create_git_commit(
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/commits"
     headers = _build_headers(
-        token=installation_token, accept="application/vnd.github+json"
+        token=installation_token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
     )
     payload = {"message": message, "tree": tree_sha, "parents": parents}
 
@@ -3164,6 +3176,7 @@ async def create_pull_request(
     base: str,
     body=None,
     installation_token=None,
+    allow_global_token: bool = True,
 ) -> "dict[str, Any]":
     """
     Open a pull request.
@@ -3176,7 +3189,9 @@ async def create_pull_request(
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
     headers = _build_headers(
-        token=installation_token, accept="application/vnd.github+json"
+        token=installation_token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
     )
     payload: dict = {"title": title, "head": head, "base": base}
     if body is not None:

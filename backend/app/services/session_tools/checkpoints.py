@@ -144,8 +144,12 @@ async def tool_checkpoint_restore(
     Returns a human-readable result string for the LLM.
     """
     if session.status != "active":
+        if session.status == "completed":
+            return (
+                "Error: Cannot restore a checkpoint after the session has been published."
+            )
         return (
-            "Error: Cannot restore a checkpoint after the session has been published."
+            f"Error: Cannot restore a checkpoint while the session is {session.status}."
         )
 
     checkpoints: list[dict[str, Any]] = list(session.checkpoints or [])

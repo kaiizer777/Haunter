@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from app.github_client import GitHubClientError, GitHubResourceNotFoundError
 from app.models import AgentSession, Repo, User
+from app.schemas import SESSION_PR_TITLE_MAX_LEN
 from app.services.session_commit import SessionCommitError, publish_session_patches
 
 _OWNER = "test-owner"
@@ -182,7 +183,7 @@ async def test_non_active_session_rejected_400() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("title", ["", "   ", "x" * 256])
+@pytest.mark.parametrize("title", ["", "   ", "x" * (SESSION_PR_TITLE_MAX_LEN + 1)])
 async def test_invalid_title_rejected_400(title: str) -> None:
     repo = _make_repo()
     session = _make_session(repo)
@@ -222,6 +223,9 @@ _PROTECTED_TARGETS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target_branch", _PROTECTED_TARGETS)
+# Mock-hygiene canary: every publisher call site in this module is patched
+# at function level, so no httpx traffic can occur. This sole respx tripwire
+# pins that invariant; the per-target mock asserts below are the real guards.
 @respx.mock
 async def test_protected_branches_rejected_with_zero_ref_calls(
     target_branch: str,
@@ -272,7 +276,6 @@ async def test_protected_branches_rejected_with_zero_ref_calls(
 
 
 @pytest.mark.asyncio
-@respx.mock
 async def test_exact_default_branch_rejected_even_when_not_protected() -> None:
     """A custom default branch (trunk) is rejected by equality, not the set."""
     repo = _make_repo(default_branch="trunk")
@@ -297,7 +300,6 @@ async def test_exact_default_branch_rejected_even_when_not_protected() -> None:
     assert exc_info.value.status_code == 400
     assert "default branch" in str(exc_info.value).lower()
     perms.assert_not_called()
-    assert len(respx.calls) == 0
     assert _ref_calls() == []
     mock_create_blob.assert_not_called()
 
@@ -312,7 +314,6 @@ _GIT_SPECIFIC_BRANCHES = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target_branch", _GIT_SPECIFIC_BRANCHES)
-@respx.mock
 async def test_git_specific_branch_rejections_use_single_error_dialect(
     target_branch: str,
 ) -> None:
@@ -339,7 +340,6 @@ async def test_git_specific_branch_rejections_use_single_error_dialect(
     assert exc_info.value.status_code == 400
     assert "contains invalid characters" in str(exc_info.value)
     perms.assert_not_called()
-    assert len(respx.calls) == 0
     mock_create_blob.assert_not_called()
 
 
@@ -529,7 +529,6 @@ _BAD_PATHS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_path", _BAD_PATHS)
-@respx.mock
 async def test_unsafe_staged_paths_rejected_before_any_github_call(
     bad_path: str,
 ) -> None:
@@ -558,7 +557,6 @@ async def test_unsafe_staged_paths_rejected_before_any_github_call(
             )
 
     assert exc_info.value.status_code == 422
-    assert len(respx.calls) == 0
     perms.assert_not_called()
     mock_fetch.assert_not_called()
     mock_create_blob.assert_not_called()
@@ -735,6 +733,9 @@ async def test_tool_path_does_not_write_history_inside_publisher() -> None:
 
     With ``persist_history=False`` the publisher still marks the row completed
     and returns the entry, but must not append it to conversation_history.
+
+    Counterpart test_pr_entry_is_appended_after_turn_entries_exactly_once
+    proves ordering given the completed state produced here.
     """
     repo = _make_repo()
     session = _make_session(repo, branch_name="feat/history")
@@ -1095,6 +1096,49 @@ async def test_pr_failure_skips_rollback_when_writer_advanced_branch() -> None:
     mock_delete_ref.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_db_commit_failure_after_pr_open_leaves_half_completed_publish() -> None:
+    """Pins current behavior: if db.commit() raises after the PR is open,
+    GitHub already holds a live PR+branch while the row still says active.
+
+    The raw error propagates without the PR URL, so a retry 409s toward a PR
+    this same session created. Surfacing the URL or persisting a
+    publish_attempt marker needs design sign-off (tracked follow-up).
+    """
+    repo = _make_repo()
+    session = _make_session(repo)
+    db = _make_db()
+    db.commit = AsyncMock(side_effect=RuntimeError("db down"))
+    mock_create_pr = AsyncMock(
+        return_value={"html_url": "https://github.com/o/r/pull/7", "number": 7}
+    )
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=AsyncMock(side_effect=GitHubResourceNotFoundError("missing")),
+            create_branch=AsyncMock(),
+            update_ref=AsyncMock(),
+            create_pr=mock_create_pr,
+        )
+        with pytest.raises(RuntimeError, match="db down"):
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=db,
+                gh_token="tok",
+            )
+
+    # The PR is live on GitHub even though persistence failed.
+    mock_create_pr.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
@@ -1104,6 +1148,8 @@ async def test_pr_failure_skips_rollback_when_writer_advanced_branch() -> None:
 async def test_installation_token_never_logged_or_returned(caplog) -> None:
     repo = _make_repo()
     session = _make_session(repo, branch_name="feat/secret-check")
+    # Intentionally fake ghs-shaped canary: it exercises the real token
+    # shape yet cannot collide with a redaction filter's "[REDACTED]" output.
     secret = "ghs_supersecrettoken"
     mock_create_pr = AsyncMock(
         return_value={"html_url": "https://github.com/o/r/pull/11", "number": 11}
@@ -1131,9 +1177,6 @@ async def test_installation_token_never_logged_or_returned(caplog) -> None:
             gh_token=secret,
         )
 
-    assert secret not in caplog.text
-    assert secret not in repr(result)
-    assert secret not in str(result.history_entry)
     assert secret not in caplog.text
     assert secret not in repr(result)
     assert secret not in str(result.history_entry)

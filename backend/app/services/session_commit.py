@@ -32,7 +32,11 @@ from app import github_client
 from app.github import pr as github_pr
 from app.github.pr import get_installation_token
 from app.repos import _verify_user_repo_permission
-from app.schemas import _validate_git_branch
+from app.schemas import (
+    SESSION_PR_BODY_MAX_LEN,
+    SESSION_PR_TITLE_MAX_LEN,
+    _validate_git_branch,
+)
 from app.services import patch_applier
 from app.services.session_tools.recon import _normalize_rel_path, _validate_file_path
 
@@ -43,8 +47,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_TITLE_MAX_LEN = 255
-_BODY_MAX_LEN = 65535
+_TITLE_MAX_LEN = SESSION_PR_TITLE_MAX_LEN
+_BODY_MAX_LEN = SESSION_PR_BODY_MAX_LEN
 
 
 class SessionCommitError(Exception):
@@ -344,6 +348,7 @@ async def publish_session_patches(
             path=file_path,
             sha=session.base_sha,
             token=gh_token,
+            allow_global_token=False,
         )
         if base_content is None:
             # A creation patch legitimately has no base content; anything else
@@ -421,6 +426,7 @@ async def publish_session_patches(
                 content=patched_content,
                 encoding="utf-8",
                 installation_token=gh_token,
+                allow_global_token=False,
             )
         except github_client.GitHubClientError as exc:
             logger.error(
@@ -452,6 +458,7 @@ async def publish_session_patches(
             repo=repo.name,
             commit_sha=session.base_sha,
             installation_token=gh_token,
+            allow_global_token=False,
         )
     except github_client.GitHubClientError as exc:
         logger.error(
@@ -473,6 +480,7 @@ async def publish_session_patches(
             tree=tree_entries,
             base_tree=base_tree_sha,
             installation_token=gh_token,
+            allow_global_token=False,
         )
     except github_client.GitHubClientError as exc:
         logger.error(
@@ -499,6 +507,7 @@ async def publish_session_patches(
             tree_sha=tree_sha,
             parents=[session.base_sha],
             installation_token=gh_token,
+            allow_global_token=False,
         )
     except github_client.GitHubClientError as exc:
         logger.error(
@@ -610,6 +619,7 @@ async def publish_session_patches(
             base=default_branch,
             body=clean_body,
             installation_token=gh_token,
+            allow_global_token=False,
         )
     except Exception as exc:
         logger.error(

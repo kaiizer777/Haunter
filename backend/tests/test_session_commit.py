@@ -25,9 +25,9 @@ from app.github_client import GitHubClientError, GitHubResourceNotFoundError
 from app.models import AgentSession, Repo, User
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture()
 def _allow_repo_write_access():
-    """These DB tests exercise commit behaviour, not GitHub user permissions."""
+    """Opt-in stub: tests exercising commit behaviour past the write-access guard."""
     with patch(
         "app.services.session_commit._verify_user_repo_permission",
         new_callable=AsyncMock,
@@ -122,6 +122,7 @@ def foo():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_success(
     db: AsyncSession,
     make_auth_client,
@@ -239,6 +240,7 @@ async def test_commit_success(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_empty_patches_rejected(
     db: AsyncSession,
     make_auth_client,
@@ -284,6 +286,7 @@ async def test_commit_empty_patches_rejected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_unauthorized_user_forbidden(
     db: AsyncSession,
     make_auth_client,
@@ -321,6 +324,7 @@ async def test_commit_unauthorized_user_forbidden(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_closed_session_rejected(
     db: AsyncSession,
     make_auth_client,
@@ -361,6 +365,7 @@ async def test_commit_closed_session_rejected(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protected_branch", ["main", "master", "dev", "develop"])
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_protected_branch_rejected_with_zero_ref_calls(
     db: AsyncSession,
     make_auth_client,
@@ -426,6 +431,7 @@ async def test_commit_protected_branch_rejected_with_zero_ref_calls(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_pr_failure_cleans_up_newly_created_branch(
     db: AsyncSession,
     make_auth_client,
@@ -519,6 +525,7 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_pr_failure_reverts_existing_branch(
     db: AsyncSession,
     make_auth_client,
@@ -624,6 +631,7 @@ async def test_commit_pr_failure_reverts_existing_branch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_pr_failure_skips_rollback_if_concurrent_writer_advanced_branch(
     db: AsyncSession,
     make_auth_client,
@@ -776,6 +784,7 @@ async def test_commit_without_repo_write_access_forbidden(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_foreign_branch_override_rejected(
     db: AsyncSession,
     make_auth_client,
@@ -825,6 +834,7 @@ async def test_commit_foreign_branch_override_rejected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_repo_write_access")
 async def test_commit_minted_branch_override_accepted(
     db: AsyncSession,
     make_auth_client,

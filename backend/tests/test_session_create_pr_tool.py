@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.models import AgentSession, Repo, User
-from app.routers.sessions import SessionCommitIn, commit_session
+from app.schemas import SESSION_PR_BODY_MAX_LEN, SESSION_PR_TITLE_MAX_LEN, SessionCommitIn
 from app.services.session_commit import SessionCommitError, SessionCommitResult
 from app.services.session_orchestrator import (
     SessionOrchestrator,
@@ -299,9 +299,9 @@ async def test_dispatch_requires_session_context() -> None:
         {"title": None},
         {"title": 123},
         {"title": "   "},
-        {"title": "x" * 256},
+        {"title": "x" * (SESSION_PR_TITLE_MAX_LEN + 1)},
         {"title": "ok", "body": 42},
-        {"title": "ok", "body": "y" * 65536},
+        {"title": "ok", "body": "y" * (SESSION_PR_BODY_MAX_LEN + 1)},
     ],
 )
 async def test_dispatch_rejects_invalid_arguments_without_publishing(
@@ -379,6 +379,25 @@ async def test_dispatch_errors_when_user_cannot_be_resolved() -> None:
     publisher.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_dispatch_refuses_publish_when_user_mismatches_session_owner() -> None:
+    """Catches an orchestrator reused across sessions publishing as the wrong identity."""
+    user = _make_user()
+    repo = _make_repo(user)
+    session = _make_session(user, repo)
+    other_user = _make_user()
+    orch = _make_orchestrator(session, current_user=other_user)
+
+    with patch(
+        "app.services.session_commit.publish_session_patches", AsyncMock()
+    ) as publisher:
+        text = await _dispatch(orch, session, {"title": "Fix"})
+
+    assert text.startswith("Error:")
+    assert "mismatch" in text
+    publisher.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Agent and UI share one implementation
 # ---------------------------------------------------------------------------
@@ -386,6 +405,10 @@ async def test_dispatch_errors_when_user_cannot_be_resolved() -> None:
 
 @pytest.mark.asyncio
 async def test_route_and_tool_both_invoke_shared_publisher() -> None:
+    # Router import lives here so only the parity test depends on the
+    # endpoint's import graph; the rest of this module tests the tool path.
+    from app.routers.sessions import commit_session
+
     user = _make_user()
     repo = _make_repo(user)
     session = _make_session(user, repo)
@@ -397,11 +420,9 @@ async def test_route_and_tool_both_invoke_shared_publisher() -> None:
     mock_db.execute = AsyncMock(return_value=mock_result)
     mock_db.commit = AsyncMock()
 
+    # NOTE: the endpoint never mints by construction (minting moved into the
+    # shared publisher, mocked below), so no token patch belongs here.
     with (
-        patch(
-            "app.routers.sessions.get_installation_token",
-            AsyncMock(return_value="tok"),
-        ),
         patch(
             "app.services.session_commit.publish_session_patches",
             AsyncMock(return_value=result),
@@ -535,6 +556,7 @@ async def test_pr_entry_is_appended_after_turn_entries_exactly_once() -> None:
 
     async def _fake_publish(**_kwargs: object) -> SessionCommitResult:
         # Mirrors the tool path: status changes, history is left to _persist.
+        # Counterpart: test_tool_path_does_not_write_history_inside_publisher pins the real half.
         session.status = "completed"
         return result
 
