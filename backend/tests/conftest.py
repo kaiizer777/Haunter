@@ -9,7 +9,8 @@ Shared fixtures and test configuration for Haunter backend tests.
 import os
 import uuid
 import warnings
-from typing import AsyncGenerator, Callable
+from typing import Any, AsyncGenerator, Callable
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from httpx import ASGITransport
@@ -596,3 +597,31 @@ def pytest_collection_modifyitems(
     if deselected:
         config.hook.pytest_deselected(items=deselected)
         items[:] = selected
+
+
+# ---------------------------------------------------------------------------
+# Shared GitHub-mint patch helper
+# ---------------------------------------------------------------------------
+
+
+def patch_token_mint(
+    return_value: str = "tok", *, side_effect: Exception | None = None
+) -> Any:
+    """Patch the publisher's installation-token mint at its lookup site.
+
+    The publisher calls the name imported into ``app.services.session_commit``
+    (``from app.github.pr import get_installation_token``), so tests must patch
+    it there -- patching ``app.github.pr.get_installation_token`` at the
+    definition site would NOT intercept the call. Resolving the target once
+    here keeps a future move of the mint call site to a single-line change.
+    """
+    if side_effect is not None:
+        return patch(
+            "app.services.session_commit.get_installation_token",
+            AsyncMock(side_effect=side_effect),
+        )
+    return patch(
+        "app.services.session_commit.get_installation_token",
+        new_callable=AsyncMock,
+        return_value=return_value,
+    )

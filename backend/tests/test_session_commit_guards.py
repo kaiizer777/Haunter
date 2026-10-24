@@ -23,6 +23,7 @@ from app.github_client import (
     GitHubResourceNotFoundError,
 )
 from app.services.session_tools.recon import _MAX_PATH_LEN, _validate_file_path
+from tests.conftest import patch_token_mint
 
 
 @pytest.fixture(autouse=True)
@@ -131,7 +132,7 @@ async def test_commit_missing_base_raises_422() -> None:
     body = SessionCommitIn(title="Fix missing file")
 
     with (
-        patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch_token_mint(),
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value=None),
     ):
         with pytest.raises(HTTPException) as exc_info:
@@ -162,7 +163,7 @@ async def test_commit_empty_patched_content_raises_422() -> None:
     body = SessionCommitIn(title="Empty file commit")
 
     with (
-        patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch_token_mint(),
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="old\n"),
         patch("app.services.patch_applier.apply_unified_diff", return_value=""),
     ):
@@ -192,10 +193,9 @@ async def test_commit_resolves_tree_sha_from_commit() -> None:
 
     fake_tree_sha = "resolved_tree_sha_67890"
     mock_create_tree = AsyncMock(return_value="new_tree_sha_99999")
-    resolver = AsyncMock(return_value="tok")
 
     with (
-        patch("app.services.session_commit.get_installation_token", resolver),
+        patch_token_mint() as resolver,
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="old\n"),
         patch("app.services.patch_applier.apply_unified_diff", return_value="new\n"),
         patch("app.github_client.create_blob", new_callable=AsyncMock, return_value="blob_1"),
@@ -244,7 +244,7 @@ async def test_commit_creation_patch_allows_none_base() -> None:
     body = SessionCommitIn(title="Add new file")
 
     with (
-        patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch_token_mint(),
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value=None),
         patch("app.github_client.create_blob", new_callable=AsyncMock, return_value="blob_new"),
         patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, return_value="base_tree_sha"),
@@ -279,7 +279,7 @@ async def test_commit_empty_creation_patch_publishes_empty_blob() -> None:
     mock_create_blob = AsyncMock(return_value="blob_empty")
 
     with (
-        patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch_token_mint(),
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value=None),
         patch("app.github_client.create_blob", mock_create_blob),
         patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, return_value="base_tree_sha"),
@@ -321,7 +321,7 @@ async def test_commit_deletion_patch_creates_tree_entry_with_null_sha() -> None:
     mock_create_tree = AsyncMock(return_value="tree_after_delete")
 
     with (
-        patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch_token_mint(),
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="old\n"),
         patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, return_value="base_tree_sha"),
         patch("app.github_client.create_git_tree", mock_create_tree),
@@ -360,7 +360,7 @@ async def test_commit_deletion_patch_with_nonempty_content_raises_422() -> None:
     body = SessionCommitIn(title="Malformed delete")
 
     with (
-        patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch_token_mint(),
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="line1\nline2\n"),
     ):
         with pytest.raises(HTTPException) as exc_info:
@@ -387,7 +387,7 @@ async def test_commit_tree_resolution_failure_raises_502() -> None:
     body = SessionCommitIn(title="Tree resolution failure")
 
     with (
-        patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch_token_mint(),
         patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value="old\n"),
         patch("app.github_client.create_blob", new_callable=AsyncMock, return_value="blob_1"),
         patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, side_effect=GitHubClientError("GitHub API 500")),
@@ -450,14 +450,14 @@ async def test_fetch_commit_tree_sha_github_client_not_found() -> None:
 
 
 @pytest.mark.asyncio
+@respx.mock
 async def test_empty_patches_rejected_before_token_mint() -> None:
     """Catches the broken variant that mints a token before the empty guard."""
     user, session = _make_mock_user_and_session(staged_patches={})
     mock_db = _make_mock_db(session)
-    resolver = AsyncMock(return_value="tok")
 
     with (
-        patch("app.services.session_commit.get_installation_token", resolver),
+        patch_token_mint() as resolver,
         _no_github_writes() as (stack, mocks),
     ):
         with stack:
@@ -472,18 +472,21 @@ async def test_empty_patches_rejected_before_token_mint() -> None:
     assert exc_info.value.status_code == 422
     resolver.assert_not_called()
     _assert_no_github_writes(mocks)
+    # Network tripwire: fail loudly if the publisher gains a new call site
+    # that the hand-maintained mock map above does not cover.
+    assert len(respx.calls) == 0
 
 
 @pytest.mark.asyncio
+@respx.mock
 async def test_non_active_session_rejected_before_token_mint() -> None:
     """Catches the broken variant that mints a token before the status guard."""
     user, session = _make_mock_user_and_session(staged_patches={"app/x.py": "diff"})
     session.status = "completed"
     mock_db = _make_mock_db(session)
-    resolver = AsyncMock(return_value="tok")
 
     with (
-        patch("app.services.session_commit.get_installation_token", resolver),
+        patch_token_mint() as resolver,
         _no_github_writes() as (stack, mocks),
     ):
         with stack:
@@ -498,20 +501,23 @@ async def test_non_active_session_rejected_before_token_mint() -> None:
     assert exc_info.value.status_code == 400
     resolver.assert_not_called()
     _assert_no_github_writes(mocks)
+    # Network tripwire: fail loudly if the publisher gains a new call site
+    # that the hand-maintained mock map above does not cover.
+    assert len(respx.calls) == 0
 
 
 @pytest.mark.asyncio
+@respx.mock
 async def test_blank_title_rejected_before_token_mint() -> None:
     """Catches minting a credential for a request the publisher will reject on shape."""
     user, session = _make_mock_user_and_session(
         staged_patches={"app/x.py": "--- a/app/x.py\n+++ b/app/x.py\n@@ -1 +1 @@\n-a\n+b\n"}
     )
     mock_db = _make_mock_db(session)
-    resolver = AsyncMock(return_value="tok")
     perms = AsyncMock()
 
     with (
-        patch("app.services.session_commit.get_installation_token", resolver),
+        patch_token_mint() as resolver,
         patch("app.services.session_commit._verify_user_repo_permission", perms),
         _no_github_writes() as (stack, mocks),
     ):
@@ -528,9 +534,13 @@ async def test_blank_title_rejected_before_token_mint() -> None:
     resolver.assert_not_called()
     perms.assert_not_called()
     _assert_no_github_writes(mocks)
+    # Network tripwire: fail loudly if the publisher gains a new call site
+    # that the hand-maintained mock map above does not cover.
+    assert len(respx.calls) == 0
 
 
 @pytest.mark.asyncio
+@respx.mock
 async def test_protected_branch_rejected_before_token_mint() -> None:
     """Catches the router-mints-first regression: main is rejected with no credential work."""
     user, session = _make_mock_user_and_session(
@@ -538,11 +548,10 @@ async def test_protected_branch_rejected_before_token_mint() -> None:
     )
     session.branch_name = "main"
     mock_db = _make_mock_db(session)
-    resolver = AsyncMock(return_value="tok")
     perms = AsyncMock()
 
     with (
-        patch("app.services.session_commit.get_installation_token", resolver),
+        patch_token_mint() as resolver,
         patch("app.services.session_commit._verify_user_repo_permission", perms),
         _no_github_writes() as (stack, mocks),
     ):
@@ -560,9 +569,13 @@ async def test_protected_branch_rejected_before_token_mint() -> None:
     resolver.assert_not_called()
     perms.assert_not_called()
     _assert_no_github_writes(mocks)
+    # Network tripwire: fail loudly if the publisher gains a new call site
+    # that the hand-maintained mock map above does not cover.
+    assert len(respx.calls) == 0
 
 
 @pytest.mark.asyncio
+@respx.mock
 async def test_custom_default_branch_rejected_before_token_mint() -> None:
     """Exact default-branch equality is enforced before credentials are minted."""
     user, session = _make_mock_user_and_session(
@@ -572,11 +585,10 @@ async def test_custom_default_branch_rejected_before_token_mint() -> None:
     session.repo.default_branch = "trunk"
     session.branch_name = "trunk"
     mock_db = _make_mock_db(session)
-    resolver = AsyncMock(return_value="tok")
     perms = AsyncMock()
 
     with (
-        patch("app.services.session_commit.get_installation_token", resolver),
+        patch_token_mint() as resolver,
         patch("app.services.session_commit._verify_user_repo_permission", perms),
         _no_github_writes() as (stack, mocks),
     ):
@@ -594,6 +606,9 @@ async def test_custom_default_branch_rejected_before_token_mint() -> None:
     resolver.assert_not_called()
     perms.assert_not_called()
     _assert_no_github_writes(mocks)
+    # Network tripwire: fail loudly if the publisher gains a new call site
+    # that the hand-maintained mock map above does not cover.
+    assert len(respx.calls) == 0
 
 
 @pytest.mark.asyncio
@@ -610,6 +625,7 @@ async def test_custom_default_branch_rejected_before_token_mint() -> None:
         "y" * 600,
     ],
 )
+@respx.mock
 async def test_non_canonical_path_rejected_before_token_mint(bad_path: str) -> None:
     """Catches normalization-retargeting: paths are rejected before credentials or writes."""
     user, session = _make_mock_user_and_session(
@@ -618,11 +634,10 @@ async def test_non_canonical_path_rejected_before_token_mint(bad_path: str) -> N
         }
     )
     mock_db = _make_mock_db(session)
-    resolver = AsyncMock(return_value="tok")
     perms = AsyncMock()
 
     with (
-        patch("app.services.session_commit.get_installation_token", resolver),
+        patch_token_mint() as resolver,
         patch("app.services.session_commit._verify_user_repo_permission", perms),
         _no_github_writes() as (stack, mocks),
     ):
@@ -639,6 +654,9 @@ async def test_non_canonical_path_rejected_before_token_mint(bad_path: str) -> N
     resolver.assert_not_called()
     perms.assert_not_called()
     _assert_no_github_writes(mocks)
+    # Network tripwire: fail loudly if the publisher gains a new call site
+    # that the hand-maintained mock map above does not cover.
+    assert len(respx.calls) == 0
 
 
 def test_path_length_boundary_allows_max_chars() -> None:
@@ -655,6 +673,7 @@ def test_path_length_boundary_allows_max_chars() -> None:
     ("status_code", "expected"),
     [(403, 403), (502, 503)],
 )
+@respx.mock
 async def test_write_access_rejection_happens_before_token_mint(
     status_code: int, expected: int
 ) -> None:
@@ -663,11 +682,10 @@ async def test_write_access_rejection_happens_before_token_mint(
         staged_patches={"app/x.py": "--- a/app/x.py\n+++ b/app/x.py\n@@ -1 +1 @@\n-a\n+b\n"}
     )
     mock_db = _make_mock_db(session)
-    resolver = AsyncMock(return_value="tok")
     perms = AsyncMock(side_effect=HTTPException(status_code=status_code, detail="nope"))
 
     with (
-        patch("app.services.session_commit.get_installation_token", resolver),
+        patch_token_mint() as resolver,
         patch("app.services.session_commit._verify_user_repo_permission", perms),
         _no_github_writes() as (stack, mocks),
     ):
@@ -684,3 +702,6 @@ async def test_write_access_rejection_happens_before_token_mint(
     perms.assert_awaited_once()
     resolver.assert_not_called()
     _assert_no_github_writes(mocks)
+    # Network tripwire: fail loudly if the publisher gains a new call site
+    # that the hand-maintained mock map above does not cover.
+    assert len(respx.calls) == 0

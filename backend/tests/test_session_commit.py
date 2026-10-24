@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import _sign_user_id
 from app.github_client import GitHubClientError, GitHubResourceNotFoundError
 from app.models import AgentSession, Repo, User
+from tests.conftest import patch_token_mint
 from tests.test_session_commit_guards import (
     _assert_no_github_writes,
     _no_github_writes,
@@ -156,11 +157,7 @@ async def test_commit_success(
     fake_pr_number = 42
 
     with (
-        patch(
-            "app.services.session_commit.get_installation_token",
-            new_callable=AsyncMock,
-            return_value="mock-gh-token",
-        ),
+        patch_token_mint("mock-gh-token"),
         patch(
             "app.github_client.create_blob",
             new_callable=AsyncMock,
@@ -265,11 +262,7 @@ async def test_commit_empty_patches_rejected(
     mock_create_blob = AsyncMock()
 
     with (
-        patch(
-            "app.services.session_commit.get_installation_token",
-            new_callable=AsyncMock,
-            return_value="tok",
-        ),
+        patch_token_mint(),
         patch("app.github_client.create_blob", mock_create_blob),
     ):
         async with _auth_client(make_auth_client, user) as ac:
@@ -397,11 +390,7 @@ async def test_commit_protected_branch_rejected_with_zero_ref_calls(
     mock_create_commit = AsyncMock()
 
     with (
-        patch(
-            "app.services.session_commit.get_installation_token",
-            new_callable=AsyncMock,
-            return_value="tok",
-        ),
+        patch_token_mint(),
         patch("app.github.pr.update_branch_ref", mock_update_ref),
         patch("app.github_client.update_branch_ref", mock_update_ref),
         patch("app.github.pr.create_branch", mock_create_branch),
@@ -463,11 +452,7 @@ async def test_commit_pr_failure_cleans_up_newly_created_branch(
     mock_create_branch = AsyncMock()
 
     with (
-        patch(
-            "app.services.session_commit.get_installation_token",
-            new_callable=AsyncMock,
-            return_value="tok",
-        ),
+        patch_token_mint(),
         patch(
             "app.github_client.create_blob",
             new_callable=AsyncMock,
@@ -559,11 +544,7 @@ async def test_commit_pr_failure_reverts_existing_branch(
     mock_restore_ref = AsyncMock()
 
     with (
-        patch(
-            "app.services.session_commit.get_installation_token",
-            new_callable=AsyncMock,
-            return_value="tok",
-        ),
+        patch_token_mint(),
         patch(
             "app.github_client.create_blob",
             new_callable=AsyncMock,
@@ -667,11 +648,7 @@ async def test_commit_pr_failure_skips_rollback_if_concurrent_writer_advanced_br
     mock_delete_ref = AsyncMock()
 
     with (
-        patch(
-            "app.services.session_commit.get_installation_token",
-            new_callable=AsyncMock,
-            return_value="tok",
-        ),
+        patch_token_mint(),
         patch(
             "app.github_client.create_blob",
             new_callable=AsyncMock,
@@ -748,11 +725,7 @@ async def test_commit_without_repo_write_access_forbidden(
     )
 
     with (
-        patch(
-            "app.services.session_commit.get_installation_token",
-            new_callable=AsyncMock,
-            return_value="tok",
-        ),
+        patch_token_mint(),
         patch(
             "app.services.session_commit._verify_user_repo_permission",
             new_callable=AsyncMock,
@@ -812,11 +785,7 @@ async def test_commit_foreign_branch_override_rejected(
     mock_create_blob = AsyncMock()
 
     with (
-        patch(
-            "app.services.session_commit.get_installation_token",
-            new_callable=AsyncMock,
-            return_value="tok",
-        ),
+        patch_token_mint(),
         patch("app.github.pr.get_branch_ref", mock_get_ref),
         patch("app.github.pr.update_branch_ref", mock_update_ref),
         patch("app.github.pr.create_branch", mock_create_branch),
@@ -859,11 +828,7 @@ async def test_commit_minted_branch_override_accepted(
     minted = f"haunter/session-{session.id.hex[:12]}"
 
     with (
-        patch(
-            "app.services.session_commit.get_installation_token",
-            new_callable=AsyncMock,
-            return_value="tok",
-        ),
+        patch_token_mint(),
         patch(
             "app.github_client.create_blob",
             new_callable=AsyncMock,
