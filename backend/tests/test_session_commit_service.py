@@ -971,6 +971,65 @@ async def test_pr_already_exists_json_payload_matches_without_rollback() -> None
 
 
 @pytest.mark.asyncio
+async def test_pr_already_exists_for_other_head_still_rolls_back() -> None:
+    """An already-exists 422 naming a DIFFERENT head must not skip rollback.
+
+    ``create_pull_request`` always sends our branch as head, so a mismatch is
+    near-impossible -- but if a proxy or API change returns the phrase for
+    another head, taking the 409 path would strand our orphan branch and point
+    the user at an unrelated PR. The head in the message must equal our branch.
+    """
+    repo = _make_repo()
+    session = _make_session(repo, branch_name="haunter/session-new")
+    mock_get_ref = AsyncMock(
+        side_effect=[GitHubResourceNotFoundError("missing"), "commit1"]
+    )
+    mock_create_branch = AsyncMock()
+    mock_delete_ref = AsyncMock()
+    mock_restore_ref = AsyncMock()
+    mock_create_pr = AsyncMock(
+        side_effect=GitHubClientError(
+            "GitHub API returned error 422: A pull request already exists for "
+            "test-owner:haunter/session-someone-else"
+        )
+    )
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=mock_get_ref,
+            create_branch=mock_create_branch,
+            update_ref=AsyncMock(),
+            create_pr=mock_create_pr,
+            delete_ref=mock_delete_ref,
+            restore_ref=mock_restore_ref,
+        )
+        with pytest.raises(SessionCommitError) as exc_info:
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=_make_db(),
+                gh_token="tok",
+            )
+
+    assert exc_info.value.status_code == 502
+    mock_delete_ref.assert_awaited_once_with(
+        owner=_OWNER,
+        repo=_REPO,
+        branch="haunter/session-new",
+        token="tok",
+        expected_sha="commit1",
+    )
+    mock_restore_ref.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_pr_failure_deletes_newly_created_branch() -> None:
     repo = _make_repo()
     session = _make_session(repo, branch_name="haunter/session-new")

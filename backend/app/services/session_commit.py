@@ -275,14 +275,23 @@ _PR_ALREADY_EXISTS_RE = re.compile(
 )
 
 
-def _is_pr_already_exists_error(exc: Exception) -> bool:
+def _is_pr_already_exists_error(exc: Exception, branch_name: str) -> bool:
     """Detect GitHub's 422 "A pull request already exists for owner:branch".
 
     Only that exact validation message skips rollback. Broader matches (any
     "already exists", or any 422 mentioning pull requests) would strand a
     branch created for a PR that was never opened.
+
+    The head named in the message must also be our branch. ``create_pull_request``
+    always sends our branch as head, so a mismatch is near-impossible -- but a
+    proxy or API change returning the phrase for a different head must not skip
+    rollback of our orphan branch nor 409 the user toward an unrelated PR.
     """
-    return _PR_ALREADY_EXISTS_RE.search(str(exc)) is not None
+    message = str(exc)
+    return (
+        _PR_ALREADY_EXISTS_RE.search(message) is not None
+        and branch_name in message
+    )
 
 
 async def _rollback_publish_branch(
@@ -722,7 +731,7 @@ async def publish_session_patches(
         )
         # A live PR already exists for this head. Deleting or rewinding the
         # branch here would break that PR, so surface the conflict untouched.
-        if _is_pr_already_exists_error(exc):
+        if _is_pr_already_exists_error(exc, branch_name):
             raise SessionCommitError(
                 f"A pull request already exists for branch '{branch_name}'. "
                 "The branch was left unchanged; close or merge the existing PR first.",
