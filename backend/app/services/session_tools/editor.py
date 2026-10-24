@@ -591,7 +591,9 @@ async def tool_create_file(
     except ValueError as exc:
         return f"Error: {exc}"
 
-    # Diff from empty (creation).
+    # Diff from empty (creation). difflib emits no output for empty
+    # content, so stage explicit creation headers: the publisher treats
+    # "--- /dev/null" as the creation marker and would otherwise 422.
     diff = "".join(
         difflib.unified_diff(
             [],
@@ -600,6 +602,8 @@ async def tool_create_file(
             tofile=f"b/{path}",
         )
     )
+    if not diff:
+        diff = f"--- /dev/null\n+++ b/{path}\n"
 
     staged_patches[path] = diff
 
@@ -962,6 +966,8 @@ async def tool_apply_multi_patch(
                     tofile=f"b/{path}",
                 )
             )
+            if not diff and not final_content:
+                diff = f"--- /dev/null\n+++ b/{path}\n"
             final_action = "create" if is_created_files.get(path) else action
         elif action == "delete":
             clean_base = clean_bases.get(path)

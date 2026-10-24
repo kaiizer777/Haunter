@@ -266,6 +266,48 @@ async def test_commit_creation_patch_allows_none_base() -> None:
 
 
 @pytest.mark.asyncio
+async def test_commit_empty_creation_patch_publishes_empty_blob() -> None:
+    """A headers-only creation patch (empty file from tool_create_file) publishes a 0-byte blob."""
+    user, session = _make_mock_user_and_session(
+        staged_patches={
+            "app/empty_init.py": "--- /dev/null\n+++ b/app/empty_init.py\n"
+        }
+    )
+    mock_db = _make_mock_db(session)
+    body = SessionCommitIn(title="Add empty file")
+
+    mock_create_blob = AsyncMock(return_value="blob_empty")
+
+    with (
+        patch("app.services.session_commit.get_installation_token", new_callable=AsyncMock, return_value="tok"),
+        patch("app.github_client.fetch_file_content", new_callable=AsyncMock, return_value=None),
+        patch("app.github_client.create_blob", mock_create_blob),
+        patch("app.github_client.fetch_commit_tree_sha", new_callable=AsyncMock, return_value="base_tree_sha"),
+        patch("app.github_client.create_git_tree", new_callable=AsyncMock, return_value="tree_empty"),
+        patch("app.github_client.create_git_commit", new_callable=AsyncMock, return_value="commit_empty"),
+        patch("app.github.pr.get_branch_ref", new_callable=AsyncMock, return_value="existing_branch_sha"),
+        patch("app.github.pr.update_branch_ref", new_callable=AsyncMock, return_value=None),
+        patch("app.github_client.create_pull_request", new_callable=AsyncMock, return_value={"html_url": "https://github.com/pr/4", "number": 4}),
+    ):
+        result = await commit_session(
+            session_id=session.id,
+            body=body,
+            current_user=user,
+            db=mock_db,
+        )
+
+    assert result.commit_sha == "commit_empty"
+    mock_create_blob.assert_called_once_with(
+        owner="test-owner",
+        repo="test-repo",
+        content="",
+        encoding="utf-8",
+        installation_token="tok",
+        allow_global_token=False,
+    )
+
+
+@pytest.mark.asyncio
 async def test_commit_deletion_patch_creates_tree_entry_with_null_sha() -> None:
     """A deletion patch (+++ /dev/null) adds a null-sha tree entry and does not fail empty-content guard."""
     user, session = _make_mock_user_and_session(
