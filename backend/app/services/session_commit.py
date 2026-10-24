@@ -285,6 +285,75 @@ def _is_pr_already_exists_error(exc: Exception) -> bool:
     return _PR_ALREADY_EXISTS_RE.search(str(exc)) is not None
 
 
+async def _rollback_publish_branch(
+    *,
+    repo: Repo,
+    branch_name: str,
+    commit_sha: str,
+    branch_was_created: bool,
+    original_target_sha: str | None,
+    gh_token: str | None,
+) -> None:
+    """Best-effort rollback of the topic ref after a failed PR open.
+
+    Only touches the ref when it still points at this session's commit;
+    a concurrent writer advancing the branch must keep its work.
+    """
+    try:
+        current_ref_sha: str | None = await github_pr.get_branch_ref(
+            owner=repo.owner,
+            repo=repo.name,
+            branch=branch_name,
+            token=gh_token,
+        )
+    except Exception as ref_exc:
+        logger.warning(
+            "session_commit: failed to inspect current ref for %s during rollback: %s",
+            branch_name,
+            ref_exc,
+        )
+        current_ref_sha = None
+
+    if current_ref_sha is not None and current_ref_sha != commit_sha:
+        logger.warning(
+            "session_commit: skipping branch rollback for %s; ref advanced to %s (expected %s)",
+            branch_name,
+            current_ref_sha,
+            commit_sha,
+        )
+    elif branch_was_created:
+        try:
+            await github_pr.delete_branch_ref(
+                owner=repo.owner,
+                repo=repo.name,
+                branch=branch_name,
+                token=gh_token,
+                expected_sha=commit_sha,
+            )
+        except Exception as del_exc:
+            logger.warning(
+                "session_commit: cleanup delete_branch_ref failed for %s: %s",
+                branch_name,
+                del_exc,
+            )
+    elif original_target_sha is not None:
+        try:
+            await github_pr.restore_branch_ref(
+                owner=repo.owner,
+                repo=repo.name,
+                branch=branch_name,
+                sha=original_target_sha,
+                token=gh_token,
+                expected_sha=commit_sha,
+            )
+        except Exception as reset_exc:
+            logger.warning(
+                "session_commit: rollback restore_branch_ref failed for %s: %s",
+                branch_name,
+                reset_exc,
+            )
+
+
 async def publish_session_patches(
     *,
     session: AgentSession,
@@ -659,62 +728,14 @@ async def publish_session_patches(
                 409,
             ) from exc
 
-        # Rollback: ensure no commit is left on a non-PR branch without a PR.
-        # Only touch the ref when it still points at this session's commit;
-        # a concurrent writer advancing the branch must keep its work.
-        try:
-            current_ref_sha: str | None = await github_pr.get_branch_ref(
-                owner=repo.owner,
-                repo=repo.name,
-                branch=branch_name,
-                token=gh_token,
-            )
-        except Exception as ref_exc:
-            logger.warning(
-                "session_commit: failed to inspect current ref for %s during rollback: %s",
-                branch_name,
-                ref_exc,
-            )
-            current_ref_sha = None
-
-        if current_ref_sha is not None and current_ref_sha != commit_sha:
-            logger.warning(
-                "session_commit: skipping branch rollback for %s; ref advanced to %s (expected %s)",
-                branch_name,
-                current_ref_sha,
-                commit_sha,
-            )
-        elif branch_was_created:
-            try:
-                await github_pr.delete_branch_ref(
-                    owner=repo.owner,
-                    repo=repo.name,
-                    branch=branch_name,
-                    token=gh_token,
-                    expected_sha=commit_sha,
-                )
-            except Exception as del_exc:
-                logger.warning(
-                    "session_commit: cleanup delete_branch_ref failed for %s: %s",
-                    branch_name,
-                    del_exc,
-                )
-        elif original_target_sha is not None:
-            try:
-                await github_pr.restore_branch_ref(
-                    owner=repo.owner,
-                    repo=repo.name,
-                    branch=branch_name,
-                    sha=original_target_sha,
-                    token=gh_token,
-                    expected_sha=commit_sha,
-                )
-            except Exception as reset_exc:
-                logger.warning(
-                    "session_commit: rollback restore_branch_ref failed for %s: %s",
-                    branch_name,
-                    reset_exc,
-                )
+        await _rollback_publish_branch(
+            repo=repo,
+            branch_name=branch_name,
+            commit_sha=commit_sha,
+            branch_was_created=branch_was_created,
+            original_target_sha=original_target_sha,
+            gh_token=gh_token,
+        )
 
         raise SessionCommitError(
             f"Failed to open pull request via GitHub API: {exc}", 502
@@ -738,9 +759,17 @@ async def publish_session_patches(
             session_id,
             pr_data,
         )
+        await _rollback_publish_branch(
+            repo=repo,
+            branch_name=branch_name,
+            commit_sha=commit_sha,
+            branch_was_created=branch_was_created,
+            original_target_sha=original_target_sha,
+            gh_token=gh_token,
+        )
         raise SessionCommitError(
             "GitHub returned an unexpected pull request response. "
-            "The branch was left unchanged.",
+            "The branch was rolled back; retry the publish.",
             502,
         )
 

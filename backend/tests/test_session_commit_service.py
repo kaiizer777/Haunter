@@ -1014,6 +1014,48 @@ async def test_pr_failure_deletes_newly_created_branch() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_malformed_pr_response_rolls_back_new_branch() -> None:
+    repo = _make_repo()
+    session = _make_session(repo, branch_name="haunter/session-new")
+    mock_get_ref = AsyncMock(
+        side_effect=[GitHubResourceNotFoundError("missing"), "commit1"]
+    )
+    mock_delete_ref = AsyncMock()
+    mock_restore_ref = AsyncMock()
+    mock_create_pr = AsyncMock(return_value={})
+
+    with (
+        ExitStack() as stack,
+        patch("app.services.session_commit._verify_user_repo_permission", AsyncMock()),
+    ):
+        _install_pipeline(
+            stack,
+            get_ref=mock_get_ref,
+            create_branch=AsyncMock(),
+            update_ref=AsyncMock(),
+            create_pr=mock_create_pr,
+            delete_ref=mock_delete_ref,
+            restore_ref=mock_restore_ref,
+        )
+        with pytest.raises(SessionCommitError) as exc_info:
+            await publish_session_patches(
+                session=session,
+                repo=repo,
+                title="Fix",
+                body=None,
+                current_user=_make_user(),
+                db=_make_db(),
+                gh_token="tok",
+            )
+
+    assert exc_info.value.status_code == 502
+    assert "rolled back" in str(exc_info.value)
+    mock_delete_ref.assert_awaited_once()
+    mock_restore_ref.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_pr_failure_restores_existing_branch_with_expected_sha() -> None:
     repo = _make_repo()
     session = _make_session(repo, branch_name="feat/existing")
