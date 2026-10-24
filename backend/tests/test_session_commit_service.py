@@ -21,6 +21,7 @@ from app.github_client import GitHubClientError, GitHubResourceNotFoundError
 from app.models import AgentSession, Repo, User
 from app.schemas import SESSION_PR_TITLE_MAX_LEN
 from app.services.session_commit import SessionCommitError, publish_session_patches
+from tests.conftest import patch_token_mint
 
 _OWNER = "test-owner"
 _REPO = "test-repo"
@@ -1391,10 +1392,7 @@ async def test_installation_token_failure_fails_closed_503() -> None:
     ):
         mocks = [stack.enter_context(patch(t, AsyncMock())) for t in targets]
         stack.enter_context(
-            patch(
-                "app.services.session_commit.get_installation_token",
-                AsyncMock(side_effect=Exception("mint outage")),
-            )
+            patch_token_mint(side_effect=Exception("mint outage"))
         )
         with pytest.raises(SessionCommitError) as exc_info:
             await publish_session_patches(
