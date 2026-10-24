@@ -37,11 +37,7 @@ from sqlalchemy.orm import selectinload
 
 from app.auth import get_current_user
 from app.db import get_db
-from app.github.pr import (
-    GitHubPRValidationError,
-    _validate_branch,
-    get_installation_token,
-)
+from app.github.pr import get_installation_token
 from app.github_client import (
     GitHubClientError,
     GitHubResourceNotFoundError,
@@ -204,13 +200,15 @@ async def create_session(
 
     # Resolve target branch:
     # When branch_name is omitted (null), never default to repo.default_branch as a writable target.
-    # Mint a dedicated topic branch (e.g. haunter/session-{id[:8]}) and resolve base_sha from repo default_branch.
+    # Mint a dedicated topic branch (e.g. haunter/session-{id.hex[:12]}) and resolve base_sha from repo default_branch.
     session_id: uuid.UUID = uuid.uuid4()
     if body.branch_name:
         branch_name: str = body.branch_name
         ref_to_fetch: str = branch_name
     else:
-        branch_name = f"haunter/session-{str(session_id)[:8]}"
+        from app.services.session_commit import minted_session_branch
+
+        branch_name = minted_session_branch(session_id)
         ref_to_fetch = repo.default_branch or "main"
 
     # Resolve base SHA via GitHub App installation token.
@@ -1067,6 +1065,7 @@ async def chat_session(
         session_id=session_id,
         db=db,
         gh_token=gh_token,
+        current_user=current_user,
     )
 
     # Launch the orchestrator in a background task so the StreamingResponse
@@ -1228,28 +1227,16 @@ async def commit_session(
     - staged_patches must be non-empty (422 if empty).
     - Returns 404 for unowned/non-existent sessions.
 
-    Commit pipeline:
-    1. Fetch base file content at session.base_sha for each staged file.
-    2. Apply unified diff via patch_applier.apply_unified_diff.
-    3. Create Git blob for each patched file.
-    4. Create a Git tree rooted at session.base_sha.
-    5. Create a Git commit.
-    6. Update the session branch ref.
-    7. Open a PR against the repo default branch.
-    8. Mark session status="completed", record PR metadata in conversation_history.
+    Commit pipeline: delegates to `publish_session_patches` (see its docstring
+    for the branch/path/write-access/mint/patch/commit/ref/PR/rollback steps).
+    This endpoint only owns auth, the row lock, fast guards, the
+    session-namespace branch check, and error mapping.
     """
-    from datetime import datetime, timezone
-
-    from app.github_client import (
-        GitHubClientError as _GHErr,
-        create_blob as _create_blob,
-        create_git_commit as _create_commit,
-        create_git_tree as _create_tree,
-        create_pull_request as _create_pr,
-        fetch_commit_tree_sha as _fetch_commit_tree,
-        fetch_file_content as _fetch_file,
+    from app.services.session_commit import (
+        SessionCommitError,
+        minted_session_branch,
+        publish_session_patches,
     )
-    from app.services.patch_applier import apply_unified_diff
 
     # ------------------------------------------------------------------
     # 1. Load session with repo join -- object-level auth + concurrency lock.
@@ -1269,6 +1256,19 @@ async def commit_session(
         result = await db.execute(stmt)
         session: Optional[AgentSession] = result.scalars().first()
     except (OperationalError, DBAPIError) as exc:
+        # Only NOWAIT lock contention (Postgres 55P03) is retryable. Any
+        # other DB failure must not masquerade as a lock conflict, or
+        # clients would retry a non-transient error forever.
+        if not _is_row_lock_conflict(exc):
+            logger.error(
+                "sessions/commit: session %s DB error (not a lock conflict): %s",
+                session_id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to access the session. Please try again.",
+            ) from exc
         logger.warning("sessions/commit: session %s lock conflict: %s", session_id, exc)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1281,7 +1281,7 @@ async def commit_session(
         )
 
     # ------------------------------------------------------------------
-    # 2. State guards & topic branch resolution.
+    # 2. Fast state guards (the shared publisher re-checks all of them).
     # ------------------------------------------------------------------
     if session.status != "active":
         raise HTTPException(
@@ -1292,421 +1292,64 @@ async def commit_session(
             ),
         )
 
-    staged_patches: dict[str, str] = session.staged_patches or {}
-    if not staged_patches:
+    if not (session.staged_patches or {}):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="No staged patches to commit. Stage at least one file patch via the chat agent.",
         )
 
     repo = session.repo
-    default_branch = repo.default_branch or "main"
-    target_branch = body.branch_name or session.branch_name
-    if not target_branch:
-        target_branch = f"haunter/session-{str(session.id)[:8]}"
 
-    # Protected-branch guard: reject protected branches or default branch before ANY external call
-    try:
-        _validate_branch(target_branch, allow_protected=False)
-    except GitHubPRValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
+    # Dashboard branch override must stay inside this session's namespace.
+    # The agent tool path always mints haunter/session-<id hex[:12]>; an arbitrary
+    # override (e.g. a teammate's feat/ branch) would publish onto a foreign
+    # ref, so only the minted name (or the already-minted session value)
+    # is accepted here.
+    if body.branch_name is not None:
+        minted_branch = minted_session_branch(session.id)
+        namespaced_current = (
+            isinstance(session.branch_name, str)
+            and session.branch_name.startswith("haunter/session-")
         )
-
-    if target_branch.lower() == default_branch.lower():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot commit directly to default branch '{target_branch}'. A topic branch must be used.",
-        )
-
-    session.branch_name = target_branch
-
-    # ------------------------------------------------------------------
-    # 3. Resolve GitHub installation token.
-    # ------------------------------------------------------------------
-    try:
-        gh_token: Optional[str] = await get_installation_token(repo)
-    except Exception:
-        gh_token = None
-
-    # ------------------------------------------------------------------
-    # 4. Apply patches: fetch base content, apply diff, create blobs.
-    # ------------------------------------------------------------------
-    tree_entries: list[dict] = []
-
-    for file_path, patch_text in staged_patches.items():
-        base_content: Optional[str] = await _fetch_file(
-            owner=repo.owner,
-            repo=repo.name,
-            path=file_path,
-            sha=session.base_sha,
-            token=gh_token,
-        )
-        if base_content is None:
-            # If the patch is not a creation patch (does not start from /dev/null),
-            # missing base content indicates a missing file at the base revision.
-            if "--- /dev/null" not in patch_text:
-                logger.error(
-                    "sessions/commit: base content missing for '%s' at sha %s in session %s",
-                    file_path,
-                    session.base_sha,
-                    session_id,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Base file '{file_path}' not found at revision {session.base_sha}.",
-                )
-            original = ""
-        else:
-            original = base_content
-
-        try:
-            patched_content = apply_unified_diff(original, patch_text)
-        except ValueError as exc:
-            logger.error(
-                "sessions/commit: patch application failed for %s in session %s: %s",
-                file_path,
-                session_id,
-                exc,
-            )
+        if body.branch_name != minted_branch and not (
+            namespaced_current and body.branch_name == session.branch_name
+        ):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Patch for '{file_path}' could not be applied cleanly: {exc}",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Invalid branch_name {body.branch_name!r}: the commit "
+                    "endpoint only publishes to this session's branch "
+                    f"({minted_branch})."
+                ),
             )
-
-        is_deletion_patch = any(
-            line.strip() == "+++ /dev/null" for line in patch_text.splitlines()
-        )
-        if is_deletion_patch:
-            if patched_content:
-                logger.error(
-                    "sessions/commit: deletion patch for '%s' in session %s resulted in non-empty content",
-                    file_path,
-                    session_id,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Deletion patch for '{file_path}' resulted in non-empty content.",
-                )
-            tree_entries.append(
-                {
-                    "path": file_path,
-                    "mode": "100644",
-                    "type": "blob",
-                    "sha": None,
-                }
-            )
-            continue
-
-        if not patched_content:
-            logger.error(
-                "sessions/commit: patched content is empty for '%s' in session %s",
-                file_path,
-                session_id,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Patched content for '{file_path}' is empty. 0-byte files cannot be committed.",
-            )
-
-        try:
-            blob_sha = await _create_blob(
-                owner=repo.owner,
-                repo=repo.name,
-                content=patched_content,
-                encoding="utf-8",
-                installation_token=gh_token,
-            )
-        except _GHErr as exc:
-            logger.error(
-                "sessions/commit: create_blob failed for %s in session %s: %s",
-                file_path,
-                session_id,
-                exc,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to create Git blob for '{file_path}' via GitHub API: {exc}",
-            )
-
-        tree_entries.append(
-            {
-                "path": file_path,
-                "mode": "100644",
-                "type": "blob",
-                "sha": blob_sha,
-            }
-        )
 
     # ------------------------------------------------------------------
-    # 5. Create Git tree (rooted at tree SHA resolved from base_sha).
+    # 3-8. Shared publisher: branch safety, path revalidation, write access,
+    #      token minting, patch application, commit, ref update, PR, and
+    #      persistence all live in one place so the session agent and this
+    #      endpoint cannot drift apart. The publisher mints the installation
+    #      token only after every guard passes.
     # ------------------------------------------------------------------
     try:
-        base_tree_sha = await _fetch_commit_tree(
-            owner=repo.owner,
-            repo=repo.name,
-            commit_sha=session.base_sha,
-            installation_token=gh_token,
-        )
-    except _GHErr as exc:
-        logger.error(
-            "sessions/commit: could not resolve tree SHA for commit %s in session %s: %s",
-            session.base_sha,
-            session_id,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to resolve Git tree SHA for commit '{session.base_sha}' via GitHub API: {exc}",
-        )
-
-    try:
-        tree_sha = await _create_tree(
-            owner=repo.owner,
-            repo=repo.name,
-            tree=tree_entries,
-            base_tree=base_tree_sha,
-            installation_token=gh_token,
-        )
-    except _GHErr as exc:
-        logger.error(
-            "sessions/commit: create_git_tree failed for session %s: %s",
-            session_id,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to create Git tree via GitHub API: {exc}",
-        )
-
-    # ------------------------------------------------------------------
-    # 6. Create Git commit.
-    # ------------------------------------------------------------------
-    commit_message = body.title
-    if body.body:
-        commit_message = f"{body.title}\n\n{body.body}"
-
-    try:
-        commit_sha = await _create_commit(
-            owner=repo.owner,
-            repo=repo.name,
-            message=commit_message,
-            tree_sha=tree_sha,
-            parents=[session.base_sha],
-            installation_token=gh_token,
-        )
-    except _GHErr as exc:
-        logger.error(
-            "sessions/commit: create_git_commit failed for session %s: %s",
-            session_id,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to create Git commit via GitHub API: {exc}",
-        )
-
-    # ------------------------------------------------------------------
-    # 7. Update or create branch ref.
-    # ------------------------------------------------------------------
-    from app.github.pr import (
-        create_branch as _pr_create_branch,
-        delete_branch_ref as _pr_delete_ref,
-        get_branch_ref as _pr_get_ref,
-        restore_branch_ref as _pr_restore_ref,
-        update_branch_ref as _pr_update_ref,
-    )
-
-    _validate_branch(target_branch, allow_protected=False)
-    branch_was_created = False
-    original_target_sha: Optional[str] = None
-
-    try:
-        original_target_sha = await _pr_get_ref(
-            owner=repo.owner,
-            repo=repo.name,
-            branch=target_branch,
-            token=gh_token,
-        )
-    except GitHubResourceNotFoundError:
-        original_target_sha = None
-    except Exception as exc:
-        logger.error(
-            "sessions/commit: get_branch_ref failed for session %s branch %s: %s",
-            session_id,
-            target_branch,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to inspect branch ref via GitHub API: {exc}",
-        )
-
-    if original_target_sha is None:
-        # Topic branch does not exist yet — create the branch ref.
-        try:
-            await _pr_create_branch(
-                owner=repo.owner,
-                repo=repo.name,
-                branch=target_branch,
-                sha=commit_sha,
-                token=gh_token,
-            )
-            branch_was_created = True
-        except Exception as exc:
-            logger.error(
-                "sessions/commit: create_branch failed for session %s branch %s: %s",
-                session_id,
-                target_branch,
-                exc,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to create branch ref via GitHub API: {exc}",
-            )
-    else:
-        try:
-            await _pr_update_ref(
-                owner=repo.owner,
-                repo=repo.name,
-                branch=target_branch,
-                sha=commit_sha,
-                token=gh_token,
-                force=False,
-            )
-        except Exception as exc:
-            logger.error(
-                "sessions/commit: update_branch_ref failed for session %s branch %s: %s",
-                session_id,
-                target_branch,
-                exc,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Failed to update branch ref via GitHub API: {exc}",
-            )
-
-    # ------------------------------------------------------------------
-    # 8. Open pull request against repo default branch.
-    # ------------------------------------------------------------------
-    pr_base = default_branch
-    try:
-        pr_data: dict = await _create_pr(
-            owner=repo.owner,
-            repo=repo.name,
+        result = await publish_session_patches(
+            session=session,
+            repo=repo,
             title=body.title,
-            head=target_branch,
-            base=pr_base,
             body=body.body,
-            installation_token=gh_token,
+            current_user=current_user,
+            db=db,
+            target_branch=body.branch_name,
         )
-    except Exception as exc:
-        logger.error(
-            "sessions/commit: create_pull_request failed for session %s: %s",
-            session_id,
-            exc,
-        )
-        # Rollback: ensure no commit is left on a non-PR branch without a PR.
-        # Guard against overwriting concurrent writer commits: only rollback if the
-        # branch ref still points to this session's commit_sha.
-        try:
-            current_ref_sha = await _pr_get_ref(
-                owner=repo.owner,
-                repo=repo.name,
-                branch=target_branch,
-                token=gh_token,
-            )
-        except Exception as ref_exc:
-            logger.warning(
-                "sessions/commit: failed to inspect current ref for %s during rollback: %s",
-                target_branch,
-                ref_exc,
-            )
-            current_ref_sha = None
-
-        if current_ref_sha is not None and current_ref_sha != commit_sha:
-            logger.warning(
-                "sessions/commit: skipping branch rollback for %s; ref advanced to %s (expected %s)",
-                target_branch,
-                current_ref_sha,
-                commit_sha,
-            )
-        elif branch_was_created:
-            try:
-                await _pr_delete_ref(
-                    owner=repo.owner,
-                    repo=repo.name,
-                    branch=target_branch,
-                    token=gh_token,
-                    expected_sha=commit_sha,
-                )
-            except Exception as del_exc:
-                logger.warning(
-                    "sessions/commit: cleanup delete_branch_ref failed for %s: %s",
-                    target_branch,
-                    del_exc,
-                )
-        elif original_target_sha is not None:
-            try:
-                await _pr_restore_ref(
-                    owner=repo.owner,
-                    repo=repo.name,
-                    branch=target_branch,
-                    sha=original_target_sha,
-                    token=gh_token,
-                    expected_sha=commit_sha,
-                )
-            except Exception as reset_exc:
-                logger.warning(
-                    "sessions/commit: rollback restore_branch_ref failed for %s: %s",
-                    target_branch,
-                    reset_exc,
-                )
+    except SessionCommitError as exc:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to open pull request via GitHub API: {exc}",
-        )
-
-    pr_url: str = pr_data.get("html_url", "")
-    pr_number: int = pr_data.get("number", 0)
-
-    # ------------------------------------------------------------------
-    # 9. Persist: mark session completed, record PR metadata.
-    # ------------------------------------------------------------------
-    session.status = "completed"
-    session.updated_at = datetime.now(timezone.utc)
-
-    history: list = list(session.conversation_history or [])
-    history.append(
-        {
-            "role": "system",
-            "content": (
-                f"Commit published. PR #{pr_number} opened: {pr_url}\n"
-                f"Commit SHA: {commit_sha}"
-            ),
-            "pr_url": pr_url,
-            "pr_number": pr_number,
-            "commit_sha": commit_sha,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-    session.conversation_history = history
-
-    await db.commit()
-
-    logger.info(
-        "sessions/commit: session %s committed -- PR #%s %s commit=%s",
-        session_id,
-        pr_number,
-        pr_url,
-        commit_sha,
-    )
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
 
     return SessionCommitOut(
-        pr_url=pr_url,
-        pr_number=pr_number,
-        commit_sha=commit_sha,
+        pr_url=result.pr_url,
+        pr_number=result.pr_number,
+        commit_sha=result.commit_sha,
     )
 
 
@@ -1807,20 +1450,66 @@ async def restore_checkpoint(
     - Reverts staged_patches and truncates conversation_history to the checkpoint snapshot.
     - Commits changes and returns updated SessionOut.
     """
-    stmt = (
-        select(AgentSession)
-        .options(selectinload(AgentSession.repo))
-        .where(
-            AgentSession.id == session_id,
-            AgentSession.user_id == current_user.id,
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    try:
+        stmt = (
+            select(AgentSession)
+            .options(selectinload(AgentSession.repo))
+            .where(
+                AgentSession.id == session_id,
+                AgentSession.user_id == current_user.id,
+            )
+            .with_for_update(nowait=True)
         )
-    )
-    result = await db.execute(stmt)
-    session: Optional[AgentSession] = result.scalars().first()
+        result = await db.execute(stmt)
+        session: Optional[AgentSession] = result.scalars().first()
+    except (OperationalError, DBAPIError) as exc:
+        # Only NOWAIT lock contention (Postgres 55P03) is retryable. Any
+        # other DB failure must not masquerade as a lock conflict, or
+        # clients would retry a non-transient error forever.
+        if not _is_row_lock_conflict(exc):
+            logger.error(
+                "sessions/restore_checkpoint: session %s DB error (not a lock conflict): %s",
+                session_id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to access the session. Please try again.",
+            ) from exc
+        logger.warning(
+            "sessions/restore_checkpoint: session %s lock conflict: %s",
+            session_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another operation is currently locking this session. Please retry.",
+        ) from exc
 
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+
+    # Lock-first ordering is deliberate: checking status before acquiring the
+    # row lock would race publish-vs-restore, so this check runs under the lock.
+    # Publishing is irreversible: the publisher marks the session completed and
+    # records the PR in conversation_history. Restoring would erase that record,
+    # so refuse before touching checkpoints, patches, or history.
+    if session.status != "active":
+        if session.status == "completed":
+            restore_detail = (
+                "Cannot restore a checkpoint after the session has been published."
+            )
+        else:
+            restore_detail = (
+                f"Cannot restore a checkpoint while the session is {session.status}."
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=restore_detail,
         )
 
     # Verify checkpoint exists before calling restore.

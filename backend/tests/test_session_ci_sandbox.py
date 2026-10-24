@@ -92,6 +92,7 @@ def test_tool_definition_present() -> None:
     assert "600" in props["timeout_sec"]["description"]
 
 
+
 def test_system_prompt_advertises_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services.session_orchestrator import _build_system_prompt
 

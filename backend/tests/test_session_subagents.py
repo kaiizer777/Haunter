@@ -99,6 +99,14 @@ def test_role_config_tool_allowlist() -> None:
     )
 
 
+def test_no_subagent_may_open_pull_requests() -> None:
+    """Publishing is the parent agent's action; subagents must never reach it."""
+    for role, config in ROLE_CONFIGS.items():
+        assert "create_pull_request" not in config.allowed_tools, (
+            f"role={role} must not be allowed to open pull requests"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 2. repo_navigator blocks editor tools at the dispatch layer
 # ---------------------------------------------------------------------------

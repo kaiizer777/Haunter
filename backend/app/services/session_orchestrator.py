@@ -38,12 +38,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.github_client import GitHubClientError
 from app.llm.client import LLMClient
 from app.llm.exceptions import LLMError
-from app.models import AgentSession
+from app.models import AgentSession, User
+from app.schemas import SESSION_PR_BODY_MAX_LEN, SESSION_PR_TITLE_MAX_LEN
 from app.services.session_streamer import SseQueue
 from app.services.session_tools.recon import (
     _count_diff_lines,
     _is_staged_creation,
     _is_staged_deletion,
+    _ensure_canonical_staged_path,
     _validate_file_path,
     resolve_read_content,
     tool_glob_files,
@@ -994,6 +996,42 @@ _TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_pull_request",
+            "description": (
+                "Publish this session: commit every staged patch to a dedicated "
+                "`haunter/session-<session-id>` topic branch, push it, and open a "
+                "pull request against the repository default branch. This is a WRITE "
+                "OPERATION — it pushes to GitHub immediately and marks the session "
+                "completed. Call it only when the user explicitly asks you to publish "
+                "or open a pull request, and only after verification passes. It cannot "
+                "target a protected or default branch."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "Pull request and commit title "
+                            f"(1-{SESSION_PR_TITLE_MAX_LEN} characters)."
+                        ),
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": (
+                            "Optional pull request description in Markdown "
+                            f"(max {SESSION_PR_BODY_MAX_LEN} characters)."
+                        ),
+                    },
+                },
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+        },
+    },
     TOOL_RUN_AUDIT_SCAN,
 ]
 
@@ -1109,7 +1147,9 @@ def _build_system_prompt(
         " 30. `git_diff(base, head, path?, stat_only?)` - unified diff or diffstat between two refs (branch names, SHAs, or tags), or against local working tree (use head='working' or head='staged').\n"
         " 31. `list_staged_files()` - list all file paths currently staged with in-memory uncommitted modifications, creations, or deletions in the session.\n"
         " 32. `invoke_subagent(role, task, target_files?)` — delegate a focused sub-task to a specialized expert subagent.\n"
-        "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n\n"
+        "     Roles: 'repo_navigator' | 'feature_architect' | 'bug_hunter' | 'sandbox_verifier' | 'code_guardian'.\n"
+        " 33. `create_pull_request(title, body?)` — publish the session: commit all staged patches to a `haunter/session-*` topic branch and open a pull request immediately (write operation; marks the session completed).\n"
+        "     Call this LAST, only when the user explicitly asks you to publish or open a pull request, and only after verification passes. It cannot target protected or default branches.\n\n"
         "For multi-step requests, start by calling update_plan to outline your steps. "
         "Update task statuses as you progress. If you encounter ambiguous architectural trade-offs, "
         "call ask_user_clarification to let the user decide.\n"
@@ -1586,6 +1626,32 @@ def _with_interrupted_turn(
     return updated
 
 
+#: Tools refused at dispatch once this turn has published a pull request.
+#: Publishing is terminal: after ``create_pull_request`` succeeds the session
+#: is ``completed``, so any later call that could mutate session state
+#: (staged patches, plan, status) or trigger external side effects (terminal
+#: commands, CI sandbox runs, subagents sharing the staged-patches dict)
+#: must not run. Read-only tools stay available. ``checkpoint_restore`` is
+#: intentionally absent: it enforces its own post-publish refusal with an
+#: exact message pinned by contract tests. ``create_pull_request`` itself is
+#: absent: the shared publisher rejects non-active sessions on its own.
+_POST_PUBLISH_BLOCKED_TOOLS: frozenset[str] = frozenset(
+    {
+        "stage_patch",
+        "discard_patch",
+        "str_replace",
+        "create_file",
+        "delete_file",
+        "apply_multi_patch",
+        "update_plan",
+        "ask_user_clarification",
+        "invoke_subagent",
+        "run_terminal_command",
+        "verify_in_ci_sandbox",
+    }
+)
+
+
 class SessionOrchestrator:
     """
     Drives the LLM tool-calling loop for a single pairing session turn.
@@ -1599,12 +1665,23 @@ class SessionOrchestrator:
         db: AsyncSession,
         gh_token: str | None = None,
         turn_id: str | None = None,
+        current_user: User | None = None,
     ) -> None:
         self.session_id = session_id
         self.db = db
         self.gh_token = gh_token
         self.turn_id = turn_id
+        self.current_user = current_user
         self._llm = LLMClient(timeout=120.0)
+        # Set by create_pull_request on success. The publisher already committed
+        # it atomically with the completed status (crash safety); `_persist`
+        # re-orders it after the turn's entries exactly once via the
+        # full-document write, so the PR record never precedes the message
+        # that asked for it and never duplicates.
+        self._pr_history_entry: dict[str, Any] | None = None
+        # Set by create_pull_request on success. Gates the post-publish
+        # dispatch block and ends the tool loop for this turn.
+        self._published_this_turn: bool = False
         self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
         self._mirror_worker_task: asyncio.Task | None = None
 
@@ -2056,6 +2133,16 @@ class SessionOrchestrator:
         # 3. Tool-calling loop — max 10 iterations to prevent runaway loops.
         MAX_ITERATIONS = 10
         for iteration in range(MAX_ITERATIONS):
+            if self._published_this_turn:
+                # create_pull_request succeeded in an earlier iteration:
+                # publishing ends the turn, so stop instead of issuing more
+                # LLM calls or dispatching further tools.
+                logger.info(
+                    "session_orchestrator: session=%s published; "
+                    "ending turn without further iterations",
+                    self.session_id,
+                )
+                break
             # Dynamically regenerate system prompt so in-turn staged/discarded patches are immediately visible to LLM
             messages[0] = {
                 "role": "system",
@@ -2294,6 +2381,18 @@ class SessionOrchestrator:
                 new_entries.append(tool_result_msg)
                 messages.append(tool_result_msg)
 
+                if (
+                    tool_name == "create_pull_request"
+                    and self._published_this_turn
+                    and not tool_result.startswith("Error")
+                ):
+                    # Greptile#4367978601: the post-publish break skips the
+                    # LLM turn that would turn this result into a visible
+                    # reply, and put_done carries no publish result — stream
+                    # the PR URL now so the turn still ends with a success
+                    # message. Post-publish blocking is unchanged.
+                    await queue.put_thought(tool_result)
+
                 if paused_for_clarification:
                     break
 
@@ -2413,11 +2512,24 @@ class SessionOrchestrator:
         Execute a single tool call and return a string result for the LLM.
 
         Mutates `staged_patches` in place for stage_patch / discard_patch.
+
+        Once this turn has published, state-changing calls are refused:
+        a later ask_user_clarification cannot reopen the session.
+
         """
         try:
             session_id = str(self.session_id) if self.session_id else None
         except Exception:
             session_id = None
+        if self._published_this_turn and tool_name in _POST_PUBLISH_BLOCKED_TOOLS:
+            logger.info(
+                "session_orchestrator: refusing %r after publish in session=%s",
+                tool_name,
+                self.session_id,
+            )
+            return (
+                f"Error: Cannot call '{tool_name}' after the session has been published."
+            )
         if tool_name == "read_file":
             return await self._tool_read_file(
                 args=args,
@@ -2680,6 +2792,14 @@ class SessionOrchestrator:
                 staged_patches=staged_patches,
                 queue=queue,
             )
+        elif tool_name == "create_pull_request":
+            if session is None:
+                return "Error: Session context is required for create_pull_request."
+            return await self._tool_create_pull_request(
+                args=args,
+                session=session,
+                staged_patches=staged_patches,
+            )
         else:
             logger.warning(
                 "session_orchestrator: unknown tool_name=%r in session=%s",
@@ -2777,6 +2897,7 @@ class SessionOrchestrator:
         # Validate path.
         try:
             path = _validate_file_path(path)
+            path = _ensure_canonical_staged_path(path)
         except ValueError as exc:
             return f"Error: {exc}"
 
@@ -3884,6 +4005,98 @@ class SessionOrchestrator:
             db=self.db,
         )
 
+    async def _tool_create_pull_request(
+        self,
+        args: dict[str, Any],
+        session: AgentSession,
+        staged_patches: dict[str, str],
+    ) -> str:
+        """
+        Publish the session through the shared commit publisher.
+
+        Structural safety: the tool accepts only a title/body — it can never
+        choose a branch, repository, or token. A dedicated ``haunter/session-*``
+        branch is minted from the session id and passed explicitly, so a
+        user-controlled ``session.branch_name`` (including ``main``) can never
+        become the publish target. The publisher re-validates the branch,
+        rejects protected/default branches, and re-verifies write access before
+        any Git write.
+        """
+        from app.services.session_commit import (
+            SessionCommitError,
+            minted_session_branch,
+            publish_session_patches,
+        )
+
+        if not isinstance(args, dict):
+            return "Error: 'create_pull_request' arguments must be a JSON object."
+
+        title = args.get("title")
+        body = args.get("body")
+        if not isinstance(title, str) or not title.strip():
+            return "Error: 'title' is required and must be a non-empty string."
+        if len(title.strip()) > SESSION_PR_TITLE_MAX_LEN:
+            return f"Error: 'title' must be {SESSION_PR_TITLE_MAX_LEN} characters or fewer."
+        if body is not None and not isinstance(body, str):
+            return "Error: 'body' must be a string when provided."
+        if isinstance(body, str) and len(body) > SESSION_PR_BODY_MAX_LEN:
+            return f"Error: 'body' must be {SESSION_PR_BODY_MAX_LEN} characters or fewer."
+
+        repo = getattr(session, "repo", None)
+        if repo is None:
+            return "Error: session repository context is missing."
+
+        current_user = self.current_user
+        if current_user is None:
+            try:
+                current_user = await self.db.get(User, session.user_id)
+            except Exception:
+                current_user = None
+        if current_user is None:
+            return (
+                "Error: could not resolve the session owner to verify repository "
+                "write access."
+            )
+        if current_user.id != session.user_id:
+            return "Error: session owner mismatch; refusing to publish."
+
+        # The turn-local dict is canonical while a turn runs; the ORM attribute
+        # still holds the pre-turn snapshot. Sync it before publishing so
+        # patches staged in this turn are included.
+        session.staged_patches = dict(staged_patches)
+
+        try:
+            result = await publish_session_patches(
+                session=session,
+                repo=repo,
+                title=title,
+                body=body,
+                current_user=current_user,
+                db=self.db,
+                target_branch=minted_session_branch(session.id),
+                gh_token=self.gh_token,
+                persist_history=True,
+            )
+        except SessionCommitError as exc:
+            return f"Error: {exc}"
+
+        # The publisher already committed this entry with the completed status.
+        # Buffer it as well so `_persist` orders it after the user message and
+        # assistant/tool entries that earned it (and force-overwrites any
+        # intermediate state exactly once).
+        self._pr_history_entry = result.history_entry
+        # Publishing is terminal for this turn: refuse later state-changing
+        # calls at dispatch and stop the tool loop below, so the session can
+        # never flip back out of completed (e.g. via ask_user_clarification).
+        self._published_this_turn = True
+
+        return (
+            f"Pull request opened: {result.pr_url}\n"
+            f"Branch: {result.branch_name}\n"
+            f"Commit: {result.commit_sha}\n"
+            "Session marked completed."
+        )
+
     async def _load_session(self) -> AgentSession | None:
         """
         Load the AgentSession with its repo relationship.
@@ -4016,6 +4229,19 @@ class SessionOrchestrator:
         """
         # Compact here as well (idempotent) so early-exit persist paths
         # (interrupt / LLM-error fallbacks) are bounded too.
+        #
+        # The PR history entry is appended here, after the turn's entries, and
+        # cleared immediately so retries/fallbacks cannot duplicate it. Doing it
+        # in this choke point makes publish-then-error paths persist it too.
+        pending_pr_entry = self._pr_history_entry
+        if pending_pr_entry is not None:
+            self._pr_history_entry = None
+            if not any(entry is pending_pr_entry for entry in updated_history):
+                updated_history = [*updated_history, pending_pr_entry]
+            if new_entries is not None and not any(
+                entry is pending_pr_entry for entry in new_entries
+            ):
+                new_entries = [*new_entries, pending_pr_entry]
         updated_history = _compact_history_for_storage(updated_history)
         # Snapshot every ORM attribute the fallback path needs BEFORE the
         # commit attempt. rollback() expires all persistent state, so reading
@@ -4034,14 +4260,21 @@ class SessionOrchestrator:
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
-        delta_stmts = self._plan_delta_statements(
-            session,
-            base_history=base_history,
-            updated_history=updated_history,
-            new_entries=new_entries,
-            patch_upserts=patch_upserts,
-            patch_removed=patch_removed,
-        )
+        # A publish turn already committed the PR entry alongside the completed
+        # status: the delta path would re-append it onto the database value
+        # that already contains it. Force the full-document write so the final
+        # state holds the entry exactly once.
+        if pending_pr_entry is not None:
+            delta_stmts: list[Any] = []
+        else:
+            delta_stmts = self._plan_delta_statements(
+                session,
+                base_history=base_history,
+                updated_history=updated_history,
+                new_entries=new_entries,
+                patch_upserts=patch_upserts,
+                patch_removed=patch_removed,
+            )
         try:
             if not getattr(self.db, "is_active", True):
                 raise RuntimeError("self.db is closed or inactive")

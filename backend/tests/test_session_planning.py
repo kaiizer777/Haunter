@@ -329,3 +329,94 @@ async def test_sse_plan_update_and_clarification_events() -> None:
     assert "event: plan_update" in item1
     item2 = await queue._q.get()
     assert "event: clarification_requested" in item2
+
+
+# ---------------------------------------------------------------------------
+# Test 8: test_published_session_blocks_update_plan
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_published_session_blocks_update_plan(db: AsyncSession) -> None:
+    """A completed (published) session refuses plan updates; plan unchanged, no SSE."""
+    user, repo = await _seed_user_and_repo(db, github_id=60008)
+    session = await _seed_session(
+        db,
+        user,
+        repo,
+        status="completed",
+        plan=[{"id": "0", "title": "Initial", "status": "pending"}],
+    )
+
+    queue = SseQueue()
+    result = await tool_update_plan(
+        [{"id": "1", "title": "Step 1", "status": "completed"}],
+        session,
+        queue,
+        db,
+    )
+    assert result.startswith("Error:")
+    assert "published" in result
+    assert len(session.plan) == 1
+    assert session.plan[0]["id"] == "0"
+    assert queue._q.empty()
+
+
+# ---------------------------------------------------------------------------
+# Test 9: test_published_session_blocks_clarification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_published_session_blocks_clarification(db: AsyncSession) -> None:
+    """A completed session refuses clarification; status stays completed, no SSE."""
+    user, repo = await _seed_user_and_repo(db, github_id=60009)
+    session = await _seed_session(db, user, repo, status="completed")
+
+    queue = SseQueue()
+    result = await tool_ask_user_clarification(
+        "Should we use asyncpg?", ["asyncpg", "psycopg"], session, queue, db
+    )
+    assert result.startswith("Error:")
+    assert "published" in result
+    assert session.status == "completed"
+    assert session.waiting_input is None
+    assert queue._q.empty()
+
+
+# ---------------------------------------------------------------------------
+# Test 10: test_dispatch_refuses_clarification_after_publish
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_refuses_clarification_after_publish(
+    db: AsyncSession,
+) -> None:
+    """After create_pull_request succeeds in-turn, dispatch refuses
+    ask_user_clarification so the session cannot flip back out of completed."""
+    from app.services.session_orchestrator import SessionOrchestrator
+
+    user, repo = await _seed_user_and_repo(db, github_id=60010)
+    session = await _seed_session(db, user, repo, status="active")
+    orch = SessionOrchestrator(
+        session_id=session.id,
+        db=AsyncMock(),
+        gh_token="tok",
+        current_user=user,
+    )
+    orch._published_this_turn = True
+
+    result = await orch._dispatch_tool(
+        tool_name="ask_user_clarification",
+        args={"question": "Pick one?", "options": ["A", "B"]},
+        repo_owner="test-org",
+        repo_name="test-repo",
+        base_sha="a" * 40,
+        staged_patches={},
+        queue=AsyncMock(),
+        session=session,
+    )
+    assert result.startswith("Error:")
+    assert "ask_user_clarification" in result
+    assert session.status == "active"

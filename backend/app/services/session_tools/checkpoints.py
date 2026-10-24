@@ -128,6 +128,12 @@ async def tool_checkpoint_restore(
     """
     Restore session state to a prior checkpoint by checkpoint_id or 'latest'.
 
+    Publishing is irreversible: the publisher marks the session ``completed``
+    and records the PR in conversation history. Restoring afterwards would
+    truncate that record, so a non-active session is refused before any state
+    is touched (no checkpoint pruning, patch restore, history truncation, SSE,
+    or flush).
+
     - Reverts session.staged_patches to the snapshot.
     - Mutates turn-local staged_patches dict in-place if provided.
     - Truncates session.conversation_history to the snapshotted length.
@@ -137,6 +143,15 @@ async def tool_checkpoint_restore(
 
     Returns a human-readable result string for the LLM.
     """
+    if session.status != "active":
+        if session.status == "completed":
+            return (
+                "Error: Cannot restore a checkpoint after the session has been published."
+            )
+        return (
+            f"Error: Cannot restore a checkpoint while the session is {session.status}."
+        )
+
     checkpoints: list[dict[str, Any]] = list(session.checkpoints or [])
     if not checkpoints:
         return f"Error: Checkpoint '{checkpoint_id}' not found."

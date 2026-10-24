@@ -722,6 +722,13 @@ class SandboxVerificationOut(BaseModel):
     logs: Optional[str] = None
 
 
+# Single source of truth for session PR title/body length caps. The tool
+# schema (session_orchestrator), the shared publisher (session_commit), and
+# the dashboard contract (SessionCommitIn) must all enforce the same limits.
+SESSION_PR_TITLE_MAX_LEN: int = 255
+SESSION_PR_BODY_MAX_LEN: int = 65535
+
+
 class SessionCommitIn(BaseModel):
     """
     Request body for POST /sessions/{session_id}/commit.
@@ -732,8 +739,8 @@ class SessionCommitIn(BaseModel):
     extra="forbid" prevents mass-assignment injection.
     """
 
-    title: str = Field(..., min_length=1, max_length=255)
-    body: str | None = Field(None, max_length=65535)
+    title: str = Field(..., min_length=1, max_length=SESSION_PR_TITLE_MAX_LEN)
+    body: str | None = Field(None, max_length=SESSION_PR_BODY_MAX_LEN)
     branch_name: Optional[str] = Field(None, max_length=255)
 
     model_config = {"extra": "forbid"}

@@ -23,7 +23,10 @@ from typing import Any
 
 from app.github_client import GitHubClientError, fetch_file_content
 from app.services.session_streamer import SseQueue
-from app.services.session_tools.recon import _validate_file_path
+from app.services.session_tools.recon import (
+    _ensure_canonical_staged_path,
+    _validate_file_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -469,6 +472,7 @@ async def tool_str_replace(
     # Validate path.
     try:
         path = _validate_file_path(path)
+        path = _ensure_canonical_staged_path(path)
     except ValueError as exc:
         return f"Error: {exc}"
 
@@ -588,10 +592,13 @@ async def tool_create_file(
     """
     try:
         path = _validate_file_path(path)
+        path = _ensure_canonical_staged_path(path)
     except ValueError as exc:
         return f"Error: {exc}"
 
-    # Diff from empty (creation).
+    # Diff from empty (creation). difflib emits no output for empty
+    # content, so stage explicit creation headers: the publisher treats
+    # "--- /dev/null" as the creation marker and would otherwise 422.
     diff = "".join(
         difflib.unified_diff(
             [],
@@ -600,6 +607,8 @@ async def tool_create_file(
             tofile=f"b/{path}",
         )
     )
+    if not diff:
+        diff = f"--- /dev/null\n+++ b/{path}\n"
 
     staged_patches[path] = diff
 
@@ -643,6 +652,7 @@ async def tool_delete_file(
     """
     try:
         path = _validate_file_path(path)
+        path = _ensure_canonical_staged_path(path)
     except ValueError as exc:
         return f"Error: {exc}"
 
@@ -792,6 +802,7 @@ async def tool_apply_multi_patch(
 
             try:
                 path = _validate_file_path(path)
+                path = _ensure_canonical_staged_path(path)
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 
@@ -864,6 +875,7 @@ async def tool_apply_multi_patch(
 
             try:
                 path = _validate_file_path(path)
+                path = _ensure_canonical_staged_path(path)
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 
@@ -884,6 +896,7 @@ async def tool_apply_multi_patch(
 
             try:
                 path = _validate_file_path(path)
+                path = _ensure_canonical_staged_path(path)
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 
@@ -962,6 +975,8 @@ async def tool_apply_multi_patch(
                     tofile=f"b/{path}",
                 )
             )
+            if not diff and not final_content:
+                diff = f"--- /dev/null\n+++ b/{path}\n"
             final_action = "create" if is_created_files.get(path) else action
         elif action == "delete":
             clean_base = clean_bases.get(path)
