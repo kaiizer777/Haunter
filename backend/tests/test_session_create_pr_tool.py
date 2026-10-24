@@ -16,6 +16,7 @@ import pytest
 from app.models import AgentSession, Repo, User
 from app.schemas import SESSION_PR_BODY_MAX_LEN, SESSION_PR_TITLE_MAX_LEN, SessionCommitIn
 from app.services.session_commit import SessionCommitError, SessionCommitResult
+from app.services.session_streamer import SseQueue
 from app.services.session_orchestrator import (
     SessionOrchestrator,
     _TOOLS,
@@ -605,6 +606,60 @@ async def test_pr_entry_is_appended_after_turn_entries_exactly_once() -> None:
         dict(session.staged_patches or {}),
     )
     assert session.conversation_history == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_publish_streams_pr_url_and_stops_loop() -> None:
+    """Greptile#4367978601: the post-publish break skipped the LLM turn that
+    would surface the PR URL, and put_done carries no publish result — the
+    user saw no success message or link. A successful in-turn publish must
+    stream a thought containing the PR URL and issue no further LLM calls,
+    while post-publish dispatch blocking stays intact.
+    """
+    user = _make_user()
+    repo = _make_repo(user)
+    session = _make_session(user, repo, staged_patches={})
+    session.conversation_history = []
+    orch = _make_orchestrator(session, current_user=user)
+    result = _make_result()
+    orch._load_session = AsyncMock(return_value=session)
+    orch._persist = AsyncMock()
+    pr_call = {
+        "id": "call_pr",
+        "type": "function",
+        "function": {
+            "name": "create_pull_request",
+            "arguments": '{"title": "Fix checkout timeout"}',
+        },
+    }
+    orch._llm = AsyncMock()
+    orch._llm.complete = AsyncMock(
+        return_value={
+            "content": "",
+            "tool_calls": [pr_call],
+            "model": "test-llm",
+        }
+    )
+
+    async def _fake_publish(**_kwargs: object) -> SessionCommitResult:
+        session.status = "completed"
+        return result
+
+    queue = SseQueue()
+    with patch(
+        "app.services.session_commit.publish_session_patches",
+        AsyncMock(side_effect=_fake_publish),
+    ):
+        await orch.run(user_message="Open the PR.", queue=queue)
+
+    # The turn ends without a second LLM iteration ...
+    orch._llm.complete.assert_awaited_once()
+    # ... but the PR URL still reaches the user on the stream.
+    thoughts = [
+        chunk for _, chunk in queue._replay_buffer if "event: thought" in chunk
+    ]
+    assert any(_PR_URL in chunk for chunk in thoughts)
 
 
 @pytest.mark.asyncio
