@@ -541,9 +541,10 @@ def _current_turn_entries() -> list[dict[str, object]]:
 async def test_pr_entry_is_appended_after_turn_entries_exactly_once() -> None:
     """Catches the PR-entry-before-the-user-message regression (issue #70 F5).
 
-    The tool only buffers ``result.history_entry``; ``_persist`` appends it
-    after every entry produced by the publish turn. A tool that appends to the
-    pre-turn history copy, or a second writer, fails the exact-order assertion.
+    The publisher commits ``result.history_entry`` with the completed status;
+    ``_persist`` re-orders the buffered copy after every entry produced by
+    the publish turn and force-overwrites exactly once. A missing atomic
+    write, or a second writer, fails the exact-order assertion.
     """
     user = _make_user()
     repo = _make_repo(user)
@@ -555,9 +556,11 @@ async def test_pr_entry_is_appended_after_turn_entries_exactly_once() -> None:
     result = _make_result()
 
     async def _fake_publish(**_kwargs: object) -> SessionCommitResult:
-        # Mirrors the tool path: status changes, history is left to _persist.
-        # Counterpart: test_tool_path_does_not_write_history_inside_publisher pins the real half.
+        # Mirrors the tool path: status and history commit together; _persist
+        # re-orders the buffered copy after the turn's entries exactly once.
+        # Counterpart: test_tool_path_persists_history_atomically_with_completed pins the real half.
         session.status = "completed"
+        session.conversation_history = [*session.conversation_history, result.history_entry]
         return result
 
     with patch(
@@ -572,7 +575,7 @@ async def test_pr_entry_is_appended_after_turn_entries_exactly_once() -> None:
         )
 
     assert "Session marked completed." in text
-    assert publisher.await_args.kwargs["persist_history"] is False
+    assert publisher.await_args.kwargs["persist_history"] is True
     # The pre-turn copy is not touched; the entry waits in the orchestrator.
     assert base_history == _realistic_base_history()
     assert orch._pr_history_entry is result.history_entry

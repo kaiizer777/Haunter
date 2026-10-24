@@ -1647,10 +1647,11 @@ class SessionOrchestrator:
         self.turn_id = turn_id
         self.current_user = current_user
         self._llm = LLMClient(timeout=120.0)
-        # Set by create_pull_request on success. `_persist` appends it after the
-        # turn's entries exactly once (the publisher does not write history from
-        # the tool path) so the PR record never precedes the message that asked
-        # for it.
+        # Set by create_pull_request on success. The publisher already committed
+        # it atomically with the completed status (crash safety); `_persist`
+        # re-orders it after the turn's entries exactly once via the
+        # full-document write, so the PR record never precedes the message
+        # that asked for it and never duplicates.
         self._pr_history_entry: dict[str, Any] | None = None
         self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
         self._mirror_worker_task: asyncio.Task | None = None
@@ -4010,14 +4011,15 @@ class SessionOrchestrator:
                 db=self.db,
                 target_branch=minted_session_branch(session.id),
                 gh_token=self.gh_token,
-                persist_history=False,
+                persist_history=True,
             )
         except SessionCommitError as exc:
             return f"Error: {exc}"
 
-        # `_persist` owns conversation_history for this turn. Buffer the entry
-        # instead of appending it to the pre-turn list: otherwise it would land
-        # before the user message and assistant/tool entries that earned it.
+        # The publisher already committed this entry with the completed status.
+        # Buffer it as well so `_persist` orders it after the user message and
+        # assistant/tool entries that earned it (and force-overwrites any
+        # intermediate state exactly once).
         self._pr_history_entry = result.history_entry
 
         return (
@@ -4190,14 +4192,21 @@ class SessionOrchestrator:
         session.conversation_history = updated_history
         session.staged_patches = updated_patches
         session.updated_at = datetime.now(timezone.utc)
-        delta_stmts = self._plan_delta_statements(
-            session,
-            base_history=base_history,
-            updated_history=updated_history,
-            new_entries=new_entries,
-            patch_upserts=patch_upserts,
-            patch_removed=patch_removed,
-        )
+        # A publish turn already committed the PR entry alongside the completed
+        # status: the delta path would re-append it onto the database value
+        # that already contains it. Force the full-document write so the final
+        # state holds the entry exactly once.
+        if pending_pr_entry is not None:
+            delta_stmts: list[Any] = []
+        else:
+            delta_stmts = self._plan_delta_statements(
+                session,
+                base_history=base_history,
+                updated_history=updated_history,
+                new_entries=new_entries,
+                patch_upserts=patch_upserts,
+                patch_removed=patch_removed,
+            )
         try:
             if not getattr(self.db, "is_active", True):
                 raise RuntimeError("self.db is closed or inactive")

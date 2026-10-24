@@ -373,12 +373,13 @@ async def publish_session_patches(
     :class:`SessionCommitError` for every expected failure; unexpected errors
     (DB failures after the PR is opened, etc.) propagate loudly.
 
-    Persistence: on success the session row is marked ``completed``. When
-    ``persist_history`` is true (the HTTP endpoint path) the PR entry is also
-    appended to ``conversation_history`` in the same transaction. The agent
-    tool passes ``persist_history=False`` and lets the orchestrator's
-    ``_persist`` append ``result.history_entry`` after the turn's entries, so
-    there is exactly one history writer per path.
+    Persistence: on success the session row is marked ``completed`` and the PR
+    entry is appended to ``conversation_history`` in the same transaction, so
+    a worker dying right after publish still leaves a usable record (the
+    status gate would otherwise block republish of an unrecorded PR). The
+    agent tool keeps ``result.history_entry`` buffered as well: the turn-end
+    ``_persist`` re-orders it after the turn's entries and takes the
+    full-document write, so the final state holds it exactly once.
     """
     staged_patches_raw = session.staged_patches or {}
     if not staged_patches_raw:

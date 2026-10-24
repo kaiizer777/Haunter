@@ -728,11 +728,13 @@ async def test_publish_creates_branch_in_order_and_persists_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_path_does_not_write_history_inside_publisher() -> None:
-    """Catches two writers: the agent tool lets _persist own history ordering.
+async def test_tool_path_persists_history_atomically_with_completed() -> None:
+    """The tool path persists the PR entry in the same commit as completed.
 
-    With ``persist_history=False`` the publisher still marks the row completed
-    and returns the entry, but must not append it to conversation_history.
+    If the worker dies right after publish, the row still carries the PR URL,
+    number, and commit SHA, so the status gate never blocks republish of an
+    unrecorded PR. The turn-end _persist re-orders the buffered copy after
+    the turn's entries and force-overwrites exactly once.
 
     Counterpart test_pr_entry_is_appended_after_turn_entries_exactly_once
     proves ordering given the completed state produced here.
@@ -762,11 +764,14 @@ async def test_tool_path_does_not_write_history_inside_publisher() -> None:
             current_user=_make_user(),
             db=_make_db(),
             gh_token="tok",
-            persist_history=False,
+            persist_history=True,
         )
 
     assert session.status == "completed"
-    assert session.conversation_history == [{"role": "user", "content": "pre-turn"}]
+    assert session.conversation_history == [
+        {"role": "user", "content": "pre-turn"},
+        result.history_entry,
+    ]
     assert result.history_entry["pr_url"] == "https://github.com/o/r/pull/12"
 
 
