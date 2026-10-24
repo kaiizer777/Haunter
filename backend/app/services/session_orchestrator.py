@@ -1626,6 +1626,32 @@ def _with_interrupted_turn(
     return updated
 
 
+#: Tools refused at dispatch once this turn has published a pull request.
+#: Publishing is terminal: after ``create_pull_request`` succeeds the session
+#: is ``completed``, so any later call that could mutate session state
+#: (staged patches, plan, status) or trigger external side effects (terminal
+#: commands, CI sandbox runs, subagents sharing the staged-patches dict)
+#: must not run. Read-only tools stay available. ``checkpoint_restore`` is
+#: intentionally absent: it enforces its own post-publish refusal with an
+#: exact message pinned by contract tests. ``create_pull_request`` itself is
+#: absent: the shared publisher rejects non-active sessions on its own.
+_POST_PUBLISH_BLOCKED_TOOLS: frozenset[str] = frozenset(
+    {
+        "stage_patch",
+        "discard_patch",
+        "str_replace",
+        "create_file",
+        "delete_file",
+        "apply_multi_patch",
+        "update_plan",
+        "ask_user_clarification",
+        "invoke_subagent",
+        "run_terminal_command",
+        "verify_in_ci_sandbox",
+    }
+)
+
+
 class SessionOrchestrator:
     """
     Drives the LLM tool-calling loop for a single pairing session turn.
@@ -1653,6 +1679,9 @@ class SessionOrchestrator:
         # full-document write, so the PR record never precedes the message
         # that asked for it and never duplicates.
         self._pr_history_entry: dict[str, Any] | None = None
+        # Set by create_pull_request on success. Gates the post-publish
+        # dispatch block and ends the tool loop for this turn.
+        self._published_this_turn: bool = False
         self._mirror_queue: asyncio.Queue[tuple[int, str, str] | None] = asyncio.Queue()
         self._mirror_worker_task: asyncio.Task | None = None
 
@@ -2104,6 +2133,16 @@ class SessionOrchestrator:
         # 3. Tool-calling loop — max 10 iterations to prevent runaway loops.
         MAX_ITERATIONS = 10
         for iteration in range(MAX_ITERATIONS):
+            if self._published_this_turn:
+                # create_pull_request succeeded in an earlier iteration:
+                # publishing ends the turn, so stop instead of issuing more
+                # LLM calls or dispatching further tools.
+                logger.info(
+                    "session_orchestrator: session=%s published; "
+                    "ending turn without further iterations",
+                    self.session_id,
+                )
+                break
             # Dynamically regenerate system prompt so in-turn staged/discarded patches are immediately visible to LLM
             messages[0] = {
                 "role": "system",
@@ -2461,11 +2500,24 @@ class SessionOrchestrator:
         Execute a single tool call and return a string result for the LLM.
 
         Mutates `staged_patches` in place for stage_patch / discard_patch.
+
+        Once this turn has published, state-changing calls are refused:
+        a later ask_user_clarification cannot reopen the session.
+
         """
         try:
             session_id = str(self.session_id) if self.session_id else None
         except Exception:
             session_id = None
+        if self._published_this_turn and tool_name in _POST_PUBLISH_BLOCKED_TOOLS:
+            logger.info(
+                "session_orchestrator: refusing %r after publish in session=%s",
+                tool_name,
+                self.session_id,
+            )
+            return (
+                f"Error: Cannot call '{tool_name}' after the session has been published."
+            )
         if tool_name == "read_file":
             return await self._tool_read_file(
                 args=args,
@@ -4021,6 +4073,10 @@ class SessionOrchestrator:
         # assistant/tool entries that earned it (and force-overwrites any
         # intermediate state exactly once).
         self._pr_history_entry = result.history_entry
+        # Publishing is terminal for this turn: refuse later state-changing
+        # calls at dispatch and stop the tool loop below, so the session can
+        # never flip back out of completed (e.g. via ask_user_clarification).
+        self._published_this_turn = True
 
         return (
             f"Pull request opened: {result.pr_url}\n"

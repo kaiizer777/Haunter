@@ -41,6 +41,8 @@ async def tool_update_plan(
     Returns:
         Status message string for the LLM.
     """
+    if session.status == "completed":
+        return "Error: Cannot update the plan after the session has been published."
     if not isinstance(tasks, list):
         return "Error: tasks must be a list of task objects."
 
@@ -95,6 +97,10 @@ async def tool_ask_user_clarification(
     Returns:
         Status message string for the LLM.
     """
+    if session.status == "completed":
+        return (
+            "Error: Cannot request clarification after the session has been published."
+        )
     if not isinstance(question, str) or not question.strip():
         return "Error: question must be a non-empty string."
 
