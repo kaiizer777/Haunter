@@ -23,6 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import _sign_user_id
 from app.github_client import GitHubClientError, GitHubResourceNotFoundError
 from app.models import AgentSession, Repo, User
+from tests.test_session_commit_guards import (
+    _assert_no_github_writes,
+    _no_github_writes,
+)
 
 
 @pytest.fixture()
@@ -743,8 +747,6 @@ async def test_commit_without_repo_write_access_forbidden(
         branch="feat/no-write-access",
     )
 
-    mock_create_blob = AsyncMock()
-
     with (
         patch(
             "app.services.session_commit.get_installation_token",
@@ -756,17 +758,18 @@ async def test_commit_without_repo_write_access_forbidden(
             new_callable=AsyncMock,
             side_effect=HTTPException(status_code=403, detail="no write access"),
         ),
-        patch("app.github_client.create_blob", mock_create_blob),
+        _no_github_writes() as (stack, mocks),
     ):
-        async with _auth_client(make_auth_client, user) as ac:
-            resp = await ac.post(
-                f"/sessions/{session.id}/commit",
-                json={"title": "No access"},
-            )
+        with stack:
+            async with _auth_client(make_auth_client, user) as ac:
+                resp = await ac.post(
+                    f"/sessions/{session.id}/commit",
+                    json={"title": "No access"},
+                )
 
     assert resp.status_code == 403, resp.text
     assert "write access" in resp.json()["detail"].lower()
-    mock_create_blob.assert_not_called()
+    _assert_no_github_writes(mocks)
 
     await db.commit()
     db.expire_all()
