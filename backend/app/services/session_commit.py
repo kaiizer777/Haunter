@@ -414,11 +414,15 @@ async def publish_session_patches(
                     f"Deletion patch for '{file_path}' resulted in non-empty content.",
                     422,
                 )
-            # Deletion entries omit blob SHA/mode: GitHub deletes the path.
+            # An explicit null SHA tells GitHub to delete the path
+            # (docs.github.com/en/rest/git/trees: "If the value is null
+            # then the file will be deleted"). Omitting "sha" is rejected.
             tree_entries.append(
                 {
                     "path": file_path,
+                    "mode": "100644",
                     "type": "blob",
+                    "sha": None,
                 }
             )
             continue

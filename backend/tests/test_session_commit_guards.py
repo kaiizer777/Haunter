@@ -267,7 +267,7 @@ async def test_commit_creation_patch_allows_none_base() -> None:
 
 @pytest.mark.asyncio
 async def test_commit_deletion_patch_creates_tree_entry_with_null_sha() -> None:
-    """A deletion patch (+++ /dev/null) adds a sha-less tree entry and does not fail empty-content guard."""
+    """A deletion patch (+++ /dev/null) adds a null-sha tree entry and does not fail empty-content guard."""
     user, session = _make_mock_user_and_session(
         staged_patches={
             "app/deleted.py": "--- a/app/deleted.py\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-old\n"
@@ -299,7 +299,7 @@ async def test_commit_deletion_patch_creates_tree_entry_with_null_sha() -> None:
     mock_create_tree.assert_called_once_with(
         owner="test-owner",
         repo="test-repo",
-        tree=[{"path": "app/deleted.py", "type": "blob"}],
+        tree=[{"path": "app/deleted.py", "mode": "100644", "type": "blob", "sha": None}],
         base_tree="base_tree_sha",
         installation_token="tok",
         allow_global_token=False,
