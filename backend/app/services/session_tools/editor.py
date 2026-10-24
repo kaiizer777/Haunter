@@ -23,7 +23,10 @@ from typing import Any
 
 from app.github_client import GitHubClientError, fetch_file_content
 from app.services.session_streamer import SseQueue
-from app.services.session_tools.recon import _validate_file_path
+from app.services.session_tools.recon import (
+    _ensure_canonical_staged_path,
+    _validate_file_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -469,6 +472,7 @@ async def tool_str_replace(
     # Validate path.
     try:
         path = _validate_file_path(path)
+        path = _ensure_canonical_staged_path(path)
     except ValueError as exc:
         return f"Error: {exc}"
 
@@ -588,6 +592,7 @@ async def tool_create_file(
     """
     try:
         path = _validate_file_path(path)
+        path = _ensure_canonical_staged_path(path)
     except ValueError as exc:
         return f"Error: {exc}"
 
@@ -647,6 +652,7 @@ async def tool_delete_file(
     """
     try:
         path = _validate_file_path(path)
+        path = _ensure_canonical_staged_path(path)
     except ValueError as exc:
         return f"Error: {exc}"
 
@@ -796,6 +802,7 @@ async def tool_apply_multi_patch(
 
             try:
                 path = _validate_file_path(path)
+                path = _ensure_canonical_staged_path(path)
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 
@@ -868,6 +875,7 @@ async def tool_apply_multi_patch(
 
             try:
                 path = _validate_file_path(path)
+                path = _ensure_canonical_staged_path(path)
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 
@@ -888,6 +896,7 @@ async def tool_apply_multi_patch(
 
             try:
                 path = _validate_file_path(path)
+                path = _ensure_canonical_staged_path(path)
             except ValueError as exc:
                 return f"Error in {label}: {exc}"
 

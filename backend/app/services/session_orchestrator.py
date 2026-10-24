@@ -45,6 +45,7 @@ from app.services.session_tools.recon import (
     _count_diff_lines,
     _is_staged_creation,
     _is_staged_deletion,
+    _ensure_canonical_staged_path,
     _validate_file_path,
     resolve_read_content,
     tool_glob_files,
@@ -2831,6 +2832,7 @@ class SessionOrchestrator:
         # Validate path.
         try:
             path = _validate_file_path(path)
+            path = _ensure_canonical_staged_path(path)
         except ValueError as exc:
             return f"Error: {exc}"
 

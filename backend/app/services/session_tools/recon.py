@@ -148,6 +148,23 @@ def _normalize_rel_path(path: str) -> str:
     return norm.removeprefix("/")
 
 
+def _ensure_canonical_staged_path(path: str) -> str:
+    """Reject staging paths the publisher would refuse at commit time.
+
+    The publisher requires keys to already be canonical (``_normalize_rel_path``
+    must not change them, no empty/``.``/``..`` segments, no trailing slash).
+    Failing fast here keeps staging and publish in agreement so a successful
+    edit can never block the whole publish.
+    """
+    if path != _normalize_rel_path(path):
+        raise ValueError(f"Non-canonical file path rejected: {path!r}. Use the canonical relative path.")
+    if not path or path.startswith("/") or path.endswith("/"):
+        raise ValueError(f"Absolute or directory file path rejected: {path!r}")
+    if any(segment in ("", ".", "..") for segment in path.split("/")):
+        raise ValueError(f"Invalid path segment in {path!r}")
+    return path
+
+
 validate_file_path = _validate_file_path
 
 

@@ -211,6 +211,24 @@ async def test_create_file_empty_content_stages_creation_headers() -> None:
 
 
 # ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_create_file_non_canonical_path_rejected() -> None:
+    """A leading ./ is rejected at staging so publish can never see it."""
+    staged: dict[str, str] = {}
+    queue = _make_queue()
+
+    result = await tool_create_file(
+        path="./src/sneaky.py",
+        content="x = 1\n",
+        staged_patches=staged,
+        queue=queue,
+    )
+
+    assert result.startswith("Error:")
+    assert staged == {}
+
+
+# ---------------------------------------------------------------------------
 # 5. delete_file
 # ---------------------------------------------------------------------------
 
