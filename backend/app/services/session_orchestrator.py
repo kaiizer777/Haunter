@@ -2381,6 +2381,18 @@ class SessionOrchestrator:
                 new_entries.append(tool_result_msg)
                 messages.append(tool_result_msg)
 
+                if (
+                    tool_name == "create_pull_request"
+                    and self._published_this_turn
+                    and not tool_result.startswith("Error")
+                ):
+                    # Greptile#4367978601: the post-publish break skips the
+                    # LLM turn that would turn this result into a visible
+                    # reply, and put_done carries no publish result — stream
+                    # the PR URL now so the turn still ends with a success
+                    # message. Post-publish blocking is unchanged.
+                    await queue.put_thought(tool_result)
+
                 if paused_for_clarification:
                     break
 
