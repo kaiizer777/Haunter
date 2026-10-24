@@ -1493,6 +1493,8 @@ async def restore_checkpoint(
             status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
         )
 
+    # Lock-first ordering is deliberate: checking status before acquiring the
+    # row lock would race publish-vs-restore, so this check runs under the lock.
     # Publishing is irreversible: the publisher marks the session completed and
     # records the PR in conversation_history. Restoring would erase that record,
     # so refuse before touching checkpoints, patches, or history.
