@@ -806,8 +806,9 @@ async def test_gather_context_empty_content_raises(db: AsyncSession) -> None:
     assert f"output_tokens={512 * 2}" in msg
 
     # A context_gatherer_error step should have been written (NOT a success step)
+    run_id = run.id
     db.expire_all()
-    steps_result = await db.execute(select(RunStep).where(RunStep.run_id == run.id))
+    steps_result = await db.execute(select(RunStep).where(RunStep.run_id == run_id))
     steps = steps_result.scalars().all()
     assert len(steps) == 1
     assert steps[0].step_name == "context_gatherer_error"
@@ -876,8 +877,9 @@ async def test_orchestrator_format_exhausted_routes_to_fallback(
         await handle_failed_run(run_id=run.id)
 
     # Refresh run from DB
+    run_id = run.id
     db.expire_all()
-    refreshed = await db.execute(select(Run).where(Run.id == run.id))
+    refreshed = await db.execute(select(Run).where(Run.id == run_id))
     run = refreshed.scalar_one()
     assert (
         run.status == "fallback_commented"
@@ -949,8 +951,9 @@ async def test_orchestrator_path_traversal_still_errors(
     ):
         await handle_failed_run(run_id=run.id)
 
+    run_id = run.id
     db.expire_all()
-    refreshed = await db.execute(select(Run).where(Run.id == run.id))
+    refreshed = await db.execute(select(Run).where(Run.id == run_id))
     run = refreshed.scalar_one()
     # Security boundary: NOT fallback_commented
     assert run.status == "error", f"expected error, got {run.status}"

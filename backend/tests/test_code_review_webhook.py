@@ -394,8 +394,9 @@ async def test_orchestrator_pipeline_pr_request_changes(
         assert "```suggestion" in kwargs["comments"][0]["body"]
 
     # Verify DB update
+    review_id = review.id
     db.expire_all()
-    stmt = select(CodeReview).where(CodeReview.id == review.id)
+    stmt = select(CodeReview).where(CodeReview.id == review_id)
     updated = (await db.execute(stmt)).scalars().first()
     assert updated.status == "completed"
     assert updated.risk_score == 90
@@ -705,12 +706,13 @@ async def test_orchestrator_null_install_app_configured_backfills_and_completes(
         mock_llm = mock_llm_cls.return_value
         mock_llm.complete = AsyncMock(return_value=mock_llm_response)
 
-        await run_code_review_pipeline(review.id)
+        review_id = review.id
+        await run_code_review_pipeline(review_id)
 
         assert mock_pr_review.called
 
     db.expire_all()
-    stmt = select(CodeReview).where(CodeReview.id == review.id)
+    stmt = select(CodeReview).where(CodeReview.id == review_id)
     updated = (await db.execute(stmt)).scalars().first()
     assert updated is not None
     assert updated.status == "completed"
@@ -786,10 +788,11 @@ async def test_orchestrator_publish_failure_sets_error_with_failure_reason(
         mock_llm = mock_llm_cls.return_value
         mock_llm.complete = AsyncMock(return_value=mock_llm_response)
 
-        await run_code_review_pipeline(review.id)
+        review_id = review.id
+        await run_code_review_pipeline(review_id)
 
     db.expire_all()
-    stmt = select(CodeReview).where(CodeReview.id == review.id)
+    stmt = select(CodeReview).where(CodeReview.id == review_id)
     updated = (await db.execute(stmt)).scalars().first()
     assert updated is not None
     # Publish failure is visible — never silently completed.
@@ -885,7 +888,8 @@ async def test_orchestrator_422_inline_fallback_drops_comments_keeps_summary(
         mock_llm = mock_llm_cls.return_value
         mock_llm.complete = AsyncMock(return_value=mock_llm_response)
 
-        await run_code_review_pipeline(review.id)
+        review_id = review.id
+        await run_code_review_pipeline(review_id)
 
     # First attempt with inline comments, second attempt summary-only.
     assert len(calls) == 2
@@ -893,7 +897,7 @@ async def test_orchestrator_422_inline_fallback_drops_comments_keeps_summary(
     assert calls[1]["comments"] == []
 
     db.expire_all()
-    stmt = select(CodeReview).where(CodeReview.id == review.id)
+    stmt = select(CodeReview).where(CodeReview.id == review_id)
     updated = (await db.execute(stmt)).scalars().first()
     assert updated is not None
     assert updated.status == "completed"
