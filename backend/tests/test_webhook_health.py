@@ -37,7 +37,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Repo, WebhookDelivery
+from app.models import Repo, Run, WebhookDelivery
 from app.webhooks import (
     _WEBHOOK_PAYLOAD_MAX_BYTES,
     WebhookDeliveryListOut,
@@ -808,9 +808,9 @@ async def test_queued_workflow_run_survives_a_failing_health_log_insert(
     500 also invites GitHub to redeliver and double the work.
 
     This asserts the response contract under that failure: the identifiers the
-    caller needs are present. It does NOT reproduce MissingGreenlet itself — the
-    test harness's TestAsyncSession overrides expire_all() to preserve primary
-    keys, so the expiry is masked here even without the snapshot.
+    caller needs are present. Because the test harness uses standard AsyncSession
+    matching production, a rollback expires all instance attributes, meaning this
+    test directly validates that pre-rollback snapshotting prevents MissingGreenlet.
     """
     await truncate_all(db)
     user = await user_factory(github_id=9121, username="wh_health_recorder_fail")
@@ -854,6 +854,9 @@ async def test_queued_workflow_run_survives_a_failing_health_log_insert(
     # Both identifiers survived the rollback.
     assert body["run_id"]
     assert body["github_run_id"] == 555501
+    run_in_db = await db.get(Run, uuid.UUID(body["run_id"]))
+    assert run_in_db is not None
+    assert run_in_db.github_run_id == 555501
 
 
 @pytest.mark.asyncio
