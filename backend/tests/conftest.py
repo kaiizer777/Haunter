@@ -107,21 +107,9 @@ if _TEST_DB_URL:
         _test_url, poolclass=NullPool, echo=False, connect_args={"ssl": True}
     )
 
-    class TestAsyncSession(AsyncSession):
-        def expire_all(self) -> None:
-            """Expire non-primary-key attributes so reloads work without MissingGreenlet on PK access."""
-            for state in list(self.sync_session.identity_map.all_states()):
-                obj = state.obj()
-                if obj is not None and getattr(state, "mapper", None) is not None:
-                    pk_keys = {c.key for c in state.mapper.primary_key}
-                    attrs = [
-                        k for k in state.mapper.column_attrs.keys() if k not in pk_keys
-                    ]
-                    self.sync_session.expire(obj, attribute_names=attrs)
-
     async_session_maker = async_sessionmaker(
         bind=_test_engine,
-        class_=TestAsyncSession,
+        class_=AsyncSession,
         expire_on_commit=False,
     )
     from app import db as db_module

@@ -592,8 +592,9 @@ async def test_generate_pr_text_does_not_write_run_pr_fields(db: AsyncSession) -
         )
 
     # Check that generate_pr_text() did not mutate or populate PR destination fields
+    run_id = run.id
     db.expire_all()
-    refreshed_run = (await db.execute(select(Run).where(Run.id == run.id))).scalar_one()
+    refreshed_run = (await db.execute(select(Run).where(Run.id == run_id))).scalar_one()
     assert refreshed_run.pr_url is None
     assert refreshed_run.pr_number is None
     assert refreshed_run.pr_branch is None

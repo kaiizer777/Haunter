@@ -11,7 +11,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, MissingGreenlet
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.pool import NullPool
 
@@ -950,3 +950,38 @@ async def test_audit_job_has_recoverable_dispatch_defaults(
     await db.commit()
     await db.refresh(job)
     assert job.status == "skipped_no_diff"
+
+@pytest.mark.asyncio
+async def test_session_rollback_and_expire_all_expire_model_attributes(
+    db: AsyncSession,
+):
+    """Verify that rollback and expire_all expire persistent model attributes (including PK).
+
+    Accessing expired attributes on an unrefreshed instance outside an async load context
+    raises MissingGreenlet, proving the test session fixture accurately mirrors production
+    AsyncSession expiration semantics.
+    """
+    await truncate_all(db)
+    user = User(github_id=9099, github_username="rollback_test_user", access_token="t99")
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    # Sanity check: accessing attributes while unexpired works cleanly
+    assert user.id is not None
+    assert user.github_username == "rollback_test_user"
+
+    # 1. After db.expire_all(), attributes are expired; synchronous access raises MissingGreenlet
+    db.expire_all()
+    with pytest.raises(MissingGreenlet):
+        _ = user.id
+
+    # Refresh restores attributes
+    await db.refresh(user)
+    assert user.id is not None
+
+    # 2. After await db.rollback(), attributes are also expired; synchronous access raises MissingGreenlet
+    await db.rollback()
+    with pytest.raises(MissingGreenlet):
+        _ = user.id
+
