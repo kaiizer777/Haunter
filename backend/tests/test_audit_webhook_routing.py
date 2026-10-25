@@ -3357,13 +3357,14 @@ async def test_settings_version_is_persisted_with_the_audit_job(
     await truncate_all(db)
     repo = await seed_repo(db, user_factory, "ver-org", "ver-repo")
     row = await set_repo_auditor_settings(db, repo)
+    repo_id = repo.id
     db.expire_all()
     refreshed = await db.scalar(
-        select(RepoSettings).where(RepoSettings.repo_id == repo.id)
+        select(RepoSettings).where(RepoSettings.repo_id == repo_id)
     )
     assert refreshed is not None
     assert refreshed.settings_version >= 1
-    trigger = await audit_pipeline.get_auditor_trigger(db, repo.id)
+    trigger = await audit_pipeline.get_auditor_trigger(db, repo_id)
     assert trigger.settings_version == refreshed.settings_version
     assert row.settings_version == refreshed.settings_version
 

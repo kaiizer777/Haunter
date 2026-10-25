@@ -219,8 +219,9 @@ async def test_commit_success(
     # identity-map entry so the next SELECT hits the DB rather than the cache.
     await db.execute(select(AgentSession).where(AgentSession.id == session.id))
     await db.commit()  # flush any pending state and release shared lock
+    session_id = session.id
     db.expire_all()
-    stmt = select(AgentSession).where(AgentSession.id == session.id)
+    stmt = select(AgentSession).where(AgentSession.id == session_id)
     result = await db.execute(stmt)
     db_session: AgentSession = result.scalars().first()
     assert db_session is not None
@@ -745,9 +746,10 @@ async def test_commit_without_repo_write_access_forbidden(
     _assert_no_github_writes(mocks)
 
     await db.commit()
+    session_id = session.id
     db.expire_all()
     result = await db.execute(
-        select(AgentSession).where(AgentSession.id == session.id)
+        select(AgentSession).where(AgentSession.id == session_id)
     )
     persisted = result.scalars().first()
     assert persisted is not None

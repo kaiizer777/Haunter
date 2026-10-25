@@ -463,20 +463,22 @@ async def test_put_global_preserves_repo_overrides(
     assert resp.status_code == 200
     assert resp.json()["scope"] == "global"
 
+    global_cfg_id = global_cfg.id
+    repo_cfg_id = repo_cfg.id
     db.expire_all()
     result = await db.execute(select(ModelConfig))
     rows = {str(c.id): c for c in result.scalars().all()}
 
     # Old global deactivated, new global active.
-    assert rows[str(global_cfg.id)].is_active is False
-    assert rows[str(global_cfg.id)].scope == "global"
+    assert rows[str(global_cfg_id)].is_active is False
+    assert rows[str(global_cfg_id)].scope == "global"
     assert rows[resp.json()["id"]].is_active is True
     assert rows[resp.json()["id"]].scope == "global"
 
     # Repo override untouched.
-    assert rows[str(repo_cfg.id)].is_active is True
-    assert rows[str(repo_cfg.id)].scope == "repo"
-    assert rows[str(repo_cfg.id)].model_name == "gpt-4o"
+    assert rows[str(repo_cfg_id)].is_active is True
+    assert rows[str(repo_cfg_id)].scope == "repo"
+    assert rows[str(repo_cfg_id)].model_name == "gpt-4o"
 
     # Repo GET still resolves the override, global GET resolves the new default.
     client2 = make_auth_client(admin_user.id)
@@ -517,10 +519,11 @@ async def test_put_repo_stamps_repo_scope(
     assert data["repo_id"] == str(repo.id)
     assert data["user_id"] == str(user.id)
 
+    repo_id = repo.id
     db.expire_all()
     row = (
         await db.execute(select(ModelConfig).where(ModelConfig.id == data["id"]))
     ).scalar_one()
     assert row.scope == "repo"
-    assert row.repo_id == repo.id
+    assert row.repo_id == repo_id
     assert row.is_active is True

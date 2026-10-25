@@ -757,8 +757,9 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
         await handle_failed_run(child_run.id)
 
     # Refresh child run
+    child_run_id = child_run.id
     db.expire_all()
-    res = await db.execute(select(Run).where(Run.id == child_run.id))
+    res = await db.execute(select(Run).where(Run.id == child_run_id))
     updated_run = res.scalar_one()
 
     assert updated_run.status == RunStatus.pr_opened.value
@@ -780,7 +781,7 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     mock_post_pr.assert_not_called()
 
     # Verify attempt notes persisted reviewer critique
-    stmt = select(Attempt).where(Attempt.run_id == child_run.id)
+    stmt = select(Attempt).where(Attempt.run_id == child_run_id)
     child_attempt = (await db.execute(stmt)).scalars().first()
     assert child_attempt is not None
     assert "docstring and type hints" in child_attempt.strategy_notes
@@ -873,8 +874,9 @@ async def test_refinement_verification_failure_posts_diagnostic_pr_comment(
         await handle_failed_run(child_run.id)
 
     # Refresh child run
+    child_run_id = child_run.id
     db.expire_all()
-    res = await db.execute(select(Run).where(Run.id == child_run.id))
+    res = await db.execute(select(Run).where(Run.id == child_run_id))
     updated_run = res.scalar_one()
 
     assert updated_run.status == RunStatus.fallback_commented.value
