@@ -414,8 +414,9 @@ async def test_put_global_preserves_repo_overrides(
     """
     await truncate_all(db)
     admin_user = await user_factory(role="admin")
-    client = make_auth_client(admin_user.id)
-    monkeypatch.setattr(settings, "admin_user_id", str(admin_user.id))
+    admin_user_id = admin_user.id
+    client = make_auth_client(admin_user_id)
+    monkeypatch.setattr(settings, "admin_user_id", str(admin_user_id))
 
     # Seed one active global config.
     global_cfg = ModelConfig(
@@ -481,7 +482,7 @@ async def test_put_global_preserves_repo_overrides(
     assert rows[str(repo_cfg_id)].model_name == "gpt-4o"
 
     # Repo GET still resolves the override, global GET resolves the new default.
-    client2 = make_auth_client(admin_user.id)
+    client2 = make_auth_client(admin_user_id)
     async with client2:
         repo_resp = await client2.get(f"/config/model?repo_id={repo_id}")
         assert repo_resp.status_code == 200
