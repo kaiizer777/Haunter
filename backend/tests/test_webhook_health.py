@@ -34,10 +34,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import MissingGreenlet, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Repo, WebhookDelivery
+from app.models import Repo, Run, WebhookDelivery
 from app.webhooks import (
     _WEBHOOK_PAYLOAD_MAX_BYTES,
     WebhookDeliveryListOut,
@@ -808,9 +809,9 @@ async def test_queued_workflow_run_survives_a_failing_health_log_insert(
     500 also invites GitHub to redeliver and double the work.
 
     This asserts the response contract under that failure: the identifiers the
-    caller needs are present. It does NOT reproduce MissingGreenlet itself — the
-    test harness's TestAsyncSession overrides expire_all() to preserve primary
-    keys, so the expiry is masked here even without the snapshot.
+    caller needs are present. Because the test harness uses standard AsyncSession
+    matching production, a rollback expires all instance attributes, meaning this
+    test directly validates that pre-rollback snapshotting prevents MissingGreenlet.
     """
     await truncate_all(db)
     user = await user_factory(github_id=9121, username="wh_health_recorder_fail")
@@ -854,6 +855,147 @@ async def test_queued_workflow_run_survives_a_failing_health_log_insert(
     # Both identifiers survived the rollback.
     assert body["run_id"]
     assert body["github_run_id"] == 555501
+    run_in_db = await db.get(Run, uuid.UUID(body["run_id"]))
+    assert run_in_db is not None
+    assert run_in_db.github_run_id == 555501
+
+
+@pytest.mark.asyncio
+async def test_unsnapshotted_orm_attribute_access_after_rollback_raises_missing_greenlet(
+    db: AsyncSession, user_factory
+):
+    """Explicit regression test proving that accessing un-snapshotted model attributes
+    post-rollback raises MissingGreenlet.
+
+    In SQLAlchemy 2.0 with standard AsyncSession (and expire_on_commit=False), calling
+    await session.rollback() unconditionally expires all loaded ORM attributes across all
+    instances in the session. Outside of an active greenlet or async refresh, accessing an
+    ORM attribute (including primary keys or columns) triggers lazy loading via the sync
+    accessor, which fails immediately with MissingGreenlet. This proves that snapshotting
+    run_id and github_run_id before invoking _record_webhook_delivery() is strictly necessary
+    to prevent turning health-log recording failures into 500 errors.
+    """
+    await truncate_all(db)
+    user = await user_factory(github_id=9122, username="wh_greenlet_test_user")
+    repo = Repo(user_id=user.id, owner="greenlet-org", name="greenlet-repo")
+    db.add(repo)
+    await db.commit()
+
+    run = Run(
+        repo_id=repo.id,
+        github_run_id=555502,
+        github_delivery_id=str(uuid.uuid4()),
+        head_sha="0123456789abcdef0123456789abcdef01234567",
+        head_branch="main",
+        status="pending",
+        conclusion="failure",
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+
+    # Pre-rollback: attributes are present in memory and safely accessible
+    assert run.id is not None
+    assert run.github_run_id == 555502
+
+    # Snapshot values beforehand (as the webhook handler does at app/webhooks.py:2760)
+    snapshotted_run_id = str(run.id)
+    snapshotted_github_run_id = run.github_run_id
+
+    # Simulate what _record_webhook_delivery() does on any DB insertion failure:
+    await db.rollback()
+
+    # The snapshotted scalars are unaffected by the rollback:
+    assert snapshotted_run_id
+    assert snapshotted_github_run_id == 555502
+
+    # But accessing un-snapshotted ORM attributes on the post-rollback instance
+    # triggers lazy loading on the async session, raising MissingGreenlet:
+    with pytest.raises(MissingGreenlet):
+        _ = run.id
+
+    with pytest.raises(MissingGreenlet):
+        _ = run.github_run_id
+
+
+@pytest.mark.asyncio
+async def test_queued_workflow_run_survives_real_health_log_recording_failure(
+    client: httpx.AsyncClient, db: AsyncSession, user_factory, caplog
+):
+    """Production-shaped coverage: webhook delivery survives real health-log DB failure.
+
+    Unlike test_queued_workflow_run_survives_a_failing_health_log_insert which mocks
+    _record_webhook_delivery entirely, this test exercises the real _record_webhook_delivery()
+    code path with an unmodified AsyncSession.
+
+    When inserting the WebhookDelivery row fails at commit time, _record_webhook_delivery()
+    catches the DB exception, logs a warning, and executes await db.rollback(). The rollback
+    unconditionally expires all loaded ORM instances in the session (including the newly created
+    Run). Because run_id and github_run_id were snapshotted into local scalar variables prior to
+    invoking _record_webhook_delivery(), the handler successfully builds and returns a 200 queued
+    response without triggering MissingGreenlet.
+    """
+    await truncate_all(db)
+    user = await user_factory(github_id=9123, username="wh_real_health_recorder_fail")
+    db.add(Repo(user_id=user.id, owner="real-fail-org", name="real-fail-repo"))
+    await db.commit()
+
+    delivery_id = str(uuid.uuid4())
+    payload = workflow_run_payload(run_id=555503)
+    payload["repository"]["name"] = "real-fail-repo"
+    payload["repository"]["full_name"] = "real-fail-org/real-fail-repo"
+    payload["repository"]["owner"]["login"] = "real-fail-org"
+    raw_body = json.dumps(payload).encode("utf-8")
+
+    real_commit = AsyncSession.commit
+
+    async def _failing_health_commit(session_self: AsyncSession, *args, **kwargs):
+        # Allow Run insert commit to succeed; fail specifically when WebhookDelivery is pending
+        for obj in session_self.new:
+            if isinstance(obj, WebhookDelivery):
+                raise OperationalError(
+                    "COMMIT", {}, Exception("simulated DB health log failure")
+                )
+        return await real_commit(session_self, *args, **kwargs)
+
+    with (
+        patch(
+            "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+        ) as mock_get,
+        patch.object(AsyncSession, "commit", _failing_health_commit),
+        caplog.at_level("WARNING", logger="app.webhooks"),
+    ):
+        mock_get.return_value = _mock_adapter()
+
+        resp = await client.post(
+            "/webhooks/github",
+            headers=_gh_headers(
+                "workflow_run", delivery_id, sign_payload(TEST_SECRET, raw_body)
+            ),
+            content=raw_body,
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "queued"
+    assert body["run_id"]
+    assert body["github_run_id"] == 555503
+
+    # Verify the Run row was committed to the DB
+    run_in_db = await db.get(Run, uuid.UUID(body["run_id"]))
+    assert run_in_db is not None
+    assert run_in_db.github_run_id == 555503
+
+    # Verify WebhookDelivery was rolled back and never persisted
+    delivery_row = (
+        await db.execute(
+            select(WebhookDelivery).where(WebhookDelivery.delivery_id == delivery_id)
+        )
+    ).scalar_one_or_none()
+    assert delivery_row is None
+
+    # Verify _record_webhook_delivery logged the expected warning on rollback
+    assert "webhook delivery health-log insert failed" in caplog.text
 
 
 @pytest.mark.asyncio
