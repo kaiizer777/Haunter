@@ -34,6 +34,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import MissingGreenlet
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -857,6 +858,64 @@ async def test_queued_workflow_run_survives_a_failing_health_log_insert(
     run_in_db = await db.get(Run, uuid.UUID(body["run_id"]))
     assert run_in_db is not None
     assert run_in_db.github_run_id == 555501
+
+
+@pytest.mark.asyncio
+async def test_unsnapshotted_orm_attribute_access_after_rollback_raises_missing_greenlet(
+    db: AsyncSession, user_factory
+):
+    """Explicit regression test proving that accessing un-snapshotted model attributes
+    post-rollback raises MissingGreenlet.
+
+    In SQLAlchemy 2.0 with standard AsyncSession (and expire_on_commit=False), calling
+    await session.rollback() unconditionally expires all loaded ORM attributes across all
+    instances in the session. Outside of an active greenlet or async refresh, accessing an
+    ORM attribute (including primary keys or columns) triggers lazy loading via the sync
+    accessor, which fails immediately with MissingGreenlet. This proves that snapshotting
+    run_id and github_run_id before invoking _record_webhook_delivery() is strictly necessary
+    to prevent turning health-log recording failures into 500 errors.
+    """
+    await truncate_all(db)
+    user = await user_factory(github_id=9122, username="wh_greenlet_test_user")
+    repo = Repo(user_id=user.id, owner="greenlet-org", name="greenlet-repo")
+    db.add(repo)
+    await db.commit()
+
+    run = Run(
+        repo_id=repo.id,
+        github_run_id=555502,
+        github_delivery_id=str(uuid.uuid4()),
+        head_sha="0123456789abcdef0123456789abcdef01234567",
+        head_branch="main",
+        status="pending",
+        conclusion="failure",
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+
+    # Pre-rollback: attributes are present in memory and safely accessible
+    assert run.id is not None
+    assert run.github_run_id == 555502
+
+    # Snapshot values beforehand (as the webhook handler does at app/webhooks.py:2760)
+    snapshotted_run_id = str(run.id)
+    snapshotted_github_run_id = run.github_run_id
+
+    # Simulate what _record_webhook_delivery() does on any DB insertion failure:
+    await db.rollback()
+
+    # The snapshotted scalars are unaffected by the rollback:
+    assert snapshotted_run_id
+    assert snapshotted_github_run_id == 555502
+
+    # But accessing un-snapshotted ORM attributes on the post-rollback instance
+    # triggers lazy loading on the async session, raising MissingGreenlet:
+    with pytest.raises(MissingGreenlet):
+        _ = run.id
+
+    with pytest.raises(MissingGreenlet):
+        _ = run.github_run_id
 
 
 @pytest.mark.asyncio
