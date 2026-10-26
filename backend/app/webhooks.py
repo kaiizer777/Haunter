@@ -417,7 +417,7 @@ def _format_auditor_thread(
 
 async def _handle_auditor_mention(
     db: AsyncSession,
-    repo: Repo,
+    repo: Any,  # Repo row, or a pre-rollback snapshot of it (id/install/owner/name)
     repo_owner: str,
     repo_name: str,
     pr_number: int,
@@ -689,6 +689,16 @@ async def _run_auditor_mention_background(
             # effort (never raises): if this insert fails the work still runs
             # and the worst case is a duplicate-scheduled second run, i.e.
             # at-least-once answers instead of a silently lost one.
+            # Snapshot every repo column the worker needs before the recorder:
+            # its failure path rolls the session back, expiring `repo`, and
+            # reading expired ORM attrs afterwards raises MissingGreenlet.
+            _bg_repo_id = repo.id
+            _bg_repo = SimpleNamespace(
+                id=_bg_repo_id,
+                github_install_id=repo.github_install_id,
+                owner=repo.owner,
+                name=repo.name,
+            )
             await _record_webhook_delivery(
                 db,
                 event=event,
@@ -696,7 +706,7 @@ async def _run_auditor_mention_background(
                 status_value=_AUDITOR_RUNNING_STATUS,
                 reason=f"auditor_started pr={pr_number} comment={comment_id}",
                 repo=f"{repo_owner}/{repo_name}",
-                repo_id=repo.id,
+                repo_id=_bg_repo_id,
             )
             comment_obj = SimpleNamespace(
                 id=comment_id,
@@ -707,7 +717,7 @@ async def _run_auditor_mention_background(
             )
             result = await _handle_auditor_mention(
                 db,
-                repo,
+                _bg_repo,
                 repo_owner,
                 repo_name,
                 pr_number,
@@ -725,7 +735,7 @@ async def _run_auditor_mention_background(
                 status_value=status_value,
                 reason=f"{reason} pr={pr_number} comment={comment_id}",
                 repo=f"{repo_owner}/{repo_name}",
-                repo_id=repo.id,
+                repo_id=_bg_repo_id,
             )
     except Exception as exc:
         logger.warning(
@@ -1058,6 +1068,9 @@ async def _dispatch_review(
     """
     from app.adapters.hosting import get_hosting_adapter
 
+    # Snapshot before any commit/rollback below: both expire ORM state, and
+    # reading review.id afterwards would raise MissingGreenlet.
+    _dispatch_review_id = review.id
     try:
         adapter = await get_hosting_adapter()
         await adapter.schedule_review(review.id, background_tasks)
@@ -1081,14 +1094,14 @@ async def _dispatch_review(
             event,
             delivery_id,
             _log_repo(owner, repo_name),
-            review.id,
+            _dispatch_review_id,
             type(exc).__name__,
         )
         _log_webhook_decision(
             event=event,
             delivery_id=delivery_id,
             status="dispatch_failed",
-            reason=f"review_id={review.id} error_type={type(exc).__name__}",
+            reason=f"review_id={_dispatch_review_id} error_type={type(exc).__name__}",
             repo=f"{owner}/{repo_name}",
             level="warning",
         )
@@ -2266,6 +2279,7 @@ async def _handle_issue_trigger(
             existing_issue_run.id,
         )
         dup_pr_url = getattr(existing_issue_run, "pr_url", None)
+        dup_run_id = str(existing_issue_run.id)
         dup_pr_number = getattr(existing_issue_run, "pr_number", None)
         if dup_pr_url:
             dup_suffix = f" — PR #{dup_pr_number}: {dup_pr_url}"
@@ -2290,7 +2304,7 @@ async def _handle_issue_trigger(
             event=event,
             delivery_id=delivery_id,
             status_value="duplicate",
-            reason=f"issue={issue_number} run_id={existing_issue_run.id}",
+            reason=f"issue={issue_number} run_id={dup_run_id}",
             repo=log_repo,
             repo_id=repo.id,
             payload=raw_body,
@@ -2299,9 +2313,9 @@ async def _handle_issue_trigger(
             "status": "duplicate",
             "delivery_id": delivery_id,
             "issue_number": issue_number,
-            "run_id": str(existing_issue_run.id),
-            "pr_url": getattr(existing_issue_run, "pr_url", None),
-            "pr_number": getattr(existing_issue_run, "pr_number", None),
+            "run_id": dup_run_id,
+            "pr_url": dup_pr_url,
+            "pr_number": dup_pr_number,
         }
 
     # 7. Resolve the default-branch head SHA best-effort (R2): an issue event
@@ -2378,6 +2392,9 @@ async def _handle_issue_trigger(
             log_repo,
             issue_number,
         )
+        dup_existing_run_id = str(existing.id) if existing is not None else None
+        dup_existing_pr_url = getattr(existing, "pr_url", None)
+        dup_existing_pr_number = getattr(existing, "pr_number", None)
         await _record_webhook_delivery(
             db,
             event=event,
@@ -2392,9 +2409,9 @@ async def _handle_issue_trigger(
             "status": "duplicate",
             "delivery_id": delivery_id,
             "issue_number": issue_number,
-            "run_id": str(existing.id) if existing is not None else None,
-            "pr_url": getattr(existing, "pr_url", None),
-            "pr_number": getattr(existing, "pr_number", None),
+            "run_id": dup_existing_run_id,
+            "pr_url": dup_existing_pr_url,
+            "pr_number": dup_existing_pr_number,
         }
 
     # 9. Schedule pipeline asynchronously.
