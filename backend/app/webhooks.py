@@ -2379,6 +2379,9 @@ async def _handle_issue_trigger(
             log_repo,
             issue_number,
         )
+        dup_existing_run_id = str(existing.id) if existing is not None else None
+        dup_existing_pr_url = getattr(existing, "pr_url", None)
+        dup_existing_pr_number = getattr(existing, "pr_number", None)
         await _record_webhook_delivery(
             db,
             event=event,
@@ -2393,9 +2396,9 @@ async def _handle_issue_trigger(
             "status": "duplicate",
             "delivery_id": delivery_id,
             "issue_number": issue_number,
-            "run_id": str(existing.id) if existing is not None else None,
-            "pr_url": getattr(existing, "pr_url", None),
-            "pr_number": getattr(existing, "pr_number", None),
+            "run_id": dup_existing_run_id,
+            "pr_url": dup_existing_pr_url,
+            "pr_number": dup_existing_pr_number,
         }
 
     # 9. Schedule pipeline asynchronously.
