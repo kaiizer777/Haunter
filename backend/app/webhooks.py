@@ -417,7 +417,7 @@ def _format_auditor_thread(
 
 async def _handle_auditor_mention(
     db: AsyncSession,
-    repo: Repo,
+    repo: Any,  # Repo row, or a pre-rollback snapshot of it (id/install/owner/name)
     repo_owner: str,
     repo_name: str,
     pr_number: int,
@@ -689,6 +689,16 @@ async def _run_auditor_mention_background(
             # effort (never raises): if this insert fails the work still runs
             # and the worst case is a duplicate-scheduled second run, i.e.
             # at-least-once answers instead of a silently lost one.
+            # Snapshot every repo column the worker needs before the recorder:
+            # its failure path rolls the session back, expiring `repo`, and
+            # reading expired ORM attrs afterwards raises MissingGreenlet.
+            _bg_repo_id = repo.id
+            _bg_repo = SimpleNamespace(
+                id=_bg_repo_id,
+                github_install_id=repo.github_install_id,
+                owner=repo.owner,
+                name=repo.name,
+            )
             await _record_webhook_delivery(
                 db,
                 event=event,
@@ -696,7 +706,7 @@ async def _run_auditor_mention_background(
                 status_value=_AUDITOR_RUNNING_STATUS,
                 reason=f"auditor_started pr={pr_number} comment={comment_id}",
                 repo=f"{repo_owner}/{repo_name}",
-                repo_id=repo.id,
+                repo_id=_bg_repo_id,
             )
             comment_obj = SimpleNamespace(
                 id=comment_id,
@@ -707,7 +717,7 @@ async def _run_auditor_mention_background(
             )
             result = await _handle_auditor_mention(
                 db,
-                repo,
+                _bg_repo,
                 repo_owner,
                 repo_name,
                 pr_number,
@@ -725,7 +735,7 @@ async def _run_auditor_mention_background(
                 status_value=status_value,
                 reason=f"{reason} pr={pr_number} comment={comment_id}",
                 repo=f"{repo_owner}/{repo_name}",
-                repo_id=repo.id,
+                repo_id=_bg_repo_id,
             )
     except Exception as exc:
         logger.warning(
