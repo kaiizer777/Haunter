@@ -33,8 +33,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
-from sqlalchemy.exc import MissingGreenlet, OperationalError
+from sqlalchemy.exc import IntegrityError, MissingGreenlet, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -44,8 +45,11 @@ from app.webhooks import (
     WebhookDeliveryListOut,
     WebhookDeliveryOut,
     _decode_replay_buffer,
+    _dispatch_review,
     _encode_replay_buffer,
+    _handle_issue_trigger,
     _log_webhook_decision,
+    _run_auditor_mention_background,
     _truncate_reason,
 )
 from tests.conftest import truncate_all
@@ -1228,3 +1232,336 @@ def _gh_headers(event: str, delivery_id: str, signature: str) -> dict[str, str]:
         "X-GitHub-Delivery": delivery_id,
         "X-Hub-Signature-256": signature,
     }
+
+
+# ---------------------------------------------------------------------------
+# Rollback pre-snapshot regression tests (issue #194 / PR #196, Greptile P2)
+# ---------------------------------------------------------------------------
+# One failure mode sits behind all four pre-snapshot fixes on this branch:
+# _record_webhook_delivery() rolls the session back when its insert fails, and
+# a rollback expires every loaded ORM instance — so reading an ORM attribute
+# afterwards raises MissingGreenlet and turns a duplicate/queued answer into a
+# 500. Each fix snapshots the needed columns into locals BEFORE the recorder.
+#
+# These hermetic tests drive the real handlers with an expiring stand-in whose
+# attribute reads raise the real MissingGreenlet after rollback. Each test
+# fails on the pre-fix code (post-rollback ORM read) and passes with the
+# snapshot in place. They run in the default fast suite (no TEST_DATABASE_URL).
+
+
+class _ExpiringAttrs:
+    """Minimal stand-in for a loaded ORM instance with rollback-expiry semantics.
+
+    Attribute reads behave like column access until expire() is called (the
+    test's equivalent of the recorder's rollback path), after which they raise
+    the real MissingGreenlet — exactly what SQLAlchemy raises for expired
+    attributes outside a greenlet. Writes never raise, matching ORM behaviour.
+    """
+
+    def __init__(self, **attrs: object) -> None:
+        self.__dict__["_attrs"] = dict(attrs)
+        self.__dict__["_expired"] = False
+
+    def expire(self) -> None:
+        self.__dict__["_expired"] = True
+
+    def __getattr__(self, name: str) -> object:
+        if self.__dict__["_expired"]:
+            raise MissingGreenlet(f"expired attribute {name!r}")
+        try:
+            return self.__dict__["_attrs"][name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    def __setattr__(self, name: str, value: object) -> None:
+        self.__dict__["_attrs"][name] = value
+
+
+def _issue_trigger_gate_mocks() -> tuple[MagicMock, MagicMock]:
+    """Read-only gates ahead of the duplicate branches of _handle_issue_trigger."""
+    mock_audit = MagicMock()
+    mock_audit.is_manual_audit_comment.return_value = False
+    mock_enforcement = MagicMock()
+    mock_enforcement.is_auto_fix_allowed.return_value = MagicMock(
+        allowed=True, reason="ok"
+    )
+    mock_enforcement.check_cost_ceiling.return_value = MagicMock(
+        allowed=True, reason="ok"
+    )
+    return mock_audit, mock_enforcement
+
+
+@pytest.mark.asyncio
+async def test_duplicate_issue_trigger_survives_failing_health_log_insert():
+    """Pre-rollback snapshot (de77a60): the throttled-duplicate answer keeps ids.
+
+    The 6b branch snapshots existing_issue_run's id/pr_url/pr_number before
+    _record_webhook_delivery(); its failure path rolls back and expires the
+    row. Pre-fix, building the reason/response afterwards raised
+    MissingGreenlet and turned a duplicate into a 500.
+    """
+    from types import SimpleNamespace
+
+    existing_id = uuid.uuid4()
+    existing = _ExpiringAttrs(
+        id=existing_id, pr_url="https://example/pr/1", pr_number=1
+    )
+    repo = SimpleNamespace(id=uuid.uuid4(), default_branch="main")
+    db = MagicMock()
+    db.rollback = AsyncMock(side_effect=lambda: existing.expire())
+
+    async def _failing_record(session: AsyncSession, **kwargs: object) -> None:
+        await session.rollback()
+
+    mock_audit, mock_enforcement = _issue_trigger_gate_mocks()
+    with (
+        patch("app.webhooks.has_issue_trigger", return_value=True),
+        patch("app.webhooks.has_auditor_mention", return_value=False),
+        patch("app.webhooks.audit_pipeline", mock_audit),
+        patch(
+            "app.webhooks._resolve_repo_for_delivery", new_callable=AsyncMock
+        ) as mock_resolve,
+        patch("app.webhooks.get_repo_settings", new_callable=AsyncMock) as mock_settings,
+        patch("app.webhooks.feature_enforcement", mock_enforcement),
+        patch(
+            "app.webhooks._find_existing_issue_root_run", new_callable=AsyncMock
+        ) as mock_find,
+        patch("app.webhooks._post_issue_trigger_ack", new_callable=AsyncMock),
+        patch(
+            "app.webhooks._record_webhook_delivery", new_callable=AsyncMock
+        ) as mock_record,
+    ):
+        mock_resolve.return_value = (repo, None)
+        mock_settings.return_value = SimpleNamespace(
+            enable_pr_comments=True, enable_auto_fix=True, max_cost_per_run_cents=10000
+        )
+        mock_find.return_value = existing
+        mock_record.side_effect = _failing_record
+        result = await _handle_issue_trigger(
+            db,
+            MagicMock(),
+            event="issues",
+            delivery_id="del-dup-issue-1",
+            repo_owner="acme",
+            repo_name="app",
+            issue_number=7,
+            trigger_text="@haunter fix",
+            trigger_comment_id=99,
+            author_association="MEMBER",
+            author_login="alice",
+            sender={},
+            raw_body=b"{}",
+            replay_repo_id=None,
+        )
+
+    assert result["status"] == "duplicate"
+    assert result["run_id"] == str(existing_id)
+    assert result["pr_url"] == "https://example/pr/1"
+    assert result["pr_number"] == 1
+
+
+@pytest.mark.asyncio
+async def test_integrity_error_duplicate_issue_trigger_survives_failing_health_log():
+    """Pre-rollback snapshot (d6587e0): the IntegrityError duplicate keeps ids.
+
+    Same failure mode as above on the second duplicate branch: after the
+    colliding insert rolls back, the re-selected row is snapshotted before the
+    recorder, whose own failure rolls back again. Pre-fix, the response read
+    the expired row and raised MissingGreenlet.
+    """
+    from types import SimpleNamespace
+
+    existing_id = uuid.uuid4()
+    existing = _ExpiringAttrs(
+        id=existing_id, pr_url="https://example/pr/2", pr_number=2
+    )
+    repo = SimpleNamespace(id=uuid.uuid4(), default_branch="main")
+    db = MagicMock()
+    rollbacks = {"n": 0}
+
+    async def _rollback() -> None:
+        # First rollback is the IntegrityError recovery (row not yet loaded);
+        # the recorder's rollback afterwards must expire it.
+        rollbacks["n"] += 1
+        if rollbacks["n"] >= 2:
+            existing.expire()
+
+    async def _failing_record(session: AsyncSession, **kwargs: object) -> None:
+        await session.rollback()
+
+    scalars = MagicMock()
+    scalars.first.return_value = existing
+    result_proxy = MagicMock()
+    result_proxy.scalars.return_value = scalars
+    db.rollback = AsyncMock(side_effect=_rollback)
+    db.commit = AsyncMock(
+        side_effect=IntegrityError("INSERT", {}, Exception("dup delivery"))
+    )
+    db.execute = AsyncMock(return_value=result_proxy)
+
+    mock_audit, mock_enforcement = _issue_trigger_gate_mocks()
+    with (
+        patch("app.webhooks.has_issue_trigger", return_value=True),
+        patch("app.webhooks.has_auditor_mention", return_value=False),
+        patch("app.webhooks.audit_pipeline", mock_audit),
+        patch(
+            "app.webhooks._resolve_repo_for_delivery", new_callable=AsyncMock
+        ) as mock_resolve,
+        patch("app.webhooks.get_repo_settings", new_callable=AsyncMock) as mock_settings,
+        patch("app.webhooks.feature_enforcement", mock_enforcement),
+        patch(
+            "app.webhooks._find_existing_issue_root_run", new_callable=AsyncMock
+        ) as mock_find,
+        patch(
+            "app.github.pr.get_installation_token", new_callable=AsyncMock
+        ) as mock_token,
+        patch(
+            "app.github_client.fetch_branch_sha", new_callable=AsyncMock
+        ) as mock_sha,
+        patch(
+            "app.webhooks._record_webhook_delivery", new_callable=AsyncMock
+        ) as mock_record,
+    ):
+        mock_resolve.return_value = (repo, None)
+        mock_settings.return_value = SimpleNamespace(
+            enable_pr_comments=True, enable_auto_fix=True, max_cost_per_run_cents=10000
+        )
+        mock_find.return_value = None
+        mock_token.return_value = "tok"
+        mock_sha.return_value = "0" * 40
+        mock_record.side_effect = _failing_record
+        result = await _handle_issue_trigger(
+            db,
+            MagicMock(),
+            event="issue_comment",
+            delivery_id="del-dup-issue-2",
+            repo_owner="acme",
+            repo_name="app",
+            issue_number=8,
+            trigger_text="@haunter fix",
+            trigger_comment_id=100,
+            author_association="MEMBER",
+            author_login="alice",
+            sender={},
+            raw_body=b"{}",
+            replay_repo_id=None,
+        )
+
+    assert result["status"] == "duplicate"
+    assert result["run_id"] == str(existing_id)
+    assert result["pr_url"] == "https://example/pr/2"
+    assert result["pr_number"] == 2
+
+
+@pytest.mark.asyncio
+async def test_auditor_background_worker_survives_failing_health_log_insert():
+    """Pre-rollback snapshot (d79a7ae): the auditor worker uses copied columns.
+
+    The worker snapshots the repo's id/install/owner/name before the running
+    recorder, whose failure path expires the ORM row. Pre-fix, the mention
+    handler and the terminal recorder read the expired row and raised
+    MissingGreenlet, losing the answer; post-fix both use the snapshot.
+    """
+    repo_id = uuid.uuid4()
+    repo = _ExpiringAttrs(
+        id=repo_id, github_install_id=4242, owner="acme", name="app"
+    )
+    db = MagicMock()
+    db.get = AsyncMock(return_value=repo)
+    db.rollback = AsyncMock(side_effect=lambda: repo.expire())
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=db)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+
+    record_calls: list[dict] = []
+
+    async def _failing_record(session: AsyncSession, **kwargs: object) -> None:
+        record_calls.append(dict(kwargs))
+        await session.rollback()
+
+    captured: dict = {}
+
+    async def _fake_mention(
+        session: AsyncSession, repo_arg: object, *args: object, **kwargs: object
+    ) -> dict:
+        captured["repo"] = repo_arg
+        return {"status": "auditor_replied", "channel": "pr_comment"}
+
+    with (
+        patch("app.db.async_session_maker", return_value=session_cm),
+        patch(
+            "app.webhooks._record_webhook_delivery", new_callable=AsyncMock
+        ) as mock_record,
+        patch("app.webhooks._handle_auditor_mention", side_effect=_fake_mention),
+    ):
+        mock_record.side_effect = _failing_record
+        result = await _run_auditor_mention_background(
+            repo_id=repo_id,
+            repo_owner="acme",
+            repo_name="app",
+            pr_number=1,
+            comment_id=2,
+            comment_body="hello",
+            comment_login="alice",
+            author_association="MEMBER",
+            in_reply_to_id=None,
+            event="issue_comment",
+            delivery_id="del-audit-1",
+        )
+
+    assert result is None
+    # Running row + terminal success row; pre-fix the terminal write blew up on
+    # the expired row and the worker fell into the error path instead.
+    assert len(record_calls) == 2
+    assert record_calls[1]["status_value"] == "auditor_replied"
+    assert all(call["repo_id"] == repo_id for call in record_calls)
+    # Whatever the handler received stays readable with the right values —
+    # pre-fix this was the expired ORM row and every read raised.
+    snapshot = captured["repo"]
+    assert snapshot.id == repo_id
+    assert snapshot.github_install_id == 4242
+    assert snapshot.owner == "acme"
+    assert snapshot.name == "app"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_review_failure_survives_rollback_expiry():
+    """Pre-rollback snapshot (e5b2543): dispatch failure logs the copied id.
+
+    schedule_review raises, the terminal write's commit fails, and the rollback
+    expires `review`. Pre-fix, the log lines read review.id afterwards and
+    raised MissingGreenlet instead of the retryable 503.
+    """
+    review_id = uuid.uuid4()
+    review = _ExpiringAttrs(id=review_id, status="pending", failure_reason=None)
+    adapter = MagicMock()
+    adapter.schedule_review = AsyncMock(side_effect=RuntimeError("lambda 500"))
+    db = MagicMock()
+    db.commit = AsyncMock(side_effect=Exception("commit failed"))
+    db.rollback = AsyncMock(side_effect=lambda: review.expire())
+    logged: dict = {}
+
+    def _capture_log(*args: object, reason: object = None, **kwargs: object) -> None:
+        logged["reason"] = reason
+
+    with (
+        patch(
+            "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+        ) as mock_get,
+        patch("app.webhooks._log_webhook_decision", side_effect=_capture_log),
+    ):
+        mock_get.return_value = adapter
+        with pytest.raises(HTTPException) as exc_info:
+            await _dispatch_review(
+                db,
+                review,
+                MagicMock(),
+                event="pull_request",
+                delivery_id="del-rev-1",
+                owner="acme",
+                repo_name="app",
+            )
+
+    assert exc_info.value.status_code == 503
+    assert f"review_id={review_id}" in str(logged["reason"])
+    assert "RuntimeError" in str(logged["reason"])
