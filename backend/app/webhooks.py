@@ -1068,6 +1068,9 @@ async def _dispatch_review(
     """
     from app.adapters.hosting import get_hosting_adapter
 
+    # Snapshot before any commit/rollback below: both expire ORM state, and
+    # reading review.id afterwards would raise MissingGreenlet.
+    _dispatch_review_id = review.id
     try:
         adapter = await get_hosting_adapter()
         await adapter.schedule_review(review.id, background_tasks)
@@ -1091,14 +1094,14 @@ async def _dispatch_review(
             event,
             delivery_id,
             _log_repo(owner, repo_name),
-            review.id,
+            _dispatch_review_id,
             type(exc).__name__,
         )
         _log_webhook_decision(
             event=event,
             delivery_id=delivery_id,
             status="dispatch_failed",
-            reason=f"review_id={review.id} error_type={type(exc).__name__}",
+            reason=f"review_id={_dispatch_review_id} error_type={type(exc).__name__}",
             repo=f"{owner}/{repo_name}",
             level="warning",
         )
