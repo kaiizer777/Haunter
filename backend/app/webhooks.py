@@ -2266,6 +2266,7 @@ async def _handle_issue_trigger(
             existing_issue_run.id,
         )
         dup_pr_url = getattr(existing_issue_run, "pr_url", None)
+        dup_run_id = str(existing_issue_run.id)
         dup_pr_number = getattr(existing_issue_run, "pr_number", None)
         if dup_pr_url:
             dup_suffix = f" — PR #{dup_pr_number}: {dup_pr_url}"
@@ -2290,7 +2291,7 @@ async def _handle_issue_trigger(
             event=event,
             delivery_id=delivery_id,
             status_value="duplicate",
-            reason=f"issue={issue_number} run_id={existing_issue_run.id}",
+            reason=f"issue={issue_number} run_id={dup_run_id}",
             repo=log_repo,
             repo_id=repo.id,
             payload=raw_body,
@@ -2299,9 +2300,9 @@ async def _handle_issue_trigger(
             "status": "duplicate",
             "delivery_id": delivery_id,
             "issue_number": issue_number,
-            "run_id": str(existing_issue_run.id),
-            "pr_url": getattr(existing_issue_run, "pr_url", None),
-            "pr_number": getattr(existing_issue_run, "pr_number", None),
+            "run_id": dup_run_id,
+            "pr_url": dup_pr_url,
+            "pr_number": dup_pr_number,
         }
 
     # 7. Resolve the default-branch head SHA best-effort (R2): an issue event
