@@ -46,6 +46,17 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 _TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "")
 
+# Fail fast: the test suite must never run against managed production.
+# The services Postgres in .github/workflows/ci.yml is a loopback throwaway;
+# a Neon hostname here means a prod-shaped URL leaked into the test env and
+# every DB fixture below would then build engines against production.
+if _TEST_DB_URL and "neon.tech" in _TEST_DB_URL.lower():
+    raise RuntimeError(
+        "TEST_DATABASE_URL must never point at Neon (neon.tech). Point it at "
+        "the local Postgres service (localhost) instead — refusing to run "
+        "tests against a managed production database."
+    )
+
 # Hosts that can only be a developer's machine or a CI service container, never
 # a managed production endpoint. Prod is Neon/RDS; it is never on loopback.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
