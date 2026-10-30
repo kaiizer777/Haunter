@@ -250,9 +250,11 @@ class ModelConfigUpdate(BaseModel):
             if not model.endswith("-free"):
                 raise ValueError(
                     f"Invalid model '{model}' for provider '{provider}'. "
-                    "OpenCode Zen models must end with '-free'."
-                    if provider == "opencode_zen"
-                    else "OpenCode Go models must end with '-free'."
+                    + (
+                        "OpenCode Zen models must end with '-free'."
+                        if provider == "opencode_zen"
+                        else "OpenCode Go models must end with '-free'."
+                    )
                 )
         elif provider == "openai":
             if model not in OPENAI_MODELS:

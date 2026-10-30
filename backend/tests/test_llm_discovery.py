@@ -196,3 +196,24 @@ async def test_get_dynamic_free_models_force_refresh_bypasses_cache() -> None:
     res2 = await get_dynamic_free_models(api_key="test_key_123", force_refresh=True)
     assert route.call_count == 2
     assert res2 == ["model-2-free"]
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_dynamic_free_models_isolates_cache_by_base_url() -> None:
+    respx.get("https://opencode.ai/zen/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "zen-model-free"}]})
+    )
+    respx.get("https://opencode.ai/go/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "go-model-free"}]})
+    )
+
+    zen_res = await get_dynamic_free_models(
+        base_url="https://opencode.ai/zen/v1", api_key="zen_key"
+    )
+    go_res = await get_dynamic_free_models(
+        base_url="https://opencode.ai/go/v1", api_key="go_key"
+    )
+
+    assert zen_res == ["zen-model-free"]
+    assert go_res == ["go-model-free"]
+

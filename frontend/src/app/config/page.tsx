@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   AlertCircle,
   ShieldCheck,
+  Shield,
   GitBranch,
   Globe,
   Zap,

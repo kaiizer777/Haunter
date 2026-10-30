@@ -177,11 +177,17 @@ class LLMClient:
 
         seed_model = explicit_model or config.model_name
 
+        provider_api_key = (
+            (settings.opencode_go_api_key or settings.opencode_zen_api_key)
+            if target_provider == "opencode_go"
+            else settings.opencode_zen_api_key
+        )
+
         # Construct dynamic fallback chain
         if target_provider in ("opencode_zen", "opencode_go"):
             dynamic_models = await get_dynamic_free_models(
                 base_url=config.base_url,
-                api_key=settings.opencode_zen_api_key,
+                api_key=provider_api_key,
             )
         else:
             dynamic_models = []
@@ -194,6 +200,7 @@ class LLMClient:
         base_provider = OpenCodeZenProvider(
             base_url=config.base_url,
             timeout=self.timeout,
+            api_key=provider_api_key,
         )
 
         attempts_log: list[tuple[str, int, str]] = []
