@@ -21,9 +21,9 @@ export default function RootPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#09090b]">
-      <div className="flex flex-col items-center gap-3">
-        <div className="h-7 w-7 rounded-[5px] bg-zinc-900 border border-zinc-800 animate-pulse" />
-        <Skeleton className="h-4 w-28" />
+      <div className="flex flex-col items-center gap-2.5">
+        <div className="h-6 w-6 rounded-[4px] bg-zinc-900 border border-zinc-800 animate-pulse" />
+        <Skeleton className="h-3.5 w-24" />
       </div>
     </div>
   );

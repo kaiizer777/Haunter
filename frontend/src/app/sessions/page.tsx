@@ -43,7 +43,7 @@ import { AppLayout } from "@/components/layout/app-layout";
 function StatusChip({ status }: { status: string }) {
   if (status === "active") {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-mono font-medium text-emerald-300">
+      <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-mono font-medium text-emerald-300">
         <span className="relative flex h-1.5 w-1.5">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60" />
           <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" />
@@ -54,14 +54,14 @@ function StatusChip({ status }: { status: string }) {
   }
   if (status === "completed") {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[11px] font-mono font-medium text-violet-300">
+      <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-mono font-medium text-violet-300">
         <CheckCircle2 className="h-3 w-3" />
         completed
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-zinc-700/60 bg-zinc-800/60 px-2 py-0.5 text-[11px] font-mono font-medium text-zinc-400">
+    <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-zinc-700/60 bg-zinc-800/60 px-1.5 py-0.5 text-[10px] font-mono font-medium text-zinc-400">
       <Circle className="h-3 w-3" />
       {status}
     </span>
@@ -138,7 +138,7 @@ function NewSessionModal({ repos, onClose, onCreated }: NewSessionModalProps) {
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
               <Zap className="h-4 w-4" />
             </div>
             <h2 className="text-sm font-semibold text-zinc-100">Start Live Session</h2>
@@ -193,7 +193,7 @@ function NewSessionModal({ repos, onClose, onCreated }: NewSessionModalProps) {
               value={branch}
               onChange={(e) => setBranch(e.target.value)}
               placeholder="auto: haunter/session-*"
-              className="w-full rounded-lg border border-zinc-700/60 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-amber-500/50 transition-all font-mono"
+              className="w-full rounded-lg border border-zinc-700/60 bg-zinc-900/80 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-amber-500/50 transition-all font-mono"
             />
           </div>
 
@@ -209,7 +209,7 @@ function NewSessionModal({ repos, onClose, onCreated }: NewSessionModalProps) {
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Fix: broken auth middleware"
               maxLength={255}
-              className="w-full rounded-lg border border-zinc-700/60 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-amber-500/50 transition-all"
+              className="w-full rounded-lg border border-zinc-700/60 bg-zinc-900/80 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-amber-500/50 transition-all"
             />
           </div>
 
@@ -224,7 +224,7 @@ function NewSessionModal({ repos, onClose, onCreated }: NewSessionModalProps) {
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 rounded-lg border border-zinc-700/60 bg-zinc-800/60 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-700/60 hover:text-zinc-100 transition-colors"
+              className="flex-1 rounded-lg border border-zinc-700/60 bg-zinc-800/60 px-3.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700/60 hover:text-zinc-100 transition-colors"
             >
               Cancel
             </button>
@@ -232,7 +232,7 @@ function NewSessionModal({ repos, onClose, onCreated }: NewSessionModalProps) {
               id="session-create-submit"
               type="submit"
               disabled={loading || repos.length === 0}
-              className="flex-1 flex items-center justify-center gap-2 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-4 py-2 text-sm font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] hover:from-amber-500/25 hover:via-amber-500/20 hover:to-amber-600/15 active:translate-y-px active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.25)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 flex items-center justify-center gap-2 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-3.5 py-1.5 text-xs font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] hover:from-amber-500/25 hover:via-amber-500/20 hover:to-amber-600/15 active:translate-y-px active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.25)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {loading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -261,7 +261,7 @@ function SessionCard({ session, onClose }: SessionCardProps) {
   const patchCount = Object.keys(session.staged_patches ?? {}).length;
 
   return (
-    <div className="group relative overflow-hidden rounded-xl border-t border-t-zinc-600/50 border-x border-x-zinc-700/60 border-b border-b-zinc-900 bg-gradient-to-b from-[#13131a] to-[#0d0d11] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_12px_rgba(0,0,0,0.4)] transition-all duration-200 hover:border-t-zinc-500/60 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.09),0_4px_20px_rgba(0,0,0,0.5)]">
+    <div className="group relative overflow-hidden rounded-lg border-t border-t-zinc-600/50 border-x border-x-zinc-700/60 border-b border-b-zinc-900 bg-gradient-to-b from-[#13131a] to-[#0d0d11] p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_12px_rgba(0,0,0,0.4)] transition-all duration-200 hover:border-t-zinc-500/60 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.09),0_4px_20px_rgba(0,0,0,0.5)]">
       {/* Ambient top glow on hover */}
       <span
         aria-hidden="true"
@@ -272,7 +272,7 @@ function SessionCard({ session, onClose }: SessionCardProps) {
         {/* Top row: title + status */}
         <div className="flex items-start justify-between gap-3 mb-3">
           <div className="min-w-0 flex-1">
-            <h3 className="text-sm font-semibold text-zinc-100 truncate">{session.title}</h3>
+            <h3 className="text-[13px] font-semibold text-zinc-100 truncate">{session.title}</h3>
             <div className="flex items-center gap-1.5 mt-0.5">
               <GitBranch className="h-3 w-3 text-zinc-500 shrink-0" />
               <span className="text-[11px] font-mono text-zinc-400 truncate">
@@ -284,7 +284,7 @@ function SessionCard({ session, onClose }: SessionCardProps) {
         </div>
 
         {/* Meta row: branch, sha, patches */}
-        <div className="flex flex-wrap items-center gap-2 mb-4">
+        <div className="flex flex-wrap items-center gap-1.5 mb-3">
           <span className="inline-flex items-center gap-1 rounded-[4px] border border-zinc-700/60 bg-zinc-900/60 px-1.5 py-0.5 text-[10px] font-mono text-zinc-400">
             <Terminal className="h-3 w-3" />
             {session.branch_name}
@@ -296,7 +296,7 @@ function SessionCard({ session, onClose }: SessionCardProps) {
         </div>
 
         {/* Timestamp */}
-        <p className="text-[10px] font-mono text-zinc-600 mb-4">
+        <p className="text-[9.5px] font-mono text-zinc-600 mb-3">
           {formatDate(session.created_at)}
         </p>
 
@@ -305,7 +305,7 @@ function SessionCard({ session, onClose }: SessionCardProps) {
           <Link
             href={`/sessions/workspace?id=${session.id}`}
             id={`session-resume-${session.id}`}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-3 py-1.5 text-xs font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] hover:from-amber-500/25 active:translate-y-px transition-all"
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-2.5 py-1 text-[11px] font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] hover:from-amber-500/25 active:translate-y-px transition-all"
           >
             <ChevronRight className="h-3.5 w-3.5" />
             {session.status === "active" ? "Resume" : "View"}
@@ -315,7 +315,7 @@ function SessionCard({ session, onClose }: SessionCardProps) {
             <button
               onClick={() => onClose(session.id)}
               id={`session-close-${session.id}`}
-              className="flex items-center justify-center gap-1 rounded-lg border border-zinc-700/60 bg-zinc-800/60 px-3 py-1.5 text-xs text-zinc-400 hover:text-red-300 hover:border-red-500/30 hover:bg-red-500/10 transition-colors"
+              className="flex items-center justify-center gap-1 rounded-lg border border-zinc-700/60 bg-zinc-800/60 px-2.5 py-1 text-[11px] text-zinc-400 hover:text-red-300 hover:border-red-500/30 hover:bg-red-500/10 transition-colors"
             >
               <XCircle className="h-3.5 w-3.5" />
               Close
@@ -503,7 +503,7 @@ function SessionsContent() {
             </span>
           </div>
 
-          <h2 className="text-base font-semibold text-zinc-100 mb-1">
+          <h2 className="text-sm font-semibold text-zinc-100 mb-1">
             Launching Live Session
           </h2>
           <p className="text-xs font-mono text-zinc-400 mb-6 max-w-sm">
@@ -528,17 +528,17 @@ function SessionsContent() {
 
   return (
     <AppLayout title="Live Sessions" subtitle="Cloud agentic pairing workspace">
-      <div className="min-h-screen bg-[#09090b] px-6 py-8">
+      <div className="min-h-screen bg-[#09090b] px-5 py-6">
         {/* Page header */}
-        <div className="mb-8 flex items-start justify-between gap-4">
+        <div className="mb-6 flex items-start justify-between gap-3.5">
           <div>
             <div className="flex items-center gap-2.5 mb-1">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
-                <Zap className="h-4.5 w-4.5" />
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                <Zap className="h-4 w-4" />
               </div>
-              <h1 className="text-lg font-bold text-zinc-100 tracking-tight">Live Sessions</h1>
+              <h1 className="text-base font-bold text-zinc-100 tracking-tight">Live Sessions</h1>
             </div>
-            <p className="text-xs font-mono text-zinc-500 ml-10.5">
+            <p className="text-[11px] font-mono text-zinc-500 ml-9.5">
               {total > 0 ? `${total} session${total !== 1 ? "s" : ""}` : "No sessions yet"} — cloud agentic pairing workspace
             </p>
           </div>
@@ -547,7 +547,7 @@ function SessionsContent() {
             <button
               onClick={handleAutoLaunch}
               disabled={loading || repos.length === 0}
-              className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition-all disabled:opacity-50"
+              className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/20 transition-all disabled:opacity-50"
               title="Automatically create a new session for your primary repo without prompts"
             >
               <Zap className="h-3.5 w-3.5 text-amber-400" />
@@ -556,7 +556,7 @@ function SessionsContent() {
             <button
               id="start-new-session-btn"
               onClick={() => setShowModal(true)}
-              className="flex items-center gap-2 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-4 py-2 text-sm font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] hover:from-amber-500/25 active:translate-y-px transition-all"
+              className="flex items-center gap-2 rounded-lg border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/20 bg-gradient-to-b from-amber-500/20 via-amber-500/15 to-amber-600/10 px-3.5 py-1.5 text-xs font-semibold text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_4px_rgba(0,0,0,0.3)] hover:from-amber-500/25 active:translate-y-px transition-all"
             >
               <Plus className="h-4 w-4" />
               New Session
@@ -613,7 +613,7 @@ function SessionsContent() {
 
         {/* Session grid */}
         {!loading && sessions.length > 0 && (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-3">
             {sessions.map((session) => (
               <SessionCard
                 key={session.id}
