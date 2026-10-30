@@ -24,6 +24,22 @@ jobs:
   backend:
     name: Backend (lint + migrations + tests)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: haunter_test
+          POSTGRES_PASSWORD: haunter_test
+          POSTGRES_DB: haunter_test
+        ports:
+          - 5432:5432
+        # Equivalent of the old `until docker exec ... pg_isready` loop:
+        # the job does not start until Postgres accepts connections.
+        options: >-
+          --health-cmd "pg_isready -U haunter_test -d haunter_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       GITHUB_CLIENT_ID: ci_test_client_id
       GITHUB_CLIENT_SECRET: ci_test_client_secret
