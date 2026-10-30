@@ -80,38 +80,6 @@ jobs:
         run: |
           echo "TOKEN_ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_ENV"
 
-      - name: Start Postgres with SSL
-        run: |
-          mkdir -p /tmp/pg-certs
-          openssl req -new -x509 -days 365 -nodes \
-            -out /tmp/pg-certs/server.crt \
-            -keyout /tmp/pg-certs/server.key \
-            -subj '/CN=localhost' \
-            -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1'
-          chmod 600 /tmp/pg-certs/server.key
-          chmod 644 /tmp/pg-certs/server.crt
-          sudo chown -R 999:999 /tmp/pg-certs
-
-          docker run -d --name haunter-pg-ssl \
-            -p 5432:5432 \
-            -v /tmp/pg-certs:/var/lib/postgresql/certs:ro \
-            -e POSTGRES_USER=haunter_test \
-            -e POSTGRES_PASSWORD=haunter_test \
-            -e POSTGRES_DB=haunter_test \
-            postgres:16 \
-            -c ssl=on \
-            -c ssl_cert_file=/var/lib/postgresql/certs/server.crt \
-            -c ssl_key_file=/var/lib/postgresql/certs/server.key
-
-          until docker exec haunter-pg-ssl pg_isready -U haunter_test -d haunter_test; do
-            echo "Waiting for postgres..."
-            sleep 1
-          done
-
-          sudo cp /tmp/pg-certs/server.crt /usr/local/share/ca-certificates/haunter.crt
-          sudo update-ca-certificates
-          echo "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" >> "$GITHUB_ENV"
-
       - name: Apply Alembic migrations
         working-directory: backend
         env:
