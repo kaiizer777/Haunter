@@ -184,7 +184,7 @@ export default function ReposPage() {
             size="sm"
             onClick={() => fetchRepos(true)}
             disabled={loading || isRefreshing}
-            className="group h-8 px-3 text-xs font-mono rounded-[6px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
+            className="group h-7.5 px-2.5 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
             title="Refresh repositories (Hot-key: R)"
           >
             <RefreshCw
@@ -198,7 +198,7 @@ export default function ReposPage() {
 
           <Button
             onClick={() => setIsAddModalOpen(true)}
-            className="flex items-center gap-1.5 bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 font-bold text-xs h-8 px-3.5 rounded-[6px] border-t border-t-amber-200/50 border-x border-x-amber-400/60 border-b border-b-amber-600/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_8px_rgba(245,158,11,0.25)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.3)] cursor-pointer transition-all"
+            className="flex items-center gap-1.5 bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 font-bold text-[11px] h-7.5 px-3 rounded-[5px] border-t border-t-amber-200/50 border-x border-x-amber-400/60 border-b border-b-amber-600/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_8px_rgba(245,158,11,0.25)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.3)] cursor-pointer transition-all"
             size="sm"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -210,7 +210,7 @@ export default function ReposPage() {
       <div className="space-y-4 min-w-0 pb-6">
         {/* Error Alert */}
         {error && (
-          <div className="flex items-start gap-3 rounded-[7px] border border-red-900/60 bg-red-950/30 p-3.5 text-[13px] text-red-300 shadow-md animate-in fade-in">
+          <div className="flex items-start gap-2.5 rounded-[7px] border border-red-900/60 bg-red-950/30 p-2.5.5 text-[13px] text-red-300 shadow-md animate-in fade-in">
             <AlertCircle className="h-4.5 w-4.5 shrink-0 text-red-400 mt-0.5" />
             <div className="space-y-0.5">
               <p className="font-semibold text-red-200">Repository Pipeline Error</p>
@@ -220,15 +220,15 @@ export default function ReposPage() {
         )}
 
         {/* Telemetry Metric Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
           {/* Stat 1: Total Monitored Repos */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-3.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Monitored Repos</span>
+              <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400">Monitored Repos</span>
               <FolderGit2 className="h-4 w-4 text-amber-400" />
             </div>
             <div className="mt-1.5 flex items-baseline gap-2">
-              <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">{repos.length}</span>
+              <span className="text-xl font-bold font-mono text-zinc-100 tabular-nums">{repos.length}</span>
               <span className="text-[11px] font-mono text-zinc-500">
                 active {repos.length === 1 ? "repo" : "repos"}
               </span>
@@ -237,28 +237,28 @@ export default function ReposPage() {
           </div>
 
           {/* Stat 2: Webhook Gateway */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-3.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">CI Webhook Gateway</span>
+              <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400">CI Webhook Gateway</span>
               <span className="flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded-[4px]">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 Live
               </span>
             </div>
             <div className="mt-1.5 flex items-baseline gap-2">
-              <span className="text-base font-bold font-mono text-zinc-100">workflow_run.completed</span>
+              <span className="text-sm font-bold font-mono text-zinc-100">workflow_run.completed</span>
             </div>
             <div className="mt-0.5 text-[11px] text-zinc-500 truncate">Instant wakeup on GitHub Actions failure events</div>
           </div>
 
           {/* Stat 3: Sandbox Isolation */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-3.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Sandbox Isolation</span>
+              <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400">Sandbox Isolation</span>
               <ShieldCheck className="h-4 w-4 text-emerald-400" />
             </div>
             <div className="mt-1.5 flex items-baseline gap-2">
-              <span className="text-base font-bold font-mono text-zinc-100">Verified CI Sandboxes</span>
+              <span className="text-sm font-bold font-mono text-zinc-100">Verified CI Sandboxes</span>
             </div>
             <div className="mt-0.5 text-[11px] text-zinc-500 truncate">Patches verified in isolated mirror before PR creation</div>
           </div>
@@ -268,13 +268,13 @@ export default function ReposPage() {
         {repos.length > 0 && (
           <div className="space-y-3">
             {/* Quick Segmented Language Tabs */}
-            <div className="flex items-center justify-between gap-3 overflow-x-auto pb-0.5">
+            <div className="flex items-center justify-between gap-2.5 overflow-x-auto pb-0.5">
               <div className="flex items-center gap-1.5 p-1 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm">
                 <button
                   type="button"
                   onClick={() => setSelectedLanguage("all")}
                   className={cn(
-                    "flex items-center gap-2 px-3 py-1.5 rounded-[5px] text-xs font-mono transition-all cursor-pointer",
+                    "flex items-center gap-2 px-2.5 py-1 rounded-[4px] text-[11px] font-mono transition-all cursor-pointer",
                     selectedLanguage === "all"
                       ? "bg-zinc-800 text-zinc-100 font-semibold border border-zinc-700/60 shadow-sm"
                       : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -302,7 +302,7 @@ export default function ReposPage() {
                       type="button"
                       onClick={() => setSelectedLanguage(lang)}
                       className={cn(
-                        "flex items-center gap-2 px-3 py-1.5 rounded-[5px] text-xs font-mono transition-all cursor-pointer",
+                        "flex items-center gap-2 px-2.5 py-1 rounded-[4px] text-[11px] font-mono transition-all cursor-pointer",
                         isActive
                           ? "bg-zinc-800 text-zinc-100 font-semibold border border-zinc-700/60 shadow-sm"
                           : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -344,8 +344,8 @@ export default function ReposPage() {
             </div>
 
             {/* Detailed Filters Bar */}
-            <div className="relative z-20 flex flex-wrap items-center justify-between gap-3.5 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] p-3">
-              <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[300px]">
+            <div className="relative z-20 flex flex-wrap items-center justify-between gap-2.5.5 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] p-2.5">
+              <div className="flex flex-wrap items-center gap-2.5 flex-1 min-w-[300px]">
                 <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-medium pl-1">
                   <Filter className="h-3.5 w-3.5 text-zinc-500" />
                   <span className="font-mono text-[11px] tracking-wide text-zinc-400 uppercase">Filters</span>
@@ -360,7 +360,7 @@ export default function ReposPage() {
                     placeholder="Search owner, repo name, default branch..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="h-8.5 pl-8.5 pr-8 text-xs font-mono rounded-[6px] bg-zinc-900/60 border-zinc-800/80 focus:outline-none focus:border-amber-400/80 focus:ring-1 focus:ring-amber-400/25 placeholder:text-zinc-500 placeholder:font-sans transition-all"
+                    className="h-7.5 pl-8 pr-7 text-[11px] font-mono rounded-[5px] bg-zinc-900/60 border-zinc-800/80 focus:outline-none focus:border-amber-400/80 focus:ring-1 focus:ring-amber-400/25 placeholder:text-zinc-500 placeholder:font-sans transition-all"
                   />
                   {!searchQuery ? (
                     <div className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center">
@@ -401,7 +401,7 @@ export default function ReposPage() {
                       ),
                     })),
                   ]}
-                  buttonClassName="min-w-[170px] h-8.5"
+                  buttonClassName="min-w-[155px] h-7.5"
                 />
               </div>
 
@@ -450,15 +450,15 @@ export default function ReposPage() {
               </p>
 
               <div className="mt-4 sm:mt-5 grid grid-cols-1 sm:grid-cols-3 gap-2.5 max-w-lg mx-auto text-left">
-                <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/50 p-2.5 sm:p-3 text-[11px] sm:text-xs text-zinc-400 shadow-sm">
+                <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/50 p-2.5 sm:p-2.5 text-[11px] sm:text-xs text-zinc-400 shadow-sm">
                   <span className="font-semibold text-zinc-200 block mb-0.5 text-xs">⚡ Zero Overhead</span>
                   Passes run untouched; fixes trigger only on CI failure.
                 </div>
-                <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/50 p-2.5 sm:p-3 text-[11px] sm:text-xs text-zinc-400 shadow-sm">
+                <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/50 p-2.5 sm:p-2.5 text-[11px] sm:text-xs text-zinc-400 shadow-sm">
                   <span className="font-semibold text-zinc-200 block mb-0.5 text-xs">🛡️ Sandbox Verified</span>
                   Patches verified in isolated mirrors before PRs open.
                 </div>
-                <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/50 p-2.5 sm:p-3 text-[11px] sm:text-xs text-zinc-400 shadow-sm">
+                <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/50 p-2.5 sm:p-2.5 text-[11px] sm:text-xs text-zinc-400 shadow-sm">
                   <span className="font-semibold text-zinc-200 block mb-0.5 text-xs">⚙️ Custom Routing</span>
                   Override inference models per repository.
                 </div>
@@ -495,19 +495,19 @@ export default function ReposPage() {
               <Table>
                 <TableHeader className="border-b border-zinc-800/90 bg-gradient-to-b from-[#141418] to-[#0c0c10] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_3px_rgba(0,0,0,0.35)]">
                   <TableRow className="border-b border-zinc-800/90 hover:bg-transparent">
-                    <TableHead className="w-[38%] pl-4 py-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none">
+                    <TableHead className="w-[38%] pl-4 py-2 text-[10px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none">
                       Repository
                     </TableHead>
-                    <TableHead className="w-[18%] px-3 py-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none">
+                    <TableHead className="w-[18%] px-3 py-2 text-[10px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none">
                       Default Branch
                     </TableHead>
-                    <TableHead className="w-[18%] px-3 py-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none">
+                    <TableHead className="w-[18%] px-3 py-2 text-[10px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none">
                       Language Hint
                     </TableHead>
-                    <TableHead className="w-[14%] px-3 py-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none">
+                    <TableHead className="w-[14%] px-3 py-2 text-[10px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none">
                       Connected
                     </TableHead>
-                    <TableHead className="w-[12%] pr-4 py-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none text-right">
+                    <TableHead className="w-[12%] pr-4 py-2 text-[10px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none text-right">
                       Actions
                     </TableHead>
                   </TableRow>
@@ -519,7 +519,7 @@ export default function ReposPage() {
                       className="border-b border-zinc-800/40 hover:bg-zinc-800/20 transition-colors group"
                     >
                       {/* Repository Name & Links */}
-                      <TableCell className="pl-4 py-3.5">
+                      <TableCell className="pl-4 py-2.5">
                         <div className="flex flex-col gap-1.5">
                           <div className="flex flex-wrap items-center gap-2">
                             <FolderGit2 className="h-4 w-4 text-amber-400/80 shrink-0" />
@@ -572,7 +572,7 @@ export default function ReposPage() {
                       </TableCell>
 
                       {/* Default Branch */}
-                      <TableCell className="px-3 py-3.5">
+                      <TableCell className="px-3 py-2.5">
                         <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-zinc-800/80 bg-[#0c0c0e]/90 px-2.5 py-1 font-mono text-[11px] text-zinc-300 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] font-medium">
                           <GitBranch className="h-3 w-3 text-zinc-500" />
                           <span>{repo.default_branch || "main"}</span>
@@ -580,7 +580,7 @@ export default function ReposPage() {
                       </TableCell>
 
                       {/* Language Hint */}
-                      <TableCell className="px-3 py-3.5">
+                      <TableCell className="px-3 py-2.5">
                         {repo.language_hint ? (
                           <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-zinc-300 bg-zinc-900/70 border border-zinc-800/80 px-2.5 py-1 rounded-[5px] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)]">
                             <span className={cn("h-1.5 w-1.5 rounded-full", getLanguageColor(repo.language_hint))} />
@@ -594,7 +594,7 @@ export default function ReposPage() {
                       </TableCell>
 
                       {/* Connected Timestamp */}
-                      <TableCell className="px-3 py-3.5 font-mono text-xs text-zinc-400">
+                      <TableCell className="px-3 py-2.5 font-mono text-xs text-zinc-400">
                         <div className="flex items-center gap-1.5">
                           <Clock className="h-3 w-3 text-zinc-500 shrink-0" />
                           <span>{formatRelativeTime(repo.created_at)}</span>
@@ -602,11 +602,11 @@ export default function ReposPage() {
                       </TableCell>
 
                       {/* Actions */}
-                      <TableCell className="pr-4 py-3.5 text-right">
+                      <TableCell className="pr-4 py-2.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           <Link
                             href="/config"
-                            className="h-7 w-7 rounded-[5px] flex items-center justify-center text-zinc-400 hover:text-cyan-300 bg-gradient-to-b from-zinc-800/70 via-zinc-850/80 to-zinc-900/90 border border-zinc-700/50 hover:border-cyan-500/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] transition-all cursor-pointer"
+                            className="h-6.5 w-6.5 rounded-[5px] flex items-center justify-center text-zinc-400 hover:text-cyan-300 bg-gradient-to-b from-zinc-800/70 via-zinc-850/80 to-zinc-900/90 border border-zinc-700/50 hover:border-cyan-500/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] transition-all cursor-pointer"
                             title="Configure model for this repository"
                           >
                             <Sliders className="h-3.5 w-3.5" />
@@ -616,7 +616,7 @@ export default function ReposPage() {
                             size="icon"
                             onClick={() => handleDeleteRepo(repo.id, `${repo.owner}/${repo.name}`)}
                             disabled={deletingId === repo.id}
-                            className="h-7 w-7 rounded-[5px] text-zinc-400 hover:text-red-400 bg-gradient-to-b from-zinc-800/70 via-zinc-850/80 to-zinc-900/90 border border-zinc-700/50 hover:border-red-500/40 hover:bg-red-950/30 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] transition-all cursor-pointer"
+                            className="h-6.5 w-6.5 rounded-[5px] text-zinc-400 hover:text-red-400 bg-gradient-to-b from-zinc-800/70 via-zinc-850/80 to-zinc-900/90 border border-zinc-700/50 hover:border-red-500/40 hover:bg-red-950/30 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_2px_rgba(0,0,0,0.3)] transition-all cursor-pointer"
                             title="Disconnect repo"
                           >
                             {deletingId === repo.id ? (
