@@ -101,7 +101,7 @@ function DiffViewer({ patchText }: { patchText: string }) {
       <div className="rounded-[6px] border border-zinc-800/90 bg-[#070709] overflow-hidden shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)]">
         {/* Diff File Header Bar */}
         {filePath && (
-          <div className="flex items-center justify-between border-b border-zinc-800/80 bg-zinc-900/60 px-3 py-1.5 text-[11px] font-mono text-zinc-300">
+          <div className="flex items-center justify-between border-b border-zinc-800/80 bg-zinc-900/60 px-2.5 py-1 text-[10px] font-mono text-zinc-300">
             <span className="flex items-center gap-1.5 text-zinc-300 font-semibold">
               <FileCode2 className="h-3 w-3 text-zinc-500" />
               {filePath}
@@ -114,7 +114,7 @@ function DiffViewer({ patchText }: { patchText: string }) {
         )}
 
         {/* Diff Body */}
-        <pre className="overflow-x-auto p-3 text-[11.5px] font-mono leading-relaxed select-text">
+        <pre className="overflow-x-auto p-2.5 text-[10.5px] font-mono leading-relaxed select-text">
           {displayedLines.map((line, lIdx) => {
             const isAdd = line.startsWith("+") && !line.startsWith("+++");
             const isDel = line.startsWith("-") && !line.startsWith("---");

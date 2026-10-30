@@ -188,7 +188,7 @@ export default function RunDetailClient() {
         ) : (
           <>
             {/* Header Meta Card */}
-            <div className="relative overflow-hidden rounded-[8px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#141418]/95 via-[#101013]/95 to-[#0a0a0d]/95 p-4 sm:p-5 space-y-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_16px_rgba(0,0,0,0.35)]">
+            <div className="relative overflow-hidden rounded-[8px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#141418]/95 via-[#101013]/95 to-[#0a0a0d]/95 p-3.5 sm:p-4 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_16px_rgba(0,0,0,0.35)]">
               <span
                 aria-hidden="true"
                 className="pointer-events-none absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent"
@@ -196,7 +196,7 @@ export default function RunDetailClient() {
 
               {/* Repository Identity & PR Context Banner */}
               {repoIdentity && (
-                <div className="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-zinc-800/80">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-2.5 border-b border-zinc-800/80">
                   <div className="flex items-center gap-3 flex-wrap">
                     <a
                       href={repoIdentity.url}
@@ -253,7 +253,7 @@ export default function RunDetailClient() {
               )}
 
               {/* Status & Actions Header */}
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-3">
                 <div className="flex items-center gap-3 flex-wrap">
                   <StatusBadge status={trace.run.status} />
 
@@ -315,7 +315,7 @@ export default function RunDetailClient() {
 
               {/* Failure Reason */}
               {trace.run.failure_reason && (
-                <div className="rounded-[6px] border border-rose-800/60 bg-gradient-to-b from-rose-950/40 via-rose-950/20 to-[#0c0809] p-3.5 space-y-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+                <div className="rounded-[6px] border border-rose-800/60 bg-gradient-to-b from-rose-950/40 via-rose-950/20 to-[#0c0809] p-3 space-y-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
                   <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-rose-300 font-mono">
                     <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />
                     <span>Failure Reason</span>
@@ -343,7 +343,7 @@ export default function RunDetailClient() {
             <CostBreakdown trace={trace} />
 
             {/* Chronological Step & Attempt Timeline */}
-            <div className="relative overflow-hidden rounded-[8px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#141418]/95 via-[#101013]/95 to-[#0a0a0d]/95 p-5 space-y-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_16px_rgba(0,0,0,0.35)]">
+            <div className="relative overflow-hidden rounded-[8px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#141418]/95 via-[#101013]/95 to-[#0a0a0d]/95 p-4 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_4px_16px_rgba(0,0,0,0.35)]">
               <span
                 aria-hidden="true"
                 className="pointer-events-none absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent"
