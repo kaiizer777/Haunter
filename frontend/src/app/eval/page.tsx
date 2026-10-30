@@ -144,7 +144,7 @@ export default function EvalPage() {
         size="sm"
         onClick={() => fetchMetrics(true)}
         disabled={isRefreshing || loading}
-        className="group h-8 px-3 text-xs font-mono rounded-[6px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
+        className="group h-7.5 px-2.5 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
         title="Refresh live eval telemetry (Hot-key: R)"
       >
         <RefreshCw
@@ -160,7 +160,7 @@ export default function EvalPage() {
       <Button
         size="sm"
         onClick={() => setIsBenchmarkOpen(true)}
-        className="flex items-center gap-1.5 bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 font-bold text-xs h-8 px-3.5 rounded-[6px] border-t border-t-amber-200/50 border-x border-x-amber-400/60 border-b border-b-amber-600/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_8px_rgba(245,158,11,0.25)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.3)] cursor-pointer transition-all"
+        className="flex items-center gap-1.5 bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 font-bold text-[11px] h-7.5 px-3 rounded-[5px] border-t border-t-amber-200/50 border-x border-x-amber-400/60 border-b border-b-amber-600/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_8px_rgba(245,158,11,0.25)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.3)] cursor-pointer transition-all"
       >
         <Zap className="h-3.5 w-3.5 fill-current" />
         <span>Run Benchmark</span>
@@ -224,7 +224,7 @@ export default function EvalPage() {
               <Button
                 size="sm"
                 onClick={() => setIsBenchmarkOpen(true)}
-                className="bg-gradient-to-b from-amber-400 to-amber-500 text-zinc-950 font-bold text-xs h-8 px-3.5 rounded-[6px] shadow-sm"
+                className="bg-gradient-to-b from-amber-400 to-amber-500 text-zinc-950 font-bold text-[11px] h-7.5 px-3 rounded-[5px] shadow-sm"
               >
                 Run Demo Smoke Benchmark
               </Button>
@@ -236,18 +236,18 @@ export default function EvalPage() {
         {!loading && !error && metrics && metrics.total_runs > 0 && (
           <>
             {/* Top 4 KPI Metric Cards with unified visual hierarchy */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               {/* 1. Healing Success Rate */}
-              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-3.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400">
                     Healing Success Rate
                   </span>
                   <TrendingUp className="h-4 w-4 text-emerald-400" />
                 </div>
 
                 <div className="mt-2 flex items-baseline gap-2">
-                  <span className="text-2xl font-bold font-mono text-emerald-400 tabular-nums">
+                  <span className="text-xl font-bold font-mono text-emerald-400 tabular-nums">
                     {metrics.success_rate_pct.toFixed(1)}%
                   </span>
                   <span className="inline-flex items-center gap-1.5 rounded-[4px] border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.2 text-[10px] font-mono font-medium text-emerald-400">
@@ -276,9 +276,9 @@ export default function EvalPage() {
               </div>
 
               {/* 2. Total Pipeline Failures */}
-              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-3.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400">
                     Total Pipeline Failures
                   </span>
                   <Activity className="h-4 w-4 text-zinc-400" />
@@ -286,7 +286,7 @@ export default function EvalPage() {
 
                 <div className="mt-2 flex items-baseline justify-between">
                   <div className="flex items-baseline gap-1.5">
-                    <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
+                    <span className="text-xl font-bold font-mono text-zinc-100 tabular-nums">
                       {metrics.total_runs}
                     </span>
                     <span className="text-[11px] font-mono text-zinc-500">runs</span>
@@ -325,16 +325,16 @@ export default function EvalPage() {
               </div>
 
               {/* 3. Avg Resolution Time */}
-              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-3.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400">
                     Avg Resolution Time
                   </span>
                   <Clock className="h-4 w-4 text-amber-400" />
                 </div>
 
                 <div className="mt-2 flex items-baseline justify-between">
-                  <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
+                  <span className="text-xl font-bold font-mono text-zinc-100 tabular-nums">
                     {formatMinutesSeconds(metrics.avg_duration_seconds)}
                   </span>
                   <span className="rounded-[4px] border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.2 text-[10px] font-mono font-medium text-sky-400">
@@ -354,16 +354,16 @@ export default function EvalPage() {
               </div>
 
               {/* 4. Total Healing Cost & Efficiency */}
-              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+              <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-3.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-400">
                     Total Healing Cost
                   </span>
                   <Coins className="h-4 w-4 text-amber-400" />
                 </div>
 
                 <div className="mt-2 flex items-baseline justify-between">
-                  <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
+                  <span className="text-xl font-bold font-mono text-zinc-100 tabular-nums">
                     ${metrics.total_cost.toFixed(4)}
                   </span>
                   <span className="rounded-[4px] border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.2 text-[10px] font-mono font-medium text-amber-400">
@@ -384,7 +384,7 @@ export default function EvalPage() {
             </div>
 
             {/* Model Calibration Section: Split Cockpit with Autonomous Gating & Calibration Bands */}
-            <div className="relative z-0 overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.3)] p-5 space-y-5">
+            <div className="relative z-0 overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5),0_2px_4px_rgba(0,0,0,0.3)] p-4 space-y-4">
               {/* Top ambient light sheen */}
               <span
                 aria-hidden="true"
@@ -392,7 +392,7 @@ export default function EvalPage() {
               />
 
               {/* Section Header & View Switcher */}
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-4 relative z-20">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-800/80 pb-3 relative z-20">
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <Target className="h-4 w-4 text-amber-400" />
@@ -422,7 +422,7 @@ export default function EvalPage() {
                     type="button"
                     onClick={() => setCalibrationTab("brackets")}
                     className={cn(
-                      "flex items-center gap-1.5 px-3 py-1.5 rounded-[5px] text-xs font-mono transition-all cursor-pointer",
+                      "flex items-center gap-1.5 px-2.5 py-1 rounded-[4px] text-[11px] font-mono transition-all cursor-pointer",
                       calibrationTab === "brackets"
                         ? "bg-zinc-800 text-zinc-100 font-semibold border border-zinc-700/60 shadow-sm"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -435,7 +435,7 @@ export default function EvalPage() {
                     type="button"
                     onClick={() => setCalibrationTab("scatter")}
                     className={cn(
-                      "flex items-center gap-1.5 px-3 py-1.5 rounded-[5px] text-xs font-mono transition-all cursor-pointer",
+                      "flex items-center gap-1.5 px-2.5 py-1 rounded-[4px] text-[11px] font-mono transition-all cursor-pointer",
                       calibrationTab === "scatter"
                         ? "bg-zinc-800 text-zinc-100 font-semibold border border-zinc-700/60 shadow-sm"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -451,7 +451,7 @@ export default function EvalPage() {
               {calibrationTab === "brackets" && (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-4.5 items-stretch relative z-20">
                   {/* Left Column: Autonomous Gating Policy Card */}
-                  <div className="lg:col-span-4 rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#141419]/90 to-[#0e0e12]/90 p-4.5 flex flex-col justify-between space-y-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <div className="lg:col-span-4 rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#141419]/90 to-[#0e0e12]/90 p-3.5 flex flex-col justify-between space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                     <div className="space-y-3.5">
                       <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2.5">
                         <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
@@ -462,7 +462,7 @@ export default function EvalPage() {
 
                       <div className="space-y-1.5">
                         <div className="flex items-baseline gap-2">
-                          <span className="text-2xl font-bold font-mono text-zinc-100">≥ 90%</span>
+                          <span className="text-xl font-bold font-mono text-zinc-100">≥ 90%</span>
                           <span className="text-xs font-mono text-emerald-400 font-semibold">Safety Threshold</span>
                         </div>
                         <p className="text-xs text-zinc-400 leading-relaxed">
@@ -492,7 +492,7 @@ export default function EvalPage() {
                   </div>
 
                   {/* Right Column: Unified Calibration Bands List */}
-                  <div className="lg:col-span-8 rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#141419]/90 to-[#0e0e12]/90 p-4.5 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                  <div className="lg:col-span-8 rounded-xl border border-zinc-800/80 bg-gradient-to-b from-[#141419]/90 to-[#0e0e12]/90 p-3.5 space-y-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                     <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2.5 text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
                       <span>Confidence Band</span>
                       <span>Sandbox Verification Status</span>
@@ -508,7 +508,7 @@ export default function EvalPage() {
                           <div
                             key={bucket.bucket}
                             className={cn(
-                              "rounded-lg border p-3 transition-all",
+                              "rounded-lg border p-2.5 transition-all",
                               hasAttempts
                                 ? "border-zinc-700/80 bg-[#16161c]/90 hover:border-zinc-600 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.02)]"
                                 : "border-zinc-800/50 bg-[#0d0d10]/60"
@@ -516,7 +516,7 @@ export default function EvalPage() {
                           >
                             <div className="flex items-center justify-between text-xs">
                               <div className="flex items-center gap-2">
-                                <span className="font-mono font-bold text-zinc-100 text-[12.5px]">
+                                <span className="font-mono font-bold text-zinc-100 text-[11.5px]">
                                   {bucket.bucket}
                                 </span>
                                 <span className="text-[11px] text-zinc-400">
@@ -617,7 +617,7 @@ export default function EvalPage() {
 function DashboardSkeleton() {
   return (
     <div className="space-y-6 min-w-0">
-      <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Skeleton className="h-32 w-full rounded-lg bg-zinc-900/60" />
         <Skeleton className="h-32 w-full rounded-lg bg-zinc-900/60" />
         <Skeleton className="h-32 w-full rounded-lg bg-zinc-900/60" />
