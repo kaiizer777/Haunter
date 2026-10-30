@@ -118,6 +118,8 @@ class Settings(BaseSettings):
     # OpenCode Zen API key (Secret Manager / .env only). Injected at request time, never logged.
     opencode_zen_api_key: Optional[str] = None
     opencode_zen_base_url: str = "https://opencode.ai/zen/v1"
+    opencode_go_api_key: Optional[str] = None
+    opencode_go_base_url: str = "https://opencode.ai/go/v1"
     default_provider: str = "opencode_zen"
     default_model: str = "nemotron-3.5-lightning-free"
 

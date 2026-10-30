@@ -46,6 +46,7 @@ def _base_url_for_provider(provider: str) -> str | None:
     """Return the configured base URL for an allowlisted provider, or None."""
     return {
         "opencode_zen": settings.opencode_zen_base_url,
+        "opencode_go": settings.opencode_go_base_url,
         "openai": settings.openai_base_url,
         "anthropic": settings.anthropic_base_url,
         "groq": settings.groq_base_url,
@@ -394,6 +395,7 @@ async def get_available_models_endpoint(
 
     return AvailableModelsOut(
         opencode_zen=zen_items,
+        opencode_go=zen_items,
         openai=openai_items,
         anthropic=anthropic_items,
         groq=groq_items,

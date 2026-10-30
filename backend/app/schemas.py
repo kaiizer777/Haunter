@@ -207,7 +207,7 @@ class AvailableRepoOut(BaseModel):
 
 # Allowlisted providers — no free-text to prevent base_url injection.
 # Extend this list when a new provider is vetted and approved.
-AllowedProvider = Literal["opencode_zen", "openai", "anthropic", "groq"]
+AllowedProvider = Literal["opencode_zen", "opencode_go", "openai", "anthropic", "groq"]
 
 # Allowlisted hosting/sandbox providers — never free-text, never derived
 # from request headers. Used by PUT /config/hosting and validated in the
@@ -246,11 +246,13 @@ class ModelConfigUpdate(BaseModel):
         provider = self.provider
         model = self.model_name.strip()
 
-        if provider == "opencode_zen":
+        if provider in ("opencode_zen", "opencode_go"):
             if not model.endswith("-free"):
                 raise ValueError(
-                    f"Invalid model '{model}' for provider 'opencode_zen'. "
+                    f"Invalid model '{model}' for provider '{provider}'. "
                     "OpenCode Zen models must end with '-free'."
+                    if provider == "opencode_zen"
+                    else "OpenCode Go models must end with '-free'."
                 )
         elif provider == "openai":
             if model not in OPENAI_MODELS:
@@ -282,6 +284,7 @@ class AvailableModelItem(BaseModel):
 
 class AvailableModelsOut(BaseModel):
     opencode_zen: list[AvailableModelItem]
+    opencode_go: list[AvailableModelItem] = []
     openai: list[AvailableModelItem]
     anthropic: list[AvailableModelItem]
     groq: list[AvailableModelItem] = []

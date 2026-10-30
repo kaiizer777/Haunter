@@ -117,7 +117,7 @@ class LLMClient:
         explicit_model = kwargs.pop("model", None)
         response_format = kwargs.get("response_format")
 
-        if target_provider not in ("opencode_zen", "openai", "anthropic", "groq"):
+        if target_provider not in ("opencode_zen", "opencode_go", "openai", "anthropic", "groq"):
             raise LLMError(f"Unsupported LLM provider: {target_provider}")
 
         if target_provider == "groq":
@@ -178,7 +178,7 @@ class LLMClient:
         seed_model = explicit_model or config.model_name
 
         # Construct dynamic fallback chain
-        if target_provider == "opencode_zen":
+        if target_provider in ("opencode_zen", "opencode_go"):
             dynamic_models = await get_dynamic_free_models(
                 base_url=config.base_url,
                 api_key=settings.opencode_zen_api_key,

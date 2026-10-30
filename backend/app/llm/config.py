@@ -101,6 +101,7 @@ def default_base_url_for_provider(provider: str | None = None) -> str:
     name = (provider or settings.default_provider or "opencode_zen").strip().lower()
     mapping: dict[str, str] = {
         "opencode_zen": settings.opencode_zen_base_url,
+        "opencode_go": settings.opencode_go_base_url,
         "openai": settings.openai_base_url,
         "anthropic": settings.anthropic_base_url,
         "groq": settings.groq_base_url,

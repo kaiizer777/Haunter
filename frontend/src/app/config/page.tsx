@@ -34,6 +34,9 @@ import {
 const PROVIDER_OPTIONS = [
   { id: "opencode_zen", name: "OpenCode Zen", defaultModel: "nemotron-3.5-lightning-free" },
   { id: "opencode_go", name: "OpenCode Go", defaultModel: "nemotron-3.5-lightning-free" },
+  { id: "openai", name: "OpenAI", defaultModel: "gpt-4o" },
+  { id: "anthropic", name: "Anthropic", defaultModel: "claude-sonnet-4-5" },
+  { id: "groq", name: "Groq", defaultModel: "openai/gpt-oss-120b" },
 ];
 
 const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string; context_window?: number }[]> = {
@@ -46,6 +49,19 @@ const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: stri
     { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Default · Free", context_window: 131072 },
     { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Fast · Free", context_window: 65536 },
     { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "1M · Free", context_window: 1048576 },
+  ],
+  openai: [
+    { id: "gpt-4o", name: "GPT-4o", tag: "Flagship", context_window: 128000 },
+    { id: "gpt-4o-mini", name: "GPT-4o Mini", tag: "Fast", context_window: 128000 },
+  ],
+  anthropic: [
+    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", tag: "SOTA Fixes", context_window: 200000 },
+    { id: "claude-haiku-3-5", name: "Claude Haiku 3.5", tag: "Low Latency", context_window: 200000 },
+  ],
+  groq: [
+    { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B", tag: "High Reasoning · Fallback", context_window: 131072 },
+    { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B Versatile", tag: "Fast · Production", context_window: 131072 },
+    { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B Instant", tag: "Ultra Fast", context_window: 131072 },
   ],
 };
 
@@ -81,6 +97,36 @@ const PROVIDER_METADATA: Record<
     icon: Activity,
     accentText: "text-emerald-400",
     badgeClass: "bg-emerald-400/10 border-emerald-400/30 text-emerald-300",
+  },
+  openai: {
+    name: "OpenAI",
+    tag: "Tier 1 Foundation",
+    shortBadge: "Direct API",
+    description: "Frontier reasoning engines providing high-precision semantic root cause analysis.",
+    baseUrl: "https://api.openai.com/v1",
+    icon: Sparkles,
+    accentText: "text-sky-400",
+    badgeClass: "bg-sky-400/10 border-sky-400/30 text-sky-300",
+  },
+  anthropic: {
+    name: "Anthropic",
+    tag: "SOTA Coding Models",
+    shortBadge: "Direct API",
+    description: "Advanced agentic coding models offering long-horizon repair planning.",
+    baseUrl: "https://api.anthropic.com/v1",
+    icon: Shield,
+    accentText: "text-violet-400",
+    badgeClass: "bg-violet-400/10 border-violet-400/30 text-violet-300",
+  },
+  groq: {
+    name: "Groq",
+    tag: "Ultra-Fast LPU Inference",
+    shortBadge: "Direct API",
+    description: "Near-instantaneous inference acceleration for high-throughput patch synthesis.",
+    baseUrl: "https://api.groq.com/openai/v1",
+    icon: Gauge,
+    accentText: "text-rose-400",
+    badgeClass: "bg-rose-400/10 border-rose-400/30 text-rose-300",
   },
 };
 
@@ -534,6 +580,9 @@ export default function ModelConfigPage() {
               : data.opencode_zen?.length
               ? data.opencode_zen
               : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_go,
+            openai: data.openai?.length ? data.openai : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.openai,
+            anthropic: data.anthropic?.length ? data.anthropic : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.anthropic,
+            groq: data.groq?.length ? data.groq : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.groq,
           });
         }
       })
