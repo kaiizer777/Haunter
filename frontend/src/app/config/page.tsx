@@ -820,7 +820,7 @@ export default function ModelConfigPage() {
               size="sm"
               onClick={handleSaveConfig}
               disabled={isPending}
-              className="h-8 px-3.5 text-xs font-mono font-bold rounded-[6px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
+              className="h-7.5 px-3 text-[11px] font-mono font-bold rounded-[5px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
             >
               {isPending ? (
                 <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
@@ -839,7 +839,7 @@ export default function ModelConfigPage() {
             size="sm"
             onClick={() => fetchActiveConfig(true)}
             disabled={loading || isRefreshing}
-            className="group h-8 px-3 text-xs font-mono rounded-[6px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
+            className="group h-7.5 px-2.5 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
             title="Sync configuration (Hot-key: R)"
           >
             <RefreshCw className={cn("h-3.5 w-3.5 transition-colors", isRefreshing ? "animate-spin text-amber-400" : "text-zinc-400 group-hover:text-amber-400")} />
@@ -848,7 +848,7 @@ export default function ModelConfigPage() {
         </div>
       }
     >
-      <div className="space-y-5 min-w-0 max-w-6xl pb-24">
+      <div className="space-y-4 min-w-0 max-w-6xl pb-20">
         {/* Error Alert */}
         {error && (
           <div className="flex items-start gap-3 rounded-[8px] border border-red-800/80 bg-gradient-to-b from-red-950/60 to-red-950/30 p-4 text-sm text-red-200 shadow-md animate-in fade-in">
@@ -882,7 +882,7 @@ export default function ModelConfigPage() {
         )}
 
         {/* TOP BAR: Scope Switcher + Target Repository Control */}
-        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 sm:p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-4">
+        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-3.5 sm:p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-3">
           <span
             aria-hidden="true"
             className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
@@ -899,7 +899,7 @@ export default function ModelConfigPage() {
                   type="button"
                   onClick={() => setSelectedScope("global")}
                   className={cn(
-                    "flex items-center gap-2 rounded-[5px] px-3.5 py-1.5 text-xs sm:text-sm font-mono transition-all cursor-pointer select-none",
+                    "flex items-center gap-1.5 rounded-[5px] px-3 py-1 text-xs sm:text-[13px] font-mono transition-all cursor-pointer select-none",
                     selectedScope === "global"
                       ? "bg-zinc-800 text-amber-400 shadow-sm border border-zinc-700/80 font-bold"
                       : "text-zinc-400 hover:text-zinc-200"
@@ -913,7 +913,7 @@ export default function ModelConfigPage() {
                   type="button"
                   onClick={() => setSelectedScope("repo")}
                   className={cn(
-                    "flex items-center gap-2 rounded-[5px] px-3.5 py-1.5 text-xs sm:text-sm font-mono transition-all cursor-pointer select-none",
+                    "flex items-center gap-1.5 rounded-[5px] px-3 py-1 text-xs sm:text-[13px] font-mono transition-all cursor-pointer select-none",
                     selectedScope === "repo"
                       ? "bg-zinc-800 text-cyan-400 shadow-sm border border-zinc-700/80 font-bold"
                       : "text-zinc-400 hover:text-zinc-200"
@@ -933,13 +933,13 @@ export default function ModelConfigPage() {
             {/* Scope Status Badges: override vs inherit + 1-click reset */}
             <div className="flex flex-wrap items-center gap-2">
               {selectedScope === "global" ? (
-                <span className="text-xs font-mono font-medium px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none bg-emerald-950/40 border-emerald-800/50 text-emerald-400">
+                <span className="text-[11px] font-mono font-medium px-2.5 py-1 rounded-[5px] border flex items-center gap-1.5 select-none bg-emerald-950/40 border-emerald-800/50 text-emerald-400">
                   <Globe className="h-3.5 w-3.5 text-emerald-400" />
                   <span>Global Default · Applies to all repos without overrides</span>
                 </span>
               ) : isRepoCustomOverride ? (
                 <>
-                  <span className="text-xs font-mono font-semibold px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none bg-cyan-950/50 border-cyan-700/60 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.18)]">
+                  <span className="text-[11px] font-mono font-semibold px-2.5 py-1 rounded-[5px] border flex items-center gap-1.5 select-none bg-cyan-950/50 border-cyan-700/60 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.18)]">
                     <GitBranch className="h-3.5 w-3.5 text-cyan-300" />
                     <span>Custom Repo Override</span>
                   </span>
@@ -948,7 +948,7 @@ export default function ModelConfigPage() {
                     size="sm"
                     onClick={handleResetToGlobalDefault}
                     disabled={isResetting || loading || !globalConfig || !selectedRepoId}
-                    className="h-7.5 px-3 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border border-zinc-700/60 cursor-pointer"
+                    className="h-7 px-2.5 text-[10.5px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border border-zinc-700/60 cursor-pointer"
                     title={
                       globalConfig
                         ? `Reset to global default (${formatModelDisplayName(globalConfig.model_name)})`
@@ -964,7 +964,7 @@ export default function ModelConfigPage() {
                   </Button>
                 </>
               ) : (
-                <span className="text-xs font-mono font-medium px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none bg-zinc-900/90 border-zinc-700/70 text-zinc-300">
+                <span className="text-[11px] font-mono font-medium px-2.5 py-1 rounded-[5px] border flex items-center gap-1.5 select-none bg-zinc-900/90 border-zinc-700/70 text-zinc-300">
                   <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
                   <span>Inheriting Platform Default</span>
                 </span>
@@ -974,7 +974,7 @@ export default function ModelConfigPage() {
 
           {/* Repo SelectDropdown (when Repo Override is selected) */}
           {selectedScope === "repo" && (
-            <div className="relative z-10 pt-3 border-t border-zinc-800/80 flex flex-col sm:flex-row sm:items-center gap-3 animate-in fade-in duration-150">
+            <div className="relative z-10 pt-2.5 border-t border-zinc-800/80 flex flex-col sm:flex-row sm:items-center gap-2.5 animate-in fade-in duration-150">
               <label className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-300 shrink-0">
                 Target Repository:
               </label>
@@ -995,7 +995,7 @@ export default function ModelConfigPage() {
                         description: `Default branch: ${r.default_branch || "main"}${r.language_hint ? ` · ${r.language_hint}` : ""}`,
                       }))}
                       placeholder="Select repository..."
-                      buttonClassName="min-w-[260px] h-9 font-mono text-xs"
+                      buttonClassName="min-w-[240px] h-8 font-mono text-xs"
                       searchable={repos.length > 5}
                     />
                     {currentRepo && (
@@ -1035,7 +1035,7 @@ export default function ModelConfigPage() {
         </div>
 
         {/* MAIN HERO: Provider Tabs + Models Grid */}
-        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-5 sm:p-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-6">
+        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 sm:p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-4.5">
           <span
             aria-hidden="true"
             className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
@@ -1044,8 +1044,8 @@ export default function ModelConfigPage() {
           {/* Header & Provider Segmented Tabs */}
           <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-zinc-800/80">
             <div>
-              <h2 className="text-base sm:text-lg font-bold text-zinc-100 flex items-center gap-2">
-                <Cpu className="h-5 w-5 text-amber-400" />
+              <h2 className="text-sm sm:text-base font-bold text-zinc-100 flex items-center gap-2">
+                <Cpu className="h-4.5 w-4.5 text-amber-400" />
                 <span>Autonomous Inference Engine</span>
               </h2>
               <p className="text-xs text-zinc-400 mt-0.5 font-mono">
@@ -1066,17 +1066,17 @@ export default function ModelConfigPage() {
                     onClick={() => handleProviderChange(p.id)}
                     disabled={isPending}
                     className={cn(
-                      "flex items-center gap-2 rounded-[5px] px-3.5 py-1.5 text-xs sm:text-sm font-mono font-medium transition-all cursor-pointer select-none",
+                      "flex items-center gap-1.5 rounded-[5px] px-3 py-1 text-xs sm:text-[12.5px] font-mono font-medium transition-all cursor-pointer select-none",
                       isSelected
                         ? "bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/80 font-bold"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
                     )}
                   >
-                    <Icon className={cn("h-4 w-4", isSelected ? meta.accentText : "text-zinc-500")} />
+                    <Icon className={cn("h-3.5 w-3.5", isSelected ? meta.accentText : "text-zinc-500")} />
                     <span>{p.name}</span>
                     <span
                       className={cn(
-                        "hidden sm:inline-block text-[10px] font-mono px-1.5 py-0.2 rounded border font-medium",
+                        "hidden sm:inline-block text-[9px] font-mono px-1.5 py-0.2 rounded border font-medium",
                         isSelected ? meta.badgeClass : "bg-zinc-900 border-zinc-800 text-zinc-500"
                       )}
                     >
@@ -1089,7 +1089,7 @@ export default function ModelConfigPage() {
           </div>
 
           {/* Provider Summary Strip */}
-          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 rounded-lg border border-zinc-800/90 bg-[#09090c]/90 text-xs sm:text-sm shadow-inner">
+          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-3.5 py-2.5 rounded-lg border border-zinc-800/90 bg-[#09090c]/90 text-xs sm:text-[12.5px] shadow-inner">
             <div className="flex items-center gap-2">
               <span className="font-bold text-zinc-100">{activeProviderMeta.name}:</span>
               <span className="text-zinc-300 font-sans">{activeProviderMeta.description}</span>
@@ -1104,10 +1104,10 @@ export default function ModelConfigPage() {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2.5">
-                  <h3 className="text-xs font-mono font-bold uppercase tracking-wider text-zinc-200">
+                  <h3 className="text-[11px] font-mono font-bold uppercase tracking-wider text-zinc-200">
                     Model Architectures
                   </h3>
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-[4px] bg-zinc-900 border border-zinc-800 text-[10.5px] font-mono text-zinc-400">
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-[4px] bg-zinc-900 border border-zinc-800 text-[9.5px] font-mono text-zinc-400">
                     {searchQuery || speedFilter !== "all"
                       ? `${currentModels.length} of ${allProviderModels.length} Available`
                       : `${allProviderModels.length} Available`}
@@ -1128,7 +1128,7 @@ export default function ModelConfigPage() {
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Filter models..."
-                    className="h-8 pl-8.5 pr-7 rounded-[6px] border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#121216] to-[#0c0c0e] font-mono text-xs text-zinc-200 placeholder:text-zinc-500 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4),0_1px_2px_rgba(0,0,0,0.2)] focus:outline-none focus:border-t-amber-400 focus:border-x-amber-500/70 focus:ring-1 focus:ring-amber-400/25 w-36 sm:w-48 transition-all"
+                    className="h-7.5 pl-8 pr-7 rounded-[5px] border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#121216] to-[#0c0c0e] font-mono text-xs text-zinc-200 placeholder:text-zinc-500 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4),0_1px_2px_rgba(0,0,0,0.2)] focus:outline-none focus:border-t-amber-400 focus:border-x-amber-500/70 focus:ring-1 focus:ring-amber-400/25 w-32 sm:w-44 transition-all"
                   />
                   {searchQuery ? (
                     <button
@@ -1155,7 +1155,7 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("all")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
+                      "px-2 py-0.5 rounded-[4px] text-[10px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "all"
                         ? "bg-gradient-to-b from-zinc-700/90 via-zinc-750 to-zinc-800/90 text-zinc-100 font-bold border-t border-t-zinc-500/70 border-x border-x-zinc-600/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -1167,7 +1167,7 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("free")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
+                      "px-2 py-0.5 rounded-[4px] text-[10px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "free"
                         ? "bg-gradient-to-b from-emerald-900/90 via-emerald-950 to-emerald-950/90 text-emerald-300 font-bold border-t border-t-emerald-500/70 border-x border-x-emerald-600/60 border-b border-b-emerald-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -1179,7 +1179,7 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("fast")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
+                      "px-2 py-0.5 rounded-[4px] text-[10px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "fast"
                         ? "bg-gradient-to-b from-cyan-900/90 via-cyan-950 to-cyan-950/90 text-cyan-300 font-bold border-t border-t-cyan-500/70 border-x border-x-cyan-600/60 border-b border-b-cyan-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -1191,7 +1191,7 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("reasoning")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
+                      "px-2 py-0.5 rounded-[4px] text-[10px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "reasoning"
                         ? "bg-gradient-to-b from-purple-900/90 via-purple-950 to-purple-950/90 text-purple-300 font-bold border-t border-t-purple-500/70 border-x border-x-purple-600/60 border-b border-b-purple-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -1204,7 +1204,7 @@ export default function ModelConfigPage() {
             </div>
 
             {loading ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
                 <Skeleton className="h-52 w-full rounded-xl bg-zinc-900/60" />
                 <Skeleton className="h-52 w-full rounded-xl bg-zinc-900/60" />
                 <Skeleton className="h-52 w-full rounded-xl bg-zinc-900/60" />
@@ -1230,7 +1230,7 @@ export default function ModelConfigPage() {
                 </Button>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
                 {currentModels.map((m) => {
                   const isSelected = m.id === selectedModel;
                   const isLive = activeConfig?.model_name === m.id;
@@ -1271,7 +1271,7 @@ export default function ModelConfigPage() {
                         }
                       }}
                       className={cn(
-                        "group relative flex flex-col justify-between rounded-xl p-5 text-left select-none transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 overflow-hidden",
+                        "group relative flex flex-col justify-between rounded-xl p-4 text-left select-none transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 overflow-hidden",
                         isSelected
                           ? "border-t border-t-amber-400 border-x border-x-amber-500/60 border-b border-b-amber-950 bg-gradient-to-b from-[#1a140b]/95 via-[#130f08]/95 to-[#0c0a05]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_0_24px_rgba(245,158,11,0.22),0_8px_24px_rgba(0,0,0,0.5)] ring-1 ring-amber-400/50"
                           : "border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_12px_28px_rgba(0,0,0,0.5)]",
@@ -1290,12 +1290,12 @@ export default function ModelConfigPage() {
                       <div className="space-y-3.5 w-full relative z-10">
                         {/* Header: Tag + Live Status + Radio Indicator */}
                         <div className="flex items-center justify-between gap-2">
-                          <span className={cn("text-[11px] font-mono font-semibold px-2.5 py-0.5 rounded-[5px]", badgePill)}>
+                          <span className={cn("text-[10px] font-mono font-semibold px-2 py-0.5 rounded-[4px]", badgePill)}>
                             {m.tag}
                           </span>
                           <div className="flex items-center gap-2">
                             {isLive && (
-                              <span className="text-[10.5px] font-mono font-semibold bg-emerald-950/60 border border-emerald-800/60 text-emerald-400 px-2.5 py-0.5 rounded-[5px] flex items-center gap-1.5 shadow-[0_0_8px_rgba(52,211,153,0.25)]">
+                              <span className="text-[9.5px] font-mono font-semibold bg-emerald-950/60 border border-emerald-800/60 text-emerald-400 px-2 py-0.5 rounded-[4px] flex items-center gap-1.5 shadow-[0_0_8px_rgba(52,211,153,0.25)]">
                                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,1)]" />
                                 Live in Prod
                               </span>
@@ -1316,13 +1316,13 @@ export default function ModelConfigPage() {
                         {/* Model Friendly Title & Technical Identifier Slug */}
                         <div>
                           <h4 className={cn(
-                            "text-[15px] font-bold tracking-tight transition-colors",
+                            "text-sm font-bold tracking-tight transition-colors",
                             isSelected ? "text-amber-300 font-bold" : "text-zinc-100 group-hover:text-white"
                           )}>
                             {displayName}
                           </h4>
                           <div className="mt-1.5 flex items-center gap-1.5">
-                            <span className="font-mono text-[11px] text-zinc-300 bg-[#08080a] border border-zinc-800/90 px-2.5 py-0.5 rounded-[4px] select-all font-medium truncate max-w-[210px] shadow-inner">
+                            <span className="font-mono text-[10px] text-zinc-300 bg-[#08080a] border border-zinc-800/90 px-2 py-0.5 rounded-[4px] select-all font-medium truncate max-w-[210px] shadow-inner">
                               {m.id}
                             </span>
                             <button
@@ -1342,11 +1342,11 @@ export default function ModelConfigPage() {
 
                         {/* Specs row: Context Window & TTFT Latency */}
                         <div className="flex items-center gap-2 text-xs font-mono pt-0.5">
-                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2.5 py-1 rounded-[5px] font-medium text-[11px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2 py-0.5 rounded-[4px] font-medium text-[10px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
                             <Layers className="h-3.5 w-3.5 text-zinc-400 group-hover:text-zinc-300" />
                             <span>{spec.contextWindow}</span>
                           </span>
-                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2.5 py-1 rounded-[5px] font-medium text-[11px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2 py-0.5 rounded-[4px] font-medium text-[10px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
                             <span
                               className={cn(
                                 "h-1.5 w-1.5 rounded-full",
@@ -1362,14 +1362,14 @@ export default function ModelConfigPage() {
                         </div>
 
                         {/* Specialty Description */}
-                        <p className="text-[12px] text-zinc-300 group-hover:text-zinc-200 leading-relaxed font-sans line-clamp-2 transition-colors">
+                        <p className="text-[11px] text-zinc-300 group-hover:text-zinc-200 leading-relaxed font-sans line-clamp-2 transition-colors">
                           {spec.specialty}
                         </p>
                       </div>
 
                       {/* Card Footer */}
-                      <div className="relative z-10 mt-3.5 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-400">
-                        <span className="font-medium text-zinc-400 font-mono text-[11px]">
+                      <div className="relative z-10 mt-2.5 pt-2.5 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400">
+                        <span className="font-medium text-zinc-400 font-mono text-[10px]">
                           {spec.recommendedRole}
                         </span>
                         <span className={cn("font-semibold text-xs flex items-center gap-1 font-mono transition-colors", isSelected ? "text-amber-300 font-bold" : "text-zinc-400 group-hover:text-zinc-200")}>
@@ -1410,7 +1410,7 @@ export default function ModelConfigPage() {
                 disabled={isPending || !isDirty}
                 size="sm"
                 className={cn(
-                  "relative px-5 py-2 font-mono font-bold text-xs rounded-[6px] transition-all cursor-pointer select-none",
+                  "relative px-4 py-1.5 font-mono font-bold text-[11px] rounded-[5px] transition-all cursor-pointer select-none",
                   isDirty
                     ? "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px]"
                     : "bg-zinc-800/90 text-zinc-400 hover:bg-zinc-800 border border-zinc-700/60"
@@ -1438,9 +1438,9 @@ export default function ModelConfigPage() {
         </div>
 
         {/* BOTTOM GRID: Balanced 2 Columns (Inference URL Enclave + Live Pipeline Telemetry) */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
           {/* Column 1: Server-Derived Base URL & Security Enclave */}
-          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3.5">
+          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3">
             <span
               aria-hidden="true"
               className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
@@ -1457,7 +1457,7 @@ export default function ModelConfigPage() {
               </span>
             </div>
 
-            <div className="relative z-10 flex items-center justify-between gap-3 rounded-[6px] border border-zinc-800/90 bg-[#08080a] px-3.5 py-2.5 font-mono text-xs sm:text-sm text-zinc-200">
+            <div className="relative z-10 flex items-center justify-between gap-3 rounded-[6px] border border-zinc-800/90 bg-[#08080a] px-3 py-2 font-mono text-xs text-zinc-200">
               <div className="flex items-center gap-2 truncate">
                 <span className="text-zinc-500 select-none text-xs font-mono">ENDPOINT:</span>
                 <span className="text-amber-300 font-semibold truncate select-all">{currentBaseUrl}</span>
@@ -1492,7 +1492,7 @@ export default function ModelConfigPage() {
           </div>
 
           {/* Column 2: Live Pipeline Telemetry & Subagents */}
-          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3.5">
+          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3">
             <span
               aria-hidden="true"
               className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
@@ -1546,7 +1546,7 @@ export default function ModelConfigPage() {
         {/* FLOATING ACTION DOCK: When changes are dirty, provide instant saving anywhere on the page */}
         {isDirty && (
           <div className="fixed bottom-6 inset-x-0 z-40 flex justify-center px-4 pointer-events-none animate-in fade-in slide-in-from-bottom-5 duration-200">
-            <div className="pointer-events-auto flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-6 max-w-2xl w-full rounded-2xl border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#18181f]/95 via-[#131317]/95 to-[#0d0d11]/95 p-3.5 sm:px-5 sm:py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_12px_32px_rgba(0,0,0,0.65),0_0_24px_rgba(245,158,11,0.18)] backdrop-blur-md ring-1 ring-amber-400/30">
+            <div className="pointer-events-auto flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-6 max-w-2xl w-full rounded-2xl border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#18181f]/95 via-[#131317]/95 to-[#0d0d11]/95 p-3 sm:px-4 sm:py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_12px_32px_rgba(0,0,0,0.65),0_0_24px_rgba(245,158,11,0.18)] backdrop-blur-md ring-1 ring-amber-400/30">
               <div className="flex items-center gap-3 text-xs sm:text-sm">
                 <span className="relative flex h-2.5 w-2.5">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
@@ -1576,7 +1576,7 @@ export default function ModelConfigPage() {
                   size="sm"
                   onClick={handleSaveConfig}
                   disabled={isPending}
-                  className="h-7.5 px-4 text-xs font-mono font-bold rounded-[5px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] flex items-center gap-1.5 cursor-pointer"
+                  className="h-7 px-3.5 text-[11px] font-mono font-bold rounded-[5px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] flex items-center gap-1.5 cursor-pointer"
                 >
                   {isPending ? (
                     <>
