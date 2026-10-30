@@ -848,7 +848,7 @@ export default function ModelConfigPage() {
         </div>
       }
     >
-      <div className="space-y-4 min-w-0 max-w-6xl pb-20">
+      <div className="space-y-4 min-w-0 w-full max-w-none pb-20">
         {/* Error Alert */}
         {error && (
           <div className="flex items-start gap-3 rounded-[8px] border border-red-800/80 bg-gradient-to-b from-red-950/60 to-red-950/30 p-4 text-sm text-red-200 shadow-md animate-in fade-in">
