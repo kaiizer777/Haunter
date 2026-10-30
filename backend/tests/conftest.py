@@ -114,8 +114,13 @@ if _TEST_DB_URL:
         if k not in ("sslmode", "channel_binding")
     ]
     _test_url = urlunparse(_parsed._replace(query=urlencode(_clean_params)))
+    # Mirror app/db.py: SSL only for managed Neon hosts. The CI/local services
+    # Postgres is a plaintext loopback throwaway whose URLs keep ?sslmode=require
+    # for Settings compat (stripped above); forcing SSL here would refuse to
+    # connect to it. A Neon URL never reaches this line — rejected by the guard.
+    _test_connect_args = {"ssl": True} if "neon.tech" in _raw_url.lower() else {}
     _test_engine = create_async_engine(
-        _test_url, poolclass=NullPool, echo=False, connect_args={"ssl": True}
+        _test_url, poolclass=NullPool, echo=False, connect_args=_test_connect_args
     )
 
     async_session_maker = async_sessionmaker(
