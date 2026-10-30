@@ -2,7 +2,7 @@
 Shared fixtures and test configuration for Haunter backend tests.
 
 ⚠️  SAFETY: truncate_all() hard-blocks against the production Neon URL.
-    Set TEST_DATABASE_URL in env to a Neon branch / local Postgres.
+    Set TEST_DATABASE_URL in env to a local Postgres service (never Neon).
     CI must export TEST_DATABASE_URL — running without it skips all DB-mutating tests.
 """
 
@@ -294,7 +294,7 @@ async def db() -> AsyncGenerator[AsyncSession, None]:
     if not _TEST_DB_URL and _is_prod_url(settings.async_database_url):
         pytest.skip(
             "TEST_DATABASE_URL not set. Refusing to run DB-mutating tests against production. "
-            "Export TEST_DATABASE_URL pointing at a Neon branch or local Postgres."
+            "Export TEST_DATABASE_URL pointing at a local Postgres service."
         )
     async with async_session_maker() as session:
         await _assert_test_db_schema_current(session)
