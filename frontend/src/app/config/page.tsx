@@ -884,70 +884,6 @@ export default function ModelConfigPage() {
           </div>
         )}
 
-        {/* TOP TELEMETRY KPI METRIC CARDS (Matching Runs page aesthetic) */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
-          {/* Active Model KPI */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Active Engine</span>
-              <Bot className="h-4 w-4 text-amber-400" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-lg sm:text-xl font-bold font-mono text-zinc-100 truncate">
-                {activeConfig ? formatModelDisplayName(activeConfig.model_name) : "Loading..."}
-              </span>
-            </div>
-            <div className="mt-1 flex items-center gap-1.5 text-[11px] text-zinc-500 truncate font-mono">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span>{activeProviderMeta.name}</span>
-            </div>
-          </div>
-
-          {/* Routing Scope KPI */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Routing Policy</span>
-              <Workflow className="h-4 w-4 text-zinc-400" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-lg sm:text-xl font-bold font-mono text-zinc-100">
-                {selectedScope === "global" ? "Global Cluster" : "Repo Override"}
-              </span>
-            </div>
-            <div className="mt-1 text-[11px] text-zinc-500 truncate">
-              {selectedScope === "global" ? "Applied to all unconfigured repos" : `Targeting ${currentRepo ? `${currentRepo.owner}/${currentRepo.name}` : "selected repository"}`}
-            </div>
-          </div>
-
-          {/* Benchmark TTFT Latency KPI */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Avg TTFT Speed</span>
-              <Gauge className="h-4 w-4 text-emerald-400" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
-                {activeSpec.latencyRating}
-              </span>
-            </div>
-            <div className="mt-1 text-[11px] text-zinc-500 truncate">Inference time-to-first-token</div>
-          </div>
-
-          {/* Security & Free Tier KPI */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Enclave & Tier</span>
-              <ShieldCheck className="h-4 w-4 text-amber-400" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-lg sm:text-xl font-bold font-mono text-emerald-400">
-                {activeSpec.isFree ? "100% Free Tier" : "Direct API"}
-              </span>
-            </div>
-            <div className="mt-1 text-[11px] text-zinc-500 truncate">Strict server allowlist gated</div>
-          </div>
-        </div>
-
         {/* TOP BAR: Scope Switcher + Target Repository Control */}
         <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 sm:p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-4">
           <span
@@ -1099,6 +1035,70 @@ export default function ModelConfigPage() {
               )}
             </div>
           )}
+        </div>
+
+        {/* TOP TELEMETRY KPI METRIC CARDS (Matching Runs page aesthetic) */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
+          {/* Active Model KPI */}
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Active Engine</span>
+              <Bot className="h-4 w-4 text-amber-400" />
+            </div>
+            <div className="mt-2 flex items-baseline gap-2">
+              <span className="text-lg sm:text-xl font-bold font-mono text-zinc-100 truncate">
+                {activeConfig ? formatModelDisplayName(activeConfig.model_name) : "Loading..."}
+              </span>
+            </div>
+            <div className="mt-1 flex items-center gap-1.5 text-[11px] text-zinc-500 truncate font-mono">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>{activeProviderMeta.name}</span>
+            </div>
+          </div>
+
+          {/* Routing Scope KPI */}
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Routing Policy</span>
+              <Workflow className="h-4 w-4 text-zinc-400" />
+            </div>
+            <div className="mt-2 flex items-baseline gap-2">
+              <span className="text-lg sm:text-xl font-bold font-mono text-zinc-100">
+                {selectedScope === "global" ? "Global Cluster" : "Repo Override"}
+              </span>
+            </div>
+            <div className="mt-1 text-[11px] text-zinc-500 truncate">
+              {selectedScope === "global" ? "Applied to all unconfigured repos" : `Targeting ${currentRepo ? `${currentRepo.owner}/${currentRepo.name}` : "selected repository"}`}
+            </div>
+          </div>
+
+          {/* Benchmark TTFT Latency KPI */}
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Avg TTFT Speed</span>
+              <Gauge className="h-4 w-4 text-emerald-400" />
+            </div>
+            <div className="mt-2 flex items-baseline gap-2">
+              <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
+                {activeSpec.latencyRating}
+              </span>
+            </div>
+            <div className="mt-1 text-[11px] text-zinc-500 truncate">Inference time-to-first-token</div>
+          </div>
+
+          {/* Security & Free Tier KPI */}
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Enclave & Tier</span>
+              <ShieldCheck className="h-4 w-4 text-amber-400" />
+            </div>
+            <div className="mt-2 flex items-baseline gap-2">
+              <span className="text-lg sm:text-xl font-bold font-mono text-emerald-400">
+                {activeSpec.isFree ? "100% Free Tier" : "Direct API"}
+              </span>
+            </div>
+            <div className="mt-1 text-[11px] text-zinc-500 truncate">Strict server allowlist gated</div>
+          </div>
         </div>
 
         {/* MAIN HERO: Provider Tabs + Models Grid */}
