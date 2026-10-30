@@ -2,7 +2,7 @@
 Shared fixtures and test configuration for Haunter backend tests.
 
 ⚠️  SAFETY: truncate_all() hard-blocks against the production Neon URL.
-    Set TEST_DATABASE_URL in env to a Neon branch / local Postgres.
+    Set TEST_DATABASE_URL in env to a local Postgres service.
     CI must export TEST_DATABASE_URL — running without it skips all DB-mutating tests.
 """
 
@@ -45,6 +45,17 @@ from main import app
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 _TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "")
+
+# Fail fast: the test suite must never run against managed production.
+# The services Postgres in .github/workflows/ci.yml is a loopback throwaway;
+# a Neon hostname here means a prod-shaped URL leaked into the test env and
+# every DB fixture below would then build engines against production.
+if _TEST_DB_URL and "neon.tech" in _TEST_DB_URL.lower():
+    raise RuntimeError(
+        "TEST_DATABASE_URL must never point at Neon (neon.tech). Point it at "
+        "the local Postgres service (localhost) instead — refusing to run "
+        "tests against a managed production database."
+    )
 
 # Hosts that can only be a developer's machine or a CI service container, never
 # a managed production endpoint. Prod is Neon/RDS; it is never on loopback.
@@ -103,8 +114,13 @@ if _TEST_DB_URL:
         if k not in ("sslmode", "channel_binding")
     ]
     _test_url = urlunparse(_parsed._replace(query=urlencode(_clean_params)))
+    # Mirror app/db.py: SSL only for managed Neon hosts. The CI/local services
+    # Postgres is a plaintext loopback throwaway whose URLs keep ?sslmode=require
+    # for Settings compat (stripped above); forcing SSL here would refuse to
+    # connect to it. A Neon URL never reaches this line — rejected by the guard.
+    _test_connect_args = {"ssl": True} if "neon.tech" in _raw_url.lower() else {}
     _test_engine = create_async_engine(
-        _test_url, poolclass=NullPool, echo=False, connect_args={"ssl": True}
+        _test_url, poolclass=NullPool, echo=False, connect_args=_test_connect_args
     )
 
     async_session_maker = async_sessionmaker(
@@ -278,7 +294,7 @@ async def db() -> AsyncGenerator[AsyncSession, None]:
     if not _TEST_DB_URL and _is_prod_url(settings.async_database_url):
         pytest.skip(
             "TEST_DATABASE_URL not set. Refusing to run DB-mutating tests against production. "
-            "Export TEST_DATABASE_URL pointing at a Neon branch or local Postgres."
+            "Export TEST_DATABASE_URL pointing at a local Postgres service."
         )
     async with async_session_maker() as session:
         await _assert_test_db_schema_current(session)
