@@ -35,7 +35,7 @@ export function AppLayout({
     return (
       <div className="flex min-h-screen bg-[#09090b]">
         {/* Skeleton Sidebar */}
-        <div className="w-[264px] border-r border-zinc-800 bg-[#0c0c0e] p-4 space-y-4">
+        <div className="w-[240px] border-r border-zinc-800 bg-[#0c0c0e] p-3.5 space-y-3.5">
           <div className="flex items-center gap-3">
             <Skeleton className="h-7 w-7 rounded-[5px]" />
             <Skeleton className="h-4 w-24" />
@@ -72,9 +72,9 @@ export function AppLayout({
       <Sidebar />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 pl-[264px] min-h-screen">
+      <div className="flex-1 flex flex-col min-w-0 pl-[240px] min-h-screen">
         <Topbar title={title} subtitle={subtitle} actions={actions} />
-        <main className={`flex-1 min-w-0 ${noPadding ? "p-0 flex flex-col overflow-hidden" : "p-6 overflow-y-auto"}`}>
+        <main className={`flex-1 min-w-0 ${noPadding ? "p-0 flex flex-col overflow-hidden" : "p-5 overflow-y-auto"}`}>
           {children}
         </main>
       </div>
