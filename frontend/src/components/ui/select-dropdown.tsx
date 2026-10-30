@@ -151,7 +151,7 @@ export function SelectDropdown({
         disabled={disabled}
         onClick={() => !disabled && setIsOpen(!isOpen)}
         className={cn(
-          "group h-8.5 flex items-center justify-between gap-2 rounded-[6px] border border-zinc-800/80 bg-zinc-900/60 px-3 text-[12.5px] text-zinc-300 font-normal transition-all duration-150 select-none cursor-pointer",
+          "group h-7.5 flex items-center justify-between gap-2 rounded-[5px] border border-zinc-800/80 bg-zinc-900/60 px-2.5 text-[11.5px] text-zinc-300 font-normal transition-all duration-150 select-none cursor-pointer",
           "hover:border-zinc-700/90 hover:bg-zinc-900/90 hover:text-zinc-100",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-zinc-600 focus-visible:border-zinc-600",
           isOpen && "border-zinc-700 bg-zinc-900 text-zinc-100 ring-1 ring-zinc-700/50 shadow-sm",
@@ -197,7 +197,7 @@ export function SelectDropdown({
                     setSearchQuery(e.target.value);
                     setHighlightedIndex(0);
                   }}
-                  className="w-full h-7.5 pl-8 pr-7 bg-zinc-900/80 border border-zinc-800/80 rounded-[5px] text-[12px] text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700"
+                  className="w-full h-7 pl-7 pr-6 bg-zinc-900/80 border border-zinc-800/80 rounded-[4px] text-[11px] text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700"
                 />
                 {searchQuery && (
                   <button
@@ -235,7 +235,7 @@ export function SelectDropdown({
                     onClick={() => handleSelect(option.value)}
                     onMouseEnter={() => setHighlightedIndex(index)}
                     className={cn(
-                      "w-full flex items-center justify-between gap-2.5 px-2.5 py-1.5 text-[12.5px] rounded-[5px] text-left transition-colors cursor-pointer select-none",
+                      "w-full flex items-center justify-between gap-2 px-2 py-1 text-[11.5px] rounded-[4px] text-left transition-colors cursor-pointer select-none",
                       isSelected
                         ? "bg-zinc-800/70 text-zinc-100 font-medium"
                         : isHighlighted

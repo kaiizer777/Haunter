@@ -45,7 +45,7 @@ export function Modal({
       {/* Modal Dialog */}
       <div
         className={cn(
-          "relative z-50 w-full max-w-md rounded-[8px] border border-zinc-800 bg-[#121215] p-5 shadow-2xl transition-all",
+          "relative z-50 w-full max-w-md rounded-[7px] border border-zinc-800 bg-[#121215] p-4.5 shadow-2xl transition-all",
           className
         )}
       >
