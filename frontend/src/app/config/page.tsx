@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useTransition, useMemo, useRef } from
 import { AppLayout } from "@/components/layout/app-layout";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { SelectDropdown } from "@/components/ui/select-dropdown";
+import { SelectDropdown, SelectOption } from "@/components/ui/select-dropdown";
 import { api, ModelConfigOut, RepoOut, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
@@ -33,9 +33,7 @@ import {
 // Strict server-side allowlists (WORK.md:252)
 const PROVIDER_OPTIONS = [
   { id: "opencode_zen", name: "OpenCode Zen", defaultModel: "nemotron-3.5-lightning-free" },
-  { id: "openai", name: "OpenAI", defaultModel: "gpt-4o" },
-  { id: "anthropic", name: "Anthropic", defaultModel: "claude-sonnet-4-5" },
-  { id: "groq", name: "Groq", defaultModel: "openai/gpt-oss-120b" },
+  { id: "opencode_go", name: "OpenCode Go", defaultModel: "nemotron-3.5-lightning-free" },
 ];
 
 const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string; context_window?: number }[]> = {
@@ -44,18 +42,10 @@ const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: stri
     { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Fast · Free", context_window: 65536 },
     { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "1M · Free", context_window: 1048576 },
   ],
-  openai: [
-    { id: "gpt-4o", name: "GPT-4o", tag: "Flagship", context_window: 128000 },
-    { id: "gpt-4o-mini", name: "GPT-4o Mini", tag: "Fast", context_window: 128000 },
-  ],
-  anthropic: [
-    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", tag: "SOTA Fixes", context_window: 200000 },
-    { id: "claude-haiku-3-5", name: "Claude Haiku 3.5", tag: "Low Latency", context_window: 200000 },
-  ],
-  groq: [
-    { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B", tag: "High Reasoning · Fallback", context_window: 131072 },
-    { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B Versatile", tag: "Fast · Production", context_window: 131072 },
-    { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B Instant", tag: "Ultra Fast", context_window: 131072 },
+  opencode_go: [
+    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Default · Free", context_window: 131072 },
+    { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Fast · Free", context_window: 65536 },
+    { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "1M · Free", context_window: 1048576 },
   ],
 };
 
@@ -82,35 +72,15 @@ const PROVIDER_METADATA: Record<
     accentText: "text-amber-400",
     badgeClass: "bg-amber-400/10 border-amber-400/30 text-amber-300",
   },
-  openai: {
-    name: "OpenAI",
-    tag: "Direct API",
-    shortBadge: "Flagship",
-    description: "Industry-standard multi-step reasoning models with GPT-4o for complex architectural bug fixes.",
-    baseUrl: "https://api.openai.com/v1",
-    icon: Cpu,
+  opencode_go: {
+    name: "OpenCode Go",
+    tag: "Low Latency · Direct Gateway",
+    shortBadge: "Direct Gateway",
+    description: "Ultra-low-latency optimized inference gateway for real-time CI patch synthesis and code verification.",
+    baseUrl: "https://opencode.ai/go/v1",
+    icon: Activity,
     accentText: "text-emerald-400",
     badgeClass: "bg-emerald-400/10 border-emerald-400/30 text-emerald-300",
-  },
-  anthropic: {
-    name: "Anthropic",
-    tag: "Direct API",
-    shortBadge: "AST SOTA",
-    description: "Specialized code reasoning via Claude 3.5 Sonnet & Claude 3.5 Haiku for nuanced test failures.",
-    baseUrl: "https://api.anthropic.com/v1",
-    icon: Sparkles,
-    accentText: "text-orange-400",
-    badgeClass: "bg-orange-400/10 border-orange-400/30 text-orange-300",
-  },
-  groq: {
-    name: "Groq",
-    tag: "LPU · Ultra-Low Latency",
-    shortBadge: "LPU Speed",
-    description: "Ultra-low-latency LPU inference for rapid CI triage, fallback healing, and high-throughput patch synthesis.",
-    baseUrl: "https://api.groq.com/openai/v1",
-    icon: Gauge,
-    accentText: "text-rose-400",
-    badgeClass: "bg-rose-400/10 border-rose-400/30 text-rose-300",
   },
 };
 
@@ -556,11 +526,14 @@ export default function ModelConfigPage() {
       .getAvailableModels()
       .then((data) => {
         if (data) {
+          const raw = data as unknown as Record<string, typeof DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen>;
           setModelOptionsByProvider({
             opencode_zen: data.opencode_zen?.length ? data.opencode_zen : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen,
-            openai: data.openai?.length ? data.openai : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.openai,
-            anthropic: data.anthropic?.length ? data.anthropic : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.anthropic,
-            groq: data.groq?.length ? data.groq : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.groq,
+            opencode_go: raw.opencode_go?.length
+              ? raw.opencode_go
+              : data.opencode_zen?.length
+              ? data.opencode_zen
+              : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_go,
           });
         }
       })
@@ -766,6 +739,19 @@ export default function ModelConfigPage() {
   const activeProviderMeta = PROVIDER_METADATA[selectedProvider] || PROVIDER_METADATA.opencode_zen;
   const currentBaseUrl = activeConfig?.base_url || activeProviderMeta.baseUrl;
   const currentRepo = repos.find((r) => r.id === selectedRepoId);
+
+  const providerDropdownOptions = useMemo<SelectOption[]>(() => {
+    return PROVIDER_OPTIONS.map((p) => {
+      const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_zen;
+      const Icon = meta.icon;
+      return {
+        value: p.id,
+        label: p.name,
+        icon: <Icon className={cn("h-3.5 w-3.5 shrink-0", meta.accentText)} />,
+        description: meta.tag,
+      };
+    });
+  }, []);
 
   // Normalize provider model list
   const allProviderModels = useMemo(() => {
@@ -1053,38 +1039,28 @@ export default function ModelConfigPage() {
               </p>
             </div>
 
-            {/* Provider Switcher Tabs */}
-            <div className="inline-flex rounded-[7px] border border-zinc-800/90 bg-[#09090b]/90 p-1 shadow-inner">
-              {PROVIDER_OPTIONS.map((p) => {
-                const isSelected = selectedProvider === p.id;
-                const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_zen;
-                const Icon = meta.icon;
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => handleProviderChange(p.id)}
-                    disabled={isPending}
-                    className={cn(
-                      "flex items-center gap-1.5 rounded-[5px] px-3 py-1 text-xs sm:text-[12.5px] font-mono font-medium transition-all cursor-pointer select-none",
-                      isSelected
-                        ? "bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/80 font-bold"
-                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
-                    )}
-                  >
-                    <Icon className={cn("h-3.5 w-3.5", isSelected ? meta.accentText : "text-zinc-500")} />
-                    <span>{p.name}</span>
-                    <span
-                      className={cn(
-                        "hidden sm:inline-block text-[9px] font-mono px-1.5 py-0.2 rounded border font-medium",
-                        isSelected ? meta.badgeClass : "bg-zinc-900 border-zinc-800 text-zinc-500"
-                      )}
-                    >
-                      {meta.shortBadge}
-                    </span>
-                  </button>
-                );
-              })}
+            {/* Provider Switcher Dropdown */}
+            <div className="flex items-center gap-2.5">
+              <span className="text-xs font-mono font-medium text-zinc-400 hidden sm:inline-block">
+                Provider:
+              </span>
+              <SelectDropdown
+                id="provider-selector"
+                aria-label="Inference Provider Selector"
+                value={selectedProvider}
+                onChange={handleProviderChange}
+                options={providerDropdownOptions}
+                buttonClassName="min-w-[190px] sm:min-w-[210px] h-8 font-mono text-xs bg-zinc-900/80 border-zinc-700/80 hover:border-zinc-600 text-zinc-200"
+                disabled={isPending}
+              />
+              <span
+                className={cn(
+                  "hidden sm:inline-flex text-[9px] font-mono px-2 py-1 rounded border font-medium",
+                  activeProviderMeta.badgeClass
+                )}
+              >
+                {activeProviderMeta.shortBadge}
+              </span>
             </div>
           </div>
 
