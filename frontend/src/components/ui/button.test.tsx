@@ -8,7 +8,7 @@ describe("button.tsx", () => {
     render(<Button>Click me</Button>);
     const btn = screen.getByRole("button", { name: "Click me" });
     expect(btn).toBeInTheDocument();
-    expect(btn).toHaveClass("bg-zinc-50", "text-zinc-950", "h-8", "px-3");
+    expect(btn).toHaveClass("bg-zinc-50", "text-zinc-950", "h-7.5", "px-3", "py-1", "text-[11.5px]");
   });
 
   it("renders with secondary variant", () => {
@@ -45,15 +45,15 @@ describe("button.tsx", () => {
   it("renders different sizes correctly", () => {
     const { rerender } = render(<Button size="sm">Small</Button>);
     let btn = screen.getByRole("button", { name: "Small" });
-    expect(btn).toHaveClass("h-7", "px-2.5", "text-[11px]");
+    expect(btn).toHaveClass("h-6.5", "px-2", "text-[10.5px]");
 
     rerender(<Button size="lg">Large</Button>);
     btn = screen.getByRole("button", { name: "Large" });
-    expect(btn).toHaveClass("h-9", "px-4", "text-sm");
+    expect(btn).toHaveClass("h-8.5", "px-3.5", "text-xs");
 
     rerender(<Button size="icon">Icon</Button>);
     btn = screen.getByRole("button", { name: "Icon" });
-    expect(btn).toHaveClass("h-8", "w-8", "p-0");
+    expect(btn).toHaveClass("h-7", "w-7", "p-0");
   });
 
   it("handles disabled state and prevents click handler execution", () => {
@@ -97,6 +97,6 @@ describe("button.tsx", () => {
   it("buttonVariants helper generates correct class string", () => {
     const classes = buttonVariants({ variant: "destructive", size: "sm" });
     expect(classes).toContain("bg-red-950");
-    expect(classes).toContain("h-7");
+    expect(classes).toContain("h-6.5");
   });
 });

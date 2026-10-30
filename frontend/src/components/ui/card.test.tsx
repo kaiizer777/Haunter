@@ -33,7 +33,15 @@ describe("card.tsx", () => {
 
     const header = screen.getByTestId("card-header");
     expect(header).toBeInTheDocument();
-    expect(header).toHaveClass("flex", "flex-col", "p-4");
+    expect(header).toHaveClass(
+      "flex",
+      "flex-col",
+      "space-y-1.5",
+      "p-3.5",
+      "sm:p-4",
+      "border-b",
+      "border-zinc-800/80"
+    );
 
     const title = screen.getByTestId("card-title");
     expect(title).toBeInTheDocument();
@@ -49,7 +57,7 @@ describe("card.tsx", () => {
 
     const content = screen.getByTestId("card-content");
     expect(content).toBeInTheDocument();
-    expect(content).toHaveClass("p-4");
+    expect(content).toHaveClass("p-3.5", "sm:p-4");
     expect(content).toHaveTextContent("Main body content");
 
     const footer = screen.getByTestId("card-footer");

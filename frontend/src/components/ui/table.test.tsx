@@ -53,14 +53,14 @@ describe("table.tsx", () => {
 
     const th = screen.getByText("Run ID");
     expect(th.tagName).toBe("TH");
-    expect(th).toHaveClass("h-9", "px-3", "text-zinc-400");
+    expect(th).toHaveClass("h-8", "px-2.5", "text-zinc-400");
 
     const row = screen.getByTestId("table-row-1");
     expect(row.tagName).toBe("TR");
 
     const td = screen.getByText("run_001");
     expect(td.tagName).toBe("TD");
-    expect(td).toHaveClass("p-3", "text-zinc-200");
+    expect(td).toHaveClass("p-2.5", "text-zinc-200");
 
     const footer = screen.getByText("Total").closest("tfoot");
     expect(footer).toBeInTheDocument();
