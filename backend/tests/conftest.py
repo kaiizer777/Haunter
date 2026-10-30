@@ -2,7 +2,7 @@
 Shared fixtures and test configuration for Haunter backend tests.
 
 ⚠️  SAFETY: truncate_all() hard-blocks against the production Neon URL.
-    Set TEST_DATABASE_URL in env to a local Postgres service (never Neon).
+    Set TEST_DATABASE_URL in env to a local Postgres service.
     CI must export TEST_DATABASE_URL — running without it skips all DB-mutating tests.
 """
 
