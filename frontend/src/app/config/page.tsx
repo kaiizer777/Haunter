@@ -1021,14 +1021,14 @@ export default function ModelConfigPage() {
         </div>
 
         {/* MAIN HERO: Provider Tabs + Models Grid */}
-        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 sm:p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-4.5">
+        <div className="relative rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 sm:p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-4.5">
           <span
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
+            className="pointer-events-none absolute inset-x-0 top-0 h-6 rounded-t-xl bg-gradient-to-b from-white/[0.04] to-transparent z-10"
           />
 
           {/* Header & Provider Segmented Tabs */}
-          <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-zinc-800/80">
+          <div className="relative z-30 flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-zinc-800/80">
             <div>
               <h2 className="text-sm sm:text-base font-bold text-zinc-100 flex items-center gap-2">
                 <Cpu className="h-4.5 w-4.5 text-amber-400" />
@@ -1040,7 +1040,7 @@ export default function ModelConfigPage() {
             </div>
 
             {/* Provider Switcher Dropdown */}
-            <div className="flex items-center gap-2.5">
+            <div className="relative z-30 flex items-center gap-2.5">
               <span className="text-xs font-mono font-medium text-zinc-400 hidden sm:inline-block">
                 Provider:
               </span>
