@@ -1,6 +1,6 @@
 <div align="center">
 
-<h3>Your engineering team's autonomous AI agent.<br/>It reviews code, ships fixes & features — before you've opened your IDE.</h3>
+<h3>Your engineering team's autonomous AI agent.<br/>It reviews code, fixes findings & ships features — before you've opened your IDE.</h3>
 
 <br/>
 
@@ -10,7 +10,6 @@
 [![Edge Hosting](https://img.shields.io/badge/Edge-Cloudflare%20Workers-F38020?style=flat-square&logo=cloudflare)](https://workers.cloudflare.com/)
 [![Database](https://img.shields.io/badge/Database-Neon%20Postgres%20(Async)-00E599?style=flat-square&logo=postgresql)](https://neon.tech/)
 [![Sandbox](https://img.shields.io/badge/Sandbox-GitHub%20Actions%20CI-181717?style=flat-square&logo=githubactions)](https://github.com/features/actions)
-[![Runtime Preview](https://img.shields.io/badge/In--Browser%20Preview-StackBlitz%20WebContainer-1389FD?style=flat-square)](https://webcontainers.io/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)](LICENSE)
 
 <br/>
