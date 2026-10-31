@@ -259,6 +259,7 @@ async def test_webhook_non_workflow_run_event(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
+@pytest.mark.db
 async def test_webhook_action_not_completed(client: httpx.AsyncClient):
     """workflow_run with action != completed (e.g. requested) is ignored."""
     payload = make_valid_payload(action="requested", conclusion=None)
@@ -278,6 +279,7 @@ async def test_webhook_action_not_completed(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
+@pytest.mark.db
 async def test_webhook_conclusion_not_failure(client: httpx.AsyncClient):
     """workflow_run with conclusion != failure (e.g. success) is ignored."""
     payload = make_valid_payload(action="completed", conclusion="success")

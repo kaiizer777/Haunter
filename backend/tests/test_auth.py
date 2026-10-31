@@ -282,6 +282,7 @@ async def test_me_expired_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.db
 async def test_me_nonexistent_user(client: httpx.AsyncClient, signed_session_factory):
     """GET /auth/me with valid signature for non-existent user returns 401."""
     ghost_id = uuid.uuid4()
