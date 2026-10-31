@@ -89,6 +89,9 @@ jobs:
   backend-db:
     name: Backend DB (migrations + integration tests)
     runs-on: ubuntu-latest
+    # Approval gate: create the "backend-db" environment in repo Settings -> Environments
+    # and add required reviewers. The job pauses for approval before running.
+    environment: backend-db
     services:
       postgres:
         image: postgres:16
