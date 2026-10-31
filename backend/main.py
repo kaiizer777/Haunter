@@ -22,7 +22,6 @@ from app.routers.github import router as github_router
 from app.routers.hosting_config import router as hosting_config_router
 from app.routers.model_config import router as model_config_router
 from app.routers.reviews import router as reviews_router
-from app.routers.sessions import router as sessions_router
 from app.routers.settings import router as settings_router
 from app.routers.traces import router as traces_router
 from app.services.audit_pipeline import (
@@ -164,7 +163,6 @@ app.include_router(model_config_router)
 app.include_router(hosting_config_router)
 app.include_router(traces_router)
 app.include_router(reviews_router)
-app.include_router(sessions_router)
 app.include_router(settings_router)
 app.include_router(webhooks_router)
 app.include_router(eval_router)

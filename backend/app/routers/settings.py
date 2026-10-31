@@ -237,7 +237,6 @@ async def list_repos_with_settings(
                 features={
                     "auto_fixer": settings.enable_auto_fix,
                     "auditor_mode": settings.enable_auditor_mode,
-                    "live_sessions": settings.enable_live_sessions,
                     "webcontainer_preview": settings.enable_webcontainer_preview,
                     "ci_sandbox": settings.enable_sandbox_verification,
                 },

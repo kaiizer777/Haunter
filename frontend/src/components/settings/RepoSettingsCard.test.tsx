@@ -17,8 +17,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
     enable_ci_sandbox: true,
     enable_pr_comments: true,
     file_issue_on_fallback: true,
-    enable_live_sessions: true,
-    enable_webcontainer_preview: true,
     audit_trigger_on_pr: true,
     audit_trigger_on_ci_failure: true,
     audit_trigger_on_ci_success: false,
@@ -60,7 +58,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
     expect(screen.getByText("Conservative Guardian")).toBeInTheDocument();
     expect(screen.getByText("Standard Dual-Engine")).toBeInTheDocument();
     expect(screen.getByText("Read-Only Auditor")).toBeInTheDocument();
-    expect(screen.getByText("Live Studio Only")).toBeInTheDocument();
     expect(screen.getByText("Custom Policy")).toBeInTheDocument();
 
     // Feature switches
@@ -68,8 +65,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
     expect(screen.getByText("Multi-Perspective Auditor Bot")).toBeInTheDocument();
     expect(screen.getByText("CI Mirror Sandbox Runner")).toBeInTheDocument();
     expect(screen.getByText("PR & Commit Annotations")).toBeInTheDocument();
-    expect(screen.getByText("Interactive Live Cloud Sessions")).toBeInTheDocument();
-    expect(screen.getByText("In-Browser WebContainer Preview")).toBeInTheDocument();
 
     // Auditor triggers
     expect(screen.getByText("Trigger on Pull Requests")).toBeInTheDocument();

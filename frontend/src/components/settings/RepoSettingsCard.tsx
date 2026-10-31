@@ -6,11 +6,9 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sliders,
-  TerminalSquare,
   Wrench,
   FlaskConical,
   MessageSquareQuote,
-  Globe,
   CheckCircle2,
   AlertCircle,
   RotateCcw,
@@ -83,14 +81,6 @@ export const PRESET_OPTIONS: PresetMeta[] = [
     description: "Zero git modifications or branch creations. Posts in-depth diagnostic annotations on PRs and commits.",
     icon: ShieldCheck,
     accentColor: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
-  },
-  {
-    key: "live_studio_only",
-    title: "Live Studio Only",
-    badge: "Interactive",
-    description: "Focused exclusively on in-browser WebContainer live preview and interactive cloud terminal sessions.",
-    icon: TerminalSquare,
-    accentColor: "text-violet-400 border-violet-500/30 bg-violet-500/10",
   },
   {
     key: "custom",
@@ -192,8 +182,6 @@ export function RepoSettingsCard({
   const [enableAuditorMode, setEnableAuditorMode] = useState<boolean>(initialSettings.enable_auditor_mode);
   const [enableSandbox, setEnableSandbox] = useState<boolean>(initialSettings.enable_sandbox_verification);
   const [enablePrComments, setEnablePrComments] = useState<boolean>(initialSettings.enable_pr_comments);
-  const [enableLiveSessions, setEnableLiveSessions] = useState<boolean>(initialSettings.enable_live_sessions);
-  const [enableWebcontainer, setEnableWebcontainer] = useState<boolean>(initialSettings.enable_webcontainer_preview);
 
   // Auditor triggers
   const [triggerOnPr, setTriggerOnPr] = useState<boolean>(initialSettings.audit_trigger_on_pr);
@@ -233,8 +221,6 @@ export function RepoSettingsCard({
     setEnableAuditorMode(initialSettings.enable_auditor_mode);
     setEnableSandbox(initialSettings.enable_sandbox_verification);
     setEnablePrComments(initialSettings.enable_pr_comments);
-    setEnableLiveSessions(initialSettings.enable_live_sessions);
-    setEnableWebcontainer(initialSettings.enable_webcontainer_preview);
 
     setTriggerOnPr(initialSettings.audit_trigger_on_pr);
     setTriggerOnCiFailure(initialSettings.audit_trigger_on_ci_failure);
@@ -336,8 +322,6 @@ export function RepoSettingsCard({
       enableAuditorMode !== initialSettings.enable_auditor_mode ||
       enableSandbox !== initialSettings.enable_sandbox_verification ||
       enablePrComments !== initialSettings.enable_pr_comments ||
-      enableLiveSessions !== initialSettings.enable_live_sessions ||
-      enableWebcontainer !== initialSettings.enable_webcontainer_preview ||
       triggerOnPr !== initialSettings.audit_trigger_on_pr ||
       triggerOnCiFailure !== initialSettings.audit_trigger_on_ci_failure ||
       triggerOnCiSuccess !== initialSettings.audit_trigger_on_ci_success ||
@@ -359,8 +343,6 @@ export function RepoSettingsCard({
     enableAuditorMode,
     enableSandbox,
     enablePrComments,
-    enableLiveSessions,
-    enableWebcontainer,
     triggerOnPr,
     triggerOnCiFailure,
     triggerOnCiSuccess,
@@ -390,8 +372,6 @@ export function RepoSettingsCard({
         setEnableAuditorMode(updated.enable_auditor_mode);
         setEnableSandbox(updated.enable_sandbox_verification);
         setEnablePrComments(updated.enable_pr_comments);
-        setEnableLiveSessions(updated.enable_live_sessions);
-        setEnableWebcontainer(updated.enable_webcontainer_preview);
 
         setTriggerOnPr(updated.audit_trigger_on_pr);
         setTriggerOnCiFailure(updated.audit_trigger_on_ci_failure);
@@ -424,8 +404,6 @@ export function RepoSettingsCard({
       enable_auditor_mode: enableAuditorMode,
       enable_sandbox_verification: enableSandbox,
       enable_pr_comments: enablePrComments,
-      enable_live_sessions: enableLiveSessions,
-      enable_webcontainer_preview: enableWebcontainer,
       audit_trigger_on_pr: triggerOnPr,
       audit_trigger_on_ci_failure: triggerOnCiFailure,
       audit_trigger_on_ci_success: triggerOnCiSuccess,
@@ -459,8 +437,6 @@ export function RepoSettingsCard({
     enableAuditorMode,
     enableSandbox,
     enablePrComments,
-    enableLiveSessions,
-    enableWebcontainer,
     triggerOnPr,
     triggerOnCiFailure,
     triggerOnCiSuccess,
@@ -483,8 +459,6 @@ export function RepoSettingsCard({
     setEnableAuditorMode(initialSettings.enable_auditor_mode);
     setEnableSandbox(initialSettings.enable_sandbox_verification);
     setEnablePrComments(initialSettings.enable_pr_comments);
-    setEnableLiveSessions(initialSettings.enable_live_sessions);
-    setEnableWebcontainer(initialSettings.enable_webcontainer_preview);
 
     setTriggerOnPr(initialSettings.audit_trigger_on_pr);
     setTriggerOnCiFailure(initialSettings.audit_trigger_on_ci_failure);
@@ -752,57 +726,6 @@ export function RepoSettingsCard({
             />
           </div>
 
-          {/* Interactive Live Sessions */}
-          <div className="flex items-start justify-between gap-4 p-3.5 rounded-lg border border-zinc-800/70 bg-[#121216]/80 hover:border-zinc-700/80 transition-all">
-            <div className="flex items-start gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-violet-500/30 bg-violet-500/10 text-violet-400 shrink-0 mt-0.5">
-                <TerminalSquare className="h-4 w-4" />
-              </div>
-              <div>
-                <label
-                  htmlFor="toggle-live-sessions"
-                  className="text-xs font-semibold text-zinc-200 block cursor-pointer select-none"
-                >
-                  Interactive Live Cloud Sessions
-                </label>
-                <p className="text-[11px] text-zinc-400 leading-relaxed mt-0.5">
-                  Allows interactive developer sessions with bidirectional streaming and slash command execution.
-                </p>
-              </div>
-            </div>
-            <Switch
-              id="toggle-live-sessions"
-              checked={enableLiveSessions}
-              onCheckedChange={(val) => handleCustomToggle(setEnableLiveSessions, val)}
-              aria-label="Interactive Live Cloud Sessions"
-            />
-          </div>
-
-          {/* WebContainer In-Browser Dev Server */}
-          <div className="flex items-start justify-between gap-4 p-3.5 rounded-lg border border-zinc-800/70 bg-[#121216]/80 hover:border-zinc-700/80 transition-all">
-            <div className="flex items-start gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-teal-500/30 bg-teal-500/10 text-teal-400 shrink-0 mt-0.5">
-                <Globe className="h-4 w-4" />
-              </div>
-              <div>
-                <label
-                  htmlFor="toggle-webcontainer"
-                  className="text-xs font-semibold text-zinc-200 block cursor-pointer select-none"
-                >
-                  In-Browser WebContainer Preview
-                </label>
-                <p className="text-[11px] text-zinc-400 leading-relaxed mt-0.5">
-                  Boots real Node.js dev servers in-browser with live hot reload for immediate UI validation.
-                </p>
-              </div>
-            </div>
-            <Switch
-              id="toggle-webcontainer"
-              checked={enableWebcontainer}
-              onCheckedChange={(val) => handleCustomToggle(setEnableWebcontainer, val)}
-              aria-label="In-Browser WebContainer Preview"
-            />
-          </div>
         </div>
       </div>
 

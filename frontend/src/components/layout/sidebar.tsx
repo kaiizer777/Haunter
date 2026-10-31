@@ -11,7 +11,6 @@ import {
   ShieldCheck,
   TerminalSquare,
   Cpu,
-  Zap,
   Settings,
   Webhook,
 } from "lucide-react";
@@ -40,7 +39,7 @@ export function Sidebar() {
     };
   }, [isAdmin]);
 
-  // Keyboard shortcut listener (Cmd/Ctrl/Alt + 1-7) for rapid developer navigation
+  // Keyboard shortcut listener (Cmd/Ctrl/Alt + 1-6) for rapid developer navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -55,13 +54,12 @@ export function Sidebar() {
 
       if ((e.metaKey || e.ctrlKey || e.altKey) && !e.shiftKey) {
         const keyMap: Record<string, string> = {
-          "1": "/sessions",
-          "2": "/runs",
-          "3": "/reviews",
-          "4": "/repos",
-          "5": "/eval",
-          "6": "/config",
-          "7": "/settings",
+          "1": "/runs",
+          "2": "/reviews",
+          "3": "/repos",
+          "4": "/eval",
+          "5": "/config",
+          "6": "/settings",
         };
         const targetHref = keyMap[e.key];
         if (targetHref) {
@@ -88,11 +86,6 @@ export function Sidebar() {
   }
 
   const navItems: NavItem[] = [
-    {
-      name: "Live Sessions",
-      href: "/sessions",
-      icon: Zap,
-    },
     {
       name: "Runs",
       href: "/runs",
@@ -149,7 +142,7 @@ export function Sidebar() {
       {/* Brand Header */}
       <div className="flex h-14 items-center justify-between px-3.5 border-b border-zinc-800/80 bg-zinc-950/40 backdrop-blur-md relative z-10">
         <Link
-          href="/sessions"
+          href="/reviews"
           className="flex items-center gap-3 group focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-400/80 rounded-lg p-1 -ml-1 transition-all"
         >
           <div className="relative flex h-7.5 w-7.5 items-center justify-center rounded-lg bg-gradient-to-b from-amber-400/20 via-amber-500/10 to-amber-600/5 border border-amber-500/30 text-amber-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_8px_rgba(0,0,0,0.4)] group-hover:border-amber-400/60 group-hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.3),0_0_16px_rgba(245,158,11,0.25)] transition-all duration-200">

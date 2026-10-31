@@ -20,7 +20,6 @@ Covers:
     - conservative
     - standard
     - audit_only / auditor_only
-    - live_studio_only
     - custom
 11. POST /api/repos/{repo_id}/settings/preset/{preset_name} path param route
 12. POST /api/repos/{repo_id}/settings/preset invalid preset (422)
@@ -130,7 +129,6 @@ async def test_get_settings_default_fallback(seeded_env, make_fake_auth_client):
         assert data["enable_ci_sandbox"] is True
         assert data["enable_pr_comments"] is True
         assert data["file_issue_on_fallback"] is True
-        assert data["enable_live_sessions"] is True
         assert data["enable_webcontainer_preview"] is True
         assert data["audit_trigger_on_pr"] is True
         assert data["audit_trigger_on_ci_failure"] is True
@@ -172,7 +170,6 @@ async def test_get_settings_persisted_row(
         enable_auditor_mode=True,
         enable_sandbox_verification=True,
         enable_pr_comments=True,
-        enable_live_sessions=False,
         enable_webcontainer_preview=False,
         audit_trigger_on_pr=True,
         audit_trigger_on_ci_failure=True,
@@ -502,7 +499,6 @@ async def test_patch_settings_cross_user_isolation(seeded_env, make_fake_auth_cl
         ("standard", True, True, True),
         ("audit_only", False, True, False),
         ("auditor_only", False, True, False),
-        ("live_studio_only", False, False, True),
     ],
 )
 async def test_post_preset_application(
@@ -703,7 +699,6 @@ def test_service_preset_normalization():
             "conservative",
             "standard",
             "audit_only",
-            "live_studio_only",
             "custom",
         }
 
@@ -785,3 +780,4 @@ async def test_service_get_and_update(fake_audit_db):
     fetched = await get_repo_settings(fake_audit_db, repo_id, auto_create=False)
     assert fetched.preset == "standard"
     assert fetched.max_cost_per_run_cents == 500
+

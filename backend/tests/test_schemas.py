@@ -20,17 +20,12 @@ from pydantic import ValidationError
 from app.models import Repo
 from app.schemas import (
     AvailableRepoOut,
-    CommitRequest,
     HostingConfigOut,
     HostingConfigUpdate,
     ModelConfigUpdate,
     PullRequestBranchRef,
     RepoCreate,
     RepoOut,
-    SessionChatIn,
-    SessionCommitIn,
-    SessionCreate,
-    SessionCreateIn,
     WorkflowRunObj,
     WorkflowRunRepo,
     WorkflowRunRepoOwner,
@@ -275,63 +270,6 @@ def test_model_config_update_pattern_validation() -> None:
         ModelConfigUpdate(provider="opencode_zen", model_name="   ")
 
 
-def test_session_chat_in_validation() -> None:
-    """SessionChatIn enforces provider allowlist and model bounds."""
-    # 1. Valid without model or provider
-    sc1 = SessionChatIn(message="Hello agent")
-    assert sc1.message == "Hello agent"
-    assert sc1.model is None
-    assert sc1.provider is None
-
-    # 2. Valid with matching provider and model
-    sc_zen = SessionChatIn(
-        message="Help", provider="opencode_zen", model="  nemotron-3.5-lightning-free  "
-    )
-    assert sc_zen.model == "nemotron-3.5-lightning-free"
-    assert sc_zen.provider == "opencode_zen"
-
-    sc_oa = SessionChatIn(message="Help", provider="openai", model="gpt-4o")
-    assert sc_oa.provider == "openai"
-    assert sc_oa.model == "gpt-4o"
-
-    sc_anth = SessionChatIn(message="Help", provider="anthropic", model="claude-sonnet-4-5")
-    assert sc_anth.provider == "anthropic"
-    assert sc_anth.model == "claude-sonnet-4-5"
-
-    sc_groq = SessionChatIn(
-        message="Help", provider="groq", model="llama-3.3-70b-versatile"
-    )
-    assert sc_groq.provider == "groq"
-    assert sc_groq.model == "llama-3.3-70b-versatile"
-
-    # 3. Provider allowlist rejection
-    with pytest.raises(ValidationError):
-        SessionChatIn(message="Help", provider="unsupported_provider")  # type: ignore[arg-type]
-
-    # 4. Model allowlist mismatch with specified provider
-    with pytest.raises(ValidationError):
-        SessionChatIn(message="Help", provider="opencode_zen", model="gpt-4o")
-    with pytest.raises(ValidationError):
-        SessionChatIn(message="Help", provider="openai", model="claude-sonnet-4-5")
-    with pytest.raises(ValidationError):
-        SessionChatIn(message="Help", provider="anthropic", model="gpt-4o")
-
-    # 5. Model pattern rejection (spaces in name, invalid chars)
-    with pytest.raises(ValidationError):
-        SessionChatIn(message="Help", provider="groq", model="bad model name")
-    with pytest.raises(ValidationError):
-        SessionChatIn(message="Help", provider="groq", model="bad;model")
-
-    # 6. Model specified without provider -> provider remains None (no schema-side override)
-    sc_inf_oa = SessionChatIn(message="Help", model="gpt-4o")
-    assert sc_inf_oa.provider is None
-    assert sc_inf_oa.model == "gpt-4o"
-    sc_inf_zen = SessionChatIn(message="Help", model="my-model-free")
-    assert sc_inf_zen.provider is None
-    assert sc_inf_zen.model == "my-model-free"
-
-
-# ---------------------------------------------------------------------------
 # WorkflowRunWebhookPayload
 # ---------------------------------------------------------------------------
 
@@ -488,38 +426,6 @@ def test_repo_create_default_branch_rejects_invalid_format(invalid_branch: str) 
         RepoCreate(owner="owner", name="repo", default_branch=invalid_branch)
 
 
-def test_session_create_valid_branch() -> None:
-    """SessionCreate allows valid branch names including main."""
-    s = SessionCreate(repo_id=uuid.uuid4(), branch_name="feature/my-task_1")
-    assert s.branch_name == "feature/my-task_1"
-    s_main = SessionCreate(repo_id=uuid.uuid4(), branch_name="main")
-    assert s_main.branch_name == "main"
-
-
-@pytest.mark.parametrize(
-    "invalid_branch",
-    ["/starts-with-slash", "ends-with-slash/", "dot..dot", "slash//slash", "has spaces", "bad$char"],
-)
-def test_session_create_rejects_invalid_format(invalid_branch: str) -> None:
-    """SessionCreate rejects malformed branch names."""
-    with pytest.raises(ValidationError):
-        SessionCreate(repo_id=uuid.uuid4(), branch_name=invalid_branch)
-
-
-def test_commit_request_valid() -> None:
-    """CommitRequest / SessionCommitIn allows valid non-protected branch and alias."""
-    c = CommitRequest(title="fix: something", branch_name="haunter/fix-1")
-    assert c.title == "fix: something"
-    assert c.branch_name == "haunter/fix-1"
-
-
-@pytest.mark.parametrize("protected", ["main", "master", "dev", "develop"])
-def test_commit_request_rejects_protected_branches(protected: str) -> None:
-    """CommitRequest rejects protected branches."""
-    with pytest.raises(ValidationError, match="protected branch"):
-        CommitRequest(title="fix: something", branch_name=protected)
-
-
 @pytest.mark.parametrize(
     "invalid_branch",
     [
@@ -534,13 +440,11 @@ def test_commit_request_rejects_protected_branches(protected: str) -> None:
 def test_validate_git_branch_rejects_hidden_components_and_lock_suffixes(invalid_branch: str) -> None:
     """_validate_git_branch rejects branch paths with hidden components or .lock suffix components."""
     with pytest.raises(ValidationError):
-        SessionCreate(repo_id=uuid.uuid4(), branch_name=invalid_branch)
+        RepoCreate(owner="owner", name="repo", default_branch=invalid_branch)
 
 
 def test_validate_git_branch_cleanly_strips_refs_heads_prefix() -> None:
     """_validate_git_branch cleanly strips refs/heads/ prefix."""
-    s = SessionCreate(repo_id=uuid.uuid4(), branch_name="refs/heads/feature/awesome")
-    assert s.branch_name == "feature/awesome"
     r = RepoCreate(owner="owner", name="repo", default_branch="refs/heads/main")
     assert r.default_branch == "main"
 
@@ -576,12 +480,6 @@ def test_branch_normalization_before_max_length_check() -> None:
     r = RepoCreate(owner="owner", name="repo", default_branch=branch_with_prefix)
     assert r.default_branch == valid_stripped_branch
 
-    s = SessionCreate(repo_id=uuid.uuid4(), branch_name=branch_with_prefix)
-    assert s.branch_name == valid_stripped_branch
-
-    c = CommitRequest(title="fix: something", branch_name=branch_with_prefix)
-    assert c.branch_name == valid_stripped_branch
-
     pr = PullRequestBranchRef(ref=branch_with_prefix)
     assert pr.ref == valid_stripped_branch
 
@@ -592,7 +490,3 @@ def test_branch_normalization_before_max_length_check() -> None:
     too_long_branch = "refs/heads/" + ("b" * 256)
     with pytest.raises(ValidationError):
         RepoCreate(owner="owner", name="repo", default_branch=too_long_branch)
-    with pytest.raises(ValidationError):
-        SessionCreate(repo_id=uuid.uuid4(), branch_name=too_long_branch)
-    with pytest.raises(ValidationError):
-        CommitRequest(title="fix", branch_name=too_long_branch)

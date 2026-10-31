@@ -28,7 +28,6 @@ from app.auth import _encrypt_token, _sign_state, _sign_user_id
 from app.config import settings
 from app.db import async_session_maker as _prod_session_maker
 from app.models import (
-    AgentSession,
     Attempt,
     EvalResult,
     ModelConfig,
@@ -205,7 +204,6 @@ async def truncate_all(db: AsyncSession) -> None:
         "DELETE FROM repo_settings",
         "DELETE FROM audit_jobs",
         "DELETE FROM code_reviews",
-        "DELETE FROM agent_sessions",
         "DELETE FROM eval_results",
         "DELETE FROM attempts",
         "DELETE FROM run_steps",
@@ -465,9 +463,6 @@ def _restore_shared_llm_client_complete(request):
 # and no subagent-scoped subclass can intercept it.
 _SCOPED_LLM_MODULES = (
     "app.llm",
-    "app.services.session_orchestrator",
-    "app.services.session_tools.audit",
-    "app.services.session_tools.subagents",
     "app.subagents.auditor",
     "app.subagents.code_reviewer",
     "app.subagents.context_gatherer",
@@ -604,28 +599,3 @@ def pytest_collection_modifyitems(
 
 
 # ---------------------------------------------------------------------------
-# Shared GitHub-mint patch helper
-# ---------------------------------------------------------------------------
-
-
-def patch_token_mint(
-    return_value: str = "tok", *, side_effect: Exception | None = None
-) -> Any:
-    """Patch the publisher's installation-token mint at its lookup site.
-
-    The publisher calls the name imported into ``app.services.session_commit``
-    (``from app.github.pr import get_installation_token``), so tests must patch
-    it there -- patching ``app.github.pr.get_installation_token`` at the
-    definition site would NOT intercept the call. Resolving the target once
-    here keeps a future move of the mint call site to a single-line change.
-    """
-    if side_effect is not None:
-        return patch(
-            "app.services.session_commit.get_installation_token",
-            AsyncMock(side_effect=side_effect),
-        )
-    return patch(
-        "app.services.session_commit.get_installation_token",
-        new_callable=AsyncMock,
-        return_value=return_value,
-    )

@@ -615,237 +615,6 @@ class UserEvalMetricsOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Agent Session schemas (Phase 1 — Cloud Agentic Live Session)
-# ---------------------------------------------------------------------------
-
-
-class SessionCreateIn(BaseModel):
-    """
-    Request body for POST /sessions.
-
-    branch_name defaults to repo.default_branch server-side if omitted.
-    title defaults to "Pairing Session" if omitted.
-    extra="forbid" prevents mass-assignment injection.
-    """
-
-    repo_id: uuid.UUID
-    branch_name: Optional[str] = Field(None, max_length=255)
-    title: Optional[str] = Field(None, max_length=255)
-
-    model_config = {"extra": "forbid"}
-
-    @field_validator("branch_name", mode="before")
-    @classmethod
-    def validate_session_branch_name(cls, v: Optional[str]) -> Optional[str]:
-        return _validate_git_branch(v, allow_protected=True)
-
-
-# Alias for backward compatibility / external imports
-SessionCreate = SessionCreateIn
-
-
-class PlanTask(BaseModel):
-    """A single step in the agent's live execution plan."""
-
-    id: str = Field(..., min_length=1, max_length=100)
-    title: str = Field(..., min_length=1, max_length=500)
-    status: Literal["pending", "in_progress", "completed", "failed"]
-
-    model_config = {"extra": "forbid"}
-
-
-class ClarificationIn(BaseModel):
-    """Request body for POST /sessions/{id}/clarify."""
-
-    response: str = Field(..., min_length=1, max_length=2000)
-
-    model_config = {"extra": "forbid"}
-
-
-class CheckpointOut(BaseModel):
-    """Single checkpoint snapshot metadata for the Time Machine UI."""
-
-    checkpoint_id: str
-    turn: int
-    timestamp: str
-    description: str
-    files_count: int
-
-    model_config = {"extra": "forbid"}
-
-
-class SessionOut(BaseModel):
-    """
-    Full session DTO returned by all session endpoints.
-
-    repo_owner and repo_name are populated server-side via join —
-    never derived from client input.
-    """
-
-    id: uuid.UUID
-    user_id: uuid.UUID
-    repo_id: uuid.UUID
-    repo_owner: str
-    repo_name: str
-    title: str
-    status: str
-    branch_name: str
-    base_sha: str
-    conversation_history: list[dict[str, Any]]
-    staged_patches: dict[str, str]
-    plan: list[dict[str, Any]] = Field(default_factory=list)
-    waiting_input: Optional[dict[str, Any]] = None
-    checkpoints: list[dict[str, Any]] = Field(default_factory=list)
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class SessionListOut(BaseModel):
-    sessions: list[SessionOut]
-    total: int
-
-
-class SessionCloseIn(BaseModel):
-    """
-    Optional request body for POST /sessions/{session_id}/close.
-
-    reason is informational only — stored nowhere in Phase 1.
-    extra="forbid" prevents injection via unexpected fields.
-    """
-
-    reason: Optional[str] = Field(None, max_length=1000)
-
-    model_config = {"extra": "forbid"}
-
-
-class SessionChatIn(BaseModel):
-    """
-    Request body for POST /sessions/{session_id}/chat.
-
-    message: The user's natural-language prompt to the pairing agent.
-    extra="forbid" prevents mass-assignment injection.
-    """
-
-    message: str = Field(..., min_length=1, max_length=32_000)
-    model: Optional[str] = Field(
-        default=None, min_length=1, max_length=255, pattern=r"^[a-zA-Z0-9._/-]+$"
-    )
-    provider: Optional[AllowedProvider] = None
-
-    model_config = {"extra": "forbid"}
-
-    @field_validator("model", mode="before")
-    @classmethod
-    def strip_model(cls, v: Any) -> Any:
-        if isinstance(v, str):
-            v = v.strip()
-            return v if v else None
-        return v
-
-    @model_validator(mode="after")
-    def validate_provider_and_model(self) -> "SessionChatIn":
-        if self.model is not None:
-            self.model = self.model.strip()
-
-        if self.provider is not None:
-            if self.model is not None:
-                provider = self.provider
-                model = self.model
-                if provider == "opencode_zen":
-                    if not model.endswith("-free"):
-                        raise ValueError(
-                            f"Invalid model '{model}' for provider 'opencode_zen'. "
-                            "OpenCode Zen models must end with '-free'."
-                        )
-                elif provider == "opencode_go":
-                    if not model:
-                        raise ValueError("Model name cannot be empty for provider 'opencode_go'.")
-                elif provider == "openai":
-                    if model not in OPENAI_MODELS:
-                        raise ValueError(
-                            f"Invalid model '{model}' for provider 'openai'. "
-                            f"Allowed models: {sorted(OPENAI_MODELS)}"
-                        )
-                elif provider == "anthropic":
-                    if model not in ANTHROPIC_MODELS:
-                        raise ValueError(
-                            f"Invalid model '{model}' for provider 'anthropic'. "
-                            f"Allowed models: {sorted(ANTHROPIC_MODELS)}"
-                        )
-                elif provider == "groq":
-                    if not model:
-                        raise ValueError("Model name cannot be empty for provider 'groq'.")
-                else:
-                    raise ValueError(f"Unsupported provider: {provider}")
-        return self
-
-
-class SandboxVerificationOut(BaseModel):
-    """
-    Response DTO for POST /sessions/{session_id}/verify.
-
-    status:  One of "queued" | "running" | "passed" | "failed".
-    passed:  True iff sandbox tests passed.
-    run_url: Optional GitHub Actions workflow run URL.
-    logs:    Optional truncated test output.
-    """
-
-    status: str
-    passed: bool
-    run_url: Optional[str] = None
-    logs: Optional[str] = None
-
-
-# Single source of truth for session PR title/body length caps. The tool
-# schema (session_orchestrator), the shared publisher (session_commit), and
-# the dashboard contract (SessionCommitIn) must all enforce the same limits.
-SESSION_PR_TITLE_MAX_LEN: int = 255
-SESSION_PR_BODY_MAX_LEN: int = 65535
-
-
-class SessionCommitIn(BaseModel):
-    """
-    Request body for POST /sessions/{session_id}/commit.
-
-    title: PR title string.
-    body: Optional PR description markdown.
-    branch_name: Optional target branch override (disallows protected branches).
-    extra="forbid" prevents mass-assignment injection.
-    """
-
-    title: str = Field(..., min_length=1, max_length=SESSION_PR_TITLE_MAX_LEN)
-    body: str | None = Field(None, max_length=SESSION_PR_BODY_MAX_LEN)
-    branch_name: Optional[str] = Field(None, max_length=255)
-
-    model_config = {"extra": "forbid"}
-
-    @field_validator("branch_name", mode="before")
-    @classmethod
-    def validate_commit_branch_name(cls, v: Optional[str]) -> Optional[str]:
-        return _validate_git_branch(v, allow_protected=False)
-
-
-# Alias for backward compatibility / external imports
-CommitRequest = SessionCommitIn
-
-
-class SessionCommitOut(BaseModel):
-    """
-    Response DTO for POST /sessions/{session_id}/commit.
-
-    pr_url:    Direct GitHub URL to the newly opened pull request.
-    pr_number: Pull request number in the repository.
-    commit_sha: The SHA of the commit pushed to the session branch.
-    """
-
-    pr_url: str
-    pr_number: int
-    commit_sha: str
-
-
-# ---------------------------------------------------------------------------
 # RepoSettings schemas — Phase 6 (Operational Governance & Feature Toggles)
 # ---------------------------------------------------------------------------
 
@@ -865,7 +634,6 @@ class RepoSettingsOut(BaseModel):
     # and turn issue filing off; RepoSettingsUpdate is extra="forbid", so
     # omitting it here made the documented opt-in unreachable via the API.
     file_issue_on_fallback: bool = True
-    enable_live_sessions: bool = True
     enable_webcontainer_preview: bool = True
     audit_trigger_on_pr: bool = True
     audit_trigger_on_ci_failure: bool = True
@@ -930,7 +698,6 @@ class RepoSettingsUpdate(BaseModel):
     enable_ci_sandbox: Optional[bool] = None
     enable_pr_comments: Optional[bool] = None
     file_issue_on_fallback: Optional[bool] = None
-    enable_live_sessions: Optional[bool] = None
     enable_webcontainer_preview: Optional[bool] = None
     audit_trigger_on_pr: Optional[bool] = None
     audit_trigger_on_ci_failure: Optional[bool] = None
@@ -974,8 +741,6 @@ class RepoSettingsUpdate(BaseModel):
                 out["enable_sandbox_verification"] = feats["ci_sandbox"]
             if "sandbox_verification" in feats:
                 out["enable_sandbox_verification"] = feats["sandbox_verification"]
-            if "live_sessions" in feats:
-                out["enable_live_sessions"] = feats["live_sessions"]
             if "webcontainer_preview" in feats:
                 out["enable_webcontainer_preview"] = feats["webcontainer_preview"]
             if "pr_comments" in feats:

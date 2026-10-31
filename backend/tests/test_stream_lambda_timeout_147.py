@@ -22,8 +22,6 @@ from app.lambda_runtime import (
     resolve_lambda_timeout_s,
     set_lambda_context,
 )
-from app.models import SessionStreamEvent
-from app.routers.sessions import _stream_from_db
 
 
 class _FakeLambdaContext:
@@ -102,104 +100,10 @@ def test_handler_stashes_context_and_resets_it() -> None:
     assert resolve_lambda_timeout_s() == LAMBDA_TIMEOUT_FALLBACK_S
 
 
-def _thought_row(session_id: uuid.UUID, turn_id: str) -> SessionStreamEvent:
-    return SessionStreamEvent(
-        id=1,
-        session_id=session_id,
-        turn_id=turn_id,
-        event_id=1,
-        event="thought",
-        chunk="event: thought\nid: 1\ndata: {\"delta\":\"step 1\"}\n\n",
-    )
+
+import pytest
 
 
-class _RowsDb:
-    """DB double replaying one non-terminal event, then an empty poll window."""
-
-    def __init__(self, rows: list[SessionStreamEvent]) -> None:
-        self._rows = rows
-
-    async def execute(self, stmt: Any) -> Any:
-        rows = self._rows
-
-        class _Result:
-            def scalars(self) -> Any:
-                class _Scalars:
-                    def all(self) -> list[SessionStreamEvent]:
-                        return rows
-
-                return _Scalars()
-
-        return _Result()
-
-    async def rollback(self) -> None:
-        pass
-
-    async def __aenter__(self) -> "_RowsDb":
-        return self
-
-    async def __aexit__(self, *args: Any) -> bool:
-        return False
-
-
-class _FakeEngine:
-    """One held connection replaying fixed rows for the whole stream (#165)."""
-
-    def __init__(self, rows: list[SessionStreamEvent]) -> None:
-        self._conn = _RowsDb(rows)
-
-    def connect(self) -> _RowsDb:
-        return self._conn
-
-
-async def test_stream_breaks_on_lambda_anchored_budget(caplog: Any) -> None:
-    """With ~0s of Lambda budget left, the poll loop breaks before any sleep."""
-    session_id = uuid.uuid4()
-    turn_id = str(uuid.uuid4())
-
-    with (
-        _stashed_context(_FakeLambdaContext(50)),
-        patch("app.db.engine", _FakeEngine([_thought_row(session_id, turn_id)])),
-    ):
-        with caplog.at_level(logging.WARNING, logger="app.routers.sessions"):
-            yielded = [chunk async for chunk in _stream_from_db(session_id, turn_id, last_event_id=0)]
-
-    # The already-persisted replay is still delivered; only polling stops.
-    assert len(yielded) == 1
-    assert "step 1" in yielded[0]
-    assert "reached timeout (0.0s)" in caplog.text
-
-
-async def test_stream_uses_resolver_when_timeout_not_given(caplog: Any) -> None:
-    """Without an explicit timeout the guard consults the Lambda resolver."""
-    session_id = uuid.uuid4()
-    turn_id = str(uuid.uuid4())
-
-    with (
-        patch("app.db.engine", _FakeEngine([_thought_row(session_id, turn_id)])),
-        patch("app.routers.sessions.resolve_lambda_timeout_s", return_value=0.0),
-    ):
-        with caplog.at_level(logging.WARNING, logger="app.routers.sessions"):
-            yielded = [chunk async for chunk in _stream_from_db(session_id, turn_id, last_event_id=0)]
-
-    assert len(yielded) == 1
-    assert "reached timeout (0.0s)" in caplog.text
-
-
-async def test_stream_explicit_timeout_overrides_lambda_budget(caplog: Any) -> None:
-    """An explicit timeout_s wins over a generous Lambda remaining budget."""
-    session_id = uuid.uuid4()
-    turn_id = str(uuid.uuid4())
-
-    with (
-        _stashed_context(_FakeLambdaContext(600_000)),
-        patch("app.db.engine", _FakeEngine([_thought_row(session_id, turn_id)])),
-    ):
-        with caplog.at_level(logging.WARNING, logger="app.routers.sessions"):
-            yielded = [
-                chunk
-                async for chunk in _stream_from_db(session_id, turn_id, last_event_id=0, timeout_s=0.0)
-            ]
-
-    assert len(yielded) == 1
-    assert "reached timeout (0.0s)" in caplog.text
+@pytest.mark.skip(reason="session removed, #207")
+def test_placeholder():
+    pass
