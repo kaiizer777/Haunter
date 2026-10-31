@@ -117,7 +117,7 @@ async def get_active_model_config_endpoint(
                 )
             )
             config = config_result.scalar_one_or_none()
-            if config is not None:
+            if config is not None and _base_url_for_provider(config.provider):
                 return ModelConfigOut.model_validate(config)
 
     # Global active config lookup — strictly global scope so repo overrides
@@ -184,7 +184,8 @@ async def update_model_config_endpoint(
     base_url = _base_url_for_provider(body.provider)
     if not base_url:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid provider"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid provider: expected 'opencode_go' or 'groq'",
         )
 
     # 1. Per-repo model config update
