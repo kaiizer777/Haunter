@@ -25,7 +25,7 @@ from app.auth import get_current_user, is_admin_user
 from app.config import settings
 from app.db import get_db
 from app.llm.config import invalidate_model_config_cache
-from app.llm.discovery import format_model_name, get_dynamic_free_models, get_dynamic_go_models
+from app.llm.discovery import format_model_name, get_dynamic_go_models
 from app.models import ModelConfig, ModelConfigScope, Repo, User
 from app.schemas import (
     AvailableModelItem,
@@ -341,55 +341,11 @@ async def get_available_models_endpoint(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AvailableModelsOut:
     """
-    Get live list of available models per provider.
-    For opencode_zen: dynamically queries /models with TTL caching, filtered to '-free'.
-    For openai, anthropic, and groq: returns approved production models with context window metadata.
+    Get live list of available models per provider (issue #205: only
+    opencode_go + groq are default providers).
+    For opencode_go: dynamically queries /models with TTL caching.
+    For groq: returns approved production models with context window metadata.
     """
-    dynamic_zen_models = await get_dynamic_free_models()
-
-    zen_items: list[AvailableModelItem] = []
-    for mid in dynamic_zen_models:
-        tag = "Default · Free" if mid == settings.default_model else "Free"
-        ctx = MODEL_CONTEXT_WINDOWS.get(mid)
-        zen_items.append(
-            AvailableModelItem(
-                id=mid,
-                name=_format_model_name(mid),
-                tag=tag,
-                context_window=ctx,
-            )
-        )
-
-    openai_items = [
-        AvailableModelItem(
-            id="gpt-4o",
-            name="GPT-4o",
-            tag="Flagship",
-            context_window=MODEL_CONTEXT_WINDOWS.get("gpt-4o", 128000),
-        ),
-        AvailableModelItem(
-            id="gpt-4o-mini",
-            name="GPT-4o Mini",
-            tag="Fast",
-            context_window=MODEL_CONTEXT_WINDOWS.get("gpt-4o-mini", 128000),
-        ),
-    ]
-
-    anthropic_items = [
-        AvailableModelItem(
-            id="claude-sonnet-4-5",
-            name="Claude Sonnet 4.5",
-            tag="SOTA Fixes",
-            context_window=MODEL_CONTEXT_WINDOWS.get("claude-sonnet-4-5", 200000),
-        ),
-        AvailableModelItem(
-            id="claude-haiku-3-5",
-            name="Claude Haiku 3.5",
-            tag="Low Latency",
-            context_window=MODEL_CONTEXT_WINDOWS.get("claude-haiku-3-5", 200000),
-        ),
-    ]
-
     groq_items = [
         AvailableModelItem(
             id="openai/gpt-oss-120b",
@@ -427,10 +383,7 @@ async def get_available_models_endpoint(
         )
 
     return AvailableModelsOut(
-        opencode_zen=zen_items,
         opencode_go=go_items,
-        openai=openai_items,
-        anthropic=anthropic_items,
         groq=groq_items,
     )
 
