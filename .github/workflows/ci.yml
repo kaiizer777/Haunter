@@ -19,10 +19,75 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Backend: lint (ruff) + migration check + pytest
+  # Backend fast: lint (ruff) + syntax check + hermetic pytest.
+  # No Postgres service: this job reports in minutes and never waits on a
+  # database container, so a broken unit test fails fast and unambiguously.
   # ---------------------------------------------------------------------------
-  backend:
-    name: Backend (lint + migrations + tests)
+  backend-fast:
+    name: Backend fast (lint + hermetic tests)
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_CLIENT_ID: ci_test_client_id
+      GITHUB_CLIENT_SECRET: ci_test_client_secret
+      CALLBACK_URL: http://localhost:7555/auth/callback
+      SESSION_SECRET_KEY: ci_test_session_secret_key_replace_in_prod
+      GITHUB_WEBHOOK_SECRET: ci_test_webhook_secret
+      FRONTEND_URL: http://localhost:3011
+      OPENCODE_ZEN_API_KEY: ci_test_zen_api_key
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install runtime deps
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Install dev deps (pytest + ruff)
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        working-directory: backend
+        run: ruff check app tests
+
+      - name: Verify Python syntax
+        working-directory: backend
+        run: python -m compileall -q app
+
+      - name: Generate test Fernet key
+        working-directory: backend
+        run: |
+          echo "TOKEN_ENCRYPTION_KEY=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> "$GITHUB_ENV"
+
+      - name: Run hermetic tests
+        working-directory: backend
+        env:
+          # Settings requires these at import time, but this job has no database
+          # and the `fast` suite never opens a connection. Loopback placeholders
+          # keep a production-shaped URL from ever being wired into CI.
+          DATABASE_URL: postgresql+asyncpg://haunter_fast:haunter_fast@localhost:5432/haunter_fast
+          DATABASE_URL_UNPOOLED: postgresql://haunter_fast:haunter_fast@localhost:5432/haunter_fast
+        # `-m fast` is explicit on purpose: GitHub Actions sets CI=true, which
+        # disables tests/conftest.py's auto-deselection of db/slow/eval tests.
+        # A bare `pytest` here would try to run the database suites with no
+        # database available.
+        run: pytest -m fast -v --tb=short --maxfail=10
+    timeout-minutes: 15
+
+  # ---------------------------------------------------------------------------
+  # Backend DB: migration round-trip + every suite that needs Postgres
+  # (db, slow, eval). `-m "db or slow or eval"` is the exact complement of the
+  # fast job's `-m fast`, so the two jobs together run the full suite once.
+  # ---------------------------------------------------------------------------
+  backend-db:
+    name: Backend DB (migrations + integration tests)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -63,17 +128,9 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt
 
-      - name: Install dev deps (ruff)
+      - name: Install dev deps (pytest)
         working-directory: backend
         run: pip install -r requirements-dev.txt
-
-      - name: Lint (ruff)
-        working-directory: backend
-        run: ruff check app tests
-
-      - name: Verify Python syntax
-        working-directory: backend
-        run: python -m compileall -q app
 
       - name: Generate test Fernet key
         working-directory: backend
@@ -96,6 +153,7 @@ jobs:
           alembic downgrade base
           alembic upgrade head
 
+      # Step name is asserted by backend/tests/test_ci_workflow_db_urls.py.
       - name: Run backend tests
         working-directory: backend
         env:
@@ -108,8 +166,8 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
           DATABASE_URL_UNPOOLED: postgresql://haunter_test:haunter_test@localhost:5432/haunter_test?sslmode=require
         run: |
-          pytest --all -v --tb=short --maxfail=10
-        timeout-minutes: 30
+          pytest -m "db or slow or eval" -v --tb=short --maxfail=10
+    timeout-minutes: 45
 
   # ---------------------------------------------------------------------------
   # Frontend: lint (eslint) + tsc + vitest + next build
