@@ -341,7 +341,7 @@ class ModelConfig(Base):
         String(255), nullable=False, default="nemotron-3.5-lightning-free"
     )
     base_url: Mapped[str] = mapped_column(
-        String(255), nullable=False, default="https://opencode.ai/zen/v1"
+        String(255), nullable=False, default="https://opencode.ai/inference/go/openai/v1"
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     scope: Mapped[str] = mapped_column(
