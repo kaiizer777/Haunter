@@ -121,7 +121,10 @@ class Settings(BaseSettings):
     opencode_go_api_key: Optional[str] = None
     opencode_go_base_url: str = "https://opencode.ai/inference/go/openai/v1"
     opencode_go_discovery_url: str = "https://opencode.ai/inference/go/v1/models"
-    default_provider: str = "opencode_zen"
+    # Issue #205: default provider set trimmed to opencode_go + groq.
+    # default_provider must be one of the allowlisted providers in
+    # app/schemas.py (AllowedProvider) so env-default fallbacks validate.
+    default_provider: str = "opencode_go"
     default_model: str = "nemotron-3.5-lightning-free"
 
     # Hard ceiling for `max_tokens` on any outgoing OpenCode Zen request.
