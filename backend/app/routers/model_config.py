@@ -294,17 +294,8 @@ async def update_model_config_endpoint(
     return ModelConfigOut.model_validate(new_config)
 
 
-def _format_model_name(model_id: str) -> str:
-    """Format model ID into human-readable label."""
-    clean = model_id
-    if clean.endswith("-free"):
-        clean = clean[:-5]
-    parts = clean.split("-")
-    return " ".join(part.capitalize() for part in parts)
-
-
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    # OpenCode Zen Free Models
+    # Static context-window catalog for known model IDs.
     "space-bunny-free": 1048576,
     "longcat-2.5-preview-free": 1048576,
     "ling-3.0-flash-fin-free": 1048576,
