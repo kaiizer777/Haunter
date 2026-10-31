@@ -96,7 +96,25 @@ describe("sidebar.tsx", () => {
     expect(evalLink).toHaveAttribute("href", "/eval");
     expect(within(evalLink).queryByText("Live")).not.toBeInTheDocument();
 
-    await screen.findByTitle("nemotron-3.5-lightning-free");
+    // Global-only telemetry is hidden for non-admins: no stale default model badge.
+    expect(screen.queryByText("Active Model")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("nemotron-3.5-lightning-free")).not.toBeInTheDocument();
+  });
+
+  it("does not preventDefault on shortcut 6 when Model Config link is hidden", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      user: standardUser,
+      loading: false,
+      error: null,
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
+    render(<Sidebar />);
+
+    expect(screen.queryByRole("link", { name: /model config/i })).not.toBeInTheDocument();
+    const evt = new KeyboardEvent("keydown", { key: "6", metaKey: true, bubbles: true, cancelable: true });
+    const prevented = !window.dispatchEvent(evt);
+    expect(prevented).toBe(false);
   });
 
   it("renders Model Config nav when user.is_admin is true", async () => {
