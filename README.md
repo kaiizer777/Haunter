@@ -61,11 +61,7 @@ CI fails  →  Root cause traced  →  Fix generated  →  Sandboxed in real CI 
 | `audit_only` | Read-only audits; never opens branches or PRs |
 | `custom` | Full control over confidence thresholds and spend caps |
 
-<br/>
-
 ---
-
-<br/>
 
 ## 📊 Full Audit Trail
 
@@ -76,8 +72,6 @@ An **eval harness** with 20 golden fixtures lets you benchmark and compare quali
 <br/>
 
 ---
-
-<br/>
 
 <div align="center">
 
