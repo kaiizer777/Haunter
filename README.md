@@ -11,7 +11,7 @@
 [![Database](https://img.shields.io/badge/Database-Neon%20Postgres%20(Async)-00E599?style=flat-square&logo=postgresql)](https://neon.tech/)
 [![Sandbox](https://img.shields.io/badge/Sandbox-GitHub%20Actions%20CI-181717?style=flat-square&logo=githubactions)](https://github.com/features/actions)
 [![Runtime Preview](https://img.shields.io/badge/In--Browser%20Preview-StackBlitz%20WebContainer-1389FD?style=flat-square)](https://webcontainers.io/)
-[![License](https://img.shields.io/badge/License-Business%20Source%201.1-yellow?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)](LICENSE)
 
 <br/>
 
@@ -110,7 +110,7 @@ An **eval harness** with 20 golden fixtures lets you benchmark and compare quali
 
 <div align="center">
 
-**Source-available — [Business Source License 1.1](LICENSE).** &nbsp;&nbsp;Not OSI open source.
+**Open source — [Apache License 2.0](LICENSE).** &nbsp;&nbsp;Copyright 2026 MD Sufiyan Bari.
 
 <br/>
 
