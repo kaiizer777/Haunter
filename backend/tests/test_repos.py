@@ -743,7 +743,7 @@ async def test_model_config_get_global_and_repo(
         assert "base_url" in data_global
 
         # 2. Non-existent / non-owned repo config -> 404
-        resp_repo_404 = await client.get(f"/config/model?repo_id={uuid.uuid4()}")
+        resp_repo_404 = await admin_client.get(f"/config/model?repo_id={uuid.uuid4()}")
         assert resp_repo_404.status_code == 404
 
 

@@ -1167,7 +1167,14 @@ export default function ModelConfigPage() {
               <div className="inline-flex rounded-[7px] border border-zinc-800/90 bg-[#09090b]/90 p-1 shadow-inner">
                 <button
                   type="button"
-                  onClick={() => setSelectedScope("global")}
+                  onClick={() => {
+                    setSelectedScope("global");
+                    if (!globalConfig) {
+                      setActiveConfig(null);
+                      setSelectedProvider("opencode_zen");
+                      setSelectedModel("nemotron-3.5-lightning-free");
+                    }
+                  }}
                   className={cn(
                     "flex items-center gap-1.5 rounded-[5px] px-3 py-1 text-xs sm:text-[13px] font-mono transition-all cursor-pointer select-none",
                     selectedScope === "global"
