@@ -1223,6 +1223,11 @@ export default function ModelConfigPage() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape" && searchQuery) {
+                      setSearchQuery("");
+                    }
+                  }}
                   placeholder="Search providers & models..."
                   className="h-8 w-48 sm:w-64 font-mono text-xs bg-zinc-900/80 border border-zinc-700/80 rounded px-2.5 pl-8 pr-7 text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
                 />
@@ -1381,8 +1386,9 @@ export default function ModelConfigPage() {
               <div ref={modelsGridRef} className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
                   {displayedModels.map((m) => {
-                  const isSelected = m.id === selectedModel;
-                  const isLive = activeConfig?.model_name === m.id;
+                  const modelProvider = m.provider || selectedProvider;
+                  const isSelected = m.id === selectedModel && modelProvider === selectedProvider;
+                  const isLive = activeConfig?.model_name === m.id && (activeConfig?.provider ? modelProvider === activeConfig.provider : true);
                   const spec = getModelSpec(m.id, m.tag, m.context_window);
                   const displayName = formatModelDisplayName(m.id, m.name);
 

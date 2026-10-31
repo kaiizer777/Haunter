@@ -210,7 +210,7 @@ export default function ReposPage() {
       <div className="space-y-4 min-w-0 pb-6">
         {/* Error Alert */}
         {error && (
-          <div className="flex items-start gap-2.5 rounded-[7px] border border-red-900/60 bg-red-950/30 p-2.5.5 text-[13px] text-red-300 shadow-md animate-in fade-in">
+          <div className="flex items-start gap-2.5 rounded-[7px] border border-red-900/60 bg-red-950/30 p-2.5 text-[13px] text-red-300 shadow-md animate-in fade-in">
             <AlertCircle className="h-4.5 w-4.5 shrink-0 text-red-400 mt-0.5" />
             <div className="space-y-0.5">
               <p className="font-semibold text-red-200">Repository Pipeline Error</p>
@@ -344,7 +344,7 @@ export default function ReposPage() {
             </div>
 
             {/* Detailed Filters Bar */}
-            <div className="relative z-20 flex flex-wrap items-center justify-between gap-2.5.5 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] p-2.5">
+            <div className="relative z-20 flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] p-2.5">
               <div className="flex flex-wrap items-center gap-2.5 flex-1 min-w-[300px]">
                 <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-medium pl-1">
                   <Filter className="h-3.5 w-3.5 text-zinc-500" />

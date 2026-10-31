@@ -2677,7 +2677,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
       actions={topbarActions}
       noPadding
     >
-      <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden bg-[#09090b]">
+      <div className="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-[#09090b]">
         {/* Alerts / Success banners */}
         {actionError && (
           <div className="mx-6 mt-3 flex items-center justify-between rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-xs text-red-300">

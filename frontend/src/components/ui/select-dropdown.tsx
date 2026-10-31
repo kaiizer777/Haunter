@@ -88,16 +88,24 @@ export function SelectDropdown({
       }
     };
 
+    const handleGlobalKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsOpen(false);
+      }
+    };
+
     if (isOpen) {
       document.addEventListener("mousedown", handleClickOutside);
       document.addEventListener("touchstart", handleClickOutside);
+      document.addEventListener("keydown", handleGlobalKeyDown);
     }
 
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("touchstart", handleClickOutside);
+      document.removeEventListener("keydown", handleGlobalKeyDown);
     };
-  }, [isOpen]);
+  }, [isOpen, ignoreClickOutsideRef]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (disabled) return;

@@ -681,7 +681,7 @@ export default function RunsPage() {
         </div>
 
         {error && (
-          <div className="rounded-[7px] border border-red-900/60 bg-red-950/30 p-2.5.5 text-[13px] text-red-300">
+          <div className="rounded-[7px] border border-red-900/60 bg-red-950/30 p-2.5 text-[13px] text-red-300">
             {error}
           </div>
         )}
