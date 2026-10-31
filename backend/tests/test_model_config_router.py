@@ -528,3 +528,40 @@ async def test_put_repo_stamps_repo_scope(
     assert row.scope == "repo"
     assert row.repo_id == repo_id
     assert row.is_active is True
+
+@pytest.mark.asyncio
+async def test_put_global_model_config_allowed_for_admin_github_username(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """PUT /config/model (global) succeeds when caller's username is in admin_github_usernames."""
+    await truncate_all(db)
+    owner_user = await user_factory(username="kaiizer777", role="user")
+    client = make_auth_client(owner_user.id)
+    monkeypatch.setattr(settings, "admin_user_id", str(uuid.uuid4()))
+    monkeypatch.setattr(settings, "admin_github_usernames", ["kaiizer777", "kaiizer77"])
+
+    payload = {"provider": "opencode_zen", "model_name": "nemotron-3.5-lightning-free"}
+    async with client:
+        resp = await client.put("/config/model", json=payload)
+
+    assert resp.status_code == 200
+    assert resp.json()["model_name"] == "nemotron-3.5-lightning-free"
+
+
+@pytest.mark.asyncio
+async def test_put_global_model_config_allowed_when_no_admin_configured(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """PUT /config/model (global) succeeds for authenticated user when no admin is configured."""
+    await truncate_all(db)
+    user = await user_factory(username="regular_user", role="user")
+    client = make_auth_client(user.id)
+    monkeypatch.setattr(settings, "admin_user_id", None)
+    monkeypatch.setattr(settings, "admin_github_usernames", [])
+
+    payload = {"provider": "opencode_zen", "model_name": "nemotron-3.5-lightning-free"}
+    async with client:
+        resp = await client.put("/config/model", json=payload)
+
+    assert resp.status_code == 200
+    assert resp.json()["model_name"] == "nemotron-3.5-lightning-free"

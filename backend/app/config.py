@@ -161,6 +161,29 @@ class Settings(BaseSettings):
 
     # Optional admin user UUID string for global model config switcher authorization
     admin_user_id: Optional[str] = None
+    admin_github_usernames: list[str] | str = ["kaiizer777", "kaiizer77"]
+
+    @field_validator("admin_github_usernames", mode="before")
+    @classmethod
+    def _normalize_admin_github_usernames(cls, v: object) -> list[str]:
+        """Normalize comma-separated string, JSON list, or list of usernames to lowercase list."""
+        if isinstance(v, str):
+            v_str = v.strip()
+            if not v_str:
+                return ["kaiizer777", "kaiizer77"]
+            if v_str.startswith("[") and v_str.endswith("]"):
+                import json
+
+                try:
+                    parsed = json.loads(v_str)
+                    if isinstance(parsed, list):
+                        return [str(x).strip().lower() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+            return [x.strip().lower() for x in v_str.split(",") if x.strip()]
+        if isinstance(v, (list, tuple, set)):
+            return [str(x).strip().lower() for x in v if str(x).strip()]
+        return ["kaiizer777", "kaiizer77"]
 
     # TinyFish API Configuration (Web Search, Stealth Fetch & Agent API)
     tinyfish_api_key: Optional[str] = None

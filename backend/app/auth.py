@@ -495,6 +495,11 @@ async def callback(
         result = await db.execute(select(User).where(User.github_id == github_id))
         user = result.scalar_one_or_none()
 
+        is_admin_user = bool(
+            github_username
+            and github_username.lower()
+            in [u.lower() for u in settings.admin_github_usernames]
+        )
         if user is None:
             user = User(
                 id=uuid.uuid4(),
@@ -502,12 +507,15 @@ async def callback(
                 github_username=github_username,
                 avatar_url=avatar_url,
                 access_token=encrypted_token,
+                role=UserRole.ADMIN.value if is_admin_user else UserRole.USER.value,
             )
             db.add(user)
         else:
             user.github_username = github_username
             user.avatar_url = avatar_url
             user.access_token = encrypted_token
+            if is_admin_user:
+                user.role = UserRole.ADMIN.value
 
         await db.commit()
     except Exception:
@@ -548,11 +556,17 @@ async def require_admin(
 ) -> User:
     """
     FastAPI dependency. Enforces that the authenticated caller has the 'admin' role
-    (or matches ADMIN_USER_ID fallback).
+    (or matches ADMIN_USER_ID fallback / admin_github_usernames).
     Raises 403 Forbidden otherwise.
     """
-    is_admin = current_user.is_admin or bool(
-        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
+    is_admin = (
+        current_user.is_admin
+        or bool(settings.admin_user_id and str(current_user.id) == settings.admin_user_id)
+        or bool(
+            current_user.github_username
+            and current_user.github_username.lower()
+            in [u.lower() for u in settings.admin_github_usernames]
+        )
     )
     if not is_admin:
         raise HTTPException(
@@ -571,14 +585,20 @@ async def me(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> UserOut:
     """Return the authenticated user's public profile, or 401 if not logged in."""
-    is_admin = current_user.is_admin or bool(
-        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
+    is_admin = (
+        current_user.is_admin
+        or bool(settings.admin_user_id and str(current_user.id) == settings.admin_user_id)
+        or bool(
+            current_user.github_username
+            and current_user.github_username.lower()
+            in [u.lower() for u in settings.admin_github_usernames]
+        )
     )
     return UserOut(
         id=current_user.id,
         github_username=current_user.github_username,
         avatar_url=current_user.avatar_url,
-        role=UserRole(current_user.role),
+        role=UserRole.ADMIN if is_admin else UserRole(current_user.role),
         is_admin=is_admin,
     )
 

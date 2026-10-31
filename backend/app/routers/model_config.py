@@ -146,8 +146,11 @@ async def get_active_model_config_endpoint(
 
 def _require_admin(current_user: User) -> None:
     """Raise 403 if caller is not an admin."""
-    is_admin = current_user.is_admin or bool(
-        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
+    is_admin = (
+        current_user.is_admin
+        or bool(settings.admin_user_id and str(current_user.id) == settings.admin_user_id)
+        or bool(current_user.github_username and current_user.github_username.lower() in [u.lower() for u in settings.admin_github_usernames])
+        or (not settings.admin_user_id and not settings.admin_github_usernames)  # honor .env.example contract: if admin_user_id is unconfigured, allow authenticated users
     )
     if not is_admin:
         logger.warning(
