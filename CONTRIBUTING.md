@@ -32,11 +32,17 @@ Create `backend/.env` (never commit it). Required keys:
 
 ```sh
 DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/haunter
+DATABASE_URL_UNPOOLED=postgresql+asyncpg://user:password@localhost:5432/haunter
 TEST_DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/haunter_test
 GITHUB_CLIENT_ID=<oauth-app-client-id>
 GITHUB_CLIENT_SECRET=<oauth-app-client-secret>
-OPENCODE_BASE_URL=https://opencode.ai/zen/v1
-OPENCODE_MODEL=nemotron-3.5-lightning-free
+CALLBACK_URL=http://localhost:7555/auth/callback
+SESSION_SECRET_KEY=<generated-session-secret>
+TOKEN_ENCRYPTION_KEY=<generated-fernet-key>
+FRONTEND_URL=http://localhost:3011
+OPENCODE_ZEN_API_KEY=<opencode-zen-api-key>
+OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen/v1
+DEFAULT_MODEL=nemotron-3.5-lightning-free
 ```
 
 `DATABASE_URL` serves the app; `TEST_DATABASE_URL` must point at a local throwaway Postgres (never production or a shared Neon branch — the test harness refuses to run otherwise). OAuth keys gate the multi-repo dashboard; model URL/keys select the provider. No hardcoded model names/URLs in code — all DB/env-driven.
