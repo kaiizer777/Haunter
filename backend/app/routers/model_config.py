@@ -356,6 +356,14 @@ async def get_available_models_endpoint(
             tag="Ultra Fast",
             context_window=MODEL_CONTEXT_WINDOWS.get("llama-3.1-8b-instant", 131072),
         ),
+        AvailableModelItem(
+            id="deepseek-r1-distill-llama-70b",
+            name="DeepSeek R1 Distill Llama 70B",
+            tag="Reasoning Distill",
+            context_window=MODEL_CONTEXT_WINDOWS.get(
+                "deepseek-r1-distill-llama-70b", 131072
+            ),
+        ),
     ]
 
     dynamic_go_models = await get_dynamic_go_models()
