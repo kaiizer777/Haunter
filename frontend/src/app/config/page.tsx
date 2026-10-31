@@ -791,7 +791,8 @@ export default function ModelConfigPage() {
   const currentRepo = repos.find((r) => r.id === selectedRepoId);
 
   const providerDropdownOptions = useMemo<SelectOption[]>(() => {
-    return PROVIDER_OPTIONS.map((p) => {
+    const q = searchQuery.toLowerCase().trim();
+    const all = PROVIDER_OPTIONS.map((p) => {
       const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_zen;
       const Icon = meta.icon;
       return {
@@ -801,39 +802,110 @@ export default function ModelConfigPage() {
         description: meta.tag,
       };
     });
-  }, []);
 
-  // Normalize provider model list
-  const allProviderModels = useMemo(() => {
+    if (!q) return all;
+
+    return all.filter((p) => {
+      const meta = PROVIDER_METADATA[p.value] || PROVIDER_METADATA.opencode_zen;
+      return (
+        p.value.toLowerCase().includes(q) ||
+        p.label.toLowerCase().includes(q) ||
+        meta.tag.toLowerCase().includes(q) ||
+        meta.description.toLowerCase().includes(q) ||
+        meta.shortBadge.toLowerCase().includes(q)
+      );
+    });
+  }, [searchQuery]);
+
+  // Normalize provider model list for the currently selected provider
+  const allProviderModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
     const options = modelOptionsByProvider[selectedProvider] || [];
     const hasSelected = options.some((m) => m.id === selectedModel);
-    return hasSelected
+    const base = hasSelected
       ? options
       : [{ id: selectedModel, name: selectedModel, tag: "Active" }, ...options];
+    return base.map((m) => ({ ...m, provider: selectedProvider }));
   }, [modelOptionsByProvider, selectedProvider, selectedModel]);
 
-  // Filter by query and speed category
-  const currentModels = useMemo(() => {
-    return allProviderModels.filter((m) => {
+  // All searchable models across all providers
+  const allGlobalModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
+    const list: Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }> = [];
+    const seen = new Set<string>();
+
+    PROVIDER_OPTIONS.forEach((p) => {
+      const pModels = modelOptionsByProvider[p.id] || [];
+      pModels.forEach((m) => {
+        const key = `${p.id}:${m.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          list.push({ ...m, provider: p.id });
+        }
+      });
+    });
+
+    if (!list.some((m) => m.id === selectedModel)) {
+      list.unshift({
+        id: selectedModel,
+        name: selectedModel,
+        tag: "Active",
+        provider: selectedProvider,
+      });
+    }
+
+    return list;
+  }, [modelOptionsByProvider, selectedModel, selectedProvider]);
+
+  // Models matching search query across all providers (before speed filter)
+  const matchingSearchModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return allProviderModels;
+
+    const matchingProviderIds = new Set(
+      PROVIDER_OPTIONS.filter((p) => {
+        const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_zen;
+        return (
+          p.id.toLowerCase().includes(q) ||
+          p.name.toLowerCase().includes(q) ||
+          meta.tag.toLowerCase().includes(q) ||
+          meta.shortBadge.toLowerCase().includes(q) ||
+          (p.id === "opencode_zen" && (q.includes("zen") || q.includes("opencode"))) ||
+          (p.id === "opencode_go" && (q.includes("go") || q.includes("opencode")))
+        );
+      }).map((p) => p.id)
+    );
+
+    return allGlobalModels.filter((m) => {
+      if (matchingProviderIds.has(m.provider)) {
+        return true;
+      }
       const spec = getModelSpec(m.id, m.tag, m.context_window);
       const friendlyName = formatModelDisplayName(m.id, m.name).toLowerCase();
-      const q = searchQuery.toLowerCase().trim();
+      const idLower = m.id.toLowerCase();
+      const specialtyLower = spec.specialty.toLowerCase();
+      const roleLower = spec.recommendedRole.toLowerCase();
+      const tagLower = m.tag.toLowerCase();
 
-      const matchesQuery =
-        !q ||
+      return (
         friendlyName.includes(q) ||
-        m.id.toLowerCase().includes(q) ||
-        spec.specialty.toLowerCase().includes(q) ||
-        spec.recommendedRole.toLowerCase().includes(q);
+        idLower.includes(q) ||
+        specialtyLower.includes(q) ||
+        roleLower.includes(q) ||
+        tagLower.includes(q)
+      );
+    });
+  }, [searchQuery, allProviderModels, allGlobalModels]);
 
-      if (!matchesQuery) return false;
-
+  // Filter by query and speed category
+  const currentModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
+    const base = searchQuery.trim() ? matchingSearchModels : allProviderModels;
+    return base.filter((m) => {
+      const spec = getModelSpec(m.id, m.tag, m.context_window);
       if (speedFilter === "free") return spec.isFree;
       if (speedFilter === "fast") return spec.speedCategory === "fast";
       if (speedFilter === "reasoning") return spec.speedCategory === "reasoning";
       return true;
     });
-  }, [allProviderModels, searchQuery, speedFilter]);
+  }, [searchQuery, matchingSearchModels, allProviderModels, speedFilter]);
 
   return (
     <AppLayout
@@ -1089,8 +1161,40 @@ export default function ModelConfigPage() {
               </p>
             </div>
 
-            {/* Provider Switcher Dropdown */}
-            <div className="relative z-30 flex items-center gap-2.5">
+            {/* Searchbar & Provider Switcher */}
+            <div className="relative z-30 flex flex-wrap sm:flex-nowrap items-center gap-2.5">
+              {/* Header Dual Searchbar (Providers & Models) */}
+              <div className="relative">
+                <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search providers & models..."
+                  className="h-8 w-48 sm:w-64 font-mono text-xs bg-zinc-900/80 border border-zinc-700/80 rounded px-2.5 pl-8 pr-7 text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                />
+                {searchQuery ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery("");
+                      searchInputRef.current?.focus();
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-0.5 rounded cursor-pointer"
+                    aria-label="Clear search query"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                ) : (
+                  <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 hidden sm:block">
+                    <kbd className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded border border-zinc-700/60 bg-zinc-800/60 px-1 font-mono text-[9px] text-zinc-400 select-none">
+                      /
+                    </kbd>
+                  </div>
+                )}
+              </div>
+
               <span className="text-xs font-mono font-medium text-zinc-400 hidden sm:inline-block">
                 Provider:
               </span>
@@ -1100,6 +1204,7 @@ export default function ModelConfigPage() {
                 value={selectedProvider}
                 onChange={handleProviderChange}
                 options={providerDropdownOptions}
+                placeholder={activeProviderMeta.name}
                 buttonClassName="min-w-[190px] sm:min-w-[210px] h-8 font-mono text-xs bg-zinc-900/80 border-zinc-700/80 hover:border-zinc-600 text-zinc-200"
                 disabled={isPending}
               />
@@ -1126,7 +1231,11 @@ export default function ModelConfigPage() {
                     Model Architectures
                   </h3>
                   <span className="inline-flex items-center px-1.5 py-0.5 rounded-[4px] bg-zinc-900 border border-zinc-800 text-[9.5px] font-mono text-zinc-400">
-                    {searchQuery || speedFilter !== "all"
+                    {searchQuery.trim()
+                      ? speedFilter !== "all"
+                        ? `${currentModels.length} of ${matchingSearchModels.length} Models Found`
+                        : `${currentModels.length} Model${currentModels.length === 1 ? "" : "s"} Found`
+                      : speedFilter !== "all"
                       ? `${currentModels.length} of ${allProviderModels.length} Available`
                       : `${allProviderModels.length} Available`}
                   </span>
@@ -1136,39 +1245,8 @@ export default function ModelConfigPage() {
                 </p>
               </div>
 
-              {/* Quick Filter Tabs & Search Bar */}
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative">
-                  <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
-                  <input
-                    ref={searchInputRef}
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Filter models..."
-                    className="h-7.5 pl-8 pr-7 rounded-[5px] border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#121216] to-[#0c0c0e] font-mono text-xs text-zinc-200 placeholder:text-zinc-500 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4),0_1px_2px_rgba(0,0,0,0.2)] focus:outline-none focus:border-t-amber-400 focus:border-x-amber-500/70 focus:ring-1 focus:ring-amber-400/25 w-32 sm:w-44 transition-all"
-                  />
-                  {searchQuery ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSearchQuery("");
-                        searchInputRef.current?.focus();
-                      }}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-0.5 rounded cursor-pointer"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  ) : (
-                    <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">
-                      <kbd className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded border border-zinc-700/60 bg-zinc-800/60 px-1 font-mono text-[9px] text-zinc-400 select-none">
-                        /
-                      </kbd>
-                    </div>
-                  )}
-                </div>
-
-                <div className="inline-flex rounded-[7px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#0a0a0d] p-1 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] text-xs font-mono gap-1">
+              {/* Quick Filter Tabs (Speed category) */}
+              <div className="inline-flex rounded-[7px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#0a0a0d] p-1 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] text-xs font-mono gap-1">
                   <button
                     type="button"
                     onClick={() => setSpeedFilter("all")}
@@ -1219,7 +1297,6 @@ export default function ModelConfigPage() {
                   </button>
                 </div>
               </div>
-            </div>
 
             {loading ? (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
@@ -1272,7 +1349,7 @@ export default function ModelConfigPage() {
 
                   return (
                     <div
-                      key={m.id}
+                      key={`${m.provider || selectedProvider}:${m.id}`}
                       role="button"
                       tabIndex={isPending ? -1 : 0}
                       aria-pressed={isSelected}
@@ -1280,12 +1357,18 @@ export default function ModelConfigPage() {
                       onClick={() => {
                         if (!isPending) {
                           setSelectedModel(m.id);
+                          if (m.provider && m.provider !== selectedProvider) {
+                            setSelectedProvider(m.provider);
+                          }
                         }
                       }}
                       onKeyDown={(e) => {
                         if ((e.key === "Enter" || e.key === " ") && !isPending) {
                           e.preventDefault();
                           setSelectedModel(m.id);
+                          if (m.provider && m.provider !== selectedProvider) {
+                            setSelectedProvider(m.provider);
+                          }
                         }
                       }}
                       className={cn(
@@ -1306,11 +1389,18 @@ export default function ModelConfigPage() {
                       />
 
                       <div className="space-y-3.5 w-full relative z-10">
-                        {/* Header: Tag + Live Status + Radio Indicator */}
+                        {/* Header: Provider badge (when cross-searching) + Tag + Live Status + Radio Indicator */}
                         <div className="flex items-center justify-between gap-2">
-                          <span className={cn("text-[10px] font-mono font-semibold px-2 py-0.5 rounded-[4px]", badgePill)}>
-                            {m.tag}
-                          </span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {searchQuery.trim() && m.provider && (
+                              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-zinc-800/90 border border-zinc-700/70 text-zinc-300 font-medium">
+                                {PROVIDER_METADATA[m.provider]?.name || m.provider}
+                              </span>
+                            )}
+                            <span className={cn("text-[10px] font-mono font-semibold px-2 py-0.5 rounded-[4px]", badgePill)}>
+                              {m.tag}
+                            </span>
+                          </div>
                           <div className="flex items-center gap-2">
                             {isLive && (
                               <span className="text-[9.5px] font-mono font-semibold bg-emerald-950/60 border border-emerald-800/60 text-emerald-400 px-2 py-0.5 rounded-[4px] flex items-center gap-1.5 shadow-[0_0_8px_rgba(52,211,153,0.25)]">
