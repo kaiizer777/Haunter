@@ -302,79 +302,6 @@ export interface AvailableModelsOut {
 }
 
 
-// ---------------------------------------------------------------------------
-// Session types (Phase 3 -- Cloud Agentic Live Session)
-// ---------------------------------------------------------------------------
-
-export interface PlanTask {
-  id: string;
-  title: string;
-  status: "pending" | "in_progress" | "completed" | "failed";
-}
-
-export interface WaitingInput {
-  question: string;
-  options: string[];
-  timestamp?: string;
-}
-
-export interface CheckpointOut {
-  checkpoint_id: string;
-  turn: number;
-  timestamp: string;
-  description: string;
-  staged_patches: Record<string, string>;
-  history_length: number;
-}
-
-export interface SessionOut {
-  id: string;
-  user_id: string;
-  repo_id: string;
-  repo_owner: string;
-  repo_name: string;
-  title: string;
-  status: "active" | "completed" | "closed" | "awaiting_clarification";
-  branch_name: string;
-  base_sha: string;
-  conversation_history: Record<string, unknown>[];
-  staged_patches: Record<string, string>;
-  plan: PlanTask[];
-  waiting_input?: WaitingInput | null;
-  checkpoints: CheckpointOut[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface SessionListOut {
-  sessions: SessionOut[];
-  total: number;
-}
-
-export interface SessionCreateIn {
-  repo_id: string;
-  branch_name?: string | null;
-  title?: string | null;
-}
-
-export interface SessionCommitIn {
-  title: string;
-  body?: string | null;
-}
-
-export interface SessionCommitOut {
-  pr_url: string;
-  pr_number: number;
-  commit_sha: string;
-}
-
-export interface SandboxVerificationOut {
-  status: string;
-  passed: boolean;
-  run_url: string | null;
-  logs: string | null;
-}
-
 export interface RepoWithSettingsOut {
   repo_id: string;
   repo_full_name: string;
@@ -382,8 +309,6 @@ export interface RepoWithSettingsOut {
   features: {
     auto_fixer: boolean;
     auditor_mode: boolean;
-    live_sessions: boolean;
-    webcontainer_preview: boolean;
     ci_sandbox: boolean;
   };
   audit_triggers: {
@@ -407,8 +332,6 @@ export interface RepoSettingsOut {
   enable_ci_sandbox?: boolean;
   enable_pr_comments: boolean;
   file_issue_on_fallback: boolean;
-  enable_live_sessions: boolean;
-  enable_webcontainer_preview: boolean;
   audit_trigger_on_pr: boolean;
   audit_trigger_on_ci_failure: boolean;
   audit_trigger_on_ci_success: boolean;
@@ -437,8 +360,6 @@ export interface RepoSettingsUpdate {
   enable_ci_sandbox?: boolean;
   enable_pr_comments?: boolean;
   file_issue_on_fallback?: boolean;
-  enable_live_sessions?: boolean;
-  enable_webcontainer_preview?: boolean;
   audit_trigger_on_pr?: boolean;
   audit_trigger_on_ci_failure?: boolean;
   audit_trigger_on_ci_success?: boolean;
@@ -892,40 +813,6 @@ export const api = {
 
   getAssociatedPrsBatch: (reviewIds: string[]) =>
     api.post<AssociatedPRsBatchResponse>("/reviews/associated-prs", { review_ids: reviewIds }),
-
-  // Session endpoints (Phase 3 -- Cloud Agentic Live Session)
-  listSessions: (params?: { status?: string; limit?: number; offset?: number }) => {
-    const query = new URLSearchParams();
-    if (params?.status) query.append("status", params.status);
-    if (params?.limit) query.append("limit", params.limit.toString());
-    if (params?.offset !== undefined) query.append("offset", params.offset.toString());
-    const qs = query.toString();
-    return api.get<SessionListOut>(`/sessions${qs ? `?${qs}` : ""}`);
-  },
-
-  getSession: (sessionId: string) =>
-    api.get<SessionOut>(`/sessions/${sessionId}`),
-
-  createSession: (data: SessionCreateIn) =>
-    api.post<SessionOut>("/sessions", data),
-
-  closeSession: (sessionId: string) =>
-    api.post<SessionOut>(`/sessions/${sessionId}/close`, {}),
-
-  verifySession: (sessionId: string) =>
-    api.post<SandboxVerificationOut>(`/sessions/${sessionId}/verify`),
-
-  commitSession: (sessionId: string, data: SessionCommitIn) =>
-    api.post<SessionCommitOut>(`/sessions/${sessionId}/commit`, data),
-
-  getSessionTree: (sessionId: string) =>
-    api.get<string[]>(`/sessions/${sessionId}/tree`),
-
-  clarifySession: (sessionId: string, data: { response: string }) =>
-    api.post<SessionOut>(`/sessions/${sessionId}/clarify`, data),
-
-  restoreCheckpoint: (sessionId: string, checkpointId: string) =>
-    api.post<SessionOut>(`/sessions/${sessionId}/checkpoints/${checkpointId}/restore`, {}),
 
   // Settings endpoints (Phase 6.4 - Granular Per-Repo Feature Governance)
   getSettingsRepos: () => api.get<RepoWithSettingsOut[]>("/settings/repos"),

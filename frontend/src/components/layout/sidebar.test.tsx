@@ -59,11 +59,11 @@ describe("sidebar.tsx", () => {
     });
   });
 
-  it("renders the brand header with link to /sessions and system status", async () => {
+  it("renders the brand header with link to /reviews and system status", async () => {
     render(<Sidebar />);
 
     const brandLink = screen.getByRole("link", { name: /haunter autonomous ci/i });
-    expect(brandLink).toHaveAttribute("href", "/sessions");
+    expect(brandLink).toHaveAttribute("href", "/reviews");
     expect(screen.getByText("v1.0")).toBeInTheDocument();
     expect(screen.getByText("System Status")).toBeInTheDocument();
     expect(screen.getByText("System Ready")).toBeInTheDocument();
@@ -80,7 +80,6 @@ describe("sidebar.tsx", () => {
     });
     render(<Sidebar />);
 
-    const sessionsLink = screen.getByRole("link", { name: /live sessions/i });
     const runsLink = screen.getByRole("link", { name: /runs/i });
     const reposLink = screen.getByRole("link", { name: /repositories/i });
     const settingsLink = screen.getByRole("link", { name: /^settings$/i });
@@ -88,7 +87,6 @@ describe("sidebar.tsx", () => {
     expect(api.getModelConfig).not.toHaveBeenCalled();
     const evalLink = screen.getByRole("link", { name: /ai reliability & evals/i });
 
-    expect(sessionsLink).toHaveAttribute("href", "/sessions");
     expect(runsLink).toHaveAttribute("href", "/runs");
     expect(within(runsLink).queryByText("Live")).not.toBeInTheDocument();
     expect(reposLink).toHaveAttribute("href", "/repos");
@@ -101,7 +99,7 @@ describe("sidebar.tsx", () => {
     expect(screen.queryByTitle("nemotron-3.5-lightning-free")).not.toBeInTheDocument();
   });
 
-  it("does not preventDefault on shortcut 6 when Model Config link is hidden", async () => {
+  it("does not preventDefault on shortcut 5 when Model Config link is hidden", async () => {
     vi.mocked(useAuth).mockReturnValue({
       user: standardUser,
       loading: false,
@@ -112,7 +110,7 @@ describe("sidebar.tsx", () => {
     render(<Sidebar />);
 
     expect(screen.queryByRole("link", { name: /model config/i })).not.toBeInTheDocument();
-    const evt = new KeyboardEvent("keydown", { key: "6", metaKey: true, bubbles: true, cancelable: true });
+    const evt = new KeyboardEvent("keydown", { key: "5", metaKey: true, bubbles: true, cancelable: true });
     const prevented = !window.dispatchEvent(evt);
     expect(prevented).toBe(false);
   });
@@ -232,7 +230,7 @@ describe("sidebar.tsx", () => {
 
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
-        key: "4",
+        key: "3",
         metaKey: true,
         bubbles: true,
       })
@@ -242,7 +240,7 @@ describe("sidebar.tsx", () => {
     await screen.findByTitle("claude-sonnet-4-5");
   });
 
-  it("triggers settings navigation on keyboard shortcut 7", async () => {
+  it("triggers settings navigation on keyboard shortcut 6", async () => {
     render(<Sidebar />);
 
     const settingsLink = screen.getByRole("link", { name: /^settings$/i });
@@ -250,7 +248,7 @@ describe("sidebar.tsx", () => {
 
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
-        key: "7",
+        key: "6",
         metaKey: true,
         bubbles: true,
       })

@@ -12,7 +12,7 @@ export default function RootPage() {
   useEffect(() => {
     if (!loading) {
       if (user) {
-        router.replace("/sessions");
+        router.replace("/reviews");
       } else {
         router.replace("/login");
       }
