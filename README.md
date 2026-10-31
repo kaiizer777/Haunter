@@ -1,6 +1,6 @@
 <div align="center">
 
-<h3>Your engineering team's autonomous AI agent.<br/>It reviews code, ships fixes & features — before you've opened Slack.</h3>
+<h3>Your engineering team's autonomous AI agent.<br/>It reviews code, ships fixes & features — before you've opened your IDE.</h3>
 
 <br/>
 
