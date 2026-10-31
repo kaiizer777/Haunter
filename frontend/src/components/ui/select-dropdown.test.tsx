@@ -84,4 +84,29 @@ describe("SelectDropdown (components/ui/select-dropdown.tsx)", () => {
     fireEvent.mouseDown(screen.getByTestId("outside"));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
+
+  it("does not close when clicking inside ignoreClickOutsideRef", async () => {
+    const user = userEvent.setup();
+    function Wrapper() {
+      const searchRef = React.useRef<HTMLInputElement>(null);
+      return (
+        <div>
+          <input ref={searchRef} data-testid="search-input" />
+          <SelectDropdown
+            value=""
+            onChange={vi.fn()}
+            options={options}
+            ignoreClickOutsideRef={searchRef}
+          />
+        </div>
+      );
+    }
+    render(<Wrapper />);
+    const trigger = screen.getByRole("button");
+    await user.click(trigger);
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByTestId("search-input"));
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+  });
 });

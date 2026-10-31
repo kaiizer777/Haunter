@@ -25,6 +25,7 @@ export interface SelectDropdownProps {
   searchable?: boolean;
   id?: string;
   "aria-label"?: string;
+  ignoreClickOutsideRef?: React.RefObject<HTMLElement | null>;
 }
 
 export function SelectDropdown({
@@ -39,6 +40,7 @@ export function SelectDropdown({
   searchable,
   id,
   "aria-label": ariaLabel,
+  ignoreClickOutsideRef,
 }: SelectDropdownProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -76,9 +78,11 @@ export function SelectDropdown({
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node;
       if (
         containerRef.current &&
-        !containerRef.current.contains(event.target as Node)
+        !containerRef.current.contains(target) &&
+        (!ignoreClickOutsideRef?.current || !ignoreClickOutsideRef.current.contains(target))
       ) {
         setIsOpen(false);
       }

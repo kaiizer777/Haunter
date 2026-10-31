@@ -1199,7 +1199,7 @@ export default function ModelConfigPage() {
             {/* Searchbar & Provider Switcher */}
             <div className="relative z-30 flex flex-wrap sm:flex-nowrap items-center gap-2.5">
               {/* Header Dual Searchbar (Providers & Models) */}
-              <div className="relative">
+              <div className="relative z-40">
                 <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
                 <input
                   ref={searchInputRef}
@@ -1240,6 +1240,7 @@ export default function ModelConfigPage() {
                 onChange={handleProviderChange}
                 options={providerDropdownOptions}
                 placeholder={activeProviderMeta.name}
+                ignoreClickOutsideRef={searchInputRef}
                 buttonClassName="min-w-[190px] sm:min-w-[210px] h-8 font-mono text-xs bg-zinc-900/80 border-zinc-700/80 hover:border-zinc-600 text-zinc-200"
                 disabled={isPending}
               />
