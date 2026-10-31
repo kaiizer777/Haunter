@@ -44,11 +44,10 @@ router = APIRouter(prefix="/config/model", tags=["model_config"])
 # never accepted from the client.
 def _base_url_for_provider(provider: str) -> str | None:
     """Return the configured base URL for an allowlisted provider, or None."""
+    # Issue #205: only opencode_go + groq are supported. Retired providers
+    # resolve to None so writes fail closed with an explicit 422.
     return {
-        "opencode_zen": settings.opencode_zen_base_url,
         "opencode_go": settings.opencode_go_base_url,
-        "openai": settings.openai_base_url,
-        "anthropic": settings.anthropic_base_url,
         "groq": settings.groq_base_url,
     }.get(provider)
 
@@ -57,7 +56,7 @@ def _default_base_url() -> str:
     """Fallback base URL derived from settings.default_provider (Phase 3.2 Issue 5)."""
     return (
         _base_url_for_provider(settings.default_provider)
-        or settings.opencode_zen_base_url
+        or settings.opencode_go_base_url
     )
 
 
