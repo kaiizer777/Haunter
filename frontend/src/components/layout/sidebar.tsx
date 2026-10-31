@@ -263,9 +263,9 @@ export function Sidebar() {
             </div>
           </div>
 
-          <div className="my-2.5 h-px w-full bg-gradient-to-r from-transparent via-zinc-700/50 to-transparent" />
-
 {isAdmin && (
+        <>
+          <div className="my-2.5 h-px w-full bg-gradient-to-r from-transparent via-zinc-700/50 to-transparent" />
           <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
             <div className="flex items-center gap-1.5">
               <Cpu className="h-3.5 w-3.5 text-zinc-500" />
@@ -278,6 +278,7 @@ export function Sidebar() {
               {activeModel.replace("-free", "")}
             </span>
           </div>
+        </>
         )}
 
           <div className="mt-2.5 pt-2 border-t border-zinc-800/70 flex items-center justify-between text-[10px] font-mono text-zinc-500">

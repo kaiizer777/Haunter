@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import ModelConfigPage from "./page";
 import { useAuth } from "@/lib/auth-context";
 import { api, ApiError, AuthUser, ModelConfigOut, RepoOut } from "@/lib/api";
@@ -58,6 +58,8 @@ describe("ModelConfigPage non-admin repo scope", () => {
     model_name: "laguna-s-2.1-free",
     base_url: "https://opencode.ai/zen/v1",
     is_active: true,
+    scope: "repo",
+    repo_id: "repo_1",
   };
 
   beforeEach(() => {
@@ -90,12 +92,25 @@ describe("ModelConfigPage non-admin repo scope", () => {
       expect(api.getRepos).toHaveBeenCalled();
       expect(api.getModelConfig).toHaveBeenCalledWith("repo_1", expect.anything());
     });
+    // Override state derives from the repo response scope even though the
+    // global default 403s: badge + reset stay available.
+    expect(await screen.findByText("Custom Repo Override")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reset to global default/i })).toBeEnabled();
   });
 
-  it("locks global controls for non-admins with an Admin Only notice", async () => {
+  it("locks global controls for non-admins: save is disabled with an Admin Only notice", async () => {
     render(<ModelConfigPage />);
 
     expect(await screen.findByText("Repository Override")).toBeInTheDocument();
     expect(screen.getAllByText("Admin Only").length).toBeGreaterThan(0);
+
+    // Switch to Global scope: global read 403s, stale repo state is cleared,
+    // and the save control is disabled (not merely labelled).
+    fireEvent.click(screen.getByRole("button", { name: /global platform default/i }));
+    const saveButton = await screen.findByRole("button", { name: /^admin only$/i });
+    expect(saveButton).toBeDisabled();
+    await waitFor(() => {
+      expect(api.getModelConfig).toHaveBeenCalledWith(undefined, expect.anything());
+    });
   });
 });
