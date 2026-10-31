@@ -1897,11 +1897,13 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   const [customProviderInput, setCustomProviderInput] = useState<"auto" | "groq" | "opencode_zen">("auto");
   const [availableModels, setAvailableModels] = useState<{
     opencode_zen: AvailableModelItem[];
+    opencode_go?: AvailableModelItem[];
     groq: AvailableModelItem[];
     openai: AvailableModelItem[];
     anthropic: AvailableModelItem[];
   }>({
     opencode_zen: FALLBACK_MODELS.opencode_zen,
+    opencode_go: [],
     groq: FALLBACK_MODELS.groq,
     openai: FALLBACK_MODELS.openai,
     anthropic: FALLBACK_MODELS.anthropic,
@@ -1924,6 +1926,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
   const allKnownModels = useMemo(() => {
     return [
       ...availableModels.opencode_zen,
+      ...(availableModels.opencode_go ?? []),
       ...availableModels.groq,
       ...availableModels.openai,
       ...availableModels.anthropic,
@@ -2280,6 +2283,7 @@ export default function SessionWorkspaceClient({ sessionId: propSessionId }: { s
       .then((data) => {
         setAvailableModels({
           opencode_zen: data.opencode_zen.length ? data.opencode_zen : FALLBACK_MODELS.opencode_zen,
+          opencode_go: data.opencode_go ?? [],
           groq: (data.groq ?? []).length ? (data.groq ?? []) : FALLBACK_MODELS.groq,
           openai: data.openai.length ? data.openai : FALLBACK_MODELS.openai,
           anthropic: data.anthropic.length ? data.anthropic : FALLBACK_MODELS.anthropic,

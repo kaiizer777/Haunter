@@ -34,7 +34,7 @@ import {
 // Strict server-side allowlists (WORK.md:252)
 const PROVIDER_OPTIONS = [
   { id: "opencode_zen", name: "OpenCode Zen", defaultModel: "nemotron-3.5-lightning-free" },
-  { id: "opencode_go", name: "OpenCode Go", defaultModel: "nemotron-3.5-lightning-free" },
+  { id: "opencode_go", name: "OpenCode Go", defaultModel: "deepseek-v4.1-flash" },
   { id: "openai", name: "OpenAI", defaultModel: "gpt-4o" },
   { id: "anthropic", name: "Anthropic", defaultModel: "claude-sonnet-4-5" },
   { id: "groq", name: "Groq", defaultModel: "openai/gpt-oss-120b" },
@@ -47,9 +47,10 @@ const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: stri
     { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "1M · Free", context_window: 1048576 },
   ],
   opencode_go: [
-    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Default · Free", context_window: 131072 },
-    { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Fast · Free", context_window: 65536 },
-    { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "1M · Free", context_window: 1048576 },
+    { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", tag: "1M · Low Latency", context_window: 1000000 },
+    { id: "glm-5.2", name: "GLM 5.2", tag: "1M · Reasoning", context_window: 1000000 },
+    { id: "mimo-v2.6-flash", name: "Mimo V2.6 Flash", tag: "1M · Fast", context_window: 1000000 },
+    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Free Tier", context_window: 131072 },
   ],
   openai: [
     { id: "gpt-4o", name: "GPT-4o", tag: "Flagship", context_window: 128000 },
@@ -94,7 +95,7 @@ const PROVIDER_METADATA: Record<
     tag: "Low Latency · Direct Gateway",
     shortBadge: "Direct Gateway",
     description: "Ultra-low-latency optimized inference gateway for real-time CI patch synthesis and code verification.",
-    baseUrl: "https://opencode.ai/go/v1",
+    baseUrl: "https://opencode.ai/inference/go/openai/v1",
     icon: Activity,
     accentText: "text-emerald-400",
     badgeClass: "bg-emerald-400/10 border-emerald-400/30 text-emerald-300",
@@ -132,6 +133,9 @@ const PROVIDER_METADATA: Record<
 };
 
 const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "deepseek-v4.1-flash": 1000000,
+  "glm-5.2": 1000000,
+  "mimo-v2.6-flash": 1000000,
   "space-bunny-free": 1048576,
   "longcat-2.5-preview-free": 1048576,
   "ling-3.0-flash-fin-free": 1048576,
@@ -191,6 +195,36 @@ interface ModelSpec {
 }
 
 const MODEL_SPECS: Record<string, ModelSpec> = {
+  "deepseek-v4.1-flash": {
+    contextWindow: "1M Context",
+    specialty: "High-Throughput Low-Latency CI Diagnostic & Fix Generation",
+    latencyRating: "~180ms TTFT",
+    latencyMs: 180,
+    recommendedRole: "Production Flash",
+    tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
+    speedCategory: "fast",
+    isFree: false,
+  },
+  "glm-5.2": {
+    contextWindow: "1M Context",
+    specialty: "Complex Multi-Step Architecture Reasoning & Logic Healing",
+    latencyRating: "~360ms TTFT",
+    latencyMs: 360,
+    recommendedRole: "High-Reasoning Production",
+    tagColor: "bg-purple-950/60 border-purple-700/60 text-purple-300",
+    speedCategory: "reasoning",
+    isFree: false,
+  },
+  "mimo-v2.6-flash": {
+    contextWindow: "1M Context",
+    specialty: "Ultra-Fast Codebase Search & Patch Synthesis",
+    latencyRating: "~210ms TTFT",
+    latencyMs: 210,
+    recommendedRole: "Fast Production",
+    tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
+    speedCategory: "fast",
+    isFree: false,
+  },
   "space-bunny-free": {
     contextWindow: "1M Context",
     specialty: "High-Capacity Ultra-Long Context CI Analysis",
@@ -442,6 +476,9 @@ function formatModelDisplayName(id: string, rawName?: string): string {
   }
 
   const KNOWN_NAMES: Record<string, string> = {
+    "deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
+    "glm-5.2": "GLM 5.2",
+    "mimo-v2.6-flash": "Mimo V2.6 Flash",
     "nemotron-3.5-lightning-free": "Nemotron 3.5 Lightning",
     "nemotron-3-ultra-free": "Nemotron 3 Ultra",
     "laguna-s-2.1-free": "Laguna S 2.1",
@@ -508,7 +545,7 @@ function getModelSpec(modelId: string, tag?: string, contextWindowTokens?: numbe
   let fallbackCtx = "Unknown Context";
   if (formattedCtx) {
     fallbackCtx = formattedCtx;
-  } else if (idLower.includes("1m") || idLower.includes("bunny") || idLower.includes("longcat") || idLower.includes("ling")) {
+  } else if (idLower.includes("1m") || idLower.includes("bunny") || idLower.includes("longcat") || idLower.includes("ling") || idLower.includes("glm") || idLower.includes("v4.1")) {
     fallbackCtx = "1M Context";
   } else if (idLower.includes("256k") || idLower.includes("mimo")) {
     fallbackCtx = "256k Context";
@@ -576,10 +613,8 @@ export default function ModelConfigPage() {
           const raw = data as unknown as Record<string, typeof DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen>;
           setModelOptionsByProvider({
             opencode_zen: data.opencode_zen?.length ? data.opencode_zen : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen,
-            opencode_go: raw.opencode_go?.length
-              ? raw.opencode_go
-              : data.opencode_zen?.length
-              ? data.opencode_zen
+            opencode_go: (data.opencode_go ?? []).length
+              ? (data.opencode_go ?? [])
               : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_go,
             openai: data.openai?.length ? data.openai : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.openai,
             anthropic: data.anthropic?.length ? data.anthropic : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.anthropic,

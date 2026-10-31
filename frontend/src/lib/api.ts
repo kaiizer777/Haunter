@@ -293,6 +293,7 @@ export interface AvailableModelItem {
 
 export interface AvailableModelsOut {
   opencode_zen: AvailableModelItem[];
+  opencode_go?: AvailableModelItem[];
   openai: AvailableModelItem[];
   anthropic: AvailableModelItem[];
   groq?: AvailableModelItem[];
