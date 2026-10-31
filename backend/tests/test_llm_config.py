@@ -33,7 +33,7 @@ async def test_get_active_model_config_empty_db_env_fallback(db: AsyncSession) -
     assert isinstance(resolved, ResolvedModelConfig)
     assert resolved.provider == settings.default_provider
     assert resolved.model_name == settings.default_model
-    assert resolved.base_url == settings.opencode_zen_base_url
+    assert resolved.base_url == settings.opencode_go_base_url
 
 
 @pytest.mark.asyncio
@@ -291,7 +291,7 @@ async def test_get_active_model_config_db_exception_fallback() -> None:
 
     assert resolved.provider == settings.default_provider
     assert resolved.model_name == settings.default_model
-    assert resolved.base_url == settings.opencode_zen_base_url
+    assert resolved.base_url == settings.opencode_go_base_url
 
 
 @pytest.mark.asyncio
