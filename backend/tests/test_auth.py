@@ -693,5 +693,11 @@ async def test_callback_admin_github_username_gets_admin_role(
     user = result.scalar_one_or_none()
     assert user is not None
     assert user.github_username == "kaiizer777"
-    assert user.role == "admin"
-    assert user.is_admin is True
+    # Persistent DB role is untouched (stays default 'user')
+    assert user.role == "user"
+    # Dynamic access via is_admin_user evaluates to True while in the list
+    assert auth_module.is_admin_user(user) is True
+
+    # If removed from list at runtime, admin access is revoked immediately
+    monkeypatch.setattr(settings, "admin_github_usernames", [])
+    assert auth_module.is_admin_user(user) is False

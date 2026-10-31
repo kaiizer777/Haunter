@@ -495,12 +495,6 @@ async def callback(
         result = await db.execute(select(User).where(User.github_id == github_id))
         user = result.scalar_one_or_none()
 
-        is_admin_from_env = bool(
-            settings.admin_github_usernames
-            and github_username
-            and github_username.lower()
-            in [u.lower() for u in settings.admin_github_usernames]
-        )
         if user is None:
             user = User(
                 id=uuid.uuid4(),
@@ -508,15 +502,13 @@ async def callback(
                 github_username=github_username,
                 avatar_url=avatar_url,
                 access_token=encrypted_token,
-                role=UserRole.ADMIN.value if is_admin_from_env else UserRole.USER.value,
+                role=UserRole.USER.value,
             )
             db.add(user)
         else:
             user.github_username = github_username
             user.avatar_url = avatar_url
             user.access_token = encrypted_token
-            if is_admin_from_env:
-                user.role = UserRole.ADMIN.value
 
         await db.commit()
     except Exception:
