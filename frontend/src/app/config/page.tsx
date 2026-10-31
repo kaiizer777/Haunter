@@ -29,6 +29,8 @@ import {
   Layers,
   RotateCcw,
   FolderGit2,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 // Strict server-side allowlists (WORK.md:252)
@@ -592,6 +594,12 @@ export default function ModelConfigPage() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [speedFilter, setSpeedFilter] = useState<"all" | "free" | "fast" | "reasoning">("all");
+  const [isExpanded, setIsExpanded] = useState(false);
+  const modelsGridRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setIsExpanded(false);
+  }, [selectedProvider, searchQuery, speedFilter]);
 
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -941,6 +949,15 @@ export default function ModelConfigPage() {
       return true;
     });
   }, [searchQuery, matchingSearchModels, allProviderModels, speedFilter]);
+
+  const DEFAULT_CARD_LIMIT = 9;
+  const hasMoreModels = currentModels.length > DEFAULT_CARD_LIMIT;
+  const displayedModels = useMemo(() => {
+    if (isExpanded || !hasMoreModels) {
+      return currentModels;
+    }
+    return currentModels.slice(0, DEFAULT_CARD_LIMIT);
+  }, [currentModels, isExpanded, hasMoreModels]);
 
   return (
     <AppLayout
@@ -1361,8 +1378,9 @@ export default function ModelConfigPage() {
                 </Button>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-                {currentModels.map((m) => {
+              <div ref={modelsGridRef} className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                  {displayedModels.map((m) => {
                   const isSelected = m.id === selectedModel;
                   const isLive = activeConfig?.model_name === m.id;
                   const spec = getModelSpec(m.id, m.tag, m.context_window);
@@ -1531,6 +1549,37 @@ export default function ModelConfigPage() {
                   );
                 })}
               </div>
+
+              {hasMoreModels && (
+                <div className="flex justify-center pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (isExpanded) {
+                        setIsExpanded(false);
+                        modelsGridRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                      } else {
+                        setIsExpanded(true);
+                      }
+                    }}
+                    className="h-8 px-4 text-xs font-mono font-medium rounded-lg border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#141418] to-[#0c0c0f] hover:from-[#181820] hover:to-[#101014] text-zinc-200 hover:text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_6px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all cursor-pointer flex items-center gap-1.5"
+                  >
+                    <span>
+                      {isExpanded
+                        ? "View Less"
+                        : `View More (${currentModels.length - DEFAULT_CARD_LIMIT} more models)`}
+                    </span>
+                    {isExpanded ? (
+                      <ChevronUp className="h-3.5 w-3.5 text-zinc-400" />
+                    ) : (
+                      <ChevronDown className="h-3.5 w-3.5 text-zinc-400" />
+                    )}
+                  </Button>
+                </div>
+              )}
+            </div>
             )}
           </div>
 
