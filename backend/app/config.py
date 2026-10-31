@@ -119,7 +119,8 @@ class Settings(BaseSettings):
     opencode_zen_api_key: Optional[str] = None
     opencode_zen_base_url: str = "https://opencode.ai/zen/v1"
     opencode_go_api_key: Optional[str] = None
-    opencode_go_base_url: str = "https://opencode.ai/go/v1"
+    opencode_go_base_url: str = "https://opencode.ai/inference/go/openai/v1"
+    opencode_go_discovery_url: str = "https://opencode.ai/inference/go/v1/models"
     default_provider: str = "opencode_zen"
     default_model: str = "nemotron-3.5-lightning-free"
 

@@ -28,7 +28,7 @@ from app.llm.config import (
     default_base_url_for_provider,
     get_active_model_config,
 )
-from app.llm.discovery import BOOTSTRAP_FREE_MODELS, get_dynamic_free_models
+from app.llm.discovery import BOOTSTRAP_FREE_MODELS, get_dynamic_free_models, get_dynamic_go_models
 from app.llm.exceptions import (
     LLMAuthenticationError,
     LLMError,
@@ -183,10 +183,23 @@ class LLMClient:
             else settings.opencode_zen_api_key
         )
 
+        target_base_url = (
+            config.base_url
+            if config.provider == target_provider and config.base_url != "https://opencode.ai/go/v1"
+            else default_base_url_for_provider(target_provider)
+        )
+
         # Construct dynamic fallback chain
-        if target_provider in ("opencode_zen", "opencode_go"):
+        if target_provider == "opencode_go":
+            go_models = await get_dynamic_go_models(
+                api_key=provider_api_key,
+            )
+            dynamic_models = [
+                m["id"] if isinstance(m, dict) else str(m) for m in go_models
+            ]
+        elif target_provider == "opencode_zen":
             dynamic_models = await get_dynamic_free_models(
-                base_url=config.base_url,
+                base_url=target_base_url,
                 api_key=provider_api_key,
             )
         else:
@@ -198,9 +211,10 @@ class LLMClient:
                 chain.append(m)
 
         base_provider = OpenCodeZenProvider(
-            base_url=config.base_url,
+            base_url=target_base_url,
             timeout=self.timeout,
             api_key=provider_api_key,
+            provider_name=target_provider,
         )
 
         attempts_log: list[tuple[str, int, str]] = []

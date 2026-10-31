@@ -1413,14 +1413,14 @@ def test_model_config_update_schema_validation():
     from app.schemas import ModelConfigUpdate
     from pydantic import ValidationError
 
-    # Valid opencode_zen and opencode_go free models
+    # Valid opencode_zen and opencode_go models
     m_go = ModelConfigUpdate(
-        provider="opencode_go", model_name="nemotron-3.5-lightning-free"
+        provider="opencode_go", model_name="deepseek-v4.1-flash"
     )
-    assert m_go.model_name == "nemotron-3.5-lightning-free"
+    assert m_go.model_name == "deepseek-v4.1-flash"
 
-    with pytest.raises(ValidationError, match="Invalid model 'invalid' for provider 'opencode_go'. OpenCode Go models must end with '-free'."):
-        ModelConfigUpdate(provider="opencode_go", model_name="invalid")
+    with pytest.raises(ValidationError, match="Model name cannot be empty for provider 'opencode_go'."):
+        ModelConfigUpdate(provider="opencode_go", model_name="")
 
     with pytest.raises(ValidationError, match="Invalid model 'invalid' for provider 'opencode_zen'. OpenCode Zen models must end with '-free'."):
         ModelConfigUpdate(provider="opencode_zen", model_name="invalid")
@@ -1490,7 +1490,8 @@ async def test_get_available_models_endpoint_direct():
     fake_user = User(id=uuid.uuid4(), github_id=1234, github_username="test_user")
     res = await get_available_models_endpoint(current_user=fake_user)
     assert any(m.id == "test-dynamic-model-free" for m in res.opencode_zen)
-    assert res.opencode_go == []
+    assert len(res.opencode_go) > 0
+    assert any(m.id == "deepseek-v4.1-flash" for m in res.opencode_go)
     assert not any(m.id == "paid-model" for m in res.opencode_zen)
     assert any(m.id == "gpt-4o" for m in res.openai)
     assert any(m.id == "claude-sonnet-4-5" for m in res.anthropic)
@@ -1727,16 +1728,16 @@ async def test_llm_client_complete_opencode_go_selects_go_credentials(monkeypatc
     monkeypatch.setattr(settings, "opencode_go_api_key", "go_secret_key_123")
     monkeypatch.setattr(settings, "opencode_zen_api_key", "zen_secret_key_456")
 
-    respx.get("https://opencode.ai/go/v1/models").mock(
-        return_value=httpx.Response(200, json={"data": [{"id": "go-model-free"}]})
+    respx.get("https://opencode.ai/inference/go/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "deepseek-v4.1-flash"}]})
     )
-    post_route = respx.post("https://opencode.ai/go/v1/chat/completions").mock(
+    post_route = respx.post("https://opencode.ai/inference/go/openai/v1/chat/completions").mock(
         return_value=httpx.Response(
             200,
             json={
                 "choices": [{"message": {"content": "Go response", "role": "assistant"}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-                "model": "go-model-free",
+                "model": "deepseek-v4.1-flash",
             },
         )
     )
@@ -1744,8 +1745,8 @@ async def test_llm_client_complete_opencode_go_selects_go_credentials(monkeypatc
     client = LLMClient(timeout=10.0)
     config = ResolvedModelConfig(
         provider="opencode_go",
-        model_name="go-model-free",
-        base_url="https://opencode.ai/go/v1",
+        model_name="deepseek-v4.1-flash",
+        base_url="https://opencode.ai/inference/go/openai/v1",
     )
 
     res = await client.complete(

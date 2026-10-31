@@ -246,16 +246,15 @@ class ModelConfigUpdate(BaseModel):
         provider = self.provider
         model = self.model_name.strip()
 
-        if provider in ("opencode_zen", "opencode_go"):
+        if provider == "opencode_zen":
             if not model.endswith("-free"):
                 raise ValueError(
-                    f"Invalid model '{model}' for provider '{provider}'. "
-                    + (
-                        "OpenCode Zen models must end with '-free'."
-                        if provider == "opencode_zen"
-                        else "OpenCode Go models must end with '-free'."
-                    )
+                    f"Invalid model '{model}' for provider 'opencode_zen'. "
+                    "OpenCode Zen models must end with '-free'."
                 )
+        elif provider == "opencode_go":
+            if not model:
+                raise ValueError("Model name cannot be empty for provider 'opencode_go'.")
         elif provider == "openai":
             if model not in OPENAI_MODELS:
                 raise ValueError(

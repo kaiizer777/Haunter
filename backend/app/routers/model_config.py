@@ -25,7 +25,7 @@ from app.auth import get_current_user
 from app.config import settings
 from app.db import get_db
 from app.llm.config import invalidate_model_config_cache
-from app.llm.discovery import get_dynamic_free_models
+from app.llm.discovery import format_model_name, get_dynamic_free_models, get_dynamic_go_models
 from app.models import ModelConfig, ModelConfigScope, Repo, User
 from app.schemas import (
     AvailableModelItem,
@@ -315,6 +315,9 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "llama-3.3-70b-versatile": 131072,
     "llama-3.1-8b-instant": 131072,
     "deepseek-r1-distill-llama-70b": 131072,
+    "deepseek-v4.1-flash": 1000000,
+    "glm-5.2": 1000000,
+    "mimo-v2.6-flash": 1000000,
 }
 
 
@@ -393,9 +396,24 @@ async def get_available_models_endpoint(
         ),
     ]
 
+    dynamic_go_models = await get_dynamic_go_models()
+    go_items: list[AvailableModelItem] = []
+    for item in dynamic_go_models:
+        mid = item["id"]
+        tag = item.get("tag") or ("Default · Direct Gateway" if mid == settings.default_model else "Direct Gateway")
+        ctx = item.get("context_window") or MODEL_CONTEXT_WINDOWS.get(mid, 1000000)
+        go_items.append(
+            AvailableModelItem(
+                id=mid,
+                name=item.get("name") or format_model_name(mid),
+                tag=tag,
+                context_window=ctx,
+            )
+        )
+
     return AvailableModelsOut(
         opencode_zen=zen_items,
-        opencode_go=[],
+        opencode_go=go_items,
         openai=openai_items,
         anthropic=anthropic_items,
         groq=groq_items,
