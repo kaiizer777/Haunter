@@ -79,7 +79,7 @@ class User(Base):
 
     @property
     def is_admin(self) -> bool:
-        return self.role == UserRole.ADMIN
+        return self.role == UserRole.ADMIN.value or self.role == UserRole.ADMIN
 
 
 class Repo(Base):

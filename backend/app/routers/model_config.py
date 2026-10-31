@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user
+from app.auth import get_current_user, is_admin_user
 from app.config import settings
 from app.db import get_db
 from app.llm.config import invalidate_model_config_cache
@@ -146,13 +146,11 @@ async def get_active_model_config_endpoint(
 
 def _require_admin(current_user: User) -> None:
     """Raise 403 if caller is not an admin."""
-    is_admin = (
-        current_user.is_admin
-        or bool(settings.admin_user_id and str(current_user.id) == settings.admin_user_id)
-        or bool(current_user.github_username and current_user.github_username.lower() in [u.lower() for u in settings.admin_github_usernames])
-        or (not settings.admin_user_id and not settings.admin_github_usernames)  # honor .env.example contract: if admin_user_id is unconfigured, allow authenticated users
-    )
-    if not is_admin:
+    # Honor .env.example: if admin_user_id is unconfigured (None or empty) and admin_github_usernames is empty, allow authenticated users
+    unconfigured = not settings.admin_user_id and not settings.admin_github_usernames
+    if unconfigured:
+        return
+    if not is_admin_user(current_user):
         logger.warning(
             "model_config: non-admin user %s attempted global model config write",
             current_user.id,
