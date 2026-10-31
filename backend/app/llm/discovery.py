@@ -351,3 +351,129 @@ async def get_dynamic_go_models(
             fallback = _last_known_go_cache.get(resolved_endpoint, BOOTSTRAP_GO_MODELS)
             _dynamic_go_cache[resolved_endpoint] = (time.monotonic() + 60.0, list(fallback))
             return [dict(m) for m in fallback]
+# ---------------------------------------------------------------------------
+# Generic custom-provider discovery (issue #205).
+#
+# Custom providers declare one compat mode; discovery behaviour follows it:
+# - "openai": GET {base_url}/models, parse {"data": [...]}, {"models": [...]},
+#   or a raw list — same shapes as the zen/go helpers above.
+# - "anthropic": the Anthropic API exposes no public model-list endpoint, so
+#   discovery always degrades to manual entry (returns []).
+#
+# Failures (network error, timeout, non-200, oversize body, unparseable
+# payload) degrade to [] so callers fall back to the manual-entry list.
+# The api_key value is never logged.
+# ---------------------------------------------------------------------------
+
+CUSTOM_DISCOVERY_MAX_BYTES: int = 1_000_000
+CUSTOM_DISCOVERY_TIMEOUT: float = 10.0
+
+
+def validate_discovery_url(base_url: str) -> str:
+    """Validate a custom-provider base URL against SSRF abuse.
+
+    Returns the normalized URL (no trailing slash). Raises ValueError when the
+    URL uses a non-http(s) scheme, has no host, or targets a loopback,
+    link-local, private-range, or metadata address. Hostnames that do not
+    resolve to a literal IP are returned unchanged — resolution-time rebinding
+    is out of scope for the discovery helper; the fetch uses a short timeout
+    and a response size cap.
+    """
+    from ipaddress import ip_address
+    from urllib.parse import urlparse
+
+    parsed = urlparse((base_url or "").strip())
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("base_url must use http or https")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ValueError("base_url must include a host")
+    if host in ("localhost", "metadata.google.internal"):
+        raise ValueError("base_url host is not allowed")
+    try:
+        ip = ip_address(host.strip("[]"))
+    except ValueError:
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+    if (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        raise ValueError("base_url host is not allowed")
+    if host in ("169.254.169.254",):
+        raise ValueError("base_url host is not allowed")
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+
+
+async def discover_provider_models(
+    base_url: str,
+    compat: str,
+    api_key: str | None = None,
+    timeout: float = CUSTOM_DISCOVERY_TIMEOUT,
+) -> list[str]:
+    """Discover model ids for a custom provider.
+
+    Args:
+        base_url: Provider base URL (validated with validate_discovery_url).
+        api_key: Optional bearer key; never logged.
+        compat: "openai" (GET {base_url}/models) or "anthropic" (manual entry).
+        timeout: HTTP request timeout in seconds.
+
+    Returns:
+        Ordered, de-duplicated model ids, or [] when discovery is
+        unsupported (anthropic) or the fetch fails.
+    """
+    normalized = validate_discovery_url(base_url)
+    if compat != "openai":
+        return []
+
+    endpoint = normalized + "/models"
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "opencode/1.0.0",
+        "x-session-id": f"sess_{uuid.uuid4().hex}",
+    }
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(endpoint, headers=headers)
+            response.raise_for_status()
+            if len(response.content) > CUSTOM_DISCOVERY_MAX_BYTES:
+                logger.warning(
+                    "custom discovery: GET %s response exceeds size cap; "
+                    "degrading to manual entry",
+                    endpoint,
+                )
+                return []
+            payload = response.json()
+
+        raw_items: list[Any] = []
+        if isinstance(payload, dict):
+            raw_items = payload.get("data") or payload.get("models") or []
+        elif isinstance(payload, list):
+            raw_items = payload
+
+        discovered: list[str] = []
+        for item in raw_items:
+            model_id = ""
+            if isinstance(item, dict):
+                model_id = str(item.get("id") or item.get("name") or "")
+            elif isinstance(item, str):
+                model_id = item
+            model_id = model_id.strip()
+            if model_id and model_id not in discovered:
+                discovered.append(model_id)
+        return discovered
+    except Exception as exc:
+        logger.warning(
+            "custom discovery: failed to query %s (%s); degrading to manual entry",
+            endpoint,
+            type(exc).__name__,
+        )
+        return []
+
