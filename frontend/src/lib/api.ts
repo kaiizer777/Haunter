@@ -276,6 +276,8 @@ export interface ModelConfigOut {
   model_name: string;
   base_url: string;
   is_active: boolean;
+  scope?: string;
+  repo_id?: string | null;
 }
 
 export interface ModelConfigUpdate {
@@ -839,6 +841,8 @@ export const api = {
     api.get<ModelConfigOut>(`/config/model${repoId ? `?repo_id=${repoId}` : ""}`, options),
   updateModelConfig: (data: ModelConfigUpdate) =>
     api.put<ModelConfigOut>("/config/model", data),
+  deleteRepoModelConfig: (repoId: string, options?: RequestOptions) =>
+    api.delete<void>(`/config/model/${repoId}`, options),
 
   // Code Reviews endpoints
   getCodeReviews: (params?: {

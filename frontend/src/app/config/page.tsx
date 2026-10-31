@@ -721,6 +721,12 @@ export default function ModelConfigPage() {
         setActiveConfig(globalCfg);
         setSelectedProvider(globalCfg.provider);
         setSelectedModel(globalCfg.model_name);
+      } else if (targetScope === "global") {
+        // Global platform default is unavailable here (non-admin 403):
+        // clear stale repo state instead of showing it under Global scope.
+        setActiveConfig(null);
+        setSelectedProvider("opencode_zen");
+        setSelectedModel("nemotron-3.5-lightning-free");
       }
     } catch (err: unknown) {
       if (controller.signal.aborted) return;
@@ -809,24 +815,36 @@ export default function ModelConfigPage() {
   // 1-click "Reset to Global Default": apply the platform default
   // provider/model onto the selected repo scope.
   const handleResetToGlobalDefault = useCallback(async () => {
-    if (!globalConfig || !selectedRepoId || isResetting) return;
+    if (!selectedRepoId || isResetting) return;
     setError(null);
     setSaveSuccess(false);
     setIsResetting(true);
     try {
-      const updated = await api.updateModelConfig({
-        provider: globalConfig.provider,
-        model_name: globalConfig.model_name,
-        repo_id: selectedRepoId,
-      });
-      setActiveConfig(updated);
-      setSelectedProvider(updated.provider);
-      setSelectedModel(updated.model_name);
-      setRepos((prev) =>
-        prev.map((r) =>
-          r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
-        )
-      );
+      if (globalConfig) {
+        const updated = await api.updateModelConfig({
+          provider: globalConfig.provider,
+          model_name: globalConfig.model_name,
+          repo_id: selectedRepoId,
+        });
+        setActiveConfig(updated);
+        setSelectedProvider(updated.provider);
+        setSelectedModel(updated.model_name);
+        setRepos((prev) =>
+          prev.map((r) =>
+            r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
+          )
+        );
+      } else {
+        // Global default is not readable here (non-admin 403): drop the
+        // repo override server-side so the repo inherits the default.
+        await api.deleteRepoModelConfig(selectedRepoId);
+        setRepos((prev) =>
+          prev.map((r) =>
+            r.id === selectedRepoId ? { ...r, active_model_config_id: null } : r
+          )
+        );
+        await fetchActiveConfig(true);
+      }
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 4500);
     } catch (err: unknown) {
@@ -838,13 +856,18 @@ export default function ModelConfigPage() {
     } finally {
       setIsResetting(false);
     }
-  }, [globalConfig, selectedRepoId, isResetting]);
+  }, [globalConfig, selectedRepoId, isResetting, fetchActiveConfig]);
 
   // Repo scope badge state: custom override vs inheriting platform default.
-  // Value-based comparison so a reset (values equal to global) reads as
-  // inheriting even though a repo-scoped row still exists server-side.
+  // Derived from the repo response scope so non-admin overrides still read
+  // as overrides when the global default is unreadable (403). Falls back to
+  // value comparison for responses without scope metadata.
   const isRepoCustomOverride = useMemo(() => {
-    if (selectedScope !== "repo" || !activeConfig || !globalConfig) return false;
+    if (selectedScope !== "repo" || !activeConfig) return false;
+    if (typeof activeConfig.scope === "string" && activeConfig.scope) {
+      return activeConfig.scope === "repo";
+    }
+    if (!globalConfig) return false;
     return (
       activeConfig.provider !== globalConfig.provider ||
       activeConfig.model_name !== globalConfig.model_name
@@ -1200,7 +1223,7 @@ export default function ModelConfigPage() {
                     variant="outline"
                     size="sm"
                     onClick={handleResetToGlobalDefault}
-                    disabled={isResetting || loading || !globalConfig || !selectedRepoId}
+                    disabled={isResetting || loading || !selectedRepoId || (!globalConfig && !isRepoCustomOverride)}
                     className="h-7 px-2.5 text-[10.5px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border border-zinc-700/60 cursor-pointer"
                     title={
                       globalConfig
@@ -1260,7 +1283,7 @@ export default function ModelConfigPage() {
                       </span>
                     )}
                   </div>
-                  {currentRepo && activeConfig && globalConfig && (
+                  {currentRepo && activeConfig && (globalConfig || isRepoCustomOverride) && (
                     <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
                       {isRepoCustomOverride ? (
                         <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-cyan-700/60 bg-cyan-950/50 px-2.5 py-1 text-cyan-300">
@@ -1275,7 +1298,7 @@ export default function ModelConfigPage() {
                           <Globe className="h-3 w-3 text-zinc-400" />
                           <span>
                             {currentRepo.owner}/{currentRepo.name} inherits platform default:{" "}
-                            <strong className="text-zinc-100">{formatModelDisplayName(globalConfig.model_name)}</strong>
+                            <strong className="text-zinc-100">{formatModelDisplayName(globalConfig?.model_name ?? activeConfig.model_name)}</strong>
                           </span>
                         </span>
                       )}
