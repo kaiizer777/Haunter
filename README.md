@@ -110,10 +110,6 @@ An **eval harness** with 20 golden fixtures lets you benchmark and compare quali
 
 <div align="center">
 
-**Open source — [Apache License 2.0](LICENSE).** &nbsp;&nbsp;Copyright 2026 MD Sufiyan Bari.
-
-<br/>
-
-*Built for teams that ship.*
+**Open source — [Apache License 2.0](LICENSE).** 
 
 </div>
