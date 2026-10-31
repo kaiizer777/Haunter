@@ -104,7 +104,7 @@ async def get_active_model_config_endpoint(
             .limit(1)
         )
         scoped_cfg = scoped_result.scalar_one_or_none()
-        if scoped_cfg is not None:
+        if scoped_cfg is not None and _base_url_for_provider(scoped_cfg.provider):
             return ModelConfigOut.model_validate(scoped_cfg)
 
         # 1b. Legacy linkage fallback: repos.active_model_config_id pointing
@@ -133,8 +133,16 @@ async def get_active_model_config_endpoint(
     )
     active_config = global_result.scalar_one_or_none()
 
-    if active_config is not None:
+    if active_config is not None and _base_url_for_provider(
+        active_config.provider
+    ):
         return ModelConfigOut.model_validate(active_config)
+    if active_config is not None:
+        logger.warning(
+            "model_config: active global row uses retired provider %s; "
+            "serving env defaults until an admin saves a supported provider",
+            active_config.provider,
+        )
 
     # Fallback to default configuration (base_url follows settings.default_provider).
     return ModelConfigOut(
