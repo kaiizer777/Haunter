@@ -68,34 +68,6 @@ CI fails  →  Root cause traced  →  Fix generated  →  Sandboxed in real CI 
 
 <br/>
 
-## 🖥 Cloud Coding Sessions
-
-> A real development environment. In your browser. Backed by your actual CI.
-
-Haunter's **Live Studio** is a full cloud coding environment where your team can tackle bugs, implement new features, and ship changes — without touching a local machine.
-
-<br/>
-
-**What you get in a session:**
-
-| Capability | Details |
-|:---|:---|
-| 🟢 **Real Node.js runtime** | WebContainer-powered — full npm ecosystem, no Docker, no local setup |
-| 📝 **Monaco diff editor** | VS Code-grade editing with surgical patch precision |
-| 🚀 **One-click CI verify** | Your changes run against your real GitHub Actions pipeline in the sandbox before you push a single commit |
-| 💾 **Session checkpoints** | Save and resume any session; hand off to a teammate mid-work |
-| 🔗 **Multi-repo** | Connect any GitHub repository; governance and spend caps apply per repo |
-
-<br/>
-
-Whether you're **debugging an open issue**, **implementing a new feature**, or **iterating on a Haunter-suggested fix** — Live Studio gives you the full development loop in the cloud. Write → verify against real CI → push. No environment setup, no pipeline surprises.
-
-<br/>
-
----
-
-<br/>
-
 ## 📊 Full Audit Trail
 
 Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and full per-run agent traces. Nothing is a black box.
