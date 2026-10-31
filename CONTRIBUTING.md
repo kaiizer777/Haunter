@@ -45,7 +45,7 @@ OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen/v1
 DEFAULT_MODEL=nemotron-3.5-lightning-free
 ```
 
-`DATABASE_URL` serves the app; `TEST_DATABASE_URL` must point at a local throwaway Postgres (never production or a shared Neon branch — the test harness refuses to run otherwise). OAuth keys gate the multi-repo dashboard; model URL/keys select the provider. No hardcoded model names/URLs in code — all DB/env-driven.
+`DATABASE_URL` serves the app; `TEST_DATABASE_URL` must point at a local throwaway Postgres (never production or a shared Neon branch — the test harness refuses to run otherwise). OAuth keys gate the multi-repo dashboard; model URL/keys select the provider.
 
 ## Tests
 
