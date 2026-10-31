@@ -1103,14 +1103,6 @@ export default function ModelConfigPage() {
                 buttonClassName="min-w-[190px] sm:min-w-[210px] h-8 font-mono text-xs bg-zinc-900/80 border-zinc-700/80 hover:border-zinc-600 text-zinc-200"
                 disabled={isPending}
               />
-              <span
-                className={cn(
-                  "hidden sm:inline-flex text-[9px] font-mono px-2 py-1 rounded border font-medium",
-                  activeProviderMeta.badgeClass
-                )}
-              >
-                {activeProviderMeta.shortBadge}
-              </span>
             </div>
           </div>
 
