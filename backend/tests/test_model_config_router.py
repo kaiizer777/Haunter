@@ -192,9 +192,9 @@ async def test_put_model_config_invalid_model_returns_422(
 
         # retired providers are rejected, even with formerly valid models
         for payload in (
-            {"provider": "groq", "model_name": "openai/gpt-oss-120b"},
-            {"provider": "groq", "model_name": "llama-3.1-8b-instant"},
-            {"provider": "opencode_go", "model_name": "deepseek-v4.1-flash"},
+            {"provider": "opencode_zen", "model_name": "nemotron-3.5-lightning-free"},
+            {"provider": "openai", "model_name": "gpt-4o"},
+            {"provider": "anthropic", "model_name": "claude-sonnet-4-5"},
         ):
             r = await client.put("/config/model", json=payload)
             assert r.status_code == 422
