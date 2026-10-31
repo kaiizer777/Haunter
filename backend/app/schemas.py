@@ -779,16 +779,6 @@ class SessionChatIn(BaseModel):
                         raise ValueError("Model name cannot be empty for provider 'groq'.")
                 else:
                     raise ValueError(f"Unsupported provider: {provider}")
-        elif self.model is not None:
-            model = self.model
-            if model in OPENAI_MODELS:
-                self.provider = "openai"
-            elif model in ANTHROPIC_MODELS:
-                self.provider = "anthropic"
-            elif model.endswith("-free") or "nemotron" in model.lower():
-                self.provider = "opencode_zen"
-            elif "/" in model or any(kw in model.lower() for kw in ("llama", "mixtral", "groq")):
-                self.provider = "groq"
         return self
 
 

@@ -22,15 +22,18 @@ Covers:
 """
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 import httpx
 import pytest
 import respx
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ModelConfig, Repo, User
-from app.repos import _validate_repo_ident, _verify_user_repo_permission
+from app.repos import _validate_repo_ident, _verify_user_repo_permission, add_repo
+from app.schemas import RepoCreate
 from fastapi import HTTPException
 from tests.conftest import truncate_all
 
@@ -823,3 +826,72 @@ async def test_put_model_config_per_repo_and_non_owned(
         )
         assert resp_b.status_code == 404
         assert resp_b.json() == {"detail": "Repo not found"}
+
+
+@pytest.mark.asyncio
+async def test_add_repo_integrity_error_23505_returns_409() -> None:
+    """add_repo maps IntegrityError with pgcode '23505' to HTTP 409 Conflict."""
+    user = User(id=uuid.uuid4(), github_id=999, github_username="testuser", access_token="enc")
+    body = RepoCreate(owner="test-owner", name="test-repo", default_branch="main")
+
+    mock_db = AsyncMock(spec=AsyncSession)
+    mock_execute_res = MagicMock()
+    mock_execute_res.scalar_one_or_none.return_value = None
+    mock_db.execute.return_value = mock_execute_res
+
+    class MockOrig23505:
+        pgcode = "23505"
+        sqlstate = "23505"
+
+        def __str__(self) -> str:
+            return "duplicate key value violates unique constraint"
+
+    mock_db.commit.side_effect = IntegrityError(
+        statement="INSERT INTO repos ...",
+        params={"owner": "test-owner", "name": "test-repo"},
+        orig=MockOrig23505(),
+    )
+
+    with patch("app.repos._verify_user_repo_permission", AsyncMock(return_value=None)), \
+         patch("app.repos.resolve_installation_id", AsyncMock(return_value=None)):
+        with pytest.raises(HTTPException) as exc_info:
+            await add_repo(body=body, current_user=user, db=mock_db)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Repo already connected"
+    mock_db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_add_repo_integrity_error_unrelated_returns_400() -> None:
+    """add_repo maps unrelated DB constraint IntegrityError to HTTP 400 even if bound parameters contain 'unique'."""
+    user = User(id=uuid.uuid4(), github_id=999, github_username="testuser", access_token="enc")
+    body = RepoCreate(owner="unique-owner", name="unique-repo", default_branch="main")
+
+    mock_db = AsyncMock(spec=AsyncSession)
+    mock_execute_res = MagicMock()
+    mock_execute_res.scalar_one_or_none.return_value = None
+    mock_db.execute.return_value = mock_execute_res
+
+    class MockOrigCheckConstraint:
+        pgcode = "23514"  # check_violation
+        sqlstate = "23514"
+
+        def __str__(self) -> str:
+            return "new row violates check constraint ck_repo_something"
+
+    mock_db.commit.side_effect = IntegrityError(
+        statement="INSERT INTO repos (owner, name) VALUES ('unique-owner', 'unique-repo')",
+        params={"owner": "unique-owner", "name": "unique-repo"},
+        orig=MockOrigCheckConstraint(),
+    )
+
+    with patch("app.repos._verify_user_repo_permission", AsyncMock(return_value=None)), \
+         patch("app.repos.resolve_installation_id", AsyncMock(return_value=None)):
+        with pytest.raises(HTTPException) as exc_info:
+            await add_repo(body=body, current_user=user, db=mock_db)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Database integrity constraint violation."
+    mock_db.rollback.assert_awaited_once()
+

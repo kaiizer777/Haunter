@@ -319,7 +319,7 @@ async def add_repo(
         await db.rollback()
         orig = getattr(exc, "orig", None)
         pgcode = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
-        err_str = str(exc).lower()
+        err_str = str(orig if orig is not None else exc).lower()
 
         # Foreign key violation (e.g. invalid user_id / referenced entity)
         if pgcode == "23503" or "foreign key" in err_str:

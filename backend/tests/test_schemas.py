@@ -322,11 +322,13 @@ def test_session_chat_in_validation() -> None:
     with pytest.raises(ValidationError):
         SessionChatIn(message="Help", provider="groq", model="bad;model")
 
-    # 6. Model specified without provider -> infers provider when known
+    # 6. Model specified without provider -> provider remains None (no schema-side override)
     sc_inf_oa = SessionChatIn(message="Help", model="gpt-4o")
-    assert sc_inf_oa.provider == "openai"
+    assert sc_inf_oa.provider is None
+    assert sc_inf_oa.model == "gpt-4o"
     sc_inf_zen = SessionChatIn(message="Help", model="my-model-free")
-    assert sc_inf_zen.provider == "opencode_zen"
+    assert sc_inf_zen.provider is None
+    assert sc_inf_zen.model == "my-model-free"
 
 
 # ---------------------------------------------------------------------------
