@@ -1,14 +1,12 @@
 import React from "react";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import ModelConfigPage, { formatContextWindow } from "./page";
+import ModelConfigPage from "./page";
 import { useAuth } from "@/lib/auth-context";
-import { api } from "@/lib/api";
-
-const mockReplace = vi.fn();
+import { api, ApiError, AuthUser, ModelConfigOut, RepoOut } from "@/lib/api";
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ replace: mockReplace, push: vi.fn() }),
+  useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
 }));
 
 vi.mock("@/components/layout/app-layout", () => ({
@@ -28,66 +26,41 @@ vi.mock("@/lib/api", () => ({
     getModelConfig: vi.fn(),
     updateModelConfig: vi.fn(),
   },
-  ApiError: class ApiError extends Error {},
+  ApiError: class ApiError extends Error {
+    status: number;
+    constructor(message: string, status = 500) {
+      super(message);
+      this.status = status;
+    }
+  },
 }));
 
-describe("formatContextWindow (frontend/src/app/config/page.tsx)", () => {
-  describe("Binary multiples", () => {
-    it("formats 1048576 as 1M Context", () => {
-      expect(formatContextWindow(1048576)).toBe("1M Context");
-    });
-
-    it("formats 262144 as 256k Context", () => {
-      expect(formatContextWindow(262144)).toBe("256k Context");
-    });
-
-    it("formats 131072 as 128k Context", () => {
-      expect(formatContextWindow(131072)).toBe("128k Context");
-    });
-
-    it("formats 65536 as 64k Context", () => {
-      expect(formatContextWindow(65536)).toBe("64k Context");
-    });
-
-    it("formats 8192 as 8k Context", () => {
-      expect(formatContextWindow(8192)).toBe("8k Context");
-    });
-  });
-
-  describe("Decimal multiples", () => {
-    it("formats 1000000 as 1M Context", () => {
-      expect(formatContextWindow(1000000)).toBe("1M Context");
-    });
-
-    it("formats 200000 as 200k Context", () => {
-      expect(formatContextWindow(200000)).toBe("200k Context");
-    });
-
-    it("formats 128000 as 128k Context", () => {
-      expect(formatContextWindow(128000)).toBe("128k Context");
-    });
-  });
-
-  describe("Fallback and falsy values", () => {
-    it("returns Unknown Context for undefined", () => {
-      expect(formatContextWindow(undefined)).toBe("Unknown Context");
-    });
-
-    it("returns Unknown Context for 0", () => {
-      expect(formatContextWindow(0)).toBe("Unknown Context");
-    });
-  });
-});
-
-describe("ModelConfigPage admin hard-block", () => {
-  const nonAdminUser = {
+describe("ModelConfigPage non-admin repo scope", () => {
+  const nonAdminUser: AuthUser = {
     id: "usr_1",
+    github_id: 111,
     github_username: "regular-user",
     avatar_url: null,
     is_admin: false,
   };
 
-  it("redirects non-admins to /repos, renders Access Denied, and fetches nothing", async () => {
+  const repo = {
+    id: "repo_1",
+    owner: "octo",
+    name: "hello",
+    full_name: "octo/hello",
+    active_model_config_id: null,
+  } as unknown as RepoOut;
+
+  const repoCfg: ModelConfigOut = {
+    id: "cfg_repo",
+    provider: "opencode_zen",
+    model_name: "laguna-s-2.1-free",
+    base_url: "https://opencode.ai/zen/v1",
+    is_active: true,
+  };
+
+  beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(useAuth).mockReturnValue({
       user: nonAdminUser,
@@ -96,15 +69,33 @@ describe("ModelConfigPage admin hard-block", () => {
       logout: vi.fn(),
       refresh: vi.fn(),
     });
+    vi.mocked(api.getAvailableModels).mockResolvedValue({} as never);
+    vi.mocked(api.getRepos).mockResolvedValue([repo]);
+    vi.mocked(api.getModelConfig).mockImplementation((repoId?: string) => {
+      if (repoId === undefined) {
+        return Promise.reject(
+          new ApiError("Admin permissions required to read global model config", 403)
+        );
+      }
+      return Promise.resolve(repoCfg);
+    });
+  });
 
+  it("allows repo-override scope for non-admins: no Access Denied, repo config loads", async () => {
     render(<ModelConfigPage />);
 
-    expect(await screen.findByText("Access Denied")).toBeInTheDocument();
+    expect(screen.queryByText("Access Denied")).not.toBeInTheDocument();
+    expect(await screen.findByText("Repository Override")).toBeInTheDocument();
     await waitFor(() => {
-      expect(mockReplace).toHaveBeenCalledWith("/repos");
+      expect(api.getRepos).toHaveBeenCalled();
+      expect(api.getModelConfig).toHaveBeenCalledWith("repo_1", expect.anything());
     });
-    expect(api.getModelConfig).not.toHaveBeenCalled();
-    expect(api.getRepos).not.toHaveBeenCalled();
-    expect(api.getAvailableModels).not.toHaveBeenCalled();
+  });
+
+  it("locks global controls for non-admins with an Admin Only notice", async () => {
+    render(<ModelConfigPage />);
+
+    expect(await screen.findByText("Repository Override")).toBeInTheDocument();
+    expect(screen.getAllByText("Admin Only").length).toBeGreaterThan(0);
   });
 });
