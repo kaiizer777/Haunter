@@ -338,6 +338,7 @@ async def get_dynamic_go_models(
                 resolved_endpoint,
             )
             fallback = _last_known_go_cache.get(resolved_endpoint, BOOTSTRAP_GO_MODELS)
+            _dynamic_go_cache[resolved_endpoint] = (time.monotonic() + 60.0, list(fallback))
             return [dict(m) for m in fallback]
 
         except Exception as exc:
@@ -348,4 +349,5 @@ async def get_dynamic_go_models(
                 exc,
             )
             fallback = _last_known_go_cache.get(resolved_endpoint, BOOTSTRAP_GO_MODELS)
+            _dynamic_go_cache[resolved_endpoint] = (time.monotonic() + 60.0, list(fallback))
             return [dict(m) for m in fallback]
