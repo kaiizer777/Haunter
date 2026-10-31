@@ -9,7 +9,7 @@ Security invariants:
   from client to prevent SSRF and endpoint hijacking.
 - Per-repo updates enforce tenant ownership: returns 404 (not 403) on non-owned repos to
   prevent existence oracle leakage.
-- Global model config switcher is open to any authenticated user (Phase 3.2 Issue 2).
+- Global model config reads and writes are admin-only.
 - SQL queries use parameterised SQLAlchemy ORM constructs.
 """
 
@@ -21,11 +21,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user
+from app.auth import get_current_user, is_admin_user
 from app.config import settings
 from app.db import get_db
 from app.llm.config import invalidate_model_config_cache
-from app.llm.discovery import get_dynamic_free_models
+from app.llm.discovery import format_model_name, get_dynamic_free_models, get_dynamic_go_models
 from app.models import ModelConfig, ModelConfigScope, Repo, User
 from app.schemas import (
     AvailableModelItem,
@@ -46,6 +46,7 @@ def _base_url_for_provider(provider: str) -> str | None:
     """Return the configured base URL for an allowlisted provider, or None."""
     return {
         "opencode_zen": settings.opencode_zen_base_url,
+        "opencode_go": settings.opencode_go_base_url,
         "openai": settings.openai_base_url,
         "anthropic": settings.anthropic_base_url,
         "groq": settings.groq_base_url,
@@ -73,7 +74,13 @@ async def get_active_model_config_endpoint(
     Get the currently active model configuration.
     If repo_id is provided, returns the repo's active config (or 404 if repo not owned).
     If repo_id is omitted, returns the global active model config from DB or env defaults.
+    Global reads are admin-only; repo reads enforce ownership.
     """
+    if repo_id is None and not is_admin_user(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin permissions required to read global model config",
+        )
     if repo_id is not None:
         repo_result = await db.execute(
             select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
@@ -144,11 +151,8 @@ async def get_active_model_config_endpoint(
 
 
 def _require_admin(current_user: User) -> None:
-    """Raise 403 if caller is not an admin."""
-    is_admin = current_user.is_admin or bool(
-        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
-    )
-    if not is_admin:
+    """Raise 403 if caller is not an admin. Closed by default: no open bypass."""
+    if not is_admin_user(current_user):
         logger.warning(
             "model_config: non-admin user %s attempted global model config write",
             current_user.id,
@@ -189,7 +193,11 @@ async def update_model_config_endpoint(
 
         if repo.active_model_config_id is not None:
             cfg_res = await db.execute(
-                select(ModelConfig).where(ModelConfig.id == repo.active_model_config_id)
+                select(ModelConfig).where(
+                    ModelConfig.id == repo.active_model_config_id,
+                    ModelConfig.repo_id == repo.id,
+                    ModelConfig.user_id == current_user.id,
+                )
             )
             existing_cfg = cfg_res.scalar_one_or_none()
         else:
@@ -314,6 +322,9 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "llama-3.3-70b-versatile": 131072,
     "llama-3.1-8b-instant": 131072,
     "deepseek-r1-distill-llama-70b": 131072,
+    "deepseek-v4.1-flash": 1000000,
+    "glm-5.2": 1000000,
+    "mimo-v2.6-flash": 1000000,
 }
 
 
@@ -392,8 +403,24 @@ async def get_available_models_endpoint(
         ),
     ]
 
+    dynamic_go_models = await get_dynamic_go_models()
+    go_items: list[AvailableModelItem] = []
+    for item in dynamic_go_models:
+        mid = item["id"]
+        tag = item.get("tag") or ("Default · Direct Gateway" if mid == settings.default_model else "Direct Gateway")
+        ctx = item.get("context_window") or MODEL_CONTEXT_WINDOWS.get(mid, 1000000)
+        go_items.append(
+            AvailableModelItem(
+                id=mid,
+                name=item.get("name") or format_model_name(mid),
+                tag=tag,
+                context_window=ctx,
+            )
+        )
+
     return AvailableModelsOut(
         opencode_zen=zen_items,
+        opencode_go=go_items,
         openai=openai_items,
         anthropic=anthropic_items,
         groq=groq_items,
@@ -414,6 +441,46 @@ async def get_repo_model_config(
         current_user=current_user,
         db=db,
         repo_id=repo_id,
+    )
+
+
+@router.delete("/{repo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_repo_model_config(
+    repo_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """
+    Reset a repo to the platform default by deactivating its repo-scoped
+    override rows and clearing the legacy linkage. Returns 404 if the repo
+    is not found or not owned by the caller (no existence oracle).
+    Usable by non-admins so repo overrides can be reset without global read.
+    """
+    repo_result = await db.execute(
+        select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
+    )
+    repo = repo_result.scalar_one_or_none()
+    if repo is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
+        )
+
+    await db.execute(
+        update(ModelConfig)
+        .where(
+            ModelConfig.is_active == True,  # noqa: E712
+            ModelConfig.scope == ModelConfigScope.REPO.value,
+            ModelConfig.repo_id == repo_id,
+        )
+        .values(is_active=False)
+    )
+    repo.active_model_config_id = None
+    await db.commit()
+    invalidate_model_config_cache(repo_id)
+    logger.info(
+        "Repo model config reset to global default: user=%s repo=%s",
+        current_user.id,
+        repo_id,
     )
 
 

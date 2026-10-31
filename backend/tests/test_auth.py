@@ -651,3 +651,54 @@ async def test_db_check_constraint_rejects_invalid_role(db: AsyncSession):
     with pytest.raises(IntegrityError):
         await db.commit()
     await db.rollback()
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_callback_admin_github_username_gets_admin_role(
+    client: httpx.AsyncClient,
+    db: AsyncSession,
+    signed_state_factory,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Users logging in with a username in admin_github_usernames receive admin role."""
+    await truncate_all(db)
+    monkeypatch.setattr(settings, "admin_github_usernames", ["kaiizer777", "kaiizer77"])
+    raw_state = "admin_oauth_state_123"
+    signed_state = signed_state_factory(raw_state)
+
+    respx.post("https://github.com/login/oauth/access_token").mock(
+        return_value=httpx.Response(
+            200,
+            json={"access_token": "gho_admin_token_456", "token_type": "bearer"},
+        )
+    )
+    respx.get("https://api.github.com/user").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 99112233,
+                "login": "kaiizer777",
+                "avatar_url": "https://avatars.githubusercontent.com/u/99112233",
+            },
+        )
+    )
+
+    resp = await client.get(
+        f"/auth/callback?code=admin_code&state={raw_state}",
+        cookies={"haunter_oauth_state": signed_state},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+
+    result = await db.execute(select(User).where(User.github_id == 99112233))
+    user = result.scalar_one_or_none()
+    assert user is not None
+    assert user.github_username == "kaiizer777"
+    # Persistent DB role is untouched (stays default 'user')
+    assert user.role == "user"
+    # Dynamic access via is_admin_user evaluates to True while in the list
+    assert auth_module.is_admin_user(user) is True
+
+    # If removed from list at runtime, admin access is revoked immediately
+    monkeypatch.setattr(settings, "admin_github_usernames", [])
+    assert auth_module.is_admin_user(user) is False

@@ -276,6 +276,8 @@ export interface ModelConfigOut {
   model_name: string;
   base_url: string;
   is_active: boolean;
+  scope?: string;
+  repo_id?: string | null;
 }
 
 export interface ModelConfigUpdate {
@@ -293,6 +295,7 @@ export interface AvailableModelItem {
 
 export interface AvailableModelsOut {
   opencode_zen: AvailableModelItem[];
+  opencode_go?: AvailableModelItem[];
   openai: AvailableModelItem[];
   anthropic: AvailableModelItem[];
   groq?: AvailableModelItem[];
@@ -609,6 +612,29 @@ async function request<T>(
       : undefined;
   }
 
+  function composeSignal(callerSignal?: AbortSignal | null): AbortSignal | undefined {
+    const timeoutSignal = createTimeoutSignal();
+    if (!callerSignal) return timeoutSignal;
+    if (!timeoutSignal) return callerSignal;
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+      return AbortSignal.any([callerSignal, timeoutSignal]);
+    }
+    const controller = new AbortController();
+    if (callerSignal.aborted) {
+      controller.abort(callerSignal.reason);
+      return controller.signal;
+    }
+    if (timeoutSignal.aborted) {
+      controller.abort(timeoutSignal.reason);
+      return controller.signal;
+    }
+    const onCallerAbort = () => controller.abort(callerSignal.reason);
+    const onTimeoutAbort = () => controller.abort(timeoutSignal.reason);
+    callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+    timeoutSignal.addEventListener("abort", onTimeoutAbort, { once: true });
+    return controller.signal;
+  }
+
   function isTimeoutAbort(err: unknown): boolean {
     return err instanceof DOMException && err.name === "TimeoutError";
   }
@@ -625,15 +651,16 @@ async function request<T>(
   const method = (fetchOptions.method || "GET").toUpperCase();
   // Only retry idempotent GETs using our own timeout signal — never retry
   // caller-aborted requests or non-idempotent methods.
-  const retryOnTimeout = method === "GET" && fetchOptions.signal == null;
+  const retryOnTimeout =
+    method === "GET" && (fetchOptions.signal == null || !fetchOptions.signal.aborted);
 
   let res: Response;
   try {
     try {
-      res = await doFetch(fetchOptions.signal ?? createTimeoutSignal());
+      res = await doFetch(composeSignal(fetchOptions.signal));
     } catch (err) {
       if (retryOnTimeout && isTimeoutAbort(err)) {
-        res = await doFetch(createTimeoutSignal());
+        res = await doFetch(composeSignal(fetchOptions.signal));
       } else {
         throw err;
       }
@@ -694,29 +721,32 @@ async function request<T>(
   }
 
   if (!res.ok) {
-    let errorDetail = "An unexpected error occurred.";
-    if (res.status >= 500) {
-      errorDetail = "Internal server error. Please try again later.";
-    } else if (res.status === 403) {
-      errorDetail = "Access denied. Insufficient permissions.";
-    } else if (res.status === 404) {
-      errorDetail = "Requested resource was not found.";
-    } else if (res.status === 422) {
-      errorDetail = "Invalid request payload. Please check your inputs.";
-    } else {
-      try {
-        const errJson = (await res.json()) as { detail?: unknown } | null;
-        if (
-          errJson &&
-          typeof errJson.detail === "string" &&
-          errJson.detail.length < 120 &&
-          !errJson.detail.includes("Traceback")
-        ) {
-          errorDetail = errJson.detail;
-        } else {
-          errorDetail = `Request failed with status ${res.status}`;
-        }
-      } catch {
+    let errorDetail = "";
+    try {
+      const errJson = (await res.json()) as { detail?: unknown } | null;
+      if (
+        errJson &&
+        typeof errJson.detail === "string" &&
+        errJson.detail.trim().length > 0 &&
+        errJson.detail.length < 120 &&
+        !errJson.detail.includes("Traceback")
+      ) {
+        errorDetail = errJson.detail;
+      }
+    } catch {
+      // Body is not JSON or cannot be parsed
+    }
+
+    if (!errorDetail) {
+      if (res.status >= 500) {
+        errorDetail = "Internal server error. Please try again later.";
+      } else if (res.status === 403) {
+        errorDetail = "Access denied. Insufficient permissions.";
+      } else if (res.status === 404) {
+        errorDetail = "Requested resource was not found.";
+      } else if (res.status === 422) {
+        errorDetail = "Invalid request payload. Please check your inputs.";
+      } else {
         errorDetail = `Request failed with status ${res.status}`;
       }
     }
@@ -811,6 +841,8 @@ export const api = {
     api.get<ModelConfigOut>(`/config/model${repoId ? `?repo_id=${repoId}` : ""}`, options),
   updateModelConfig: (data: ModelConfigUpdate) =>
     api.put<ModelConfigOut>("/config/model", data),
+  deleteRepoModelConfig: (repoId: string, options?: RequestOptions) =>
+    api.delete<void>(`/config/model/${repoId}`, options),
 
   // Code Reviews endpoints
   getCodeReviews: (params?: {

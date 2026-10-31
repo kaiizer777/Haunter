@@ -1,17 +1,19 @@
 "use client";
 
-import { useEffect, useState, useCallback, useTransition, useMemo, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { AppLayout } from "@/components/layout/app-layout";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { SelectDropdown } from "@/components/ui/select-dropdown";
+import { SelectDropdown, SelectOption } from "@/components/ui/select-dropdown";
 import { api, ModelConfigOut, RepoOut, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
 import {
   Cpu,
   CheckCircle2,
   AlertCircle,
   ShieldCheck,
+  Shield,
   GitBranch,
   Globe,
   Zap,
@@ -28,13 +30,14 @@ import {
   Layers,
   RotateCcw,
   FolderGit2,
-  Workflow,
-  Bot,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 // Strict server-side allowlists (WORK.md:252)
 const PROVIDER_OPTIONS = [
   { id: "opencode_zen", name: "OpenCode Zen", defaultModel: "nemotron-3.5-lightning-free" },
+  { id: "opencode_go", name: "OpenCode Go", defaultModel: "deepseek-v4.1-flash" },
   { id: "openai", name: "OpenAI", defaultModel: "gpt-4o" },
   { id: "anthropic", name: "Anthropic", defaultModel: "claude-sonnet-4-5" },
   { id: "groq", name: "Groq", defaultModel: "openai/gpt-oss-120b" },
@@ -45,6 +48,12 @@ const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: stri
     { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Default · Free", context_window: 131072 },
     { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Fast · Free", context_window: 65536 },
     { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "1M · Free", context_window: 1048576 },
+  ],
+  opencode_go: [
+    { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", tag: "1M · Low Latency", context_window: 1000000 },
+    { id: "glm-5.2", name: "GLM 5.2", tag: "1M · Reasoning", context_window: 1000000 },
+    { id: "mimo-v2.6-flash", name: "Mimo V2.6 Flash", tag: "1M · Fast", context_window: 1000000 },
+    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Free Tier", context_window: 131072 },
   ],
   openai: [
     { id: "gpt-4o", name: "GPT-4o", tag: "Flagship", context_window: 128000 },
@@ -84,31 +93,41 @@ const PROVIDER_METADATA: Record<
     accentText: "text-amber-400",
     badgeClass: "bg-amber-400/10 border-amber-400/30 text-amber-300",
   },
-  openai: {
-    name: "OpenAI",
-    tag: "Direct API",
-    shortBadge: "Flagship",
-    description: "Industry-standard multi-step reasoning models with GPT-4o for complex architectural bug fixes.",
-    baseUrl: "https://api.openai.com/v1",
-    icon: Cpu,
+  opencode_go: {
+    name: "OpenCode Go",
+    tag: "Low Latency · Direct Gateway",
+    shortBadge: "Direct Gateway",
+    description: "Ultra-low-latency optimized inference gateway for real-time CI patch synthesis and code verification.",
+    baseUrl: "https://opencode.ai/inference/go/openai/v1",
+    icon: Activity,
     accentText: "text-emerald-400",
     badgeClass: "bg-emerald-400/10 border-emerald-400/30 text-emerald-300",
   },
+  openai: {
+    name: "OpenAI",
+    tag: "Tier 1 Foundation",
+    shortBadge: "Direct API",
+    description: "Frontier reasoning engines providing high-precision semantic root cause analysis.",
+    baseUrl: "https://api.openai.com/v1",
+    icon: Sparkles,
+    accentText: "text-sky-400",
+    badgeClass: "bg-sky-400/10 border-sky-400/30 text-sky-300",
+  },
   anthropic: {
     name: "Anthropic",
-    tag: "Direct API",
-    shortBadge: "AST SOTA",
-    description: "Specialized code reasoning via Claude 3.5 Sonnet & Claude 3.5 Haiku for nuanced test failures.",
+    tag: "SOTA Coding Models",
+    shortBadge: "Direct API",
+    description: "Advanced agentic coding models offering long-horizon repair planning.",
     baseUrl: "https://api.anthropic.com/v1",
-    icon: Sparkles,
-    accentText: "text-orange-400",
-    badgeClass: "bg-orange-400/10 border-orange-400/30 text-orange-300",
+    icon: Shield,
+    accentText: "text-violet-400",
+    badgeClass: "bg-violet-400/10 border-violet-400/30 text-violet-300",
   },
   groq: {
     name: "Groq",
-    tag: "LPU · Ultra-Low Latency",
-    shortBadge: "LPU Speed",
-    description: "Ultra-low-latency LPU inference for rapid CI triage, fallback healing, and high-throughput patch synthesis.",
+    tag: "Ultra-Fast LPU Inference",
+    shortBadge: "Direct API",
+    description: "Near-instantaneous inference acceleration for high-throughput patch synthesis.",
     baseUrl: "https://api.groq.com/openai/v1",
     icon: Gauge,
     accentText: "text-rose-400",
@@ -117,6 +136,9 @@ const PROVIDER_METADATA: Record<
 };
 
 const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "deepseek-v4.1-flash": 1000000,
+  "glm-5.2": 1000000,
+  "mimo-v2.6-flash": 1000000,
   "space-bunny-free": 1048576,
   "longcat-2.5-preview-free": 1048576,
   "ling-3.0-flash-fin-free": 1048576,
@@ -176,6 +198,36 @@ interface ModelSpec {
 }
 
 const MODEL_SPECS: Record<string, ModelSpec> = {
+  "deepseek-v4.1-flash": {
+    contextWindow: "1M Context",
+    specialty: "High-Throughput Low-Latency CI Diagnostic & Fix Generation",
+    latencyRating: "~180ms TTFT",
+    latencyMs: 180,
+    recommendedRole: "Production Flash",
+    tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
+    speedCategory: "fast",
+    isFree: false,
+  },
+  "glm-5.2": {
+    contextWindow: "1M Context",
+    specialty: "Complex Multi-Step Architecture Reasoning & Logic Healing",
+    latencyRating: "~360ms TTFT",
+    latencyMs: 360,
+    recommendedRole: "High-Reasoning Production",
+    tagColor: "bg-purple-950/60 border-purple-700/60 text-purple-300",
+    speedCategory: "reasoning",
+    isFree: false,
+  },
+  "mimo-v2.6-flash": {
+    contextWindow: "1M Context",
+    specialty: "Ultra-Fast Codebase Search & Patch Synthesis",
+    latencyRating: "~210ms TTFT",
+    latencyMs: 210,
+    recommendedRole: "Fast Production",
+    tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
+    speedCategory: "fast",
+    isFree: false,
+  },
   "space-bunny-free": {
     contextWindow: "1M Context",
     specialty: "High-Capacity Ultra-Long Context CI Analysis",
@@ -427,6 +479,9 @@ function formatModelDisplayName(id: string, rawName?: string): string {
   }
 
   const KNOWN_NAMES: Record<string, string> = {
+    "deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
+    "glm-5.2": "GLM 5.2",
+    "mimo-v2.6-flash": "Mimo V2.6 Flash",
     "nemotron-3.5-lightning-free": "Nemotron 3.5 Lightning",
     "nemotron-3-ultra-free": "Nemotron 3 Ultra",
     "laguna-s-2.1-free": "Laguna S 2.1",
@@ -493,7 +548,7 @@ function getModelSpec(modelId: string, tag?: string, contextWindowTokens?: numbe
   let fallbackCtx = "Unknown Context";
   if (formattedCtx) {
     fallbackCtx = formattedCtx;
-  } else if (idLower.includes("1m") || idLower.includes("bunny") || idLower.includes("longcat") || idLower.includes("ling")) {
+  } else if (idLower.includes("1m") || idLower.includes("bunny") || idLower.includes("longcat") || idLower.includes("ling") || idLower.includes("glm") || idLower.includes("v4.1")) {
     fallbackCtx = "1M Context";
   } else if (idLower.includes("256k") || idLower.includes("mimo")) {
     fallbackCtx = "256k Context";
@@ -526,6 +581,11 @@ function getModelSpec(modelId: string, tag?: string, contextWindowTokens?: numbe
 }
 
 export default function ModelConfigPage() {
+  const { user } = useAuth();
+  const isAdmin = Boolean(user?.is_admin);
+  const hasInitializedScopeRef = useRef(false);
+  const activeFetchControllerRef = useRef<AbortController | null>(null);
+
   const [repos, setRepos] = useState<RepoOut[]>([]);
   const [selectedScope, setSelectedScope] = useState<"global" | "repo">("global");
   const [selectedRepoId, setSelectedRepoId] = useState<string>("");
@@ -540,6 +600,12 @@ export default function ModelConfigPage() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [speedFilter, setSpeedFilter] = useState<"all" | "free" | "fast" | "reasoning">("all");
+  const [isExpanded, setIsExpanded] = useState(false);
+  const modelsGridRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setIsExpanded(false);
+  }, [selectedProvider, searchQuery, speedFilter]);
 
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -548,9 +614,17 @@ export default function ModelConfigPage() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [copiedModelId, setCopiedModelId] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
+  const [isSaving, setIsSaving] = useState(false);
+  const isPending = isSaving;
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Clean up any ongoing fetch controllers on unmount
+  useEffect(() => {
+    return () => {
+      activeFetchControllerRef.current?.abort();
+    };
+  }, []);
 
   // Load dynamic models from backend
   useEffect(() => {
@@ -558,8 +632,12 @@ export default function ModelConfigPage() {
       .getAvailableModels()
       .then((data) => {
         if (data) {
+          const raw = data as unknown as Record<string, typeof DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen>;
           setModelOptionsByProvider({
             opencode_zen: data.opencode_zen?.length ? data.opencode_zen : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen,
+            opencode_go: (data.opencode_go ?? []).length
+              ? (data.opencode_go ?? [])
+              : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_go,
             openai: data.openai?.length ? data.openai : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.openai,
             anthropic: data.anthropic?.length ? data.anthropic : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.anthropic,
             groq: data.groq?.length ? data.groq : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.groq,
@@ -577,12 +655,33 @@ export default function ModelConfigPage() {
         setRepos(data);
         if (data.length > 0) {
           setSelectedRepoId(data[0].id);
+          if (user && !user.is_admin && !hasInitializedScopeRef.current) {
+            setSelectedScope("repo");
+            hasInitializedScopeRef.current = true;
+          }
         }
       })
       .catch(() => {});
-  }, []);
+  }, [user]);
+
+  // If user auth resolves after repos have loaded
+  useEffect(() => {
+    if (!hasInitializedScopeRef.current && user && !user.is_admin && repos.length > 0) {
+      setSelectedScope("repo");
+      hasInitializedScopeRef.current = true;
+    }
+  }, [user, repos]);
 
   const fetchActiveConfig = useCallback(async (isManualRefresh = false) => {
+    if (activeFetchControllerRef.current) {
+      activeFetchControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    activeFetchControllerRef.current = controller;
+
+    const targetScope = selectedScope;
+    const targetRepoId = selectedRepoId;
+
     if (isManualRefresh) {
       setIsRefreshing(true);
     } else {
@@ -592,30 +691,65 @@ export default function ModelConfigPage() {
     try {
       // Always resolve the platform default so repo scope can show
       // override-vs-inherit badges and offer a 1-click reset.
-      const globalCfg = await api.getModelConfig();
-      setGlobalConfig(globalCfg);
+      let globalCfg: ModelConfigOut | null = null;
+      try {
+        globalCfg = await api.getModelConfig(undefined, {
+          signal: controller.signal,
+          silent: true,
+        });
+        if (controller.signal.aborted) return;
+        setGlobalConfig(globalCfg);
+      } catch (gErr: unknown) {
+        if (gErr instanceof ApiError && (gErr.status === 403 || /admin/i.test(gErr.message))) {
+          if (controller.signal.aborted) return;
+          setGlobalConfig(null);
+        } else {
+          throw gErr;
+        }
+      }
 
-      if (selectedScope === "repo" && selectedRepoId) {
-        const repoCfg = await api.getModelConfig(selectedRepoId);
+      if (targetScope === "repo" && targetRepoId) {
+        const repoCfg = await api.getModelConfig(targetRepoId, {
+          signal: controller.signal,
+          silent: true,
+        });
+        if (controller.signal.aborted) return;
         setActiveConfig(repoCfg);
         setSelectedProvider(repoCfg.provider);
         setSelectedModel(repoCfg.model_name);
-      } else {
+      } else if (globalCfg) {
         setActiveConfig(globalCfg);
         setSelectedProvider(globalCfg.provider);
         setSelectedModel(globalCfg.model_name);
+      } else if (targetScope === "global") {
+        // Global platform default is unavailable here (non-admin 403):
+        // clear stale repo state instead of showing it under Global scope.
+        setActiveConfig(null);
+        setSelectedProvider("opencode_zen");
+        setSelectedModel("nemotron-3.5-lightning-free");
       }
     } catch (err: unknown) {
+      if (controller.signal.aborted) return;
       if (err instanceof ApiError) {
         setError(err.message);
-      } else {
+      } else if (err instanceof Error && err.name !== "AbortError") {
         setError("Failed to load model configuration.");
       }
     } finally {
-      setLoading(false);
-      setIsRefreshing(false);
+      if (!controller.signal.aborted) {
+        setLoading(false);
+        setIsRefreshing(false);
+      }
     }
   }, [selectedScope, selectedRepoId]);
+
+  // Non-admins auto-switch to repo scope; global controls stay locked.
+  useEffect(() => {
+    if (user && !user.is_admin && !hasInitializedScopeRef.current) {
+      setSelectedScope("repo");
+      hasInitializedScopeRef.current = true;
+    }
+  }, [user]);
 
   useEffect(() => {
     fetchActiveConfig();
@@ -630,63 +764,87 @@ export default function ModelConfigPage() {
     }
   };
 
-  const handleSaveConfig = useCallback(() => {
+  const effectiveTargetIsGlobal = selectedScope === "global" || !selectedRepoId;
+
+  const handleSaveConfig = useCallback(async () => {
+    if (isSaving) return;
+    if (effectiveTargetIsGlobal && !isAdmin) {
+      setError(
+        "Global platform default can only be modified by administrators. Switch to Repository Override to customize models for your repos."
+      );
+      return;
+    }
     setError(null);
     setSaveSuccess(false);
+    setIsSaving(true);
 
-    startTransition(async () => {
-      try {
-        const payload = {
-          provider: selectedProvider,
-          model_name: selectedModel,
-          repo_id: selectedScope === "repo" ? selectedRepoId || undefined : undefined,
-        };
+    try {
+      const payload = {
+        provider: selectedProvider,
+        model_name: selectedModel,
+        repo_id: selectedScope === "repo" ? selectedRepoId || undefined : undefined,
+      };
 
-        const updated = await api.updateModelConfig(payload);
-        setActiveConfig(updated);
-        if (selectedScope === "global") {
-          setGlobalConfig(updated);
-        } else if (selectedRepoId) {
-          // Keep repo override tracking in sync without a full repos refetch.
-          setRepos((prev) =>
-            prev.map((r) =>
-              r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
-            )
-          );
-        }
-        setSaveSuccess(true);
-        setTimeout(() => setSaveSuccess(false), 4500);
-      } catch (err: unknown) {
-        if (err instanceof ApiError) {
-          setError(err.message);
-        } else {
-          setError("Failed to update active model configuration.");
-        }
+      const updated = await api.updateModelConfig(payload);
+      setActiveConfig(updated);
+      if (selectedScope === "global") {
+        setGlobalConfig(updated);
+      } else if (selectedRepoId) {
+        // Keep repo override tracking in sync without a full repos refetch.
+        setRepos((prev) =>
+          prev.map((r) =>
+            r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
+          )
+        );
       }
-    });
-  }, [selectedProvider, selectedModel, selectedScope, selectedRepoId]);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 4500);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("Failed to update active model configuration.");
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  }, [isSaving, effectiveTargetIsGlobal, isAdmin, selectedProvider, selectedModel, selectedScope, selectedRepoId]);
 
   // 1-click "Reset to Global Default": apply the platform default
   // provider/model onto the selected repo scope.
   const handleResetToGlobalDefault = useCallback(async () => {
-    if (!globalConfig || !selectedRepoId || isResetting) return;
+    if (!selectedRepoId || isResetting) return;
     setError(null);
     setSaveSuccess(false);
     setIsResetting(true);
     try {
-      const updated = await api.updateModelConfig({
-        provider: globalConfig.provider,
-        model_name: globalConfig.model_name,
-        repo_id: selectedRepoId,
-      });
-      setActiveConfig(updated);
-      setSelectedProvider(updated.provider);
-      setSelectedModel(updated.model_name);
-      setRepos((prev) =>
-        prev.map((r) =>
-          r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
-        )
-      );
+      if (globalConfig) {
+        const updated = await api.updateModelConfig({
+          provider: globalConfig.provider,
+          model_name: globalConfig.model_name,
+          repo_id: selectedRepoId,
+        });
+        setActiveConfig(updated);
+        setSelectedProvider(updated.provider);
+        setSelectedModel(updated.model_name);
+        setRepos((prev) =>
+          prev.map((r) =>
+            r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
+          )
+        );
+      } else {
+        // Global default is not readable here (non-admin 403): drop the
+        // repo override server-side so the repo inherits the default.
+        await api.deleteRepoModelConfig(selectedRepoId);
+        setRepos((prev) =>
+          prev.map((r) =>
+            r.id === selectedRepoId ? { ...r, active_model_config_id: null } : r
+          )
+        );
+        await fetchActiveConfig(true);
+      }
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 4500);
     } catch (err: unknown) {
@@ -698,13 +856,18 @@ export default function ModelConfigPage() {
     } finally {
       setIsResetting(false);
     }
-  }, [globalConfig, selectedRepoId, isResetting]);
+  }, [globalConfig, selectedRepoId, isResetting, fetchActiveConfig]);
 
   // Repo scope badge state: custom override vs inheriting platform default.
-  // Value-based comparison so a reset (values equal to global) reads as
-  // inheriting even though a repo-scoped row still exists server-side.
+  // Derived from the repo response scope so non-admin overrides still read
+  // as overrides when the global default is unreadable (403). Falls back to
+  // value comparison for responses without scope metadata.
   const isRepoCustomOverride = useMemo(() => {
-    if (selectedScope !== "repo" || !activeConfig || !globalConfig) return false;
+    if (selectedScope !== "repo" || !activeConfig) return false;
+    if (typeof activeConfig.scope === "string" && activeConfig.scope) {
+      return activeConfig.scope === "repo";
+    }
+    if (!globalConfig) return false;
     return (
       activeConfig.provider !== globalConfig.provider ||
       activeConfig.model_name !== globalConfig.model_name
@@ -719,6 +882,7 @@ export default function ModelConfigPage() {
     );
   }, [activeConfig, selectedProvider, selectedModel]);
 
+  const canSave = !isPending && isDirty && !(effectiveTargetIsGlobal && !isAdmin);
   // Keyboard shortcut handlers: '/' to search, 'r' to sync, Cmd+S to save
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -730,7 +894,7 @@ export default function ModelConfigPage() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
-        if (!isPending && isDirty) {
+        if (canSave) {
           handleSaveConfig();
         }
       } else if (e.key === "/") {
@@ -743,9 +907,10 @@ export default function ModelConfigPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isPending, isDirty, handleSaveConfig, fetchActiveConfig]);
+  }, [canSave, handleSaveConfig, fetchActiveConfig]);
 
   const handleDiscardChanges = () => {
+    setError(null);
     if (activeConfig) {
       setSelectedProvider(activeConfig.provider);
       setSelectedModel(activeConfig.model_name);
@@ -768,39 +933,132 @@ export default function ModelConfigPage() {
   const activeProviderMeta = PROVIDER_METADATA[selectedProvider] || PROVIDER_METADATA.opencode_zen;
   const currentBaseUrl = activeConfig?.base_url || activeProviderMeta.baseUrl;
   const currentRepo = repos.find((r) => r.id === selectedRepoId);
-  const activeSpec = getModelSpec(activeConfig?.model_name || selectedModel);
 
-  // Normalize provider model list
-  const allProviderModels = useMemo(() => {
+  const providerDropdownOptions = useMemo<SelectOption[]>(() => {
+    const q = searchQuery.toLowerCase().trim();
+    const all = PROVIDER_OPTIONS.map((p) => {
+      const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_zen;
+      const Icon = meta.icon;
+      return {
+        value: p.id,
+        label: p.name,
+        icon: <Icon className={cn("h-3.5 w-3.5 shrink-0", meta.accentText)} />,
+        description: meta.tag,
+      };
+    });
+
+    if (!q) return all;
+
+    return all.filter((p) => {
+      const meta = PROVIDER_METADATA[p.value] || PROVIDER_METADATA.opencode_zen;
+      return (
+        p.value.toLowerCase().includes(q) ||
+        p.label.toLowerCase().includes(q) ||
+        meta.tag.toLowerCase().includes(q) ||
+        meta.description.toLowerCase().includes(q) ||
+        meta.shortBadge.toLowerCase().includes(q)
+      );
+    });
+  }, [searchQuery]);
+
+  // Normalize provider model list for the currently selected provider
+  const allProviderModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
     const options = modelOptionsByProvider[selectedProvider] || [];
     const hasSelected = options.some((m) => m.id === selectedModel);
-    return hasSelected
+    const base = hasSelected
       ? options
       : [{ id: selectedModel, name: selectedModel, tag: "Active" }, ...options];
+    return base.map((m) => ({ ...m, provider: selectedProvider }));
   }, [modelOptionsByProvider, selectedProvider, selectedModel]);
 
-  // Filter by query and speed category
-  const currentModels = useMemo(() => {
-    return allProviderModels.filter((m) => {
+  // All searchable models across all providers
+  const allGlobalModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
+    const list: Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }> = [];
+    const seen = new Set<string>();
+
+    PROVIDER_OPTIONS.forEach((p) => {
+      const pModels = modelOptionsByProvider[p.id] || [];
+      pModels.forEach((m) => {
+        const key = `${p.id}:${m.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          list.push({ ...m, provider: p.id });
+        }
+      });
+    });
+
+    if (!list.some((m) => m.id === selectedModel)) {
+      list.unshift({
+        id: selectedModel,
+        name: selectedModel,
+        tag: "Active",
+        provider: selectedProvider,
+      });
+    }
+
+    return list;
+  }, [modelOptionsByProvider, selectedModel, selectedProvider]);
+
+  // Models matching search query across all providers (before speed filter)
+  const matchingSearchModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return allProviderModels;
+
+    const matchingProviderIds = new Set(
+      PROVIDER_OPTIONS.filter((p) => {
+        const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_zen;
+        return (
+          p.id.toLowerCase().includes(q) ||
+          p.name.toLowerCase().includes(q) ||
+          meta.tag.toLowerCase().includes(q) ||
+          meta.shortBadge.toLowerCase().includes(q) ||
+          (p.id === "opencode_zen" && (q.includes("zen") || q.includes("opencode"))) ||
+          (p.id === "opencode_go" && (q.includes("go") || q.includes("opencode")))
+        );
+      }).map((p) => p.id)
+    );
+
+    return allGlobalModels.filter((m) => {
+      if (matchingProviderIds.has(m.provider)) {
+        return true;
+      }
       const spec = getModelSpec(m.id, m.tag, m.context_window);
       const friendlyName = formatModelDisplayName(m.id, m.name).toLowerCase();
-      const q = searchQuery.toLowerCase().trim();
+      const idLower = m.id.toLowerCase();
+      const specialtyLower = spec.specialty.toLowerCase();
+      const roleLower = spec.recommendedRole.toLowerCase();
+      const tagLower = m.tag.toLowerCase();
 
-      const matchesQuery =
-        !q ||
+      return (
         friendlyName.includes(q) ||
-        m.id.toLowerCase().includes(q) ||
-        spec.specialty.toLowerCase().includes(q) ||
-        spec.recommendedRole.toLowerCase().includes(q);
+        idLower.includes(q) ||
+        specialtyLower.includes(q) ||
+        roleLower.includes(q) ||
+        tagLower.includes(q)
+      );
+    });
+  }, [searchQuery, allProviderModels, allGlobalModels]);
 
-      if (!matchesQuery) return false;
-
+  // Filter by query and speed category
+  const currentModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
+    const base = searchQuery.trim() ? matchingSearchModels : allProviderModels;
+    return base.filter((m) => {
+      const spec = getModelSpec(m.id, m.tag, m.context_window);
       if (speedFilter === "free") return spec.isFree;
       if (speedFilter === "fast") return spec.speedCategory === "fast";
       if (speedFilter === "reasoning") return spec.speedCategory === "reasoning";
       return true;
     });
-  }, [allProviderModels, searchQuery, speedFilter]);
+  }, [searchQuery, matchingSearchModels, allProviderModels, speedFilter]);
+
+  const DEFAULT_CARD_LIMIT = 9;
+  const hasMoreModels = currentModels.length > DEFAULT_CARD_LIMIT;
+  const displayedModels = useMemo(() => {
+    if (isExpanded || !hasMoreModels) {
+      return currentModels;
+    }
+    return currentModels.slice(0, DEFAULT_CARD_LIMIT);
+  }, [currentModels, isExpanded, hasMoreModels]);
 
   return (
     <AppLayout
@@ -822,18 +1080,27 @@ export default function ModelConfigPage() {
             <Button
               size="sm"
               onClick={handleSaveConfig}
-              disabled={isPending}
-              className="h-8 px-3.5 text-xs font-mono font-bold rounded-[6px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
+              disabled={!canSave}
+              className={cn(
+                "h-7.5 px-3 text-[11px] font-mono font-bold rounded-[5px] flex items-center gap-1.5 transition-all",
+                !canSave
+                  ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
+                  : "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] cursor-pointer"
+              )}
             >
               {isPending ? (
                 <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
+              ) : effectiveTargetIsGlobal && !isAdmin ? (
+                <Lock className="h-3.5 w-3.5 text-zinc-400" />
               ) : (
                 <Check className="h-3.5 w-3.5 text-zinc-950 stroke-[2.5]" />
               )}
-              <span>Save Changes</span>
-              <kbd className="hidden sm:inline-block rounded bg-zinc-950/20 px-1 py-0.2 text-[10px] font-mono text-zinc-900 border border-zinc-950/30">
-                ⌘S
-              </kbd>
+              <span>{effectiveTargetIsGlobal && !isAdmin ? "Admin Only" : "Save Changes"}</span>
+              {!(effectiveTargetIsGlobal && !isAdmin) && (
+                <kbd className="hidden sm:inline-block rounded bg-zinc-950/20 px-1 py-0.2 text-[10px] font-mono text-zinc-900 border border-zinc-950/30">
+                  ⌘S
+                </kbd>
+              )}
             </Button>
           )}
 
@@ -842,7 +1109,7 @@ export default function ModelConfigPage() {
             size="sm"
             onClick={() => fetchActiveConfig(true)}
             disabled={loading || isRefreshing}
-            className="group h-8 px-3 text-xs font-mono rounded-[6px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
+            className="group h-7.5 px-2.5 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.35),0_1px_2px_rgba(0,0,0,0.2)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
             title="Sync configuration (Hot-key: R)"
           >
             <RefreshCw className={cn("h-3.5 w-3.5 transition-colors", isRefreshing ? "animate-spin text-amber-400" : "text-zinc-400 group-hover:text-amber-400")} />
@@ -851,7 +1118,7 @@ export default function ModelConfigPage() {
         </div>
       }
     >
-      <div className="space-y-5 min-w-0 max-w-6xl pb-24">
+      <div className="space-y-4 min-w-0 w-full max-w-none pb-20">
         {/* Error Alert */}
         {error && (
           <div className="flex items-start gap-3 rounded-[8px] border border-red-800/80 bg-gradient-to-b from-red-950/60 to-red-950/30 p-4 text-sm text-red-200 shadow-md animate-in fade-in">
@@ -884,72 +1151,8 @@ export default function ModelConfigPage() {
           </div>
         )}
 
-        {/* TOP TELEMETRY KPI METRIC CARDS (Matching Runs page aesthetic) */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
-          {/* Active Model KPI */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Active Engine</span>
-              <Bot className="h-4 w-4 text-amber-400" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-lg sm:text-xl font-bold font-mono text-zinc-100 truncate">
-                {activeConfig ? formatModelDisplayName(activeConfig.model_name) : "Loading..."}
-              </span>
-            </div>
-            <div className="mt-1 flex items-center gap-1.5 text-[11px] text-zinc-500 truncate font-mono">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span>{activeProviderMeta.name}</span>
-            </div>
-          </div>
-
-          {/* Routing Scope KPI */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Routing Policy</span>
-              <Workflow className="h-4 w-4 text-zinc-400" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-lg sm:text-xl font-bold font-mono text-zinc-100">
-                {selectedScope === "global" ? "Global Cluster" : "Repo Override"}
-              </span>
-            </div>
-            <div className="mt-1 text-[11px] text-zinc-500 truncate">
-              {selectedScope === "global" ? "Applied to all unconfigured repos" : `Targeting ${currentRepo ? `${currentRepo.owner}/${currentRepo.name}` : "selected repository"}`}
-            </div>
-          </div>
-
-          {/* Benchmark TTFT Latency KPI */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Avg TTFT Speed</span>
-              <Gauge className="h-4 w-4 text-emerald-400" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
-                {activeSpec.latencyRating}
-              </span>
-            </div>
-            <div className="mt-1 text-[11px] text-zinc-500 truncate">Inference time-to-first-token</div>
-          </div>
-
-          {/* Security & Free Tier KPI */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Enclave & Tier</span>
-              <ShieldCheck className="h-4 w-4 text-amber-400" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-lg sm:text-xl font-bold font-mono text-emerald-400">
-                {activeSpec.isFree ? "100% Free Tier" : "Direct API"}
-              </span>
-            </div>
-            <div className="mt-1 text-[11px] text-zinc-500 truncate">Strict server allowlist gated</div>
-          </div>
-        </div>
-
         {/* TOP BAR: Scope Switcher + Target Repository Control */}
-        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 sm:p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-4">
+        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-3.5 sm:p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-3">
           <span
             aria-hidden="true"
             className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
@@ -964,9 +1167,16 @@ export default function ModelConfigPage() {
               <div className="inline-flex rounded-[7px] border border-zinc-800/90 bg-[#09090b]/90 p-1 shadow-inner">
                 <button
                   type="button"
-                  onClick={() => setSelectedScope("global")}
+                  onClick={() => {
+                    setSelectedScope("global");
+                    if (!globalConfig) {
+                      setActiveConfig(null);
+                      setSelectedProvider("opencode_zen");
+                      setSelectedModel("nemotron-3.5-lightning-free");
+                    }
+                  }}
                   className={cn(
-                    "flex items-center gap-2 rounded-[5px] px-3.5 py-1.5 text-xs sm:text-sm font-mono transition-all cursor-pointer select-none",
+                    "flex items-center gap-1.5 rounded-[5px] px-3 py-1 text-xs sm:text-[13px] font-mono transition-all cursor-pointer select-none",
                     selectedScope === "global"
                       ? "bg-zinc-800 text-amber-400 shadow-sm border border-zinc-700/80 font-bold"
                       : "text-zinc-400 hover:text-zinc-200"
@@ -974,13 +1184,19 @@ export default function ModelConfigPage() {
                 >
                   <Globe className="h-3.5 w-3.5 text-amber-400" />
                   <span>Global Platform Default</span>
+                  {!isAdmin && (
+                    <span className="ml-1 inline-flex items-center gap-1 rounded bg-zinc-900 border border-zinc-700/70 px-1.5 py-0.5 text-[10px] text-zinc-400 font-mono">
+                      <Lock className="h-2.5 w-2.5 text-zinc-400" />
+                      <span>Admin Only</span>
+                    </span>
+                  )}
                 </button>
 
                 <button
                   type="button"
                   onClick={() => setSelectedScope("repo")}
                   className={cn(
-                    "flex items-center gap-2 rounded-[5px] px-3.5 py-1.5 text-xs sm:text-sm font-mono transition-all cursor-pointer select-none",
+                    "flex items-center gap-1.5 rounded-[5px] px-3 py-1 text-xs sm:text-[13px] font-mono transition-all cursor-pointer select-none",
                     selectedScope === "repo"
                       ? "bg-zinc-800 text-cyan-400 shadow-sm border border-zinc-700/80 font-bold"
                       : "text-zinc-400 hover:text-zinc-200"
@@ -1000,13 +1216,13 @@ export default function ModelConfigPage() {
             {/* Scope Status Badges: override vs inherit + 1-click reset */}
             <div className="flex flex-wrap items-center gap-2">
               {selectedScope === "global" ? (
-                <span className="text-xs font-mono font-medium px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none bg-emerald-950/40 border-emerald-800/50 text-emerald-400">
+                <span className="text-[11px] font-mono font-medium px-2.5 py-1 rounded-[5px] border flex items-center gap-1.5 select-none bg-emerald-950/40 border-emerald-800/50 text-emerald-400">
                   <Globe className="h-3.5 w-3.5 text-emerald-400" />
                   <span>Global Default · Applies to all repos without overrides</span>
                 </span>
               ) : isRepoCustomOverride ? (
                 <>
-                  <span className="text-xs font-mono font-semibold px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none bg-cyan-950/50 border-cyan-700/60 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.18)]">
+                  <span className="text-[11px] font-mono font-semibold px-2.5 py-1 rounded-[5px] border flex items-center gap-1.5 select-none bg-cyan-950/50 border-cyan-700/60 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.18)]">
                     <GitBranch className="h-3.5 w-3.5 text-cyan-300" />
                     <span>Custom Repo Override</span>
                   </span>
@@ -1014,8 +1230,8 @@ export default function ModelConfigPage() {
                     variant="outline"
                     size="sm"
                     onClick={handleResetToGlobalDefault}
-                    disabled={isResetting || loading || !globalConfig || !selectedRepoId}
-                    className="h-7.5 px-3 text-[11px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border border-zinc-700/60 cursor-pointer"
+                    disabled={isResetting || loading || !selectedRepoId || (!globalConfig && !isRepoCustomOverride)}
+                    className="h-7 px-2.5 text-[10.5px] font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border border-zinc-700/60 cursor-pointer"
                     title={
                       globalConfig
                         ? `Reset to global default (${formatModelDisplayName(globalConfig.model_name)})`
@@ -1031,7 +1247,7 @@ export default function ModelConfigPage() {
                   </Button>
                 </>
               ) : (
-                <span className="text-xs font-mono font-medium px-3 py-1.5 rounded-[6px] border flex items-center gap-1.5 select-none bg-zinc-900/90 border-zinc-700/70 text-zinc-300">
+                <span className="text-[11px] font-mono font-medium px-2.5 py-1 rounded-[5px] border flex items-center gap-1.5 select-none bg-zinc-900/90 border-zinc-700/70 text-zinc-300">
                   <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
                   <span>Inheriting Platform Default</span>
                 </span>
@@ -1041,7 +1257,7 @@ export default function ModelConfigPage() {
 
           {/* Repo SelectDropdown (when Repo Override is selected) */}
           {selectedScope === "repo" && (
-            <div className="relative z-10 pt-3 border-t border-zinc-800/80 flex flex-col sm:flex-row sm:items-center gap-3 animate-in fade-in duration-150">
+            <div className="relative z-10 pt-2.5 border-t border-zinc-800/80 flex flex-col sm:flex-row sm:items-center gap-2.5 animate-in fade-in duration-150">
               <label className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-300 shrink-0">
                 Target Repository:
               </label>
@@ -1062,7 +1278,7 @@ export default function ModelConfigPage() {
                         description: `Default branch: ${r.default_branch || "main"}${r.language_hint ? ` · ${r.language_hint}` : ""}`,
                       }))}
                       placeholder="Select repository..."
-                      buttonClassName="min-w-[260px] h-9 font-mono text-xs"
+                      buttonClassName="min-w-[240px] h-8 font-mono text-xs"
                       searchable={repos.length > 5}
                     />
                     {currentRepo && (
@@ -1074,7 +1290,7 @@ export default function ModelConfigPage() {
                       </span>
                     )}
                   </div>
-                  {currentRepo && activeConfig && globalConfig && (
+                  {currentRepo && activeConfig && (globalConfig || isRepoCustomOverride) && (
                     <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
                       {isRepoCustomOverride ? (
                         <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-cyan-700/60 bg-cyan-950/50 px-2.5 py-1 text-cyan-300">
@@ -1089,7 +1305,7 @@ export default function ModelConfigPage() {
                           <Globe className="h-3 w-3 text-zinc-400" />
                           <span>
                             {currentRepo.owner}/{currentRepo.name} inherits platform default:{" "}
-                            <strong className="text-zinc-100">{formatModelDisplayName(globalConfig.model_name)}</strong>
+                            <strong className="text-zinc-100">{formatModelDisplayName(globalConfig?.model_name ?? activeConfig.model_name)}</strong>
                           </span>
                         </span>
                       )}
@@ -1099,20 +1315,30 @@ export default function ModelConfigPage() {
               )}
             </div>
           )}
+
+          {/* Subtle Notice for Non-Admins viewing Global Scope */}
+          {selectedScope === "global" && !isAdmin && (
+            <div className="relative z-10 pt-2.5 border-t border-zinc-800/80 flex items-center gap-2.5 text-xs font-mono text-zinc-300 bg-zinc-900/50 rounded-lg px-3.5 py-2.5 border border-zinc-800/90 shadow-inner">
+              <Lock className="h-4 w-4 text-amber-400 shrink-0" />
+              <span>
+                Global platform default can only be modified by administrators. Switch to Repository Override to customize models for your repos.
+              </span>
+            </div>
+          )}
         </div>
 
         {/* MAIN HERO: Provider Tabs + Models Grid */}
-        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-5 sm:p-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-6">
+        <div className="relative rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 sm:p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-4.5">
           <span
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
+            className="pointer-events-none absolute inset-x-0 top-0 h-6 rounded-t-xl bg-gradient-to-b from-white/[0.04] to-transparent z-10"
           />
 
           {/* Header & Provider Segmented Tabs */}
-          <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-zinc-800/80">
+          <div className="relative z-30 flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-zinc-800/80">
             <div>
-              <h2 className="text-base sm:text-lg font-bold text-zinc-100 flex items-center gap-2">
-                <Cpu className="h-5 w-5 text-amber-400" />
+              <h2 className="text-sm sm:text-base font-bold text-zinc-100 flex items-center gap-2">
+                <Cpu className="h-4.5 w-4.5 text-amber-400" />
                 <span>Autonomous Inference Engine</span>
               </h2>
               <p className="text-xs text-zinc-400 mt-0.5 font-mono">
@@ -1120,43 +1346,64 @@ export default function ModelConfigPage() {
               </p>
             </div>
 
-            {/* Provider Switcher Tabs */}
-            <div className="inline-flex rounded-[7px] border border-zinc-800/90 bg-[#09090b]/90 p-1 shadow-inner">
-              {PROVIDER_OPTIONS.map((p) => {
-                const isSelected = selectedProvider === p.id;
-                const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_zen;
-                const Icon = meta.icon;
-                return (
+            {/* Searchbar & Provider Switcher */}
+            <div className="relative z-30 flex flex-wrap sm:flex-nowrap items-center gap-2.5">
+              {/* Header Dual Searchbar (Providers & Models) */}
+              <div className="relative z-40">
+                <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape" && searchQuery) {
+                      setSearchQuery("");
+                    }
+                  }}
+                  placeholder="Search providers & models..."
+                  className="h-8 w-48 sm:w-64 font-mono text-xs bg-zinc-900/80 border border-zinc-700/80 rounded px-2.5 pl-8 pr-7 text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                />
+                {searchQuery ? (
                   <button
-                    key={p.id}
                     type="button"
-                    onClick={() => handleProviderChange(p.id)}
-                    disabled={isPending}
-                    className={cn(
-                      "flex items-center gap-2 rounded-[5px] px-3.5 py-1.5 text-xs sm:text-sm font-mono font-medium transition-all cursor-pointer select-none",
-                      isSelected
-                        ? "bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/80 font-bold"
-                        : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
-                    )}
+                    onClick={() => {
+                      setSearchQuery("");
+                      searchInputRef.current?.focus();
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-0.5 rounded cursor-pointer"
+                    aria-label="Clear search query"
                   >
-                    <Icon className={cn("h-4 w-4", isSelected ? meta.accentText : "text-zinc-500")} />
-                    <span>{p.name}</span>
-                    <span
-                      className={cn(
-                        "hidden sm:inline-block text-[10px] font-mono px-1.5 py-0.2 rounded border font-medium",
-                        isSelected ? meta.badgeClass : "bg-zinc-900 border-zinc-800 text-zinc-500"
-                      )}
-                    >
-                      {meta.shortBadge}
-                    </span>
+                    <X className="h-3 w-3" />
                   </button>
-                );
-              })}
+                ) : (
+                  <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 hidden sm:block">
+                    <kbd className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded border border-zinc-700/60 bg-zinc-800/60 px-1 font-mono text-[9px] text-zinc-400 select-none">
+                      /
+                    </kbd>
+                  </div>
+                )}
+              </div>
+
+              <span className="text-xs font-mono font-medium text-zinc-400 hidden sm:inline-block">
+                Provider:
+              </span>
+              <SelectDropdown
+                id="provider-selector"
+                aria-label="Inference Provider Selector"
+                value={selectedProvider}
+                onChange={handleProviderChange}
+                options={providerDropdownOptions}
+                placeholder={activeProviderMeta.name}
+                ignoreClickOutsideRef={searchInputRef}
+                buttonClassName="min-w-[190px] sm:min-w-[210px] h-8 font-mono text-xs bg-zinc-900/80 border-zinc-700/80 hover:border-zinc-600 text-zinc-200"
+                disabled={isPending}
+              />
             </div>
           </div>
 
           {/* Provider Summary Strip */}
-          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 rounded-lg border border-zinc-800/90 bg-[#09090c]/90 text-xs sm:text-sm shadow-inner">
+          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-3.5 py-2.5 rounded-lg border border-zinc-800/90 bg-[#09090c]/90 text-xs sm:text-[12.5px] shadow-inner">
             <div className="flex items-center gap-2">
               <span className="font-bold text-zinc-100">{activeProviderMeta.name}:</span>
               <span className="text-zinc-300 font-sans">{activeProviderMeta.description}</span>
@@ -1171,11 +1418,15 @@ export default function ModelConfigPage() {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2.5">
-                  <h3 className="text-xs font-mono font-bold uppercase tracking-wider text-zinc-200">
+                  <h3 className="text-[11px] font-mono font-bold uppercase tracking-wider text-zinc-200">
                     Model Architectures
                   </h3>
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-[4px] bg-zinc-900 border border-zinc-800 text-[10.5px] font-mono text-zinc-400">
-                    {searchQuery || speedFilter !== "all"
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-[4px] bg-zinc-900 border border-zinc-800 text-[9.5px] font-mono text-zinc-400">
+                    {searchQuery.trim()
+                      ? speedFilter !== "all"
+                        ? `${currentModels.length} of ${matchingSearchModels.length} Models Found`
+                        : `${currentModels.length} Model${currentModels.length === 1 ? "" : "s"} Found`
+                      : speedFilter !== "all"
                       ? `${currentModels.length} of ${allProviderModels.length} Available`
                       : `${allProviderModels.length} Available`}
                   </span>
@@ -1185,44 +1436,13 @@ export default function ModelConfigPage() {
                 </p>
               </div>
 
-              {/* Quick Filter Tabs & Search Bar */}
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative">
-                  <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
-                  <input
-                    ref={searchInputRef}
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Filter models..."
-                    className="h-8 pl-8.5 pr-7 rounded-[6px] border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#121216] to-[#0c0c0e] font-mono text-xs text-zinc-200 placeholder:text-zinc-500 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4),0_1px_2px_rgba(0,0,0,0.2)] focus:outline-none focus:border-t-amber-400 focus:border-x-amber-500/70 focus:ring-1 focus:ring-amber-400/25 w-36 sm:w-48 transition-all"
-                  />
-                  {searchQuery ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSearchQuery("");
-                        searchInputRef.current?.focus();
-                      }}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-0.5 rounded cursor-pointer"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  ) : (
-                    <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">
-                      <kbd className="inline-flex h-3.5 min-w-3.5 items-center justify-center rounded border border-zinc-700/60 bg-zinc-800/60 px-1 font-mono text-[9px] text-zinc-400 select-none">
-                        /
-                      </kbd>
-                    </div>
-                  )}
-                </div>
-
-                <div className="inline-flex rounded-[7px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#0a0a0d] p-1 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] text-xs font-mono gap-1">
+              {/* Quick Filter Tabs (Speed category) */}
+              <div className="inline-flex rounded-[7px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-[#0a0a0d] p-1 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] text-xs font-mono gap-1">
                   <button
                     type="button"
                     onClick={() => setSpeedFilter("all")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
+                      "px-2 py-0.5 rounded-[4px] text-[10px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "all"
                         ? "bg-gradient-to-b from-zinc-700/90 via-zinc-750 to-zinc-800/90 text-zinc-100 font-bold border-t border-t-zinc-500/70 border-x border-x-zinc-600/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -1234,7 +1454,7 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("free")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
+                      "px-2 py-0.5 rounded-[4px] text-[10px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "free"
                         ? "bg-gradient-to-b from-emerald-900/90 via-emerald-950 to-emerald-950/90 text-emerald-300 font-bold border-t border-t-emerald-500/70 border-x border-x-emerald-600/60 border-b border-b-emerald-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -1246,7 +1466,7 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("fast")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
+                      "px-2 py-0.5 rounded-[4px] text-[10px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "fast"
                         ? "bg-gradient-to-b from-cyan-900/90 via-cyan-950 to-cyan-950/90 text-cyan-300 font-bold border-t border-t-cyan-500/70 border-x border-x-cyan-600/60 border-b border-b-cyan-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -1258,7 +1478,7 @@ export default function ModelConfigPage() {
                     type="button"
                     onClick={() => setSpeedFilter("reasoning")}
                     className={cn(
-                      "px-2.5 py-1 rounded-[5px] text-[11px] font-mono transition-all cursor-pointer select-none",
+                      "px-2 py-0.5 rounded-[4px] text-[10px] font-mono transition-all cursor-pointer select-none",
                       speedFilter === "reasoning"
                         ? "bg-gradient-to-b from-purple-900/90 via-purple-950 to-purple-950/90 text-purple-300 font-bold border-t border-t-purple-500/70 border-x border-x-purple-600/60 border-b border-b-purple-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_1px_3px_rgba(0,0,0,0.4)]"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -1268,10 +1488,9 @@ export default function ModelConfigPage() {
                   </button>
                 </div>
               </div>
-            </div>
 
             {loading ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
                 <Skeleton className="h-52 w-full rounded-xl bg-zinc-900/60" />
                 <Skeleton className="h-52 w-full rounded-xl bg-zinc-900/60" />
                 <Skeleton className="h-52 w-full rounded-xl bg-zinc-900/60" />
@@ -1297,10 +1516,12 @@ export default function ModelConfigPage() {
                 </Button>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {currentModels.map((m) => {
-                  const isSelected = m.id === selectedModel;
-                  const isLive = activeConfig?.model_name === m.id;
+              <div ref={modelsGridRef} className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                  {displayedModels.map((m) => {
+                  const modelProvider = m.provider || selectedProvider;
+                  const isSelected = m.id === selectedModel && modelProvider === selectedProvider;
+                  const isLive = activeConfig?.model_name === m.id && (activeConfig?.provider ? modelProvider === activeConfig.provider : true);
                   const spec = getModelSpec(m.id, m.tag, m.context_window);
                   const displayName = formatModelDisplayName(m.id, m.name);
 
@@ -1321,7 +1542,7 @@ export default function ModelConfigPage() {
 
                   return (
                     <div
-                      key={m.id}
+                      key={`${m.provider || selectedProvider}:${m.id}`}
                       role="button"
                       tabIndex={isPending ? -1 : 0}
                       aria-pressed={isSelected}
@@ -1329,16 +1550,22 @@ export default function ModelConfigPage() {
                       onClick={() => {
                         if (!isPending) {
                           setSelectedModel(m.id);
+                          if (m.provider && m.provider !== selectedProvider) {
+                            setSelectedProvider(m.provider);
+                          }
                         }
                       }}
                       onKeyDown={(e) => {
                         if ((e.key === "Enter" || e.key === " ") && !isPending) {
                           e.preventDefault();
                           setSelectedModel(m.id);
+                          if (m.provider && m.provider !== selectedProvider) {
+                            setSelectedProvider(m.provider);
+                          }
                         }
                       }}
                       className={cn(
-                        "group relative flex flex-col justify-between rounded-xl p-5 text-left select-none transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 overflow-hidden",
+                        "group relative flex flex-col justify-between rounded-xl p-4 text-left select-none transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 overflow-hidden",
                         isSelected
                           ? "border-t border-t-amber-400 border-x border-x-amber-500/60 border-b border-b-amber-950 bg-gradient-to-b from-[#1a140b]/95 via-[#130f08]/95 to-[#0c0a05]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_0_24px_rgba(245,158,11,0.22),0_8px_24px_rgba(0,0,0,0.5)] ring-1 ring-amber-400/50"
                           : "border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_12px_28px_rgba(0,0,0,0.5)]",
@@ -1355,14 +1582,21 @@ export default function ModelConfigPage() {
                       />
 
                       <div className="space-y-3.5 w-full relative z-10">
-                        {/* Header: Tag + Live Status + Radio Indicator */}
+                        {/* Header: Provider badge (when cross-searching) + Tag + Live Status + Radio Indicator */}
                         <div className="flex items-center justify-between gap-2">
-                          <span className={cn("text-[11px] font-mono font-semibold px-2.5 py-0.5 rounded-[5px]", badgePill)}>
-                            {m.tag}
-                          </span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {searchQuery.trim() && m.provider && (
+                              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-zinc-800/90 border border-zinc-700/70 text-zinc-300 font-medium">
+                                {PROVIDER_METADATA[m.provider]?.name || m.provider}
+                              </span>
+                            )}
+                            <span className={cn("text-[10px] font-mono font-semibold px-2 py-0.5 rounded-[4px]", badgePill)}>
+                              {m.tag}
+                            </span>
+                          </div>
                           <div className="flex items-center gap-2">
                             {isLive && (
-                              <span className="text-[10.5px] font-mono font-semibold bg-emerald-950/60 border border-emerald-800/60 text-emerald-400 px-2.5 py-0.5 rounded-[5px] flex items-center gap-1.5 shadow-[0_0_8px_rgba(52,211,153,0.25)]">
+                              <span className="text-[9.5px] font-mono font-semibold bg-emerald-950/60 border border-emerald-800/60 text-emerald-400 px-2 py-0.5 rounded-[4px] flex items-center gap-1.5 shadow-[0_0_8px_rgba(52,211,153,0.25)]">
                                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,1)]" />
                                 Live in Prod
                               </span>
@@ -1383,13 +1617,13 @@ export default function ModelConfigPage() {
                         {/* Model Friendly Title & Technical Identifier Slug */}
                         <div>
                           <h4 className={cn(
-                            "text-[15px] font-bold tracking-tight transition-colors",
+                            "text-sm font-bold tracking-tight transition-colors",
                             isSelected ? "text-amber-300 font-bold" : "text-zinc-100 group-hover:text-white"
                           )}>
                             {displayName}
                           </h4>
                           <div className="mt-1.5 flex items-center gap-1.5">
-                            <span className="font-mono text-[11px] text-zinc-300 bg-[#08080a] border border-zinc-800/90 px-2.5 py-0.5 rounded-[4px] select-all font-medium truncate max-w-[210px] shadow-inner">
+                            <span className="font-mono text-[10px] text-zinc-300 bg-[#08080a] border border-zinc-800/90 px-2 py-0.5 rounded-[4px] select-all font-medium truncate max-w-[210px] shadow-inner">
                               {m.id}
                             </span>
                             <button
@@ -1409,11 +1643,11 @@ export default function ModelConfigPage() {
 
                         {/* Specs row: Context Window & TTFT Latency */}
                         <div className="flex items-center gap-2 text-xs font-mono pt-0.5">
-                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2.5 py-1 rounded-[5px] font-medium text-[11px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2 py-0.5 rounded-[4px] font-medium text-[10px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
                             <Layers className="h-3.5 w-3.5 text-zinc-400 group-hover:text-zinc-300" />
                             <span>{spec.contextWindow}</span>
                           </span>
-                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2.5 py-1 rounded-[5px] font-medium text-[11px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+                          <span className="flex items-center gap-1.5 bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 text-zinc-200 border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-950 px-2 py-0.5 rounded-[4px] font-medium text-[10px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
                             <span
                               className={cn(
                                 "h-1.5 w-1.5 rounded-full",
@@ -1429,14 +1663,14 @@ export default function ModelConfigPage() {
                         </div>
 
                         {/* Specialty Description */}
-                        <p className="text-[12px] text-zinc-300 group-hover:text-zinc-200 leading-relaxed font-sans line-clamp-2 transition-colors">
+                        <p className="text-[11px] text-zinc-300 group-hover:text-zinc-200 leading-relaxed font-sans line-clamp-2 transition-colors">
                           {spec.specialty}
                         </p>
                       </div>
 
                       {/* Card Footer */}
-                      <div className="relative z-10 mt-3.5 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-400">
-                        <span className="font-medium text-zinc-400 font-mono text-[11px]">
+                      <div className="relative z-10 mt-2.5 pt-2.5 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400">
+                        <span className="font-medium text-zinc-400 font-mono text-[10px]">
                           {spec.recommendedRole}
                         </span>
                         <span className={cn("font-semibold text-xs flex items-center gap-1 font-mono transition-colors", isSelected ? "text-amber-300 font-bold" : "text-zinc-400 group-hover:text-zinc-200")}>
@@ -1454,6 +1688,37 @@ export default function ModelConfigPage() {
                   );
                 })}
               </div>
+
+              {hasMoreModels && (
+                <div className="flex justify-center pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (isExpanded) {
+                        setIsExpanded(false);
+                        modelsGridRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                      } else {
+                        setIsExpanded(true);
+                      }
+                    }}
+                    className="h-8 px-4 text-xs font-mono font-medium rounded-lg border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#141418] to-[#0c0c0f] hover:from-[#181820] hover:to-[#101014] text-zinc-200 hover:text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_6px_rgba(0,0,0,0.3)] active:translate-y-[0.5px] transition-all cursor-pointer flex items-center gap-1.5"
+                  >
+                    <span>
+                      {isExpanded
+                        ? "View Less"
+                        : `View More (${currentModels.length - DEFAULT_CARD_LIMIT} more models)`}
+                    </span>
+                    {isExpanded ? (
+                      <ChevronUp className="h-3.5 w-3.5 text-zinc-400" />
+                    ) : (
+                      <ChevronDown className="h-3.5 w-3.5 text-zinc-400" />
+                    )}
+                  </Button>
+                </div>
+              )}
+            </div>
             )}
           </div>
 
@@ -1474,19 +1739,26 @@ export default function ModelConfigPage() {
               )}
               <Button
                 onClick={handleSaveConfig}
-                disabled={isPending || !isDirty}
+                disabled={!canSave}
                 size="sm"
                 className={cn(
-                  "relative px-5 py-2 font-mono font-bold text-xs rounded-[6px] transition-all cursor-pointer select-none",
-                  isDirty
-                    ? "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px]"
+                  "relative px-4 py-1.5 font-mono font-bold text-[11px] rounded-[5px] transition-all select-none",
+                  effectiveTargetIsGlobal && !isAdmin
+                    ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
+                    : isDirty
+                    ? "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] cursor-pointer"
                     : "bg-zinc-800/90 text-zinc-400 hover:bg-zinc-800 border border-zinc-700/60"
                 )}
               >
-                {isPending ? (
+                {isSaving ? (
                   <span className="flex items-center gap-2">
                     <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
-                    <span>Applying Live...</span>
+                    <span>Saving...</span>
+                  </span>
+                ) : effectiveTargetIsGlobal && !isAdmin ? (
+                  <span className="flex items-center gap-2 text-zinc-400 font-medium">
+                    <Lock className="h-3.5 w-3.5 text-zinc-400" />
+                    <span>Admin Only</span>
                   </span>
                 ) : isDirty ? (
                   <span className="flex items-center gap-2">
@@ -1505,9 +1777,9 @@ export default function ModelConfigPage() {
         </div>
 
         {/* BOTTOM GRID: Balanced 2 Columns (Inference URL Enclave + Live Pipeline Telemetry) */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
           {/* Column 1: Server-Derived Base URL & Security Enclave */}
-          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3.5">
+          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3">
             <span
               aria-hidden="true"
               className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
@@ -1524,7 +1796,7 @@ export default function ModelConfigPage() {
               </span>
             </div>
 
-            <div className="relative z-10 flex items-center justify-between gap-3 rounded-[6px] border border-zinc-800/90 bg-[#08080a] px-3.5 py-2.5 font-mono text-xs sm:text-sm text-zinc-200">
+            <div className="relative z-10 flex items-center justify-between gap-3 rounded-[6px] border border-zinc-800/90 bg-[#08080a] px-3 py-2 font-mono text-xs text-zinc-200">
               <div className="flex items-center gap-2 truncate">
                 <span className="text-zinc-500 select-none text-xs font-mono">ENDPOINT:</span>
                 <span className="text-amber-300 font-semibold truncate select-all">{currentBaseUrl}</span>
@@ -1559,7 +1831,7 @@ export default function ModelConfigPage() {
           </div>
 
           {/* Column 2: Live Pipeline Telemetry & Subagents */}
-          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3.5">
+          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3">
             <span
               aria-hidden="true"
               className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
@@ -1613,7 +1885,7 @@ export default function ModelConfigPage() {
         {/* FLOATING ACTION DOCK: When changes are dirty, provide instant saving anywhere on the page */}
         {isDirty && (
           <div className="fixed bottom-6 inset-x-0 z-40 flex justify-center px-4 pointer-events-none animate-in fade-in slide-in-from-bottom-5 duration-200">
-            <div className="pointer-events-auto flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-6 max-w-2xl w-full rounded-2xl border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#18181f]/95 via-[#131317]/95 to-[#0d0d11]/95 p-3.5 sm:px-5 sm:py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_12px_32px_rgba(0,0,0,0.65),0_0_24px_rgba(245,158,11,0.18)] backdrop-blur-md ring-1 ring-amber-400/30">
+            <div className="pointer-events-auto flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-6 max-w-2xl w-full rounded-2xl border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 bg-gradient-to-b from-[#18181f]/95 via-[#131317]/95 to-[#0d0d11]/95 p-3 sm:px-4 sm:py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_12px_32px_rgba(0,0,0,0.65),0_0_24px_rgba(245,158,11,0.18)] backdrop-blur-md ring-1 ring-amber-400/30">
               <div className="flex items-center gap-3 text-xs sm:text-sm">
                 <span className="relative flex h-2.5 w-2.5">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
@@ -1642,17 +1914,27 @@ export default function ModelConfigPage() {
                 <Button
                   size="sm"
                   onClick={handleSaveConfig}
-                  disabled={isPending}
-                  className="h-7.5 px-4 text-xs font-mono font-bold rounded-[5px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] flex items-center gap-1.5 cursor-pointer"
+                  disabled={!canSave}
+                  className={cn(
+                    "h-7 px-3.5 text-[11px] font-mono font-bold rounded-[5px] transition-all select-none flex items-center gap-1.5",
+                    effectiveTargetIsGlobal && !isAdmin
+                      ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
+                      : "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] cursor-pointer"
+                  )}
                 >
-                  {isPending ? (
+                  {isSaving ? (
                     <>
                       <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
-                      <span>Applying...</span>
+                      <span>Saving...</span>
+                    </>
+                  ) : effectiveTargetIsGlobal && !isAdmin ? (
+                    <>
+                      <Lock className="h-3.5 w-3.5 text-zinc-400" />
+                      <span>Admin Only</span>
                     </>
                   ) : (
                     <>
-                      <span>Apply Configuration</span>
+                      <span>Save Configuration</span>
                       <kbd className="hidden sm:inline-block rounded bg-zinc-950/20 px-1 py-0.2 text-[10px] font-mono text-zinc-900 border border-zinc-950/30">
                         ⌘S
                       </kbd>

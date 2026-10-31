@@ -86,7 +86,7 @@ export function EvalBenchmarkModal({
             {/* Option 1: Demo Smoke */}
             <div
               onClick={() => !isRunning && setBenchmarkMode("demo")}
-              className={`cursor-pointer rounded-[6px] border p-3 transition-all ${
+              className={`cursor-pointer rounded-[5px] border p-2.5 transition-all ${
                 benchmarkMode === "demo"
                   ? "border-amber-500/80 bg-amber-950/20 shadow-[0_0_12px_rgba(245,158,11,0.12)]"
                   : "border-zinc-800 bg-[#0d0d10] hover:border-zinc-700"
@@ -94,7 +94,7 @@ export function EvalBenchmarkModal({
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Zap className="h-4 w-4 text-amber-400" />
+                  <Zap className="h-3.5 w-3.5 text-amber-400" />
                   <span className="font-semibold text-zinc-100 font-mono">
                     Canonical Demo Smoke
                   </span>
@@ -112,7 +112,7 @@ export function EvalBenchmarkModal({
             {/* Option 2: Dry Run Suite */}
             <div
               onClick={() => !isRunning && setBenchmarkMode("dry_run")}
-              className={`cursor-pointer rounded-[6px] border p-3 transition-all ${
+              className={`cursor-pointer rounded-[5px] border p-2.5 transition-all ${
                 benchmarkMode === "dry_run"
                   ? "border-emerald-500/80 bg-emerald-950/20 shadow-[0_0_12px_rgba(16,185,129,0.12)]"
                   : "border-zinc-800 bg-[#0d0d10] hover:border-zinc-700"
@@ -120,7 +120,7 @@ export function EvalBenchmarkModal({
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <ShieldCheck className="h-4 w-4 text-emerald-400" />
+                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
                   <span className="font-semibold text-zinc-100 font-mono">
                     Full Golden Fixture Suite (Dry Run)
                   </span>

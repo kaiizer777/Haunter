@@ -11,8 +11,11 @@ from app.llm.config import (
 )
 from app.llm.discovery import (
     BOOTSTRAP_FREE_MODELS,
+    BOOTSTRAP_GO_MODELS,
     clear_model_cache,
+    format_model_name,
     get_dynamic_free_models,
+    get_dynamic_go_models,
 )
 from app.llm.exceptions import (
     LLMAuthenticationError,
@@ -31,7 +34,10 @@ __all__ = [
     "default_base_url_for_provider",
     "get_active_model_config",
     "get_dynamic_free_models",
+    "get_dynamic_go_models",
     "BOOTSTRAP_FREE_MODELS",
+    "BOOTSTRAP_GO_MODELS",
+    "format_model_name",
     "clear_model_cache",
     "OpenCodeZenProvider",
     "OpenAIAdapter",

@@ -51,7 +51,7 @@ describe("sidebar.tsx", () => {
     currentPathname = "/runs";
     vi.mocked(api.getModelConfig).mockResolvedValue(mockModelConfig);
     vi.mocked(useAuth).mockReturnValue({
-      user: standardUser,
+      user: adminUser,
       loading: false,
       error: null,
       logout: vi.fn(),
@@ -70,14 +70,22 @@ describe("sidebar.tsx", () => {
     await screen.findByTitle("claude-sonnet-4-5");
   });
 
-  it("renders navigation links including AI Reliability & Evals for non-admin user", async () => {
+  it("hides Model Config nav for non-admin user", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      user: standardUser,
+      loading: false,
+      error: null,
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
     render(<Sidebar />);
 
     const sessionsLink = screen.getByRole("link", { name: /live sessions/i });
     const runsLink = screen.getByRole("link", { name: /runs/i });
     const reposLink = screen.getByRole("link", { name: /repositories/i });
     const settingsLink = screen.getByRole("link", { name: /^settings$/i });
-    const configLink = screen.getByRole("link", { name: /model config/i });
+    expect(screen.queryByRole("link", { name: /model config/i })).not.toBeInTheDocument();
+    expect(api.getModelConfig).not.toHaveBeenCalled();
     const evalLink = screen.getByRole("link", { name: /ai reliability & evals/i });
 
     expect(sessionsLink).toHaveAttribute("href", "/sessions");
@@ -85,10 +93,43 @@ describe("sidebar.tsx", () => {
     expect(within(runsLink).queryByText("Live")).not.toBeInTheDocument();
     expect(reposLink).toHaveAttribute("href", "/repos");
     expect(settingsLink).toHaveAttribute("href", "/settings");
-    expect(configLink).toHaveAttribute("href", "/config");
     expect(evalLink).toHaveAttribute("href", "/eval");
     expect(within(evalLink).queryByText("Live")).not.toBeInTheDocument();
 
+    // Global-only telemetry is hidden for non-admins: no stale default model badge.
+    expect(screen.queryByText("Active Model")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("nemotron-3.5-lightning-free")).not.toBeInTheDocument();
+  });
+
+  it("does not preventDefault on shortcut 6 when Model Config link is hidden", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      user: standardUser,
+      loading: false,
+      error: null,
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
+    render(<Sidebar />);
+
+    expect(screen.queryByRole("link", { name: /model config/i })).not.toBeInTheDocument();
+    const evt = new KeyboardEvent("keydown", { key: "6", metaKey: true, bubbles: true, cancelable: true });
+    const prevented = !window.dispatchEvent(evt);
+    expect(prevented).toBe(false);
+  });
+
+  it("renders Model Config nav when user.is_admin is true", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      user: adminUser,
+      loading: false,
+      error: null,
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
+
+    render(<Sidebar />);
+
+    const configLink = screen.getByRole("link", { name: /model config/i });
+    expect(configLink).toHaveAttribute("href", "/config");
     await screen.findByTitle("claude-sonnet-4-5");
   });
 

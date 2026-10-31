@@ -309,16 +309,41 @@ async def add_repo(
         name=body.name,
         default_branch=body.default_branch,
         language_hint=body.language_hint,
-        active_model_config_id=body.active_model_config_id,
         github_install_id=final_install_id,
     )
     db.add(repo)
     try:
         await db.commit()
         await db.refresh(repo)
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
-        raise HTTPException(status_code=409, detail="Repo already connected")
+        orig = getattr(exc, "orig", None)
+        pgcode = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+        err_str = str(orig if orig is not None else exc).lower()
+
+        # Foreign key violation (e.g. invalid user_id / referenced entity)
+        if pgcode == "23503" or "foreign key" in err_str:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid reference: referenced entity does not exist.",
+            ) from exc
+
+        # Unique constraint violation (user_id, owner, name)
+        if (
+            pgcode == "23505"
+            or "uq_repo_user_owner_name" in err_str
+            or "unique constraint" in err_str
+            or "unique" in err_str
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Repo already connected",
+            ) from exc
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Database integrity constraint violation.",
+        ) from exc
 
     logger.info(
         "Repo added: user=%s repo=%s/%s install_id=%s",

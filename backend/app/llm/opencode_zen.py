@@ -30,11 +30,14 @@ class OpenCodeZenProvider:
         api_key: str | None = None,
         timeout: float = 120.0,
         session_id: str | None = None,
+        provider_name: str = "opencode_zen",
     ) -> None:
         self.base_url = (base_url or settings.opencode_zen_base_url).rstrip("/") + "/"
         self._api_key = api_key or settings.opencode_zen_api_key
         self.timeout = timeout
-        self.session_id = session_id or f"sess_{uuid.uuid4().hex}"
+        self.provider_name = provider_name
+        prefix = "ses_" if self.provider_name == "opencode_go" else "sess_"
+        self.session_id = session_id or f"{prefix}{uuid.uuid4().hex}"
 
     async def complete(
         self,
@@ -58,8 +61,13 @@ class OpenCodeZenProvider:
             }
         """
         if not self._api_key:
+            key_name = (
+                "OPENCODE_GO_API_KEY"
+                if self.provider_name == "opencode_go"
+                else "OPENCODE_ZEN_API_KEY"
+            )
             raise LLMAuthenticationError(
-                "OPENCODE_ZEN_API_KEY is not configured in settings or environment"
+                f"{key_name} is not configured in settings or environment"
             )
 
         endpoint = urljoin(self.base_url, "chat/completions")
@@ -69,6 +77,7 @@ class OpenCodeZenProvider:
             "Content-Type": "application/json",
             "User-Agent": "opencode/1.0.0",
             "x-session-id": session_id,
+            "x-opencode-session": session_id,
         }
 
         # Clamp `max_tokens` to the configured ceiling. Subagents currently pass
@@ -79,12 +88,13 @@ class OpenCodeZenProvider:
         # defence so the high test value doesn't break the workflow. Subagents
         # still see their requested value in the trace — only the wire payload
         # is clamped.
-        if "max_tokens" in kwargs:
+        if self.provider_name in ("opencode_zen", "opencode_go") and "max_tokens" in kwargs:
             ceiling = settings.opencode_zen_max_output_tokens
             requested = kwargs["max_tokens"]
             if requested > ceiling:
                 logger.debug(
-                    "opencode_zen: clamping max_tokens %d -> %d (configured ceiling)",
+                    "%s: clamping max_tokens %d -> %d (configured ceiling)",
+                    self.provider_name,
                     requested,
                     ceiling,
                 )

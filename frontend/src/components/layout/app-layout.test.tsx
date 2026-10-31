@@ -125,7 +125,8 @@ describe("app-layout.tsx", () => {
     expect(screen.getByText("Autonomous CI")).toBeInTheDocument();
     expect(screen.getByText("Runs")).toBeInTheDocument();
     expect(screen.getByText("Repositories")).toBeInTheDocument();
-    expect(screen.getByText("Model Config")).toBeInTheDocument();
+    // Model Config nav is admin-only and hidden for this non-admin user.
+    expect(screen.queryByText("Model Config")).not.toBeInTheDocument();
   });
 
   it("renders correctly when subtitle and actions are omitted", () => {

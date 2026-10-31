@@ -341,9 +341,9 @@ export default function MockRunsPage() {
       {/* ========================================================================= */}
       {/* 1. SIDEBAR SHELL                                                          */}
       {/* ========================================================================= */}
-      <aside className="fixed inset-y-0 left-0 z-30 flex w-[264px] flex-col border-r border-zinc-800 bg-[#0c0c0e] select-none">
+      <aside className="fixed inset-y-0 left-0 z-30 flex w-[240px] flex-col border-r border-zinc-800 bg-[#0c0c0e] select-none">
         {/* Brand Header */}
-        <div className="flex h-16 items-center justify-between px-5 border-b border-zinc-800/80">
+        <div className="flex h-14 items-center justify-between px-4 border-b border-zinc-800/80">
           <Link href="/mock" className="flex items-center gap-3 group">
             <div className="flex h-8 w-8 items-center justify-center rounded-[6px] bg-zinc-900 border border-zinc-700/70 text-amber-400 group-hover:border-amber-400/80 transition-colors">
               <TerminalSquare className="h-4.5 w-4.5" />
@@ -469,9 +469,9 @@ export default function MockRunsPage() {
       {/* ========================================================================= */}
       {/* 2. MAIN CONTENT AREA (OFFSET BY SIDEBAR WIDTH 264px)                      */}
       {/* ========================================================================= */}
-      <div className="flex-1 flex flex-col pl-[264px] min-h-screen">
+      <div className="flex-1 flex flex-col pl-[240px] min-h-screen">
         {/* Topbar */}
-        <header className="sticky top-0 z-20 flex h-16 w-full items-center justify-between border-b border-zinc-800 bg-[#09090b]/90 px-6 backdrop-blur-sm">
+        <header className="sticky top-0 z-20 flex h-14 w-full items-center justify-between border-b border-zinc-800 bg-[#09090b]/90 px-5 backdrop-blur-sm">
           <div className="flex items-center gap-3.5">
             <div>
               <div className="flex items-center gap-2.5">
@@ -531,7 +531,7 @@ export default function MockRunsPage() {
         </header>
 
         {/* Main Body */}
-        <main className="flex-1 p-6 overflow-y-auto space-y-5">
+        <main className="flex-1 p-5 overflow-y-auto space-y-4">
           {/* ===================================================================== */}
           {/* 3. FILTER BAR CONTAINER                                               */}
           {/* ===================================================================== */}
@@ -550,7 +550,7 @@ export default function MockRunsPage() {
                   placeholder="Search branch, sha, diagnosis..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="h-10 pl-9.5 pr-3.5 text-[13px] rounded-[7px]"
+                  className="h-8.5 pl-8 pr-3 text-xs rounded-[6px]"
                 />
               </div>
 

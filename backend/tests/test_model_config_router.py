@@ -10,11 +10,11 @@ Covers:
 - PUT /config/model as admin:
   - Creates a new ModelConfig row with is_active=True.
   - Deactivates previous active global ModelConfig rows (single-active invariant).
-- PUT /config/model is open to any authenticated user (Phase 3.2 Issue 2: no 403).
+- PUT /config/model (global) is admin-only (403 for non-admins).
 - PUT /config/model with invalid provider (e.g. "gcp") returns 422.
 - PUT /config/model with invalid model (e.g. provider="openai", model="invalid") returns 422.
 - Unauthenticated requests return 401.
-- GET /config/model returns the currently active global config or env default.
+- GET /config/model (global, no repo_id) is admin-only; returns active global config or env default.
 - Per-repo model config endpoints (GET/PUT /config/model/{repo_id}) enforce tenant ownership (404 on unowned repo).
 """
 
@@ -63,7 +63,7 @@ async def test_get_available_models_returns_all_three_buckets(
     Network calls to OpenCode Zen models endpoint are mocked with respx.
     """
     await truncate_all(db)
-    user = await user_factory()
+    user = await user_factory(role="admin")
     client = make_auth_client(user.id)
 
     zen_discovery_payload = {
@@ -307,7 +307,7 @@ async def test_get_model_config_global_fallback_and_active(
     and returns active DB row once populated.
     """
     await truncate_all(db)
-    user = await user_factory()
+    user = await user_factory(role="admin")
     client = make_auth_client(user.id)
 
     async with client:
@@ -338,6 +338,20 @@ async def test_get_model_config_global_fallback_and_active(
 
 
 # ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_get_global_model_config_forbidden_for_non_admin(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """GET /config/model (global, no repo_id) returns 403 for non-admin users."""
+    await truncate_all(db)
+    non_admin_user = await user_factory(role="user")
+    client = make_auth_client(non_admin_user.id)
+    async with client:
+        resp = await client.get("/config/model")
+    assert resp.status_code == 403
+    assert "Admin permissions required" in resp.json()["detail"]
+
+
 # Per-repo model config endpoints
 # ---------------------------------------------------------------------------
 
@@ -501,7 +515,7 @@ async def test_put_repo_stamps_repo_scope(
 ):
     """PUT /config/model/{repo_id} stamps scope='repo' + repo_id/user_id pins."""
     await truncate_all(db)
-    user = await user_factory()
+    user = await user_factory(role="admin")
     repo = Repo(user_id=user.id, owner="acme", name="api")
     db.add(repo)
     await db.commit()
@@ -528,3 +542,107 @@ async def test_put_repo_stamps_repo_scope(
     assert row.scope == "repo"
     assert row.repo_id == repo_id
     assert row.is_active is True
+
+@pytest.mark.asyncio
+async def test_put_global_model_config_allowed_for_admin_github_username(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """PUT /config/model (global) succeeds when caller's username is in admin_github_usernames."""
+    await truncate_all(db)
+    owner_user = await user_factory(username="kaiizer777", role="user")
+    client = make_auth_client(owner_user.id)
+    monkeypatch.setattr(settings, "admin_user_id", str(uuid.uuid4()))
+    monkeypatch.setattr(settings, "admin_github_usernames", ["kaiizer777", "kaiizer77"])
+
+    payload = {"provider": "opencode_zen", "model_name": "nemotron-3.5-lightning-free"}
+    async with client:
+        resp = await client.put("/config/model", json=payload)
+
+    assert resp.status_code == 200
+    assert resp.json()["model_name"] == "nemotron-3.5-lightning-free"
+
+
+@pytest.mark.asyncio
+async def test_put_global_model_config_forbidden_when_no_admin_configured(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """PUT /config/model (global) returns 403 for non-admins even when no admin is configured (closed by default)."""
+    await truncate_all(db)
+    user = await user_factory(username="regular_user", role="user")
+    client = make_auth_client(user.id)
+    monkeypatch.setattr(settings, "admin_user_id", None)
+    monkeypatch.setattr(settings, "admin_github_usernames", [])
+
+    payload = {"provider": "opencode_zen", "model_name": "nemotron-3.5-lightning-free"}
+    async with client:
+        resp = await client.put("/config/model", json=payload)
+
+    assert resp.status_code == 403
+    assert "Admin permissions required" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_put_repo_model_config_does_not_mutate_other_user_config(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """PUT /config/model/{repo_id} does not mutate a config owned by another user or repo (#205)."""
+    await truncate_all(db)
+    user_a = await user_factory(github_id=901, username="user_a")
+    user_b = await user_factory(github_id=902, username="user_b")
+
+    repo_a = Repo(user_id=user_a.id, owner="user-a", name="repo-a")
+    db.add(repo_a)
+    await db.commit()
+    await db.refresh(repo_a)
+
+    # User A creates a repo config
+    cfg_a = ModelConfig(
+        provider="anthropic",
+        model_name="claude-sonnet-4-5",
+        base_url="https://api.anthropic.com",
+        is_active=True,
+        scope="repo",
+        repo_id=repo_a.id,
+        user_id=user_a.id,
+    )
+    db.add(cfg_a)
+    await db.commit()
+    await db.refresh(cfg_a)
+
+    # User B has repo_b, maliciously referencing cfg_a.id
+    repo_b = Repo(
+        user_id=user_b.id,
+        owner="user-b",
+        name="repo-b",
+        active_model_config_id=cfg_a.id,
+    )
+    db.add(repo_b)
+    await db.commit()
+    await db.refresh(repo_b)
+
+    # User B updates repo_b's model config
+    client_b = make_auth_client(user_b.id)
+    async with client_b:
+        resp = await client_b.put(
+            f"/config/model/{repo_b.id}",
+            json={"provider": "openai", "model_name": "gpt-4o"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["provider"] == "openai"
+    assert data["model_name"] == "gpt-4o"
+    # Ensure a NEW config was created for repo_b, rather than mutating user A's cfg_a!
+    assert data["id"] != str(cfg_a.id)
+
+    # Verify user A's config was NOT modified
+    user_a_id = user_a.id
+    repo_a_id = repo_a.id
+    cfg_a_id = cfg_a.id
+    db.expire_all()
+    reloaded_cfg_a = (
+        await db.execute(select(ModelConfig).where(ModelConfig.id == cfg_a_id))
+    ).scalar_one()
+    assert reloaded_cfg_a.provider == "anthropic"
+    assert reloaded_cfg_a.model_name == "claude-sonnet-4-5"
+    assert reloaded_cfg_a.user_id == user_a_id
+    assert reloaded_cfg_a.repo_id == repo_a_id

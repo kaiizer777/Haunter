@@ -408,28 +408,28 @@ export default function RunsPage() {
     >
       <div className="space-y-5 min-w-0">
         {/* Telemetry Metric Cards */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
           {/* Total Runs */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Total CI Runs</span>
               <Activity className="h-4 w-4 text-zinc-500" />
             </div>
             <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">{metrics.totalRuns}</span>
+              <span className="text-xl font-bold font-mono text-zinc-100 tabular-nums">{metrics.totalRuns}</span>
               <span className="text-[11px] font-mono text-zinc-500">runs</span>
             </div>
             <div className="mt-1 text-[11px] text-zinc-500 truncate">Autonomous pipelines tracked</div>
           </div>
 
           {/* Auto-Heal Rate */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Heal Rate</span>
               <CheckCircle2 className="h-4 w-4 text-emerald-400" />
             </div>
             <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-bold font-mono text-emerald-400 tabular-nums">
+              <span className="text-xl font-bold font-mono text-emerald-400 tabular-nums">
                 {runs.length > 0 ? `${metrics.healRate}%` : "-"}
               </span>
               <span className="text-[11px] font-mono text-zinc-500">PRs opened</span>
@@ -438,26 +438,26 @@ export default function RunsPage() {
           </div>
 
           {/* Avg MTTR */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Avg MTTR</span>
               <Clock className="h-4 w-4 text-amber-400" />
             </div>
             <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">{metrics.avgDurationStr}</span>
+              <span className="text-xl font-bold font-mono text-zinc-100 tabular-nums">{metrics.avgDurationStr}</span>
               <span className="text-[11px] font-mono text-zinc-500">per fix</span>
             </div>
             <div className="mt-1 text-[11px] text-zinc-500 truncate">Failure diagnosis to PR</div>
           </div>
 
           {/* Total Compute Cost */}
-          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-4 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
+          <div className="rounded-lg border border-zinc-800/80 bg-gradient-to-b from-[#121216]/90 to-[#0c0c0e]/90 backdrop-blur p-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] flex flex-col justify-between">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">Total Compute</span>
               <Coins className="h-4 w-4 text-amber-400" />
             </div>
             <div className="mt-2 flex items-baseline gap-2">
-              <span className="text-2xl font-bold font-mono text-zinc-100 tabular-nums">
+              <span className="text-xl font-bold font-mono text-zinc-100 tabular-nums">
                 ${metrics.totalCost.toFixed(4)}
               </span>
               {metrics.totalTokens > 0 && (
@@ -473,7 +473,7 @@ export default function RunsPage() {
         {/* Quick Status Filter Tabs & Control Bar */}
         <div className="space-y-3">
           {/* Quick Segmented Tabs */}
-          <div className="flex items-center justify-between gap-3 overflow-x-auto pb-0.5">
+          <div className="flex items-center justify-between gap-2.5 overflow-x-auto pb-0.5">
             <div className="flex items-center gap-1.5 p-1 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm">
               {quickFilterTabs.map((tab) => {
                 const isActive = selectedStatus === tab.id;
@@ -485,7 +485,7 @@ export default function RunsPage() {
                       setSelectedStatus(tab.id);
                       setPage(0);
                     }}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-[5px] text-xs font-mono transition-all ${
+                    className={`flex items-center gap-2 px-2.5 py-1 rounded-[4px] text-[11px] font-mono transition-all ${
                       isActive
                         ? "bg-zinc-800 text-zinc-100 font-semibold border border-zinc-700/60 shadow-sm"
                         : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40"
@@ -524,8 +524,8 @@ export default function RunsPage() {
           </div>
 
           {/* Detailed Filters Bar */}
-          <div className="relative z-20 flex flex-wrap items-center justify-between gap-3.5 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] p-3">
-            <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[300px]">
+          <div className="relative z-20 flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-zinc-800/80 bg-[#0d0d10]/90 backdrop-blur-sm shadow-[inset_0_1px_0_0_rgba(255,255,255,0.03)] p-2.5">
+            <div className="flex flex-wrap items-center gap-2.5 flex-1 min-w-[300px]">
               <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-medium pl-1">
                 <Filter className="h-3.5 w-3.5 text-zinc-500" />
                 <span className="font-mono text-[11px] tracking-wide text-zinc-400 uppercase">Filters</span>
@@ -537,7 +537,7 @@ export default function RunsPage() {
                 onClick={() => setGrouped((g) => !g)}
                 aria-pressed={grouped}
                 title="Group runs by failure signature"
-                className={`flex items-center gap-1.5 h-8.5 px-2.5 text-xs font-mono rounded-[6px] border transition-all ${
+                className={`flex items-center gap-1.5 h-7.5 px-2 text-[11px] font-mono rounded-[5px] border transition-all ${
                   grouped
                     ? "bg-amber-500/15 text-amber-200 border-amber-500/40"
                     : "bg-zinc-900/60 text-zinc-400 border-zinc-800/80 hover:text-zinc-200 hover:border-zinc-700"
@@ -561,7 +561,7 @@ export default function RunsPage() {
                   placeholder="Search branch, commit sha, repo..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="h-8.5 pl-8.5 pr-8 text-xs font-mono rounded-[6px] bg-zinc-900/60 border-zinc-800/80 focus:outline-none focus:border-amber-400/80 focus:ring-1 focus:ring-amber-400/25 placeholder:text-zinc-500 placeholder:font-sans transition-all"
+                  className="h-7.5 pl-8 pr-7 text-[11px] font-mono rounded-[5px] bg-zinc-900/60 border-zinc-800/80 focus:outline-none focus:border-amber-400/80 focus:ring-1 focus:ring-amber-400/25 placeholder:text-zinc-500 placeholder:font-sans transition-all"
                 />
                 {!searchQuery ? (
                   <div className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center">
@@ -603,7 +603,7 @@ export default function RunsPage() {
                     icon: <FolderGit2 className="h-3.5 w-3.5 text-amber-400/80" />,
                   })),
                 ]}
-                buttonClassName="min-w-[190px] h-8.5"
+                buttonClassName="min-w-[170px] h-7.5"
               />
 
               {/* Status select */}
@@ -657,7 +657,7 @@ export default function RunsPage() {
                     ),
                   },
                 ]}
-                buttonClassName="min-w-[165px] h-8.5"
+                buttonClassName="min-w-[150px] h-7.5"
               />
             </div>
 
@@ -681,7 +681,7 @@ export default function RunsPage() {
         </div>
 
         {error && (
-          <div className="rounded-[7px] border border-red-900/60 bg-red-950/30 p-3.5 text-[13px] text-red-300">
+          <div className="rounded-[7px] border border-red-900/60 bg-red-950/30 p-2.5 text-[13px] text-red-300">
             {error}
           </div>
         )}
@@ -769,7 +769,7 @@ export default function RunsPage() {
               )}
             </div>
           ) : grouped ? (
-            <div className="p-3 space-y-2.5">
+            <div className="p-2.5 space-y-2.5">
               {signatureGroups.map((group) => {
                 const sampleId = group.sampleRunId;
                 return (
@@ -777,7 +777,7 @@ export default function RunsPage() {
                     key={group.signature}
                     className="rounded-[7px] border border-zinc-800/80 bg-zinc-900/40 px-3.5 py-3"
                   >
-                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div className="flex items-center justify-between gap-2.5 flex-wrap">
                       <div className="flex items-center gap-2 min-w-0">
                         <Layers className="h-3.5 w-3.5 text-amber-400/80 shrink-0" />
                         <span
@@ -836,7 +836,7 @@ export default function RunsPage() {
                 <TableHeader className="border-b border-zinc-800/90 bg-gradient-to-b from-[#141418] to-[#0c0c10] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_3px_rgba(0,0,0,0.35)]">
                   <TableRow className="border-b border-zinc-800/90 hover:bg-transparent">
                     {/* Column 0: CHECKBOX (Standard UX Left Position) */}
-                    <TableHead className="w-10 pl-4 py-3 text-center">
+                    <TableHead className="w-9 pl-3.5 py-2 text-center">
                       <div className="flex items-center justify-center">
                         <input
                           ref={(el) => {
@@ -856,37 +856,37 @@ export default function RunsPage() {
                     </TableHead>
 
                     {/* Column 1: STATUS */}
-                    <TableHead className="w-[140px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-3">
+                    <TableHead className="w-[140px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-2 text-[10px]">
                       Status
                     </TableHead>
 
                     {/* Column 2: REPOSITORY */}
-                    <TableHead className="w-[200px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-3">
+                    <TableHead className="w-[200px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-2 text-[10px]">
                       Repository
                     </TableHead>
 
                     {/* Column 3: BRANCH / COMMIT */}
-                    <TableHead className="px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-3">
+                    <TableHead className="px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-2 text-[10px]">
                       Branch / Commit
                     </TableHead>
 
                     {/* Column 4: TRIGGERED */}
-                    <TableHead className="w-[110px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-3">
+                    <TableHead className="w-[110px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-2 text-[10px]">
                       Triggered
                     </TableHead>
 
                     {/* Column 5: DURATION */}
-                    <TableHead className="w-[110px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-3">
+                    <TableHead className="w-[110px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-2 text-[10px]">
                       Duration
                     </TableHead>
 
                     {/* Column 6: COST */}
-                    <TableHead className="w-[110px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-3">
+                    <TableHead className="w-[110px] px-3 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-2 text-[10px]">
                       Compute
                     </TableHead>
 
                     {/* Column 7: ACTIONS */}
-                    <TableHead className="w-[170px] text-right pr-4 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-3">
+                    <TableHead className="w-[170px] text-right pr-4 text-[11px] font-mono tracking-wider uppercase text-zinc-500 font-medium select-none py-2 text-[10px]">
                       Actions
                     </TableHead>
                   </TableRow>
@@ -915,7 +915,7 @@ export default function RunsPage() {
                         } ${isBatchDeleting ? "opacity-50 pointer-events-none" : ""}`}
                       >
                         {/* Column 0: CHECKBOX */}
-                        <TableCell className="w-10 pl-4 py-3 text-center align-middle" onClick={(e) => e.stopPropagation()}>
+                        <TableCell className="w-9 pl-3.5 py-2 text-center align-middle" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-center">
                             <input
                               type="checkbox"
@@ -933,7 +933,7 @@ export default function RunsPage() {
                         </TableCell>
 
                         {/* Column 1: STATUS */}
-                        <TableCell className="px-3 py-3 align-middle whitespace-nowrap">
+                        <TableCell className="px-2.5 py-2 align-middle whitespace-nowrap">
                           <div className="flex flex-col gap-0.5 items-start">
                             <StatusBadge status={run.status} />
                             {(run.status === "flaky_detected" || run.conclusion === "flaky_test") && (
@@ -945,7 +945,7 @@ export default function RunsPage() {
                         </TableCell>
 
                         {/* Column 2: REPOSITORY */}
-                        <TableCell className="px-3 py-3 align-middle whitespace-nowrap">
+                        <TableCell className="px-2.5 py-2 align-middle whitespace-nowrap">
                           <div className="flex items-center gap-2 max-w-[210px] min-w-0" title={repoLabel}>
                             <FolderGit2 className="h-3.5 w-3.5 text-zinc-500 shrink-0 group-hover:text-amber-400/80 transition-colors" />
                             <span className="font-mono text-xs truncate">
@@ -958,7 +958,7 @@ export default function RunsPage() {
                         </TableCell>
 
                         {/* Column 3: BRANCH / COMMIT */}
-                        <TableCell className="px-3 py-3 align-middle">
+                        <TableCell className="px-2.5 py-2 align-middle">
                           <div className="flex items-center gap-2 font-mono text-xs text-zinc-400 min-w-0">
                             {isFixBranch ? (
                               <span
@@ -995,14 +995,14 @@ export default function RunsPage() {
 
                         {/* Column 4: TRIGGERED */}
                         <TableCell
-                          className="px-3 py-3 text-zinc-400 font-mono text-xs tabular-nums align-middle whitespace-nowrap"
+                          className="px-2.5 py-2 text-zinc-400 font-mono text-[11px] tabular-nums align-middle whitespace-nowrap"
                           title={new Date(run.created_at).toLocaleString()}
                         >
                           {formatRelativeTime(run.created_at)}
                         </TableCell>
 
                         {/* Column 5: DURATION */}
-                        <TableCell className="px-3 py-3 align-middle whitespace-nowrap">
+                        <TableCell className="px-2.5 py-2 align-middle whitespace-nowrap">
                           <span
                             className="inline-flex items-center gap-1.5 font-mono text-xs text-zinc-300 tabular-nums"
                             title={`Started: ${new Date(run.created_at).toLocaleString()}${
@@ -1015,7 +1015,7 @@ export default function RunsPage() {
                         </TableCell>
 
                         {/* Column 6: COST */}
-                        <TableCell className="px-3 py-3 align-middle whitespace-nowrap">
+                        <TableCell className="px-2.5 py-2 align-middle whitespace-nowrap">
                           <div className="flex flex-col font-mono leading-tight">
                             {run.cost && run.cost > 0 ? (
                               <span className="text-xs font-mono font-medium text-emerald-400 tabular-nums">
@@ -1033,7 +1033,7 @@ export default function RunsPage() {
                         </TableCell>
 
                         {/* Column 7: ACTIONS */}
-                        <TableCell className="text-right pr-4 py-3 align-middle whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                        <TableCell className="text-right pr-3.5 py-2 align-middle whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end gap-1.5">
                             <RetryRunButton
                               runId={run.id}

@@ -22,15 +22,18 @@ Covers:
 """
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 import httpx
 import pytest
 import respx
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ModelConfig, Repo, User
-from app.repos import _validate_repo_ident, _verify_user_repo_permission
+from app.repos import _validate_repo_ident, _verify_user_repo_permission, add_repo
+from app.schemas import RepoCreate
 from fastapi import HTTPException
 from tests.conftest import truncate_all
 
@@ -308,6 +311,57 @@ async def test_post_repo_duplicate_own(
         resp2 = await client.post("/repos", json={"owner": "org", "name": "repo1"})
         assert resp2.status_code == 409
         assert resp2.json() == {"detail": "Repo already connected"}
+
+
+@pytest.mark.asyncio
+async def test_post_repo_ignores_active_model_config_id(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """POST /repos ignores client-supplied active_model_config_id to prevent BOLA (#205)."""
+    await truncate_all(db)
+    user = await user_factory(github_id=708, username="bola_user")
+    client = make_auth_client(user.id)
+    random_config_id = str(uuid.uuid4())
+
+    async with client:
+        resp = await client.post(
+            "/repos",
+            json={
+                "owner": "org",
+                "name": "repo_bola",
+                "active_model_config_id": random_config_id,
+            },
+        )
+        assert resp.status_code == 201
+        assert resp.json()["active_model_config_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_post_repo_fk_error_not_masked_as_409(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """POST /repos returns 400 when an IntegrityError originates from a foreign key failure."""
+    from unittest.mock import patch
+    from sqlalchemy.exc import IntegrityError
+
+    await truncate_all(db)
+    user = await user_factory(github_id=709, username="fk_user")
+    client = make_auth_client(user.id)
+
+    # Simulate an IntegrityError with foreign key error signature
+    fk_exc = IntegrityError(
+        "insert or update on table 'repos' violates foreign key constraint",
+        params={},
+        orig=Exception("violates foreign key constraint"),
+    )
+    with patch("sqlalchemy.ext.asyncio.AsyncSession.commit", side_effect=fk_exc):
+        async with client:
+            resp = await client.post(
+                "/repos",
+                json={"owner": "org", "name": "repo_fk"},
+            )
+            assert resp.status_code == 400
+            assert resp.json() == {"detail": "Invalid reference: referenced entity does not exist."}
 
 
 @pytest.mark.asyncio
@@ -666,15 +720,22 @@ async def test_concurrent_post_same_repo(
 async def test_model_config_get_global_and_repo(
     db: AsyncSession, user_factory, make_auth_client
 ):
-    """GET /config/model returns global config; GET with non-owned repo_id returns 404."""
+    """GET /config/model global read is admin-only; GET with non-owned repo_id returns 404."""
     await truncate_all(db)
     user = await user_factory(github_id=714, username="cfg_user")
     user_id = user.id
     client = make_auth_client(user_id)
+    admin = await user_factory(github_id=715, username="cfg_admin", role="admin")
+    admin_client = make_auth_client(admin.id)
 
     async with client:
-        # 1. Global config
-        resp_global = await client.get("/config/model")
+        # 1a. Non-admin global read -> 403
+        resp_forbidden = await client.get("/config/model")
+        assert resp_forbidden.status_code == 403
+
+    async with admin_client:
+        # 1b. Admin global config
+        resp_global = await admin_client.get("/config/model")
         assert resp_global.status_code == 200
         data_global = resp_global.json()
         assert "model_name" in data_global
@@ -682,7 +743,7 @@ async def test_model_config_get_global_and_repo(
         assert "base_url" in data_global
 
         # 2. Non-existent / non-owned repo config -> 404
-        resp_repo_404 = await client.get(f"/config/model?repo_id={uuid.uuid4()}")
+        resp_repo_404 = await admin_client.get(f"/config/model?repo_id={uuid.uuid4()}")
         assert resp_repo_404.status_code == 404
 
 
@@ -772,3 +833,118 @@ async def test_put_model_config_per_repo_and_non_owned(
         )
         assert resp_b.status_code == 404
         assert resp_b.json() == {"detail": "Repo not found"}
+
+
+@pytest.mark.asyncio
+async def test_delete_model_config_per_repo_resets_to_global(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """DELETE /config/model/{repo_id} drops the repo override; unowned -> 404."""
+    await truncate_all(db)
+    user_a = await user_factory(github_id=718, username="user_repo_reset_a")
+    user_a_id = user_a.id
+    user_b = await user_factory(github_id=719, username="user_repo_reset_b")
+    user_b_id = user_b.id
+
+    repo_a = Repo(user_id=user_a_id, owner="org-a", name="repo-reset-a")
+    db.add(repo_a)
+    await db.commit()
+    await db.refresh(repo_a)
+    repo_a_id = repo_a.id
+
+    client_a = make_auth_client(user_a_id)
+    client_b = make_auth_client(user_b_id)
+
+    async with client_a:
+        resp_put = await client_a.put(
+            f"/config/model/{repo_a_id}",
+            json={"provider": "anthropic", "model_name": "claude-sonnet-4-5"},
+        )
+        assert resp_put.status_code == 200
+        assert resp_put.json()["scope"] == "repo"
+
+        resp_get = await client_a.get(f"/config/model?repo_id={repo_a_id}")
+        assert resp_get.status_code == 200
+        assert resp_get.json()["scope"] == "repo"
+
+        resp_del = await client_a.delete(f"/config/model/{repo_a_id}")
+        assert resp_del.status_code == 204
+
+        # After reset the repo inherits the platform default again.
+        resp_after = await client_a.get(f"/config/model?repo_id={repo_a_id}")
+        assert resp_after.status_code == 200
+        assert resp_after.json()["scope"] == "global"
+
+    async with client_b:
+        resp_b = await client_b.delete(f"/config/model/{repo_a_id}")
+        assert resp_b.status_code == 404
+        assert resp_b.json() == {"detail": "Repo not found"}
+
+
+@pytest.mark.asyncio
+async def test_add_repo_integrity_error_23505_returns_409() -> None:
+    """add_repo maps IntegrityError with pgcode '23505' to HTTP 409 Conflict."""
+    user = User(id=uuid.uuid4(), github_id=999, github_username="testuser", access_token="enc")
+    body = RepoCreate(owner="test-owner", name="test-repo", default_branch="main")
+
+    mock_db = AsyncMock(spec=AsyncSession)
+    mock_execute_res = MagicMock()
+    mock_execute_res.scalar_one_or_none.return_value = None
+    mock_db.execute.return_value = mock_execute_res
+
+    class MockOrig23505:
+        pgcode = "23505"
+        sqlstate = "23505"
+
+        def __str__(self) -> str:
+            return "duplicate key value violates unique constraint"
+
+    mock_db.commit.side_effect = IntegrityError(
+        statement="INSERT INTO repos ...",
+        params={"owner": "test-owner", "name": "test-repo"},
+        orig=MockOrig23505(),
+    )
+
+    with patch("app.repos._verify_user_repo_permission", AsyncMock(return_value=None)), \
+         patch("app.repos.resolve_installation_id", AsyncMock(return_value=None)):
+        with pytest.raises(HTTPException) as exc_info:
+            await add_repo(body=body, current_user=user, db=mock_db)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Repo already connected"
+    mock_db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_add_repo_integrity_error_unrelated_returns_400() -> None:
+    """add_repo maps unrelated DB constraint IntegrityError to HTTP 400 even if bound parameters contain 'unique'."""
+    user = User(id=uuid.uuid4(), github_id=999, github_username="testuser", access_token="enc")
+    body = RepoCreate(owner="unique-owner", name="unique-repo", default_branch="main")
+
+    mock_db = AsyncMock(spec=AsyncSession)
+    mock_execute_res = MagicMock()
+    mock_execute_res.scalar_one_or_none.return_value = None
+    mock_db.execute.return_value = mock_execute_res
+
+    class MockOrigCheckConstraint:
+        pgcode = "23514"  # check_violation
+        sqlstate = "23514"
+
+        def __str__(self) -> str:
+            return "new row violates check constraint ck_repo_something"
+
+    mock_db.commit.side_effect = IntegrityError(
+        statement="INSERT INTO repos (owner, name) VALUES ('unique-owner', 'unique-repo')",
+        params={"owner": "unique-owner", "name": "unique-repo"},
+        orig=MockOrigCheckConstraint(),
+    )
+
+    with patch("app.repos._verify_user_repo_permission", AsyncMock(return_value=None)), \
+         patch("app.repos.resolve_installation_id", AsyncMock(return_value=None)):
+        with pytest.raises(HTTPException) as exc_info:
+            await add_repo(body=body, current_user=user, db=mock_db)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Database integrity constraint violation."
+    mock_db.rollback.assert_awaited_once()
+

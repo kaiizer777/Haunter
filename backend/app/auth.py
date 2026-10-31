@@ -502,6 +502,7 @@ async def callback(
                 github_username=github_username,
                 avatar_url=avatar_url,
                 access_token=encrypted_token,
+                role=UserRole.USER.value,
             )
             db.add(user)
         else:
@@ -543,18 +544,26 @@ async def logout(request: Request, response: Response) -> dict[str, str]:
     return {"detail": "Logged out"}
 
 
+def is_admin_user(user: User) -> bool:
+    """Return True if user is an admin via DB role, settings.admin_user_id, or settings.admin_github_usernames."""
+    if user.role == UserRole.ADMIN.value or getattr(user, "is_admin", False):
+        return True
+    if settings.admin_user_id and str(user.id) == settings.admin_user_id:
+        return True
+    if settings.admin_github_usernames and user.github_username:
+        return user.github_username.lower() in [u.lower() for u in settings.admin_github_usernames]
+    return False
+
+
 async def require_admin(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> User:
     """
     FastAPI dependency. Enforces that the authenticated caller has the 'admin' role
-    (or matches ADMIN_USER_ID fallback).
+    (or matches ADMIN_USER_ID fallback / admin_github_usernames).
     Raises 403 Forbidden otherwise.
     """
-    is_admin = current_user.is_admin or bool(
-        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
-    )
-    if not is_admin:
+    if not is_admin_user(current_user):
         raise HTTPException(
             status_code=403,
             detail="Forbidden: admin access required",
@@ -571,14 +580,12 @@ async def me(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> UserOut:
     """Return the authenticated user's public profile, or 401 if not logged in."""
-    is_admin = current_user.is_admin or bool(
-        settings.admin_user_id and str(current_user.id) == settings.admin_user_id
-    )
+    is_admin = is_admin_user(current_user)
     return UserOut(
         id=current_user.id,
         github_username=current_user.github_username,
         avatar_url=current_user.avatar_url,
-        role=UserRole(current_user.role),
+        role=UserRole.ADMIN if is_admin else UserRole(current_user.role),
         is_admin=is_admin,
     )
 
@@ -602,9 +609,7 @@ async def update_user_role(
     await db.commit()
     await db.refresh(target_user)
 
-    is_admin = target_user.is_admin or bool(
-        settings.admin_user_id and str(target_user.id) == settings.admin_user_id
-    )
+    is_admin = is_admin_user(target_user)
     return UserOut(
         id=target_user.id,
         github_username=target_user.github_username,
