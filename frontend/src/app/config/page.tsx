@@ -691,12 +691,18 @@ export default function ModelConfigPage() {
     try {
       // Always resolve the platform default so repo scope can show
       // override-vs-inherit badges and offer a 1-click reset.
-      const globalCfg = await api.getModelConfig(undefined, { signal: controller.signal });
+      const globalCfg = await api.getModelConfig(undefined, {
+        signal: controller.signal,
+        silent: true,
+      });
       if (controller.signal.aborted) return;
       setGlobalConfig(globalCfg);
 
       if (targetScope === "repo" && targetRepoId) {
-        const repoCfg = await api.getModelConfig(targetRepoId, { signal: controller.signal });
+        const repoCfg = await api.getModelConfig(targetRepoId, {
+          signal: controller.signal,
+          silent: true,
+        });
         if (controller.signal.aborted) return;
         setActiveConfig(repoCfg);
         setSelectedProvider(repoCfg.provider);
@@ -709,9 +715,7 @@ export default function ModelConfigPage() {
     } catch (err: unknown) {
       if (controller.signal.aborted) return;
       if (err instanceof ApiError) {
-        if (err.status !== 0) {
-          setError(err.message);
-        }
+        setError(err.message);
       } else if (err instanceof Error && err.name !== "AbortError") {
         setError("Failed to load model configuration.");
       }
@@ -736,9 +740,11 @@ export default function ModelConfigPage() {
     }
   };
 
+  const effectiveTargetIsGlobal = selectedScope === "global" || !selectedRepoId;
+
   const handleSaveConfig = useCallback(async () => {
     if (isSaving) return;
-    if (selectedScope === "global" && !isAdmin) {
+    if (effectiveTargetIsGlobal && !isAdmin) {
       setError(
         "Global platform default can only be modified by administrators. Switch to Repository Override to customize models for your repos."
       );
@@ -780,7 +786,7 @@ export default function ModelConfigPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [isSaving, selectedScope, isAdmin, selectedProvider, selectedModel, selectedRepoId]);
+  }, [isSaving, effectiveTargetIsGlobal, isAdmin, selectedProvider, selectedModel, selectedScope, selectedRepoId]);
 
   // 1-click "Reset to Global Default": apply the platform default
   // provider/model onto the selected repo scope.
@@ -835,6 +841,8 @@ export default function ModelConfigPage() {
     );
   }, [activeConfig, selectedProvider, selectedModel]);
 
+  const canSave = !isPending && isDirty && !(effectiveTargetIsGlobal && !isAdmin);
+
   // Keyboard shortcut handlers: '/' to search, 'r' to sync, Cmd+S to save
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -846,7 +854,7 @@ export default function ModelConfigPage() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
-        if (!isPending && isDirty && !(selectedScope === "global" && !isAdmin)) {
+        if (canSave) {
           handleSaveConfig();
         }
       } else if (e.key === "/") {
@@ -859,7 +867,7 @@ export default function ModelConfigPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isPending, isDirty, selectedScope, isAdmin, handleSaveConfig, fetchActiveConfig]);
+  }, [canSave, handleSaveConfig, fetchActiveConfig]);
 
   const handleDiscardChanges = () => {
     setError(null);
@@ -1032,18 +1040,27 @@ export default function ModelConfigPage() {
             <Button
               size="sm"
               onClick={handleSaveConfig}
-              disabled={isPending}
-              className="h-7.5 px-3 text-[11px] font-mono font-bold rounded-[5px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] flex items-center gap-1.5 transition-all cursor-pointer"
+              disabled={!canSave}
+              className={cn(
+                "h-7.5 px-3 text-[11px] font-mono font-bold rounded-[5px] flex items-center gap-1.5 transition-all",
+                !canSave
+                  ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
+                  : "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] cursor-pointer"
+              )}
             >
               {isPending ? (
                 <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
+              ) : effectiveTargetIsGlobal && !isAdmin ? (
+                <Lock className="h-3.5 w-3.5 text-zinc-400" />
               ) : (
                 <Check className="h-3.5 w-3.5 text-zinc-950 stroke-[2.5]" />
               )}
-              <span>Save Changes</span>
-              <kbd className="hidden sm:inline-block rounded bg-zinc-950/20 px-1 py-0.2 text-[10px] font-mono text-zinc-900 border border-zinc-950/30">
-                ⌘S
-              </kbd>
+              <span>{effectiveTargetIsGlobal && !isAdmin ? "Admin Only" : "Save Changes"}</span>
+              {!(effectiveTargetIsGlobal && !isAdmin) && (
+                <kbd className="hidden sm:inline-block rounded bg-zinc-950/20 px-1 py-0.2 text-[10px] font-mono text-zinc-900 border border-zinc-950/30">
+                  ⌘S
+                </kbd>
+              )}
             </Button>
           )}
 
@@ -1675,11 +1692,11 @@ export default function ModelConfigPage() {
               )}
               <Button
                 onClick={handleSaveConfig}
-                disabled={isSaving || !isDirty || (selectedScope === "global" && !isAdmin)}
+                disabled={!canSave}
                 size="sm"
                 className={cn(
                   "relative px-4 py-1.5 font-mono font-bold text-[11px] rounded-[5px] transition-all select-none",
-                  selectedScope === "global" && !isAdmin
+                  effectiveTargetIsGlobal && !isAdmin
                     ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
                     : isDirty
                     ? "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] cursor-pointer"
@@ -1691,7 +1708,7 @@ export default function ModelConfigPage() {
                     <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
                     <span>Saving...</span>
                   </span>
-                ) : selectedScope === "global" && !isAdmin ? (
+                ) : effectiveTargetIsGlobal && !isAdmin ? (
                   <span className="flex items-center gap-2 text-zinc-400 font-medium">
                     <Lock className="h-3.5 w-3.5 text-zinc-400" />
                     <span>Admin Only</span>
@@ -1850,10 +1867,10 @@ export default function ModelConfigPage() {
                 <Button
                   size="sm"
                   onClick={handleSaveConfig}
-                  disabled={isSaving || (selectedScope === "global" && !isAdmin)}
+                  disabled={!canSave}
                   className={cn(
                     "h-7 px-3.5 text-[11px] font-mono font-bold rounded-[5px] transition-all select-none flex items-center gap-1.5",
-                    selectedScope === "global" && !isAdmin
+                    effectiveTargetIsGlobal && !isAdmin
                       ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
                       : "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] cursor-pointer"
                   )}
@@ -1863,7 +1880,7 @@ export default function ModelConfigPage() {
                       <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
                       <span>Saving...</span>
                     </>
-                  ) : selectedScope === "global" && !isAdmin ? (
+                  ) : effectiveTargetIsGlobal && !isAdmin ? (
                     <>
                       <Lock className="h-3.5 w-3.5 text-zinc-400" />
                       <span>Admin Only</span>
