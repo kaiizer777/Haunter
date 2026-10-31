@@ -187,12 +187,6 @@ class Settings(BaseSettings):
             return [str(x).strip().lower() for x in v if str(x).strip()]
         return []
 
-    # TinyFish API Configuration (Web Search, Stealth Fetch & Agent API)
-    tinyfish_api_key: Optional[str] = None
-    tinyfish_base_url: str = "https://api.tinyfish.io/v1"
-    tinyfish_search_url: str = "https://api.search.tinyfish.ai"
-    tinyfish_fetch_url: str = "https://api.fetch.tinyfish.ai"
-
     # GitHub App credentials for repo-write operations (Phase 8).
     # App permissions required: contents:write, pull_requests:write — NO administration.
     # github_app_private_key is a PEM string — load from SSM / Secret Manager in prod.
