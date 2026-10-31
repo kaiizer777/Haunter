@@ -695,29 +695,32 @@ async function request<T>(
   }
 
   if (!res.ok) {
-    let errorDetail = "An unexpected error occurred.";
-    if (res.status >= 500) {
-      errorDetail = "Internal server error. Please try again later.";
-    } else if (res.status === 403) {
-      errorDetail = "Access denied. Insufficient permissions.";
-    } else if (res.status === 404) {
-      errorDetail = "Requested resource was not found.";
-    } else if (res.status === 422) {
-      errorDetail = "Invalid request payload. Please check your inputs.";
-    } else {
-      try {
-        const errJson = (await res.json()) as { detail?: unknown } | null;
-        if (
-          errJson &&
-          typeof errJson.detail === "string" &&
-          errJson.detail.length < 120 &&
-          !errJson.detail.includes("Traceback")
-        ) {
-          errorDetail = errJson.detail;
-        } else {
-          errorDetail = `Request failed with status ${res.status}`;
-        }
-      } catch {
+    let errorDetail = "";
+    try {
+      const errJson = (await res.json()) as { detail?: unknown } | null;
+      if (
+        errJson &&
+        typeof errJson.detail === "string" &&
+        errJson.detail.trim().length > 0 &&
+        errJson.detail.length < 120 &&
+        !errJson.detail.includes("Traceback")
+      ) {
+        errorDetail = errJson.detail;
+      }
+    } catch {
+      // Body is not JSON or cannot be parsed
+    }
+
+    if (!errorDetail) {
+      if (res.status >= 500) {
+        errorDetail = "Internal server error. Please try again later.";
+      } else if (res.status === 403) {
+        errorDetail = "Access denied. Insufficient permissions.";
+      } else if (res.status === 404) {
+        errorDetail = "Requested resource was not found.";
+      } else if (res.status === 422) {
+        errorDetail = "Invalid request payload. Please check your inputs.";
+      } else {
         errorDetail = `Request failed with status ${res.status}`;
       }
     }
