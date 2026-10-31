@@ -25,6 +25,8 @@ vi.mock("@/lib/api", () => ({
     getRepos: vi.fn(),
     getModelConfig: vi.fn(),
     updateModelConfig: vi.fn(),
+    deleteRepoModelConfig: vi.fn(),
+    validateCustomProvider: vi.fn(),
   },
   ApiError: class ApiError extends Error {
     status: number;
@@ -54,9 +56,9 @@ describe("ModelConfigPage non-admin repo scope", () => {
 
   const repoCfg: ModelConfigOut = {
     id: "cfg_repo",
-    provider: "opencode_zen",
-    model_name: "laguna-s-2.1-free",
-    base_url: "https://opencode.ai/zen/v1",
+    provider: "opencode_go",
+    model_name: "deepseek-v4.1-flash",
+    base_url: "https://opencode.ai/inference/go/openai/v1",
     is_active: true,
     scope: "repo",
     repo_id: "repo_1",
@@ -112,5 +114,99 @@ describe("ModelConfigPage non-admin repo scope", () => {
     await waitFor(() => {
       expect(api.getModelConfig).toHaveBeenCalledWith(undefined, expect.anything());
     });
+  });
+});
+
+describe("ModelConfigPage provider pruning + admin custom provider", () => {
+  const adminUser: AuthUser = {
+    id: "usr_admin",
+    github_id: 1,
+    github_username: "admin-user",
+    avatar_url: null,
+    is_admin: true,
+  };
+
+  const globalCfg: ModelConfigOut = {
+    id: "cfg_global",
+    provider: "opencode_go",
+    model_name: "deepseek-v4.1-flash",
+    base_url: "https://opencode.ai/inference/go/openai/v1",
+    is_active: true,
+    scope: "global",
+    repo_id: null,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useAuth).mockReturnValue({
+      user: adminUser,
+      loading: false,
+      error: null,
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
+    vi.mocked(api.getAvailableModels).mockResolvedValue({} as never);
+    vi.mocked(api.getRepos).mockResolvedValue([]);
+    vi.mocked(api.getModelConfig).mockImplementation((repoId?: string) => {
+      if (repoId === undefined) return Promise.resolve(globalCfg);
+      return Promise.reject(new ApiError("not found", 404));
+    });
+    vi.mocked(api.validateCustomProvider).mockResolvedValue({
+      ok: false,
+      supported: false,
+    } as never);
+  });
+
+  it("prunes prebuilt providers to OpenCode Go + Groq", async () => {
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("Repository Override")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Inference Provider Selector"));
+    const goOptions = await screen.findAllByText("OpenCode Go");
+    expect(goOptions.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("Groq")).toBeInTheDocument();
+    expect(screen.queryByText("OpenAI")).not.toBeInTheDocument();
+    expect(screen.queryByText("Anthropic")).not.toBeInTheDocument();
+    expect(screen.queryByText("OpenCode Zen")).not.toBeInTheDocument();
+  });
+
+  it("shows the admin custom-provider form and falls back gracefully without a backend endpoint", async () => {
+    render(<ModelConfigPage />);
+    expect(await screen.findByText(/Custom Provider/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Custom provider name"), {
+      target: { value: "my-provider" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider base URL"), {
+      target: { value: "https://my-host/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider API key"), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /validate & discover models/i }));
+    expect(await screen.findByText(/not supported by this backend/i)).toBeInTheDocument();
+    expect(api.validateCustomProvider).toHaveBeenCalledWith({
+      name: "my-provider",
+      compat: "openai",
+      base_url: "https://my-host/v1",
+      api_key: "sk-test",
+    });
+  });
+
+  it("hides the admin custom-provider form from non-admins", async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      user: {
+        id: "usr_1",
+        github_id: 111,
+        github_username: "regular-user",
+        avatar_url: null,
+        is_admin: false,
+      },
+      loading: false,
+      error: null,
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("Repository Override")).toBeInTheDocument();
+    expect(screen.queryByText(/Custom Provider/)).not.toBeInTheDocument();
   });
 });

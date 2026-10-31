@@ -985,7 +985,7 @@ export default function ModelConfigPage() {
         meta.shortBadge.toLowerCase().includes(q)
       );
     });
-  }, [searchQuery]);
+  }, [searchQuery, customProviders]);
 
   // Normalize provider model list for the currently selected provider
   const allProviderModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {

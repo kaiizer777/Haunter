@@ -894,4 +894,42 @@ describe("api.ts", () => {
       expect(capturedOpts.body).toBe(JSON.stringify({}));
     });
   });
+
+  describe("validateCustomProvider graceful fallback", () => {
+    it("returns unsupported instead of throwing when the backend endpoint is absent (404)", async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async () => {
+        return new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 });
+      });
+      const result = await api.validateCustomProvider({
+        name: "my-provider",
+        compat: "openai",
+        base_url: "https://my-host/v1",
+        api_key: "sk-test",
+      });
+      expect(result).toEqual({
+        ok: false,
+        supported: false,
+        detail: "Custom provider validation is not supported by this backend.",
+      });
+    });
+
+    it("passes through backend validation results when the endpoint exists", async () => {
+      const payload = {
+        ok: true,
+        supported: true,
+        provider_id: "custom_my-provider",
+        models: [{ id: "m1", name: "M1", tag: "Custom" }],
+      };
+      globalThis.fetch = vi.fn().mockImplementation(async () => {
+        return new Response(JSON.stringify(payload), { status: 200 });
+      });
+      const result = await api.validateCustomProvider({
+        name: "my-provider",
+        compat: "openai",
+        base_url: "https://my-host/v1",
+        api_key: "sk-test",
+      });
+      expect(result).toEqual(payload);
+    });
+  });
 });
