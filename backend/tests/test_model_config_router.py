@@ -10,11 +10,11 @@ Covers:
 - PUT /config/model as admin:
   - Creates a new ModelConfig row with is_active=True.
   - Deactivates previous active global ModelConfig rows (single-active invariant).
-- PUT /config/model is open to any authenticated user (Phase 3.2 Issue 2: no 403).
+- PUT /config/model (global) is admin-only (403 for non-admins).
 - PUT /config/model with invalid provider (e.g. "gcp") returns 422.
 - PUT /config/model with invalid model (e.g. provider="openai", model="invalid") returns 422.
 - Unauthenticated requests return 401.
-- GET /config/model returns the currently active global config or env default.
+- GET /config/model (global, no repo_id) is admin-only; returns active global config or env default.
 - Per-repo model config endpoints (GET/PUT /config/model/{repo_id}) enforce tenant ownership (404 on unowned repo).
 """
 
@@ -63,7 +63,7 @@ async def test_get_available_models_returns_all_three_buckets(
     Network calls to OpenCode Zen models endpoint are mocked with respx.
     """
     await truncate_all(db)
-    user = await user_factory()
+    user = await user_factory(role="admin")
     client = make_auth_client(user.id)
 
     zen_discovery_payload = {
@@ -307,7 +307,7 @@ async def test_get_model_config_global_fallback_and_active(
     and returns active DB row once populated.
     """
     await truncate_all(db)
-    user = await user_factory()
+    user = await user_factory(role="admin")
     client = make_auth_client(user.id)
 
     async with client:
@@ -338,6 +338,20 @@ async def test_get_model_config_global_fallback_and_active(
 
 
 # ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_get_global_model_config_forbidden_for_non_admin(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """GET /config/model (global, no repo_id) returns 403 for non-admin users."""
+    await truncate_all(db)
+    non_admin_user = await user_factory(role="user")
+    client = make_auth_client(non_admin_user.id)
+    async with client:
+        resp = await client.get("/config/model")
+    assert resp.status_code == 403
+    assert "Admin permissions required" in resp.json()["detail"]
+
+
 # Per-repo model config endpoints
 # ---------------------------------------------------------------------------
 
@@ -501,7 +515,7 @@ async def test_put_repo_stamps_repo_scope(
 ):
     """PUT /config/model/{repo_id} stamps scope='repo' + repo_id/user_id pins."""
     await truncate_all(db)
-    user = await user_factory()
+    user = await user_factory(role="admin")
     repo = Repo(user_id=user.id, owner="acme", name="api")
     db.add(repo)
     await db.commit()
@@ -549,10 +563,10 @@ async def test_put_global_model_config_allowed_for_admin_github_username(
 
 
 @pytest.mark.asyncio
-async def test_put_global_model_config_allowed_when_no_admin_configured(
+async def test_put_global_model_config_forbidden_when_no_admin_configured(
     db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
 ):
-    """PUT /config/model (global) succeeds for authenticated user when no admin is configured."""
+    """PUT /config/model (global) returns 403 for non-admins even when no admin is configured (closed by default)."""
     await truncate_all(db)
     user = await user_factory(username="regular_user", role="user")
     client = make_auth_client(user.id)
@@ -563,8 +577,8 @@ async def test_put_global_model_config_allowed_when_no_admin_configured(
     async with client:
         resp = await client.put("/config/model", json=payload)
 
-    assert resp.status_code == 200
-    assert resp.json()["model_name"] == "nemotron-3.5-lightning-free"
+    assert resp.status_code == 403
+    assert "Admin permissions required" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio

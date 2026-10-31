@@ -9,7 +9,7 @@ Security invariants:
   from client to prevent SSRF and endpoint hijacking.
 - Per-repo updates enforce tenant ownership: returns 404 (not 403) on non-owned repos to
   prevent existence oracle leakage.
-- Global model config switcher is open to any authenticated user (Phase 3.2 Issue 2).
+- Global model config reads and writes are admin-only.
 - SQL queries use parameterised SQLAlchemy ORM constructs.
 """
 
@@ -74,7 +74,13 @@ async def get_active_model_config_endpoint(
     Get the currently active model configuration.
     If repo_id is provided, returns the repo's active config (or 404 if repo not owned).
     If repo_id is omitted, returns the global active model config from DB or env defaults.
+    Global reads are admin-only; repo reads enforce ownership.
     """
+    if repo_id is None and not is_admin_user(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin permissions required to read global model config",
+        )
     if repo_id is not None:
         repo_result = await db.execute(
             select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
@@ -145,11 +151,7 @@ async def get_active_model_config_endpoint(
 
 
 def _require_admin(current_user: User) -> None:
-    """Raise 403 if caller is not an admin."""
-    # Honor .env.example: if admin_user_id is unconfigured (None or empty) and admin_github_usernames is empty, allow authenticated users
-    unconfigured = not settings.admin_user_id and not settings.admin_github_usernames
-    if unconfigured:
-        return
+    """Raise 403 if caller is not an admin. Closed by default: no open bypass."""
     if not is_admin_user(current_user):
         logger.warning(
             "model_config: non-admin user %s attempted global model config write",

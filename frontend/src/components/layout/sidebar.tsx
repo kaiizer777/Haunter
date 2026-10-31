@@ -16,13 +16,17 @@ import {
   Webhook,
 } from "lucide-react";
 import { api, ModelConfigOut } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { user } = useAuth();
+  const isAdmin = Boolean(user?.is_admin);
   const [activeModel, setActiveModel] = useState<string>("nemotron-3.5-lightning-free");
 
   useEffect(() => {
+    if (!isAdmin) return;
     let isMounted = true;
     api.getModelConfig(undefined, { silent: true })
       .then((cfg: ModelConfigOut) => {
@@ -34,7 +38,7 @@ export function Sidebar() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [isAdmin]);
 
   // Keyboard shortcut listener (Cmd/Ctrl/Alt + 1-7) for rapid developer navigation
   useEffect(() => {
@@ -124,6 +128,10 @@ export function Sidebar() {
     },
   ];
 
+  const visibleNavItems: NavItem[] = isAdmin
+    ? navItems
+    : navItems.filter((item) => item.href !== "/config");
+
 
   return (
     <aside
@@ -171,7 +179,7 @@ export function Sidebar() {
           <span>Navigation</span>
           <span className="text-[9px] text-zinc-600 font-mono">CI / CD</span>
         </div>
-        {navItems.map((item) => {
+        {visibleNavItems.map((item) => {
           const isActive =
             pathname === item.href ||
             (item.href !== "/" && pathname.startsWith(item.href));

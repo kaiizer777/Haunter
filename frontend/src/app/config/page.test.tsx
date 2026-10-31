@@ -1,5 +1,35 @@
-import { describe, it, expect } from "vitest";
-import { formatContextWindow } from "./page";
+import React from "react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import ModelConfigPage, { formatContextWindow } from "./page";
+import { useAuth } from "@/lib/auth-context";
+import { api } from "@/lib/api";
+
+const mockReplace = vi.fn();
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: mockReplace, push: vi.fn() }),
+}));
+
+vi.mock("@/components/layout/app-layout", () => ({
+  AppLayout: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="app-layout">{children}</div>
+  ),
+}));
+
+vi.mock("@/lib/auth-context", () => ({
+  useAuth: vi.fn(),
+}));
+
+vi.mock("@/lib/api", () => ({
+  api: {
+    getAvailableModels: vi.fn(),
+    getRepos: vi.fn(),
+    getModelConfig: vi.fn(),
+    updateModelConfig: vi.fn(),
+  },
+  ApiError: class ApiError extends Error {},
+}));
 
 describe("formatContextWindow (frontend/src/app/config/page.tsx)", () => {
   describe("Binary multiples", () => {
@@ -46,5 +76,35 @@ describe("formatContextWindow (frontend/src/app/config/page.tsx)", () => {
     it("returns Unknown Context for 0", () => {
       expect(formatContextWindow(0)).toBe("Unknown Context");
     });
+  });
+});
+
+describe("ModelConfigPage admin hard-block", () => {
+  const nonAdminUser = {
+    id: "usr_1",
+    github_username: "regular-user",
+    avatar_url: null,
+    is_admin: false,
+  };
+
+  it("redirects non-admins to /repos, renders Access Denied, and fetches nothing", async () => {
+    vi.clearAllMocks();
+    vi.mocked(useAuth).mockReturnValue({
+      user: nonAdminUser,
+      loading: false,
+      error: null,
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
+
+    render(<ModelConfigPage />);
+
+    expect(await screen.findByText("Access Denied")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith("/repos");
+    });
+    expect(api.getModelConfig).not.toHaveBeenCalled();
+    expect(api.getRepos).not.toHaveBeenCalled();
+    expect(api.getAvailableModels).not.toHaveBeenCalled();
   });
 });

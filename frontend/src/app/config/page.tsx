@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { AppLayout } from "@/components/layout/app-layout";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -581,7 +582,8 @@ function getModelSpec(modelId: string, tag?: string, contextWindowTokens?: numbe
 }
 
 export default function ModelConfigPage() {
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
+  const router = useRouter();
   const isAdmin = Boolean(user?.is_admin);
   const hasInitializedScopeRef = useRef(false);
   const activeFetchControllerRef = useRef<AbortController | null>(null);
@@ -628,6 +630,7 @@ export default function ModelConfigPage() {
 
   // Load dynamic models from backend
   useEffect(() => {
+    if (!isAdmin) return;
     api
       .getAvailableModels()
       .then((data) => {
@@ -645,10 +648,11 @@ export default function ModelConfigPage() {
         }
       })
       .catch(() => {});
-  }, []);
+  }, [isAdmin]);
 
   // Load repos on mount
   useEffect(() => {
+    if (!isAdmin) return;
     api
       .getRepos()
       .then((data) => {
@@ -728,8 +732,9 @@ export default function ModelConfigPage() {
   }, [selectedScope, selectedRepoId]);
 
   useEffect(() => {
+    if (!isAdmin) return;
     fetchActiveConfig();
-  }, [fetchActiveConfig]);
+  }, [fetchActiveConfig, isAdmin]);
 
   // Handle provider switch -> update available model selection
   const handleProviderChange = (newProvider: string) => {
@@ -842,6 +847,12 @@ export default function ModelConfigPage() {
   }, [activeConfig, selectedProvider, selectedModel]);
 
   const canSave = !isPending && isDirty && !(effectiveTargetIsGlobal && !isAdmin);
+  // Hard-block: non-admins are redirected away; the page renders Access Denied and fetches nothing.
+  useEffect(() => {
+    if (!authLoading && user && !isAdmin) {
+      router.replace("/repos");
+    }
+  }, [authLoading, user, isAdmin, router]);
 
   // Keyboard shortcut handlers: '/' to search, 'r' to sync, Cmd+S to save
   useEffect(() => {
@@ -1020,6 +1031,17 @@ export default function ModelConfigPage() {
     return currentModels.slice(0, DEFAULT_CARD_LIMIT);
   }, [currentModels, isExpanded, hasMoreModels]);
 
+  if (!authLoading && user && !isAdmin) {
+    return (
+      <AppLayout title="Model & Provider Configuration" subtitle="Manage and hot-swap active LLM inference engines globally or per repository">
+        <div className="flex flex-col items-center justify-center gap-3 py-24 text-center" role="alert">
+          <Lock className="h-8 w-8 text-zinc-500" />
+          <h1 className="text-lg font-semibold text-zinc-100">Access Denied</h1>
+          <p className="max-w-sm text-sm text-zinc-400">Model configuration is restricted to administrators.</p>
+        </div>
+      </AppLayout>
+    );
+  }
   return (
     <AppLayout
       title="Model & Provider Configuration"
