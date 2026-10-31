@@ -27,6 +27,7 @@ from app.schemas import (
     PullRequestBranchRef,
     RepoCreate,
     RepoOut,
+    SessionChatIn,
     SessionCommitIn,
     SessionCreate,
     SessionCreateIn,
@@ -254,10 +255,78 @@ def test_model_config_update_unknown_provider() -> None:
 
 def test_model_config_update_whitespace_stripped() -> None:
     cfg_zen = ModelConfigUpdate(provider="opencode_zen", model_name="  foo-free  \n")
+    assert cfg_zen.model_name == "foo-free"
     assert cfg_zen.model_name.strip() == "foo-free"
 
     cfg_openai = ModelConfigUpdate(provider="openai", model_name="  gpt-4o  ")
+    assert cfg_openai.model_name == "gpt-4o"
     assert cfg_openai.model_name.strip() == "gpt-4o"
+
+
+def test_model_config_update_pattern_validation() -> None:
+    """ModelConfigUpdate rejects invalid characters and empty strings."""
+    with pytest.raises(ValidationError):
+        ModelConfigUpdate(provider="opencode_zen", model_name="foo free-free")
+    with pytest.raises(ValidationError):
+        ModelConfigUpdate(provider="opencode_zen", model_name="foo;bar-free")
+    with pytest.raises(ValidationError):
+        ModelConfigUpdate(provider="opencode_zen", model_name="")
+    with pytest.raises(ValidationError):
+        ModelConfigUpdate(provider="opencode_zen", model_name="   ")
+
+
+def test_session_chat_in_validation() -> None:
+    """SessionChatIn enforces provider allowlist and model bounds."""
+    # 1. Valid without model or provider
+    sc1 = SessionChatIn(message="Hello agent")
+    assert sc1.message == "Hello agent"
+    assert sc1.model is None
+    assert sc1.provider is None
+
+    # 2. Valid with matching provider and model
+    sc_zen = SessionChatIn(
+        message="Help", provider="opencode_zen", model="  nemotron-3.5-lightning-free  "
+    )
+    assert sc_zen.model == "nemotron-3.5-lightning-free"
+    assert sc_zen.provider == "opencode_zen"
+
+    sc_oa = SessionChatIn(message="Help", provider="openai", model="gpt-4o")
+    assert sc_oa.provider == "openai"
+    assert sc_oa.model == "gpt-4o"
+
+    sc_anth = SessionChatIn(message="Help", provider="anthropic", model="claude-sonnet-4-5")
+    assert sc_anth.provider == "anthropic"
+    assert sc_anth.model == "claude-sonnet-4-5"
+
+    sc_groq = SessionChatIn(
+        message="Help", provider="groq", model="llama-3.3-70b-versatile"
+    )
+    assert sc_groq.provider == "groq"
+    assert sc_groq.model == "llama-3.3-70b-versatile"
+
+    # 3. Provider allowlist rejection
+    with pytest.raises(ValidationError):
+        SessionChatIn(message="Help", provider="unsupported_provider")  # type: ignore[arg-type]
+
+    # 4. Model allowlist mismatch with specified provider
+    with pytest.raises(ValidationError):
+        SessionChatIn(message="Help", provider="opencode_zen", model="gpt-4o")
+    with pytest.raises(ValidationError):
+        SessionChatIn(message="Help", provider="openai", model="claude-sonnet-4-5")
+    with pytest.raises(ValidationError):
+        SessionChatIn(message="Help", provider="anthropic", model="gpt-4o")
+
+    # 5. Model pattern rejection (spaces in name, invalid chars)
+    with pytest.raises(ValidationError):
+        SessionChatIn(message="Help", provider="groq", model="bad model name")
+    with pytest.raises(ValidationError):
+        SessionChatIn(message="Help", provider="groq", model="bad;model")
+
+    # 6. Model specified without provider -> infers provider when known
+    sc_inf_oa = SessionChatIn(message="Help", model="gpt-4o")
+    assert sc_inf_oa.provider == "openai"
+    sc_inf_zen = SessionChatIn(message="Help", model="my-model-free")
+    assert sc_inf_zen.provider == "opencode_zen"
 
 
 # ---------------------------------------------------------------------------

@@ -311,6 +311,57 @@ async def test_post_repo_duplicate_own(
 
 
 @pytest.mark.asyncio
+async def test_post_repo_ignores_active_model_config_id(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """POST /repos ignores client-supplied active_model_config_id to prevent BOLA (#205)."""
+    await truncate_all(db)
+    user = await user_factory(github_id=708, username="bola_user")
+    client = make_auth_client(user.id)
+    random_config_id = str(uuid.uuid4())
+
+    async with client:
+        resp = await client.post(
+            "/repos",
+            json={
+                "owner": "org",
+                "name": "repo_bola",
+                "active_model_config_id": random_config_id,
+            },
+        )
+        assert resp.status_code == 201
+        assert resp.json()["active_model_config_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_post_repo_fk_error_not_masked_as_409(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """POST /repos returns 400 when an IntegrityError originates from a foreign key failure."""
+    from unittest.mock import patch
+    from sqlalchemy.exc import IntegrityError
+
+    await truncate_all(db)
+    user = await user_factory(github_id=709, username="fk_user")
+    client = make_auth_client(user.id)
+
+    # Simulate an IntegrityError with foreign key error signature
+    fk_exc = IntegrityError(
+        "insert or update on table 'repos' violates foreign key constraint",
+        params={},
+        orig=Exception("violates foreign key constraint"),
+    )
+    with patch("sqlalchemy.ext.asyncio.AsyncSession.commit", side_effect=fk_exc):
+        async with client:
+            resp = await client.post(
+                "/repos",
+                json={"owner": "org", "name": "repo_fk"},
+            )
+            assert resp.status_code == 400
+            assert resp.json() == {"detail": "Invalid reference: referenced entity does not exist."}
+
+
+@pytest.mark.asyncio
 async def test_post_repo_same_owner_name_different_user(
     db: AsyncSession, user_factory, make_auth_client
 ):

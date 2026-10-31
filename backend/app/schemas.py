@@ -127,7 +127,10 @@ class RepoCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     default_branch: Optional[str] = Field(None, max_length=255)
     language_hint: Optional[str] = Field(None, max_length=255)
-    active_model_config_id: Optional[uuid.UUID] = None
+    active_model_config_id: Optional[uuid.UUID] = Field(
+        default=None,
+        description="Ignored on creation to prevent BOLA / attaching unverified tenant config (#205).",
+    )
     github_install_id: Optional[int] = Field(default=None, gt=0)
 
     @field_validator("owner", "name")
@@ -238,13 +241,35 @@ class ModelConfigUpdate(BaseModel):
     """
 
     provider: AllowedProvider
-    model_name: str
+    model_name: str = Field(
+        ..., min_length=1, max_length=255, pattern=r"^[a-zA-Z0-9._/-]+$"
+    )
     repo_id: Optional[uuid.UUID] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_empty_model_name_for_provider(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            provider = data.get("provider")
+            model = data.get("model_name")
+            if provider == "opencode_go" and (model is None or not str(model).strip()):
+                raise ValueError("Model name cannot be empty for provider 'opencode_go'.")
+            if provider == "groq" and (model is None or not str(model).strip()):
+                raise ValueError("Model name cannot be empty for provider 'groq'.")
+        return data
+
+    @field_validator("model_name", mode="before")
+    @classmethod
+    def strip_model_name(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip()
+        return v
 
     @model_validator(mode="after")
     def validate_model_name_for_provider(self) -> "ModelConfigUpdate":
         provider = self.provider
         model = self.model_name.strip()
+        self.model_name = model
 
         if provider == "opencode_zen":
             if not model.endswith("-free"):
@@ -704,10 +729,67 @@ class SessionChatIn(BaseModel):
     """
 
     message: str = Field(..., min_length=1, max_length=32_000)
-    model: Optional[str] = Field(default=None, max_length=255)
-    provider: Optional[str] = Field(default=None, max_length=100)
+    model: Optional[str] = Field(
+        default=None, min_length=1, max_length=255, pattern=r"^[a-zA-Z0-9._/-]+$"
+    )
+    provider: Optional[AllowedProvider] = None
 
     model_config = {"extra": "forbid"}
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def strip_model(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = v.strip()
+            return v if v else None
+        return v
+
+    @model_validator(mode="after")
+    def validate_provider_and_model(self) -> "SessionChatIn":
+        if self.model is not None:
+            self.model = self.model.strip()
+
+        if self.provider is not None:
+            if self.model is not None:
+                provider = self.provider
+                model = self.model
+                if provider == "opencode_zen":
+                    if not model.endswith("-free"):
+                        raise ValueError(
+                            f"Invalid model '{model}' for provider 'opencode_zen'. "
+                            "OpenCode Zen models must end with '-free'."
+                        )
+                elif provider == "opencode_go":
+                    if not model:
+                        raise ValueError("Model name cannot be empty for provider 'opencode_go'.")
+                elif provider == "openai":
+                    if model not in OPENAI_MODELS:
+                        raise ValueError(
+                            f"Invalid model '{model}' for provider 'openai'. "
+                            f"Allowed models: {sorted(OPENAI_MODELS)}"
+                        )
+                elif provider == "anthropic":
+                    if model not in ANTHROPIC_MODELS:
+                        raise ValueError(
+                            f"Invalid model '{model}' for provider 'anthropic'. "
+                            f"Allowed models: {sorted(ANTHROPIC_MODELS)}"
+                        )
+                elif provider == "groq":
+                    if not model:
+                        raise ValueError("Model name cannot be empty for provider 'groq'.")
+                else:
+                    raise ValueError(f"Unsupported provider: {provider}")
+        elif self.model is not None:
+            model = self.model
+            if model in OPENAI_MODELS:
+                self.provider = "openai"
+            elif model in ANTHROPIC_MODELS:
+                self.provider = "anthropic"
+            elif model.endswith("-free") or "nemotron" in model.lower():
+                self.provider = "opencode_zen"
+            elif "/" in model or any(kw in model.lower() for kw in ("llama", "mixtral", "groq")):
+                self.provider = "groq"
+        return self
 
 
 class SandboxVerificationOut(BaseModel):

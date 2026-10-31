@@ -565,3 +565,70 @@ async def test_put_global_model_config_allowed_when_no_admin_configured(
 
     assert resp.status_code == 200
     assert resp.json()["model_name"] == "nemotron-3.5-lightning-free"
+
+
+@pytest.mark.asyncio
+async def test_put_repo_model_config_does_not_mutate_other_user_config(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """PUT /config/model/{repo_id} does not mutate a config owned by another user or repo (#205)."""
+    await truncate_all(db)
+    user_a = await user_factory(github_id=901, username="user_a")
+    user_b = await user_factory(github_id=902, username="user_b")
+
+    repo_a = Repo(user_id=user_a.id, owner="user-a", name="repo-a")
+    db.add(repo_a)
+    await db.commit()
+    await db.refresh(repo_a)
+
+    # User A creates a repo config
+    cfg_a = ModelConfig(
+        provider="anthropic",
+        model_name="claude-sonnet-4-5",
+        base_url="https://api.anthropic.com",
+        is_active=True,
+        scope="repo",
+        repo_id=repo_a.id,
+        user_id=user_a.id,
+    )
+    db.add(cfg_a)
+    await db.commit()
+    await db.refresh(cfg_a)
+
+    # User B has repo_b, maliciously referencing cfg_a.id
+    repo_b = Repo(
+        user_id=user_b.id,
+        owner="user-b",
+        name="repo-b",
+        active_model_config_id=cfg_a.id,
+    )
+    db.add(repo_b)
+    await db.commit()
+    await db.refresh(repo_b)
+
+    # User B updates repo_b's model config
+    client_b = make_auth_client(user_b.id)
+    async with client_b:
+        resp = await client_b.put(
+            f"/config/model/{repo_b.id}",
+            json={"provider": "openai", "model_name": "gpt-4o"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["provider"] == "openai"
+    assert data["model_name"] == "gpt-4o"
+    # Ensure a NEW config was created for repo_b, rather than mutating user A's cfg_a!
+    assert data["id"] != str(cfg_a.id)
+
+    # Verify user A's config was NOT modified
+    user_a_id = user_a.id
+    repo_a_id = repo_a.id
+    cfg_a_id = cfg_a.id
+    db.expire_all()
+    reloaded_cfg_a = (
+        await db.execute(select(ModelConfig).where(ModelConfig.id == cfg_a_id))
+    ).scalar_one()
+    assert reloaded_cfg_a.provider == "anthropic"
+    assert reloaded_cfg_a.model_name == "claude-sonnet-4-5"
+    assert reloaded_cfg_a.user_id == user_a_id
+    assert reloaded_cfg_a.repo_id == repo_a_id

@@ -193,7 +193,11 @@ async def update_model_config_endpoint(
 
         if repo.active_model_config_id is not None:
             cfg_res = await db.execute(
-                select(ModelConfig).where(ModelConfig.id == repo.active_model_config_id)
+                select(ModelConfig).where(
+                    ModelConfig.id == repo.active_model_config_id,
+                    ModelConfig.repo_id == repo.id,
+                    ModelConfig.user_id == current_user.id,
+                )
             )
             existing_cfg = cfg_res.scalar_one_or_none()
         else:
