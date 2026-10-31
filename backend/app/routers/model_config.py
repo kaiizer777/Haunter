@@ -444,6 +444,46 @@ async def get_repo_model_config(
     )
 
 
+@router.delete("/{repo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_repo_model_config(
+    repo_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """
+    Reset a repo to the platform default by deactivating its repo-scoped
+    override rows and clearing the legacy linkage. Returns 404 if the repo
+    is not found or not owned by the caller (no existence oracle).
+    Usable by non-admins so repo overrides can be reset without global read.
+    """
+    repo_result = await db.execute(
+        select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
+    )
+    repo = repo_result.scalar_one_or_none()
+    if repo is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
+        )
+
+    await db.execute(
+        update(ModelConfig)
+        .where(
+            ModelConfig.is_active == True,  # noqa: E712
+            ModelConfig.scope == ModelConfigScope.REPO.value,
+            ModelConfig.repo_id == repo_id,
+        )
+        .values(is_active=False)
+    )
+    repo.active_model_config_id = None
+    await db.commit()
+    invalidate_model_config_cache(repo_id)
+    logger.info(
+        "Repo model config reset to global default: user=%s repo=%s",
+        current_user.id,
+        repo_id,
+    )
+
+
 @router.put("/{repo_id}", response_model=ModelConfigOut)
 async def update_repo_model_config(
     repo_id: uuid.UUID,

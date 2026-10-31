@@ -720,15 +720,22 @@ async def test_concurrent_post_same_repo(
 async def test_model_config_get_global_and_repo(
     db: AsyncSession, user_factory, make_auth_client
 ):
-    """GET /config/model returns global config; GET with non-owned repo_id returns 404."""
+    """GET /config/model global read is admin-only; GET with non-owned repo_id returns 404."""
     await truncate_all(db)
     user = await user_factory(github_id=714, username="cfg_user")
     user_id = user.id
     client = make_auth_client(user_id)
+    admin = await user_factory(github_id=715, username="cfg_admin", role="admin")
+    admin_client = make_auth_client(admin.id)
 
     async with client:
-        # 1. Global config
-        resp_global = await client.get("/config/model")
+        # 1a. Non-admin global read -> 403
+        resp_forbidden = await client.get("/config/model")
+        assert resp_forbidden.status_code == 403
+
+    async with admin_client:
+        # 1b. Admin global config
+        resp_global = await admin_client.get("/config/model")
         assert resp_global.status_code == 200
         data_global = resp_global.json()
         assert "model_name" in data_global
@@ -824,6 +831,52 @@ async def test_put_model_config_per_repo_and_non_owned(
             f"/config/model/{repo_a_id}",
             json={"provider": "anthropic", "model_name": "claude-sonnet-4-5"},
         )
+        assert resp_b.status_code == 404
+        assert resp_b.json() == {"detail": "Repo not found"}
+
+
+@pytest.mark.asyncio
+async def test_delete_model_config_per_repo_resets_to_global(
+    db: AsyncSession, user_factory, make_auth_client
+):
+    """DELETE /config/model/{repo_id} drops the repo override; unowned -> 404."""
+    await truncate_all(db)
+    user_a = await user_factory(github_id=718, username="user_repo_reset_a")
+    user_a_id = user_a.id
+    user_b = await user_factory(github_id=719, username="user_repo_reset_b")
+    user_b_id = user_b.id
+
+    repo_a = Repo(user_id=user_a_id, owner="org-a", name="repo-reset-a")
+    db.add(repo_a)
+    await db.commit()
+    await db.refresh(repo_a)
+    repo_a_id = repo_a.id
+
+    client_a = make_auth_client(user_a_id)
+    client_b = make_auth_client(user_b_id)
+
+    async with client_a:
+        resp_put = await client_a.put(
+            f"/config/model/{repo_a_id}",
+            json={"provider": "anthropic", "model_name": "claude-sonnet-4-5"},
+        )
+        assert resp_put.status_code == 200
+        assert resp_put.json()["scope"] == "repo"
+
+        resp_get = await client_a.get(f"/config/model?repo_id={repo_a_id}")
+        assert resp_get.status_code == 200
+        assert resp_get.json()["scope"] == "repo"
+
+        resp_del = await client_a.delete(f"/config/model/{repo_a_id}")
+        assert resp_del.status_code == 204
+
+        # After reset the repo inherits the platform default again.
+        resp_after = await client_a.get(f"/config/model?repo_id={repo_a_id}")
+        assert resp_after.status_code == 200
+        assert resp_after.json()["scope"] == "global"
+
+    async with client_b:
+        resp_b = await client_b.delete(f"/config/model/{repo_a_id}")
         assert resp_b.status_code == 404
         assert resp_b.json() == {"detail": "Repo not found"}
 
