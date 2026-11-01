@@ -42,3 +42,17 @@ The Haunter frontend is a Next.js 16 static SPA dashboard (React 19, Tailwind CS
 2. **Deterministic Component Testing**: When adding or updating UI components, write/update corresponding Vitest tests in `src/**/*.test.tsx`.
 3. **Keep the Next.js Agent Block**: Do not remove or alter the `<!-- BEGIN:nextjs-agent-rules -->` block at the top of this file; it is maintained by Next.js tooling.
 
+
+## Local PR review trigger
+
+Local dev has no auto-trigger — GitHub never reaches localhost. To run a PR review locally, trigger the real production ingress manually:
+
+```sh
+cd backend
+python scripts/trigger_local_review.py --repo <owner>/<name> --pr <N> --seed-repo
+```
+
+- `GITHUB_WEBHOOK_SECRET` in `backend/.env` must match the value the server uses (any non-empty value works locally).
+- Repeat runs need a fresh commit SHA (dedup guard blocks identical `repo+sha+pr`); the script generates one by default, or pass `--sha`.
+- `status="queued"` means the review was enqueued — the pipeline runs in `BackgroundTasks` after the HTTP response, so check the review status afterwards.
+- See `CONTRIBUTING.md` → "Trigger a local PR review" for the full walkthrough.
