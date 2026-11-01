@@ -388,11 +388,11 @@ async def test_put_model_config_non_owner_repo(
     user_factory,
     make_auth_client,
 ):
-    """PUT /config/model/{repo_id} on non-owned repo returns 404."""
+    """PUT /config/model/{repo_id} on non-owned repo returns 404 (admin-only)."""
     await truncate_all(db)
-    user_a = await user_factory(github_id=883, username="owner_a")
+    user_a = await user_factory(github_id=883, username="owner_a", role="admin")
     user_a_id = user_a.id
-    user_b = await user_factory(github_id=884, username="intruder_b")
+    user_b = await user_factory(github_id=884, username="intruder_b", role="admin")
     user_b_id = user_b.id
 
     repo_a = Repo(user_id=user_a_id, owner="owner-a", name="secret-repo")
@@ -1399,7 +1399,7 @@ async def test_get_available_models_endpoint(
     """GET /config/model/available returns the opencode_go + groq buckets."""
     clear_model_cache()
 
-    user = await user_factory(github_id=1000, username="avail_user")
+    user = await user_factory(github_id=1000, username="avail_user", role="admin")
     client = make_auth_client(user.id)
 
     async with client:
