@@ -24,7 +24,7 @@
 
 ## 🔍 PR & Devops Agent
 
-Connect any GitHub repository and Haunter becomes a team member. Every pull request gets reviewed across four dimensions — and every finding it's confident.
+Connect any GitHub repository and Haunter becomes a team member. Every pull request gets reviewed across four dimensions — with confident findings reported in the review.
 
 <br/>
 
