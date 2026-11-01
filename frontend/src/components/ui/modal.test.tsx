@@ -220,4 +220,19 @@ describe("modal.tsx", () => {
     expect(trigger).toHaveFocus();
     document.body.removeChild(trigger);
   });
+
+  it("renders icon badge when icon prop is provided", () => {
+    render(
+      <Modal
+        isOpen={true}
+        onClose={vi.fn()}
+        title="Icon Modal"
+        icon={<span data-testid="custom-icon">★</span>}
+      >
+        <p>Modal Content</p>
+      </Modal>
+    );
+
+    expect(screen.getByTestId("custom-icon")).toBeInTheDocument();
+  });
 });
