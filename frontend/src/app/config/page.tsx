@@ -585,7 +585,7 @@ export default function ModelConfigPage() {
   const isPending = isSaving;
 
   // Admin custom providers (OpenAI/Anthropic-compatible endpoints).
-  const [customProviders, setCustomProviders] = useState<Record<string, { name: string; baseUrl: string }>>({});
+  const [customProviders, setCustomProviders] = useState<Record<string, { name: string; baseUrl: string; compat?: CustomProviderCompat }>>({});
   const [customName, setCustomName] = useState("");
   const [customCompat, setCustomCompat] = useState<CustomProviderCompat>("openai");
   const [customBaseUrl, setCustomBaseUrl] = useState("");
@@ -832,7 +832,7 @@ export default function ModelConfigPage() {
       setModelOptionsByProvider((prev) => ({ ...prev, [providerId]: models }));
       setCustomProviders((prev) => ({
         ...prev,
-        [providerId]: { name: customName.trim(), baseUrl: customBaseUrl.trim() },
+        [providerId]: { name: customName.trim(), baseUrl: customBaseUrl.trim(), compat: customCompat },
       }));
       setSelectedProvider(providerId);
       setSelectedModel(models[0].id);
@@ -1544,9 +1544,9 @@ export default function ModelConfigPage() {
                   size="sm"
                   variant="outline"
                   onClick={handleOpenCustomModal}
-                  className="h-8 px-2.5 text-xs font-mono border-zinc-700/80 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200 cursor-pointer flex items-center gap-1.5 shrink-0"
+                  className="group h-8 px-2.5 text-xs font-mono rounded-[5px] text-zinc-200 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] cursor-pointer flex items-center gap-1.5 shrink-0 transition-all"
                 >
-                  <Plus className="h-3.5 w-3.5 text-zinc-400" />
+                  <Plus className="h-3.5 w-3.5 text-amber-400/90 group-hover:text-amber-300 transition-colors" />
                   <span>Add Custom Provider</span>
                 </Button>
               )}
