@@ -294,11 +294,29 @@ export interface AvailableModelItem {
 }
 
 export interface AvailableModelsOut {
-  opencode_zen: AvailableModelItem[];
+  opencode_zen?: AvailableModelItem[];
   opencode_go?: AvailableModelItem[];
-  openai: AvailableModelItem[];
-  anthropic: AvailableModelItem[];
+  openai?: AvailableModelItem[];
+  anthropic?: AvailableModelItem[];
   groq?: AvailableModelItem[];
+  [provider: string]: AvailableModelItem[] | undefined;
+}
+
+export type CustomProviderCompat = "openai" | "anthropic";
+
+export interface CustomProviderValidateRequest {
+  name: string;
+  compat: CustomProviderCompat;
+  base_url: string;
+  api_key: string;
+}
+
+export interface CustomProviderValidateOut {
+  ok: boolean;
+  supported: boolean;
+  provider_id?: string;
+  models?: AvailableModelItem[];
+  detail?: string;
 }
 
 
@@ -776,6 +794,29 @@ export const api = {
     api.put<ModelConfigOut>("/config/model", data),
   deleteRepoModelConfig: (repoId: string, options?: RequestOptions) =>
     api.delete<void>(`/config/model/${repoId}`, options),
+  validateCustomProvider: async (
+    data: CustomProviderValidateRequest,
+    options?: RequestOptions
+  ): Promise<CustomProviderValidateOut> => {
+    try {
+      return await api.post<CustomProviderValidateOut>(
+        "/config/model/custom/validate",
+        data,
+        options
+      );
+    } catch (err: unknown) {
+      // Graceful fallback when the backend endpoint is absent: report
+      // unsupported so the UI can offer direct save instead of failing.
+      if (err instanceof ApiError && (err.status === 404 || err.status === 405)) {
+        return {
+          ok: false,
+          supported: false,
+          detail: "Custom provider validation is not supported by this backend.",
+        };
+      }
+      throw err;
+    }
+  },
 
   // Code Reviews endpoints
   getCodeReviews: (params?: {

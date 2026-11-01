@@ -59,13 +59,16 @@ from tests.conftest import truncate_all
 
 OPENCODE_ZEN_ENDPOINT = "https://opencode.ai/zen/v1/chat/completions"
 OPENCODE_ZEN_MODELS_ENDPOINT = "https://opencode.ai/zen/v1/models"
+# Issue #205: env-default provider is opencode_go, so LLMClient tests
+# using the default config hit this endpoint, not the Zen one above.
+OPENCODE_GO_ENDPOINT = "https://opencode.ai/inference/go/openai/v1/chat/completions"
 
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_llm_client_complete_mocked_200():
     """LLMClient.complete() parses 200 response into content, usage, latency_ms, and model."""
-    route = respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+    route = respx.post(OPENCODE_GO_ENDPOINT).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -87,8 +90,10 @@ async def test_llm_client_complete_mocked_200():
     client = LLMClient()
     messages = [{"role": "user", "content": "Analyze CI logs"}]
     # Ensure api key is present for test
-    orig_key = settings.opencode_zen_api_key
+    orig_zen_key = settings.opencode_zen_api_key
+    orig_go_key = settings.opencode_go_api_key
     settings.opencode_zen_api_key = "test_zen_key_123"
+    settings.opencode_go_api_key = "test_zen_key_123"
 
     try:
         res = await client.complete(messages=messages)
@@ -102,9 +107,10 @@ async def test_llm_client_complete_mocked_200():
         assert route.called
         req_headers = route.calls.last.request.headers
         assert req_headers["User-Agent"] == "opencode/1.0.0"
-        assert req_headers["x-session-id"].startswith("sess_")
+        assert req_headers["x-session-id"].startswith("ses_")
     finally:
-        settings.opencode_zen_api_key = orig_key
+        settings.opencode_zen_api_key = orig_zen_key
+        settings.opencode_go_api_key = orig_go_key
 
 
 @pytest.mark.asyncio
@@ -139,7 +145,7 @@ async def test_opencode_zen_provider_sends_required_free_tier_headers():
 @respx.mock
 async def test_llm_client_complete_with_tools():
     """LLMClient.complete() passes tools schema and parses tool_calls."""
-    respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+    respx.post(OPENCODE_GO_ENDPOINT).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -200,7 +206,7 @@ async def test_llm_client_complete_with_tools():
 @respx.mock
 async def test_llm_client_missing_usage_defaults_to_zero():
     """LLM response missing the usage dict safely defaults input/output tokens to 0."""
-    respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+    respx.post(OPENCODE_GO_ENDPOINT).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -226,7 +232,7 @@ async def test_llm_client_missing_usage_defaults_to_zero():
 @respx.mock
 async def test_llm_client_latency_measured():
     """Execution latency is measured in milliseconds (>0, <30000)."""
-    respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+    respx.post(OPENCODE_GO_ENDPOINT).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -276,7 +282,7 @@ async def test_get_active_model_config_db_empty_fallback_env(db: AsyncSession):
     resolved = await get_active_model_config(db=db)
     assert resolved.provider == settings.default_provider
     assert resolved.model_name == settings.default_model
-    assert resolved.base_url == settings.opencode_zen_base_url
+    assert resolved.base_url == settings.opencode_go_base_url
 
 
 @pytest.mark.asyncio
@@ -313,40 +319,40 @@ async def test_put_model_config_switches_model_for_next_complete(
     client = make_auth_client(user_id)
 
     async with client:
-        # 1. Switch global active model to hy3-free
+        # 1. Switch global active model to deepseek-v4.1-flash
         resp = await client.put(
             "/config/model",
-            json={"provider": "opencode_zen", "model_name": "hy3-free"},
+            json={"provider": "opencode_go", "model_name": "deepseek-v4.1-flash"},
         )
         assert resp.status_code == 200
-        assert resp.json()["model_name"] == "hy3-free"
+        assert resp.json()["model_name"] == "deepseek-v4.1-flash"
 
-    # 2. Mock OpenCode Zen completion
-    mock_route = respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+    # 2. Mock OpenCode Go completion
+    mock_route = respx.post(OPENCODE_GO_ENDPOINT).mock(
         return_value=httpx.Response(
             200,
             json={
-                "model": "hy3-free",
-                "choices": [{"message": {"content": "Response from hy3-free"}}],
+                "model": "deepseek-v4.1-flash",
+                "choices": [{"message": {"content": "Response from DeepSeek"}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 10},
             },
         )
     )
 
-    orig_key = settings.opencode_zen_api_key
-    settings.opencode_zen_api_key = "test_zen_key_123"
+    orig_key = settings.opencode_go_api_key
+    settings.opencode_go_api_key = "test_go_key_123"
 
     try:
         llm = LLMClient()
         res = await llm.complete(messages=[{"role": "user", "content": "hi"}], db=db)
-        assert res["content"] == "Response from hy3-free"
-        assert res["model"] == "hy3-free"
+        assert res["content"] == "Response from DeepSeek"
+        assert res["model"] == "deepseek-v4.1-flash"
         assert mock_route.called
-        # Check payload had model hy3-free
+        # Check payload had model deepseek-v4.1-flash
         sent_body = json.loads(mock_route.calls.last.request.content)
-        assert sent_body["model"] == "hy3-free"
+        assert sent_body["model"] == "deepseek-v4.1-flash"
     finally:
-        settings.opencode_zen_api_key = orig_key
+        settings.opencode_go_api_key = orig_key
 
 
 @pytest.mark.asyncio
@@ -400,8 +406,8 @@ async def test_put_model_config_non_owner_repo(
         resp = await client_b.put(
             f"/config/model/{repo_a_id}",
             json={
-                "provider": "opencode_zen",
-                "model_name": "nemotron-3.5-lightning-free",
+                "provider": "groq",
+                "model_name": "openai/gpt-oss-120b",
             },
         )
         assert resp.status_code == 404
@@ -412,7 +418,7 @@ async def test_put_model_config_non_owner_repo(
 @respx.mock
 async def test_llm_retry_429_success_second_try():
     """Retry wrapper retries on HTTP 429 rate limit and succeeds on 2nd attempt."""
-    route = respx.post(OPENCODE_ZEN_ENDPOINT)
+    route = respx.post(OPENCODE_GO_ENDPOINT)
     route.side_effect = [
         httpx.Response(429, json={"error": "Rate limit exceeded"}),
         httpx.Response(
@@ -449,15 +455,17 @@ async def test_llm_retry_500_exhausts_and_caps():
     now verifies the Phase 17 contract: the chain eventually exhausts and
     raises ``LLMExhaustedFreeTierError`` with no secret leak.
     """
-    route = respx.post(OPENCODE_ZEN_ENDPOINT)
+    route = respx.post(OPENCODE_GO_ENDPOINT)
     # The fallback chain is ``len(FREE_TIER_FALLBACK_ORDER) * ATTEMPTS_PER_MODEL``
     # = 49 calls. respx repeats the last ``side_effect`` entry once the list
     # is exhausted, so a single 500 here covers all 49 invocations.
     route.side_effect = httpx.Response(500, text="Internal Server Error")
 
     client = LLMClient()
-    orig_key = settings.opencode_zen_api_key
+    orig_zen_key = settings.opencode_zen_api_key
+    orig_go_key = settings.opencode_go_api_key
     settings.opencode_zen_api_key = "super_secret_opencode_key_9999"
+    settings.opencode_go_api_key = "super_secret_opencode_key_9999"
 
     try:
         with patch("asyncio.sleep", return_value=None):
@@ -478,7 +486,8 @@ async def test_llm_retry_500_exhausts_and_caps():
             # at least len(chain) * 1 (one per outer LLMClient attempt).
             assert route.call_count >= len(FREE_TIER_FALLBACK_ORDER)
     finally:
-        settings.opencode_zen_api_key = orig_key
+        settings.opencode_zen_api_key = orig_zen_key
+        settings.opencode_go_api_key = orig_go_key
 
 
 @pytest.mark.asyncio
@@ -492,7 +501,7 @@ async def test_llm_timeout_generic_error():
     raise ``LLMExhaustedFreeTierError``. The timeout's generic message
     is still visible inside ``exc.attempts``.
     """
-    route = respx.post(OPENCODE_ZEN_ENDPOINT)
+    route = respx.post(OPENCODE_GO_ENDPOINT)
     route.side_effect = httpx.ReadTimeout("Read timed out")
 
     client = LLMClient()
@@ -521,7 +530,7 @@ async def test_llm_timeout_generic_error():
 async def test_llm_api_key_not_in_logs_or_response(caplog):
     """Secret API key is never logged or exposed in returned response dict."""
     secret_key = "opencode_secret_key_never_leak_12345"
-    respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+    respx.post(OPENCODE_GO_ENDPOINT).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -533,8 +542,10 @@ async def test_llm_api_key_not_in_logs_or_response(caplog):
     )
 
     client = LLMClient()
-    orig_key = settings.opencode_zen_api_key
+    orig_zen_key = settings.opencode_zen_api_key
+    orig_go_key = settings.opencode_go_api_key
     settings.opencode_zen_api_key = secret_key
+    settings.opencode_go_api_key = secret_key
 
     try:
         with caplog.at_level(logging.DEBUG):
@@ -544,7 +555,8 @@ async def test_llm_api_key_not_in_logs_or_response(caplog):
             assert secret_key not in caplog.text
             assert secret_key not in str(res)
     finally:
-        settings.opencode_zen_api_key = orig_key
+        settings.opencode_zen_api_key = orig_zen_key
+        settings.opencode_go_api_key = orig_go_key
 
 
 @pytest.mark.asyncio
@@ -552,7 +564,7 @@ async def test_llm_api_key_not_in_logs_or_response(caplog):
 async def test_llm_response_not_evaled():
     """LLM response containing script or executable injection payload is preserved as safe raw string."""
     payload_str = '<script>alert("XSS")</script>\n```python\nimport os; os.system("rm -rf /")\n```'
-    respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+    respx.post(OPENCODE_GO_ENDPOINT).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -1002,6 +1014,11 @@ async def test_dynamic_fallback_chain_construction():
             res = await client.complete(
                 messages=[{"role": "user", "content": "chain test"}],
                 model="custom-seed-free",
+                model_config=ResolvedModelConfig(
+                    provider="opencode_zen",
+                    model_name="custom-seed-free",
+                    base_url="https://opencode.ai/zen/v1",
+                ),
             )
             assert res["content"] == "ok"
             assert res["model"] == "laguna-s-2.1-free"
@@ -1323,7 +1340,7 @@ async def test_retry_policy_upstream_400_switches_model():
 @respx.mock
 async def test_retry_policy_global_401_aborts_immediately():
     """Policy 3: Global account-level 401 auth error aborts immediately across all models."""
-    respx.post(OPENCODE_ZEN_ENDPOINT).mock(
+    respx.post(OPENCODE_GO_ENDPOINT).mock(
         return_value=httpx.Response(401, json={"error": "Invalid API key"})
     )
 
@@ -1342,32 +1359,32 @@ async def test_retry_policy_global_401_aborts_immediately():
 
 
 @pytest.mark.asyncio
-async def test_put_model_config_allows_dynamic_free_models(
+async def test_put_model_config_go_allowlist_and_zen_retired(
     db: AsyncSession,
     user_factory,
     make_auth_client,
 ):
-    """PUT /config/model allows any model ending with '-free' for opencode_zen without 422."""
+    """PUT /config/model allows allowlisted opencode_go models; retired opencode_zen 422s."""
     await truncate_all(db)
     user = await user_factory(github_id=999, username="dyn_user", role="admin")
     client = make_auth_client(user.id)
 
     async with client:
-        # Valid new dynamic -free model
+        # Allowlisted OpenCode Go model
         resp = await client.put(
             "/config/model",
             json={
-                "provider": "opencode_zen",
-                "model_name": "newly-discovered-model-free",
+                "provider": "opencode_go",
+                "model_name": "deepseek-v4.1-flash",
             },
         )
         assert resp.status_code == 200
-        assert resp.json()["model_name"] == "newly-discovered-model-free"
+        assert resp.json()["model_name"] == "deepseek-v4.1-flash"
 
-        # Invalid model for opencode_zen (not ending with -free)
+        # Retired opencode_zen provider is rejected even for -free models
         resp_invalid = await client.put(
             "/config/model",
-            json={"provider": "opencode_zen", "model_name": "claude-sonnet-4-5"},
+            json={"provider": "opencode_zen", "model_name": "newly-discovered-model-free"},
         )
         assert resp_invalid.status_code == 422
 
@@ -1379,19 +1396,8 @@ async def test_get_available_models_endpoint(
     user_factory,
     make_auth_client,
 ):
-    """GET /config/model/available returns dynamically discovered OpenCode Zen models and standard providers."""
+    """GET /config/model/available returns the opencode_go + groq buckets."""
     clear_model_cache()
-    respx.get(OPENCODE_ZEN_MODELS_ENDPOINT).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "data": [
-                    {"id": "test-dynamic-model-free"},
-                    {"id": "paid-model"},
-                ]
-            },
-        )
-    )
 
     user = await user_factory(github_id=1000, username="avail_user", role="admin")
     client = make_auth_client(user.id)
@@ -1400,20 +1406,20 @@ async def test_get_available_models_endpoint(
         resp = await client.get("/config/model/available")
         assert resp.status_code == 200
         data = resp.json()
-        assert "opencode_zen" in data
-        assert "openai" in data
-        assert "anthropic" in data
-        zen_ids = [m["id"] for m in data["opencode_zen"]]
-        assert "test-dynamic-model-free" in zen_ids
-        assert "paid-model" not in zen_ids
+        assert set(data.keys()) == {"opencode_go", "groq"}
+        go_ids = [m["id"] for m in data["opencode_go"]]
+        for mid in ("deepseek-v4.1-flash", "glm-5.2", "mimo-v2.6-flash"):
+            assert mid in go_ids
+        groq_ids = [m["id"] for m in data["groq"]]
+        assert "openai/gpt-oss-120b" in groq_ids
 
 
 def test_model_config_update_schema_validation():
-    """ModelConfigUpdate allows any *-free model for opencode_zen, strict allowlist for others, and rejects invalid models."""
+    """ModelConfigUpdate allows allowlisted go/groq models, rejects retired providers and unknown models."""
     from app.schemas import ModelConfigUpdate
     from pydantic import ValidationError
 
-    # Valid opencode_zen and opencode_go models
+    # Valid opencode_go models
     m_go = ModelConfigUpdate(
         provider="opencode_go", model_name="deepseek-v4.1-flash"
     )
@@ -1423,39 +1429,25 @@ def test_model_config_update_schema_validation():
         ModelConfigUpdate(provider="opencode_go", model_name="")
 
     with pytest.raises(ValidationError, match="Invalid model selection."):
-        ModelConfigUpdate(provider="opencode_zen", model_name="invalid")
+        ModelConfigUpdate(provider="opencode_go", model_name="invalid")
 
-    # Valid opencode_zen free models
     m1 = ModelConfigUpdate(
-        provider="opencode_zen", model_name="nemotron-3.5-lightning-free"
+        provider="opencode_go", model_name="nemotron-3.5-lightning-free"
     )
     assert m1.model_name == "nemotron-3.5-lightning-free"
 
-    m2 = ModelConfigUpdate(provider="opencode_zen", model_name="laguna-s-2.1-free")
-    assert m2.model_name == "laguna-s-2.1-free"
+    m2 = ModelConfigUpdate(provider="opencode_go", model_name="glm-5.2")
+    assert m2.model_name == "glm-5.2"
 
-    m3 = ModelConfigUpdate(
-        provider="opencode_zen", model_name="brand-new-rotational-model-free"
-    )
-    assert m3.model_name == "brand-new-rotational-model-free"
-
-    # Invalid opencode_zen model (not ending in -free)
+    # Invalid opencode_go model (not in allowlist)
     with pytest.raises(ValidationError):
-        ModelConfigUpdate(provider="opencode_zen", model_name="claude-sonnet-4-5")
+        ModelConfigUpdate(provider="opencode_go", model_name="gpt-4o")
 
-    # Valid openai models
-    m4 = ModelConfigUpdate(provider="openai", model_name="gpt-4o")
-    assert m4.model_name == "gpt-4o"
+    # Retired providers are rejected by the AllowedProvider literal
+    for retired in ("opencode_zen", "openai", "anthropic"):
+        with pytest.raises(ValidationError):
+            ModelConfigUpdate(provider=retired, model_name="whatever")  # type: ignore[arg-type]
 
-    # Invalid openai model
-    with pytest.raises(ValidationError):
-        ModelConfigUpdate(provider="openai", model_name="unapproved-gpt-model")
-
-    # Valid anthropic models
-    m5 = ModelConfigUpdate(provider="anthropic", model_name="claude-sonnet-4-5")
-    assert m5.model_name == "claude-sonnet-4-5"
-
-    # Invalid anthropic model
     # Valid groq models
     m6 = ModelConfigUpdate(provider="groq", model_name="openai/gpt-oss-120b")
     assert m6.model_name == "openai/gpt-oss-120b"
@@ -1471,31 +1463,23 @@ def test_model_config_update_schema_validation():
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_available_models_endpoint_direct():
-    """GET /config/model/available endpoint returns structured provider models."""
+    """GET /config/model/available endpoint returns the opencode_go + groq buckets."""
     from app.routers.model_config import get_available_models_endpoint
 
     clear_model_cache()
-    respx.get(OPENCODE_ZEN_MODELS_ENDPOINT).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "data": [
-                    {"id": "test-dynamic-model-free"},
-                    {"id": "paid-model"},
-                ]
-            },
-        )
-    )
 
     fake_user = User(id=uuid.uuid4(), github_id=1234, github_username="test_user", role="admin")
     res = await get_available_models_endpoint(current_user=fake_user)
-    assert any(m.id == "test-dynamic-model-free" for m in res.opencode_zen)
-    assert len(res.opencode_go) > 0
-    assert any(m.id == "deepseek-v4.1-flash" for m in res.opencode_go)
-    assert not any(m.id == "paid-model" for m in res.opencode_zen)
-    assert any(m.id == "gpt-4o" for m in res.openai)
-    assert any(m.id == "claude-sonnet-4-5" for m in res.anthropic)
-    assert any(m.id == "openai/gpt-oss-120b" for m in res.groq)
+    go_ids = [m.id for m in res.opencode_go]
+    for mid in ("deepseek-v4.1-flash", "glm-5.2", "mimo-v2.6-flash"):
+        assert mid in go_ids
+    groq_ids = [m.id for m in res.groq]
+    assert groq_ids == [
+        "openai/gpt-oss-120b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "deepseek-r1-distill-llama-70b",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1587,7 +1571,12 @@ async def test_opencode_zen_fallback_to_groq_on_free_tier_error():
     client = LLMClient()
     try:
         res = await client.complete(
-            messages=[{"role": "user", "content": "diagnose failure"}]
+                messages=[{"role": "user", "content": "diagnose failure"}],
+                model_config=ResolvedModelConfig(
+                    provider="opencode_zen",
+                    model_name="nemotron-3.5-lightning-free",
+                    base_url="https://opencode.ai/zen/v1",
+                ),
         )
         assert res["content"] == "Fixed via Groq"
         assert res["model"] == "llama-3.3-70b-versatile"

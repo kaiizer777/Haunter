@@ -5,7 +5,8 @@ import { AppLayout } from "@/components/layout/app-layout";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SelectDropdown, SelectOption } from "@/components/ui/select-dropdown";
-import { api, ModelConfigOut, RepoOut, ApiError } from "@/lib/api";
+import { Modal } from "@/components/ui/modal";
+import { api, ModelConfigOut, RepoOut, ApiError, AvailableModelItem, CustomProviderCompat } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
 import {
@@ -13,11 +14,9 @@ import {
   CheckCircle2,
   AlertCircle,
   ShieldCheck,
-  Shield,
   GitBranch,
   Globe,
   Zap,
-  Sparkles,
   Lock,
   Copy,
   Check,
@@ -32,36 +31,30 @@ import {
   FolderGit2,
   ChevronDown,
   ChevronUp,
+  Plus,
+  Server,
+  Eye,
+  EyeOff,
+  Sparkles,
 } from "lucide-react";
 
 // Strict server-side allowlists (WORK.md:252)
 const PROVIDER_OPTIONS = [
-  { id: "opencode_zen", name: "OpenCode Zen", defaultModel: "nemotron-3.5-lightning-free" },
   { id: "opencode_go", name: "OpenCode Go", defaultModel: "deepseek-v4.1-flash" },
-  { id: "openai", name: "OpenAI", defaultModel: "gpt-4o" },
-  { id: "anthropic", name: "Anthropic", defaultModel: "claude-sonnet-4-5" },
   { id: "groq", name: "Groq", defaultModel: "openai/gpt-oss-120b" },
 ];
 
+const BASE_URL_PRESETS = [
+  { label: "Together AI", value: "https://api.together.xyz/v1" },
+  { label: "OpenAI", value: "https://api.openai.com/v1" },
+] as const;
+
 const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string; context_window?: number }[]> = {
-  opencode_zen: [
-    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Default · Free", context_window: 131072 },
-    { id: "laguna-s-2.1-free", name: "Laguna S 2.1", tag: "Fast · Free", context_window: 65536 },
-    { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin", tag: "1M · Free", context_window: 1048576 },
-  ],
   opencode_go: [
     { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", tag: "1M · Low Latency", context_window: 1000000 },
     { id: "glm-5.2", name: "GLM 5.2", tag: "1M · Reasoning", context_window: 1000000 },
     { id: "mimo-v2.6-flash", name: "Mimo V2.6 Flash", tag: "1M · Fast", context_window: 1000000 },
     { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning", tag: "Free Tier", context_window: 131072 },
-  ],
-  openai: [
-    { id: "gpt-4o", name: "GPT-4o", tag: "Flagship", context_window: 128000 },
-    { id: "gpt-4o-mini", name: "GPT-4o Mini", tag: "Fast", context_window: 128000 },
-  ],
-  anthropic: [
-    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", tag: "SOTA Fixes", context_window: 200000 },
-    { id: "claude-haiku-3-5", name: "Claude Haiku 3.5", tag: "Low Latency", context_window: 200000 },
   ],
   groq: [
     { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B", tag: "High Reasoning · Fallback", context_window: 131072 },
@@ -83,16 +76,6 @@ const PROVIDER_METADATA: Record<
     badgeClass: string;
   }
 > = {
-  opencode_zen: {
-    name: "OpenCode Zen",
-    tag: "Recommended · Free Tier",
-    shortBadge: "Free Tier",
-    description: "High-throughput inference gateway built for rapid CI fault diagnosis and automated patch synthesis.",
-    baseUrl: "https://opencode.ai/zen/v1",
-    icon: Zap,
-    accentText: "text-amber-400",
-    badgeClass: "bg-amber-400/10 border-amber-400/30 text-amber-300",
-  },
   opencode_go: {
     name: "OpenCode Go",
     tag: "Low Latency · Direct Gateway",
@@ -102,26 +85,6 @@ const PROVIDER_METADATA: Record<
     icon: Activity,
     accentText: "text-emerald-400",
     badgeClass: "bg-emerald-400/10 border-emerald-400/30 text-emerald-300",
-  },
-  openai: {
-    name: "OpenAI",
-    tag: "Tier 1 Foundation",
-    shortBadge: "Direct API",
-    description: "Frontier reasoning engines providing high-precision semantic root cause analysis.",
-    baseUrl: "https://api.openai.com/v1",
-    icon: Sparkles,
-    accentText: "text-sky-400",
-    badgeClass: "bg-sky-400/10 border-sky-400/30 text-sky-300",
-  },
-  anthropic: {
-    name: "Anthropic",
-    tag: "SOTA Coding Models",
-    shortBadge: "Direct API",
-    description: "Advanced agentic coding models offering long-horizon repair planning.",
-    baseUrl: "https://api.anthropic.com/v1",
-    icon: Shield,
-    accentText: "text-violet-400",
-    badgeClass: "bg-violet-400/10 border-violet-400/30 text-violet-300",
   },
   groq: {
     name: "Groq",
@@ -585,15 +548,19 @@ export default function ModelConfigPage() {
   const isAdmin = Boolean(user?.is_admin);
   const hasInitializedScopeRef = useRef(false);
   const activeFetchControllerRef = useRef<AbortController | null>(null);
+  const activeValidateControllerRef = useRef<AbortController | null>(null);
+  const activeValidateRequestRef = useRef<number>(0);
 
   const [repos, setRepos] = useState<RepoOut[]>([]);
-  const [selectedScope, setSelectedScope] = useState<"global" | "repo">("global");
+  const [selectedScope, setSelectedScope] = useState<"global" | "repo">(() =>
+    (user?.is_admin === false ? "repo" : "global")
+  );
   const [selectedRepoId, setSelectedRepoId] = useState<string>("");
 
   const [activeConfig, setActiveConfig] = useState<ModelConfigOut | null>(null);
   const [globalConfig, setGlobalConfig] = useState<ModelConfigOut | null>(null);
-  const [selectedProvider, setSelectedProvider] = useState<string>("opencode_zen");
-  const [selectedModel, setSelectedModel] = useState<string>("nemotron-3.5-lightning-free");
+  const [selectedProvider, setSelectedProvider] = useState<string>("opencode_go");
+  const [selectedModel, setSelectedModel] = useState<string>("deepseek-v4.1-flash");
   const [modelOptionsByProvider, setModelOptionsByProvider] = useState<
     Record<string, { id: string; name: string; tag: string; context_window?: number }[]>
   >(DEFAULT_MODEL_OPTIONS_BY_PROVIDER);
@@ -617,12 +584,26 @@ export default function ModelConfigPage() {
   const [isSaving, setIsSaving] = useState(false);
   const isPending = isSaving;
 
+  // Admin custom providers (OpenAI/Anthropic-compatible endpoints).
+  const [customProviders, setCustomProviders] = useState<Record<string, { name: string; baseUrl: string }>>({});
+  const [customName, setCustomName] = useState("");
+  const [customCompat, setCustomCompat] = useState<CustomProviderCompat>("openai");
+  const [customBaseUrl, setCustomBaseUrl] = useState("");
+  const [customApiKey, setCustomApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [customModels, setCustomModels] = useState<AvailableModelItem[]>([]);
+  const [isValidatingCustom, setIsValidatingCustom] = useState(false);
+  const [customError, setCustomError] = useState<string | null>(null);
+  const [isCustomModalOpen, setIsCustomModalOpen] = useState(false);
+
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   // Clean up any ongoing fetch controllers on unmount
   useEffect(() => {
     return () => {
       activeFetchControllerRef.current?.abort();
+      activeValidateControllerRef.current?.abort();
+      activeValidateRequestRef.current = 0;
     };
   }, []);
 
@@ -634,15 +615,21 @@ export default function ModelConfigPage() {
       .getAvailableModels()
       .then((data) => {
         if (data) {
-          const raw = data as unknown as Record<string, typeof DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen>;
-          setModelOptionsByProvider({
-            opencode_zen: data.opencode_zen?.length ? data.opencode_zen : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_zen,
-            opencode_go: (data.opencode_go ?? []).length
-              ? (data.opencode_go ?? [])
-              : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_go,
-            openai: data.openai?.length ? data.openai : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.openai,
-            anthropic: data.anthropic?.length ? data.anthropic : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.anthropic,
-            groq: data.groq?.length ? data.groq : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.groq,
+          const raw = data as unknown as Record<string, AvailableModelItem[] | undefined>;
+          setModelOptionsByProvider((prev) => {
+            const next: typeof DEFAULT_MODEL_OPTIONS_BY_PROVIDER = {
+              opencode_go: (raw.opencode_go ?? []).length
+                ? (raw.opencode_go ?? [])
+                : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.opencode_go,
+              groq: raw.groq?.length ? raw.groq : DEFAULT_MODEL_OPTIONS_BY_PROVIDER.groq,
+            };
+            for (const [key, value] of Object.entries(raw)) {
+              if (key !== "opencode_go" && key !== "groq" && Array.isArray(value) && value.length) {
+                next[key] = value;
+              }
+            }
+            void prev;
+            return next;
           });
         }
       })
@@ -657,10 +644,6 @@ export default function ModelConfigPage() {
         setRepos(data);
         if (data.length > 0) {
           setSelectedRepoId(data[0].id);
-          if (user && !user.is_admin && !hasInitializedScopeRef.current) {
-            setSelectedScope("repo");
-            hasInitializedScopeRef.current = true;
-          }
         }
       })
       .catch(() => {});
@@ -732,8 +715,8 @@ export default function ModelConfigPage() {
         // Global platform default is unavailable here (non-admin 403):
         // clear stale repo state instead of showing it under Global scope.
         setActiveConfig(null);
-        setSelectedProvider("opencode_zen");
-        setSelectedModel("nemotron-3.5-lightning-free");
+        setSelectedProvider("opencode_go");
+        setSelectedModel("deepseek-v4.1-flash");
       }
     } catch (err: unknown) {
       if (controller.signal.aborted) return;
@@ -771,7 +754,115 @@ export default function ModelConfigPage() {
     }
   };
 
+  const handleOpenCustomModal = useCallback(() => {
+    activeValidateControllerRef.current?.abort();
+    activeValidateControllerRef.current = null;
+    activeValidateRequestRef.current = 0;
+    setCustomError(null);
+    setCustomModels([]);
+    setShowApiKey(false);
+    setIsCustomModalOpen(true);
+  }, []);
+
+  const handleCloseCustomModal = useCallback(() => {
+    activeValidateControllerRef.current?.abort();
+    activeValidateControllerRef.current = null;
+    activeValidateRequestRef.current = 0;
+    setIsCustomModalOpen(false);
+    setCustomError(null);
+    setCustomModels([]);
+    setIsValidatingCustom(false);
+    setShowApiKey(false);
+  }, []);
+
+  // Admin custom provider: validate -> discover -> select -> persist via
+  // the standard save flow. Falls back gracefully when the backend has no
+  // validation endpoint (validateCustomProvider reports unsupported).
+  const handleValidateCustomProvider = useCallback(async () => {
+    if (!customName.trim() || !customBaseUrl.trim() || !customApiKey) {
+      setCustomError("Name, base URL, and API key are required.");
+      return;
+    }
+    setCustomError(null);
+    setIsValidatingCustom(true);
+
+    activeValidateControllerRef.current?.abort();
+    const validateController = new AbortController();
+    activeValidateControllerRef.current = validateController;
+
+    const requestId = ++activeValidateRequestRef.current;
+
+    try {
+      const result = await api.validateCustomProvider(
+        {
+          name: customName.trim(),
+          compat: customCompat,
+          base_url: customBaseUrl.trim(),
+          api_key: customApiKey,
+        },
+        { signal: validateController.signal }
+      );
+
+      // If modal was closed or a newer request was dispatched while in-flight, ignore response
+      if (
+        validateController.signal.aborted ||
+        activeValidateRequestRef.current !== requestId
+      ) {
+        return;
+      }
+
+      if (!result.supported) {
+        setCustomError(
+          result.detail ||
+            "Custom provider validation is not supported by this backend. Save directly instead."
+        );
+        return;
+      }
+      if (!result.ok) {
+        setCustomError(result.detail || "Custom provider validation failed.");
+        return;
+      }
+      const providerId =
+        result.provider_id ||
+        `custom_${customName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+      const models = result.models?.length
+        ? result.models
+        : [{ id: customName.trim(), name: customName.trim(), tag: "Custom" }];
+      setCustomModels(models);
+      setModelOptionsByProvider((prev) => ({ ...prev, [providerId]: models }));
+      setCustomProviders((prev) => ({
+        ...prev,
+        [providerId]: { name: customName.trim(), baseUrl: customBaseUrl.trim() },
+      }));
+      setSelectedProvider(providerId);
+      setSelectedModel(models[0].id);
+      setCustomName("");
+      setCustomBaseUrl("");
+      setCustomApiKey("");
+      setShowApiKey(false);
+      setIsCustomModalOpen(false);
+    } catch (err: unknown) {
+      if (
+        validateController.signal.aborted ||
+        activeValidateRequestRef.current !== requestId
+      ) {
+        return;
+      }
+      setCustomError(err instanceof ApiError ? err.message : "Custom provider validation failed.");
+    } finally {
+      if (activeValidateControllerRef.current === validateController) {
+        activeValidateControllerRef.current = null;
+      }
+      if (activeValidateRequestRef.current === requestId) {
+        setIsValidatingCustom(false);
+      }
+    }
+  }, [customName, customCompat, customBaseUrl, customApiKey]);
+
   const effectiveTargetIsGlobal = selectedScope === "global" || !selectedRepoId;
+  // Non-admin mutation controls are disabled when targeting global scope;
+  // the backend remains authoritative. Repo overrides stay editable.
+  const canMutateTarget = isAdmin || !effectiveTargetIsGlobal;
 
   const handleSaveConfig = useCallback(async () => {
     if (!isAdmin) {
@@ -941,14 +1032,31 @@ export default function ModelConfigPage() {
     setTimeout(() => setCopiedModelId(null), 1800);
   };
 
-  const activeProviderMeta = PROVIDER_METADATA[selectedProvider] || PROVIDER_METADATA.opencode_zen;
+  const registeredCustom = customProviders[selectedProvider];
+  const activeProviderMeta = PROVIDER_METADATA[selectedProvider] ||
+    (registeredCustom
+      ? {
+          name: registeredCustom.name,
+          tag: "Custom Inference Endpoint",
+          shortBadge: "Custom API",
+          description: "Custom OpenAI/Anthropic-compatible endpoint. Select a discovered model below, then Save Configuration to persist.",
+          baseUrl: registeredCustom.baseUrl,
+          icon: Zap,
+          accentText: "text-amber-400",
+          badgeClass: "bg-amber-400/10 border-amber-400/30 text-amber-300",
+        }
+      : PROVIDER_METADATA.opencode_go);
   const currentBaseUrl = activeConfig?.base_url || activeProviderMeta.baseUrl;
   const currentRepo = repos.find((r) => r.id === selectedRepoId);
 
   const providerDropdownOptions = useMemo<SelectOption[]>(() => {
     const q = searchQuery.toLowerCase().trim();
-    const all = PROVIDER_OPTIONS.map((p) => {
-      const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_zen;
+    const allProviders = [
+      ...PROVIDER_OPTIONS,
+      ...Object.entries(customProviders).map(([id, c]) => ({ id, name: c.name, defaultModel: "" })),
+    ];
+    const all = allProviders.map((p) => {
+      const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_go;
       const Icon = meta.icon;
       return {
         value: p.id,
@@ -961,7 +1069,7 @@ export default function ModelConfigPage() {
     if (!q) return all;
 
     return all.filter((p) => {
-      const meta = PROVIDER_METADATA[p.value] || PROVIDER_METADATA.opencode_zen;
+      const meta = PROVIDER_METADATA[p.value] || PROVIDER_METADATA.opencode_go;
       return (
         p.value.toLowerCase().includes(q) ||
         p.label.toLowerCase().includes(q) ||
@@ -970,7 +1078,7 @@ export default function ModelConfigPage() {
         meta.shortBadge.toLowerCase().includes(q)
       );
     });
-  }, [searchQuery]);
+  }, [searchQuery, customProviders]);
 
   // Normalize provider model list for the currently selected provider
   const allProviderModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
@@ -1017,13 +1125,12 @@ export default function ModelConfigPage() {
 
     const matchingProviderIds = new Set(
       PROVIDER_OPTIONS.filter((p) => {
-        const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_zen;
+        const meta = PROVIDER_METADATA[p.id] || PROVIDER_METADATA.opencode_go;
         return (
           p.id.toLowerCase().includes(q) ||
           p.name.toLowerCase().includes(q) ||
           meta.tag.toLowerCase().includes(q) ||
           meta.shortBadge.toLowerCase().includes(q) ||
-          (p.id === "opencode_zen" && (q.includes("zen") || q.includes("opencode"))) ||
           (p.id === "opencode_go" && (q.includes("go") || q.includes("opencode")))
         );
       }).map((p) => p.id)
@@ -1429,8 +1536,20 @@ export default function ModelConfigPage() {
                 placeholder={activeProviderMeta.name}
                 ignoreClickOutsideRef={searchInputRef}
                 buttonClassName="min-w-[190px] sm:min-w-[210px] h-8 font-mono text-xs bg-zinc-900/80 border-zinc-700/80 hover:border-zinc-600 text-zinc-200"
-                disabled={isPending}
+                disabled={isPending || !canMutateTarget}
               />
+              {isAdmin && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={handleOpenCustomModal}
+                  className="h-8 px-2.5 text-xs font-mono border-zinc-700/80 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200 cursor-pointer flex items-center gap-1.5 shrink-0"
+                >
+                  <Plus className="h-3.5 w-3.5 text-zinc-400" />
+                  <span>Add Custom Provider</span>
+                </Button>
+              )}
             </div>
           </div>
 
@@ -1444,6 +1563,24 @@ export default function ModelConfigPage() {
               {activeProviderMeta.baseUrl.replace("https://", "")}
             </span>
           </div>
+
+          {/* Discovered models & save guidance for active custom provider */}
+          {registeredCustom && (
+            <div
+              role="status"
+              className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs font-mono text-amber-200 shadow-inner"
+            >
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-amber-400 shrink-0" />
+                <span>
+                  Discovered <strong>{(modelOptionsByProvider[selectedProvider] || []).length} model{((modelOptionsByProvider[selectedProvider] || []).length === 1 ? "" : "s")}</strong> for <strong>{registeredCustom.name}</strong>. Select an architecture below and save.
+                </span>
+              </div>
+              <span className="text-[11px] text-amber-400 font-medium">
+                Save Configuration to persist
+              </span>
+            </div>
+          )}
 
           {/* Models Header & Filter Controls (Hot-key '/' enabled) */}
           <div className="relative z-10 space-y-4 pt-1">
@@ -1576,11 +1713,11 @@ export default function ModelConfigPage() {
                     <div
                       key={`${m.provider || selectedProvider}:${m.id}`}
                       role="button"
-                      tabIndex={isPending ? -1 : 0}
+                      tabIndex={isPending || !canMutateTarget ? -1 : 0}
                       aria-pressed={isSelected}
-                      aria-disabled={isPending}
+                      aria-disabled={isPending || !canMutateTarget}
                       onClick={() => {
-                        if (!isPending) {
+                        if (!isPending && canMutateTarget) {
                           setSelectedModel(m.id);
                           if (m.provider && m.provider !== selectedProvider) {
                             setSelectedProvider(m.provider);
@@ -1588,7 +1725,7 @@ export default function ModelConfigPage() {
                         }
                       }}
                       onKeyDown={(e) => {
-                        if ((e.key === "Enter" || e.key === " ") && !isPending) {
+                        if ((e.key === "Enter" || e.key === " ") && !isPending && canMutateTarget) {
                           e.preventDefault();
                           setSelectedModel(m.id);
                           if (m.provider && m.provider !== selectedProvider) {
@@ -1782,7 +1919,7 @@ export default function ModelConfigPage() {
                     : "bg-zinc-800/90 text-zinc-400 hover:bg-zinc-800 border border-zinc-700/60"
                 )}
               >
-                {isSaving ? (
+                {isPending ? (
                   <span className="flex items-center gap-2">
                     <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
                     <span>Saving...</span>
@@ -1954,7 +2091,7 @@ export default function ModelConfigPage() {
                       : "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] cursor-pointer"
                   )}
                 >
-                  {isSaving ? (
+                  {isPending ? (
                     <>
                       <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
                       <span>Saving...</span>
@@ -1976,6 +2113,245 @@ export default function ModelConfigPage() {
               </div>
             </div>
           </div>
+        )}
+        {/* Top-level Admin Custom Provider Modal to avoid backdrop-blur-sm containing block trap */}
+        {/* Admin custom provider modal: name + compat + baseURL + key -> validate -> discover -> select -> persist via Save */}
+        {isAdmin && (
+          <Modal
+            isOpen={isCustomModalOpen}
+            onClose={handleCloseCustomModal}
+            title="Custom Provider"
+            description="Connect an OpenAI or Anthropic-compatible custom inference endpoint."
+            icon={<Server className="h-4 w-4 text-amber-400" />}
+            className="max-w-lg"
+          >
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
+                  <span>Name <span className="text-red-400">*</span></span>
+                  <input
+                    aria-label="Custom provider name"
+                    value={customName}
+                    onChange={(e) => setCustomName(e.target.value)}
+                    disabled={isPending || isValidatingCustom}
+                    placeholder="my-provider"
+                    className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                  />
+                </label>
+                <div className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
+                  <span>Compatibility <span className="text-red-400">*</span></span>
+                  <div className="relative flex rounded-[6px] border border-zinc-700/80 bg-zinc-900/90 p-0.5 h-8.5">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={customCompat === "openai"}
+                      onClick={() => setCustomCompat("openai")}
+                      disabled={isPending || isValidatingCustom}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer",
+                        customCompat === "openai"
+                          ? "bg-zinc-800 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.4)] border border-amber-500/30"
+                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 border border-transparent"
+                      )}
+                    >
+                      <Sparkles className={cn("h-3.5 w-3.5", customCompat === "openai" ? "text-amber-400" : "text-zinc-400")} />
+                      <span>OpenAI</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={customCompat === "anthropic"}
+                      onClick={() => setCustomCompat("anthropic")}
+                      disabled={isPending || isValidatingCustom}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer",
+                        customCompat === "anthropic"
+                          ? "bg-zinc-800 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.4)] border border-amber-500/30"
+                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 border border-transparent"
+                      )}
+                    >
+                      <Zap className={cn("h-3.5 w-3.5", customCompat === "anthropic" ? "text-amber-400" : "text-zinc-400")} />
+                      <span>Anthropic</span>
+                    </button>
+                    <select
+                      aria-label="Custom provider compatibility"
+                      value={customCompat}
+                      onChange={(e) => setCustomCompat(e.target.value as CustomProviderCompat)}
+                      disabled={isPending || isValidatingCustom}
+                      className="sr-only"
+                      tabIndex={-1}
+                    >
+                      <option value="openai">OpenAI-compatible</option>
+                      <option value="anthropic">Anthropic-compatible</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1.5 sm:col-span-2">
+                  <div className="flex items-center justify-between text-xs font-mono text-zinc-300">
+                    <label htmlFor="custom-base-url">
+                      Base URL <span className="text-red-400">*</span>
+                    </label>
+                  </div>
+                  <input
+                    id="custom-base-url"
+                    aria-label="Custom provider base URL"
+                    value={customBaseUrl}
+                    onChange={(e) => setCustomBaseUrl(e.target.value)}
+                    disabled={isPending || isValidatingCustom}
+                    placeholder="https://my-host/v1"
+                    className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                  />
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                    <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">Presets:</span>
+                    {BASE_URL_PRESETS.map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        disabled={isPending || isValidatingCustom}
+                        onClick={() => setCustomBaseUrl(preset.value)}
+                        className={cn(
+                          "px-2 py-0.5 rounded-[4px] border text-[11px] font-mono transition-all cursor-pointer",
+                          customBaseUrl === preset.value
+                            ? "border-amber-500/40 bg-amber-500/15 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.15)]"
+                            : "border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 hover:bg-zinc-800/50"
+                        )}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1.5 sm:col-span-2">
+                  <div className="flex items-center justify-between text-xs font-mono text-zinc-300">
+                    <label htmlFor="custom-api-key">
+                      API Key <span className="text-red-400">*</span>
+                    </label>
+                  </div>
+                  <div className="relative">
+                    <input
+                      id="custom-api-key"
+                      aria-label="Custom provider API key"
+                      type={showApiKey ? "text" : "password"}
+                      value={customApiKey}
+                      onChange={(e) => setCustomApiKey(e.target.value)}
+                      disabled={isPending || isValidatingCustom}
+                      placeholder="sk-..."
+                      className="h-8.5 w-full rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 pl-2.5 pr-9 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey((prev) => !prev)}
+                      disabled={isPending || isValidatingCustom}
+                      aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-[4px] p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-amber-400 transition-colors"
+                    >
+                      {showApiKey ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {customError && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2.5 p-3 rounded-[6px] border border-red-500/30 bg-red-950/30 text-xs font-mono text-red-300 shadow-[inset_0_1px_0_rgba(239,68,68,0.1)]"
+                >
+                  <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed">{customError}</span>
+                </div>
+              )}
+
+              {customModels.length > 0 && (
+                <div className="space-y-2 p-3 rounded-[6px] border border-zinc-800/90 bg-[#0d0d10]/80">
+                  <div className="flex items-center justify-between text-xs font-mono">
+                    <span className="text-zinc-400 font-medium flex items-center gap-1.5">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-amber-400" />
+                      Discovered Models ({customModels.length})
+                    </span>
+                    <span className="text-[11px] text-zinc-500">
+                      Click to pre-select
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pt-1">
+                    {customModels.map((m) => {
+                      const isSelected = selectedModel === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setSelectedModel(m.id)}
+                          disabled={isPending}
+                          className={cn(
+                            "group relative flex items-center gap-1.5 rounded-[5px] px-2.5 py-1 text-xs font-mono transition-all cursor-pointer",
+                            isSelected
+                              ? "border border-amber-500/50 bg-amber-500/15 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.15)] font-semibold"
+                              : "border border-zinc-700/70 bg-zinc-900/90 text-zinc-300 hover:border-zinc-500 hover:text-zinc-100 hover:bg-zinc-850"
+                          )}
+                        >
+                          {isSelected ? (
+                            <Check className="h-3 w-3 text-amber-400 shrink-0" />
+                          ) : (
+                            <span className="h-1.5 w-1.5 rounded-full bg-zinc-600 group-hover:bg-zinc-400" />
+                          )}
+                          <span>{m.name || m.id}</span>
+                          {m.tag && (
+                            <span
+                              className={cn(
+                                "text-[10px] px-1 py-0.2 rounded border",
+                                isSelected
+                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-400/80"
+                                  : "border-zinc-700/50 bg-zinc-800/60 text-zinc-500"
+                              )}
+                            >
+                              {m.tag}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[11px] font-mono text-zinc-500 pt-0.5">
+                    Select a model, then Save Configuration to persist.
+                  </p>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-zinc-800/80">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={handleCloseCustomModal}
+                  className="h-8.5 px-3 text-xs font-mono text-zinc-400 hover:text-zinc-200 border-zinc-800 hover:bg-zinc-800/60"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleValidateCustomProvider}
+                  disabled={isPending || isValidatingCustom}
+                  className="h-8.5 px-3.5 text-xs font-mono font-bold rounded-[6px] bg-gradient-to-b from-amber-400 via-amber-500 to-amber-600 text-zinc-950 border-t border-t-amber-300/80 border-x border-x-amber-500/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_4px_rgba(0,0,0,0.3)] hover:brightness-105 active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.35)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isValidatingCustom ? (
+                    <span className="flex items-center gap-2">
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
+                      <span>Validating...</span>
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      <Server className="h-3.5 w-3.5 text-zinc-950" />
+                      <span>Validate & Discover Models</span>
+                    </span>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </Modal>
         )}
       </div>
     </AppLayout>

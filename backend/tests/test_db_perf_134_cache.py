@@ -454,7 +454,7 @@ async def test_update_model_config_repo_invalidates_before_refresh():
     mock_db.refresh.side_effect = RuntimeError("refresh failed")
 
     body = MagicMock(
-        provider="opencode_zen", model_name="probe-free", repo_id=repo_id
+        provider="opencode_go", model_name="probe-free", repo_id=repo_id
     )
 
     with pytest.raises(RuntimeError, match="refresh failed"):
@@ -494,7 +494,7 @@ async def test_update_model_config_global_invalidates_before_refresh():
     mock_db.refresh.side_effect = RuntimeError("refresh failed")
 
     admin = MagicMock(id=uuid.uuid4(), is_admin=True)
-    body = MagicMock(provider="opencode_zen", model_name="probe-free", repo_id=None)
+    body = MagicMock(provider="opencode_go", model_name="probe-free", repo_id=None)
 
     with pytest.raises(RuntimeError, match="refresh failed"):
         await mc_router.update_model_config_endpoint(body, admin, mock_db)

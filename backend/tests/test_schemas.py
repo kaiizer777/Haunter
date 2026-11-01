@@ -197,50 +197,44 @@ def test_available_repo_out_required_fields() -> None:
 
 @pytest.mark.parametrize(
     "model_name",
-    ["nemotron-3.5-lightning-free", "qwen-2.5-coder-32b-free", "foo-free"],
+    ["deepseek-v4.1-flash", "nemotron-3.5-lightning-free", "glm-5.2"],
 )
-def test_model_config_update_opencode_zen_valid(model_name: str) -> None:
-    cfg = ModelConfigUpdate(provider="opencode_zen", model_name=model_name)
-    assert cfg.provider == "opencode_zen"
+def test_model_config_update_opencode_go_valid(model_name: str) -> None:
+    cfg = ModelConfigUpdate(provider="opencode_go", model_name=model_name)
+    assert cfg.provider == "opencode_go"
     assert cfg.model_name == model_name
 
 
 @pytest.mark.parametrize(
     "model_name",
-    ["nemotron-3.5-lightning", "qwen-2.5-coder-32b", "foo-bar", "gpt-4o"],
+    ["nemotron-3.5-lightning", "gpt-4o", "foo-bar"],
 )
-def test_model_config_update_opencode_zen_invalid_suffix(model_name: str) -> None:
+def test_model_config_update_opencode_go_invalid(model_name: str) -> None:
     with pytest.raises(ValidationError) as exc_info:
-        ModelConfigUpdate(provider="opencode_zen", model_name=model_name)
-    assert "Invalid model selection." in str(exc_info.value)
-
-
-@pytest.mark.parametrize("model_name", ["gpt-4o", "gpt-4o-mini"])
-def test_model_config_update_openai_valid(model_name: str) -> None:
-    cfg = ModelConfigUpdate(provider="openai", model_name=model_name)
-    assert cfg.provider == "openai"
-    assert cfg.model_name == model_name
-
-
-@pytest.mark.parametrize("model_name", ["gpt-5", "gpt-3.5-turbo", "claude-sonnet-4-5"])
-def test_model_config_update_openai_invalid(model_name: str) -> None:
-    with pytest.raises(ValidationError) as exc_info:
-        ModelConfigUpdate(provider="openai", model_name=model_name)
+        ModelConfigUpdate(provider="opencode_go", model_name=model_name)
     assert "Invalid model" in str(exc_info.value)
 
 
-@pytest.mark.parametrize("model_name", ["claude-sonnet-4-5", "claude-haiku-3-5"])
-def test_model_config_update_anthropic_valid(model_name: str) -> None:
-    cfg = ModelConfigUpdate(provider="anthropic", model_name=model_name)
-    assert cfg.provider == "anthropic"
+@pytest.mark.parametrize("model_name", ["openai/gpt-oss-120b", "llama-3.1-8b-instant"])
+def test_model_config_update_groq_valid(model_name: str) -> None:
+    cfg = ModelConfigUpdate(provider="groq", model_name=model_name)
+    assert cfg.provider == "groq"
     assert cfg.model_name == model_name
 
 
-@pytest.mark.parametrize("model_name", ["claude-opus", "claude-3-haiku", "gpt-4o"])
-def test_model_config_update_anthropic_invalid(model_name: str) -> None:
+@pytest.mark.parametrize("model_name", ["gpt-4o", "claude-sonnet-4-5", "foo-bar"])
+def test_model_config_update_groq_invalid(model_name: str) -> None:
     with pytest.raises(ValidationError) as exc_info:
-        ModelConfigUpdate(provider="anthropic", model_name=model_name)
+        ModelConfigUpdate(provider="groq", model_name=model_name)
     assert "Invalid model" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("provider", ["opencode_zen", "openai", "anthropic"])
+def test_model_config_update_retired_providers_rejected(provider: str) -> None:
+    """Retired providers are rejected by the AllowedProvider literal (issue #205)."""
+    with pytest.raises(ValidationError) as exc_info:
+        ModelConfigUpdate(provider=provider, model_name="whatever")  # type: ignore[arg-type]
+    assert "opencode_go" in str(exc_info.value) and "groq" in str(exc_info.value)
 
 
 def test_model_config_update_unknown_provider() -> None:
@@ -249,25 +243,25 @@ def test_model_config_update_unknown_provider() -> None:
 
 
 def test_model_config_update_whitespace_stripped() -> None:
-    cfg_zen = ModelConfigUpdate(provider="opencode_zen", model_name="  foo-free  \n")
-    assert cfg_zen.model_name == "foo-free"
-    assert cfg_zen.model_name.strip() == "foo-free"
+    cfg_go = ModelConfigUpdate(provider="opencode_go", model_name="  deepseek-v4.1-flash  \n")
+    assert cfg_go.model_name == "deepseek-v4.1-flash"
+    assert cfg_go.model_name.strip() == "deepseek-v4.1-flash"
 
-    cfg_openai = ModelConfigUpdate(provider="openai", model_name="  gpt-4o  ")
-    assert cfg_openai.model_name == "gpt-4o"
-    assert cfg_openai.model_name.strip() == "gpt-4o"
+    cfg_groq = ModelConfigUpdate(provider="groq", model_name="  openai/gpt-oss-120b  ")
+    assert cfg_groq.model_name == "openai/gpt-oss-120b"
+    assert cfg_groq.model_name.strip() == "openai/gpt-oss-120b"
 
 
 def test_model_config_update_pattern_validation() -> None:
     """ModelConfigUpdate rejects invalid characters and empty strings."""
     with pytest.raises(ValidationError):
-        ModelConfigUpdate(provider="opencode_zen", model_name="foo free-free")
+        ModelConfigUpdate(provider="opencode_go", model_name="foo free")
     with pytest.raises(ValidationError):
-        ModelConfigUpdate(provider="opencode_zen", model_name="foo;bar-free")
+        ModelConfigUpdate(provider="opencode_go", model_name="foo;bar")
     with pytest.raises(ValidationError):
-        ModelConfigUpdate(provider="opencode_zen", model_name="")
+        ModelConfigUpdate(provider="opencode_go", model_name="")
     with pytest.raises(ValidationError):
-        ModelConfigUpdate(provider="opencode_zen", model_name="   ")
+        ModelConfigUpdate(provider="groq", model_name="   ")
 
 
 # WorkflowRunWebhookPayload

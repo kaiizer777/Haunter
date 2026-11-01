@@ -51,7 +51,7 @@ async def test_repo_read_non_admin_403() -> None:
 
 async def test_repo_write_non_admin_403() -> None:
     body = ModelConfigUpdate(
-        provider="openai", model_name="gpt-4o", repo_id=uuid.uuid4()
+        provider="opencode_go", model_name="deepseek-v4.1-flash", repo_id=uuid.uuid4()
     )
     await _expect_403(
         update_model_config_endpoint(
@@ -106,7 +106,7 @@ def test_failure_reason_redacts_model_tokens() -> None:
 
 def test_validator_errors_are_generic() -> None:
     with pytest.raises(ValidationError) as exc_info:
-        ModelConfigUpdate(provider="openai", model_name="not-a-real-model")
+        ModelConfigUpdate(provider="opencode_go", model_name="not-a-real-model")
     msgs = " | ".join(e.get("msg", "") for e in exc_info.value.errors())
     assert "Invalid model selection." in msgs
     assert "Allowed models" not in msgs

@@ -25,7 +25,7 @@ from app.auth import get_current_user, is_admin_user
 from app.config import settings
 from app.db import get_db
 from app.llm.config import invalidate_model_config_cache
-from app.llm.discovery import format_model_name, get_dynamic_free_models, get_dynamic_go_models
+from app.llm.discovery import format_model_name, get_dynamic_go_models
 from app.models import ModelConfig, ModelConfigScope, Repo, User
 from app.schemas import (
     AvailableModelItem,
@@ -44,11 +44,10 @@ router = APIRouter(prefix="/config/model", tags=["model_config"])
 # never accepted from the client.
 def _base_url_for_provider(provider: str) -> str | None:
     """Return the configured base URL for an allowlisted provider, or None."""
+    # Issue #205: only opencode_go + groq are supported. Retired providers
+    # resolve to None so writes fail closed with an explicit 422.
     return {
-        "opencode_zen": settings.opencode_zen_base_url,
         "opencode_go": settings.opencode_go_base_url,
-        "openai": settings.openai_base_url,
-        "anthropic": settings.anthropic_base_url,
         "groq": settings.groq_base_url,
     }.get(provider)
 
@@ -57,7 +56,7 @@ def _default_base_url() -> str:
     """Fallback base URL derived from settings.default_provider (Phase 3.2 Issue 5)."""
     return (
         _base_url_for_provider(settings.default_provider)
-        or settings.opencode_zen_base_url
+        or settings.opencode_go_base_url
     )
 
 
@@ -74,7 +73,7 @@ async def get_active_model_config_endpoint(
     Get the currently active model configuration.
     If repo_id is provided, returns the repo's active config (or 404 if repo not owned).
     If repo_id is omitted, returns the global active model config from DB or env defaults.
-    Global and repo reads are admin-only.
+    Global reads are admin-only; repo reads are admin-only and also enforce ownership.
     """
     if repo_id is None and not is_admin_user(current_user):
         raise HTTPException(
@@ -107,7 +106,7 @@ async def get_active_model_config_endpoint(
             .limit(1)
         )
         scoped_cfg = scoped_result.scalar_one_or_none()
-        if scoped_cfg is not None:
+        if scoped_cfg is not None and _base_url_for_provider(scoped_cfg.provider):
             return ModelConfigOut.model_validate(scoped_cfg)
 
         # 1b. Legacy linkage fallback: repos.active_model_config_id pointing
@@ -120,7 +119,7 @@ async def get_active_model_config_endpoint(
                 )
             )
             config = config_result.scalar_one_or_none()
-            if config is not None:
+            if config is not None and _base_url_for_provider(config.provider):
                 return ModelConfigOut.model_validate(config)
 
     # Global active config lookup — strictly global scope so repo overrides
@@ -136,8 +135,16 @@ async def get_active_model_config_endpoint(
     )
     active_config = global_result.scalar_one_or_none()
 
-    if active_config is not None:
+    if active_config is not None and _base_url_for_provider(
+        active_config.provider
+    ):
         return ModelConfigOut.model_validate(active_config)
+    if active_config is not None:
+        logger.warning(
+            "model_config: active global row uses retired provider %s; "
+            "serving env defaults until an admin saves a supported provider",
+            active_config.provider,
+        )
 
     # Fallback to default configuration (base_url follows settings.default_provider).
     return ModelConfigOut(
@@ -190,12 +197,12 @@ async def update_model_config_endpoint(
     base_url = _base_url_for_provider(body.provider)
     if not base_url:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid provider"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid provider: expected 'opencode_go' or 'groq'",
         )
 
     # 1. Per-repo model config update
     if body.repo_id is not None:
-        _require_admin(current_user)
         repo_result = await db.execute(
             select(Repo).where(Repo.id == body.repo_id, Repo.user_id == current_user.id)
         )
@@ -300,17 +307,8 @@ async def update_model_config_endpoint(
     return ModelConfigOut.model_validate(new_config)
 
 
-def _format_model_name(model_id: str) -> str:
-    """Format model ID into human-readable label."""
-    clean = model_id
-    if clean.endswith("-free"):
-        clean = clean[:-5]
-    parts = clean.split("-")
-    return " ".join(part.capitalize() for part in parts)
-
-
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    # OpenCode Zen Free Models
+    # Static context-window catalog for known model IDs.
     "space-bunny-free": 1048576,
     "longcat-2.5-preview-free": 1048576,
     "ling-3.0-flash-fin-free": 1048576,
@@ -348,59 +346,16 @@ async def get_available_models_endpoint(
 ) -> AvailableModelsOut:
     """
     Admin-only: full model vocabulary is never exposed to non-admins.
-    For opencode_zen: dynamically queries /models with TTL caching, filtered to '-free'.
-    For openai, anthropic, and groq: returns approved production models with context window metadata.
+    Get live list of available models per provider (issue #205: only
+    opencode_go + groq are default providers).
+    For opencode_go: dynamically queries /models with TTL caching.
+    For groq: returns approved production models with context window metadata.
     """
     if not is_admin_user(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin permissions required to list available models",
         )
-    dynamic_zen_models = await get_dynamic_free_models()
-
-    zen_items: list[AvailableModelItem] = []
-    for mid in dynamic_zen_models:
-        tag = "Default · Free" if mid == settings.default_model else "Free"
-        ctx = MODEL_CONTEXT_WINDOWS.get(mid)
-        zen_items.append(
-            AvailableModelItem(
-                id=mid,
-                name=_format_model_name(mid),
-                tag=tag,
-                context_window=ctx,
-            )
-        )
-
-    openai_items = [
-        AvailableModelItem(
-            id="gpt-4o",
-            name="GPT-4o",
-            tag="Flagship",
-            context_window=MODEL_CONTEXT_WINDOWS.get("gpt-4o", 128000),
-        ),
-        AvailableModelItem(
-            id="gpt-4o-mini",
-            name="GPT-4o Mini",
-            tag="Fast",
-            context_window=MODEL_CONTEXT_WINDOWS.get("gpt-4o-mini", 128000),
-        ),
-    ]
-
-    anthropic_items = [
-        AvailableModelItem(
-            id="claude-sonnet-4-5",
-            name="Claude Sonnet 4.5",
-            tag="SOTA Fixes",
-            context_window=MODEL_CONTEXT_WINDOWS.get("claude-sonnet-4-5", 200000),
-        ),
-        AvailableModelItem(
-            id="claude-haiku-3-5",
-            name="Claude Haiku 3.5",
-            tag="Low Latency",
-            context_window=MODEL_CONTEXT_WINDOWS.get("claude-haiku-3-5", 200000),
-        ),
-    ]
-
     groq_items = [
         AvailableModelItem(
             id="openai/gpt-oss-120b",
@@ -420,6 +375,14 @@ async def get_available_models_endpoint(
             tag="Ultra Fast",
             context_window=MODEL_CONTEXT_WINDOWS.get("llama-3.1-8b-instant", 131072),
         ),
+        AvailableModelItem(
+            id="deepseek-r1-distill-llama-70b",
+            name="DeepSeek R1 Distill Llama 70B",
+            tag="Reasoning Distill",
+            context_window=MODEL_CONTEXT_WINDOWS.get(
+                "deepseek-r1-distill-llama-70b", 131072
+            ),
+        ),
     ]
 
     dynamic_go_models = await get_dynamic_go_models()
@@ -438,10 +401,7 @@ async def get_available_models_endpoint(
         )
 
     return AvailableModelsOut(
-        opencode_zen=zen_items,
         opencode_go=go_items,
-        openai=openai_items,
-        anthropic=anthropic_items,
         groq=groq_items,
     )
 

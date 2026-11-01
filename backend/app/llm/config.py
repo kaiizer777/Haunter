@@ -98,15 +98,14 @@ def default_base_url_for_provider(provider: str | None = None) -> str:
     configured base URL instead of hardcoding the OpenCode Zen URL for every
     provider. Unknown providers fall back to the OpenCode Zen base URL.
     """
-    name = (provider or settings.default_provider or "opencode_zen").strip().lower()
+    # Issue #205: only opencode_go + groq are supported. Unknown providers
+    # fall back to the opencode_go base URL.
+    name = (provider or settings.default_provider or "opencode_go").strip().lower()
     mapping: dict[str, str] = {
-        "opencode_zen": settings.opencode_zen_base_url,
         "opencode_go": settings.opencode_go_base_url,
-        "openai": settings.openai_base_url,
-        "anthropic": settings.anthropic_base_url,
         "groq": settings.groq_base_url,
     }
-    return mapping.get(name, settings.opencode_zen_base_url)
+    return mapping.get(name, settings.opencode_go_base_url)
 
 
 async def _resolve_from_db(

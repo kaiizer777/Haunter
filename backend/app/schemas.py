@@ -213,7 +213,7 @@ class AvailableRepoOut(BaseModel):
 
 # Allowlisted providers — no free-text to prevent base_url injection.
 # Extend this list when a new provider is vetted and approved.
-AllowedProvider = Literal["opencode_zen", "opencode_go", "openai", "anthropic", "groq"]
+AllowedProvider = Literal["opencode_go", "groq"]
 
 # Allowlisted hosting/sandbox providers — never free-text, never derived
 # from request headers. Used by PUT /config/hosting and validated in the
@@ -227,6 +227,23 @@ AllowedSandboxProvider = Literal["github_actions", "aws"]
 OPENAI_MODELS: set[str] = {"gpt-4o", "gpt-4o-mini"}
 ANTHROPIC_MODELS: set[str] = {"claude-sonnet-4-5", "claude-haiku-3-5"}
 
+# Issue #205: strict allowlists for the two default providers, mirroring the
+# OPENAI/ANTHROPIC pattern. OpenCode Go IDs mirror BOOTSTRAP_GO_MODELS in
+# app/llm/discovery.py; Groq IDs mirror the groq catalog in
+# app/routers/model_config.py.
+OPENCODE_GO_MODELS: set[str] = {
+    "deepseek-v4.1-flash",
+    "glm-5.2",
+    "mimo-v2.6-flash",
+    "nemotron-3.5-lightning-free",
+}
+GROQ_MODELS: set[str] = {
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "deepseek-r1-distill-llama-70b",
+}
+
 # Preserved for backward compatibility
 AllowedModelName = str
 
@@ -236,10 +253,10 @@ class ModelConfigUpdate(BaseModel):
     Used by PUT /config/model (global) or PUT /config/model/{repo_id} (per-repo)
     to update active model config.
     Provider and model_name are validated against provider rules.
-    - For 'opencode_zen': allows any model name ending with '-free'.
-    - For 'openai': allows approved OpenAI models (see administrator).
-    - For 'anthropic': allows approved Anthropic models (see administrator).
-    - For 'groq': allows non-empty model names.
+    - For 'opencode_go': allows approved OpenCode Go models (OPENCODE_GO_MODELS).
+    - For 'groq': allows approved Groq models (GROQ_MODELS).
+    Retired providers (opencode_zen, openai, anthropic) are rejected by the
+    AllowedProvider literal with a 422 listing the supported providers.
     base_url is derived server-side from the provider allowlist, never from the client.
     """
 
@@ -256,8 +273,10 @@ class ModelConfigUpdate(BaseModel):
             provider = data.get("provider")
             model = data.get("model_name")
             if provider == "opencode_go" and (model is None or not str(model).strip()):
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError("Invalid model selection.")
             if provider == "groq" and (model is None or not str(model).strip()):
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError("Invalid model selection.")
         return data
 
@@ -274,30 +293,12 @@ class ModelConfigUpdate(BaseModel):
         model = self.model_name.strip()
         self.model_name = model
 
-        if provider == "opencode_zen":
-            if not model.endswith("-free"):
+        if provider == "opencode_go":
+            if model not in OPENCODE_GO_MODELS:
                 logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError("Invalid model selection.")
-        elif provider == "opencode_go":
-            if not model:
-                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
-                raise ValueError("Invalid model selection.")
-        elif provider == "openai":
-            if model not in OPENAI_MODELS:
-                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
-                raise ValueError(
-                    "Invalid model selection. "
-                    "See your administrator for available models."
-                )
-        elif provider == "anthropic":
-            if model not in ANTHROPIC_MODELS:
-                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
-                raise ValueError(
-                    "Invalid model selection. "
-                    "See your administrator for available models."
-                )
         elif provider == "groq":
-            if not model:
+            if model not in GROQ_MODELS:
                 logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError("Invalid model selection.")
         else:
@@ -315,11 +316,8 @@ class AvailableModelItem(BaseModel):
 
 
 class AvailableModelsOut(BaseModel):
-    opencode_zen: list[AvailableModelItem]
-    opencode_go: list[AvailableModelItem] = []
-    openai: list[AvailableModelItem]
-    anthropic: list[AvailableModelItem]
-    groq: list[AvailableModelItem] = []
+    opencode_go: list[AvailableModelItem]
+    groq: list[AvailableModelItem]
 
 
 class ModelConfigOut(BaseModel):
