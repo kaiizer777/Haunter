@@ -800,11 +800,11 @@ async def test_put_model_config_valid_and_validation(
 async def test_put_model_config_per_repo_and_non_owned(
     db: AsyncSession, user_factory, make_auth_client
 ):
-    """PUT /config/model/{repo_id} updates per-repo config; returns 404 on unowned repo."""
+    """PUT /config/model/{repo_id} updates per-repo config; returns 404 on unowned repo (admin-only)."""
     await truncate_all(db)
-    user_a = await user_factory(github_id=716, username="user_repo_cfg_a")
+    user_a = await user_factory(github_id=716, username="user_repo_cfg_a", role="admin")
     user_a_id = user_a.id
-    user_b = await user_factory(github_id=717, username="user_repo_cfg_b")
+    user_b = await user_factory(github_id=717, username="user_repo_cfg_b", role="admin")
     user_b_id = user_b.id
 
     repo_a = Repo(user_id=user_a_id, owner="org-a", name="repo-cfg-a")
@@ -841,9 +841,9 @@ async def test_delete_model_config_per_repo_resets_to_global(
 ):
     """DELETE /config/model/{repo_id} drops the repo override; unowned -> 404."""
     await truncate_all(db)
-    user_a = await user_factory(github_id=718, username="user_repo_reset_a")
+    user_a = await user_factory(github_id=718, username="user_repo_reset_a", role="admin")
     user_a_id = user_a.id
-    user_b = await user_factory(github_id=719, username="user_repo_reset_b")
+    user_b = await user_factory(github_id=719, username="user_repo_reset_b", role="admin")
     user_b_id = user_b.id
 
     repo_a = Repo(user_id=user_a_id, owner="org-a", name="repo-reset-a")
