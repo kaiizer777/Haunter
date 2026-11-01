@@ -98,7 +98,6 @@ const mockRepos: RepoOut[] = [
     name: "UpGrade",
     default_branch: "main",
     language_hint: "python",
-    active_model_config_id: null,
     created_at: new Date().toISOString(),
   },
 ];

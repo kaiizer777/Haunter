@@ -70,7 +70,6 @@ describe("add-repo-modal.tsx", () => {
     name: "haunter-core",
     default_branch: "main",
     language_hint: "typescript",
-    active_model_config_id: null,
     created_at: new Date().toISOString(),
   };
 

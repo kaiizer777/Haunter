@@ -40,7 +40,6 @@ describe("SettingsPage (app/settings/page.tsx)", () => {
       name: "Haunter",
       default_branch: "main",
       language_hint: "python",
-      active_model_config_id: null,
       created_at: new Date().toISOString(),
     },
     {
@@ -49,7 +48,6 @@ describe("SettingsPage (app/settings/page.tsx)", () => {
       name: "Gengar",
       default_branch: "master",
       language_hint: "typescript",
-      active_model_config_id: null,
       created_at: new Date().toISOString(),
     },
   ];
@@ -71,7 +69,6 @@ describe("SettingsPage (app/settings/page.tsx)", () => {
     allowed_branches: ["main"],
     ignore_draft_prs: true,
     max_cost_per_run_cents: 100,
-    model_override_scope: "inherit",
     settings_version: 1,
   };
 

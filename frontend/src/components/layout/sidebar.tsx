@@ -27,7 +27,7 @@ export function Sidebar() {
   useEffect(() => {
     if (!isAdmin) return;
     let isMounted = true;
-    api.getModelConfig({ silent: true })
+    api.getModelConfig()
       .then((cfg: ModelConfigOut) => {
         if (isMounted && cfg?.model_name) {
           setActiveModel(cfg.model_name);

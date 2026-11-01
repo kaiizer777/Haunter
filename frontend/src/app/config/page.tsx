@@ -35,7 +35,6 @@ import {
   Eye,
   EyeOff,
   Sparkles,
-  Globe,
 } from "lucide-react";
 
 // Strict server-side allowlists (WORK.md:252)
@@ -695,10 +694,7 @@ export default function ModelConfigPage() {
     }
     setError(null);
     try {
-      const globalCfg = await api.getModelConfig({
-        signal: controller.signal,
-        silent: true,
-      });
+      const globalCfg = await api.getModelConfig();
       if (controller.signal.aborted) return;
       setGlobalConfig(globalCfg);
       setActiveConfig(globalCfg);
@@ -839,7 +835,6 @@ export default function ModelConfigPage() {
   }, [customName, customCompat, customBaseUrl, customApiKey]);
 
   const effectiveTargetIsGlobal = true;
-  const canMutateTarget = isAdmin || !effectiveTargetIsGlobal;
 
   const handleSaveConfig = useCallback(async () => {
     if (!isAdmin) {
@@ -1190,12 +1185,6 @@ export default function ModelConfigPage() {
           </div>
         )}
         {/* Model config is global-only (issue #226). */}
-        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-3.5 sm:p-4">
-          <div className="relative z-10 flex items-center gap-2 text-xs font-mono text-zinc-300">
-            <Globe className="h-4 w-4 text-amber-400 shrink-0" />
-            <span>Global platform default applies to all repositories.</span>
-          </div>
-        </div>
 
         {/* MAIN HERO: Provider Tabs + Models Grid */}
         <div className="relative rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-3.5 sm:p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-3.5">
@@ -1267,7 +1256,7 @@ export default function ModelConfigPage() {
                 placeholder={activeProviderMeta.name}
                 ignoreClickOutsideRef={searchInputRef}
                 buttonClassName="min-w-[175px] sm:min-w-[195px] h-7.5 font-mono text-[11px] bg-zinc-900/80 border-zinc-700/80 hover:border-zinc-600 text-zinc-200"
-                disabled={isPending || !canMutateTarget}
+                disabled={isPending || !isAdmin}
               />
               {isAdmin && (
                 <Button
@@ -1477,11 +1466,11 @@ export default function ModelConfigPage() {
                     <div
                       key={`${m.provider || selectedProvider}:${m.id}`}
                       role="button"
-                      tabIndex={isPending || !canMutateTarget ? -1 : 0}
+                      tabIndex={isPending || !isAdmin ? -1 : 0}
                       aria-pressed={isSelected}
-                      aria-disabled={isPending || !canMutateTarget}
+                      aria-disabled={isPending || !isAdmin}
                       onClick={() => {
-                        if (!isPending && canMutateTarget) {
+                        if (!isPending && isAdmin) {
                           setSelectedModel(m.id);
                           if (m.provider && m.provider !== selectedProvider) {
                             setSelectedProvider(m.provider);
@@ -1489,7 +1478,7 @@ export default function ModelConfigPage() {
                         }
                       }}
                       onKeyDown={(e) => {
-                        if ((e.key === "Enter" || e.key === " ") && !isPending && canMutateTarget) {
+                        if ((e.key === "Enter" || e.key === " ") && !isPending && isAdmin) {
                           e.preventDefault();
                           setSelectedModel(m.id);
                           if (m.provider && m.provider !== selectedProvider) {

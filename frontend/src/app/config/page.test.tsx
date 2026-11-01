@@ -37,7 +37,6 @@ vi.mock("@/lib/api", () => ({
     getRepos: vi.fn(),
     getModelConfig: vi.fn(),
     updateModelConfig: vi.fn(),
-    deleteRepoModelConfig: vi.fn(),
     validateCustomProvider: vi.fn(),
   },
   ApiError: class ApiError extends Error {
@@ -66,7 +65,6 @@ describe("ModelConfigPage non-admin: features only, zero model vocabulary", () =
     owner: "octo",
     name: "hello",
     full_name: "octo/hello",
-    active_model_config_id: null,
   } as unknown as RepoOut;
 
   beforeEach(() => {
@@ -84,9 +82,7 @@ describe("ModelConfigPage non-admin: features only, zero model vocabulary", () =
 
   it("never calls getAvailableModels for is_admin=false", async () => {
     render(<ModelConfigPage />);
-    await waitFor(() => {
-      expect(api.getRepos).toHaveBeenCalled();
-    });
+    await screen.findByText("Automation features");
     expect(api.getAvailableModels).not.toHaveBeenCalled();
     expect(api.getModelConfig).not.toHaveBeenCalled();
   });
@@ -114,8 +110,6 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     model_name: "deepseek-v4.1-flash",
     base_url: "https://opencode.ai/inference/go/openai/v1",
     is_active: true,
-    scope: "global",
-    repo_id: null,
   };
 
   beforeEach(() => {
@@ -129,10 +123,7 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     });
     vi.mocked(api.getAvailableModels).mockResolvedValue({} as never);
     vi.mocked(api.getRepos).mockResolvedValue([]);
-    vi.mocked(api.getModelConfig).mockImplementation((repoId?: string) => {
-      if (repoId === undefined) return Promise.resolve(globalCfg);
-      return Promise.reject(new ApiError("not found", 404));
-    });
+    vi.mocked(api.getModelConfig).mockResolvedValue(globalCfg);
     vi.mocked(api.validateCustomProvider).mockResolvedValue({
       ok: false,
       supported: false,

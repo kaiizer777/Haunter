@@ -54,7 +54,6 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       name: "sentinel",
       default_branch: "main",
       language_hint: "typescript",
-      active_model_config_id: null,
       created_at: new Date().toISOString(),
     },
   ];

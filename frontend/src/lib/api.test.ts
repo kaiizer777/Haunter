@@ -840,12 +840,9 @@ describe("api.ts", () => {
       expect(capturedUrl).toBe("https://api.example.com/config/model/available");
     });
 
-    it("api.getModelConfig calls GET /config/model with or without repo_id", async () => {
+    it("api.getModelConfig calls GET /config/model", async () => {
       await api.getModelConfig();
       expect(capturedUrl).toBe("https://api.example.com/config/model");
-
-      await api.getModelConfig("repo-abc");
-      expect(capturedUrl).toBe("https://api.example.com/config/model?repo_id=repo-abc");
     });
 
     it("api.updateModelConfig calls PUT /config/model with update payload", async () => {
