@@ -74,7 +74,7 @@ async def get_active_model_config_endpoint(
     Get the currently active model configuration.
     If repo_id is provided, returns the repo's active config (or 404 if repo not owned).
     If repo_id is omitted, returns the global active model config from DB or env defaults.
-    Global reads are admin-only; repo reads enforce ownership.
+    Global and repo reads are admin-only.
     """
     if repo_id is None and not is_admin_user(current_user):
         raise HTTPException(
@@ -82,6 +82,8 @@ async def get_active_model_config_endpoint(
             detail="Admin permissions required to read global model config",
         )
     if repo_id is not None:
+        if not is_admin_user(current_user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin permissions required to read repo model config")
         repo_result = await db.execute(
             select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
         )
@@ -171,7 +173,7 @@ async def update_model_config_endpoint(
 ) -> ModelConfigOut:
     """
     Update active model configuration.
-    - If body.repo_id is supplied: updates model config for that repo (enforces ownership).
+    - If body.repo_id is supplied: updates model config for that repo (admin-only).
     - If body.repo_id is null: updates global active model config (admin-only).
     """
     base_url = _base_url_for_provider(body.provider)
@@ -182,6 +184,7 @@ async def update_model_config_endpoint(
 
     # 1. Per-repo model config update
     if body.repo_id is not None:
+        _require_admin(current_user)
         repo_result = await db.execute(
             select(Repo).where(Repo.id == body.repo_id, Repo.user_id == current_user.id)
         )
@@ -333,10 +336,15 @@ async def get_available_models_endpoint(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AvailableModelsOut:
     """
-    Get live list of available models per provider.
+    Admin-only: full model vocabulary is never exposed to non-admins.
     For opencode_zen: dynamically queries /models with TTL caching, filtered to '-free'.
     For openai, anthropic, and groq: returns approved production models with context window metadata.
     """
+    if not is_admin_user(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin permissions required to list available models",
+        )
     dynamic_zen_models = await get_dynamic_free_models()
 
     zen_items: list[AvailableModelItem] = []
@@ -454,7 +462,7 @@ async def delete_repo_model_config(
     Reset a repo to the platform default by deactivating its repo-scoped
     override rows and clearing the legacy linkage. Returns 404 if the repo
     is not found or not owned by the caller (no existence oracle).
-    Usable by non-admins so repo overrides can be reset without global read.
+    Admin-only: repo model overrides can only be reset by admins.
     """
     repo_result = await db.execute(
         select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
@@ -474,6 +482,7 @@ async def delete_repo_model_config(
         )
         .values(is_active=False)
     )
+    _require_admin(current_user)
     repo.active_model_config_id = None
     await db.commit()
     invalidate_model_config_cache(repo_id)
