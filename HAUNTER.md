@@ -393,7 +393,6 @@ erDiagram
     }
 
     repos ||--o{ runs : triggers
-    repos ||--o| model_configs : "active model"
     repos {
         uuid id PK
         uuid user_id FK
@@ -402,7 +401,6 @@ erDiagram
         string default_branch
         string language_hint
         int github_install_id
-        uuid active_model_config_id FK
         timestamp created_at
     }
 
@@ -497,7 +495,6 @@ erDiagram
 - `default_branch`: `String(255)` (Nullable).
 - `language_hint`: `String(255)` (Nullable).
 - `github_install_id`: `Integer` (Nullable).
-- `active_model_config_id`: `UUID` (Foreign Key `model_configs.id` ondelete `SET NULL`, Nullable).
 - `created_at`: `TIMESTAMP(timezone=True)`.
 - *Constraints:* `UniqueConstraint("user_id", "owner", "name", name="uq_repo_user_owner_name")`.
 
@@ -668,8 +665,8 @@ Haunter connects to OpenCode Zen as its default OpenAI-compatible LLM endpoint:
 ### 9.2 Hot-Switchable Architecture
 LLM configurations are decoupled from application deployments:
 1. **Model Switcher (`PUT /config/model`):**
-   - Admin-gated endpoint updates active model selection globally or per-repository.
-   - Stored in `model_configs` table and referenced by `repos.active_model_config_id`.
+   - Admin-gated endpoint updates the active model selection globally.
+   - Stored in the `model_configs` table (`is_active` flag); a single global active config applies to all repositories.
    - Dynamic model discovery (`GET /config/model/available`) queries available OpenCode Zen models in real time.
 2. **System Config Store (`system_configs`):**
    - Stores runtime keys (`hosting_provider`, `sandbox_provider`).
