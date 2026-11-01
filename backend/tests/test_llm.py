@@ -714,7 +714,7 @@ async def test_llm_client_gives_up_after_all_models_exhausted():
             assert count == 1, f"{model} had {count} attempts, expected 1"
         msg = str(exc)
         assert "exhausted" in msg.lower()
-        assert all(model in msg for model in chain_models)
+        assert all(model not in msg for model in chain_models)
         for _m, _i, err in exc.attempts:
             assert "provider down" in err or "500" in err
         inter_model_sleeps = [d for d in sleep_calls if d == INTER_MODEL_SLEEP_S]

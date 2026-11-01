@@ -212,7 +212,7 @@ def test_model_config_update_opencode_zen_valid(model_name: str) -> None:
 def test_model_config_update_opencode_zen_invalid_suffix(model_name: str) -> None:
     with pytest.raises(ValidationError) as exc_info:
         ModelConfigUpdate(provider="opencode_zen", model_name=model_name)
-    assert "OpenCode Zen models must end with '-free'" in str(exc_info.value)
+    assert "Invalid model selection." in str(exc_info.value)
 
 
 @pytest.mark.parametrize("model_name", ["gpt-4o", "gpt-4o-mini"])

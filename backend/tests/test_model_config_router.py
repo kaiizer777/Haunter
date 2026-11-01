@@ -361,8 +361,8 @@ async def test_repo_model_config_ownership_enforced(
     db: AsyncSession, user_factory, make_auth_client
 ):
     """
-    GET and PUT /config/model/{repo_id} return 404 if the repo does not belong
-    to the current authenticated user (prevents existence oracle leakage).
+    Repo model config is admin-only: non-admins get 403 on repo reads/writes.
+    Admins still get 404 on repos they do not own (existence oracle guard).
     """
     await truncate_all(db)
     user_a = await user_factory(github_id=920, username="user_a")
@@ -378,19 +378,25 @@ async def test_repo_model_config_ownership_enforced(
     db.add(repo_a)
     await db.commit()
 
-    # User B tries to read and update user A's repo config
+    # User B is a non-admin: repo reads/writes are 403 regardless of ownership.
     client_b = make_auth_client(user_b.id)
     async with client_b:
         get_resp = await client_b.get(f"/config/model/{repo_a.id}")
-        assert get_resp.status_code == 404
-        assert get_resp.json() == {"detail": "Repo not found"}
+        assert get_resp.status_code == 403
 
         put_resp = await client_b.put(
             f"/config/model/{repo_a.id}",
             json={"provider": "openai", "model_name": "gpt-4o"},
         )
-        assert put_resp.status_code == 404
-        assert put_resp.json() == {"detail": "Repo not found"}
+        assert put_resp.status_code == 403
+
+    # An admin still gets 404 on a repo they do not own (no existence oracle).
+    admin = await user_factory(role="admin")
+    client_admin = make_auth_client(admin.id)
+    async with client_admin:
+        get_resp = await client_admin.get(f"/config/model/{repo_a.id}")
+        assert get_resp.status_code == 404
+        assert get_resp.json() == {"detail": "Repo not found"}
 
 
 @pytest.mark.asyncio
@@ -587,8 +593,8 @@ async def test_put_repo_model_config_does_not_mutate_other_user_config(
 ):
     """PUT /config/model/{repo_id} does not mutate a config owned by another user or repo (#205)."""
     await truncate_all(db)
-    user_a = await user_factory(github_id=901, username="user_a")
-    user_b = await user_factory(github_id=902, username="user_b")
+    user_a = await user_factory(role="admin", github_id=901, username="user_a")
+    user_b = await user_factory(role="admin", github_id=902, username="user_b")
 
     repo_a = Repo(user_id=user_a.id, owner="user-a", name="repo-a")
     db.add(repo_a)

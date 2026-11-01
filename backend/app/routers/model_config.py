@@ -464,6 +464,7 @@ async def delete_repo_model_config(
     is not found or not owned by the caller (no existence oracle).
     Admin-only: repo model overrides can only be reset by admins.
     """
+    _require_admin(current_user)
     repo_result = await db.execute(
         select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
     )
@@ -482,7 +483,6 @@ async def delete_repo_model_config(
         )
         .values(is_active=False)
     )
-    _require_admin(current_user)
     repo.active_model_config_id = None
     await db.commit()
     invalidate_model_config_cache(repo_id)
