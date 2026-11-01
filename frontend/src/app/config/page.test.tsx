@@ -397,4 +397,37 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     expect(anthropicTab).toHaveAttribute("aria-selected", "false");
     expect(compatSelect).toHaveValue("openai");
   });
+
+  it("renders protocol badge and copy URL button for active custom provider", async () => {
+    vi.mocked(api.validateCustomProvider).mockResolvedValueOnce({
+      ok: true,
+      supported: true,
+      provider_id: "custom_openai_ep",
+      models: [{ id: "custom-ep-model", name: "Custom EP Model", tag: "Custom" }],
+    } as never);
+
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    fireEvent.change(await screen.findByLabelText("Custom provider name"), {
+      target: { value: "OpenAI Proxy" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider base URL"), {
+      target: { value: "https://proxy.internal/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider API key"), {
+      target: { value: "sk-proxy-key" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /validate & discover models/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByText("OpenAI Proxy:")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI Compatible")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /copy base url/i })).toBeInTheDocument();
+  });
 });
