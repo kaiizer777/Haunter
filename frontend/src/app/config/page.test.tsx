@@ -363,9 +363,9 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     const baseUrlInput = await screen.findByLabelText("Custom provider base URL");
     expect(baseUrlInput).toHaveValue("");
 
-    const ollamaBtn = screen.getByRole("button", { name: /^ollama$/i });
-    fireEvent.click(ollamaBtn);
-    expect(baseUrlInput).toHaveValue("http://localhost:11434/v1");
+    const togetherBtn = screen.getByRole("button", { name: /^together ai$/i });
+    fireEvent.click(togetherBtn);
+    expect(baseUrlInput).toHaveValue("https://api.together.xyz/v1");
 
     const openaiPresetBtn = screen.getByRole("button", { name: /^openai$/i });
     fireEvent.click(openaiPresetBtn);
