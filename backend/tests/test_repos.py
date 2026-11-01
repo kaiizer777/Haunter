@@ -758,16 +758,16 @@ async def test_put_model_config_valid_and_validation(
     client = make_auth_client(user_id)
 
     async with client:
-        # 1. Valid update with openai provider
+        # 1. Valid update with opencode_go provider
         resp_valid = await client.put(
             "/config/model",
-            json={"provider": "openai", "model_name": "gpt-4o"},
+            json={"provider": "opencode_go", "model_name": "nemotron-3.5-lightning-free"},
         )
         assert resp_valid.status_code == 200
         data_valid = resp_valid.json()
-        assert data_valid["provider"] == "openai"
-        assert data_valid["model_name"] == "gpt-4o"
-        assert data_valid["base_url"] == "https://api.openai.com/v1"
+        assert data_valid["provider"] == "opencode_go"
+        assert data_valid["model_name"] == "nemotron-3.5-lightning-free"
+        assert data_valid["base_url"] == "https://opencode.ai/inference/go/openai/v1"
 
         # 2. Invalid provider -> 422
         resp_bad_provider = await client.put(
@@ -779,7 +779,7 @@ async def test_put_model_config_valid_and_validation(
         # 3. Invalid model -> 422
         resp_bad_model = await client.put(
             "/config/model",
-            json={"provider": "openai", "model_name": "evil-llm-injection"},
+            json={"provider": "opencode_go", "model_name": "evil-llm-injection"},
         )
         assert resp_bad_model.status_code == 422
 
@@ -787,13 +787,13 @@ async def test_put_model_config_valid_and_validation(
         resp_override = await client.put(
             "/config/model",
             json={
-                "provider": "opencode_zen",
+                "provider": "opencode_go",
                 "model_name": "nemotron-3.5-lightning-free",
                 "base_url": "https://evil-attacker.com/v1",
             },
         )
         assert resp_override.status_code == 200
-        assert resp_override.json()["base_url"] == "https://opencode.ai/zen/v1"
+        assert resp_override.json()["base_url"] == "https://opencode.ai/inference/go/openai/v1"
 
 
 @pytest.mark.asyncio
@@ -820,16 +820,16 @@ async def test_put_model_config_per_repo_and_non_owned(
         # User A updates their own repo's model config
         resp_a = await client_a.put(
             f"/config/model/{repo_a_id}",
-            json={"provider": "anthropic", "model_name": "claude-sonnet-4-5"},
+            json={"provider": "groq", "model_name": "llama-3.3-70b-versatile"},
         )
         assert resp_a.status_code == 200
-        assert resp_a.json()["model_name"] == "claude-sonnet-4-5"
+        assert resp_a.json()["model_name"] == "llama-3.3-70b-versatile"
 
     async with client_b:
         # User B attempts to update User A's repo model config -> 404
         resp_b = await client_b.put(
             f"/config/model/{repo_a_id}",
-            json={"provider": "anthropic", "model_name": "claude-sonnet-4-5"},
+            json={"provider": "groq", "model_name": "llama-3.3-70b-versatile"},
         )
         assert resp_b.status_code == 404
         assert resp_b.json() == {"detail": "Repo not found"}
@@ -858,7 +858,7 @@ async def test_delete_model_config_per_repo_resets_to_global(
     async with client_a:
         resp_put = await client_a.put(
             f"/config/model/{repo_a_id}",
-            json={"provider": "anthropic", "model_name": "claude-sonnet-4-5"},
+            json={"provider": "groq", "model_name": "llama-3.3-70b-versatile"},
         )
         assert resp_put.status_code == 200
         assert resp_put.json()["scope"] == "repo"
