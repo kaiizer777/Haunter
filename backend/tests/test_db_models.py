@@ -856,13 +856,13 @@ async def test_model_configs_defaults(db: AsyncSession):
     """Assert default values on ModelConfig model."""
     await truncate_all(db)
 
-    cfg = ModelConfig(provider="opencode_zen")
+    cfg = ModelConfig(provider="opencode_go")
     db.add(cfg)
     await db.commit()
     await db.refresh(cfg)
 
     assert cfg.model_name == "nemotron-3.5-lightning-free"
-    assert cfg.base_url == "https://opencode.ai/zen/v1"
+    assert cfg.base_url == "https://opencode.ai/inference/go/openai/v1"
     assert cfg.is_active is True
     assert cfg.scope == "global"
     assert cfg.created_at.tzinfo is not None

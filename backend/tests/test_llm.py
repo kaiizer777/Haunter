@@ -279,7 +279,7 @@ async def test_get_active_model_config_db_empty_fallback_env(db: AsyncSession):
     resolved = await get_active_model_config(db=db)
     assert resolved.provider == settings.default_provider
     assert resolved.model_name == settings.default_model
-    assert resolved.base_url == settings.opencode_zen_base_url
+    assert resolved.base_url == settings.opencode_go_base_url
 
 
 @pytest.mark.asyncio
