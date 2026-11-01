@@ -150,4 +150,74 @@ describe("modal.tsx", () => {
     expect(dialog).toBeInTheDocument();
     expect(dialog).toHaveClass("border-amber-400");
   });
+
+  it("auto-focuses the first input inside children when opened", () => {
+    render(
+      <Modal isOpen={true} onClose={vi.fn()} title="Focus Input Test">
+        <input aria-label="First Field" data-testid="first-input" />
+        <button>Submit</button>
+      </Modal>
+    );
+
+    expect(screen.getByTestId("first-input")).toHaveFocus();
+  });
+
+  it("auto-focuses the close button when no inputs are present", () => {
+    render(
+      <Modal isOpen={true} onClose={vi.fn()} title="Focus Close Button Test">
+        <p>No interactive inputs here</p>
+      </Modal>
+    );
+
+    expect(screen.getByRole("button", { name: /close modal/i })).toHaveFocus();
+  });
+
+  it("traps focus between first and last focusable elements on Tab and Shift+Tab", () => {
+    render(
+      <Modal isOpen={true} onClose={vi.fn()} title="Tab Trap Test">
+        <input aria-label="First Field" data-testid="first-input" />
+        <button data-testid="last-button">Last Action</button>
+      </Modal>
+    );
+
+    const closeBtn = screen.getByRole("button", { name: /close modal/i });
+    const lastBtn = screen.getByTestId("last-button");
+
+    // Close button is the first element in DOM order
+    closeBtn.focus();
+    expect(closeBtn).toHaveFocus();
+
+    // Shift+Tab from first element wraps to last element
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(lastBtn).toHaveFocus();
+
+    // Tab from last element wraps to first element
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: false });
+    expect(closeBtn).toHaveFocus();
+  });
+
+  it("restores focus to previous active element when closed", () => {
+    const trigger = document.createElement("button");
+    trigger.textContent = "Open Modal";
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(trigger).toHaveFocus();
+
+    const { rerender } = render(
+      <Modal isOpen={true} onClose={vi.fn()} title="Restore Focus Test">
+        <input data-testid="modal-input" />
+      </Modal>
+    );
+
+    expect(screen.getByTestId("modal-input")).toHaveFocus();
+
+    rerender(
+      <Modal isOpen={false} onClose={vi.fn()} title="Restore Focus Test">
+        <input data-testid="modal-input" />
+      </Modal>
+    );
+
+    expect(trigger).toHaveFocus();
+    document.body.removeChild(trigger);
+  });
 });

@@ -169,12 +169,15 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /validate & discover models/i }));
     expect(await screen.findByText(/not supported by this backend/i)).toBeInTheDocument();
-    expect(api.validateCustomProvider).toHaveBeenCalledWith({
-      name: "my-provider",
-      compat: "openai",
-      base_url: "https://my-host/v1",
-      api_key: "sk-test",
-    });
+    expect(api.validateCustomProvider).toHaveBeenCalledWith(
+      {
+        name: "my-provider",
+        compat: "openai",
+        base_url: "https://my-host/v1",
+        api_key: "sk-test",
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
   });
 
   it("hides the admin custom-provider form from non-admins", async () => {
@@ -258,12 +261,15 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
       expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
     });
 
-    expect(api.validateCustomProvider).toHaveBeenCalledWith({
-      name: "vLLM Server",
-      compat: "openai",
-      base_url: "https://vllm.internal/v1",
-      api_key: "sk-vllm-secret",
-    });
+    expect(api.validateCustomProvider).toHaveBeenCalledWith(
+      {
+        name: "vLLM Server",
+        compat: "openai",
+        base_url: "https://vllm.internal/v1",
+        api_key: "sk-vllm-secret",
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
 
     // Assert provider and model state were selected as expected
     expect(screen.getByRole("button", { name: /inference provider selector/i })).toHaveTextContent("vLLM Server");
@@ -280,12 +286,16 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
   });
 
   it("ignores in-flight validation responses and cleans up state when modal is closed before completion", async () => {
+    let capturedSignal: AbortSignal | undefined;
     let resolveValidation!: (value: unknown) => void;
     const pendingPromise = new Promise((resolve) => {
       resolveValidation = resolve;
     });
     vi.mocked(api.validateCustomProvider).mockImplementationOnce(
-      () => pendingPromise as never
+      (_data, options) => {
+        capturedSignal = options?.signal;
+        return pendingPromise as never;
+      }
     );
 
     render(<ModelConfigPage />);
@@ -304,8 +314,13 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /validate & discover models/i }));
 
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal?.aborted).toBe(false);
+
     // Close the modal while validation is in flight
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+
+    expect(capturedSignal?.aborted).toBe(true);
 
     // Resolve validation after modal was closed
     resolveValidation({

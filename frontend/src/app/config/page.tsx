@@ -539,6 +539,7 @@ export default function ModelConfigPage() {
   const isAdmin = Boolean(user?.is_admin);
   const hasInitializedScopeRef = useRef(false);
   const activeFetchControllerRef = useRef<AbortController | null>(null);
+  const activeValidateControllerRef = useRef<AbortController | null>(null);
   const activeValidateRequestRef = useRef<number>(0);
 
   const [repos, setRepos] = useState<RepoOut[]>([]);
@@ -591,6 +592,7 @@ export default function ModelConfigPage() {
   useEffect(() => {
     return () => {
       activeFetchControllerRef.current?.abort();
+      activeValidateControllerRef.current?.abort();
       activeValidateRequestRef.current = 0;
     };
   }, []);
@@ -743,6 +745,8 @@ export default function ModelConfigPage() {
   };
 
   const handleOpenCustomModal = useCallback(() => {
+    activeValidateControllerRef.current?.abort();
+    activeValidateControllerRef.current = null;
     activeValidateRequestRef.current = 0;
     setCustomError(null);
     setCustomModels([]);
@@ -750,6 +754,8 @@ export default function ModelConfigPage() {
   }, []);
 
   const handleCloseCustomModal = useCallback(() => {
+    activeValidateControllerRef.current?.abort();
+    activeValidateControllerRef.current = null;
     activeValidateRequestRef.current = 0;
     setIsCustomModalOpen(false);
     setCustomError(null);
@@ -768,18 +774,28 @@ export default function ModelConfigPage() {
     setCustomError(null);
     setIsValidatingCustom(true);
 
+    activeValidateControllerRef.current?.abort();
+    const validateController = new AbortController();
+    activeValidateControllerRef.current = validateController;
+
     const requestId = ++activeValidateRequestRef.current;
 
     try {
-      const result = await api.validateCustomProvider({
-        name: customName.trim(),
-        compat: customCompat,
-        base_url: customBaseUrl.trim(),
-        api_key: customApiKey,
-      });
+      const result = await api.validateCustomProvider(
+        {
+          name: customName.trim(),
+          compat: customCompat,
+          base_url: customBaseUrl.trim(),
+          api_key: customApiKey,
+        },
+        { signal: validateController.signal }
+      );
 
       // If modal was closed or a newer request was dispatched while in-flight, ignore response
-      if (activeValidateRequestRef.current !== requestId) {
+      if (
+        validateController.signal.aborted ||
+        activeValidateRequestRef.current !== requestId
+      ) {
         return;
       }
 
@@ -813,11 +829,17 @@ export default function ModelConfigPage() {
       setCustomApiKey("");
       setIsCustomModalOpen(false);
     } catch (err: unknown) {
-      if (activeValidateRequestRef.current !== requestId) {
+      if (
+        validateController.signal.aborted ||
+        activeValidateRequestRef.current !== requestId
+      ) {
         return;
       }
       setCustomError(err instanceof ApiError ? err.message : "Custom provider validation failed.");
     } finally {
+      if (activeValidateControllerRef.current === validateController) {
+        activeValidateControllerRef.current = null;
+      }
       if (activeValidateRequestRef.current === requestId) {
         setIsValidatingCustom(false);
       }

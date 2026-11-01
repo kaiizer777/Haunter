@@ -978,5 +978,30 @@ describe("api.ts", () => {
       });
       expect(result).toEqual(payload);
     });
+
+    it("connects signal and request options to the underlying fetch call", async () => {
+      const controller = new AbortController();
+      let capturedSignal: AbortSignal | undefined;
+      globalThis.fetch = vi.fn().mockImplementation(async (_url, opts) => {
+        capturedSignal = opts?.signal;
+        return new Response(JSON.stringify({ ok: true, supported: true }), { status: 200 });
+      });
+
+      await api.validateCustomProvider(
+        {
+          name: "my-provider",
+          compat: "openai",
+          base_url: "https://my-host/v1",
+          api_key: "sk-test",
+        },
+        { signal: controller.signal }
+      );
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(capturedSignal).toBeDefined();
+      expect(capturedSignal?.aborted).toBe(false);
+      controller.abort();
+      expect(capturedSignal?.aborted).toBe(true);
+    });
   });
 });
