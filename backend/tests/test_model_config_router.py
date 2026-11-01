@@ -379,7 +379,7 @@ async def test_repo_model_config_ownership_enforced(
 
         put_resp = await client_admin.put(
             f"/config/model/{repo_a.id}",
-            json={"provider": "groq", "model_name": "llama-3-3-70b-versatile"},
+            json={"provider": "groq", "model_name": "llama-3.3-70b-versatile"},
         )
         assert put_resp.status_code == 404
         assert put_resp.json() == {"detail": "Repo not found"}
