@@ -19,7 +19,6 @@ export interface RepoOut {
   name: string;
   default_branch: string | null;
   language_hint: string | null;
-  active_model_config_id: string | null;
   created_at: string;
   /** True when another workspace tracks the same owner/name. Existence only. */
   registration_conflict?: boolean;
@@ -276,14 +275,11 @@ export interface ModelConfigOut {
   model_name: string;
   base_url: string;
   is_active: boolean;
-  scope?: string;
-  repo_id?: string | null;
 }
 
 export interface ModelConfigUpdate {
   provider: string;
   model_name: string;
-  repo_id?: string;
 }
 
 export interface AvailableModelItem {
@@ -360,7 +356,6 @@ export interface RepoSettingsOut {
   monitored_branches?: string[];
   ignore_draft_prs: boolean;
   max_cost_per_run_cents: number;
-  model_override_scope: string;
   review_guidelines_text?: string | null;
   review_strictness?: string;
   review_focus_areas?: string[];
@@ -388,7 +383,6 @@ export interface RepoSettingsUpdate {
   monitored_branches?: string[];
   ignore_draft_prs?: boolean;
   max_cost_per_run_cents?: number;
-  model_override_scope?: string;
   review_guidelines_text?: string | null;
   review_strictness?: string;
   review_focus_areas?: string[];
@@ -790,12 +784,10 @@ export const api = {
   // Never surface raw allowlist dumps: non-admin callers get generic copy.
   getAvailableModels: () =>
     api.get<AvailableModelsOut>("/config/model/available"),
-  getModelConfig: (repoId?: string, options?: RequestOptions) =>
-    api.get<ModelConfigOut>(`/config/model${repoId ? `?repo_id=${repoId}` : ""}`, options),
+  getModelConfig: (options?: RequestOptions) =>
+    api.get<ModelConfigOut>("/config/model", options),
   updateModelConfig: (data: ModelConfigUpdate) =>
     api.put<ModelConfigOut>("/config/model", data),
-  deleteRepoModelConfig: (repoId: string, options?: RequestOptions) =>
-    api.delete<void>(`/config/model/${repoId}`, options),
   validateCustomProvider: async (
     data: CustomProviderValidateRequest,
     options?: RequestOptions
