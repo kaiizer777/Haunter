@@ -90,8 +90,10 @@ async def test_llm_client_complete_mocked_200():
     client = LLMClient()
     messages = [{"role": "user", "content": "Analyze CI logs"}]
     # Ensure api key is present for test
-    orig_key = settings.opencode_zen_api_key
+    orig_zen_key = settings.opencode_zen_api_key
+    orig_go_key = settings.opencode_go_api_key
     settings.opencode_zen_api_key = "test_zen_key_123"
+    settings.opencode_go_api_key = "test_zen_key_123"
 
     try:
         res = await client.complete(messages=messages)
@@ -107,7 +109,8 @@ async def test_llm_client_complete_mocked_200():
         assert req_headers["User-Agent"] == "opencode/1.0.0"
         assert req_headers["x-session-id"].startswith("ses_")
     finally:
-        settings.opencode_zen_api_key = orig_key
+        settings.opencode_zen_api_key = orig_zen_key
+        settings.opencode_go_api_key = orig_go_key
 
 
 @pytest.mark.asyncio
@@ -459,8 +462,10 @@ async def test_llm_retry_500_exhausts_and_caps():
     route.side_effect = httpx.Response(500, text="Internal Server Error")
 
     client = LLMClient()
-    orig_key = settings.opencode_zen_api_key
+    orig_zen_key = settings.opencode_zen_api_key
+    orig_go_key = settings.opencode_go_api_key
     settings.opencode_zen_api_key = "super_secret_opencode_key_9999"
+    settings.opencode_go_api_key = "super_secret_opencode_key_9999"
 
     try:
         with patch("asyncio.sleep", return_value=None):
@@ -470,7 +475,7 @@ async def test_llm_retry_500_exhausts_and_caps():
                 )
             assert "exhausted" in str(exc_info.value).lower()
             assert (
-                "500" in str(exc_info.value) or "error" in str(exc_info.value).lower()
+                "retry" in str(exc_info.value).lower()
             )
             assert "super_secret_opencode_key_9999" not in str(exc_info.value)
             # The chain hit every model in FREE_TIER_FALLBACK_ORDER, with
@@ -481,7 +486,8 @@ async def test_llm_retry_500_exhausts_and_caps():
             # at least len(chain) * 1 (one per outer LLMClient attempt).
             assert route.call_count >= len(FREE_TIER_FALLBACK_ORDER)
     finally:
-        settings.opencode_zen_api_key = orig_key
+        settings.opencode_zen_api_key = orig_zen_key
+        settings.opencode_go_api_key = orig_go_key
 
 
 @pytest.mark.asyncio
@@ -536,8 +542,10 @@ async def test_llm_api_key_not_in_logs_or_response(caplog):
     )
 
     client = LLMClient()
-    orig_key = settings.opencode_zen_api_key
+    orig_zen_key = settings.opencode_zen_api_key
+    orig_go_key = settings.opencode_go_api_key
     settings.opencode_zen_api_key = secret_key
+    settings.opencode_go_api_key = secret_key
 
     try:
         with caplog.at_level(logging.DEBUG):
@@ -547,7 +555,8 @@ async def test_llm_api_key_not_in_logs_or_response(caplog):
             assert secret_key not in caplog.text
             assert secret_key not in str(res)
     finally:
-        settings.opencode_zen_api_key = orig_key
+        settings.opencode_zen_api_key = orig_zen_key
+        settings.opencode_go_api_key = orig_go_key
 
 
 @pytest.mark.asyncio
@@ -717,7 +726,7 @@ async def test_llm_client_gives_up_after_all_models_exhausted():
             assert count == 1, f"{model} had {count} attempts, expected 1"
         msg = str(exc)
         assert "exhausted" in msg.lower()
-        assert all(model in msg for model in chain_models)
+        assert all(model not in msg for model in chain_models)
         for _m, _i, err in exc.attempts:
             assert "provider down" in err or "500" in err
         inter_model_sleeps = [d for d in sleep_calls if d == INTER_MODEL_SLEEP_S]
@@ -1416,10 +1425,10 @@ def test_model_config_update_schema_validation():
     )
     assert m_go.model_name == "deepseek-v4.1-flash"
 
-    with pytest.raises(ValidationError, match="Model name cannot be empty for provider 'opencode_go'."):
+    with pytest.raises(ValidationError, match="Invalid model selection."):
         ModelConfigUpdate(provider="opencode_go", model_name="")
 
-    with pytest.raises(ValidationError, match="Invalid model 'invalid' for provider 'opencode_go'"):
+    with pytest.raises(ValidationError, match="Invalid model selection."):
         ModelConfigUpdate(provider="opencode_go", model_name="invalid")
 
     m1 = ModelConfigUpdate(
@@ -1459,7 +1468,7 @@ async def test_get_available_models_endpoint_direct():
 
     clear_model_cache()
 
-    fake_user = User(id=uuid.uuid4(), github_id=1234, github_username="test_user")
+    fake_user = User(id=uuid.uuid4(), github_id=1234, github_username="test_user", role="admin")
     res = await get_available_models_endpoint(current_user=fake_user)
     go_ids = [m.id for m in res.opencode_go]
     for mid in ("deepseek-v4.1-flash", "glm-5.2", "mimo-v2.6-flash"):
