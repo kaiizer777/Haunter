@@ -392,7 +392,7 @@ def _sanitize_fallback(
 
 _MODEL_TOKEN_RES = [
     re.compile(r"[A-Za-z0-9_./-]+-free\b"),
-    re.compile(r"\b(?:gpt|claude|llama|deepseek|qwen|gemma|mimo|nemotron|muse-spark|jev|laguna|ling|longcat|space-bunny|gpt-oss)[A-Za-z0-9_./-]*", re.IGNORECASE),
+    re.compile(r"\b(?:gpt|claude|llama|deepseek|qwen|gemma|glm|mimo|nemotron|muse-spark|jev|laguna|ling|longcat|space-bunny|gpt-oss)[A-Za-z0-9_./-]*", re.IGNORECASE),
 ]
 
 
@@ -428,6 +428,9 @@ def _format_failure_reason(stage: str, exc: BaseException) -> str:
         msg = "the AI fix service exhausted its current capacity; please retry later"
     else:
         msg = str(exc) if exc is not None else ""
+        # Bound the regex input first: the `-free` pattern backtracks
+        # on long token-character runs, so redact a truncated prefix.
+        msg = msg[: _FAILURE_REASON_MAX_CHARS + 256]
         msg = _redact_model_tokens(msg)
     if not msg:
         msg = "(no message)"
