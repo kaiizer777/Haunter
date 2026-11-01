@@ -35,6 +35,7 @@ import {
   Eye,
   EyeOff,
   Sparkles,
+  Globe,
 } from "lucide-react";
 
 // Strict server-side allowlists (WORK.md:252)
@@ -593,11 +594,7 @@ export default function ModelConfigPage() {
   const activeValidateControllerRef = useRef<AbortController | null>(null);
   const activeValidateRequestRef = useRef<number>(0);
 
-  const [repos, setRepos] = useState<RepoOut[]>([]);
-  const [selectedScope, setSelectedScope] = useState<"global" | "repo">(() =>
-    (user?.is_admin === false ? "repo" : "global")
-  );
-  const [selectedRepoId, setSelectedRepoId] = useState<string>("");
+  // Model config is global-only (issue #226): no per-repo overrides.
 
   const [activeConfig, setActiveConfig] = useState<ModelConfigOut | null>(null);
   const [globalConfig, setGlobalConfig] = useState<ModelConfigOut | null>(null);
@@ -678,26 +675,6 @@ export default function ModelConfigPage() {
       .catch(() => {});
   }, [isAdmin]);
 
-  // Load repos on mount
-  useEffect(() => {
-    api
-      .getRepos()
-      .then((data) => {
-        setRepos(data);
-        if (data.length > 0) {
-          setSelectedRepoId(data[0].id);
-        }
-      })
-      .catch(() => {});
-  }, [user]);
-
-  // If user auth resolves after repos have loaded
-  useEffect(() => {
-    if (!hasInitializedScopeRef.current && user && !user.is_admin && repos.length > 0) {
-      setSelectedScope("repo");
-      hasInitializedScopeRef.current = true;
-    }
-  }, [user, repos]);
 
   const fetchActiveConfig = useCallback(async (isManualRefresh = false) => {
     if (!isAdmin) {
@@ -711,9 +688,6 @@ export default function ModelConfigPage() {
     const controller = new AbortController();
     activeFetchControllerRef.current = controller;
 
-    const targetScope = selectedScope;
-    const targetRepoId = selectedRepoId;
-
     if (isManualRefresh) {
       setIsRefreshing(true);
     } else {
@@ -721,45 +695,15 @@ export default function ModelConfigPage() {
     }
     setError(null);
     try {
-      // Always resolve the platform default so repo scope can show
-      // override-vs-inherit badges and offer a 1-click reset.
-      let globalCfg: ModelConfigOut | null = null;
-      try {
-        globalCfg = await api.getModelConfig(undefined, {
-          signal: controller.signal,
-          silent: true,
-        });
-        if (controller.signal.aborted) return;
-        setGlobalConfig(globalCfg);
-      } catch (gErr: unknown) {
-        if (gErr instanceof ApiError && (gErr.status === 403 || /admin/i.test(gErr.message))) {
-          if (controller.signal.aborted) return;
-          setGlobalConfig(null);
-        } else {
-          throw gErr;
-        }
-      }
-
-      if (targetScope === "repo" && targetRepoId) {
-        const repoCfg = await api.getModelConfig(targetRepoId, {
-          signal: controller.signal,
-          silent: true,
-        });
-        if (controller.signal.aborted) return;
-        setActiveConfig(repoCfg);
-        setSelectedProvider(repoCfg.provider);
-        setSelectedModel(repoCfg.model_name);
-      } else if (globalCfg) {
-        setActiveConfig(globalCfg);
-        setSelectedProvider(globalCfg.provider);
-        setSelectedModel(globalCfg.model_name);
-      } else if (targetScope === "global") {
-        // Global platform default is unavailable here (non-admin 403):
-        // clear stale repo state instead of showing it under Global scope.
-        setActiveConfig(null);
-        setSelectedProvider("opencode_go");
-        setSelectedModel("deepseek-v4.1-flash");
-      }
+      const globalCfg = await api.getModelConfig({
+        signal: controller.signal,
+        silent: true,
+      });
+      if (controller.signal.aborted) return;
+      setGlobalConfig(globalCfg);
+      setActiveConfig(globalCfg);
+      setSelectedProvider(globalCfg.provider);
+      setSelectedModel(globalCfg.model_name);
     } catch (err: unknown) {
       if (controller.signal.aborted) return;
       if (err instanceof ApiError) {
@@ -773,15 +717,8 @@ export default function ModelConfigPage() {
         setIsRefreshing(false);
       }
     }
-  }, [selectedScope, selectedRepoId, isAdmin]);
+  }, [isAdmin]);
 
-  // Non-admins auto-switch to repo scope; global controls stay locked.
-  useEffect(() => {
-    if (user && !user.is_admin && !hasInitializedScopeRef.current) {
-      setSelectedScope("repo");
-      hasInitializedScopeRef.current = true;
-    }
-  }, [user]);
 
   useEffect(() => {
     fetchActiveConfig();
@@ -901,9 +838,7 @@ export default function ModelConfigPage() {
     }
   }, [customName, customCompat, customBaseUrl, customApiKey]);
 
-  const effectiveTargetIsGlobal = selectedScope === "global" || !selectedRepoId;
-  // Non-admin mutation controls are disabled when targeting global scope;
-  // the backend remains authoritative. Repo overrides stay editable.
+  const effectiveTargetIsGlobal = true;
   const canMutateTarget = isAdmin || !effectiveTargetIsGlobal;
 
   const handleSaveConfig = useCallback(async () => {
@@ -912,12 +847,7 @@ export default function ModelConfigPage() {
       return;
     }
     if (isSaving) return;
-    if (effectiveTargetIsGlobal && !isAdmin) {
-      setError(
-        "Global platform default can only be modified by administrators. Switch to Repository Override to customize models for your repos."
-      );
-      return;
-    }
+
     setError(null);
     setSaveSuccess(false);
     setIsSaving(true);
@@ -926,21 +856,11 @@ export default function ModelConfigPage() {
       const payload = {
         provider: selectedProvider,
         model_name: selectedModel,
-        repo_id: selectedScope === "repo" ? selectedRepoId || undefined : undefined,
       };
 
       const updated = await api.updateModelConfig(payload);
       setActiveConfig(updated);
-      if (selectedScope === "global") {
-        setGlobalConfig(updated);
-      } else if (selectedRepoId) {
-        // Keep repo override tracking in sync without a full repos refetch.
-        setRepos((prev) =>
-          prev.map((r) =>
-            r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
-          )
-        );
-      }
+      setGlobalConfig(updated);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 4500);
     } catch (err: unknown) {
@@ -954,69 +874,8 @@ export default function ModelConfigPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [isSaving, effectiveTargetIsGlobal, isAdmin, selectedProvider, selectedModel, selectedScope, selectedRepoId]);
+  }, [isSaving, isAdmin, selectedProvider, selectedModel]);
 
-  // 1-click "Reset to Global Default": apply the platform default
-  // provider/model onto the selected repo scope.
-  const handleResetToGlobalDefault = useCallback(async () => {
-    if (!selectedRepoId || isResetting) return;
-    setError(null);
-    setSaveSuccess(false);
-    setIsResetting(true);
-    try {
-      if (globalConfig) {
-        const updated = await api.updateModelConfig({
-          provider: globalConfig.provider,
-          model_name: globalConfig.model_name,
-          repo_id: selectedRepoId,
-        });
-        setActiveConfig(updated);
-        setSelectedProvider(updated.provider);
-        setSelectedModel(updated.model_name);
-        setRepos((prev) =>
-          prev.map((r) =>
-            r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
-          )
-        );
-      } else {
-        // Global default is not readable here (non-admin 403): drop the
-        // repo override server-side so the repo inherits the default.
-        await api.deleteRepoModelConfig(selectedRepoId);
-        setRepos((prev) =>
-          prev.map((r) =>
-            r.id === selectedRepoId ? { ...r, active_model_config_id: null } : r
-          )
-        );
-        await fetchActiveConfig(true);
-      }
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 4500);
-    } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setError(err.message);
-      } else {
-        setError("Failed to reset repo to the global default.");
-      }
-    } finally {
-      setIsResetting(false);
-    }
-  }, [globalConfig, selectedRepoId, isResetting, fetchActiveConfig]);
-
-  // Repo scope badge state: custom override vs inheriting platform default.
-  // Derived from the repo response scope so non-admin overrides still read
-  // as overrides when the global default is unreadable (403). Falls back to
-  // value comparison for responses without scope metadata.
-  const isRepoCustomOverride = useMemo(() => {
-    if (selectedScope !== "repo" || !activeConfig) return false;
-    if (typeof activeConfig.scope === "string" && activeConfig.scope) {
-      return activeConfig.scope === "repo";
-    }
-    if (!globalConfig) return false;
-    return (
-      activeConfig.provider !== globalConfig.provider ||
-      activeConfig.model_name !== globalConfig.model_name
-    );
-  }, [selectedScope, activeConfig, globalConfig]);
 
   const isDirty = useMemo(() => {
     if (!activeConfig) return false;
@@ -1088,7 +947,7 @@ export default function ModelConfigPage() {
           badgeClass: "bg-amber-400/10 border-amber-400/30 text-amber-300",
         }
       : PROVIDER_METADATA.opencode_go);
-  const currentRepo = repos.find((r) => r.id === selectedRepoId);
+  // Model config is global-only; no per-repo target.
 
   const providerDropdownOptions = useMemo<SelectOption[]>(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -1243,7 +1102,7 @@ export default function ModelConfigPage() {
   return (
     <AppLayout
       title="Model & Provider Configuration"
-      subtitle="Manage and hot-swap active LLM inference engines globally or per repository"
+      subtitle="Manage and hot-swap the active LLM inference engine globally"
       actions={
         <div className="flex items-center gap-2.5">
           {activeConfig && (
@@ -1330,6 +1189,13 @@ export default function ModelConfigPage() {
             </span>
           </div>
         )}
+        {/* Model config is global-only (issue #226). */}
+        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-3.5 sm:p-4">
+          <div className="relative z-10 flex items-center gap-2 text-xs font-mono text-zinc-300">
+            <Globe className="h-4 w-4 text-amber-400 shrink-0" />
+            <span>Global platform default applies to all repositories.</span>
+          </div>
+        </div>
 
         {/* MAIN HERO: Provider Tabs + Models Grid */}
         <div className="relative rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-3.5 sm:p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-3.5">
