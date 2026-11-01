@@ -230,7 +230,7 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     expect(api.validateCustomProvider).not.toHaveBeenCalled();
   });
 
-  it("resets inputs, closes modal, and selects custom provider on successful validation", async () => {
+  it("validates custom provider, resets form, and updates provider selection on success", async () => {
     vi.mocked(api.validateCustomProvider).mockResolvedValueOnce({
       ok: true,
       supported: true,
@@ -264,5 +264,62 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
       base_url: "https://vllm.internal/v1",
       api_key: "sk-vllm-secret",
     });
+
+    // Assert provider and model state were selected as expected
+    expect(screen.getByRole("button", { name: /inference provider selector/i })).toHaveTextContent("vLLM Server");
+    expect(screen.getByText("vLLM Server:")).toBeInTheDocument();
+    expect(screen.getAllByText("Custom Model 1").length).toBeGreaterThan(0);
+    expect(screen.getByRole("status")).toHaveTextContent(/discovered 1 model for vLLM Server/i);
+
+    // Reopen modal and explicitly assert input fields were reset
+    fireEvent.click(screen.getByRole("button", { name: /add custom provider/i }));
+    expect(await screen.findByLabelText("Custom provider name")).toHaveValue("");
+    expect(screen.getByLabelText("Custom provider base URL")).toHaveValue("");
+    expect(screen.getByLabelText("Custom provider API key")).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+  });
+
+  it("ignores in-flight validation responses and cleans up state when modal is closed before completion", async () => {
+    let resolveValidation!: (value: unknown) => void;
+    const pendingPromise = new Promise((resolve) => {
+      resolveValidation = resolve;
+    });
+    vi.mocked(api.validateCustomProvider).mockImplementationOnce(
+      () => pendingPromise as never
+    );
+
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    fireEvent.change(await screen.findByLabelText("Custom provider name"), {
+      target: { value: "Pending Provider" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider base URL"), {
+      target: { value: "https://pending.internal/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider API key"), {
+      target: { value: "sk-pending" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /validate & discover models/i }));
+
+    // Close the modal while validation is in flight
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+
+    // Resolve validation after modal was closed
+    resolveValidation({
+      ok: true,
+      supported: true,
+      provider_id: "custom_pending",
+      models: [{ id: "pending-model", name: "Pending Model", tag: "Custom" }],
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
+    });
+
+    // Active provider should remain untouched, not updated to the closed pending provider
+    expect(screen.getByRole("button", { name: /inference provider selector/i })).not.toHaveTextContent("Pending Provider");
   });
 });
