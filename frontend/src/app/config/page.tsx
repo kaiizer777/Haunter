@@ -2140,19 +2140,54 @@ export default function ModelConfigPage() {
                     className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
                   />
                 </label>
-                <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
+                <div className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
                   <span>Compatibility <span className="text-red-400">*</span></span>
-                  <select
-                    aria-label="Custom provider compatibility"
-                    value={customCompat}
-                    onChange={(e) => setCustomCompat(e.target.value as CustomProviderCompat)}
-                    disabled={isPending || isValidatingCustom}
-                    className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2 text-xs font-mono text-zinc-200 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
-                  >
-                    <option value="openai">OpenAI-compatible</option>
-                    <option value="anthropic">Anthropic-compatible</option>
-                  </select>
-                </label>
+                  <div className="relative flex rounded-[6px] border border-zinc-700/80 bg-zinc-900/90 p-0.5 h-8.5">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={customCompat === "openai"}
+                      onClick={() => setCustomCompat("openai")}
+                      disabled={isPending || isValidatingCustom}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer",
+                        customCompat === "openai"
+                          ? "bg-zinc-800 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.4)] border border-amber-500/30"
+                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 border border-transparent"
+                      )}
+                    >
+                      <Sparkles className={cn("h-3.5 w-3.5", customCompat === "openai" ? "text-amber-400" : "text-zinc-400")} />
+                      <span>OpenAI</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={customCompat === "anthropic"}
+                      onClick={() => setCustomCompat("anthropic")}
+                      disabled={isPending || isValidatingCustom}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer",
+                        customCompat === "anthropic"
+                          ? "bg-zinc-800 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.4)] border border-amber-500/30"
+                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 border border-transparent"
+                      )}
+                    >
+                      <Zap className={cn("h-3.5 w-3.5", customCompat === "anthropic" ? "text-amber-400" : "text-zinc-400")} />
+                      <span>Anthropic</span>
+                    </button>
+                    <select
+                      aria-label="Custom provider compatibility"
+                      value={customCompat}
+                      onChange={(e) => setCustomCompat(e.target.value as CustomProviderCompat)}
+                      disabled={isPending || isValidatingCustom}
+                      className="sr-only"
+                      tabIndex={-1}
+                    >
+                      <option value="openai">OpenAI-compatible</option>
+                      <option value="anthropic">Anthropic-compatible</option>
+                    </select>
+                  </div>
+                </div>
                 <div className="flex flex-col gap-1.5 sm:col-span-2">
                   <div className="flex items-center justify-between text-xs font-mono text-zinc-300">
                     <label htmlFor="custom-base-url">
@@ -2225,30 +2260,65 @@ export default function ModelConfigPage() {
               {customError && (
                 <div
                   role="alert"
-                  className="flex items-start gap-2 p-2.5 rounded-[6px] border border-red-900/60 bg-red-950/40 text-xs font-mono text-red-300"
+                  className="flex items-start gap-2.5 p-3 rounded-[6px] border border-red-500/30 bg-red-950/30 text-xs font-mono text-red-300 shadow-[inset_0_1px_0_rgba(239,68,68,0.1)]"
                 >
                   <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
-                  <span>{customError}</span>
+                  <span className="leading-relaxed">{customError}</span>
                 </div>
               )}
 
               {customModels.length > 0 && (
-                <div className="flex flex-wrap items-center gap-2 p-2.5 rounded-[6px] border border-zinc-800 bg-zinc-900/50">
-                  <span className="text-xs font-mono text-zinc-400">Discovered:</span>
-                  {customModels.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => setSelectedModel(m.id)}
-                      disabled={isPending}
-                      className="rounded border border-zinc-700/70 bg-zinc-900/80 px-2 py-1 text-[11px] font-mono text-zinc-200 hover:border-zinc-500 cursor-pointer"
-                    >
-                      {m.name || m.id}
-                    </button>
-                  ))}
-                  <span className="text-[11px] font-mono text-zinc-500">
+                <div className="space-y-2 p-3 rounded-[6px] border border-zinc-800/90 bg-[#0d0d10]/80">
+                  <div className="flex items-center justify-between text-xs font-mono">
+                    <span className="text-zinc-400 font-medium flex items-center gap-1.5">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-amber-400" />
+                      Discovered Models ({customModels.length})
+                    </span>
+                    <span className="text-[11px] text-zinc-500">
+                      Click to pre-select
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pt-1">
+                    {customModels.map((m) => {
+                      const isSelected = selectedModel === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setSelectedModel(m.id)}
+                          disabled={isPending}
+                          className={cn(
+                            "group relative flex items-center gap-1.5 rounded-[5px] px-2.5 py-1 text-xs font-mono transition-all cursor-pointer",
+                            isSelected
+                              ? "border border-amber-500/50 bg-amber-500/15 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.15)] font-semibold"
+                              : "border border-zinc-700/70 bg-zinc-900/90 text-zinc-300 hover:border-zinc-500 hover:text-zinc-100 hover:bg-zinc-850"
+                          )}
+                        >
+                          {isSelected ? (
+                            <Check className="h-3 w-3 text-amber-400 shrink-0" />
+                          ) : (
+                            <span className="h-1.5 w-1.5 rounded-full bg-zinc-600 group-hover:bg-zinc-400" />
+                          )}
+                          <span>{m.name || m.id}</span>
+                          {m.tag && (
+                            <span
+                              className={cn(
+                                "text-[10px] px-1 py-0.2 rounded border",
+                                isSelected
+                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-400/80"
+                                  : "border-zinc-700/50 bg-zinc-800/60 text-zinc-500"
+                              )}
+                            >
+                              {m.tag}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[11px] font-mono text-zinc-500 pt-0.5">
                     Select a model, then Save Configuration to persist.
-                  </span>
+                  </p>
                 </div>
               )}
 
@@ -2258,7 +2328,7 @@ export default function ModelConfigPage() {
                   size="sm"
                   variant="outline"
                   onClick={handleCloseCustomModal}
-                  className="h-8 px-3 text-xs font-mono text-zinc-400 hover:text-zinc-200 border-zinc-800 hover:bg-zinc-800/60"
+                  className="h-8.5 px-3 text-xs font-mono text-zinc-400 hover:text-zinc-200 border-zinc-800 hover:bg-zinc-800/60"
                 >
                   Cancel
                 </Button>
@@ -2267,15 +2337,18 @@ export default function ModelConfigPage() {
                   size="sm"
                   onClick={handleValidateCustomProvider}
                   disabled={isPending || isValidatingCustom}
-                  className="h-8 px-3 text-xs font-mono font-bold rounded-[5px] bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700/60 cursor-pointer"
+                  className="h-8.5 px-3.5 text-xs font-mono font-bold rounded-[6px] bg-gradient-to-b from-amber-400 via-amber-500 to-amber-600 text-zinc-950 border-t border-t-amber-300/80 border-x border-x-amber-500/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_4px_rgba(0,0,0,0.3)] hover:brightness-105 active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.35)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isValidatingCustom ? (
                     <span className="flex items-center gap-2">
-                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
                       <span>Validating...</span>
                     </span>
                   ) : (
-                    <span>Validate & Discover Models</span>
+                    <span className="flex items-center gap-1.5">
+                      <Server className="h-3.5 w-3.5 text-zinc-950" />
+                      <span>Validate & Discover Models</span>
+                    </span>
                   )}
                 </Button>
               </div>
