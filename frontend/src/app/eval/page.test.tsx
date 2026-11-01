@@ -16,11 +16,11 @@ vi.mock("next/navigation", () => ({
 
 // Mock auth context
 vi.mock("@/lib/auth-context", () => ({
-  useAuth: () => ({
+  useAuth: vi.fn(() => ({
     user: { id: "u-1", github_username: "kaiizer777", is_admin: true },
     loading: false,
     logout: vi.fn(),
-  }),
+  })),
 }));
 
 // Mock API
@@ -104,8 +104,14 @@ const mockRepos: RepoOut[] = [
 ];
 
 describe("eval/page.tsx", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const { useAuth } = await import("@/lib/auth-context");
+    vi.mocked(useAuth).mockReturnValue({
+      user: { id: "u-1", github_username: "kaiizer777", is_admin: true },
+      loading: false,
+      logout: vi.fn(),
+    } as never);
     (api.getUserEvalMetrics as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockMetrics);
     (api.getRuns as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ runs: mockRuns, total: 2 });
     (api.getRepos as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(mockRepos);
@@ -172,6 +178,22 @@ describe("eval/page.tsx", () => {
       expect(screen.getByText("Telemetry Load Failure")).toBeInTheDocument();
       expect(screen.getByText("Database connection lost")).toBeInTheDocument();
     });
+  });
+
+  it("blocks non-admins without fetching telemetry", async () => {
+    const { useAuth } = await import("@/lib/auth-context");
+    vi.mocked(useAuth).mockReturnValue({
+      user: { id: "u-2", github_username: "regular", is_admin: false },
+      loading: false,
+      logout: vi.fn(),
+    } as never);
+
+    render(<EvalPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/available to admins only/i)).toBeInTheDocument();
+    });
+    expect(api.getUserEvalMetrics).not.toHaveBeenCalled();
   });
 
   it("opens benchmark runner modal when Run Benchmark is clicked", async () => {

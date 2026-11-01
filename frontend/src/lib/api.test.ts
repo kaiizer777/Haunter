@@ -904,7 +904,7 @@ describe("api.ts", () => {
       const err = await api.getAvailableModels().catch((e) => e);
       expect(err).toBeInstanceOf(ApiError);
       expect(String(err.message)).not.toMatch(/gpt|claude|provider|allowlist/i);
-      expect(String(err.message)).toMatch(/try again/i);
+      expect(String(err.message)).toBe("Access denied. Insufficient permissions.");
     });
 
     it("keeps non-model backend detail intact", async () => {
@@ -916,6 +916,29 @@ describe("api.ts", () => {
       const err = await api.getRepos().catch((e) => e);
       expect(err).toBeInstanceOf(ApiError);
       expect(String(err.message)).toBe("Repository not found");
+    });
+
+    it("does not collapse ordinary -ling words in backend detail", async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async () =>
+        new Response(JSON.stringify({ detail: "Error handling request" }), {
+          status: 500,
+        })
+      );
+      const err = await api.getRepos().catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(String(err.message)).toBe("Error handling request");
+    });
+
+    it("falls back to status copy when model detail is dropped", async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async () =>
+        new Response(
+          JSON.stringify({ detail: "allowed models: gpt-4o, claude" }),
+          { status: 403 }
+        )
+      );
+      const err = await api.getRepos().catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(String(err.message)).toBe("Access denied. Insufficient permissions.");
     });
   });
 });

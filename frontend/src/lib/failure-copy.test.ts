@@ -35,6 +35,14 @@ describe("failure-copy (non-admin feature language)", () => {
     expect(describeFailureForDisplay(null, null, false)).toBeNull();
   });
 
+  it("does not treat ordinary -ling words as model vocabulary", () => {
+    expect(isModelVocabulary("handling the request timed out")).toBe(false);
+    expect(isModelVocabulary("polling for updates failed")).toBe(false);
+    expect(
+      describeFailureForDisplay("handling the request timed out", null, false)
+    ).toBe("handling the request timed out");
+  });
+
   it("sanitizes allowlist-shaped error text for non-admins", () => {
     expect(isModelVocabulary("allowed models: gpt-4o, claude")).toBe(true);
     expect(isModelVocabulary("sandbox verification timed out")).toBe(false);

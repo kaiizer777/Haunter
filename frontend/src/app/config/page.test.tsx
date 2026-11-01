@@ -36,7 +36,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 const MODEL_VOCAB_RE =
-  /provider|model card|context window|Default · Free|inference engine|nemotron|laguna|gpt|claude|groq|anthropic|base_url/i;
+  /provider|opencode|openai|deepseek|llama|qwen|glm|mimo|gemma|muse|model card|context window|Default · Free|inference engine|nemotron|laguna|gpt|claude|groq|anthropic|base_url/i;
 
 describe("ModelConfigPage non-admin: features only, zero model vocabulary", () => {
   const nonAdminUser: AuthUser = {
