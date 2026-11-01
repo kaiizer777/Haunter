@@ -73,7 +73,7 @@ async def get_active_model_config_endpoint(
     Get the currently active model configuration.
     If repo_id is provided, returns the repo's active config (or 404 if repo not owned).
     If repo_id is omitted, returns the global active model config from DB or env defaults.
-    Global reads are admin-only; repo reads enforce ownership.
+    Global reads are admin-only; repo reads are admin-only and also enforce ownership.
     """
     if repo_id is None and not is_admin_user(current_user):
         raise HTTPException(
