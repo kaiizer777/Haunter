@@ -152,6 +152,14 @@ async def get_active_model_config_endpoint(
     )
 
 
+async def _require_model_admin(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Dependency that 403s non-admins before request-body validation runs."""
+    _require_admin(current_user)
+    return current_user
+
+
 def _require_admin(current_user: User) -> None:
     """Raise 403 if caller is not an admin. Closed by default: no open bypass."""
     if not is_admin_user(current_user):
@@ -168,7 +176,7 @@ def _require_admin(current_user: User) -> None:
 @router.put("", response_model=ModelConfigOut)
 async def update_model_config_endpoint(
     body: ModelConfigUpdate,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(_require_model_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ModelConfigOut:
     """
@@ -458,7 +466,7 @@ async def get_repo_model_config(
 @router.delete("/{repo_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_repo_model_config(
     repo_id: uuid.UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(_require_model_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """
@@ -500,7 +508,7 @@ async def delete_repo_model_config(
 async def update_repo_model_config(
     repo_id: uuid.UUID,
     body: ModelConfigUpdate,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(_require_model_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ModelConfigOut:
     """
