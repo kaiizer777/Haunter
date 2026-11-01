@@ -39,8 +39,6 @@ Connect any GitHub repository and Haunter becomes a team member. Every pull requ
 
 <br/>
 
-**When CI breaks, Haunter heals it — automatically.**
-
 A failing workflow is just another kind of PR problem. Haunter reads the failure, traces it to the exact root cause, generates a patch, and runs it through an **ephemeral sandbox** (a real mirror repo on GitHub Actions) before proposing anything. No guessing. No noise. Just a clean fix PR.
 
 ```
