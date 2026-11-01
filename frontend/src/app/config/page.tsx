@@ -32,6 +32,10 @@ import {
   ChevronDown,
   ChevronUp,
   Plus,
+  Server,
+  Eye,
+  EyeOff,
+  Sparkles,
 } from "lucide-react";
 
 // Strict server-side allowlists (WORK.md:252)
@@ -39,6 +43,13 @@ const PROVIDER_OPTIONS = [
   { id: "opencode_go", name: "OpenCode Go", defaultModel: "deepseek-v4.1-flash" },
   { id: "groq", name: "Groq", defaultModel: "openai/gpt-oss-120b" },
 ];
+
+const BASE_URL_PRESETS = [
+  { label: "Ollama", value: "http://localhost:11434/v1" },
+  { label: "vLLM / LM Studio", value: "http://localhost:8000/v1" },
+  { label: "Together AI", value: "https://api.together.xyz/v1" },
+  { label: "OpenAI", value: "https://api.openai.com/v1" },
+] as const;
 
 const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string; context_window?: number }[]> = {
   opencode_go: [
@@ -581,6 +592,7 @@ export default function ModelConfigPage() {
   const [customCompat, setCustomCompat] = useState<CustomProviderCompat>("openai");
   const [customBaseUrl, setCustomBaseUrl] = useState("");
   const [customApiKey, setCustomApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
   const [customModels, setCustomModels] = useState<AvailableModelItem[]>([]);
   const [isValidatingCustom, setIsValidatingCustom] = useState(false);
   const [customError, setCustomError] = useState<string | null>(null);
@@ -750,6 +762,7 @@ export default function ModelConfigPage() {
     activeValidateRequestRef.current = 0;
     setCustomError(null);
     setCustomModels([]);
+    setShowApiKey(false);
     setIsCustomModalOpen(true);
   }, []);
 
@@ -761,6 +774,7 @@ export default function ModelConfigPage() {
     setCustomError(null);
     setCustomModels([]);
     setIsValidatingCustom(false);
+    setShowApiKey(false);
   }, []);
 
   // Admin custom provider: validate -> discover -> select -> persist via
@@ -827,6 +841,7 @@ export default function ModelConfigPage() {
       setCustomName("");
       setCustomBaseUrl("");
       setCustomApiKey("");
+      setShowApiKey(false);
       setIsCustomModalOpen(false);
     } catch (err: unknown) {
       if (
@@ -2109,6 +2124,7 @@ export default function ModelConfigPage() {
             onClose={handleCloseCustomModal}
             title="Custom Provider"
             description="Connect an OpenAI or Anthropic-compatible custom inference endpoint."
+            icon={<Server className="h-4 w-4 text-amber-400" />}
             className="max-w-lg"
           >
             <div className="space-y-4">
@@ -2137,9 +2153,14 @@ export default function ModelConfigPage() {
                     <option value="anthropic">Anthropic-compatible</option>
                   </select>
                 </label>
-                <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300 sm:col-span-2">
-                  <span>Base URL <span className="text-red-400">*</span></span>
+                <div className="flex flex-col gap-1.5 sm:col-span-2">
+                  <div className="flex items-center justify-between text-xs font-mono text-zinc-300">
+                    <label htmlFor="custom-base-url">
+                      Base URL <span className="text-red-400">*</span>
+                    </label>
+                  </div>
                   <input
+                    id="custom-base-url"
                     aria-label="Custom provider base URL"
                     value={customBaseUrl}
                     onChange={(e) => setCustomBaseUrl(e.target.value)}
@@ -2147,19 +2168,58 @@ export default function ModelConfigPage() {
                     placeholder="https://my-host/v1"
                     className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
                   />
-                </label>
-                <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300 sm:col-span-2">
-                  <span>API Key <span className="text-red-400">*</span></span>
-                  <input
-                    aria-label="Custom provider API key"
-                    type="password"
-                    value={customApiKey}
-                    onChange={(e) => setCustomApiKey(e.target.value)}
-                    disabled={isPending || isValidatingCustom}
-                    placeholder="sk-..."
-                    className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
-                  />
-                </label>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                    <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">Presets:</span>
+                    {BASE_URL_PRESETS.map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        disabled={isPending || isValidatingCustom}
+                        onClick={() => setCustomBaseUrl(preset.value)}
+                        className={cn(
+                          "px-2 py-0.5 rounded-[4px] border text-[11px] font-mono transition-all cursor-pointer",
+                          customBaseUrl === preset.value
+                            ? "border-amber-500/40 bg-amber-500/15 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.15)]"
+                            : "border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 hover:bg-zinc-800/50"
+                        )}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1.5 sm:col-span-2">
+                  <div className="flex items-center justify-between text-xs font-mono text-zinc-300">
+                    <label htmlFor="custom-api-key">
+                      API Key <span className="text-red-400">*</span>
+                    </label>
+                  </div>
+                  <div className="relative">
+                    <input
+                      id="custom-api-key"
+                      aria-label="Custom provider API key"
+                      type={showApiKey ? "text" : "password"}
+                      value={customApiKey}
+                      onChange={(e) => setCustomApiKey(e.target.value)}
+                      disabled={isPending || isValidatingCustom}
+                      placeholder="sk-..."
+                      className="h-8.5 w-full rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 pl-2.5 pr-9 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey((prev) => !prev)}
+                      disabled={isPending || isValidatingCustom}
+                      aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-[4px] p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-amber-400 transition-colors"
+                    >
+                      {showApiKey ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {customError && (
