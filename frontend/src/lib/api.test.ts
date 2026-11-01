@@ -893,5 +893,29 @@ describe("api.ts", () => {
       expect(capturedOpts.method).toBe("POST");
       expect(capturedOpts.body).toBe(JSON.stringify({}));
     });
+
+    it("redacts model-allowlist backend detail to generic copy", async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async () =>
+        new Response(
+          JSON.stringify({ detail: "allowed models: gpt-4o, claude-sonnet (provider openai)" }),
+          { status: 403 }
+        )
+      );
+      const err = await api.getAvailableModels().catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(String(err.message)).not.toMatch(/gpt|claude|provider|allowlist/i);
+      expect(String(err.message)).toMatch(/try again/i);
+    });
+
+    it("keeps non-model backend detail intact", async () => {
+      globalThis.fetch = vi.fn().mockImplementation(async () =>
+        new Response(JSON.stringify({ detail: "Repository not found" }), {
+          status: 404,
+        })
+      );
+      const err = await api.getRepos().catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(String(err.message)).toBe("Repository not found");
+    });
   });
 });

@@ -85,14 +85,15 @@ describe("sidebar.tsx", () => {
     const settingsLink = screen.getByRole("link", { name: /^settings$/i });
     expect(screen.queryByRole("link", { name: /model config/i })).not.toBeInTheDocument();
     expect(api.getModelConfig).not.toHaveBeenCalled();
-    const evalLink = screen.getByRole("link", { name: /ai reliability & evals/i });
+    // Eval and model surfaces are admin-only: hidden for non-admins.
+    expect(
+      screen.queryByRole("link", { name: /ai reliability & evals/i })
+    ).not.toBeInTheDocument();
 
     expect(runsLink).toHaveAttribute("href", "/runs");
     expect(within(runsLink).queryByText("Live")).not.toBeInTheDocument();
     expect(reposLink).toHaveAttribute("href", "/repos");
     expect(settingsLink).toHaveAttribute("href", "/settings");
-    expect(evalLink).toHaveAttribute("href", "/eval");
-    expect(within(evalLink).queryByText("Live")).not.toBeInTheDocument();
 
     // Global-only telemetry is hidden for non-admins: no stale default model badge.
     expect(screen.queryByText("Active Model")).not.toBeInTheDocument();
