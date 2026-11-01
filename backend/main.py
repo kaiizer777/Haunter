@@ -193,9 +193,9 @@ async def sandbox_health(
     """
     Return the active sandbox provider configuration.
 
-    Read-only, no auth required. Used by the dashboard's model/provider
-    switcher to surface the current sandbox backend and — for the
-    github_actions provider — the configured org and App ID.
+    Requires authentication. Used by the dashboard's sandbox indicator;
+    the sandbox backend for all authenticated users. The detail block
+    (org, app id, installation id) is admin-only.
 
     Response shape:
         {
