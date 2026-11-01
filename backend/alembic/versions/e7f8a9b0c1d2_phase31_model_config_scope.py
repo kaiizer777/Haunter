@@ -66,24 +66,26 @@ def _has_fk(table: str, name: str, default: bool = True) -> bool:
 
 def upgrade() -> None:
     # 1. Discriminator + ownership pins (expand step — nullable/additive only).
-    if not _has_column("model_configs", "scope"):
+    # Offline (--sql) mode has no connection to inspect; default False so the
+    # DDL is still emitted for review (matches a9b8... handling).
+    if not _has_column("model_configs", "scope", default=False):
         op.add_column(
             "model_configs",
             sa.Column("scope", sa.String(length=16), nullable=False, server_default="global"),
         )
-    if not _has_column("model_configs", "repo_id"):
+    if not _has_column("model_configs", "repo_id", default=False):
         op.add_column(
             "model_configs",
             sa.Column("repo_id", sa.UUID(as_uuid=True), nullable=True),
         )
-    if not _has_column("model_configs", "user_id"):
+    if not _has_column("model_configs", "user_id", default=False):
         op.add_column(
             "model_configs",
             sa.Column("user_id", sa.UUID(as_uuid=True), nullable=True),
         )
 
     # 2. FK constraints (SET NULL — deleting a repo/user never deletes history).
-    if not _has_fk("model_configs", "fk_model_configs_repo_id_repos"):
+    if not _has_fk("model_configs", "fk_model_configs_repo_id_repos", default=False):
         op.create_foreign_key(
             "fk_model_configs_repo_id_repos",
             "model_configs",
@@ -92,7 +94,7 @@ def upgrade() -> None:
             ["id"],
             ondelete="SET NULL",
         )
-    if not _has_fk("model_configs", "fk_model_configs_user_id_users"):
+    if not _has_fk("model_configs", "fk_model_configs_user_id_users", default=False):
         op.create_foreign_key(
             "fk_model_configs_user_id_users",
             "model_configs",
@@ -103,11 +105,11 @@ def upgrade() -> None:
         )
 
     # 3. Indexes for scope-filtered hot paths.
-    if not _has_index("model_configs", "ix_model_configs_scope"):
+    if not _has_index("model_configs", "ix_model_configs_scope", default=False):
         op.create_index("ix_model_configs_scope", "model_configs", ["scope"])
-    if not _has_index("model_configs", "ix_model_configs_repo_id"):
+    if not _has_index("model_configs", "ix_model_configs_repo_id", default=False):
         op.create_index("ix_model_configs_repo_id", "model_configs", ["repo_id"])
-    if not _has_index("model_configs", "ix_model_configs_user_id"):
+    if not _has_index("model_configs", "ix_model_configs_user_id", default=False):
         op.create_index("ix_model_configs_user_id", "model_configs", ["user_id"])
 
     # 4. Backfill: rows linked from repos.active_model_config_id are repo
