@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/lib/auth-context";
 import { AppLayout } from "@/components/layout/app-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -47,6 +48,14 @@ function formatMinutesSeconds(totalSeconds: number | null | undefined): string {
 
 export default function EvalPage() {
   const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
+  const isAdmin = Boolean(user?.is_admin);
+
+  useEffect(() => {
+    if (!authLoading && !isAdmin) {
+      router.replace("/");
+    }
+  }, [authLoading, isAdmin, router]);
 
   const [metrics, setMetrics] = useState<UserEvalMetricsOut | null>(null);
   const [loading, setLoading] = useState(true);
@@ -85,8 +94,10 @@ export default function EvalPage() {
   }, []);
 
   useEffect(() => {
-    fetchMetrics();
-  }, [fetchMetrics]);
+    if (!authLoading && isAdmin) {
+      fetchMetrics();
+    }
+  }, [fetchMetrics, authLoading, isAdmin]);
 
   // Keyboard shortcut handler: 'r' to refresh
   useEffect(() => {
@@ -167,6 +178,16 @@ export default function EvalPage() {
       </Button>
     </div>
   );
+
+  if (!authLoading && !isAdmin) {
+    return (
+      <AppLayout title="AI Reliability & Evals" subtitle="Admin only">
+        <div className="rounded-[7px] border border-zinc-800 bg-[#111114] p-3.5 text-[13px] text-zinc-400">
+          Access denied. This surface is available to admins only.
+        </div>
+      </AppLayout>
+    );
+  }
 
   return (
     <AppLayout

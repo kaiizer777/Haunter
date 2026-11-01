@@ -107,3 +107,16 @@ def test_validator_errors_are_generic() -> None:
     msgs = " | ".join(e.get("msg", "") for e in exc_info.value.errors())
     assert "Invalid model selection." in msgs
     assert "Allowed models" not in msgs
+
+
+def test_failure_reason_redacts_glm_tokens() -> None:
+    reason = _format_failure_reason(
+        "verification", ValueError("backend glm-5.2 exploded")
+    )
+    assert "glm-5.2" not in reason
+    assert "[model]" in reason
+
+
+def test_failure_reason_long_message_stays_capped() -> None:
+    reason = _format_failure_reason("verification", ValueError("x" * 40000))
+    assert len(reason) <= 500

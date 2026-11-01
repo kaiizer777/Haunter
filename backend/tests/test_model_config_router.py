@@ -162,6 +162,24 @@ async def test_put_global_model_config_forbidden_for_non_admin(
 
 
 @pytest.mark.asyncio
+async def test_put_model_config_gated_before_validation(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """Non-admin invalid-provider PUT returns 403, not 422 (no allowlist oracle)."""
+    await truncate_all(db)
+    non_admin_user = await user_factory(role="user")
+    client = make_auth_client(non_admin_user.id)
+
+    monkeypatch.setattr(settings, "admin_user_id", str(uuid.uuid4()))
+
+    payload = {"provider": "gcp", "model_name": "gemini-pro"}
+    async with client:
+        resp = await client.put("/config/model", json=payload)
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_put_global_model_config_allowed_for_admin(
     db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
 ):

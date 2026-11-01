@@ -748,7 +748,7 @@ export default function ModelConfigPage() {
         setIsRefreshing(false);
       }
     }
-  }, [selectedScope, selectedRepoId]);
+  }, [selectedScope, selectedRepoId, isAdmin]);
 
   // Non-admins auto-switch to repo scope; global controls stay locked.
   useEffect(() => {

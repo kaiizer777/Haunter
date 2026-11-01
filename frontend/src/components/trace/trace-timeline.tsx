@@ -24,8 +24,9 @@ import { Button } from "@/components/ui/button";
 
 interface TraceTimelineProps {
   trace: TraceOut;
-  /** When false, attempt failure text renders in feature language. Defaults
-   *  to false so raw backend strings never leak unless a caller opts in. */
+  /** When false, failure text matching model/provider vocabulary renders
+   *  in feature language; other raw text passes through. Defaults to false
+   *  so model identifiers never leak unless a caller opts in. */
   isAdmin?: boolean;
 }
 
