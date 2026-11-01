@@ -1092,7 +1092,6 @@ export default function ModelConfigPage() {
           badgeClass: "bg-amber-400/10 border-amber-400/30 text-amber-300",
         }
       : PROVIDER_METADATA.opencode_go);
-  const currentBaseUrl = activeConfig?.base_url || activeProviderMeta.baseUrl;
   const currentRepo = repos.find((r) => r.id === selectedRepoId);
 
   const providerDropdownOptions = useMemo<SelectOption[]>(() => {
@@ -1230,7 +1229,7 @@ export default function ModelConfigPage() {
         title="Repository Features"
         subtitle="Manage automation features for your repositories"
       >
-        <div className="space-y-4 min-w-0 w-full max-w-none pb-20">
+        <div className="space-y-4 min-w-0 w-full max-w-none pb-12">
           <div className="rounded-[8px] border border-zinc-800/80 bg-gradient-to-b from-[#111115]/95 to-[#09090c]/95 p-6 text-sm text-zinc-300">
             <p className="font-semibold text-zinc-100">Automation features</p>
             <p className="mt-1 text-zinc-400">
@@ -1303,7 +1302,7 @@ export default function ModelConfigPage() {
         </div>
       }
     >
-      <div className="space-y-4 min-w-0 w-full max-w-none pb-20">
+      <div className="space-y-4 min-w-0 w-full max-w-none pb-12">
         {/* Error Alert */}
         {error && (
           <div className="flex items-start gap-3 rounded-[8px] border border-red-800/80 bg-gradient-to-b from-red-950/60 to-red-950/30 p-4 text-sm text-red-200 shadow-md animate-in fade-in">
@@ -2024,112 +2023,6 @@ export default function ModelConfigPage() {
                   </span>
                 )}
               </Button>
-            </div>
-          </div>
-        </div>
-
-        {/* BOTTOM GRID: Balanced 2 Columns (Inference URL Enclave + Live Pipeline Telemetry) */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
-          {/* Column 1: Server-Derived Base URL & Security Enclave */}
-          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3">
-            <span
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
-            />
-            <div className="flex items-center justify-between relative z-10">
-              <div className="flex items-center gap-2">
-                <Lock className="h-4 w-4 text-emerald-400" />
-                <h3 className="text-sm font-mono font-semibold text-zinc-200">
-                  Inference Base URL (Server-Derived)
-                </h3>
-              </div>
-              <span className="text-xs font-mono bg-emerald-950/40 border border-emerald-800/40 text-emerald-400 px-2 py-0.5 rounded">
-                TLS 1.3 Verified
-              </span>
-            </div>
-
-            <div className="relative z-10 flex items-center justify-between gap-3 rounded-[6px] border border-zinc-800/90 bg-[#08080a] px-3 py-2 font-mono text-xs text-zinc-200">
-              <div className="flex items-center gap-2 truncate">
-                <span className="text-zinc-500 select-none text-xs font-mono">ENDPOINT:</span>
-                <span className="text-amber-300 font-semibold truncate select-all">{currentBaseUrl}</span>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => handleCopyUrl(currentBaseUrl)}
-                  className="flex items-center gap-1.5 text-xs text-zinc-300 hover:text-white border border-zinc-700/80 bg-zinc-800 px-2.5 py-1 rounded-[5px] transition-colors cursor-pointer"
-                >
-                  {copiedUrl ? (
-                    <>
-                      <Check className="h-3.5 w-3.5 text-emerald-400" />
-                      <span className="text-emerald-400 font-semibold">Copied</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="h-3.5 w-3.5 text-zinc-400" />
-                      <span>Copy</span>
-                    </>
-                  )}
-                </button>
-                <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-400 font-mono">
-                  Locked
-                </span>
-              </div>
-            </div>
-
-            <p className="relative z-10 text-xs text-zinc-400 leading-relaxed font-sans">
-              Inference endpoints are generated strictly server-side by Haunter&apos;s orchestrator to prevent prompt injection and unauthorized upstream proxying.
-            </p>
-          </div>
-
-          {/* Column 2: Live Pipeline Telemetry & Subagents */}
-          <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.4)] space-y-3">
-            <span
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
-            />
-            <div className="flex items-center justify-between relative z-10">
-              <div className="flex items-center gap-2">
-                <Activity className="h-4 w-4 text-emerald-400" />
-                <h3 className="text-sm font-mono font-semibold text-zinc-200">
-                  Subagent Pipeline Telemetry
-                </h3>
-              </div>
-              <div className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded font-mono">
-                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span>Ready for CI Webhooks</span>
-              </div>
-            </div>
-
-            {/* Stepper diagram */}
-            <div className="relative z-10 grid grid-cols-5 gap-1.5 text-center font-mono">
-              <div className="rounded-[6px] border border-zinc-800/80 bg-[#0c0c0e] p-2 space-y-0.5">
-                <span className="text-[10px] text-zinc-500 uppercase block font-semibold">01</span>
-                <span className="text-xs text-zinc-300 font-medium block truncate">Webhook</span>
-              </div>
-              <div className="rounded-[6px] border border-zinc-800/80 bg-[#0c0c0e] p-2 space-y-0.5">
-                <span className="text-[10px] text-zinc-500 uppercase block font-semibold">02</span>
-                <span className="text-xs text-zinc-300 font-medium block truncate">Gatherer</span>
-              </div>
-              <div className="rounded-[6px] border border-amber-500/50 bg-amber-400/10 p-2 space-y-0.5 ring-1 ring-amber-400/30 shadow-[0_0_12px_rgba(245,158,11,0.15)]">
-                <span className="text-[10px] text-amber-400 uppercase block font-bold">03 Fixer</span>
-                <span className="text-xs text-amber-300 font-bold block truncate">
-                  {formatModelDisplayName(selectedModel)}
-                </span>
-              </div>
-              <div className="rounded-[6px] border border-zinc-800/80 bg-[#0c0c0e] p-2 space-y-0.5">
-                <span className="text-[10px] text-zinc-500 uppercase block font-semibold">04</span>
-                <span className="text-xs text-zinc-300 font-medium block truncate">Sandbox</span>
-              </div>
-              <div className="rounded-[6px] border border-zinc-800/80 bg-[#0c0c0e] p-2 space-y-0.5">
-                <span className="text-[10px] text-zinc-500 uppercase block font-semibold">05</span>
-                <span className="text-xs text-zinc-300 font-medium block truncate">PR Writer</span>
-              </div>
-            </div>
-
-            <div className="relative z-10 flex items-center justify-between text-xs text-zinc-400 font-mono pt-0.5">
-              <span>Orchestrator: <strong className="text-zinc-200 font-medium">Async Subagents (SQS/Lambda)</strong></span>
-              <span>Routing: <strong className="text-emerald-400 font-medium">Allowlist Enforced</strong></span>
             </div>
           </div>
         </div>

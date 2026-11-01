@@ -455,4 +455,11 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
       expect(input.className).not.toContain("focus:ring-white/40");
     }
   });
+it("does not render server-derived base URL or subagent pipeline telemetry cards", async () => {
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("OpenCode Go")).toBeInTheDocument();
+    expect(screen.queryByText(/inference base url \(server-derived\)/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/subagent pipeline telemetry/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/tls 1\.3 verified/i)).not.toBeInTheDocument();
+  });
 });
