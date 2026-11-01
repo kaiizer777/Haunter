@@ -65,7 +65,6 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         db: AsyncSession | None = None,
-        repo_id: uuid.UUID | None = None,
         model_config: ResolvedModelConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
@@ -88,7 +87,6 @@ class LLMClient:
             messages: List of message dicts (e.g. ``[{"role": "user", "content": "..."}]``).
             tools: Optional tool definitions for tool-calling agents.
             db: Optional database session to resolve active model config.
-            repo_id: Optional repo UUID to apply per-repo model overrides.
             model_config: Pre-resolved active model config. When provided, the
               DB lookup is skipped entirely — fan-out callers (e.g. the
               4-perspective audit) resolve once and share it so N concurrent
@@ -112,7 +110,7 @@ class LLMClient:
                   against the ``max_tokens`` they requested — a response truncated at
                   the budget is otherwise indistinguishable from a complete one.
         """
-        config = model_config or await get_active_model_config(db=db, repo_id=repo_id)
+        config = model_config or await get_active_model_config(db=db)
         target_provider = kwargs.pop("provider", config.provider)
         explicit_model = kwargs.pop("model", None)
         response_format = kwargs.get("response_format")
