@@ -157,11 +157,19 @@ async def get_active_model_config_endpoint(
     )
 
 
+async def _require_model_admin(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Dependency that 403s non-admins before request-body validation runs."""
+    _require_admin(current_user)
+    return current_user
+
+
 def _require_admin(current_user: User) -> None:
     """Raise 403 if caller is not an admin. Closed by default: no open bypass."""
     if not is_admin_user(current_user):
         logger.warning(
-            "model_config: non-admin user %s attempted global model config write",
+            "model_config: non-admin user %s attempted model config write",
             current_user.id,
         )
         raise HTTPException(
@@ -173,14 +181,17 @@ def _require_admin(current_user: User) -> None:
 @router.put("", response_model=ModelConfigOut)
 async def update_model_config_endpoint(
     body: ModelConfigUpdate,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(_require_model_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ModelConfigOut:
     """
     Update active model configuration.
-    - If body.repo_id is supplied: updates model config for that repo (enforces ownership).
+    - If body.repo_id is supplied: updates model config for that repo (admin-only).
     - If body.repo_id is null: updates global active model config (admin-only).
     """
+    # Gate before any request handling: body validation and the provider
+    # allowlist check below must not leak details to non-admins.
+    _require_admin(current_user)
     base_url = _base_url_for_provider(body.provider)
     if not base_url:
         raise HTTPException(
@@ -332,11 +343,17 @@ async def get_available_models_endpoint(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> AvailableModelsOut:
     """
+    Admin-only: full model vocabulary is never exposed to non-admins.
     Get live list of available models per provider (issue #205: only
     opencode_go + groq are default providers).
     For opencode_go: dynamically queries /models with TTL caching.
     For groq: returns approved production models with context window metadata.
     """
+    if not is_admin_user(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin permissions required to list available models",
+        )
     groq_items = [
         AvailableModelItem(
             id="openai/gpt-oss-120b",
@@ -407,15 +424,16 @@ async def get_repo_model_config(
 @router.delete("/{repo_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_repo_model_config(
     repo_id: uuid.UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(_require_model_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """
     Reset a repo to the platform default by deactivating its repo-scoped
     override rows and clearing the legacy linkage. Returns 404 if the repo
     is not found or not owned by the caller (no existence oracle).
-    Usable by non-admins so repo overrides can be reset without global read.
+    Admin-only: repo model overrides can only be reset by admins.
     """
+    _require_admin(current_user)
     repo_result = await db.execute(
         select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
     )
@@ -448,7 +466,7 @@ async def delete_repo_model_config(
 async def update_repo_model_config(
     repo_id: uuid.UUID,
     body: ModelConfigUpdate,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(_require_model_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ModelConfigOut:
     """
