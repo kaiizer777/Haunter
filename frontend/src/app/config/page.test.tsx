@@ -153,7 +153,11 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
 
   it("shows the admin custom-provider form and falls back gracefully without a backend endpoint", async () => {
     render(<ModelConfigPage />);
-    expect(await screen.findByText(/Custom Provider/)).toBeInTheDocument();
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    expect(addBtn).toBeInTheDocument();
+    fireEvent.click(addBtn);
+
+    expect(await screen.findByLabelText("Custom provider name")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Custom provider name"), {
       target: { value: "my-provider" },
     });
@@ -189,7 +193,8 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     });
     render(<ModelConfigPage />);
     expect(await screen.findByText("Automation features")).toBeInTheDocument();
-    expect(screen.queryByText(/Custom Provider/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /add custom provider/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
     expect(screen.queryByText("Repository Override")).not.toBeInTheDocument();
   });
 });
