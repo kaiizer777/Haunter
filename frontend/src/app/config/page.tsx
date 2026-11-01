@@ -2159,22 +2159,28 @@ export default function ModelConfigPage() {
             icon={<Server className="h-4 w-4 text-amber-400" />}
             className="max-w-lg"
           >
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-4.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                 <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
-                  <span>Name <span className="text-red-400">*</span></span>
+                  <span className="flex items-center justify-between">
+                    <span>Name <span className="text-red-400">*</span></span>
+                    <span className="text-[10px] text-zinc-500 font-sans">Identifier</span>
+                  </span>
                   <input
                     aria-label="Custom provider name"
                     value={customName}
                     onChange={(e) => setCustomName(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="my-provider"
-                    className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-t-amber-400/80 focus:border-x-amber-500/60 focus:border-b-amber-600 focus:ring-1 focus:ring-amber-400/20 transition-all"
                   />
                 </label>
                 <div className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
-                  <span>Compatibility <span className="text-red-400">*</span></span>
-                  <div className="relative flex rounded-[6px] border border-zinc-700/80 bg-zinc-900/90 p-0.5 h-8.5">
+                  <span className="flex items-center justify-between">
+                    <span>Compatibility <span className="text-red-400">*</span></span>
+                    <span className="text-[10px] text-zinc-500 font-sans">Wire protocol</span>
+                  </span>
+                  <div className="relative flex rounded-[6px] border border-zinc-800/90 bg-[#09090c]/90 p-0.5 h-9 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4)]">
                     <button
                       type="button"
                       role="tab"
@@ -2184,11 +2190,11 @@ export default function ModelConfigPage() {
                       className={cn(
                         "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer",
                         customCompat === "openai"
-                          ? "bg-zinc-800 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.4)] border border-amber-500/30"
-                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 border border-transparent"
+                          ? "bg-gradient-to-b from-zinc-800/95 via-zinc-850 to-zinc-900/95 text-amber-300 border-t border-t-amber-400/40 border-x border-x-amber-500/25 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_3px_rgba(0,0,0,0.4)]"
+                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-850/50 border border-transparent"
                       )}
                     >
-                      <Sparkles className={cn("h-3.5 w-3.5", customCompat === "openai" ? "text-amber-400" : "text-zinc-400")} />
+                      <Sparkles className={cn("h-3.5 w-3.5", customCompat === "openai" ? "text-amber-400" : "text-zinc-500")} />
                       <span>OpenAI</span>
                     </button>
                     <button
@@ -2200,11 +2206,11 @@ export default function ModelConfigPage() {
                       className={cn(
                         "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer",
                         customCompat === "anthropic"
-                          ? "bg-zinc-800 text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_2px_rgba(0,0,0,0.4)] border border-amber-500/30"
-                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 border border-transparent"
+                          ? "bg-gradient-to-b from-zinc-800/95 via-zinc-850 to-zinc-900/95 text-amber-300 border-t border-t-amber-400/40 border-x border-x-amber-500/25 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_3px_rgba(0,0,0,0.4)]"
+                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-850/50 border border-transparent"
                       )}
                     >
-                      <Zap className={cn("h-3.5 w-3.5", customCompat === "anthropic" ? "text-amber-400" : "text-zinc-400")} />
+                      <Zap className={cn("h-3.5 w-3.5", customCompat === "anthropic" ? "text-amber-400" : "text-zinc-500")} />
                       <span>Anthropic</span>
                     </button>
                     <select
@@ -2222,9 +2228,10 @@ export default function ModelConfigPage() {
                 </div>
                 <div className="flex flex-col gap-1.5 sm:col-span-2">
                   <div className="flex items-center justify-between text-xs font-mono text-zinc-300">
-                    <label htmlFor="custom-base-url">
-                      Base URL <span className="text-red-400">*</span>
+                    <label htmlFor="custom-base-url" className="flex items-center gap-1">
+                      <span>Base URL <span className="text-red-400">*</span></span>
                     </label>
+                    <span className="text-[10px] text-zinc-500 font-sans">Must include path (e.g. /v1)</span>
                   </div>
                   <input
                     id="custom-base-url"
@@ -2233,33 +2240,37 @@ export default function ModelConfigPage() {
                     onChange={(e) => setCustomBaseUrl(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="https://my-host/v1"
-                    className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-t-amber-400/80 focus:border-x-amber-500/60 focus:border-b-amber-600 focus:ring-1 focus:ring-amber-400/20 transition-all"
                   />
                   <div className="flex flex-wrap items-center gap-1.5 mt-1">
                     <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">Presets:</span>
-                    {BASE_URL_PRESETS.map((preset) => (
-                      <button
-                        key={preset.label}
-                        type="button"
-                        disabled={isPending || isValidatingCustom}
-                        onClick={() => setCustomBaseUrl(preset.value)}
-                        className={cn(
-                          "px-2 py-0.5 rounded-[4px] border text-[11px] font-mono transition-all cursor-pointer",
-                          customBaseUrl === preset.value
-                            ? "border-amber-500/40 bg-amber-500/15 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.15)]"
-                            : "border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 hover:bg-zinc-800/50"
-                        )}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
+                    {BASE_URL_PRESETS.map((preset) => {
+                      const isActive = customBaseUrl === preset.value;
+                      return (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          disabled={isPending || isValidatingCustom}
+                          onClick={() => setCustomBaseUrl(preset.value)}
+                          className={cn(
+                            "px-2.5 py-0.5 rounded-[4px] border text-[11px] font-mono transition-all cursor-pointer active:translate-y-[0.5px]",
+                            isActive
+                              ? "border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/40 bg-gradient-to-b from-amber-500/20 to-amber-950/40 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.2),0_1px_2px_rgba(0,0,0,0.3)] font-medium"
+                              : "border-zinc-800/90 bg-[#0c0c0f] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 hover:bg-zinc-850/50"
+                          )}
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
                 <div className="flex flex-col gap-1.5 sm:col-span-2">
                   <div className="flex items-center justify-between text-xs font-mono text-zinc-300">
-                    <label htmlFor="custom-api-key">
-                      API Key <span className="text-red-400">*</span>
+                    <label htmlFor="custom-api-key" className="flex items-center gap-1">
+                      <span>API Key <span className="text-red-400">*</span></span>
                     </label>
+                    <span className="text-[10px] text-zinc-500 font-sans">Sent in Authorization bearer header</span>
                   </div>
                   <div className="relative">
                     <input
@@ -2270,14 +2281,14 @@ export default function ModelConfigPage() {
                       onChange={(e) => setCustomApiKey(e.target.value)}
                       disabled={isPending || isValidatingCustom}
                       placeholder="sk-..."
-                      className="h-8.5 w-full rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 pl-2.5 pr-9 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                      className="h-9 w-full rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 pl-3 pr-10 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-t-amber-400/80 focus:border-x-amber-500/60 focus:border-b-amber-600 focus:ring-1 focus:ring-amber-400/20 transition-all"
                     />
                     <button
                       type="button"
                       onClick={() => setShowApiKey((prev) => !prev)}
                       disabled={isPending || isValidatingCustom}
                       aria-label={showApiKey ? "Hide API key" : "Show API key"}
-                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-[4px] p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-amber-400 transition-colors"
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-[4px] p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-amber-300 focus:outline-none focus:ring-1 focus:ring-amber-400 active:translate-y-[calc(-50%+0.5px)] transition-all cursor-pointer"
                     >
                       {showApiKey ? (
                         <EyeOff className="h-3.5 w-3.5" />
