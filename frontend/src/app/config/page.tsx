@@ -691,7 +691,7 @@ export default function ModelConfigPage() {
     }
     setError(null);
     try {
-      const globalCfg = await api.getModelConfig();
+      const globalCfg = await api.getModelConfig({ signal: controller.signal, silent: true });
       if (controller.signal.aborted) return;
       setActiveConfig(globalCfg);
       setSelectedProvider(globalCfg.provider);
