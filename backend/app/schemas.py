@@ -5,6 +5,7 @@ All external input crossing a trust boundary is validated through these schemas.
 No free-text injection vectors — provider and model_name use Literal allowlists.
 """
 
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -13,6 +14,8 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import UserRole
+
+logger = logging.getLogger(__name__)
 
 # Branch name and repo ident validation regexes and protected branch names
 _BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9/_.-]+$")
@@ -234,8 +237,8 @@ class ModelConfigUpdate(BaseModel):
     to update active model config.
     Provider and model_name are validated against provider rules.
     - For 'opencode_zen': allows any model name ending with '-free'.
-    - For 'openai': allows approved OpenAI models (gpt-4o, gpt-4o-mini).
-    - For 'anthropic': allows approved Anthropic models (claude-sonnet-4-5, claude-haiku-3-5).
+    - For 'openai': allows approved OpenAI models (see administrator).
+    - For 'anthropic': allows approved Anthropic models (see administrator).
     - For 'groq': allows non-empty model names.
     base_url is derived server-side from the provider allowlist, never from the client.
     """
@@ -253,9 +256,9 @@ class ModelConfigUpdate(BaseModel):
             provider = data.get("provider")
             model = data.get("model_name")
             if provider == "opencode_go" and (model is None or not str(model).strip()):
-                raise ValueError("Model name cannot be empty for provider 'opencode_go'.")
+                raise ValueError("Invalid model selection.")
             if provider == "groq" and (model is None or not str(model).strip()):
-                raise ValueError("Model name cannot be empty for provider 'groq'.")
+                raise ValueError("Invalid model selection.")
         return data
 
     @field_validator("model_name", mode="before")
@@ -273,30 +276,33 @@ class ModelConfigUpdate(BaseModel):
 
         if provider == "opencode_zen":
             if not model.endswith("-free"):
-                raise ValueError(
-                    f"Invalid model '{model}' for provider 'opencode_zen'. "
-                    "OpenCode Zen models must end with '-free'."
-                )
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
+                raise ValueError("Invalid model selection.")
         elif provider == "opencode_go":
             if not model:
-                raise ValueError("Model name cannot be empty for provider 'opencode_go'.")
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
+                raise ValueError("Invalid model selection.")
         elif provider == "openai":
             if model not in OPENAI_MODELS:
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError(
-                    f"Invalid model '{model}' for provider 'openai'. "
-                    f"Allowed models: {sorted(OPENAI_MODELS)}"
+                    "Invalid model selection. "
+                    "See your administrator for available models."
                 )
         elif provider == "anthropic":
             if model not in ANTHROPIC_MODELS:
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError(
-                    f"Invalid model '{model}' for provider 'anthropic'. "
-                    f"Allowed models: {sorted(ANTHROPIC_MODELS)}"
+                    "Invalid model selection. "
+                    "See your administrator for available models."
                 )
         elif provider == "groq":
             if not model:
-                raise ValueError("Model name cannot be empty for provider 'groq'.")
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
+                raise ValueError("Invalid model selection.")
         else:
-            raise ValueError(f"Unsupported provider: {provider}")
+            logger.warning("model_config.rejected provider=%s model=%s", provider, model)
+            raise ValueError("Invalid model selection.")
 
         return self
 

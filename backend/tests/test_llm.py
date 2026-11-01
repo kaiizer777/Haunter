@@ -382,11 +382,11 @@ async def test_put_model_config_non_owner_repo(
     user_factory,
     make_auth_client,
 ):
-    """PUT /config/model/{repo_id} on non-owned repo returns 404."""
+    """PUT /config/model/{repo_id} on non-owned repo returns 404 (admin-only)."""
     await truncate_all(db)
-    user_a = await user_factory(github_id=883, username="owner_a")
+    user_a = await user_factory(github_id=883, username="owner_a", role="admin")
     user_a_id = user_a.id
-    user_b = await user_factory(github_id=884, username="intruder_b")
+    user_b = await user_factory(github_id=884, username="intruder_b", role="admin")
     user_b_id = user_b.id
 
     repo_a = Repo(user_id=user_a_id, owner="owner-a", name="secret-repo")
@@ -467,7 +467,7 @@ async def test_llm_retry_500_exhausts_and_caps():
                 )
             assert "exhausted" in str(exc_info.value).lower()
             assert (
-                "500" in str(exc_info.value) or "error" in str(exc_info.value).lower()
+                "retry" in str(exc_info.value).lower()
             )
             assert "super_secret_opencode_key_9999" not in str(exc_info.value)
             # The chain hit every model in FREE_TIER_FALLBACK_ORDER, with
@@ -714,7 +714,7 @@ async def test_llm_client_gives_up_after_all_models_exhausted():
             assert count == 1, f"{model} had {count} attempts, expected 1"
         msg = str(exc)
         assert "exhausted" in msg.lower()
-        assert all(model in msg for model in chain_models)
+        assert all(model not in msg for model in chain_models)
         for _m, _i, err in exc.attempts:
             assert "provider down" in err or "500" in err
         inter_model_sleeps = [d for d in sleep_calls if d == INTER_MODEL_SLEEP_S]
@@ -1393,7 +1393,7 @@ async def test_get_available_models_endpoint(
         )
     )
 
-    user = await user_factory(github_id=1000, username="avail_user")
+    user = await user_factory(github_id=1000, username="avail_user", role="admin")
     client = make_auth_client(user.id)
 
     async with client:
@@ -1419,10 +1419,10 @@ def test_model_config_update_schema_validation():
     )
     assert m_go.model_name == "deepseek-v4.1-flash"
 
-    with pytest.raises(ValidationError, match="Model name cannot be empty for provider 'opencode_go'."):
+    with pytest.raises(ValidationError, match="Invalid model selection."):
         ModelConfigUpdate(provider="opencode_go", model_name="")
 
-    with pytest.raises(ValidationError, match="Invalid model 'invalid' for provider 'opencode_zen'. OpenCode Zen models must end with '-free'."):
+    with pytest.raises(ValidationError, match="Invalid model selection."):
         ModelConfigUpdate(provider="opencode_zen", model_name="invalid")
 
     # Valid opencode_zen free models
@@ -1487,7 +1487,7 @@ async def test_get_available_models_endpoint_direct():
         )
     )
 
-    fake_user = User(id=uuid.uuid4(), github_id=1234, github_username="test_user")
+    fake_user = User(id=uuid.uuid4(), github_id=1234, github_username="test_user", role="admin")
     res = await get_available_models_endpoint(current_user=fake_user)
     assert any(m.id == "test-dynamic-model-free" for m in res.opencode_zen)
     assert len(res.opencode_go) > 0
