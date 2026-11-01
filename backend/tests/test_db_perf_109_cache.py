@@ -179,7 +179,6 @@ def _mock_global_config_session(model_name="cached-model-free"):
         model_name=model_name,
         base_url="https://opencode.ai/zen/v1",
         is_active=True,
-        scope="global",
         created_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
     )
     mock_result = MagicMock()

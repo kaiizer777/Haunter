@@ -171,7 +171,6 @@ async def test_model_config_stale_inflight_read_not_cached():
         model_name="stale-model",
         base_url="https://opencode.ai/zen/v1",
         is_active=True,
-        scope="global",
         created_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
     )
     mock_result = MagicMock()
@@ -366,7 +365,6 @@ async def test_model_config_cache_is_bounded():
         model_name="bounded-model",
         base_url="https://opencode.ai/zen/v1",
         is_active=True,
-        scope="global",
         created_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
     )
     mock_result = MagicMock()
@@ -375,7 +373,7 @@ async def test_model_config_cache_is_bounded():
     mock_session.execute.return_value = mock_result
 
     for _ in range(MODEL_MAXSIZE + 10):
-        await get_active_model_config(db=mock_session, repo_id=uuid.uuid4())
+        await get_active_model_config(db=mock_session)
 
     assert len(_model_config_cache) <= MODEL_MAXSIZE
 
@@ -403,7 +401,6 @@ async def test_model_config_expired_entries_pruned_on_store():
         model_name="bounded-model",
         base_url="https://opencode.ai/zen/v1",
         is_active=True,
-        scope="global",
         created_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
     )
     mock_result = MagicMock()
@@ -416,54 +413,6 @@ async def test_model_config_expired_entries_pruned_on_store():
     assert stale_key not in _model_config_cache
     assert "global" in _model_config_cache
 
-
-@pytest.mark.asyncio
-async def test_update_model_config_repo_invalidates_before_refresh():
-    """Repo PUT: commit ok + refresh boom => cache already dropped."""
-    from app.routers import model_config as mc_router
-
-    repo_id = uuid.uuid4()
-    cache_key = f"repo:{repo_id}"
-    _model_config_cache[cache_key] = (
-        mc_mod.ResolvedModelConfig(
-            provider="opencode_zen",
-            model_name="old-model",
-            base_url="https://opencode.ai/zen/v1",
-        ),
-        time.monotonic(),
-    )
-
-    repo = MagicMock()
-    repo.id = repo_id
-    repo.active_model_config_id = None
-    repo_result = MagicMock()
-    repo_result.scalar_one_or_none.return_value = repo
-
-    added = []
-    mock_db = AsyncMock()
-    mock_db.execute.return_value = repo_result
-    # db.add is sync in production: keep it a plain mock so no
-    # coroutine goes unawaited (same pattern as the #109 auto-create test).
-    mock_db.add = MagicMock(side_effect=lambda obj: added.append(obj))
-
-    async def _flush():
-        for obj in added:
-            obj.id = uuid.uuid4()
-
-    mock_db.flush.side_effect = _flush
-    mock_db.refresh.side_effect = RuntimeError("refresh failed")
-
-    body = MagicMock(
-        provider="opencode_go", model_name="probe-free", repo_id=repo_id
-    )
-
-    with pytest.raises(RuntimeError, match="refresh failed"):
-        await mc_router.update_model_config_endpoint(
-            body, MagicMock(id=uuid.uuid4()), mock_db
-        )
-
-    mock_db.commit.assert_awaited_once()
-    assert cache_key not in _model_config_cache
 
 
 @pytest.mark.asyncio

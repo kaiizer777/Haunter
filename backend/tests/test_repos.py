@@ -12,13 +12,11 @@ Covers:
 8. DELETE /repos/{id} non-owned repo -> 404 Not Found (prevents existence oracle).
 9. DELETE /repos/{id} non-existent repo -> 404 Not Found.
 10. Concurrent POST /repos (4x same repo) -> exactly 1 row in DB (1x 201, 3x 409).
-11. GET /config/model -> 200 fallback/active; GET /config/model?repo_id={non_owned} -> 404.
+11. GET /config/model -> 200 fallback/active (global-only).
 12. PUT /config/model valid -> 200 with server-derived base_url.
 13. PUT /config/model evil_provider -> 422 Unprocessable Entity.
 14. PUT /config/model evil_model -> 422 Unprocessable Entity.
 15. PUT /config/model client-supplied base_url ignored / not injectable.
-16. PUT /config/model/{repo_id} non-owned repo -> 404 Not Found.
-17. PUT /config/model/{repo_id} per-repo scope isolated from global model config.
 """
 
 import asyncio
@@ -311,29 +309,6 @@ async def test_post_repo_duplicate_own(
         resp2 = await client.post("/repos", json={"owner": "org", "name": "repo1"})
         assert resp2.status_code == 409
         assert resp2.json() == {"detail": "Repo already connected"}
-
-
-@pytest.mark.asyncio
-async def test_post_repo_ignores_active_model_config_id(
-    db: AsyncSession, user_factory, make_auth_client
-):
-    """POST /repos ignores client-supplied active_model_config_id to prevent BOLA (#205)."""
-    await truncate_all(db)
-    user = await user_factory(github_id=708, username="bola_user")
-    client = make_auth_client(user.id)
-    random_config_id = str(uuid.uuid4())
-
-    async with client:
-        resp = await client.post(
-            "/repos",
-            json={
-                "owner": "org",
-                "name": "repo_bola",
-                "active_model_config_id": random_config_id,
-            },
-        )
-        assert resp.status_code == 201
-        assert resp.json()["active_model_config_id"] is None
 
 
 @pytest.mark.asyncio
@@ -742,9 +717,8 @@ async def test_model_config_get_global_and_repo(
         assert "provider" in data_global
         assert "base_url" in data_global
 
-        # 2. Non-existent / non-owned repo config -> 404
-        resp_repo_404 = await admin_client.get(f"/config/model?repo_id={uuid.uuid4()}")
-        assert resp_repo_404.status_code == 404
+        # Global-only: repo_id is no longer accepted; global read remains admin-only.
+        assert "model_name" in data_global
 
 
 @pytest.mark.asyncio
@@ -794,91 +768,6 @@ async def test_put_model_config_valid_and_validation(
         )
         assert resp_override.status_code == 200
         assert resp_override.json()["base_url"] == "https://opencode.ai/inference/go/openai/v1"
-
-
-@pytest.mark.asyncio
-async def test_put_model_config_per_repo_and_non_owned(
-    db: AsyncSession, user_factory, make_auth_client
-):
-    """PUT /config/model/{repo_id} updates per-repo config; returns 404 on unowned repo (admin-only)."""
-    await truncate_all(db)
-    user_a = await user_factory(github_id=716, username="user_repo_cfg_a", role="admin")
-    user_a_id = user_a.id
-    user_b = await user_factory(github_id=717, username="user_repo_cfg_b", role="admin")
-    user_b_id = user_b.id
-
-    repo_a = Repo(user_id=user_a_id, owner="org-a", name="repo-cfg-a")
-    db.add(repo_a)
-    await db.commit()
-    await db.refresh(repo_a)
-    repo_a_id = repo_a.id
-
-    client_a = make_auth_client(user_a_id)
-    client_b = make_auth_client(user_b_id)
-
-    async with client_a:
-        # User A updates their own repo's model config
-        resp_a = await client_a.put(
-            f"/config/model/{repo_a_id}",
-            json={"provider": "groq", "model_name": "llama-3.3-70b-versatile"},
-        )
-        assert resp_a.status_code == 200
-        assert resp_a.json()["model_name"] == "llama-3.3-70b-versatile"
-
-    async with client_b:
-        # User B attempts to update User A's repo model config -> 404
-        resp_b = await client_b.put(
-            f"/config/model/{repo_a_id}",
-            json={"provider": "groq", "model_name": "llama-3.3-70b-versatile"},
-        )
-        assert resp_b.status_code == 404
-        assert resp_b.json() == {"detail": "Repo not found"}
-
-
-@pytest.mark.asyncio
-async def test_delete_model_config_per_repo_resets_to_global(
-    db: AsyncSession, user_factory, make_auth_client
-):
-    """DELETE /config/model/{repo_id} drops the repo override; unowned -> 404."""
-    await truncate_all(db)
-    user_a = await user_factory(github_id=718, username="user_repo_reset_a", role="admin")
-    user_a_id = user_a.id
-    user_b = await user_factory(github_id=719, username="user_repo_reset_b", role="admin")
-    user_b_id = user_b.id
-
-    repo_a = Repo(user_id=user_a_id, owner="org-a", name="repo-reset-a")
-    db.add(repo_a)
-    await db.commit()
-    await db.refresh(repo_a)
-    repo_a_id = repo_a.id
-
-    client_a = make_auth_client(user_a_id)
-    client_b = make_auth_client(user_b_id)
-
-    async with client_a:
-        resp_put = await client_a.put(
-            f"/config/model/{repo_a_id}",
-            json={"provider": "groq", "model_name": "llama-3.3-70b-versatile"},
-        )
-        assert resp_put.status_code == 200
-        assert resp_put.json()["scope"] == "repo"
-
-        resp_get = await client_a.get(f"/config/model?repo_id={repo_a_id}")
-        assert resp_get.status_code == 200
-        assert resp_get.json()["scope"] == "repo"
-
-        resp_del = await client_a.delete(f"/config/model/{repo_a_id}")
-        assert resp_del.status_code == 204
-
-        # After reset the repo inherits the platform default again.
-        resp_after = await client_a.get(f"/config/model?repo_id={repo_a_id}")
-        assert resp_after.status_code == 200
-        assert resp_after.json()["scope"] == "global"
-
-    async with client_b:
-        resp_b = await client_b.delete(f"/config/model/{repo_a_id}")
-        assert resp_b.status_code == 404
-        assert resp_b.json() == {"detail": "Repo not found"}
 
 
 @pytest.mark.asyncio

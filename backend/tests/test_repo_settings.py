@@ -137,7 +137,6 @@ async def test_get_settings_default_fallback(seeded_env, make_fake_auth_client):
         assert data["allowed_branches"] == ["main", "master"]
         assert data["monitored_branches"] == ["main", "master"]
         assert data["max_cost_per_run_cents"] == 100
-        assert data["model_override_scope"] == "inherit"
         assert data["settings_version"] == 1
 
 
@@ -177,7 +176,6 @@ async def test_get_settings_persisted_row(
         audit_trigger_on_manual_mention=True,
         allowed_branches=["release", "prod"],
         max_cost_per_run_cents=45,
-        model_override_scope="repo",
         settings_version=3,
     )
     fake_audit_db.add(persisted)
@@ -193,7 +191,6 @@ async def test_get_settings_persisted_row(
         assert data["enable_auditor_mode"] is True
         assert data["allowed_branches"] == ["release", "prod"]
         assert data["max_cost_per_run_cents"] == 45
-        assert data["model_override_scope"] == "repo"
         assert data["settings_version"] == 3
 
 
