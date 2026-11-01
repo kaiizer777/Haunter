@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import ModelConfigPage from "./page";
 import { useAuth } from "@/lib/auth-context";
-import { api, ApiError, AuthUser, ModelConfigOut, RepoOut } from "@/lib/api";
+import { api, AuthUser, ModelConfigOut, RepoOut } from "@/lib/api";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),

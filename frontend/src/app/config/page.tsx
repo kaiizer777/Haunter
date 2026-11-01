@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SelectDropdown, SelectOption } from "@/components/ui/select-dropdown";
 import { Modal } from "@/components/ui/modal";
-import { api, ModelConfigOut, RepoOut, ApiError, AvailableModelItem, CustomProviderCompat } from "@/lib/api";
+import { api, ModelConfigOut, ApiError, AvailableModelItem, CustomProviderCompat } from "@/lib/api";
 
 type ConfigModelItem = AvailableModelItem & { provider: string };
 
@@ -588,7 +588,6 @@ function getModelSpec(
 export default function ModelConfigPage() {
   const { user } = useAuth();
   const isAdmin = Boolean(user?.is_admin);
-  const hasInitializedScopeRef = useRef(false);
   const activeFetchControllerRef = useRef<AbortController | null>(null);
   const activeValidateControllerRef = useRef<AbortController | null>(null);
   const activeValidateRequestRef = useRef<number>(0);
@@ -596,7 +595,6 @@ export default function ModelConfigPage() {
   // Model config is global-only (issue #226): no per-repo overrides.
 
   const [activeConfig, setActiveConfig] = useState<ModelConfigOut | null>(null);
-  const [globalConfig, setGlobalConfig] = useState<ModelConfigOut | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>("opencode_go");
   const [selectedModel, setSelectedModel] = useState<string>("deepseek-v4.1-flash");
   const [modelOptionsByProvider, setModelOptionsByProvider] = useState<
@@ -614,7 +612,6 @@ export default function ModelConfigPage() {
 
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isResetting, setIsResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
@@ -696,7 +693,6 @@ export default function ModelConfigPage() {
     try {
       const globalCfg = await api.getModelConfig();
       if (controller.signal.aborted) return;
-      setGlobalConfig(globalCfg);
       setActiveConfig(globalCfg);
       setSelectedProvider(globalCfg.provider);
       setSelectedModel(globalCfg.model_name);
@@ -834,8 +830,6 @@ export default function ModelConfigPage() {
     }
   }, [customName, customCompat, customBaseUrl, customApiKey]);
 
-  const effectiveTargetIsGlobal = true;
-
   const handleSaveConfig = useCallback(async () => {
     if (!isAdmin) {
       setError("Inference engine settings are managed by administrators.");
@@ -855,7 +849,6 @@ export default function ModelConfigPage() {
 
       const updated = await api.updateModelConfig(payload);
       setActiveConfig(updated);
-      setGlobalConfig(updated);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 4500);
     } catch (err: unknown) {
@@ -880,7 +873,7 @@ export default function ModelConfigPage() {
     );
   }, [activeConfig, selectedProvider, selectedModel]);
 
-  const canSave = !isPending && isDirty && !(effectiveTargetIsGlobal && !isAdmin);
+  const canSave = !isPending && isDirty && isAdmin;
   // Keyboard shortcut handlers: '/' to search, 'r' to sync, Cmd+S to save
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1124,13 +1117,13 @@ export default function ModelConfigPage() {
             >
               {isPending ? (
                 <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
-              ) : effectiveTargetIsGlobal && !isAdmin ? (
+              ) : !isAdmin ? (
                 <Lock className="h-3.5 w-3.5 text-zinc-400" />
               ) : (
                 <Check className="h-3.5 w-3.5 text-zinc-950 stroke-[2.5]" />
               )}
-              <span>{effectiveTargetIsGlobal && !isAdmin ? "Admin Only" : "Save Changes"}</span>
-              {!(effectiveTargetIsGlobal && !isAdmin) && (
+              <span>{!isAdmin ? "Admin Only" : "Save Changes"}</span>
+              {isAdmin && (
                 <kbd className="hidden sm:inline-block rounded bg-zinc-950/20 px-1 py-0.2 text-[10px] font-mono text-zinc-900 border border-zinc-950/30">
                   ⌘S
                 </kbd>
@@ -1669,7 +1662,7 @@ export default function ModelConfigPage() {
                 size="sm"
                 className={cn(
                   "relative h-7.5 px-3.5 py-1 font-mono font-bold text-[10.5px] rounded-[5px] transition-all select-none",
-                  effectiveTargetIsGlobal && !isAdmin
+                  !isAdmin
                     ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
                     : isDirty
                     ? "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] cursor-pointer"
@@ -1681,7 +1674,7 @@ export default function ModelConfigPage() {
                     <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
                     <span>Saving...</span>
                   </span>
-                ) : effectiveTargetIsGlobal && !isAdmin ? (
+                ) : !isAdmin ? (
                   <span className="flex items-center gap-2 text-zinc-400 font-medium">
                     <Lock className="h-3.5 w-3.5 text-zinc-400" />
                     <span>Admin Only</span>
@@ -1737,7 +1730,7 @@ export default function ModelConfigPage() {
                   disabled={!canSave}
                   className={cn(
                     "h-7 px-3 text-[10.5px] font-mono font-bold rounded-[4px] transition-all select-none flex items-center gap-1.5",
-                    effectiveTargetIsGlobal && !isAdmin
+                    !isAdmin
                       ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
                       : "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] cursor-pointer"
                   )}
@@ -1747,7 +1740,7 @@ export default function ModelConfigPage() {
                       <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
                       <span>Saving...</span>
                     </>
-                  ) : effectiveTargetIsGlobal && !isAdmin ? (
+                  ) : !isAdmin ? (
                     <>
                       <Lock className="h-3.5 w-3.5 text-zinc-400" />
                       <span>Admin Only</span>

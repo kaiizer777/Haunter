@@ -15,7 +15,6 @@ import {
   Save,
   GitBranch,
   DollarSign,
-  Workflow,
   ScrollText,
   Gauge,
   Crosshair,
@@ -89,24 +88,6 @@ export const PRESET_OPTIONS: PresetMeta[] = [
     description: "Granular control over all agent triggers, sandbox verification policies, and budget safety bounds.",
     icon: Wrench,
     accentColor: "text-zinc-300 border-zinc-700/50 bg-zinc-800/40",
-  },
-];
-
-const SCOPE_OPTIONS: SelectOption[] = [
-  {
-    value: "inherit",
-    label: "Global Cluster Default (Inherit)",
-    description: "Uses the active LLM engine configured in Model Config dashboard.",
-  },
-  {
-    value: "repo_pinned",
-    label: "Repository Pinned",
-    description: "Locks this repository to its explicitly pinned model configuration.",
-  },
-  {
-    value: "user_preferred",
-    label: "User Preferred",
-    description: "Prioritizes user session preference across all diagnostic tasks.",
   },
 ];
 
