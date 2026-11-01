@@ -156,7 +156,7 @@ def _require_admin(current_user: User) -> None:
     """Raise 403 if caller is not an admin. Closed by default: no open bypass."""
     if not is_admin_user(current_user):
         logger.warning(
-            "model_config: non-admin user %s attempted global model config write",
+            "model_config: non-admin user %s attempted model config write",
             current_user.id,
         )
         raise HTTPException(
@@ -176,6 +176,9 @@ async def update_model_config_endpoint(
     - If body.repo_id is supplied: updates model config for that repo (admin-only).
     - If body.repo_id is null: updates global active model config (admin-only).
     """
+    # Gate before any request handling: body validation and the provider
+    # allowlist check below must not leak details to non-admins.
+    _require_admin(current_user)
     base_url = _base_url_for_provider(body.provider)
     if not base_url:
         raise HTTPException(
