@@ -2172,7 +2172,7 @@ export default function ModelConfigPage() {
                     onChange={(e) => setCustomName(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="my-provider"
-                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-t-amber-400/80 focus:border-x-amber-500/60 focus:border-b-amber-600 focus:ring-1 focus:ring-amber-400/20 transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-1 focus:ring-white/40 transition-all"
                   />
                 </label>
                 <div className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
@@ -2188,7 +2188,7 @@ export default function ModelConfigPage() {
                       onClick={() => setCustomCompat("openai")}
                       disabled={isPending || isValidatingCustom}
                       className={cn(
-                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-400/40",
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40",
                         customCompat === "openai"
                           ? "bg-gradient-to-b from-zinc-800/95 via-zinc-850 to-zinc-900/95 text-white border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.4)]"
                           : "border-0 border-transparent bg-transparent shadow-none text-zinc-400 hover:text-zinc-200"
@@ -2204,7 +2204,7 @@ export default function ModelConfigPage() {
                       onClick={() => setCustomCompat("anthropic")}
                       disabled={isPending || isValidatingCustom}
                       className={cn(
-                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-400/40",
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40",
                         customCompat === "anthropic"
                           ? "bg-gradient-to-b from-zinc-800/95 via-zinc-850 to-zinc-900/95 text-white border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.4)]"
                           : "border-0 border-transparent bg-transparent shadow-none text-zinc-400 hover:text-zinc-200"
@@ -2240,7 +2240,7 @@ export default function ModelConfigPage() {
                     onChange={(e) => setCustomBaseUrl(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="https://my-host/v1"
-                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-t-amber-400/80 focus:border-x-amber-500/60 focus:border-b-amber-600 focus:ring-1 focus:ring-amber-400/20 transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-1 focus:ring-white/40 transition-all"
                   />
                   <div className="flex flex-wrap items-center gap-1.5 mt-1">
                     <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">Presets:</span>
@@ -2253,7 +2253,7 @@ export default function ModelConfigPage() {
                           disabled={isPending || isValidatingCustom}
                           onClick={() => setCustomBaseUrl(preset.value)}
                           className={cn(
-                            "px-2.5 py-0.5 rounded-[4px] border text-[11px] font-mono transition-all cursor-pointer active:translate-y-[0.5px]",
+                            "px-2.5 py-0.5 rounded-[4px] border text-[11px] font-mono transition-all cursor-pointer active:translate-y-[0.5px] focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40",
                             isActive
                               ? "border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/40 bg-gradient-to-b from-amber-500/20 to-amber-950/40 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.2),0_1px_2px_rgba(0,0,0,0.3)] font-medium"
                               : "border-zinc-800/90 bg-[#0c0c0f] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 hover:bg-zinc-850/50"
@@ -2281,14 +2281,14 @@ export default function ModelConfigPage() {
                       onChange={(e) => setCustomApiKey(e.target.value)}
                       disabled={isPending || isValidatingCustom}
                       placeholder="sk-..."
-                      className="h-9 w-full rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 pl-3 pr-10 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-t-amber-400/80 focus:border-x-amber-500/60 focus:border-b-amber-600 focus:ring-1 focus:ring-amber-400/20 transition-all"
+                      className="h-9 w-full rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 pl-3 pr-10 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-1 focus:ring-white/40 transition-all"
                     />
                     <button
                       type="button"
                       onClick={() => setShowApiKey((prev) => !prev)}
                       disabled={isPending || isValidatingCustom}
                       aria-label={showApiKey ? "Hide API key" : "Show API key"}
-                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-[4px] p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-amber-300 focus:outline-none focus:ring-1 focus:ring-amber-400 active:translate-y-[calc(-50%+0.5px)] transition-all cursor-pointer"
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-[4px] p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-white/40 active:translate-y-[calc(-50%+0.5px)] transition-all cursor-pointer"
                     >
                       {showApiKey ? (
                         <EyeOff className="h-3.5 w-3.5" />
