@@ -1554,21 +1554,54 @@ export default function ModelConfigPage() {
           </div>
 
           {/* Provider Summary Strip */}
-          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-3.5 py-2.5 rounded-lg border border-zinc-800/90 bg-[#09090c]/90 text-xs sm:text-[12.5px] shadow-inner">
-            <div className="flex items-center gap-2">
+          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-3.5 py-2.5 rounded-[7px] border-t border-t-zinc-600/70 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#141418]/95 via-[#0e0e12]/95 to-[#09090c]/95 text-xs sm:text-[12.5px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_8px_rgba(0,0,0,0.35)]">
+            <div className="flex flex-wrap items-center gap-2">
+              {registeredCustom && (
+                <div className="flex items-center gap-1.5 mr-1">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[4px] border border-amber-500/30 bg-amber-500/10 text-[10.5px] font-mono text-amber-300 font-medium">
+                    {registeredCustom.compat === "anthropic" ? (
+                      <>
+                        <Zap className="h-3 w-3 text-amber-400" />
+                        <span>Anthropic Compatible</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="h-3 w-3 text-amber-400" />
+                        <span>OpenAI Compatible</span>
+                      </>
+                    )}
+                  </span>
+                </div>
+              )}
               <span className="font-bold text-zinc-100">{activeProviderMeta.name}:</span>
               <span className="text-zinc-300 font-sans">{activeProviderMeta.description}</span>
             </div>
-            <span className="text-xs font-mono text-zinc-400 bg-zinc-900/90 px-2.5 py-1 rounded border border-zinc-800 shrink-0 select-all">
-              {activeProviderMeta.baseUrl.replace("https://", "")}
-            </span>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className="text-xs font-mono text-zinc-300 bg-zinc-900/90 px-2.5 py-1 rounded-[5px] border border-zinc-800/90 shrink-0 select-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.4)]">
+                {activeProviderMeta.baseUrl.replace("https://", "")}
+              </span>
+              <button
+                type="button"
+                onClick={() => handleCopyUrl(activeProviderMeta.baseUrl)}
+                aria-label="Copy base URL"
+                title="Copy base URL"
+                className="h-7 w-7 rounded-[5px] flex items-center justify-center border border-zinc-800 bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700 active:translate-y-[0.5px] transition-all cursor-pointer"
+              >
+                {copiedUrl ? (
+                  <Check className="h-3.5 w-3.5 text-emerald-400" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
           </div>
 
           {/* Discovered models & save guidance for active custom provider */}
           {registeredCustom && (
             <div
               role="status"
-              className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs font-mono text-amber-200 shadow-inner"
+              className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-[7px] border-t border-t-amber-400/40 border-x border-x-amber-500/25 border-b border-b-amber-950/80 bg-gradient-to-b from-amber-950/25 via-[#13110e]/95 to-[#0b0a08]/95 text-xs font-mono text-amber-200 shadow-[inset_0_1px_0_rgba(251,191,36,0.12),0_2px_8px_rgba(0,0,0,0.3)]"
             >
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-amber-400 shrink-0" />
@@ -1576,8 +1609,9 @@ export default function ModelConfigPage() {
                   Discovered <strong>{(modelOptionsByProvider[selectedProvider] || []).length} model{((modelOptionsByProvider[selectedProvider] || []).length === 1 ? "" : "s")}</strong> for <strong>{registeredCustom.name}</strong>. Select an architecture below and save.
                 </span>
               </div>
-              <span className="text-[11px] text-amber-400 font-medium">
-                Save Configuration to persist
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[4px] border border-amber-500/30 bg-amber-500/10 text-[11px] text-amber-300 font-medium shadow-[inset_0_1px_0_rgba(251,191,36,0.15)] shrink-0 self-start sm:self-auto">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                <span>Save Configuration to persist</span>
               </span>
             </div>
           )}
