@@ -654,6 +654,16 @@ async function request<T>(
       ) {
         errorDetail = errJson.detail;
       }
+      // Never leak model/provider vocabulary from backend error detail
+      // (e.g. allowlist dumps) to non-admin surfaces: collapse to generic.
+      if (
+        errorDetail &&
+        /gpt|claude|llama|deepseek|mistral|gemini|nemotron|laguna|ling|mimo|glm|\bmodel\b|provider|allowlist|anthropic|openai|groq|opencode|context_window|base_url/i.test(
+          errorDetail
+        )
+      ) {
+        errorDetail = "Something went wrong. Please try again or contact support.";
+      }
     } catch {
       // Body is not JSON or cannot be parsed
     }
@@ -755,7 +765,8 @@ export const api = {
   runEval: (data?: EvalRunRequest) => api.post<EvalResultOut>("/eval/run", data || {}),
   getUserEvalMetrics: () => api.get<UserEvalMetricsOut>("/eval/user-metrics"),
 
-  // Model Config endpoints
+  // Model Config endpoints — ADMIN-ONLY on the backend (403 for others).
+  // Never surface raw allowlist dumps: non-admin callers get generic copy.
   getAvailableModels: () =>
     api.get<AvailableModelsOut>("/config/model/available"),
   getModelConfig: (repoId?: string, options?: RequestOptions) =>
