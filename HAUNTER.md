@@ -1,6 +1,6 @@
 # HAUNTER — Architectural & Mechanical Specification
 
-**System Classification:** Autonomous CI Failure Diagnosis & Remediation Engine  
+**System Classification:** Autonomous GitHub PR Review & Issue Fixing Agent (PR Agent)  
 **Author / Engineering Lead:** MD Sufiyan Bari  
 **Runtime Target:** AWS Lambda (`x86_64`) + Neon Serverless Postgres + Cloudflare Workers (Static SPA)  
 **Verification Engine:** Pure Git Data API + GitHub Actions Sandbox Runner  
@@ -10,12 +10,12 @@
 
 ## 1. System Purpose & Core Boundaries
 
-Haunter is an autonomous serverless system designed to intercept GitHub Actions CI workflow failures, isolate failure context, generate candidate patches, verify patches within a sterile GitHub Actions sandbox mirror, and open pull requests with full mechanical diagnostic traces.
+Haunter is an autonomous serverless GitHub agent/bot that reviews pull requests and fixes issues mentioned in (or explicitly requested on) those pull requests. It is triggered only by GitHub tags or webhooks (e.g. `pull_request`, `issue_comment`, and tag events). For now it operates as a PR agent: it reviews a PR across security, regressions, architecture, and performance, and, when an issue is mentioned in the PR or it is told to, generates a candidate fix, verifies it within a sterile GitHub Actions sandbox mirror, and opens a pull request under a strict human-merge gate. State and traces are logged to Neon Postgres and surfaced on a Cloudflare Workers dashboard.
 
 ```
        [ Upstream User Repository ]
                      │
-         workflow_run (failure)
+         pull_request / issue_comment / tag (webhook)
                      ▼
        [ AWS Lambda Function URL ]  ──► Returns HTTP 202 in <1s
                      │ (async self-invoke)
@@ -57,7 +57,7 @@ sequenceDiagram
     participant LLM as OpenCode Zen (LLM)
     participant SB as GitHub Actions Sandbox (Mirror Repo)
 
-    GH->>L_HTTP: POST /webhooks/github (workflow_run.completed)
+    GH->>L_HTTP: POST /webhooks/github (pull_request / issue_comment / tag)
     Note over L_HTTP: Verify X-Hub-Signature-256 (HMAC-SHA256)
     L_HTTP->>DB: Upsert Run (status="pending")
     L_HTTP->>L_ASYNC: boto3.client("lambda").invoke(InvocationType="Event", {"run_id": uuid, "token": hmac})
@@ -101,7 +101,7 @@ sequenceDiagram
 
 ### 2.2 Execution Step Breakdown
 1. **Signature Verification:** Incoming `POST /webhooks/github` payloads are verified against `GITHUB_WEBHOOK_SECRET` using HMAC-SHA256 (`X-Hub-Signature-256`).
-2. **Payload Filtering:** Webhooks are filtered to `action == "completed"` and `workflow_run.conclusion == "failure"`. Successful or pending runs are acknowledged with HTTP 200 and discarded.
+2. **Payload Filtering:** Webhooks are filtered to supported PR/issue/tag events (`pull_request`, `issue_comment`, tag pushes). Unsupported or non-actionable events are acknowledged with HTTP 200 and discarded.
 3. **Idempotency Check:** Webhooks check for existing runs keyed on `github_run_id` and `github_delivery_id`. Re-deliveries are safely deduped.
 4. **Asynchronous Self-Invocation:** Lambda HTTP handler executes `AWSHostingAdapter.schedule_pipeline()`, calling `boto3.client("lambda").invoke(FunctionName=self, InvocationType="Event", Payload={"run_id": str(run.id), "token": hmac_token})`. The HTTP request returns `202 Accepted` immediately.
 5. **Worker Execution:** Lambda spins up a background invocation executing `lambda_handler.py:handler` in pipeline mode. The payload token is verified via constant-time HMAC comparison before `handle_failed_run(run_id)` runs.
@@ -805,9 +805,8 @@ Auditor Mode transforms Haunter into a dedicated, read-only AI Senior Staff Engi
 
 ### 14.2 Webhook Triggers & Filter Matrix
 Configured per repository via granular event flags evaluated in `backend/app/webhooks.py`:
-- `on_pull_request`: Triggered on `pull_request.opened` and `pull_request.synchronize` to audit new PR diffs against the base branch.
-- `on_ci_failure`: Triggered on `workflow_run.completed` with conclusion `failure`. Conducts an automated root-cause analysis without creating an unsolicited PR.
-- `on_ci_success`: Triggered on `workflow_run.completed` with conclusion `success`. Runs regression and performance checks on verified green builds.
+- `on_pull_request`: Triggered on `pull_request` events to review the PR diff and (when an issue is mentioned or requested) propose fixes.
+- `on_issue_comment`: Triggered on `issue_comment.created` mentioning Haunter, to fix an issue referenced in the PR context.
 - `on_manual_mention`: Triggered on `issue_comment.created` matching `@haunter-auditor audit` (imperative audit request; questions about audits — including capability questions like `what can you audit?` — stay on the Q&A path). Conducts an on-demand ad-hoc review of the PR or issue context. Endpoints resolve synchronously before the ack with bounded waits and the replayable delivery row is recorded first, so the path needs no post-response work (Lambda-safe); the durable outbox claim deduplicates redeliveries on `delivery_id`.
 
 ### 14.3 Multi-Perspective Audit Core (`backend/app/subagents/auditor.py`)
@@ -854,7 +853,7 @@ Every repository registered in Haunter is governed by a dedicated configuration 
 
 ### 15.2 1-Click Governance Presets
 The `/settings` dashboard exposes 6 enterprise presets:
-- **Autonomous DevOps (`autonomous`):** Auto-PR generation, full CI failure repair, and automated code review enabled.
+- **Autonomous DevOps (`autonomous`):** Auto-PR generation, automated PR review, and issue fixing enabled.
 - **Conservative Guardian (`conservative`):** High-assurance mode requiring 90%+ confidence thresholds and strict branch allowlists.
 - **Standard (`standard`):** Dual-engine CI repair and code review with balanced confidence thresholds (70%).
 - **Auditor Only (`audit_only`):** Strictly read-only security auditor bot with zero automated code changes.
