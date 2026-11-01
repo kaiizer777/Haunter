@@ -16,7 +16,6 @@ Dynamic free-tier model discovery + dual-policy retry architecture:
 import asyncio
 import json
 import logging
-import uuid
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,7 +71,7 @@ class LLMClient:
         Execute a chat completion against the active model provider.
 
         Constructs a dynamic fallback chain:
-        1. Seed (active model from DB or per-repo config) first.
+        1. Seed (active model from DB) first.
         2. All dynamically discovered '-free' models appended (de-duplicated).
 
         Decouples retries into two distinct policies:

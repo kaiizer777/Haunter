@@ -254,6 +254,8 @@ class ModelConfigUpdate(BaseModel):
     base_url is derived server-side from the provider allowlist, never from the client.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     provider: AllowedProvider
     model_name: str = Field(
         ..., min_length=1, max_length=255, pattern=r"^[a-zA-Z0-9._/-]+$"

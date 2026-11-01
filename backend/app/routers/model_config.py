@@ -1,23 +1,21 @@
 """
 Model Configuration endpoints for Haunter (Phase 4).
 
-Supports reading and updating active model configurations globally and per-repo.
+Supports reading and updating the active global model configuration.
 All endpoints are gated by get_current_user and strictly validated with Pydantic allowlists.
 
 Security invariants:
 - base_url is derived server-side from the provider allowlist map (settings-driven) — never accepted
   from client to prevent SSRF and endpoint hijacking.
-- Per-repo updates enforce tenant ownership: returns 404 (not 403) on non-owned repos to
-  prevent existence oracle leakage.
 - Global model config reads and writes are admin-only.
 - SQL queries use parameterised SQLAlchemy ORM constructs.
 """
 
 import logging
 import uuid
-from typing import Annotated, Optional
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -270,4 +268,3 @@ async def get_available_models_endpoint(
         opencode_go=go_items,
         groq=groq_items,
     )
-

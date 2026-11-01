@@ -11,6 +11,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.exc import NoInspectionAvailable
 
 
 revision: str = "a9b8c7d6e5f4"
@@ -27,7 +28,7 @@ def _has_column(table: str, column: str, default: bool = True) -> bool:
     try:
         inspector = sa.inspect(_bind())
         return column in {c["name"] for c in inspector.get_columns(table)}
-    except Exception:
+    except NoInspectionAvailable:
         # Offline mode (MockConnection) has no inspection; use caller-provided
         # default (upgrade assumes present, downgrade assumes absent).
         return default
@@ -37,7 +38,7 @@ def _has_index(table: str, index: str, default: bool = True) -> bool:
     try:
         inspector = sa.inspect(_bind())
         return index in {i["name"] for i in inspector.get_indexes(table)}
-    except Exception:
+    except NoInspectionAvailable:
         return default
 
 
@@ -45,14 +46,14 @@ def _has_fk(table: str, name: str, default: bool = True) -> bool:
     try:
         inspector = sa.inspect(_bind())
         return any(fk.get("name") == name for fk in inspector.get_foreign_keys(table))
-    except Exception:
+    except NoInspectionAvailable:
         return default
 
 
 def _drop_fks_on_columns(table: str, columns: set[str]) -> None:
     try:
         inspector = sa.inspect(_bind())
-    except Exception:
+    except NoInspectionAvailable:
         return
     for fk in inspector.get_foreign_keys(table):
         if set(fk.get("constrained_columns") or ()) & columns:
@@ -106,7 +107,7 @@ def downgrade() -> None:
     if not _has_column("model_configs", "scope", default=False):
         op.add_column(
             "model_configs",
-            sa.Column("scope", sa.String(length=16), nullable=True, server_default="global"),
+            sa.Column("scope", sa.String(length=16), nullable=False, server_default="global"),
         )
     if not _has_column("model_configs", "repo_id", default=False):
         op.add_column(
@@ -133,4 +134,41 @@ def downgrade() -> None:
                 server_default="inherit",
             ),
         )
-    # Note: FK constraints and indexes are not restored in downgrade.
+
+    # Restore FK constraints (best-effort).
+    if _has_column("model_configs", "repo_id") and not _has_fk(
+        "model_configs", "fk_model_configs_repo_id_repos", default=False
+    ):
+        op.create_foreign_key(
+            "fk_model_configs_repo_id_repos",
+            "model_configs",
+            "repos",
+            ["repo_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+    if _has_column("model_configs", "user_id") and not _has_fk(
+        "model_configs", "fk_model_configs_user_id_users", default=False
+    ):
+        op.create_foreign_key(
+            "fk_model_configs_user_id_users",
+            "model_configs",
+            "users",
+            ["user_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+
+    # Restore indexes (best-effort).
+    if _has_column("model_configs", "scope") and not _has_index(
+        "model_configs", "ix_model_configs_scope", default=False
+    ):
+        op.create_index("ix_model_configs_scope", "model_configs", ["scope"])
+    if _has_column("model_configs", "repo_id") and not _has_index(
+        "model_configs", "ix_model_configs_repo_id", default=False
+    ):
+        op.create_index("ix_model_configs_repo_id", "model_configs", ["repo_id"])
+    if _has_column("model_configs", "user_id") and not _has_index(
+        "model_configs", "ix_model_configs_user_id", default=False
+    ):
+        op.create_index("ix_model_configs_user_id", "model_configs", ["user_id"])

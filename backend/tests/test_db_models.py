@@ -865,7 +865,6 @@ async def test_model_configs_defaults(db: AsyncSession):
     assert cfg.model_name == "nemotron-3.5-lightning-free"
     assert cfg.base_url == "https://opencode.ai/inference/go/openai/v1"
     assert cfg.is_active is True
-    assert cfg.scope == "global"
     assert cfg.created_at.tzinfo is not None
 
 

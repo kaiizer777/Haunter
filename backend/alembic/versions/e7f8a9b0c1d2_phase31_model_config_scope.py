@@ -27,6 +27,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.exc import NoInspectionAvailable
 
 # revision identifiers, used by Alembic.
 revision: str = "e7f8a9b0c1d2"
@@ -35,43 +36,79 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _bind():
+    return op.get_bind()
+
+
+def _has_column(table: str, column: str, default: bool = True) -> bool:
+    try:
+        inspector = sa.inspect(_bind())
+        return column in {c["name"] for c in inspector.get_columns(table)}
+    except NoInspectionAvailable:
+        return default
+
+
+def _has_index(table: str, index: str, default: bool = True) -> bool:
+    try:
+        inspector = sa.inspect(_bind())
+        return index in {i["name"] for i in inspector.get_indexes(table)}
+    except NoInspectionAvailable:
+        return default
+
+
+def _has_fk(table: str, name: str, default: bool = True) -> bool:
+    try:
+        inspector = sa.inspect(_bind())
+        return any(fk.get("name") == name for fk in inspector.get_foreign_keys(table))
+    except NoInspectionAvailable:
+        return default
+
+
 def upgrade() -> None:
     # 1. Discriminator + ownership pins (expand step — nullable/additive only).
-    op.add_column(
-        "model_configs",
-        sa.Column("scope", sa.String(length=16), nullable=False, server_default="global"),
-    )
-    op.add_column(
-        "model_configs",
-        sa.Column("repo_id", sa.UUID(as_uuid=True), nullable=True),
-    )
-    op.add_column(
-        "model_configs",
-        sa.Column("user_id", sa.UUID(as_uuid=True), nullable=True),
-    )
+    if not _has_column("model_configs", "scope"):
+        op.add_column(
+            "model_configs",
+            sa.Column("scope", sa.String(length=16), nullable=False, server_default="global"),
+        )
+    if not _has_column("model_configs", "repo_id"):
+        op.add_column(
+            "model_configs",
+            sa.Column("repo_id", sa.UUID(as_uuid=True), nullable=True),
+        )
+    if not _has_column("model_configs", "user_id"):
+        op.add_column(
+            "model_configs",
+            sa.Column("user_id", sa.UUID(as_uuid=True), nullable=True),
+        )
 
     # 2. FK constraints (SET NULL — deleting a repo/user never deletes history).
-    op.create_foreign_key(
-        "fk_model_configs_repo_id_repos",
-        "model_configs",
-        "repos",
-        ["repo_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-    op.create_foreign_key(
-        "fk_model_configs_user_id_users",
-        "model_configs",
-        "users",
-        ["user_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
+    if not _has_fk("model_configs", "fk_model_configs_repo_id_repos"):
+        op.create_foreign_key(
+            "fk_model_configs_repo_id_repos",
+            "model_configs",
+            "repos",
+            ["repo_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+    if not _has_fk("model_configs", "fk_model_configs_user_id_users"):
+        op.create_foreign_key(
+            "fk_model_configs_user_id_users",
+            "model_configs",
+            "users",
+            ["user_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
 
     # 3. Indexes for scope-filtered hot paths.
-    op.create_index("ix_model_configs_scope", "model_configs", ["scope"])
-    op.create_index("ix_model_configs_repo_id", "model_configs", ["repo_id"])
-    op.create_index("ix_model_configs_user_id", "model_configs", ["user_id"])
+    if not _has_index("model_configs", "ix_model_configs_scope"):
+        op.create_index("ix_model_configs_scope", "model_configs", ["scope"])
+    if not _has_index("model_configs", "ix_model_configs_repo_id"):
+        op.create_index("ix_model_configs_repo_id", "model_configs", ["repo_id"])
+    if not _has_index("model_configs", "ix_model_configs_user_id"):
+        op.create_index("ix_model_configs_user_id", "model_configs", ["user_id"])
 
     # 4. Backfill: rows linked from repos.active_model_config_id are repo
     # overrides — promote them from the 'global' default to scope='repo'.
@@ -85,11 +122,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_model_configs_user_id", table_name="model_configs")
-    op.drop_index("ix_model_configs_repo_id", table_name="model_configs")
-    op.drop_index("ix_model_configs_scope", table_name="model_configs")
-    op.drop_constraint("fk_model_configs_user_id_users", "model_configs", type_="foreignkey")
-    op.drop_constraint("fk_model_configs_repo_id_repos", "model_configs", type_="foreignkey")
-    op.drop_column("model_configs", "user_id")
-    op.drop_column("model_configs", "repo_id")
-    op.drop_column("model_configs", "scope")
+    if _has_index("model_configs", "ix_model_configs_user_id"):
+        op.drop_index("ix_model_configs_user_id", table_name="model_configs")
+    if _has_index("model_configs", "ix_model_configs_repo_id"):
+        op.drop_index("ix_model_configs_repo_id", table_name="model_configs")
+    if _has_index("model_configs", "ix_model_configs_scope"):
+        op.drop_index("ix_model_configs_scope", table_name="model_configs")
+    if _has_fk("model_configs", "fk_model_configs_user_id_users"):
+        op.drop_constraint("fk_model_configs_user_id_users", "model_configs", type_="foreignkey")
+    if _has_fk("model_configs", "fk_model_configs_repo_id_repos"):
+        op.drop_constraint("fk_model_configs_repo_id_repos", "model_configs", type_="foreignkey")
+    if _has_column("model_configs", "user_id"):
+        op.drop_column("model_configs", "user_id")
+    if _has_column("model_configs", "repo_id"):
+        op.drop_column("model_configs", "repo_id")
+    if _has_column("model_configs", "scope"):
+        op.drop_column("model_configs", "scope")

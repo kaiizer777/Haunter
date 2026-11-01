@@ -1,8 +1,8 @@
 """
 Dynamic model config resolution for Haunter LLM subsystem.
 
-Resolves active provider, model name, and base URL from Postgres (model_configs table)
-or per-repo overrides, falling back gracefully to environment variable defaults.
+Resolves active provider, model name, and base URL from Postgres (model_configs table),
+falling back gracefully to environment variable defaults.
 """
 
 import logging

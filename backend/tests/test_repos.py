@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import ModelConfig, Repo, User
 from app.repos import _validate_repo_ident, _verify_user_repo_permission, add_repo
 from app.schemas import RepoCreate
+from pydantic import ValidationError
 from fastapi import HTTPException
 from tests.conftest import truncate_all
 
@@ -717,8 +718,15 @@ async def test_model_config_get_global_and_repo(
         assert "provider" in data_global
         assert "base_url" in data_global
 
-        # Global-only: repo_id is no longer accepted; global read remains admin-only.
-        assert "model_name" in data_global
+        # Global-only: repo_id is no longer accepted by ModelConfigUpdate (extra="forbid").
+        from app.schemas import ModelConfigUpdate
+
+        with pytest.raises(ValidationError):
+            ModelConfigUpdate(
+                provider="opencode_go",
+                model_name="nemotron-3.5-lightning-free",
+                repo_id=uuid.uuid4(),
+            )
 
 
 @pytest.mark.asyncio

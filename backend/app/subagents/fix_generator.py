@@ -892,8 +892,6 @@ async def generate_fix(
     # objects may expire and lazy attribute reads raise MissingGreenlet.
     run_id = run.id
     run_diagnosis = run.diagnosis_summary
-    run_repo_id: Optional[uuid.UUID] = run.repo_id
-
     # -------------------------------------------------------------------------
     # 1. Attempt cap check — plain read, no row lock held across the LLM
     # call below (#107). A SELECT ... FOR UPDATE here would serialize
