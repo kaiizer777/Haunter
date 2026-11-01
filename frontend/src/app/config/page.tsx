@@ -45,8 +45,6 @@ const PROVIDER_OPTIONS = [
 ];
 
 const BASE_URL_PRESETS = [
-  { label: "Ollama", value: "http://localhost:11434/v1" },
-  { label: "vLLM / LM Studio", value: "http://localhost:8000/v1" },
   { label: "Together AI", value: "https://api.together.xyz/v1" },
   { label: "OpenAI", value: "https://api.openai.com/v1" },
 ] as const;
