@@ -7,6 +7,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { SelectDropdown, SelectOption } from "@/components/ui/select-dropdown";
 import { Modal } from "@/components/ui/modal";
 import { api, ModelConfigOut, RepoOut, ApiError, AvailableModelItem, CustomProviderCompat } from "@/lib/api";
+
+type ConfigModelItem = AvailableModelItem & { provider: string };
+
 import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
 import {
@@ -49,7 +52,7 @@ const BASE_URL_PRESETS = [
   { label: "OpenAI", value: "https://api.openai.com/v1" },
 ] as const;
 
-const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, { id: string; name: string; tag: string; context_window?: number }[]> = {
+const DEFAULT_MODEL_OPTIONS_BY_PROVIDER: Record<string, AvailableModelItem[]> = {
   opencode_go: [
     { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", tag: "1M · Low Latency", context_window: 1000000 },
     { id: "glm-5.2", name: "GLM 5.2", tag: "1M · Reasoning", context_window: 1000000 },
@@ -158,6 +161,7 @@ interface ModelSpec {
   tagColor: string;
   speedCategory: "fast" | "standard" | "reasoning";
   isFree?: boolean;
+  tokenCost: string;
 }
 
 const MODEL_SPECS: Record<string, ModelSpec> = {
@@ -170,6 +174,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
     speedCategory: "fast",
     isFree: false,
+    tokenCost: "$0.14 / 1M",
   },
   "glm-5.2": {
     contextWindow: "1M Context",
@@ -180,6 +185,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-purple-950/60 border-purple-700/60 text-purple-300",
     speedCategory: "reasoning",
     isFree: false,
+    tokenCost: "$0.35 / 1M",
   },
   "mimo-v2.6-flash": {
     contextWindow: "1M Context",
@@ -190,6 +196,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
     speedCategory: "fast",
     isFree: false,
+    tokenCost: "$0.10 / 1M",
   },
   "space-bunny-free": {
     contextWindow: "1M Context",
@@ -200,6 +207,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
     speedCategory: "standard",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "longcat-2.5-preview-free": {
     contextWindow: "1M Context",
@@ -210,6 +218,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
     speedCategory: "standard",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "ling-3.0-flash-fin-free": {
     contextWindow: "1M Context",
@@ -220,6 +229,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
     speedCategory: "standard",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "mimo-v2.6-flash-free": {
     contextWindow: "256k Context",
@@ -230,6 +240,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
     speedCategory: "fast",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "mimo-v2.5-free": {
     contextWindow: "256k Context",
@@ -240,6 +251,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
     speedCategory: "fast",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "nemotron-3.5-lightning-free": {
     contextWindow: "128k Context",
@@ -250,6 +262,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-amber-950/60 border-amber-700/60 text-amber-300",
     speedCategory: "standard",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "nemotron-3-ultra-free": {
     contextWindow: "128k Context",
@@ -260,6 +273,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-amber-950/60 border-amber-700/60 text-amber-300",
     speedCategory: "standard",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "laguna-s-2.1-free": {
     contextWindow: "64k Context",
@@ -270,6 +284,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
     speedCategory: "fast",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "deepseek-r1-0528-free": {
     contextWindow: "64k Context",
@@ -280,6 +295,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-purple-950/60 border-purple-700/60 text-purple-300",
     speedCategory: "reasoning",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "deepseek-v4-flash-free": {
     contextWindow: "128k Context",
@@ -290,6 +306,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-blue-950/60 border-blue-700/60 text-blue-300",
     speedCategory: "fast",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "jev-1.13-free": {
     contextWindow: "128k Context",
@@ -300,6 +317,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-amber-950/60 border-amber-700/60 text-amber-300",
     speedCategory: "standard",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "muse-spark-1.3-contributor-free": {
     contextWindow: "128k Context",
@@ -310,6 +328,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-violet-950/60 border-violet-700/60 text-violet-300",
     speedCategory: "standard",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "muse-spark-1.2-contributor-free": {
     contextWindow: "128k Context",
@@ -320,6 +339,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-violet-950/60 border-violet-700/60 text-violet-300",
     speedCategory: "standard",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "qwen-2.5-coder-32b-instruct-free": {
     contextWindow: "128k Context",
@@ -330,6 +350,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-teal-950/60 border-teal-700/60 text-teal-300",
     speedCategory: "standard",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "deepseek-r1-distill-qwen-32b-free": {
     contextWindow: "128k Context",
@@ -340,6 +361,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-indigo-950/60 border-indigo-700/60 text-indigo-300",
     speedCategory: "reasoning",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "llama-3.3-70b-instruct-free": {
     contextWindow: "128k Context",
@@ -350,6 +372,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-purple-950/60 border-purple-700/60 text-purple-300",
     speedCategory: "reasoning",
     isFree: true,
+    tokenCost: "$0.00 / 1M",
   },
   "gpt-4o": {
     contextWindow: "128k Context",
@@ -360,6 +383,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-purple-950/60 border-purple-700/60 text-purple-300",
     speedCategory: "reasoning",
     isFree: false,
+    tokenCost: "$2.50 / 1M",
   },
   "gpt-4o-mini": {
     contextWindow: "128k Context",
@@ -370,6 +394,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
     speedCategory: "fast",
     isFree: false,
+    tokenCost: "$0.15 / 1M",
   },
   "claude-sonnet-4-5": {
     contextWindow: "200k Context",
@@ -380,6 +405,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-orange-950/60 border-orange-700/60 text-orange-300",
     speedCategory: "reasoning",
     isFree: false,
+    tokenCost: "$3.00 / 1M",
   },
   "claude-haiku-3-5": {
     contextWindow: "200k Context",
@@ -390,6 +416,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-cyan-950/60 border-cyan-700/60 text-cyan-300",
     speedCategory: "fast",
     isFree: false,
+    tokenCost: "$0.80 / 1M",
   },
   "openai/gpt-oss-120b": {
     contextWindow: "128k Context",
@@ -400,6 +427,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-rose-950/60 border-rose-700/60 text-rose-300",
     speedCategory: "reasoning",
     isFree: false,
+    tokenCost: "$0.45 / 1M",
   },
   "llama-3.3-70b-versatile": {
     contextWindow: "128k Context",
@@ -410,6 +438,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-rose-950/60 border-rose-700/60 text-rose-300",
     speedCategory: "fast",
     isFree: false,
+    tokenCost: "$0.59 / 1M",
   },
   "llama-3.1-8b-instant": {
     contextWindow: "128k Context",
@@ -420,6 +449,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
     speedCategory: "fast",
     isFree: false,
+    tokenCost: "$0.05 / 1M",
   },
   "gemma2-9b-it": {
     contextWindow: "8k Context",
@@ -430,6 +460,7 @@ const MODEL_SPECS: Record<string, ModelSpec> = {
     tagColor: "bg-emerald-950/60 border-emerald-700/60 text-emerald-300",
     speedCategory: "fast",
     isFree: false,
+    tokenCost: "$0.07 / 1M",
   },
 };
 
@@ -489,14 +520,20 @@ function formatModelDisplayName(id: string, rawName?: string): string {
 /**
  * Resolve spec metadata with intelligent heuristics for dynamic models.
  */
-function getModelSpec(modelId: string, tag?: string, contextWindowTokens?: number): ModelSpec {
+function getModelSpec(
+  modelId: string,
+  tag?: string,
+  contextWindowTokens?: number,
+  tokenCost?: string
+): ModelSpec {
   const ctxTokens = contextWindowTokens ?? MODEL_CONTEXT_WINDOWS[modelId];
   const formattedCtx = ctxTokens ? formatContextWindow(ctxTokens) : undefined;
 
   if (MODEL_SPECS[modelId]) {
     const spec = MODEL_SPECS[modelId];
-    if (formattedCtx && spec.contextWindow !== formattedCtx) {
-      return { ...spec, contextWindow: formattedCtx };
+    const resolvedCost = tokenCost || spec.tokenCost;
+    if ((formattedCtx && spec.contextWindow !== formattedCtx) || (tokenCost && tokenCost !== spec.tokenCost)) {
+      return { ...spec, contextWindow: formattedCtx ?? spec.contextWindow, tokenCost: resolvedCost };
     }
     return spec;
   }
@@ -540,6 +577,15 @@ function getModelSpec(modelId: string, tag?: string, contextWindowTokens?: numbe
       : "bg-zinc-800 border-zinc-700 text-zinc-300",
     speedCategory: isFlash ? "fast" : isReasoning ? "reasoning" : "standard",
     isFree,
+    tokenCost:
+      tokenCost ??
+      (isFree
+        ? "$0.00 / 1M"
+        : isFlash
+        ? "$0.15 / 1M"
+        : isReasoning
+        ? "$0.60 / 1M"
+        : "$0.20 / 1M"),
   };
 }
 
@@ -562,7 +608,7 @@ export default function ModelConfigPage() {
   const [selectedProvider, setSelectedProvider] = useState<string>("opencode_go");
   const [selectedModel, setSelectedModel] = useState<string>("deepseek-v4.1-flash");
   const [modelOptionsByProvider, setModelOptionsByProvider] = useState<
-    Record<string, { id: string; name: string; tag: string; context_window?: number }[]>
+    Record<string, AvailableModelItem[]>
   >(DEFAULT_MODEL_OPTIONS_BY_PROVIDER);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -1081,7 +1127,7 @@ export default function ModelConfigPage() {
   }, [searchQuery, customProviders]);
 
   // Normalize provider model list for the currently selected provider
-  const allProviderModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
+  const allProviderModels = useMemo<ConfigModelItem[]>(() => {
     const options = modelOptionsByProvider[selectedProvider] || [];
     const hasSelected = options.some((m) => m.id === selectedModel);
     const base = hasSelected
@@ -1091,8 +1137,8 @@ export default function ModelConfigPage() {
   }, [modelOptionsByProvider, selectedProvider, selectedModel]);
 
   // All searchable models across all providers
-  const allGlobalModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
-    const list: Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }> = [];
+  const allGlobalModels = useMemo<ConfigModelItem[]>(() => {
+    const list: ConfigModelItem[] = [];
     const seen = new Set<string>();
 
     PROVIDER_OPTIONS.forEach((p) => {
@@ -1119,7 +1165,7 @@ export default function ModelConfigPage() {
   }, [modelOptionsByProvider, selectedModel, selectedProvider]);
 
   // Models matching search query across all providers (before speed filter)
-  const matchingSearchModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
+  const matchingSearchModels = useMemo<ConfigModelItem[]>(() => {
     const q = searchQuery.toLowerCase().trim();
     if (!q) return allProviderModels;
 
@@ -1158,7 +1204,7 @@ export default function ModelConfigPage() {
   }, [searchQuery, allProviderModels, allGlobalModels]);
 
   // Filter by query and speed category
-  const currentModels = useMemo<Array<{ id: string; name: string; tag: string; context_window?: number; provider: string }>>(() => {
+  const currentModels = useMemo<ConfigModelItem[]>(() => {
     const base = searchQuery.trim() ? matchingSearchModels : allProviderModels;
     return base.filter((m) => {
       const spec = getModelSpec(m.id, m.tag, m.context_window);
@@ -1724,8 +1770,7 @@ export default function ModelConfigPage() {
                   {displayedModels.map((m) => {
                   const modelProvider = m.provider || selectedProvider;
                   const isSelected = m.id === selectedModel && modelProvider === selectedProvider;
-                  const isLive = activeConfig?.model_name === m.id && (activeConfig?.provider ? modelProvider === activeConfig.provider : true);
-                  const spec = getModelSpec(m.id, m.tag, m.context_window);
+                  const spec = getModelSpec(m.id, m.tag, m.context_window, m.token_cost || m.cost);
                   const displayName = formatModelDisplayName(m.id, m.name);
 
                   // Calculate glass chip styling based on tag/free status
@@ -1798,12 +1843,16 @@ export default function ModelConfigPage() {
                             </span>
                           </div>
                           <div className="flex items-center gap-2">
-                            {isLive && (
-                              <span className="text-[9.5px] font-mono font-semibold bg-emerald-950/60 border border-emerald-800/60 text-emerald-400 px-2 py-0.5 rounded-[4px] flex items-center gap-1.5 shadow-[0_0_8px_rgba(52,211,153,0.25)]">
-                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,1)]" />
-                                Live in Prod
-                              </span>
-                            )}
+                            <span
+                              className={cn(
+                                "font-mono text-[9.5px] px-2 py-0.5 rounded-[4px] border transition-colors",
+                                isSelected
+                                  ? "bg-amber-950/40 border-amber-800/50 text-amber-300/90"
+                                  : "bg-zinc-800/80 border-zinc-700/60 text-zinc-400"
+                              )}
+                            >
+                              {spec.tokenCost}
+                            </span>
                             <div
                               className={cn(
                                 "h-4 w-4 rounded-full flex items-center justify-center transition-all duration-150",
@@ -2172,7 +2221,7 @@ export default function ModelConfigPage() {
                     onChange={(e) => setCustomName(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="my-provider"
-                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-1 focus:ring-white/40 transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-0 focus-visible:ring-0 transition-all"
                   />
                 </label>
                 <div className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
@@ -2240,7 +2289,7 @@ export default function ModelConfigPage() {
                     onChange={(e) => setCustomBaseUrl(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="https://my-host/v1"
-                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-1 focus:ring-white/40 transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-0 focus-visible:ring-0 transition-all"
                   />
                   <div className="flex flex-wrap items-center gap-1.5 mt-1">
                     <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">Presets:</span>
@@ -2281,7 +2330,7 @@ export default function ModelConfigPage() {
                       onChange={(e) => setCustomApiKey(e.target.value)}
                       disabled={isPending || isValidatingCustom}
                       placeholder="sk-..."
-                      className="h-9 w-full rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 pl-3 pr-10 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-1 focus:ring-white/40 transition-all"
+                      className="h-9 w-full rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 pl-3 pr-10 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-0 focus-visible:ring-0 transition-all"
                     />
                     <button
                       type="button"

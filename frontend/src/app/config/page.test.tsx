@@ -430,4 +430,29 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     expect(screen.getByText("OpenAI Compatible")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /copy base url/i })).toBeInTheDocument();
   });
+
+  it("renders model token cost badges and does not render live in prod badges", async () => {
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("$0.14 / 1M")).toBeInTheDocument();
+    expect(screen.getByText("$0.00 / 1M")).toBeInTheDocument();
+    expect(screen.queryByText(/live in prod/i)).not.toBeInTheDocument();
+  });
+
+  it("applies razor-sharp white focus border styling without ring to custom modal inputs", async () => {
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    const nameInput = await screen.findByLabelText("Custom provider name");
+    const urlInput = screen.getByLabelText("Custom provider base URL");
+    const keyInput = screen.getByLabelText("Custom provider API key");
+
+    for (const input of [nameInput, urlInput, keyInput]) {
+      expect(input.className).toContain("focus:border-white");
+      expect(input.className).toContain("focus-visible:border-white");
+      expect(input.className).toContain("focus:ring-0");
+      expect(input.className).toContain("focus-visible:ring-0");
+      expect(input.className).not.toContain("focus:ring-white/40");
+    }
+  });
 });
