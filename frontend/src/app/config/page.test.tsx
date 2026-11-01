@@ -141,7 +141,7 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
 
   it("prunes prebuilt providers to OpenCode Go + Groq", async () => {
     render(<ModelConfigPage />);
-    expect(await screen.findByText("Repository Override")).toBeInTheDocument();
+    expect(await screen.findByText("Autonomous Inference Engine")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Inference Provider Selector"));
     const goOptions = await screen.findAllByText("OpenCode Go");
     expect(goOptions.length).toBeGreaterThanOrEqual(2);
@@ -463,4 +463,12 @@ it("does not render server-derived base URL or subagent pipeline telemetry cards
     expect(screen.queryByText(/subagent pipeline telemetry/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/tls 1\.3 verified/i)).not.toBeInTheDocument();
   });
+it("does not render top scope switcher card", async () => {
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("Autonomous Inference Engine")).toBeInTheDocument();
+    expect(screen.queryByText(/Scope:/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Global Platform Default/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Repository Override/i)).not.toBeInTheDocument();
+  });
 });
+

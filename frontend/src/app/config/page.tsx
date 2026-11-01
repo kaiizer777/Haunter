@@ -16,9 +16,6 @@ import {
   Cpu,
   CheckCircle2,
   AlertCircle,
-  ShieldCheck,
-  GitBranch,
-  Globe,
   Zap,
   Lock,
   Copy,
@@ -31,7 +28,6 @@ import {
   Gauge,
   Layers,
   RotateCcw,
-  FolderGit2,
   ChevronDown,
   ChevronUp,
   Plus,
@@ -1334,182 +1330,6 @@ export default function ModelConfigPage() {
             </span>
           </div>
         )}
-
-        {/* TOP BAR: Scope Switcher + Target Repository Control */}
-        <div className="relative overflow-hidden rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-3 sm:p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-2.5">
-          <span
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 h-6 bg-gradient-to-b from-white/[0.04] to-transparent z-10"
-          />
-
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 relative z-10">
-            {/* Scope Segmented Control */}
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-400 select-none">
-                Scope:
-              </span>
-              <div className="inline-flex rounded-[7px] border border-zinc-800/90 bg-[#09090b]/90 p-1 shadow-inner">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedScope("global");
-                    if (!globalConfig) {
-                      setActiveConfig(null);
-                      setSelectedProvider("opencode_zen");
-                      setSelectedModel("nemotron-3.5-lightning-free");
-                    }
-                  }}
-                  className={cn(
-                    "flex items-center gap-1.5 rounded-[5px] px-2.5 py-1 text-[11px] sm:text-xs font-mono transition-all cursor-pointer select-none",
-                    selectedScope === "global"
-                      ? "bg-zinc-800 text-amber-400 shadow-sm border border-zinc-700/80 font-bold"
-                      : "text-zinc-400 hover:text-zinc-200"
-                  )}
-                >
-                  <Globe className="h-3 w-3 text-amber-400" />
-                  <span>Global Platform Default</span>
-                  {!isAdmin && (
-                    <span className="ml-1 inline-flex items-center gap-1 rounded bg-zinc-900 border border-zinc-700/70 px-1.5 py-0.5 text-[10px] text-zinc-400 font-mono">
-                      <Lock className="h-2.5 w-2.5 text-zinc-400" />
-                      <span>Admin Only</span>
-                    </span>
-                  )}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setSelectedScope("repo")}
-                  className={cn(
-                    "flex items-center gap-1.5 rounded-[5px] px-2.5 py-1 text-[11px] sm:text-xs font-mono transition-all cursor-pointer select-none",
-                    selectedScope === "repo"
-                      ? "bg-zinc-800 text-cyan-400 shadow-sm border border-zinc-700/80 font-bold"
-                      : "text-zinc-400 hover:text-zinc-200"
-                  )}
-                >
-                  <GitBranch className="h-3 w-3 text-cyan-400" />
-                  <span>Repository Override</span>
-                  {repos.length > 0 && (
-                    <span className="ml-1 rounded-full bg-cyan-950 border border-cyan-800/60 px-2 py-0.2 text-[10px] text-cyan-300 font-mono tabular-nums">
-                      {repos.length}
-                    </span>
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {/* Scope Status Badges: override vs inherit + 1-click reset */}
-            <div className="flex flex-wrap items-center gap-2">
-              {selectedScope === "global" ? (
-                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-[5px] border flex items-center gap-1.5 select-none bg-emerald-950/40 border-emerald-800/50 text-emerald-400">
-                  <Globe className="h-3.5 w-3.5 text-emerald-400" />
-                  <span>Global Default · Applies to all repos without overrides</span>
-                </span>
-              ) : isRepoCustomOverride ? (
-                <>
-                  <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-[5px] border flex items-center gap-1.5 select-none bg-cyan-950/50 border-cyan-700/60 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.18)]">
-                    <GitBranch className="h-3.5 w-3.5 text-cyan-300" />
-                    <span>Custom Repo Override</span>
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleResetToGlobalDefault}
-                    disabled={isResetting || loading || !selectedRepoId || (!globalConfig && !isRepoCustomOverride)}
-                    className="h-6.5 px-2 text-[10px] font-mono rounded-[4px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border border-zinc-700/60 cursor-pointer"
-                    title={
-                      globalConfig
-                        ? `Reset to global default (${formatModelDisplayName(globalConfig.model_name)})`
-                        : "Reset to global default"
-                    }
-                  >
-                    {isResetting ? (
-                      <RefreshCw className="h-3 w-3 mr-1.5 animate-spin" />
-                    ) : (
-                      <RotateCcw className="h-3 w-3 mr-1.5" />
-                    )}
-                    <span>{isResetting ? "Resetting..." : "Reset to Global Default"}</span>
-                  </Button>
-                </>
-              ) : (
-                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-[5px] border flex items-center gap-1.5 select-none bg-zinc-900/90 border-zinc-700/70 text-zinc-300">
-                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
-                  <span>Inheriting Platform Default</span>
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Repo SelectDropdown (when Repo Override is selected) */}
-          {selectedScope === "repo" && (
-            <div className="relative z-10 pt-2.5 border-t border-zinc-800/80 flex flex-col sm:flex-row sm:items-center gap-2.5 animate-in fade-in duration-150">
-              <label className="text-[11px] font-mono font-semibold uppercase tracking-wider text-zinc-300 shrink-0">
-                Target Repository:
-              </label>
-              {repos.length === 0 ? (
-                <div className="text-xs text-zinc-400 font-mono p-2 border border-dashed border-zinc-800 rounded bg-zinc-950">
-                  No connected repositories found. Connect a repository first in the Repositories tab.
-                </div>
-              ) : (
-                <div className="flex-1 flex flex-col gap-2.5">
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-                    <SelectDropdown
-                      value={selectedRepoId}
-                      onChange={(val) => setSelectedRepoId(val)}
-                      options={repos.map((r) => ({
-                        value: r.id,
-                        label: `${r.owner}/${r.name}`,
-                        icon: <FolderGit2 className="h-3.5 w-3.5 text-amber-400/80" />,
-                        description: `Default branch: ${r.default_branch || "main"}${r.language_hint ? ` · ${r.language_hint}` : ""}`,
-                      }))}
-                      placeholder="Select repository..."
-                      buttonClassName="min-w-[220px] h-7.5 font-mono text-[11px]"
-                      searchable={repos.length > 5}
-                    />
-                    {currentRepo && (
-                      <span className="text-[11px] text-zinc-400 font-mono whitespace-nowrap">
-                        Branch: <strong className="text-zinc-200">{currentRepo.default_branch || "main"}</strong>
-                        {currentRepo.language_hint && (
-                          <> · Language: <strong className="text-amber-400/90">{currentRepo.language_hint}</strong></>
-                        )}
-                      </span>
-                    )}
-                  </div>
-                  {currentRepo && activeConfig && (globalConfig || isRepoCustomOverride) && (
-                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
-                      {isRepoCustomOverride ? (
-                        <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-cyan-700/60 bg-cyan-950/50 px-2 py-0.5 text-cyan-300">
-                          <GitBranch className="h-3 w-3" />
-                          <span>
-                            {currentRepo.owner}/{currentRepo.name} uses custom override:{" "}
-                            <strong>{formatModelDisplayName(activeConfig.model_name)}</strong>
-                          </span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 rounded-[5px] border border-zinc-700/70 bg-zinc-900/80 px-2 py-0.5 text-zinc-300">
-                          <Globe className="h-3 w-3 text-zinc-400" />
-                          <span>
-                            {currentRepo.owner}/{currentRepo.name} inherits platform default:{" "}
-                            <strong className="text-zinc-100">{formatModelDisplayName(globalConfig?.model_name ?? activeConfig.model_name)}</strong>
-                          </span>
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Subtle Notice for Non-Admins viewing Global Scope */}
-          {selectedScope === "global" && !isAdmin && (
-            <div className="relative z-10 pt-2.5 border-t border-zinc-800/80 flex items-center gap-2.5 text-[11px] font-mono text-zinc-300 bg-zinc-900/50 rounded-lg px-3 py-2 border border-zinc-800/90 shadow-inner">
-              <Lock className="h-4 w-4 text-amber-400 shrink-0" />
-              <span>
-                Global platform default can only be modified by administrators. Switch to Repository Override to customize models for your repos.
-              </span>
-            </div>
-          )}
-        </div>
 
         {/* MAIN HERO: Provider Tabs + Models Grid */}
         <div className="relative rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-3.5 sm:p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-3.5">
