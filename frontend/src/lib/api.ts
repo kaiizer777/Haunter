@@ -795,12 +795,14 @@ export const api = {
   deleteRepoModelConfig: (repoId: string, options?: RequestOptions) =>
     api.delete<void>(`/config/model/${repoId}`, options),
   validateCustomProvider: async (
-    data: CustomProviderValidateRequest
+    data: CustomProviderValidateRequest,
+    options?: RequestOptions
   ): Promise<CustomProviderValidateOut> => {
     try {
       return await api.post<CustomProviderValidateOut>(
         "/config/model/custom/validate",
-        data
+        data,
+        options
       );
     } catch (err: unknown) {
       // Graceful fallback when the backend endpoint is absent: report

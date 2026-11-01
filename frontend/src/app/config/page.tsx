@@ -539,6 +539,7 @@ export default function ModelConfigPage() {
   const isAdmin = Boolean(user?.is_admin);
   const hasInitializedScopeRef = useRef(false);
   const activeFetchControllerRef = useRef<AbortController | null>(null);
+  const activeValidateRequestRef = useRef<number>(0);
 
   const [repos, setRepos] = useState<RepoOut[]>([]);
   const [selectedScope, setSelectedScope] = useState<"global" | "repo">(() =>
@@ -590,6 +591,7 @@ export default function ModelConfigPage() {
   useEffect(() => {
     return () => {
       activeFetchControllerRef.current?.abort();
+      activeValidateRequestRef.current = 0;
     };
   }, []);
 
@@ -740,6 +742,21 @@ export default function ModelConfigPage() {
     }
   };
 
+  const handleOpenCustomModal = useCallback(() => {
+    activeValidateRequestRef.current = 0;
+    setCustomError(null);
+    setCustomModels([]);
+    setIsCustomModalOpen(true);
+  }, []);
+
+  const handleCloseCustomModal = useCallback(() => {
+    activeValidateRequestRef.current = 0;
+    setIsCustomModalOpen(false);
+    setCustomError(null);
+    setCustomModels([]);
+    setIsValidatingCustom(false);
+  }, []);
+
   // Admin custom provider: validate -> discover -> select -> persist via
   // the standard save flow. Falls back gracefully when the backend has no
   // validation endpoint (validateCustomProvider reports unsupported).
@@ -750,6 +767,9 @@ export default function ModelConfigPage() {
     }
     setCustomError(null);
     setIsValidatingCustom(true);
+
+    const requestId = ++activeValidateRequestRef.current;
+
     try {
       const result = await api.validateCustomProvider({
         name: customName.trim(),
@@ -757,6 +777,12 @@ export default function ModelConfigPage() {
         base_url: customBaseUrl.trim(),
         api_key: customApiKey,
       });
+
+      // If modal was closed or a newer request was dispatched while in-flight, ignore response
+      if (activeValidateRequestRef.current !== requestId) {
+        return;
+      }
+
       if (!result.supported) {
         setCustomError(
           result.detail ||
@@ -787,9 +813,14 @@ export default function ModelConfigPage() {
       setCustomApiKey("");
       setIsCustomModalOpen(false);
     } catch (err: unknown) {
+      if (activeValidateRequestRef.current !== requestId) {
+        return;
+      }
       setCustomError(err instanceof ApiError ? err.message : "Custom provider validation failed.");
     } finally {
-      setIsValidatingCustom(false);
+      if (activeValidateRequestRef.current === requestId) {
+        setIsValidatingCustom(false);
+      }
     }
   }, [customName, customCompat, customBaseUrl, customApiKey]);
 
@@ -969,7 +1000,16 @@ export default function ModelConfigPage() {
   const registeredCustom = customProviders[selectedProvider];
   const activeProviderMeta = PROVIDER_METADATA[selectedProvider] ||
     (registeredCustom
-      ? { ...PROVIDER_METADATA.opencode_go, name: registeredCustom.name, baseUrl: registeredCustom.baseUrl }
+      ? {
+          name: registeredCustom.name,
+          tag: "Custom Inference Endpoint",
+          shortBadge: "Custom API",
+          description: "Custom OpenAI/Anthropic-compatible endpoint. Select a discovered model below, then Save Configuration to persist.",
+          baseUrl: registeredCustom.baseUrl,
+          icon: Zap,
+          accentText: "text-amber-400",
+          badgeClass: "bg-amber-400/10 border-amber-400/30 text-amber-300",
+        }
       : PROVIDER_METADATA.opencode_go);
   const currentBaseUrl = activeConfig?.base_url || activeProviderMeta.baseUrl;
   const currentRepo = repos.find((r) => r.id === selectedRepoId);
@@ -1468,10 +1508,7 @@ export default function ModelConfigPage() {
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => {
-                    setCustomError(null);
-                    setIsCustomModalOpen(true);
-                  }}
+                  onClick={handleOpenCustomModal}
                   className="h-8 px-2.5 text-xs font-mono border-zinc-700/80 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200 cursor-pointer flex items-center gap-1.5 shrink-0"
                 >
                   <Plus className="h-3.5 w-3.5 text-zinc-400" />
@@ -1491,6 +1528,24 @@ export default function ModelConfigPage() {
               {activeProviderMeta.baseUrl.replace("https://", "")}
             </span>
           </div>
+
+          {/* Discovered models & save guidance for active custom provider */}
+          {registeredCustom && (
+            <div
+              role="status"
+              className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs font-mono text-amber-200 shadow-inner"
+            >
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-amber-400 shrink-0" />
+                <span>
+                  Discovered <strong>{(modelOptionsByProvider[selectedProvider] || []).length} model{((modelOptionsByProvider[selectedProvider] || []).length === 1 ? "" : "s")}</strong> for <strong>{registeredCustom.name}</strong>. Select an architecture below and save.
+                </span>
+              </div>
+              <span className="text-[11px] text-amber-400 font-medium">
+                Save Configuration to persist
+              </span>
+            </div>
+          )}
 
           {/* Models Header & Filter Controls (Hot-key '/' enabled) */}
           <div className="relative z-10 space-y-4 pt-1">
@@ -2029,10 +2084,7 @@ export default function ModelConfigPage() {
         {isAdmin && (
           <Modal
             isOpen={isCustomModalOpen}
-            onClose={() => {
-              setIsCustomModalOpen(false);
-              setCustomError(null);
-            }}
+            onClose={handleCloseCustomModal}
             title="Custom Provider"
             description="Connect an OpenAI or Anthropic-compatible custom inference endpoint."
             className="max-w-lg"
@@ -2123,10 +2175,7 @@ export default function ModelConfigPage() {
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => {
-                    setIsCustomModalOpen(false);
-                    setCustomError(null);
-                  }}
+                  onClick={handleCloseCustomModal}
                   className="h-8 px-3 text-xs font-mono text-zinc-400 hover:text-zinc-200 border-zinc-800 hover:bg-zinc-800/60"
                 >
                   Cancel
