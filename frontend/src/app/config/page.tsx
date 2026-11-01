@@ -2188,10 +2188,10 @@ export default function ModelConfigPage() {
                       onClick={() => setCustomCompat("openai")}
                       disabled={isPending || isValidatingCustom}
                       className={cn(
-                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer",
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-400/40",
                         customCompat === "openai"
                           ? "bg-gradient-to-b from-zinc-800/95 via-zinc-850 to-zinc-900/95 text-amber-300 border-t border-t-amber-400/40 border-x border-x-amber-500/25 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_3px_rgba(0,0,0,0.4)]"
-                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-850/50 border border-transparent"
+                          : "bg-transparent border border-transparent shadow-none text-zinc-400 hover:text-zinc-200"
                       )}
                     >
                       <Sparkles className={cn("h-3.5 w-3.5", customCompat === "openai" ? "text-amber-400" : "text-zinc-500")} />
@@ -2204,10 +2204,10 @@ export default function ModelConfigPage() {
                       onClick={() => setCustomCompat("anthropic")}
                       disabled={isPending || isValidatingCustom}
                       className={cn(
-                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer",
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-400/40",
                         customCompat === "anthropic"
                           ? "bg-gradient-to-b from-zinc-800/95 via-zinc-850 to-zinc-900/95 text-amber-300 border-t border-t-amber-400/40 border-x border-x-amber-500/25 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_3px_rgba(0,0,0,0.4)]"
-                          : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-850/50 border border-transparent"
+                          : "bg-transparent border border-transparent shadow-none text-zinc-400 hover:text-zinc-200"
                       )}
                     >
                       <Zap className={cn("h-3.5 w-3.5", customCompat === "anthropic" ? "text-amber-400" : "text-zinc-500")} />
