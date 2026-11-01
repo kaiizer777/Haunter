@@ -21,6 +21,9 @@ from __future__ import annotations
 import importlib
 import re
 
+import httpx
+import pytest
+
 
 def _load_trigger():
     """Import the script inside each test: it has module-level logging/sys.path side effects."""
@@ -118,3 +121,205 @@ def test_reviewable_actions_mirror_ingress_contract() -> None:
     trigger = _load_trigger()
 
     assert set(trigger._REVIEWABLE_ACTIONS) == REVIEWABLE_PR_ACTIONS
+
+
+async def _send(
+    trigger,
+    status_code: int,
+    body: dict,
+    headers: dict[str, str] | None = None,
+):
+    """POST through the script's helper against a MockTransport (no network)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json=body, headers=headers or {})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await trigger._post_webhook(
+            client,
+            url="http://testserver/webhooks/github",
+            body=b"{}",
+            headers={},
+            timeout=5.0,
+        )
+    return trigger._outcome_from_response(response)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "body", "expected_exit"),
+    [
+        (
+            200,
+            {
+                "status": "queued",
+                "review_id": "11111111-1111-1111-1111-111111111111",
+            },
+            0,
+        ),
+        (
+            200,
+            {
+                "status": "queued",
+                "reason": "auditor pr audit owns this delivery",
+                "audit_id": "audit-abc123def456",
+            },
+            0,
+        ),
+        (
+            200,
+            {"status": "duplicate", "review_id": "22222222-2222-2222-2222-222222222222"},
+            3,
+        ),
+        (200, {"status": "ignored", "reason": "unregistered repository"}, 4),
+        (200, {"status": "skipped", "reason": "base branch not allowed"}, 4),
+        (500, {"detail": "boom"}, 1),
+        (401, {"detail": "Invalid or missing signature"}, 1),
+        (429, {"detail": "rate limit"}, 1),
+        (503, {"detail": "dispatch failed"}, 1),
+    ],
+    ids=[
+        "queued-review",
+        "queued-auditor",
+        "duplicate",
+        "ignored",
+        "skipped",
+        "server-error",
+        "unauthorized",
+        "rate-limited",
+        "unavailable",
+    ],
+)
+async def test_response_maps_to_exit_code(status_code, body, expected_exit) -> None:
+    trigger = _load_trigger()
+
+    outcome = await _send(trigger, status_code, body)
+
+    assert outcome.exit_code == expected_exit
+
+
+async def test_queued_review_reports_review_id_and_background_note() -> None:
+    trigger = _load_trigger()
+
+    outcome = await _send(
+        trigger,
+        200,
+        {"status": "queued", "review_id": "review-123"},
+    )
+
+    assert outcome.exit_code == 0
+    assert any("review-123" in line for line in outcome.lines)
+    assert any("BackgroundTask" in line for line in outcome.lines)
+
+
+async def test_auditor_queued_reports_audit_id_and_no_code_review_row() -> None:
+    trigger = _load_trigger()
+
+    outcome = await _send(
+        trigger,
+        200,
+        {
+            "status": "queued",
+            "reason": "auditor pr audit owns this delivery",
+            "audit_id": "audit-abc123def456",
+        },
+    )
+
+    assert outcome.exit_code == 0
+    assert any("audit-abc123def456" in line for line in outcome.lines)
+    assert any("No CodeReview row" in line for line in outcome.lines)
+
+
+async def test_duplicate_advises_fresh_sha() -> None:
+    trigger = _load_trigger()
+
+    outcome = await _send(
+        trigger,
+        200,
+        {"status": "duplicate", "review_id": "review-123"},
+    )
+
+    assert outcome.exit_code == 3
+    assert any("--sha" in line for line in outcome.lines)
+
+
+async def test_ignored_reason_is_printed_verbatim_with_hint() -> None:
+    trigger = _load_trigger()
+
+    outcome = await _send(
+        trigger,
+        200,
+        {"status": "ignored", "reason": "unregistered repository"},
+    )
+
+    assert outcome.exit_code == 4
+    assert any("unregistered repository" in line for line in outcome.lines)
+    assert any("--seed-repo" in line for line in outcome.lines)
+
+
+async def test_429_reports_retry_after() -> None:
+    trigger = _load_trigger()
+
+    outcome = await _send(
+        trigger,
+        429,
+        {"detail": "Webhook rate limit exceeded"},
+        headers={"Retry-After": "42"},
+    )
+
+    assert outcome.exit_code == 1
+    assert any("42" in line for line in outcome.lines)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--repo", "no-slash", "--pr", "1"],
+        ["--repo", "owner/", "--pr", "1"],
+        ["--repo", "/name", "--pr", "1"],
+        ["--repo", "a/b/c", "--pr", "1"],
+    ],
+)
+def test_parse_args_rejects_malformed_repo(argv) -> None:
+    trigger = _load_trigger()
+
+    with pytest.raises(SystemExit) as excinfo:
+        trigger._parse_args(argv)
+
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize("pr", ["0", "-3"])
+def test_parse_args_rejects_non_positive_pr(pr) -> None:
+    trigger = _load_trigger()
+
+    with pytest.raises(SystemExit) as excinfo:
+        trigger._parse_args(["--repo", "saif-org/haunter-demo", "--pr", pr])
+
+    assert excinfo.value.code == 2
+
+
+def test_parse_args_rejects_malformed_sha() -> None:
+    trigger = _load_trigger()
+
+    with pytest.raises(SystemExit) as excinfo:
+        trigger._parse_args(
+            ["--repo", "saif-org/haunter-demo", "--pr", "1", "--sha", "deadbeef"]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_parse_args_accepts_valid_inputs() -> None:
+    trigger = _load_trigger()
+
+    args = trigger._parse_args(
+        ["--repo", "saif-org/haunter-demo", "--pr", "7", "--sha", "A" * 40]
+    )
+
+    assert args.repo == "saif-org/haunter-demo"
+    assert args.pr == 7
+    assert args.sha == "a" * 40
+    assert args.action == "opened"
+    assert args.base_url == "http://127.0.0.1:7555"
+    assert args.seed_repo is False
+    assert args.dry_run is False
