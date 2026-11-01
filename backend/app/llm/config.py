@@ -7,7 +7,6 @@ or per-repo overrides, falling back gracefully to environment variable defaults.
 
 import logging
 import time
-import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import select

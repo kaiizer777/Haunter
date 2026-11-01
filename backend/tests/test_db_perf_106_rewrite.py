@@ -145,7 +145,6 @@ async def test_fix_generator_format_retry_accumulates_usage() -> None:
             prior_attempt=None,
             db=db,
             run_id=uuid.uuid4(),
-            repo_id=None,
             review_feedback=None,
         )
 
@@ -187,7 +186,6 @@ async def test_fix_generator_retry_normalizes_messy_usage() -> None:
             prior_attempt=None,
             db=db,
             run_id=uuid.uuid4(),
-            repo_id=None,
         )
 
     in_tokens, out_tokens = ta.normalize_usage(response.get("usage"))
@@ -228,7 +226,6 @@ async def test_pr_writer_retry_normalizes_messy_usage() -> None:
             patch_text="diff",
             db=db,
             run_id=uuid.uuid4(),
-            repo_id=None,
         )
 
     in_tokens, out_tokens = ta.normalize_usage(response.get("usage"))

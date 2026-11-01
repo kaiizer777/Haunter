@@ -26,7 +26,7 @@ from app.config import settings
 from app.db import get_db
 from app.llm.config import invalidate_model_config_cache
 from app.llm.discovery import format_model_name, get_dynamic_go_models
-from app.models import ModelConfig, Repo, User
+from app.models import ModelConfig, User
 from app.schemas import (
     AvailableModelItem,
     AvailableModelsOut,
