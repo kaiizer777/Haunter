@@ -1,11 +1,5 @@
 # Haunter — Redeployment Runbook
 
-> This file exists because agents and humans keep hitting the same gotchas every single
-> time they deploy. **Read it top to bottom before touching anything.**
->
-> Supersedes the old `aws.md`. Everything that was in it is preserved here, plus the
-> security checklist that was added after a real credential leak.
-
 ---
 
 ## 0. Critical facts
