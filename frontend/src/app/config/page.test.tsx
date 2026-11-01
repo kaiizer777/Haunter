@@ -197,4 +197,72 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
     expect(screen.queryByText("Repository Override")).not.toBeInTheDocument();
   });
+
+  it("keeps custom-provider modal closed by default and opens upon clicking Add Custom Provider", async () => {
+    render(<ModelConfigPage />);
+    expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+    expect(await screen.findByLabelText("Custom provider name")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Custom Provider" })).toBeInTheDocument();
+  });
+
+  it("closes the modal when Cancel is clicked", async () => {
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+    expect(await screen.findByLabelText("Custom provider name")).toBeInTheDocument();
+
+    const cancelBtn = screen.getByRole("button", { name: /cancel/i });
+    fireEvent.click(cancelBtn);
+    expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
+  });
+
+  it("displays validation error when submitting with missing required fields", async () => {
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    const validateBtn = await screen.findByRole("button", { name: /validate & discover models/i });
+    fireEvent.click(validateBtn);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Name, base URL, and API key are required.");
+    expect(api.validateCustomProvider).not.toHaveBeenCalled();
+  });
+
+  it("resets inputs, closes modal, and selects custom provider on successful validation", async () => {
+    vi.mocked(api.validateCustomProvider).mockResolvedValueOnce({
+      ok: true,
+      supported: true,
+      provider_id: "custom_vllm",
+      models: [{ id: "custom-model-1", name: "Custom Model 1", tag: "Custom" }],
+    } as never);
+
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    fireEvent.change(await screen.findByLabelText("Custom provider name"), {
+      target: { value: "vLLM Server" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider base URL"), {
+      target: { value: "https://vllm.internal/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider API key"), {
+      target: { value: "sk-vllm-secret" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /validate & discover models/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
+    });
+
+    expect(api.validateCustomProvider).toHaveBeenCalledWith({
+      name: "vLLM Server",
+      compat: "openai",
+      base_url: "https://vllm.internal/v1",
+      api_key: "sk-vllm-secret",
+    });
+  });
 });
