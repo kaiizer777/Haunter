@@ -5,6 +5,7 @@ All external input crossing a trust boundary is validated through these schemas.
 No free-text injection vectors — provider and model_name use Literal allowlists.
 """
 
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -13,6 +14,8 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import UserRole
+
+logger = logging.getLogger(__name__)
 
 # Branch name and repo ident validation regexes and protected branch names
 _BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9/_.-]+$")
@@ -273,26 +276,32 @@ class ModelConfigUpdate(BaseModel):
 
         if provider == "opencode_zen":
             if not model.endswith("-free"):
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError("Invalid model selection.")
         elif provider == "opencode_go":
             if not model:
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError("Invalid model selection.")
         elif provider == "openai":
             if model not in OPENAI_MODELS:
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError(
                     "Invalid model selection. "
                     "See your administrator for available models."
                 )
         elif provider == "anthropic":
             if model not in ANTHROPIC_MODELS:
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError(
                     "Invalid model selection. "
                     "See your administrator for available models."
                 )
         elif provider == "groq":
             if not model:
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
                 raise ValueError("Invalid model selection.")
         else:
+            logger.warning("model_config.rejected provider=%s model=%s", provider, model)
             raise ValueError("Invalid model selection.")
 
         return self

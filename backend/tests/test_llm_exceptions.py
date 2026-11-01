@@ -131,10 +131,9 @@ class TestLLMExhaustedFreeTierError:
         assert "boom" not in err.message
         assert "(1 backends, 1 attempts)" in err.message
 
-    def test_long_error_truncated_at_cap(self) -> None:
+    def test_long_error_not_in_message(self) -> None:
         # Model-hide: per-model errors stay in .attempts, never in .message.
-        max_chars = LLMExhaustedFreeTierError._PER_MODEL_ERR_MAX_CHARS
-        long_err = "e" * (max_chars + 10)
+        long_err = "e" * 300
         err_long = LLMExhaustedFreeTierError([("m1", 1, long_err)])
         assert err_long.attempts == [("m1", 1, long_err)]
         assert "m1" not in err_long.message

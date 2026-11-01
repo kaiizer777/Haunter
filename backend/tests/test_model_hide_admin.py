@@ -78,6 +78,9 @@ async def test_sandbox_requires_auth_shape_and_redacts_detail() -> None:
     assert result["detail"] == {}
     admin_result = await sandbox_health(current_user=ADMIN)
     assert isinstance(admin_result["detail"], dict)
+    assert "org" in admin_result["detail"]
+    assert "app_id" in admin_result["detail"]
+    assert "installation_id" in admin_result["detail"]
 
 
 def test_exhausted_message_has_no_model_tokens() -> None:
