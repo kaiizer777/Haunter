@@ -655,14 +655,15 @@ async function request<T>(
         errorDetail = errJson.detail;
       }
       // Never leak model/provider vocabulary from backend error detail
-      // (e.g. allowlist dumps) to non-admin surfaces: collapse to generic.
+      // (e.g. allowlist dumps): drop it so the status-specific fallback
+      // below supplies a generic message.
       if (
         errorDetail &&
-        /gpt|claude|llama|deepseek|mistral|gemini|nemotron|laguna|ling|mimo|glm|\bmodel\b|provider|allowlist|anthropic|openai|groq|opencode|context_window|base_url/i.test(
+        /gpt|claude|llama|deepseek|mistral|gemini|nemotron|laguna|\bling\b|mimo|glm|\bmodel\b|provider|allowlist|anthropic|openai|groq|opencode|context_window|base_url/i.test(
           errorDetail
         )
       ) {
-        errorDetail = "Something went wrong. Please try again or contact support.";
+        errorDetail = "";
       }
     } catch {
       // Body is not JSON or cannot be parsed

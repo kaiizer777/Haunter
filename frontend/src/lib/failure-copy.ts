@@ -4,7 +4,7 @@
  * user-facing feature language. Unknown reasons get a generic message.
  */
 const MODEL_VOCAB_RE =
-  /gpt|claude|llama|deepseek|mistral|gemini|nemotron|laguna|ling|mimo|glm|provider|model|allowlist|anthropic|openai|groq|opencode|context_window|base_url/i;
+  /gpt|claude|llama|deepseek|mistral|gemini|nemotron|laguna|\bling\b|mimo|glm|provider|model|allowlist|anthropic|openai|groq|opencode|context_window|base_url/i;
 
 export function isModelVocabulary(text: string): boolean {
   return MODEL_VOCAB_RE.test(text);
