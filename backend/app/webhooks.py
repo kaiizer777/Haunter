@@ -571,7 +571,6 @@ async def _handle_auditor_mention(
         response = await llm.complete(
             messages=messages,
             db=db,
-            repo_id=getattr(repo, "id", None),
             max_tokens=1500,
         )
     except Exception as exc:
