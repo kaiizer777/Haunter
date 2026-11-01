@@ -337,4 +337,62 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     // Active provider should remain untouched, not updated to the closed pending provider
     expect(screen.getByRole("button", { name: /inference provider selector/i })).not.toHaveTextContent("Pending Provider");
   });
+
+  it("toggles password visibility between text and password types", async () => {
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    const apiKeyInput = await screen.findByLabelText("Custom provider API key");
+    expect(apiKeyInput).toHaveAttribute("type", "password");
+
+    const showBtn = screen.getByRole("button", { name: /show api key/i });
+    fireEvent.click(showBtn);
+    expect(apiKeyInput).toHaveAttribute("type", "text");
+
+    const hideBtn = screen.getByRole("button", { name: /hide api key/i });
+    fireEvent.click(hideBtn);
+    expect(apiKeyInput).toHaveAttribute("type", "password");
+  });
+
+  it("populates Base URL when preset button is clicked", async () => {
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    const baseUrlInput = await screen.findByLabelText("Custom provider base URL");
+    expect(baseUrlInput).toHaveValue("");
+
+    const ollamaBtn = screen.getByRole("button", { name: /^ollama$/i });
+    fireEvent.click(ollamaBtn);
+    expect(baseUrlInput).toHaveValue("http://localhost:11434/v1");
+
+    const openaiPresetBtn = screen.getByRole("button", { name: /^openai$/i });
+    fireEvent.click(openaiPresetBtn);
+    expect(baseUrlInput).toHaveValue("https://api.openai.com/v1");
+  });
+
+  it("switches compatibility mode between OpenAI and Anthropic using segmented control", async () => {
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    const openaiTab = await screen.findByRole("tab", { name: /openai/i });
+    const anthropicTab = screen.getByRole("tab", { name: /anthropic/i });
+    const compatSelect = screen.getByLabelText("Custom provider compatibility");
+
+    expect(openaiTab).toHaveAttribute("aria-selected", "true");
+    expect(anthropicTab).toHaveAttribute("aria-selected", "false");
+    expect(compatSelect).toHaveValue("openai");
+
+    fireEvent.click(anthropicTab);
+    expect(openaiTab).toHaveAttribute("aria-selected", "false");
+    expect(anthropicTab).toHaveAttribute("aria-selected", "true");
+    expect(compatSelect).toHaveValue("anthropic");
+
+    fireEvent.click(openaiTab);
+    expect(openaiTab).toHaveAttribute("aria-selected", "true");
+    expect(anthropicTab).toHaveAttribute("aria-selected", "false");
+    expect(compatSelect).toHaveValue("openai");
+  });
 });
