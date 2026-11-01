@@ -286,7 +286,7 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
   });
 
   it("ignores in-flight validation responses and cleans up state when modal is closed before completion", async () => {
-    let capturedSignal: AbortSignal | undefined;
+    let capturedSignal: AbortSignal | null | undefined;
     let resolveValidation!: (value: unknown) => void;
     const pendingPromise = new Promise((resolve) => {
       resolveValidation = resolve;

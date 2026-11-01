@@ -981,7 +981,7 @@ describe("api.ts", () => {
 
     it("connects signal and request options to the underlying fetch call", async () => {
       const controller = new AbortController();
-      let capturedSignal: AbortSignal | undefined;
+      let capturedSignal: AbortSignal | null | undefined;
       globalThis.fetch = vi.fn().mockImplementation(async (_url, opts) => {
         capturedSignal = opts?.signal;
         return new Response(JSON.stringify({ ok: true, supported: true }), { status: 200 });
