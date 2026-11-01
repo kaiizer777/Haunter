@@ -5,6 +5,7 @@ All external input crossing a trust boundary is validated through these schemas.
 No free-text injection vectors — provider and model_name use Literal allowlists.
 """
 
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -13,6 +14,8 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import UserRole
+
+logger = logging.getLogger(__name__)
 
 # Branch name and repo ident validation regexes and protected branch names
 _BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9/_.-]+$")
@@ -270,9 +273,11 @@ class ModelConfigUpdate(BaseModel):
             provider = data.get("provider")
             model = data.get("model_name")
             if provider == "opencode_go" and (model is None or not str(model).strip()):
-                raise ValueError("Model name cannot be empty for provider 'opencode_go'.")
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
+                raise ValueError("Invalid model selection.")
             if provider == "groq" and (model is None or not str(model).strip()):
-                raise ValueError("Model name cannot be empty for provider 'groq'.")
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
+                raise ValueError("Invalid model selection.")
         return data
 
     @field_validator("model_name", mode="before")
@@ -290,18 +295,15 @@ class ModelConfigUpdate(BaseModel):
 
         if provider == "opencode_go":
             if model not in OPENCODE_GO_MODELS:
-                raise ValueError(
-                    f"Invalid model '{model}' for provider 'opencode_go'. "
-                    f"Allowed models: {sorted(OPENCODE_GO_MODELS)}"
-                )
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
+                raise ValueError("Invalid model selection.")
         elif provider == "groq":
             if model not in GROQ_MODELS:
-                raise ValueError(
-                    f"Invalid model '{model}' for provider 'groq'. "
-                    f"Allowed models: {sorted(GROQ_MODELS)}"
-                )
+                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
+                raise ValueError("Invalid model selection.")
         else:
-            raise ValueError(f"Unsupported provider: {provider}")
+            logger.warning("model_config.rejected provider=%s model=%s", provider, model)
+            raise ValueError("Invalid model selection.")
 
         return self
 
