@@ -10,8 +10,20 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("@/components/layout/app-layout", () => ({
-  AppLayout: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="app-layout">{children}</div>
+  AppLayout: ({
+    children,
+    title,
+    subtitle,
+  }: {
+    children: React.ReactNode;
+    title?: React.ReactNode;
+    subtitle?: React.ReactNode;
+  }) => (
+    <div data-testid="app-layout">
+      <h1>{title}</h1>
+      <p>{subtitle}</p>
+      {children}
+    </div>
   ),
 }));
 
@@ -37,7 +49,10 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-describe("ModelConfigPage non-admin repo scope", () => {
+const MODEL_VOCAB_RE =
+  /provider|opencode|openai|deepseek|llama|qwen|glm|mimo|gemma|muse|model card|context window|Default · Free|inference engine|nemotron|laguna|gpt|claude|groq|anthropic|base_url/i;
+
+describe("ModelConfigPage non-admin: features only, zero model vocabulary", () => {
   const nonAdminUser: AuthUser = {
     id: "usr_1",
     github_id: 111,
@@ -54,16 +69,6 @@ describe("ModelConfigPage non-admin repo scope", () => {
     active_model_config_id: null,
   } as unknown as RepoOut;
 
-  const repoCfg: ModelConfigOut = {
-    id: "cfg_repo",
-    provider: "opencode_go",
-    model_name: "deepseek-v4.1-flash",
-    base_url: "https://opencode.ai/inference/go/openai/v1",
-    is_active: true,
-    scope: "repo",
-    repo_id: "repo_1",
-  };
-
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(useAuth).mockReturnValue({
@@ -73,47 +78,24 @@ describe("ModelConfigPage non-admin repo scope", () => {
       logout: vi.fn(),
       refresh: vi.fn(),
     });
-    vi.mocked(api.getAvailableModels).mockResolvedValue({} as never);
     vi.mocked(api.getRepos).mockResolvedValue([repo]);
-    vi.mocked(api.getModelConfig).mockImplementation((repoId?: string) => {
-      if (repoId === undefined) {
-        return Promise.reject(
-          new ApiError("Admin permissions required to read global model config", 403)
-        );
-      }
-      return Promise.resolve(repoCfg);
-    });
+    vi.mocked(api.getAvailableModels).mockResolvedValue({} as never);
   });
 
-  it("allows repo-override scope for non-admins: no Access Denied, repo config loads", async () => {
+  it("never calls getAvailableModels for is_admin=false", async () => {
     render(<ModelConfigPage />);
-
-    expect(screen.queryByText("Access Denied")).not.toBeInTheDocument();
-    expect(await screen.findByText("Repository Override")).toBeInTheDocument();
     await waitFor(() => {
       expect(api.getRepos).toHaveBeenCalled();
-      expect(api.getModelConfig).toHaveBeenCalledWith("repo_1", expect.anything());
     });
-    // Override state derives from the repo response scope even though the
-    // global default 403s: badge + reset stay available.
-    expect(await screen.findByText("Custom Repo Override")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /reset to global default/i })).toBeEnabled();
+    expect(api.getAvailableModels).not.toHaveBeenCalled();
+    expect(api.getModelConfig).not.toHaveBeenCalled();
   });
 
-  it("locks global controls for non-admins: save is disabled with an Admin Only notice", async () => {
-    render(<ModelConfigPage />);
-
-    expect(await screen.findByText("Repository Override")).toBeInTheDocument();
-    expect(screen.getAllByText("Admin Only").length).toBeGreaterThan(0);
-
-    // Switch to Global scope: global read 403s, stale repo state is cleared,
-    // and the save control is disabled (not merely labelled).
-    fireEvent.click(screen.getByRole("button", { name: /global platform default/i }));
-    const saveButton = await screen.findByRole("button", { name: /^admin only$/i });
-    expect(saveButton).toBeDisabled();
-    await waitFor(() => {
-      expect(api.getModelConfig).toHaveBeenCalledWith(undefined, expect.anything());
-    });
+  it("renders feature language with zero model vocabulary for non-admins", async () => {
+    const { container } = render(<ModelConfigPage />);
+    expect(await screen.findByText("Automation features")).toBeInTheDocument();
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(MODEL_VOCAB_RE);
   });
 });
 
@@ -206,7 +188,8 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
       refresh: vi.fn(),
     });
     render(<ModelConfigPage />);
-    expect(await screen.findByText("Repository Override")).toBeInTheDocument();
+    expect(await screen.findByText("Automation features")).toBeInTheDocument();
     expect(screen.queryByText(/Custom Provider/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Repository Override")).not.toBeInTheDocument();
   });
 });
