@@ -30,6 +30,7 @@ import {
   FolderGit2,
   ChevronDown,
   ChevronUp,
+  Plus,
 } from "lucide-react";
 
 // Strict server-side allowlists (WORK.md:252)
@@ -580,6 +581,7 @@ export default function ModelConfigPage() {
   const [customModels, setCustomModels] = useState<AvailableModelItem[]>([]);
   const [isValidatingCustom, setIsValidatingCustom] = useState(false);
   const [customError, setCustomError] = useState<string | null>(null);
+  const [isCustomModalOpen, setIsCustomModalOpen] = useState(false);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1456,6 +1458,21 @@ export default function ModelConfigPage() {
                 buttonClassName="min-w-[190px] sm:min-w-[210px] h-8 font-mono text-xs bg-zinc-900/80 border-zinc-700/80 hover:border-zinc-600 text-zinc-200"
                 disabled={isPending || !canMutateTarget}
               />
+              {isAdmin && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setCustomError(null);
+                    setIsCustomModalOpen(true);
+                  }}
+                  className="h-8 px-2.5 text-xs font-mono border-zinc-700/80 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200 cursor-pointer flex items-center gap-1.5 shrink-0"
+                >
+                  <Plus className="h-3.5 w-3.5 text-zinc-400" />
+                  <span>Add Custom Provider</span>
+                </Button>
+              )}
             </div>
           </div>
 
