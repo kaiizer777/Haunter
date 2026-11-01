@@ -2114,7 +2114,7 @@ export default function ModelConfigPage() {
                     onChange={(e) => setCustomName(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="my-provider"
-                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-0 focus-visible:ring-0 transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus:border-t-white focus:border-x-white focus:border-b-white focus:ring-1 focus:ring-white transition-all"
                   />
                 </label>
                 <div className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
@@ -2182,7 +2182,7 @@ export default function ModelConfigPage() {
                     onChange={(e) => setCustomBaseUrl(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="https://my-host/v1"
-                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-0 focus-visible:ring-0 transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus:border-t-white focus:border-x-white focus:border-b-white focus:ring-1 focus:ring-white transition-all"
                   />
                   <div className="flex flex-wrap items-center gap-1.5 mt-1">
                     <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">Presets:</span>
@@ -2223,7 +2223,7 @@ export default function ModelConfigPage() {
                       onChange={(e) => setCustomApiKey(e.target.value)}
                       disabled={isPending || isValidatingCustom}
                       placeholder="sk-..."
-                      className="h-9 w-full rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 pl-3 pr-10 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus-visible:border-white focus:ring-0 focus-visible:ring-0 transition-all"
+                      className="h-9 w-full rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 pl-3 pr-10 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus:border-t-white focus:border-x-white focus:border-b-white focus:ring-1 focus:ring-white transition-all"
                     />
                     <button
                       type="button"

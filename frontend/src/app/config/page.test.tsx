@@ -438,7 +438,7 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     expect(screen.queryByText(/live in prod/i)).not.toBeInTheDocument();
   });
 
-  it("applies razor-sharp white focus border styling without ring to custom modal inputs", async () => {
+  it("applies bright white focus border and ring styling to custom modal inputs", async () => {
     render(<ModelConfigPage />);
     const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
     fireEvent.click(addBtn);
@@ -449,10 +449,11 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
 
     for (const input of [nameInput, urlInput, keyInput]) {
       expect(input.className).toContain("focus:border-white");
-      expect(input.className).toContain("focus-visible:border-white");
-      expect(input.className).toContain("focus:ring-0");
-      expect(input.className).toContain("focus-visible:ring-0");
-      expect(input.className).not.toContain("focus:ring-white/40");
+      expect(input.className).toContain("focus:border-t-white");
+      expect(input.className).toContain("focus:border-x-white");
+      expect(input.className).toContain("focus:border-b-white");
+      expect(input.className).toContain("focus:ring-1");
+      expect(input.className).toContain("focus:ring-white");
     }
   });
 it("does not render server-derived base URL or subagent pipeline telemetry cards", async () => {
