@@ -626,8 +626,10 @@ export default function ModelConfigPage() {
     };
   }, []);
 
-  // Load dynamic models from backend
+  // Load dynamic models from backend (admin-only: non-admins never see
+  // the catalog, provider tabs, model cards, or context-window badges).
   useEffect(() => {
+    if (!isAdmin) return;
     api
       .getAvailableModels()
       .then((data) => {
@@ -645,7 +647,7 @@ export default function ModelConfigPage() {
         }
       })
       .catch(() => {});
-  }, []);
+  }, [isAdmin]);
 
   // Load repos on mount
   useEffect(() => {
@@ -673,6 +675,11 @@ export default function ModelConfigPage() {
   }, [user, repos]);
 
   const fetchActiveConfig = useCallback(async (isManualRefresh = false) => {
+    if (!isAdmin) {
+      setLoading(false);
+      setIsRefreshing(false);
+      return;
+    }
     if (activeFetchControllerRef.current) {
       activeFetchControllerRef.current.abort();
     }
@@ -767,6 +774,10 @@ export default function ModelConfigPage() {
   const effectiveTargetIsGlobal = selectedScope === "global" || !selectedRepoId;
 
   const handleSaveConfig = useCallback(async () => {
+    if (!isAdmin) {
+      setError("Inference engine settings are managed by administrators.");
+      return;
+    }
     if (isSaving) return;
     if (effectiveTargetIsGlobal && !isAdmin) {
       setError(
@@ -1059,6 +1070,27 @@ export default function ModelConfigPage() {
     }
     return currentModels.slice(0, DEFAULT_CARD_LIMIT);
   }, [currentModels, isExpanded, hasMoreModels]);
+
+  if (user && !isAdmin) {
+    return (
+      <AppLayout
+        title="Repository Features"
+        subtitle="Manage automation features for your repositories"
+      >
+        <div className="space-y-4 min-w-0 w-full max-w-none pb-20">
+          <div className="rounded-[8px] border border-zinc-800/80 bg-gradient-to-b from-[#111115]/95 to-[#09090c]/95 p-6 text-sm text-zinc-300">
+            <p className="font-semibold text-zinc-100">Automation features</p>
+            <p className="mt-1 text-zinc-400">
+              Configure auto-fix, auditor mode, sandbox verification, audit
+              triggers, monitored branches, and cost limits per repository in{" "}
+              <span className="font-mono text-amber-400">Settings</span>.
+              Fix automation is managed for you — contact an administrator for anything beyond these features.
+            </p>
+          </div>
+        </div>
+      </AppLayout>
+    );
+  }
 
   return (
     <AppLayout
