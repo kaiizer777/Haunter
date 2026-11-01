@@ -141,7 +141,7 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
 
   it("prunes prebuilt providers to OpenCode Go + Groq", async () => {
     render(<ModelConfigPage />);
-    expect(await screen.findByText("Repository Override")).toBeInTheDocument();
+    expect(await screen.findByText("Autonomous Inference Engine")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Inference Provider Selector"));
     const goOptions = await screen.findAllByText("OpenCode Go");
     expect(goOptions.length).toBeGreaterThanOrEqual(2);
@@ -397,4 +397,78 @@ describe("ModelConfigPage provider pruning + admin custom provider", () => {
     expect(anthropicTab).toHaveAttribute("aria-selected", "false");
     expect(compatSelect).toHaveValue("openai");
   });
+
+  it("renders protocol badge and copy URL button for active custom provider", async () => {
+    vi.mocked(api.validateCustomProvider).mockResolvedValueOnce({
+      ok: true,
+      supported: true,
+      provider_id: "custom_openai_ep",
+      models: [{ id: "custom-ep-model", name: "Custom EP Model", tag: "Custom" }],
+    } as never);
+
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    fireEvent.change(await screen.findByLabelText("Custom provider name"), {
+      target: { value: "OpenAI Proxy" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider base URL"), {
+      target: { value: "https://proxy.internal/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider API key"), {
+      target: { value: "sk-proxy-key" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /validate & discover models/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByText("OpenAI Proxy:")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI Compatible")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /copy base url/i })).toBeInTheDocument();
+  });
+
+  it("renders model token cost badges and does not render live in prod badges", async () => {
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("$0.14 / 1M")).toBeInTheDocument();
+    expect(screen.getByText("$0.00 / 1M")).toBeInTheDocument();
+    expect(screen.queryByText(/live in prod/i)).not.toBeInTheDocument();
+  });
+
+  it("applies crisp hairline white focus border styling without ring doubling to custom modal inputs", async () => {
+    render(<ModelConfigPage />);
+    const addBtn = await screen.findByRole("button", { name: /add custom provider/i });
+    fireEvent.click(addBtn);
+
+    const nameInput = await screen.findByLabelText("Custom provider name");
+    const urlInput = screen.getByLabelText("Custom provider base URL");
+    const keyInput = screen.getByLabelText("Custom provider API key");
+
+    for (const input of [nameInput, urlInput, keyInput]) {
+      expect(input.className).toContain("focus:border-white/90");
+      expect(input.className).toContain("focus:border-t-white/90");
+      expect(input.className).toContain("focus:border-x-white/90");
+      expect(input.className).toContain("focus:border-b-white/90");
+      expect(input.className).toContain("focus:ring-1");
+      expect(input.className).toContain("focus:ring-white/40");
+    }
+  });
+it("does not render server-derived base URL or subagent pipeline telemetry cards", async () => {
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("OpenCode Go")).toBeInTheDocument();
+    expect(screen.queryByText(/inference base url \(server-derived\)/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/subagent pipeline telemetry/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/tls 1\.3 verified/i)).not.toBeInTheDocument();
+  });
+it("does not render top scope switcher card", async () => {
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("Autonomous Inference Engine")).toBeInTheDocument();
+    expect(screen.queryByText(/Scope:/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Global Platform Default/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Repository Override/i)).not.toBeInTheDocument();
+  });
 });
+

@@ -291,6 +291,8 @@ export interface AvailableModelItem {
   name: string;
   tag: string;
   context_window?: number;
+  token_cost?: string;
+  cost?: string;
 }
 
 export interface AvailableModelsOut {
