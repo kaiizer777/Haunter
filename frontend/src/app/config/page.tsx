@@ -5,6 +5,7 @@ import { AppLayout } from "@/components/layout/app-layout";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SelectDropdown, SelectOption } from "@/components/ui/select-dropdown";
+import { Modal } from "@/components/ui/modal";
 import { api, ModelConfigOut, RepoOut, ApiError, AvailableModelItem, CustomProviderCompat } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
@@ -781,6 +782,10 @@ export default function ModelConfigPage() {
       }));
       setSelectedProvider(providerId);
       setSelectedModel(models[0].id);
+      setCustomName("");
+      setCustomBaseUrl("");
+      setCustomApiKey("");
+      setIsCustomModalOpen(false);
     } catch (err: unknown) {
       setCustomError(err instanceof ApiError ? err.message : "Custom provider validation failed.");
     } finally {
@@ -1487,99 +1492,131 @@ export default function ModelConfigPage() {
             </span>
           </div>
 
-          {/* Admin custom provider: name + compat + baseURL + key -> validate -> discover -> select -> persist via Save */}
+          {/* Admin custom provider modal: name + compat + baseURL + key -> validate -> discover -> select -> persist via Save */}
           {isAdmin && (
-            <div className="relative z-10 rounded-lg border border-zinc-800/90 bg-[#09090c]/90 p-3.5 space-y-3">
-              <h4 className="text-[11px] font-mono font-bold uppercase tracking-wider text-zinc-200">
-                Custom Provider <span className="text-zinc-500">(Admin)</span>
-              </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <label className="flex flex-col gap-1 text-xs font-mono text-zinc-400">
-                  Name
-                  <input
-                    aria-label="Custom provider name"
-                    value={customName}
-                    onChange={(e) => setCustomName(e.target.value)}
-                    disabled={isPending || isValidatingCustom}
-                    placeholder="my-provider"
-                    className="h-8 rounded border border-zinc-700/80 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 placeholder:text-zinc-600"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-xs font-mono text-zinc-400">
-                  Compatibility
-                  <select
-                    aria-label="Custom provider compatibility"
-                    value={customCompat}
-                    onChange={(e) => setCustomCompat(e.target.value as CustomProviderCompat)}
-                    disabled={isPending || isValidatingCustom}
-                    className="h-8 rounded border border-zinc-700/80 bg-zinc-900/80 px-2 text-xs text-zinc-200"
-                  >
-                    <option value="openai">OpenAI-compatible</option>
-                    <option value="anthropic">Anthropic-compatible</option>
-                  </select>
-                </label>
-                <label className="flex flex-col gap-1 text-xs font-mono text-zinc-400">
-                  Base URL
-                  <input
-                    aria-label="Custom provider base URL"
-                    value={customBaseUrl}
-                    onChange={(e) => setCustomBaseUrl(e.target.value)}
-                    disabled={isPending || isValidatingCustom}
-                    placeholder="https://my-host/v1"
-                    className="h-8 rounded border border-zinc-700/80 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 placeholder:text-zinc-600"
-                  />
-                </label>
-                <label className="flex flex-col gap-1 text-xs font-mono text-zinc-400">
-                  API Key
-                  <input
-                    aria-label="Custom provider API key"
-                    type="password"
-                    value={customApiKey}
-                    onChange={(e) => setCustomApiKey(e.target.value)}
-                    disabled={isPending || isValidatingCustom}
-                    placeholder="sk-..."
-                    className="h-8 rounded border border-zinc-700/80 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 placeholder:text-zinc-600"
-                  />
-                </label>
-              </div>
-              <div className="flex flex-wrap items-center gap-2.5">
-                <Button
-                  size="sm"
-                  onClick={handleValidateCustomProvider}
-                  disabled={isPending || isValidatingCustom}
-                  className="h-7.5 px-3 text-[11px] font-mono font-bold rounded-[5px] bg-zinc-800 text-zinc-200 border border-zinc-700/60 cursor-pointer"
-                >
-                  {isValidatingCustom ? (
-                    <span className="flex items-center gap-2">
-                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                      <span>Validating...</span>
-                    </span>
-                  ) : (
-                    <span>Validate &amp; Discover Models</span>
-                  )}
-                </Button>
-                {customError && (
-                  <span role="alert" className="text-xs font-mono text-red-300">{customError}</span>
-                )}
-              </div>
-              {customModels.length > 0 && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-mono text-zinc-400">Discovered:</span>
-                  {customModels.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => setSelectedModel(m.id)}
-                      disabled={isPending}
-                      className="rounded border border-zinc-700/70 bg-zinc-900/80 px-2 py-1 text-[11px] font-mono text-zinc-200 cursor-pointer"
+            <Modal
+              isOpen={isCustomModalOpen}
+              onClose={() => {
+                setIsCustomModalOpen(false);
+                setCustomError(null);
+              }}
+              title="Custom Provider"
+              description="Connect an OpenAI or Anthropic-compatible custom inference endpoint."
+              className="max-w-lg"
+            >
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
+                    <span>Name <span className="text-red-400">*</span></span>
+                    <input
+                      aria-label="Custom provider name"
+                      value={customName}
+                      onChange={(e) => setCustomName(e.target.value)}
+                      disabled={isPending || isValidatingCustom}
+                      placeholder="my-provider"
+                      className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
+                    <span>Compatibility <span className="text-red-400">*</span></span>
+                    <select
+                      aria-label="Custom provider compatibility"
+                      value={customCompat}
+                      onChange={(e) => setCustomCompat(e.target.value as CustomProviderCompat)}
+                      disabled={isPending || isValidatingCustom}
+                      className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2 text-xs font-mono text-zinc-200 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
                     >
-                      {m.name || m.id}
-                    </button>
-                  ))}
-                  <span className="text-xs font-mono text-zinc-500">Select a model, then Save Configuration to persist.</span>
+                      <option value="openai">OpenAI-compatible</option>
+                      <option value="anthropic">Anthropic-compatible</option>
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300 sm:col-span-2">
+                    <span>Base URL <span className="text-red-400">*</span></span>
+                    <input
+                      aria-label="Custom provider base URL"
+                      value={customBaseUrl}
+                      onChange={(e) => setCustomBaseUrl(e.target.value)}
+                      disabled={isPending || isValidatingCustom}
+                      placeholder="https://my-host/v1"
+                      className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300 sm:col-span-2">
+                    <span>API Key <span className="text-red-400">*</span></span>
+                    <input
+                      aria-label="Custom provider API key"
+                      type="password"
+                      value={customApiKey}
+                      onChange={(e) => setCustomApiKey(e.target.value)}
+                      disabled={isPending || isValidatingCustom}
+                      placeholder="sk-..."
+                      className="h-8.5 rounded-[5px] border border-zinc-700/80 bg-zinc-900/90 px-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/25 transition-all"
+                    />
+                  </label>
                 </div>
-              )}
-            </div>
+
+                {customError && (
+                  <div
+                    role="alert"
+                    className="flex items-start gap-2 p-2.5 rounded-[6px] border border-red-900/60 bg-red-950/40 text-xs font-mono text-red-300"
+                  >
+                    <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+                    <span>{customError}</span>
+                  </div>
+                )}
+
+                {customModels.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 p-2.5 rounded-[6px] border border-zinc-800 bg-zinc-900/50">
+                    <span className="text-xs font-mono text-zinc-400">Discovered:</span>
+                    {customModels.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => setSelectedModel(m.id)}
+                        disabled={isPending}
+                        className="rounded border border-zinc-700/70 bg-zinc-900/80 px-2 py-1 text-[11px] font-mono text-zinc-200 hover:border-zinc-500 cursor-pointer"
+                      >
+                        {m.name || m.id}
+                      </button>
+                    ))}
+                    <span className="text-[11px] font-mono text-zinc-500">
+                      Select a model, then Save Configuration to persist.
+                    </span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-zinc-800/80">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setIsCustomModalOpen(false);
+                      setCustomError(null);
+                    }}
+                    className="h-8 px-3 text-xs font-mono text-zinc-400 hover:text-zinc-200 border-zinc-800 hover:bg-zinc-800/60"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={handleValidateCustomProvider}
+                    disabled={isPending || isValidatingCustom}
+                    className="h-8 px-3 text-xs font-mono font-bold rounded-[5px] bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700/60 cursor-pointer"
+                  >
+                    {isValidatingCustom ? (
+                      <span className="flex items-center gap-2">
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        <span>Validating...</span>
+                      </span>
+                    ) : (
+                      <span>Validate & Discover Models</span>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </Modal>
           )}
 
           {/* Models Header & Filter Controls (Hot-key '/' enabled) */}
