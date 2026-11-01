@@ -383,35 +383,26 @@ async def test_put_model_config_validation_errors(
 
 
 @pytest.mark.asyncio
-async def test_put_model_config_non_owner_repo(
+async def test_put_model_config_non_admin_forbidden(
     db: AsyncSession,
     user_factory,
     make_auth_client,
 ):
-    """PUT /config/model/{repo_id} on non-owned repo returns 404 (admin-only)."""
+    """Non-admin users cannot update the global model config (admin-only)."""
     await truncate_all(db)
-    user_a = await user_factory(github_id=883, username="owner_a", role="admin")
-    user_a_id = user_a.id
-    user_b = await user_factory(github_id=884, username="intruder_b", role="admin")
-    user_b_id = user_b.id
+    user = await user_factory(github_id=884, username="intruder_b", role="user")
+    user_id = user.id
 
-    repo_a = Repo(user_id=user_a_id, owner="owner-a", name="secret-repo")
-    db.add(repo_a)
-    await db.commit()
-    await db.refresh(repo_a)
-    repo_a_id = repo_a.id
-
-    client_b = make_auth_client(user_b_id)
-    async with client_b:
-        resp = await client_b.put(
-            f"/config/model/{repo_a_id}",
+    client = make_auth_client(user_id)
+    async with client:
+        resp = await client.put(
+            "/config/model",
             json={
                 "provider": "groq",
                 "model_name": "openai/gpt-oss-120b",
             },
         )
-        assert resp.status_code == 404
-        assert resp.json() == {"detail": "Repo not found"}
+        assert resp.status_code == 403
 
 
 @pytest.mark.asyncio

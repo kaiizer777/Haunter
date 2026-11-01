@@ -728,6 +728,13 @@ async def test_model_config_get_global_and_repo(
                 repo_id=uuid.uuid4(),
             )
 
+        # Global-only: a stale repo_id query param is ignored; global payload returned.
+        resp_with_repo_id = await admin_client.get(
+            f"/config/model?repo_id={uuid.uuid4()}"
+        )
+        assert resp_with_repo_id.status_code == 200
+        assert resp_with_repo_id.json() == data_global
+
 
 @pytest.mark.asyncio
 async def test_put_model_config_valid_and_validation(
@@ -765,7 +772,7 @@ async def test_put_model_config_valid_and_validation(
         )
         assert resp_bad_model.status_code == 422
 
-        # 4. Client-supplied base_url is ignored / stripped by schema
+        # 4. Client-supplied base_url is rejected by schema (extra="forbid") — no injection.
         resp_override = await client.put(
             "/config/model",
             json={
@@ -774,8 +781,7 @@ async def test_put_model_config_valid_and_validation(
                 "base_url": "https://evil-attacker.com/v1",
             },
         )
-        assert resp_override.status_code == 200
-        assert resp_override.json()["base_url"] == "https://opencode.ai/inference/go/openai/v1"
+        assert resp_override.status_code == 422
 
 
 @pytest.mark.asyncio

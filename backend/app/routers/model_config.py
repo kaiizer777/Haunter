@@ -94,7 +94,7 @@ async def get_active_model_config_endpoint(
 
     # Fallback to default configuration (base_url follows settings.default_provider).
     return ModelConfigOut(
-        id=uuid.uuid4(),
+        id=uuid.UUID("00000000-0000-0000-0000-000000000000"),
         provider=settings.default_provider,
         model_name=settings.default_model,
         base_url=_default_base_url(),
