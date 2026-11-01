@@ -81,6 +81,8 @@ async def get_active_model_config_endpoint(
             detail="Admin permissions required to read global model config",
         )
     if repo_id is not None:
+        if not is_admin_user(current_user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin permissions required to read repo model config")
         repo_result = await db.execute(
             select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
         )
