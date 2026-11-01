@@ -1229,7 +1229,7 @@ export default function ModelConfigPage() {
         title="Repository Features"
         subtitle="Manage automation features for your repositories"
       >
-        <div className="space-y-3.5 min-w-0 w-full max-w-none pb-10">
+        <div className="space-y-3.5 min-w-0 w-full max-w-none pb-1">
           <div className="rounded-[8px] border border-zinc-800/80 bg-gradient-to-b from-[#111115]/95 to-[#09090c]/95 p-5 text-xs text-zinc-300">
             <p className="font-semibold text-zinc-100">Automation features</p>
             <p className="mt-1 text-zinc-400">
@@ -1302,7 +1302,7 @@ export default function ModelConfigPage() {
         </div>
       }
     >
-      <div className="space-y-3.5 min-w-0 w-full max-w-none pb-10">
+      <div className="space-y-3.5 min-w-0 w-full max-w-none pb-1">
         {/* Error Alert */}
         {error && (
           <div className="flex items-start gap-3 rounded-[8px] border border-red-800/80 bg-gradient-to-b from-red-950/60 to-red-950/30 p-4 text-sm text-red-200 shadow-md animate-in fade-in">
