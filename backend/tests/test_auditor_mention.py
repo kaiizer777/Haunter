@@ -766,11 +766,15 @@ async def test_haunter_mention_without_auditor_never_calls_auditor_llm(
         with patch(
             "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
         ) as mock_get:
-            adapter = MagicMock()
-            adapter.schedule_pipeline = AsyncMock()
-            adapter.schedule_review = AsyncMock()
-            mock_get.return_value = adapter
-            resp = await _post_router(client, "issue_comment", payload)
+            with patch(
+                "app.github.pr.get_installation_token", new_callable=AsyncMock
+            ) as mock_token:
+                mock_token.side_effect = RuntimeError("no installation")
+                adapter = MagicMock()
+                adapter.schedule_pipeline = AsyncMock()
+                adapter.schedule_review = AsyncMock()
+                mock_get.return_value = adapter
+                resp = await _post_router(client, "issue_comment", payload)
     assert resp.status_code == 200
     llm_cls.assert_not_called()
     post_mock.assert_not_called()
