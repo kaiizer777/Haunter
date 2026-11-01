@@ -193,29 +193,19 @@ async def test_health_reports_real_stranded_run(
 
 
 async def test_sandbox_health_default_github_actions(client: httpx.AsyncClient):
-    """GET /health/sandbox returns 200 with github_actions provider details."""
+    """GET /health/sandbox unauthenticated returns 401 (auth-gated, detail admin-only)."""
     response = await client.get("/health/sandbox")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["provider"] == "github_actions"
-    assert data["ok"] is True
-    assert "org" in data["detail"]
-    assert "app_id" in data["detail"]
-    assert "installation_id" in data["detail"]
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
 async def test_sandbox_health_aws_provider(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ):
-    """GET /health/sandbox with provider=aws returns empty detail dict."""
+    """GET /health/sandbox with provider=aws unauthenticated returns 401."""
     monkeypatch.setattr(settings, "sandbox_provider", "aws")
     response = await client.get("/health/sandbox")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["provider"] == "aws"
-    assert data["ok"] is True
-    assert data["detail"] == {}
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio

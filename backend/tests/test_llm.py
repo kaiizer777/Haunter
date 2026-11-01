@@ -467,7 +467,7 @@ async def test_llm_retry_500_exhausts_and_caps():
                 )
             assert "exhausted" in str(exc_info.value).lower()
             assert (
-                "500" in str(exc_info.value) or "error" in str(exc_info.value).lower()
+                "retry" in str(exc_info.value).lower()
             )
             assert "super_secret_opencode_key_9999" not in str(exc_info.value)
             # The chain hit every model in FREE_TIER_FALLBACK_ORDER, with
@@ -1419,10 +1419,10 @@ def test_model_config_update_schema_validation():
     )
     assert m_go.model_name == "deepseek-v4.1-flash"
 
-    with pytest.raises(ValidationError, match="Model name cannot be empty for provider 'opencode_go'."):
+    with pytest.raises(ValidationError, match="Invalid model selection."):
         ModelConfigUpdate(provider="opencode_go", model_name="")
 
-    with pytest.raises(ValidationError, match="Invalid model 'invalid' for provider 'opencode_zen'. OpenCode Zen models must end with '-free'."):
+    with pytest.raises(ValidationError, match="Invalid model selection."):
         ModelConfigUpdate(provider="opencode_zen", model_name="invalid")
 
     # Valid opencode_zen free models
@@ -1487,7 +1487,7 @@ async def test_get_available_models_endpoint_direct():
         )
     )
 
-    fake_user = User(id=uuid.uuid4(), github_id=1234, github_username="test_user")
+    fake_user = User(id=uuid.uuid4(), github_id=1234, github_username="test_user", role="admin")
     res = await get_available_models_endpoint(current_user=fake_user)
     assert any(m.id == "test-dynamic-model-free" for m in res.opencode_zen)
     assert len(res.opencode_go) > 0
