@@ -47,6 +47,23 @@ DEFAULT_MODEL=nemotron-3.5-lightning-free
 
 `DATABASE_URL` serves the app; `TEST_DATABASE_URL` must point at a local throwaway Postgres (never production or a shared Neon branch — the test harness refuses to run otherwise). OAuth keys gate the multi-repo dashboard; model URL/keys select the provider.
 
+### Trigger a local PR review
+
+Exercise the real review pipeline by POSTing a signed `pull_request` webhook to a running dev server. The script is only a client: it hits the same `POST /webhooks/github` ingress GitHub uses, so no review logic is bypassed.
+
+Add `GITHUB_WEBHOOK_SECRET=devsecret` to `backend/.env`, restart uvicorn, then from `backend/`:
+
+```sh
+python scripts/trigger_local_review.py --repo saif-org/haunter-demo --pr 7 --seed-repo
+# --seed-repo creates the `saif-dev` user and repo row when they are missing.
+# Inspect the payload + curl equivalent without sending:
+python scripts/trigger_local_review.py --repo saif-org/haunter-demo --pr 7 --dry-run --secret devsecret
+```
+
+The secret must match the server's `GITHUB_WEBHOOK_SECRET`; `--secret` overrides the `.env` value. Each run uses a fresh random head SHA so repeat runs are not rejected as duplicates — pass `--sha <40-hex>` to replay a specific commit.
+
+A `queued` response means the delivery was accepted, not that the review finished: locally the pipeline runs as a FastAPI `BackgroundTask` after the response, so watch the uvicorn log. `--seed-repo` sets no `github_install_id`, so fetching the diff for a fully successful review still needs GitHub App credentials.
+
 ## Tests
 
 From `backend/`:
