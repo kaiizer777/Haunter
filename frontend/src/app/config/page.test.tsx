@@ -10,8 +10,20 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("@/components/layout/app-layout", () => ({
-  AppLayout: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="app-layout">{children}</div>
+  AppLayout: ({
+    children,
+    title,
+    subtitle,
+  }: {
+    children: React.ReactNode;
+    title?: React.ReactNode;
+    subtitle?: React.ReactNode;
+  }) => (
+    <div data-testid="app-layout">
+      <h1>{title}</h1>
+      <p>{subtitle}</p>
+      {children}
+    </div>
   ),
 }));
 

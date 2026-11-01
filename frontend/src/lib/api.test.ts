@@ -897,13 +897,13 @@ describe("api.ts", () => {
     it("redacts model-allowlist backend detail to generic copy", async () => {
       globalThis.fetch = vi.fn().mockImplementation(async () =>
         new Response(
-          JSON.stringify({ detail: "allowed models: gpt-4o, claude-sonnet (provider openai)" }),
+          JSON.stringify({ detail: "allowed models: gpt-4o, nemotron-3.5 via opencode (provider openai, base_url)" }),
           { status: 403 }
         )
       );
       const err = await api.getAvailableModels().catch((e) => e);
       expect(err).toBeInstanceOf(ApiError);
-      expect(String(err.message)).not.toMatch(/gpt|claude|provider|allowlist/i);
+      expect(String(err.message)).not.toMatch(/gpt|nemotron|opencode|openai|provider|allowlist|base_url/i);
       expect(String(err.message)).toBe("Access denied. Insufficient permissions.");
     });
 

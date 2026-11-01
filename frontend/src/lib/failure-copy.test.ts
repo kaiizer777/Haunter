@@ -36,6 +36,7 @@ describe("failure-copy (non-admin feature language)", () => {
   });
 
   it("does not treat ordinary -ling words as model vocabulary", () => {
+    expect(isModelVocabulary("ling-3.0-flash-fin-free failed")).toBe(true);
     expect(isModelVocabulary("handling the request timed out")).toBe(false);
     expect(isModelVocabulary("polling for updates failed")).toBe(false);
     expect(
