@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { TraceOut } from "@/lib/api";
+import { describeFailureForDisplay } from "@/lib/failure-copy";
 import { formatCost, formatLatency, formatRelativeTime } from "@/lib/utils";
 import { 
   Bot, 
@@ -23,6 +24,9 @@ import { Button } from "@/components/ui/button";
 
 interface TraceTimelineProps {
   trace: TraceOut;
+  /** When false, attempt failure text renders in feature language. Defaults
+   *  to false so raw backend strings never leak unless a caller opts in. */
+  isAdmin?: boolean;
 }
 
 function getStepMetadata(stepName: string) {
@@ -159,7 +163,7 @@ function DiffViewer({ patchText }: { patchText: string }) {
   );
 }
 
-export function TraceTimeline({ trace }: TraceTimelineProps) {
+export function TraceTimeline({ trace, isAdmin = false }: TraceTimelineProps) {
   const { steps, attempts } = trace;
   const [copiedPatchAttempt, setCopiedPatchAttempt] = useState<number | null>(null);
 
@@ -368,13 +372,13 @@ export function TraceTimeline({ trace }: TraceTimelineProps) {
                 </div>
 
                 {/* Failure Reason */}
-                {attempt.failure_reason && (
+                {describeFailureForDisplay(attempt.failure_reason, null, isAdmin) && (
                   <div className="rounded-[6px] border border-rose-800/60 bg-gradient-to-b from-rose-950/40 via-rose-950/20 to-[#0c0809] p-3 text-xs text-rose-200 font-mono whitespace-pre-wrap shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
                     <span className="text-rose-400 font-semibold block text-[10.5px] uppercase tracking-wider mb-1 flex items-center gap-1">
                       <AlertCircle className="h-3.5 w-3.5" />
                       Failure Reason
                     </span>
-                    {attempt.failure_reason}
+                    {describeFailureForDisplay(attempt.failure_reason, null, isAdmin)}
                   </div>
                 )}
 
