@@ -125,7 +125,9 @@ export function Sidebar() {
 
   const visibleNavItems: NavItem[] = isAdmin
     ? navItems
-    : navItems.filter((item) => item.href !== "/config");
+    : navItems.filter(
+        (item) => item.href !== "/config" && item.href !== "/eval"
+      ) // non-admins: features only; model/eval surfaces are admin-only;
 
 
   return (
