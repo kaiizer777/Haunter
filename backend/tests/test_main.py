@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.limiter import limiter
+from tests.conftest import truncate_all
 
 
 @pytest.mark.asyncio
@@ -193,29 +194,52 @@ async def test_health_reports_real_stranded_run(
 
 
 async def test_sandbox_health_default_github_actions(client: httpx.AsyncClient):
-    """GET /health/sandbox returns 200 with github_actions provider details."""
+    """GET /health/sandbox unauthenticated returns 401 (auth-gated, detail admin-only)."""
     response = await client.get("/health/sandbox")
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_sandbox_health_non_admin_empty_detail(
+    db: AsyncSession, user_factory, make_auth_client,
+):
+    """GET /health/sandbox as non-admin returns ok with empty detail."""
+    await truncate_all(db)
+    user = await user_factory(role="user")
+    async with make_auth_client(user.id) as authed:
+        response = await authed.get("/health/sandbox")
     assert response.status_code == 200
-    data = response.json()
-    assert data["provider"] == "github_actions"
-    assert data["ok"] is True
-    assert "org" in data["detail"]
-    assert "app_id" in data["detail"]
-    assert "installation_id" in data["detail"]
+    body = response.json()
+    assert body["ok"] is True
+    assert body["detail"] == {}
+    assert "org" not in body["detail"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_health_admin_detail_present(
+    db: AsyncSession, user_factory, make_auth_client,
+):
+    """GET /health/sandbox as admin returns admin-only detail keys."""
+    await truncate_all(db)
+    admin = await user_factory(role="admin")
+    async with make_auth_client(admin.id) as authed:
+        response = await authed.get("/health/sandbox")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert "org" in body["detail"]
+    assert "app_id" in body["detail"]
+    assert "installation_id" in body["detail"]
 
 
 @pytest.mark.asyncio
 async def test_sandbox_health_aws_provider(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ):
-    """GET /health/sandbox with provider=aws returns empty detail dict."""
+    """GET /health/sandbox with provider=aws unauthenticated returns 401."""
     monkeypatch.setattr(settings, "sandbox_provider", "aws")
     response = await client.get("/health/sandbox")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["provider"] == "aws"
-    assert data["ok"] is True
-    assert data["detail"] == {}
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio

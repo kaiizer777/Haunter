@@ -2,19 +2,20 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from typing import Annotated, AsyncIterator, Optional
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import select
 
+from app.auth import get_current_user, is_admin_user
 from app.auth import router as auth_router
 from app.config import settings
 from app import db as db_module
-from app.models import Run
+from app.models import Run, User
 from app.limiter import limiter
 from app.repos import router as repos_router
 from app.routers.eval import router as eval_router
@@ -188,13 +189,15 @@ async def health_check() -> dict:
 
 
 @app.get("/health/sandbox")
-async def sandbox_health() -> dict:
+async def sandbox_health(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
     """
     Return the active sandbox provider configuration.
 
-    Read-only, no auth required. Used by the dashboard's model/provider
-    switcher to surface the current sandbox backend and — for the
-    github_actions provider — the configured org and App ID.
+    Requires authentication. Used by the dashboard's sandbox indicator;
+    the sandbox backend for all authenticated users. The detail block
+    (org, app id, installation id) is admin-only.
 
     Response shape:
         {
@@ -212,7 +215,7 @@ async def sandbox_health() -> dict:
     )
     detail: dict = {}
 
-    if provider == "github_actions":
+    if is_admin_user(current_user) and provider == "github_actions":
         detail["org"] = getattr(settings, "github_sandbox_org", None)
         detail["app_id"] = getattr(settings, "github_sandbox_app_id", None)
         detail["installation_id"] = getattr(

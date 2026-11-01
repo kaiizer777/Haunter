@@ -13,6 +13,8 @@ import { Button } from "@/components/ui/button";
 import RetryRunButton from "@/components/runs/retry-run-button";
 import RunLineage from "@/components/runs/run-lineage";
 import { api, TraceOut, RepoOut } from "@/lib/api";
+import { describeFailureForDisplay } from "@/lib/failure-copy";
+import { useAuth } from "@/lib/auth-context";
 import { formatRelativeTime } from "@/lib/utils";
 import {
   ArrowLeft,
@@ -41,6 +43,8 @@ export default function RunDetailClient() {
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState(false);
   const [repos, setRepos] = useState<RepoOut[]>([]);
+  const { user } = useAuth();
+  const isAdmin = Boolean(user?.is_admin);
 
   useEffect(() => {
     if (typeof api.getRepos === "function") {
@@ -267,7 +271,7 @@ export default function RunDetailClient() {
                   {trace.failure_classification && !trace.run.failure_reason && (
                     <Badge variant="destructive" className="text-[10px] font-mono px-2 py-0.5 rounded-[4px]">
                       <AlertTriangle className="h-2.5 w-2.5 mr-1" />
-                      {trace.failure_classification}
+                      {describeFailureForDisplay(null, trace.failure_classification, isAdmin)}
                     </Badge>
                   )}
 
@@ -313,15 +317,16 @@ export default function RunDetailClient() {
                 )}
               </div>
 
-              {/* Failure Reason */}
-              {trace.run.failure_reason && (
+              {/* Failure Reason (feature language for non-admins) */}
+              {trace.run.failure_reason &&
+              describeFailureForDisplay(trace.run.failure_reason, null, isAdmin) && (
                 <div className="rounded-[6px] border border-rose-800/60 bg-gradient-to-b from-rose-950/40 via-rose-950/20 to-[#0c0809] p-3 space-y-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
                   <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-rose-300 font-mono">
                     <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />
                     <span>Failure Reason</span>
                   </div>
                   <p className="text-xs text-rose-200/90 leading-relaxed font-mono whitespace-pre-wrap select-text">
-                    {trace.run.failure_reason}
+                    {describeFailureForDisplay(trace.run.failure_reason, null, isAdmin)}
                   </p>
                 </div>
               )}
@@ -364,7 +369,7 @@ export default function RunDetailClient() {
                 </span>
               </div>
 
-              <TraceTimeline trace={trace} />
+              <TraceTimeline trace={trace} isAdmin={isAdmin} />
             </div>
           </>
         )}

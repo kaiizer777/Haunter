@@ -114,7 +114,10 @@ class TestLLMExhaustedFreeTierError:
         err = LLMExhaustedFreeTierError([])
         assert err.status_code == 502
         assert err.attempts == []
-        expected = "All 0 free-tier models exhausted (0 attempts). Last errors: "
+        expected = (
+            "The AI fix service exhausted its current capacity "
+            "(0 backends, 0 attempts). Please retry later."
+        )
         assert err.message == expected
         assert str(err) == expected
         assert isinstance(err, LLMError)
@@ -123,21 +126,18 @@ class TestLLMExhaustedFreeTierError:
         err = LLMExhaustedFreeTierError([("m1", 1, "boom")])
         assert err.status_code == 502
         assert err.attempts == [("m1", 1, "boom")]
-        assert (
-            "All 1 free-tier models exhausted (1 attempts). Last errors: m1: boom"
-            == err.message
-        )
+        # Model-hide: user-visible message carries counts only, never ids.
+        assert "m1" not in err.message
+        assert "boom" not in err.message
+        assert "(1 backends, 1 attempts)" in err.message
 
-    def test_long_error_truncated_at_cap(self) -> None:
-        max_chars = LLMExhaustedFreeTierError._PER_MODEL_ERR_MAX_CHARS
-        exact_err = "e" * max_chars
-        err_exact = LLMExhaustedFreeTierError([("m1", 1, exact_err)])
-        assert f"m1: {exact_err}" in err_exact.message
-
-        long_err = "e" * (max_chars + 10)
+    def test_long_error_not_in_message(self) -> None:
+        # Model-hide: per-model errors stay in .attempts, never in .message.
+        long_err = "e" * 300
         err_long = LLMExhaustedFreeTierError([("m1", 1, long_err)])
-        expected_truncated = ("e" * (max_chars - 1)) + "\u2026"
-        assert f"m1: {expected_truncated}" in err_long.message
+        assert err_long.attempts == [("m1", 1, long_err)]
+        assert "m1" not in err_long.message
+        assert long_err not in err_long.message
 
     def test_multiple_attempts_same_model_keeps_last_error(self) -> None:
         attempts = [
@@ -145,12 +145,11 @@ class TestLLMExhaustedFreeTierError:
             ("nemotron-3.5", 2, "final error"),
         ]
         err = LLMExhaustedFreeTierError(attempts)
+        assert err.attempts == attempts
         assert "first error" not in err.message
-        assert "final error" in err.message
-        assert (
-            "All 1 free-tier models exhausted (2 attempts). Last errors: nemotron-3.5: final error"
-            == err.message
-        )
+        assert "final error" not in err.message
+        assert "nemotron-3.5" not in err.message
+        assert "(1 backends, 2 attempts)" in err.message
 
     @pytest.mark.parametrize(
         ("model_order", "expected_body"),
@@ -174,9 +173,14 @@ class TestLLMExhaustedFreeTierError:
         model_order: list[tuple[str, int, str]],
         expected_body: str,
     ) -> None:
+        # Model-hide: message carries backend/attempt counts only.
+        del expected_body
         err = LLMExhaustedFreeTierError(model_order)
-        assert expected_body in err.message
         assert err.attempts == model_order
+        for model, _idx, _err in model_order:
+            assert model not in err.message
+        n_models = len({m for m, _i, _e in model_order})
+        assert f"({n_models} backends, {len(model_order)} attempts)" in err.message
 
     def test_custom_message_override(self) -> None:
         err = LLMExhaustedFreeTierError(

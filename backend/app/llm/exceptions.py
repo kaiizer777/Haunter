@@ -92,19 +92,12 @@ class LLMExhaustedFreeTierError(LLMError):
 
     @classmethod
     def _build_message(cls, attempts: list[tuple[str, int, str]]) -> str:
-        # Surface the LAST error per model (not every attempt) so the
-        # message stays compact. Later attempts overwrite earlier ones
-        # because we walk the chain model-by-model, attempt-by-attempt.
-        per_model_last_err: dict[str, str] = {}
-        for model, _idx, err in attempts:
-            per_model_last_err[model] = err
-
-        parts = [
-            f"{model}: {_truncate_for_failure_reason(err, cls._PER_MODEL_ERR_MAX_CHARS)}"
-            for model, err in per_model_last_err.items()
-        ]
-        body = ", ".join(parts)
+        # Model-hide: user-visible messages use feature language only.
+        # Model ids and per-model errors stay in structured logs
+        # (self.attempts), never in the message string.
+        n_models = len({m for m, _i, _e in attempts})
         return (
-            f"All {len(per_model_last_err)} free-tier models exhausted "
-            f"({len(attempts)} attempts). Last errors: {body}"
+            "The AI fix service exhausted its current capacity "
+            f"({n_models} backends, {len(attempts)} attempts). "
+            "Please retry later."
         )
