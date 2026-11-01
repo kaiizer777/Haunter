@@ -2303,7 +2303,7 @@ export default function ModelConfigPage() {
               {customError && (
                 <div
                   role="alert"
-                  className="flex items-start gap-2.5 p-3 rounded-[6px] border border-red-500/30 bg-red-950/30 text-xs font-mono text-red-300 shadow-[inset_0_1px_0_rgba(239,68,68,0.1)]"
+                  className="flex items-start gap-2.5 p-3 rounded-[6px] border-t border-t-red-500/40 border-x border-x-red-600/30 border-b border-b-red-950 bg-gradient-to-b from-red-950/40 via-red-950/25 to-[#0f0707] text-xs font-mono text-red-300 shadow-[inset_0_1px_0_rgba(239,68,68,0.15),0_2px_6px_rgba(0,0,0,0.3)]"
                 >
                   <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
                   <span className="leading-relaxed">{customError}</span>
@@ -2311,13 +2311,13 @@ export default function ModelConfigPage() {
               )}
 
               {customModels.length > 0 && (
-                <div className="space-y-2 p-3 rounded-[6px] border border-zinc-800/90 bg-[#0d0d10]/80">
+                <div className="space-y-2.5 p-3.5 rounded-[7px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#08080a]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.4)]">
                   <div className="flex items-center justify-between text-xs font-mono">
-                    <span className="text-zinc-400 font-medium flex items-center gap-1.5">
+                    <span className="text-zinc-300 font-medium flex items-center gap-1.5">
                       <CheckCircle2 className="h-3.5 w-3.5 text-amber-400" />
                       Discovered Models ({customModels.length})
                     </span>
-                    <span className="text-[11px] text-zinc-500">
+                    <span className="text-[10.5px] font-mono text-zinc-400 bg-zinc-900/80 px-2 py-0.5 rounded border border-zinc-800">
                       Click to pre-select
                     </span>
                   </div>
@@ -2331,25 +2331,25 @@ export default function ModelConfigPage() {
                           onClick={() => setSelectedModel(m.id)}
                           disabled={isPending}
                           className={cn(
-                            "group relative flex items-center gap-1.5 rounded-[5px] px-2.5 py-1 text-xs font-mono transition-all cursor-pointer",
+                            "group relative flex items-center gap-1.5 rounded-[5px] px-2.5 py-1 text-xs font-mono transition-all cursor-pointer active:translate-y-[0.5px]",
                             isSelected
-                              ? "border border-amber-500/50 bg-amber-500/15 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.15)] font-semibold"
-                              : "border border-zinc-700/70 bg-zinc-900/90 text-zinc-300 hover:border-zinc-500 hover:text-zinc-100 hover:bg-zinc-850"
+                              ? "border-t border-t-amber-400/50 border-x border-x-amber-500/40 border-b border-b-amber-600/50 bg-gradient-to-b from-amber-500/20 via-amber-500/10 to-amber-950/30 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.2),0_1px_3px_rgba(0,0,0,0.3)] font-semibold"
+                              : "border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-900 bg-gradient-to-b from-zinc-850 to-zinc-900/90 text-zinc-300 hover:border-t-zinc-600 hover:text-zinc-100 hover:bg-zinc-800/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
                           )}
                         >
                           {isSelected ? (
                             <Check className="h-3 w-3 text-amber-400 shrink-0" />
                           ) : (
-                            <span className="h-1.5 w-1.5 rounded-full bg-zinc-600 group-hover:bg-zinc-400" />
+                            <span className="h-1.5 w-1.5 rounded-full bg-zinc-600 group-hover:bg-amber-400/60 transition-colors" />
                           )}
                           <span>{m.name || m.id}</span>
                           {m.tag && (
                             <span
                               className={cn(
-                                "text-[10px] px-1 py-0.2 rounded border",
+                                "text-[10px] px-1.5 py-0.2 rounded border font-mono",
                                 isSelected
-                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-400/80"
-                                  : "border-zinc-700/50 bg-zinc-800/60 text-zinc-500"
+                                  ? "border-amber-500/40 bg-amber-500/15 text-amber-300/90"
+                                  : "border-zinc-700/50 bg-zinc-800/80 text-zinc-400"
                               )}
                             >
                               {m.tag}
@@ -2371,7 +2371,7 @@ export default function ModelConfigPage() {
                   size="sm"
                   variant="outline"
                   onClick={handleCloseCustomModal}
-                  className="h-8.5 px-3 text-xs font-mono text-zinc-400 hover:text-zinc-200 border-zinc-800 hover:bg-zinc-800/60"
+                  className="h-8.5 px-3.5 text-xs font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] cursor-pointer transition-all"
                 >
                   Cancel
                 </Button>
@@ -2380,7 +2380,7 @@ export default function ModelConfigPage() {
                   size="sm"
                   onClick={handleValidateCustomProvider}
                   disabled={isPending || isValidatingCustom}
-                  className="h-8.5 px-3.5 text-xs font-mono font-bold rounded-[6px] bg-gradient-to-b from-amber-400 via-amber-500 to-amber-600 text-zinc-950 border-t border-t-amber-300/80 border-x border-x-amber-500/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_4px_rgba(0,0,0,0.3)] hover:brightness-105 active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.35)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="h-8.5 px-4 text-xs font-mono font-bold rounded-[6px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/70 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.45),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isValidatingCustom ? (
                     <span className="flex items-center gap-2">
@@ -2389,7 +2389,7 @@ export default function ModelConfigPage() {
                     </span>
                   ) : (
                     <span className="flex items-center gap-1.5">
-                      <Server className="h-3.5 w-3.5 text-zinc-950" />
+                      <Server className="h-3.5 w-3.5 text-zinc-950 stroke-[2.2]" />
                       <span>Validate & Discover Models</span>
                     </span>
                   )}
