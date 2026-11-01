@@ -33,6 +33,25 @@ describe("modal.tsx", () => {
     expect(screen.getByTestId("modal-body")).toBeInTheDocument();
   });
 
+  it("renders with role dialog, aria-modal, and accessible close button", () => {
+    const handleClose = vi.fn();
+    render(
+      <Modal
+        isOpen={true}
+        onClose={handleClose}
+        title="Accessible Dialog"
+        description="Accessible description"
+      >
+        <div>Content</div>
+      </Modal>
+    );
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.getByRole("button", { name: /close modal/i })).toBeInTheDocument();
+  });
+
   it("does not render description paragraph when description prop is omitted", () => {
     const handleClose = vi.fn();
     render(
@@ -70,8 +89,7 @@ describe("modal.tsx", () => {
       </Modal>
     );
 
-    const buttons = screen.getAllByRole("button");
-    const closeBtn = buttons[0];
+    const closeBtn = screen.getByRole("button", { name: /close modal/i });
     fireEvent.click(closeBtn);
     expect(handleClose).toHaveBeenCalledTimes(1);
   });

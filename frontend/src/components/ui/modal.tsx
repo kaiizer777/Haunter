@@ -44,6 +44,9 @@ export function Modal({
 
       {/* Modal Dialog */}
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
         className={cn(
           "relative z-50 w-full max-w-md rounded-[7px] border border-zinc-800 bg-[#121215] p-4.5 shadow-2xl transition-all",
           className
@@ -51,13 +54,14 @@ export function Modal({
       >
         <div className="flex items-start justify-between pb-3 border-b border-zinc-800/80">
           <div>
-            <h3 className="text-sm font-semibold text-zinc-100">{title}</h3>
+            <h3 id="modal-title" className="text-sm font-semibold text-zinc-100">{title}</h3>
             {description && (
               <p className="mt-1 text-xs text-zinc-400">{description}</p>
             )}
           </div>
           <button
             onClick={onClose}
+            aria-label="Close modal"
             className="rounded-[4px] p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-amber-400"
           >
             <X className="h-4 w-4" />
