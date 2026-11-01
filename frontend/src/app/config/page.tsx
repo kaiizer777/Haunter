@@ -1589,7 +1589,7 @@ export default function ModelConfigPage() {
                   size="sm"
                   variant="outline"
                   onClick={handleOpenCustomModal}
-                  className="group h-7.5 px-2.5 text-[11px] font-mono rounded-[5px] text-zinc-200 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] cursor-pointer flex items-center gap-1.5 shrink-0 transition-all"
+                  className="group h-8 px-2.5 text-xs font-mono rounded-[5px] text-zinc-200 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] cursor-pointer flex items-center gap-1.5 shrink-0 transition-all"
                 >
                   <Plus className="h-3.5 w-3.5 text-amber-400/90 group-hover:text-amber-300 transition-colors" />
                   <span>Add Custom Provider</span>
@@ -1646,7 +1646,7 @@ export default function ModelConfigPage() {
           {registeredCustom && (
             <div
               role="status"
-              className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3 py-2 rounded-[6px] border-t border-t-amber-400/40 border-x border-x-amber-500/25 border-b border-b-amber-950/80 bg-gradient-to-b from-amber-950/25 via-[#13110e]/95 to-[#0b0a08]/95 text-[11px] font-mono text-amber-200 shadow-[inset_0_1px_0_rgba(251,191,36,0.12),0_2px_8px_rgba(0,0,0,0.3)]"
+              className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-[7px] border-t border-t-amber-400/40 border-x border-x-amber-500/25 border-b border-b-amber-950/80 bg-gradient-to-b from-amber-950/25 via-[#13110e]/95 to-[#0b0a08]/95 text-xs font-mono text-amber-200 shadow-[inset_0_1px_0_rgba(251,191,36,0.12),0_2px_8px_rgba(0,0,0,0.3)]"
             >
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-amber-400 shrink-0" />
@@ -1654,7 +1654,7 @@ export default function ModelConfigPage() {
                   Discovered <strong>{(modelOptionsByProvider[selectedProvider] || []).length} model{((modelOptionsByProvider[selectedProvider] || []).length === 1 ? "" : "s")}</strong> for <strong>{registeredCustom.name}</strong>. Select an architecture below and save.
                 </span>
               </div>
-              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[4px] border border-amber-500/30 bg-amber-500/10 text-[10px] text-amber-300 font-medium shadow-[inset_0_1px_0_rgba(251,191,36,0.15)] shrink-0 self-start sm:self-auto">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[4px] border border-amber-500/30 bg-amber-500/10 text-[11px] text-amber-300 font-medium shadow-[inset_0_1px_0_rgba(251,191,36,0.15)] shrink-0 self-start sm:self-auto">
                 <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
                 <span>Save Configuration to persist</span>
               </span>
@@ -2099,11 +2099,11 @@ export default function ModelConfigPage() {
             title="Custom Provider"
             description="Connect an OpenAI or Anthropic-compatible custom inference endpoint."
             icon={<Server className="h-4 w-4 text-amber-400" />}
-            className="max-w-md"
+            className="max-w-lg"
           >
-            <div className="space-y-3.5">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <label className="flex flex-col gap-1 text-[11px] font-mono text-zinc-300">
+            <div className="space-y-4.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <label className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
                   <span className="flex items-center justify-between">
                     <span>Name <span className="text-red-400">*</span></span>
                     <span className="text-[10px] text-zinc-500 font-sans">Identifier</span>
@@ -2114,15 +2114,15 @@ export default function ModelConfigPage() {
                     onChange={(e) => setCustomName(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="my-provider"
-                    className="h-8 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-2.5 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus:border-t-white focus:border-x-white focus:border-b-white focus:ring-1 focus:ring-white transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white/90 focus:border-t-white/90 focus:border-x-white/90 focus:border-b-white/90 focus:ring-1 focus:ring-white/40 transition-all"
                   />
                 </label>
-                <div className="flex flex-col gap-1 text-[11px] font-mono text-zinc-300">
+                <div className="flex flex-col gap-1.5 text-xs font-mono text-zinc-300">
                   <span className="flex items-center justify-between">
                     <span>Compatibility <span className="text-red-400">*</span></span>
                     <span className="text-[10px] text-zinc-500 font-sans">Wire protocol</span>
                   </span>
-                  <div className="relative flex rounded-[6px] border border-zinc-800/90 bg-[#09090c]/90 p-0.5 h-8 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4)]">
+                  <div className="relative flex rounded-[6px] border border-zinc-800/90 bg-[#09090c]/90 p-0.5 h-9 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4)]">
                     <button
                       type="button"
                       role="tab"
@@ -2130,7 +2130,7 @@ export default function ModelConfigPage() {
                       onClick={() => setCustomCompat("openai")}
                       disabled={isPending || isValidatingCustom}
                       className={cn(
-                        "flex-1 flex items-center justify-center gap-1 rounded-[4px] text-[11px] font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40",
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40",
                         customCompat === "openai"
                           ? "bg-gradient-to-b from-zinc-800/95 via-zinc-850 to-zinc-900/95 text-white border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.4)]"
                           : "border-0 border-transparent bg-transparent shadow-none text-zinc-400 hover:text-zinc-200"
@@ -2146,7 +2146,7 @@ export default function ModelConfigPage() {
                       onClick={() => setCustomCompat("anthropic")}
                       disabled={isPending || isValidatingCustom}
                       className={cn(
-                        "flex-1 flex items-center justify-center gap-1 rounded-[4px] text-[11px] font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40",
+                        "flex-1 flex items-center justify-center gap-1.5 rounded-[4px] text-xs font-mono font-medium transition-all cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40",
                         customCompat === "anthropic"
                           ? "bg-gradient-to-b from-zinc-800/95 via-zinc-850 to-zinc-900/95 text-white border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_3px_rgba(0,0,0,0.4)]"
                           : "border-0 border-transparent bg-transparent shadow-none text-zinc-400 hover:text-zinc-200"
@@ -2169,7 +2169,7 @@ export default function ModelConfigPage() {
                   </div>
                 </div>
                 <div className="flex flex-col gap-1.5 sm:col-span-2">
-                  <div className="flex items-center justify-between text-[11px] font-mono text-zinc-300">
+                  <div className="flex items-center justify-between text-xs font-mono text-zinc-300">
                     <label htmlFor="custom-base-url" className="flex items-center gap-1">
                       <span>Base URL <span className="text-red-400">*</span></span>
                     </label>
@@ -2182,10 +2182,10 @@ export default function ModelConfigPage() {
                     onChange={(e) => setCustomBaseUrl(e.target.value)}
                     disabled={isPending || isValidatingCustom}
                     placeholder="https://my-host/v1"
-                    className="h-8 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-2.5 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus:border-t-white focus:border-x-white focus:border-b-white focus:ring-1 focus:ring-white transition-all"
+                    className="h-9 rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 px-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white/90 focus:border-t-white/90 focus:border-x-white/90 focus:border-b-white/90 focus:ring-1 focus:ring-white/40 transition-all"
                   />
                   <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                    <span className="text-[9.5px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">Presets:</span>
+                    <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">Presets:</span>
                     {BASE_URL_PRESETS.map((preset) => {
                       const isActive = customBaseUrl === preset.value;
                       return (
@@ -2195,7 +2195,7 @@ export default function ModelConfigPage() {
                           disabled={isPending || isValidatingCustom}
                           onClick={() => setCustomBaseUrl(preset.value)}
                           className={cn(
-                            "px-2 py-0.5 rounded-[4px] border text-[10px] font-mono transition-all cursor-pointer active:translate-y-[0.5px] focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40",
+                            "px-2.5 py-0.5 rounded-[4px] border text-[11px] font-mono transition-all cursor-pointer active:translate-y-[0.5px] focus:outline-none focus-visible:ring-1 focus-visible:ring-white/40",
                             isActive
                               ? "border-t border-t-amber-400/40 border-x border-x-amber-500/30 border-b border-b-amber-600/40 bg-gradient-to-b from-amber-500/20 to-amber-950/40 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.2),0_1px_2px_rgba(0,0,0,0.3)] font-medium"
                               : "border-zinc-800/90 bg-[#0c0c0f] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 hover:bg-zinc-850/50"
@@ -2208,7 +2208,7 @@ export default function ModelConfigPage() {
                   </div>
                 </div>
                 <div className="flex flex-col gap-1.5 sm:col-span-2">
-                  <div className="flex items-center justify-between text-[11px] font-mono text-zinc-300">
+                  <div className="flex items-center justify-between text-xs font-mono text-zinc-300">
                     <label htmlFor="custom-api-key" className="flex items-center gap-1">
                       <span>API Key <span className="text-red-400">*</span></span>
                     </label>
@@ -2223,7 +2223,7 @@ export default function ModelConfigPage() {
                       onChange={(e) => setCustomApiKey(e.target.value)}
                       disabled={isPending || isValidatingCustom}
                       placeholder="sk-..."
-                      className="h-8 w-full rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 pl-2.5 pr-9 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white focus:border-t-white focus:border-x-white focus:border-b-white focus:ring-1 focus:ring-white transition-all"
+                      className="h-9 w-full rounded-[6px] border-t border-t-zinc-700/90 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-[#09090c]/90 pl-3 pr-10 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 shadow-[inset_0_1px_2px_rgba(0,0,0,0.5)] focus:outline-none focus:border-white/90 focus:border-t-white/90 focus:border-x-white/90 focus:border-b-white/90 focus:ring-1 focus:ring-white/40 transition-all"
                     />
                     <button
                       type="button"
@@ -2253,7 +2253,7 @@ export default function ModelConfigPage() {
               )}
 
               {customModels.length > 0 && (
-                <div className="space-y-2 p-3 rounded-[6px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#08080a]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.4)]">
+                <div className="space-y-2.5 p-3.5 rounded-[7px] border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#08080a]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_2px_8px_rgba(0,0,0,0.4)]">
                   <div className="flex items-center justify-between text-xs font-mono">
                     <span className="text-zinc-300 font-medium flex items-center gap-1.5">
                       <CheckCircle2 className="h-3.5 w-3.5 text-amber-400" />
@@ -2273,7 +2273,7 @@ export default function ModelConfigPage() {
                           onClick={() => setSelectedModel(m.id)}
                           disabled={isPending}
                           className={cn(
-                            "group relative flex items-center gap-1 rounded-[4px] px-2 py-0.5 text-[11px] font-mono transition-all cursor-pointer active:translate-y-[0.5px]",
+                            "group relative flex items-center gap-1.5 rounded-[5px] px-2.5 py-1 text-xs font-mono transition-all cursor-pointer active:translate-y-[0.5px]",
                             isSelected
                               ? "border-t border-t-amber-400/50 border-x border-x-amber-500/40 border-b border-b-amber-600/50 bg-gradient-to-b from-amber-500/20 via-amber-500/10 to-amber-950/30 text-amber-300 shadow-[inset_0_1px_0_rgba(251,191,36,0.2),0_1px_3px_rgba(0,0,0,0.3)] font-semibold"
                               : "border-t border-t-zinc-700/60 border-x border-x-zinc-800/70 border-b border-b-zinc-900 bg-gradient-to-b from-zinc-850 to-zinc-900/90 text-zinc-300 hover:border-t-zinc-600 hover:text-zinc-100 hover:bg-zinc-800/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
@@ -2313,7 +2313,7 @@ export default function ModelConfigPage() {
                   size="sm"
                   variant="outline"
                   onClick={handleCloseCustomModal}
-                  className="h-7.5 px-3 text-[11px] font-mono rounded-[4px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] cursor-pointer transition-all"
+                  className="h-8.5 px-3.5 text-xs font-mono rounded-[5px] text-zinc-300 hover:text-white bg-gradient-to-b from-zinc-800/90 via-zinc-850 to-zinc-900/90 border-t border-t-zinc-600/70 border-x border-x-zinc-700/60 border-b border-b-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_3px_rgba(0,0,0,0.35)] hover:border-t-zinc-500 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_2px_6px_rgba(0,0,0,0.4)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] cursor-pointer transition-all"
                 >
                   Cancel
                 </Button>
@@ -2322,7 +2322,7 @@ export default function ModelConfigPage() {
                   size="sm"
                   onClick={handleValidateCustomProvider}
                   disabled={isPending || isValidatingCustom}
-                  className="h-7.5 px-3.5 text-[11px] font-mono font-bold rounded-[5px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/70 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.45),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="h-8.5 px-4 text-xs font-mono font-bold rounded-[6px] bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/70 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.45),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isValidatingCustom ? (
                     <span className="flex items-center gap-2">
