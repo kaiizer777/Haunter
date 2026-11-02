@@ -2424,7 +2424,7 @@ async def run_audit(
     phase_1c_context: Optional[str] = None,
     enable_phase1_context: bool = True,
     file_contexts: Optional[Mapping[str, str]] = None,
-    enable_holistic: bool = True,
+    enable_holistic: bool = False,
 ) -> AuditResult:
     """Run four fixed, bounded perspectives and return a synthesized read-only report."""
     started = time.monotonic()
@@ -2655,7 +2655,11 @@ async def run_audit(
         except Exception as p1_exc:
             logger.warning("Auditor: Phase 1 context build failed; continuing without: %s", p1_exc)
 
-    diff_chunks = partition_diff_into_chunks(clean_diff, hard_limit=550)
+    diff_chunks = (
+        partition_diff_into_chunks(clean_diff, hard_limit=550)
+        if len(clean_diff.splitlines()) > 550
+        else [clean_diff]
+    )
 
     async def run_one(
         perspective: PerspectiveName,
@@ -2738,8 +2742,6 @@ async def run_audit(
         if perspectives is not None
         else list(PERSPECTIVES)
     )
-    if not active_perspectives:
-        active_perspectives = list(PERSPECTIVES)
 
     async def run_holistic() -> tuple[PerspectiveResult, Optional[BaseException]]:
         try:
@@ -2775,8 +2777,8 @@ async def run_audit(
                 exc,
             )
 
-    should_run_holistic = enable_holistic and (
-        perspectives is None or "holistic" in perspectives
+    should_run_holistic = enable_holistic or (
+        perspectives is not None and "holistic" in perspectives
     )
 
     tasks = [run_one(perspective) for perspective in active_perspectives]

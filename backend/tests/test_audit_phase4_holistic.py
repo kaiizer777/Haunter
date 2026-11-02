@@ -458,6 +458,7 @@ async def test_full_unchunked_diff_passed_to_holistic_perspective():
         llm_client=fake_llm,
         engine="test-engine",
         enable_phase1_context=False,
+        enable_holistic=True,
     )
 
     assert isinstance(result, AuditResult)
@@ -476,3 +477,54 @@ async def test_full_unchunked_diff_passed_to_holistic_perspective():
     # The result perspectives must include 'holistic'
     perspectives_executed = {p.perspective for p in result.perspectives}
     assert "holistic" in perspectives_executed
+
+
+@pytest.mark.asyncio
+async def test_holistic_not_scheduled_by_default():
+    """By default, only the 4 standard perspectives run, not holistic."""
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+    fake_llm = _RecordingLLM()
+
+    result = await run_audit(
+        diff_text=diff,
+        repo_full_name="org/repo",
+        pr_number=99,
+        llm_client=fake_llm,
+        engine="test-engine",
+        enable_phase1_context=False,
+    )
+
+    assert isinstance(result, AuditResult)
+    holistic_calls = [
+        c for c in fake_llm.calls if "## Perspective\nholistic" in c["content"]
+    ]
+    assert len(holistic_calls) == 0
+    perspectives_executed = {p.perspective for p in result.perspectives}
+    assert "holistic" not in perspectives_executed
+    assert perspectives_executed == {"security", "correctness", "performance", "architecture"}
+
+
+@pytest.mark.asyncio
+async def test_holistic_only_perspective_does_not_restore_core():
+    """Thread #26: Requesting perspectives=['holistic'] must execute only holistic."""
+    diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+    fake_llm = _RecordingLLM()
+
+    result = await run_audit(
+        diff_text=diff,
+        repo_full_name="org/repo",
+        pr_number=99,
+        llm_client=fake_llm,
+        engine="test-engine",
+        enable_phase1_context=False,
+        perspectives=["holistic"],
+    )
+
+    assert isinstance(result, AuditResult)
+    holistic_calls = [
+        c for c in fake_llm.calls if "## Perspective\nholistic" in c["content"]
+    ]
+    assert len(holistic_calls) == 1
+    perspectives_executed = {p.perspective for p in result.perspectives}
+    assert perspectives_executed == {"holistic"}
+
