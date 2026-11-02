@@ -228,8 +228,6 @@ async def test_get_installation_token_dev_fallback() -> None:
 def _mock_pr_settings(
     app_id=None,
     app_key=None,
-    auditor_id=None,
-    auditor_key=None,
     ssm_path="",
 ):
     """Patch app.github.pr.settings with fully explicit attrs (no MagicMock leakage)."""
@@ -237,15 +235,13 @@ def _mock_pr_settings(
     mock_settings = patcher.start()
     mock_settings.github_app_id = app_id
     mock_settings.github_app_private_key = app_key
-    mock_settings.github_auditor_app_id = auditor_id
-    mock_settings.github_auditor_app_private_key = auditor_key
     mock_settings.github_app_private_key_ssm_path = ssm_path
     return patcher
 
 
 def test_resolve_app_credentials_explicit_wins() -> None:
-    """Explicit write pair set → source=github_app (auditor attrs ignored)."""
-    patcher = _mock_pr_settings("explicit-id", "explicit-pem", "auditor-id", "auditor-pem")
+    """Explicit App pair set → source=github_app."""
+    patcher = _mock_pr_settings("explicit-id", "explicit-pem")
     try:
         app_id, key, source = _resolve_app_credentials()
     finally:
@@ -253,28 +249,21 @@ def test_resolve_app_credentials_explicit_wins() -> None:
     assert (app_id, key, source) == ("explicit-id", "explicit-pem", "github_app")
 
 
-def test_resolve_app_credentials_never_uses_auditor() -> None:
-    """Auditor pair alone is NOT valid for writes → source=none (fail closed).
+def test_settings_expose_no_separate_auditor_pair() -> None:
+    """The consolidated config has one App pair — no auditor-only credentials."""
+    from app.config import Settings
 
-    The auditor App is read-only; its token lacks contents:write /
-    pull_requests:write. PR writes must never be signed with it.
-    """
-    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem")
-    try:
-        app_id, key, source = _resolve_app_credentials()
-    finally:
-        patcher.stop()
-    assert (app_id, key, source) == (None, None, "none")
+    assert "github_auditor_app_id" not in Settings.model_fields
+    assert "github_auditor_app_private_key" not in Settings.model_fields
 
 
 def test_resolve_app_credentials_half_pair_fails_closed() -> None:
-    """Half-configured explicit pair (id without key) → none, never auditor.
+    """Half-configured explicit pair (id without key) → none, never a mixed pair.
 
-    Even with a fully configured auditor pair present, a half write pair
-    must not silently become an auditor-signed write — that would mask the
-    misconfiguration behind a 403 at GitHub.
+    A half pair must not be resolved as a usable App credential — that would
+    mask the misconfiguration behind a 403 at GitHub.
     """
-    patcher = _mock_pr_settings("explicit-id", "   ", "auditor-id", "auditor-pem")
+    patcher = _mock_pr_settings("explicit-id", "   ")
     try:
         app_id, key, source = _resolve_app_credentials()
     finally:
@@ -284,7 +273,7 @@ def test_resolve_app_credentials_half_pair_fails_closed() -> None:
 
 def test_resolve_app_credentials_none_when_all_missing() -> None:
     """Nothing configured → source=none so callers take the dev GITHUB_TOKEN path."""
-    patcher = _mock_pr_settings(None, "", "  ", None)
+    patcher = _mock_pr_settings(None, "")
     try:
         app_id, key, source = _resolve_app_credentials()
     finally:
@@ -295,7 +284,7 @@ def test_resolve_app_credentials_none_when_all_missing() -> None:
 @pytest.mark.anyio
 async def test_resolve_write_credentials_prefers_env_pair() -> None:
     """Env pair set (+ SSM path set) → env wins, SSM never read."""
-    patcher = _mock_pr_settings("env-id", "env-pem", None, None, "/haunter/WRITE_KEY")
+    patcher = _mock_pr_settings("env-id", "env-pem", "/haunter/WRITE_KEY")
     try:
         with patch(
             "app.github.pr._load_pem_from_ssm",
@@ -312,7 +301,7 @@ async def test_resolve_write_credentials_prefers_env_pair() -> None:
 @pytest.mark.anyio
 async def test_resolve_write_credentials_ssm_path() -> None:
     """App ID + SSM path (no env PEM) → PEM loaded from SSM (Lambda path)."""
-    patcher = _mock_pr_settings("app-id", None, "auditor-id", "auditor-pem", "/haunter/WRITE_KEY")
+    patcher = _mock_pr_settings("app-id", None, "/haunter/WRITE_KEY")
     try:
         with patch(
             "app.github.pr._load_pem_from_ssm",
@@ -328,23 +317,11 @@ async def test_resolve_write_credentials_ssm_path() -> None:
 
 
 @pytest.mark.anyio
-async def test_resolve_write_credentials_auditor_only_is_none() -> None:
-    """Auditor pair alone (no SSM) → none, so writes fail closed."""
-    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
-    try:
-        app_id, key, source = await _resolve_write_credentials()
-    finally:
-        patcher.stop()
-        _clear_pem_cache_for_tests()
-    assert (app_id, key, source) == (None, None, "none")
-
-
-@pytest.mark.anyio
-async def test_get_installation_token_auditor_only_uses_dev_fallback() -> None:
-    """Auditor-only config + GITHUB_TOKEN set → dev token, no JWT, no HTTP."""
+async def test_get_installation_token_without_app_creds_uses_dev_fallback() -> None:
+    """No App credentials + GITHUB_TOKEN set → dev token, no JWT, no HTTP."""
     repo = _make_repo(install_id=321)
     _TOKEN_CACHE.clear()
-    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
+    patcher = _mock_pr_settings(None, None, "")
     # _mock_pr_settings already started the patcher: capture the active mock
     # from the target instead of start()ing again (a second start() layers a
     # new mock that the single stop() below never removes → leaks across tests).
@@ -364,17 +341,17 @@ async def test_get_installation_token_auditor_only_uses_dev_fallback() -> None:
 
 
 @pytest.mark.anyio
-async def test_get_installation_token_auditor_only_no_token_fails_closed() -> None:
-    """Auditor-only config + no GITHUB_TOKEN → explicit GitHubPRError (no silent auditor write)."""
+async def test_get_installation_token_without_creds_or_token_fails_closed() -> None:
+    """No App credentials + no GITHUB_TOKEN → explicit GitHubPRError."""
     repo = _make_repo(install_id=322)
     _TOKEN_CACHE.clear()
-    patcher = _mock_pr_settings(None, None, "auditor-id", "auditor-pem", "")
+    patcher = _mock_pr_settings(None, None, "")
     # Same single-start rule as above: reuse the already-active mock, the
     # finally-stop() below then fully restores the target.
     mock_settings = patcher.target.settings
     mock_settings.github_token = None
     try:
-        with pytest.raises(GitHubPRError, match="auditor"):
+        with pytest.raises(GitHubPRError, match="No GitHub auth configured"):
             await get_installation_token(repo)
     finally:
         patcher.stop()
@@ -386,7 +363,7 @@ async def test_get_installation_token_uses_ssm_write_key() -> None:
     """App ID + SSM PEM → POSTs with JWT minted from the SSM key."""
     repo = _make_repo(install_id=323)
     _TOKEN_CACHE.clear()
-    patcher = _mock_pr_settings("app-id", None, None, None, "/haunter/WRITE_KEY")
+    patcher = _mock_pr_settings("app-id", None, "/haunter/WRITE_KEY")
     try:
         with (
             patch(

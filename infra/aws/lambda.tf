@@ -223,17 +223,13 @@ resource "aws_lambda_function" "haunter" {
       WEBHOOK_RATE_LIMIT_BACKEND        = var.webhook_rate_limit_backend
       WEBHOOK_RATE_LIMIT_MAX_DELIVERIES = tostring(var.webhook_rate_limit_max_deliveries)
       WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = tostring(var.webhook_rate_limit_window_seconds)
-      # Write-capable App for PR writes (backend/app/github/pr.py). Only the
-      # App ID travels as an env var — the ~1.6KB PEM is read at runtime from
-      # SSM (GITHUB_APP_PRIVATE_KEY_SSM_PATH) to stay under the Lambda
-      # environment-variable size limit. The read-only auditor App below is
-      # NEVER used for writes (fail-closed in pr.py).
+      # Single GitHub App for PR writes (backend/app/github/pr.py) and
+      # Auditor Mode reads (backend/app/github/auditor.py). Only the App ID
+      # travels as an env var — the ~1.6KB PEM is read at runtime from SSM
+      # (GITHUB_APP_PRIVATE_KEY_SSM_PATH) to stay under the Lambda
+      # environment-variable size limit.
       GITHUB_APP_ID                       = var.github_app_id
       GITHUB_APP_PRIVATE_KEY_SSM_PATH     = local.github_app_private_key_ssm_path
-      # Read-only auditor App — used ONLY by the audit read path
-      # (backend/app/github/auditor.py). Never a source for PR writes.
-      GITHUB_AUDITOR_APP_ID               = var.github_auditor_app_id
-      GITHUB_AUDITOR_APP_PRIVATE_KEY      = var.github_auditor_app_private_key
       AUDIT_SELF_INVOKE_SECRET            = var.audit_self_invoke_secret
 
       # Hosting + Sandbox provider (Phase 13/14)
@@ -385,10 +381,11 @@ resource "aws_cloudwatch_event_rule" "audit_dispatch" {
 # so the function cannot read a secret at runtime even if the env block were
 # empty.
 #
-# What the dispatcher does genuinely need: DB connectivity, the dedicated
-# self-invoke secret (to sign the audit children it schedules), and the read-only
-# auditor App credentials. It does NOT get the LLM provider keys or any SSM
-# parameter access.
+# What the dispatcher does genuinely need: DB connectivity and the dedicated
+# self-invoke secret (to sign the audit children it schedules). It does NOT get
+# any GitHub App credentials — the main function mints installation tokens,
+# including auditor reads — nor the LLM provider keys or any SSM parameter
+# access.
 # ---------------------------------------------------------------------------
 
 resource "aws_cloudwatch_log_group" "audit_dispatcher" {
@@ -479,10 +476,14 @@ resource "aws_lambda_function" "audit_dispatcher" {
       SESSION_SECRET_KEY   = var.session_secret_key
       FRONTEND_URL         = var.frontend_url
 
-      GITHUB_WEBHOOK_SECRET          = var.github_webhook_secret
-      GITHUB_AUDITOR_APP_ID          = var.github_auditor_app_id
-      GITHUB_AUDITOR_APP_PRIVATE_KEY = var.github_auditor_app_private_key
-      AUDIT_SELF_INVOKE_SECRET       = var.audit_self_invoke_secret
+      GITHUB_WEBHOOK_SECRET    = var.github_webhook_secret
+      AUDIT_SELF_INVOKE_SECRET = var.audit_self_invoke_secret
+
+      # Deliberately no GitHub App credentials: this dispatcher only claims
+      # audit jobs and invokes the main function, which mints installation
+      # tokens (including auditor reads) with the single App pair. Keeping the
+      # App key off this role preserves the SSM/Secrets isolation documented
+      # in audit_dispatcher_handler.py.
 
       HOSTING_PROVIDER = "aws"
       SANDBOX_PROVIDER = var.sandbox_provider

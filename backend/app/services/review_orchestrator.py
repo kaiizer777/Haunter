@@ -1425,9 +1425,8 @@ async def _ensure_install_id(session: Any, repo: Any) -> None:
         return
     # Explicit pair checked against this module's settings first (unit tests
     # patch review_orchestrator.settings directly). The sync resolver is
-    # env-only on purpose: the read-only auditor App is NEVER valid for
-    # writes, so only the write-capable pair justifies a backfill attempt
-    # here (the async SSM path is resolved later by get_installation_token()).
+    # env-only on purpose: a backfill needs an env PEM here, while the async
+    # SSM path is resolved later by get_installation_token().
     explicit_configured = _is_configured_str(
         settings.github_app_id
     ) and _is_configured_str(settings.github_app_private_key)

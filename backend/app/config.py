@@ -63,8 +63,6 @@ class Settings(BaseSettings):
     # Used by backend/app/github_client.py. Never logged or stored in run rows.
     github_token: Optional[str] = None
 
-    github_auditor_app_id: Optional[str] = None
-    github_auditor_app_private_key: Optional[str] = None
     audit_self_invoke_secret: Optional[str] = None
 
     # Where to redirect after a successful OAuth callback.
