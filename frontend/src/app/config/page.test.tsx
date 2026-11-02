@@ -463,3 +463,91 @@ it("does not render top scope switcher card", async () => {
   });
 });
 
+describe("ModelConfigPage save behavior", () => {
+  const adminUser: AuthUser = {
+    id: "usr_admin",
+    github_id: 1,
+    github_username: "admin-user",
+    avatar_url: null,
+    is_admin: true,
+  };
+
+  const globalCfg: ModelConfigOut = {
+    id: "cfg_global",
+    provider: "opencode_go",
+    model_name: "deepseek-v4.1-flash",
+    base_url: "https://opencode.ai/inference/go/openai/v1",
+    is_active: true,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useAuth).mockReturnValue({
+      user: adminUser,
+      loading: false,
+      error: null,
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
+    vi.mocked(api.getAvailableModels).mockResolvedValue({} as never);
+    vi.mocked(api.getRepos).mockResolvedValue([]);
+    vi.mocked(api.getModelConfig).mockResolvedValue(globalCfg);
+    vi.mocked(api.validateCustomProvider).mockResolvedValue({
+      ok: false,
+      supported: false,
+    } as never);
+    vi.mocked(api.updateModelConfig).mockResolvedValue(globalCfg);
+  });
+
+  it("invokes save with selected dynamic model for built-in provider", async () => {
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("Autonomous Inference Engine")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByText("GLM 5.2"));
+
+    const saveBtns = await screen.findAllByRole("button", { name: /save configuration/i });
+    fireEvent.click(saveBtns[0]);
+
+    await waitFor(() => {
+      expect(api.updateModelConfig).toHaveBeenCalledWith({
+        provider: "opencode_go",
+        model_name: "glm-5.2",
+      });
+    });
+  });
+
+  it("disables save and makes no call for a custom provider", async () => {
+    vi.mocked(api.validateCustomProvider).mockResolvedValueOnce({
+      ok: true,
+      supported: true,
+      provider_id: "custom_vllm",
+      models: [{ id: "custom-model-1", name: "Custom Model 1", tag: "Custom" }],
+    } as never);
+
+    render(<ModelConfigPage />);
+    expect(await screen.findByText("Autonomous Inference Engine")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: /add custom provider/i }));
+    fireEvent.change(await screen.findByLabelText("Custom provider name"), {
+      target: { value: "vLLM Server" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider base URL"), {
+      target: { value: "https://vllm.internal/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("Custom provider API key"), {
+      target: { value: "sk-vllm-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /validate & discover models/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Custom provider name")).not.toBeInTheDocument();
+    });
+
+    const saveBtns = await screen.findAllByRole("button", { name: /save configuration/i });
+    expect(saveBtns[0]).toBeDisabled();
+
+    fireEvent.click(saveBtns[0]);
+    expect(api.updateModelConfig).not.toHaveBeenCalled();
+  });
+});
+
