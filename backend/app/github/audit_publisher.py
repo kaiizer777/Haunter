@@ -40,6 +40,7 @@ from app.subagents.auditor import (
     AuditResult,
     DiffGrounding,
     build_diff_grounding,
+    classify_finding_bucket,
     select_scoped_findings,
 )
 
@@ -182,7 +183,7 @@ def validate_finding_coordinates(
             and (
                 finding.line_end in left_lines_in_diff
                 or finding.line_start in left_lines_in_diff
-                or any(l in left_lines_in_diff for l in range(finding.line_start, finding.line_end + 1))
+                or any(line_no in left_lines_in_diff for line_no in range(finding.line_start, finding.line_end + 1))
             )
         )
     )
@@ -338,7 +339,6 @@ def format_finding_comment_body(
 ) -> str:
     """Format markdown content for a separate GitHub review comment for a finding."""
     if isinstance(finding, AuditFinding):
-        severity = finding.severity
         title = finding.title
         file_path = finding.file_path
         line_start = finding.line_start
@@ -347,7 +347,6 @@ def format_finding_comment_body(
         suggested_fix = finding.suggested_fix
         finding_id = finding.id
     else:
-        severity = str(finding.get("severity", "NOTE"))
         title = str(finding.get("title", "Audit Finding"))
         file_path = str(finding.get("file_path", "unknown"))
         try:
@@ -362,10 +361,18 @@ def format_finding_comment_body(
         suggested_fix = finding.get("suggested_fix")
         finding_id = str(finding.get("id", ""))
 
-    sev_upper = severity.upper()
-    if sev_upper == "BLOCKER":
+    bucket = None
+    if isinstance(finding, AuditFinding) or hasattr(finding, "priority_bucket"):
+        bucket = getattr(finding, "priority_bucket", None)
+    elif isinstance(finding, Mapping):
+        bucket = finding.get("priority_bucket")
+
+    if not bucket:
+        bucket = classify_finding_bucket(finding)
+
+    if bucket == "must_fix":
         badge = "⛔ Must-Fix:"
-    elif sev_upper == "WARNING":
+    elif bucket == "should_fix":
         badge = "⚠️ Should-Fix:"
     else:
         badge = "💡 Suggestion:"
@@ -764,8 +771,11 @@ async def publish_audit_review(
             # Determine review event: COMMENT vs REQUEST_CHANGES
             if effective_allowed and request_changes_on_blocker:
                 has_confident_blocker = any(
-                    f.severity == "BLOCKER"
-                    and f.confidence >= INFORMATIONAL_CONFIDENCE_THRESHOLD
+                    (
+                        getattr(f, "priority_bucket", None) == "must_fix"
+                        or classify_finding_bucket(f, overall_confidence=result.confidence) == "must_fix"
+                    )
+                    and getattr(f, "confidence", 100) >= INFORMATIONAL_CONFIDENCE_THRESHOLD
                     for f in result.findings
                 )
                 event = "REQUEST_CHANGES" if has_confident_blocker else "COMMENT"
