@@ -247,6 +247,37 @@ _REDACTION_PLACEHOLDER_RE: re.Pattern[str] = re.compile(
 )
 
 
+
+def should_show_suggested_patch(finding: ReviewFinding, patch_clean: str) -> bool:
+    """Show a suggested code block ONLY when ALL of the following hold:
+    - touches a single file
+    - simple fix (not complex multi-hunk)
+    - suggested code is strictly under 30 lines
+    Otherwise, drop the suggested code block entirely and keep the finding text + remediation description.
+    """
+    file_path = getattr(finding, "file_path", "")
+    if any(sep in file_path for sep in (",", ";", "\n")) or "multi" in file_path.lower():
+        return False
+
+    lines_count = len(patch_clean.splitlines())
+    if lines_count >= 30:
+        return False
+
+    hunk_headers = re.findall(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", patch_clean, re.MULTILINE)
+    if len(hunk_headers) > 1:
+        return False
+
+    diff_git_headers = re.findall(r"^diff --git ", patch_clean, re.MULTILINE)
+    if len(diff_git_headers) > 1:
+        return False
+
+    file_plus_headers = re.findall(r"^\+\+\+ (?:b/)?(.*)$", patch_clean, re.MULTILINE)
+    distinct_files = {f.strip() for f in file_plus_headers if f.strip() not in ("/dev/null", "dev/null", "")}
+    if len(distinct_files) > 1:
+        return False
+
+    return True
+
 def format_github_suggestion(finding: ReviewFinding) -> str:
     """
     Format a ReviewFinding into a GitHub comment markdown string.
@@ -305,7 +336,14 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
                 patch_clean = "\n".join(lines[1:-1]).strip("\r\n")
             elif lines[0].startswith("```"):
                 patch_clean = "\n".join(lines[1:]).strip("\r\n")
-        if _REDACTION_PLACEHOLDER_RE.search(patch_clean):
+
+        if not should_show_suggested_patch(finding, patch_clean):
+            sections.extend([
+                "",
+                "**Remediation:**",
+                "Manual remediation recommended (change exceeds single-file/simple suggestion threshold; see problem description).",
+            ])
+        elif _REDACTION_PLACEHOLDER_RE.search(patch_clean):
             # A bare ``` is not enough on its own: the patch may contain a fence
             # run of its own, which would close the block early and dump the
             # remainder into the comment as prose. Size the fence past the
