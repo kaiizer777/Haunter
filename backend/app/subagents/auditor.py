@@ -11,7 +11,7 @@ import time
 import unicodedata
 import uuid
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping, Optional, Sequence
@@ -791,8 +791,7 @@ class AuditResult:
         return sum(
             1
             for f in self.findings
-            if getattr(f, "priority_bucket", None) == "must_fix"
-            or classify_finding_bucket(f, overall_confidence=self.confidence) == "must_fix"
+            if classify_finding_bucket(f, overall_confidence=self.confidence) == "must_fix"
         )
 
     @property
@@ -800,8 +799,7 @@ class AuditResult:
         return sum(
             1
             for f in self.findings
-            if getattr(f, "priority_bucket", None) == "should_fix"
-            or classify_finding_bucket(f, overall_confidence=self.confidence) == "should_fix"
+            if classify_finding_bucket(f, overall_confidence=self.confidence) == "should_fix"
         )
 
     @property
@@ -809,8 +807,7 @@ class AuditResult:
         return sum(
             1
             for f in self.findings
-            if getattr(f, "priority_bucket", None) == "suggestion"
-            or classify_finding_bucket(f, overall_confidence=self.confidence) == "suggestion"
+            if classify_finding_bucket(f, overall_confidence=self.confidence) == "suggestion"
         )
 
     @property
@@ -2816,20 +2813,29 @@ async def run_audit(
         overall_confidence = min(
             overall_confidence, INFORMATIONAL_CONFIDENCE_THRESHOLD - 1
         )
+    # Synchronize finding buckets with final post-capped overall confidence
+    findings = [
+        replace(
+            f,
+            priority_bucket=classify_finding_bucket(
+                f, overall_confidence=overall_confidence
+            ),
+        )
+        if f.priority_bucket != classify_finding_bucket(f, overall_confidence=overall_confidence)
+        else f
+        for f in findings
+    ]
     must_fix_count = sum(
         1 for f in findings
-        if getattr(f, "priority_bucket", None) == "must_fix"
-        or classify_finding_bucket(f, overall_confidence=overall_confidence) == "must_fix"
+        if classify_finding_bucket(f, overall_confidence=overall_confidence) == "must_fix"
     )
     should_fix_count = sum(
         1 for f in findings
-        if getattr(f, "priority_bucket", None) == "should_fix"
-        or classify_finding_bucket(f, overall_confidence=overall_confidence) == "should_fix"
+        if classify_finding_bucket(f, overall_confidence=overall_confidence) == "should_fix"
     )
     suggestion_count = sum(
         1 for f in findings
-        if getattr(f, "priority_bucket", None) == "suggestion"
-        or classify_finding_bucket(f, overall_confidence=overall_confidence) == "suggestion"
+        if classify_finding_bucket(f, overall_confidence=overall_confidence) == "suggestion"
     )
     status = build_status_label(
         must_fix_count,
