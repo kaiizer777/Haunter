@@ -68,6 +68,87 @@ class PublishResult:
     posted_counts: Optional[dict[str, int]] = None
 
 
+
+def is_cross_file_finding(finding: Any) -> bool:
+    """Determine if a finding applies across multiple files."""
+    if (
+        getattr(finding, "cross_file", False)
+        or getattr(finding, "is_cross_file", False)
+        or getattr(finding, "multi_file", False)
+    ):
+        return True
+
+    file_path = getattr(finding, "file_path", "")
+    if isinstance(file_path, str):
+        if any(sep in file_path for sep in (",", ";", "\n")) or "multi" in file_path.lower():
+            return True
+
+    suggested_fix = getattr(finding, "suggested_fix", None)
+    if isinstance(suggested_fix, str) and suggested_fix.strip():
+        diff_git_count = len(re.findall(r"^diff --git ", suggested_fix, re.MULTILINE))
+        if diff_git_count > 1:
+            return True
+        file_headers = re.findall(r"^\+\+\+ (?:b/)?(.*)$", suggested_fix, re.MULTILINE)
+        distinct_files = {f.strip() for f in file_headers if f.strip() not in ("/dev/null", "dev/null", "")}
+        if len(distinct_files) > 1:
+            return True
+
+    return False
+
+
+def should_show_suggested_code(
+    finding: Any,
+    suggested_code: Optional[str] = None,
+) -> bool:
+    """Show a suggested code block ONLY when ALL of the following hold:
+    - touches a single file
+    - simple fix (not complex multi-hunk)
+    - suggested code is strictly under 30 lines
+    Otherwise, drop the suggested code block entirely and keep the finding text + remediation description.
+    """
+    if is_cross_file_finding(finding):
+        return False
+
+    code = suggested_code
+    if code is None:
+        code = getattr(finding, "suggested_fix", None) or getattr(finding, "suggested_patch", None)
+    if not code or not isinstance(code, str):
+        return False
+
+    clean_code = code.strip()
+    if not clean_code:
+        return False
+
+    # Strip outer code fences if wrapped
+    if clean_code.startswith("```"):
+        lines = clean_code.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+            clean_code = "\n".join(lines[1:-1]).strip()
+        elif lines[0].startswith("```"):
+            clean_code = "\n".join(lines[1:]).strip()
+
+    # Line count check: strictly under 30 lines (< 30)
+    lines_count = len(clean_code.splitlines())
+    if lines_count >= 30:
+        return False
+
+    # Multi-hunk check: at most 1 hunk header (@@ ... @@)
+    hunk_headers = re.findall(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", clean_code, re.MULTILINE)
+    if len(hunk_headers) > 1:
+        return False
+
+    # Multi-file diff check in code itself
+    diff_git_count = len(re.findall(r"^diff --git ", clean_code, re.MULTILINE))
+    if diff_git_count > 1:
+        return False
+
+    file_plus_headers = re.findall(r"^\+\+\+ (?:b/)?(.*)$", clean_code, re.MULTILINE)
+    distinct_files = {f.strip() for f in file_plus_headers if f.strip() not in ("/dev/null", "dev/null", "")}
+    if len(distinct_files) > 1:
+        return False
+
+    return True
+
 def validate_finding_coordinates(
     finding: AuditFinding,
     grounding: DiffGrounding,
@@ -77,23 +158,65 @@ def validate_finding_coordinates(
     GitHub API rejects review comments with 422 Unprocessable Entity if the line
     is outside the modified diff hunks. This validator verifies the coordinates.
 
+    Supports both RIGHT side (added/modified lines) and LEFT side (deleted lines/files).
+    If line is in left_line_index (deleted line), anchor with side="LEFT", start_side="LEFT".
+
     Returns:
         dict with coordinate keys (`path`, `line`, `side`, optional `start_line`, `start_side`)
         or None if invalid.
     """
     file_path = sanitize_output_path(finding.file_path)
-    lines_in_diff = grounding.line_index.get(file_path)
-    if not lines_in_diff:
+    lines_in_diff = grounding.line_index.get(file_path, set())
+    left_lines_in_diff = getattr(grounding, "left_line_index", {}).get(file_path, set())
+
+    if not lines_in_diff and not left_lines_in_diff:
         return None
 
-    target_line: Optional[int] = None
-    # Prefer line_end as the anchor if it is in the diff hunk
+    finding_side = str(getattr(finding, "side", "") or "").upper()
+
+    # Rule: If line is in left_line_index (deleted line), anchor with side="LEFT", start_side="LEFT".
+    is_deleted_line = (
+        finding_side == "LEFT"
+        or (
+            finding_side != "RIGHT"
+            and (
+                finding.line_end in left_lines_in_diff
+                or finding.line_start in left_lines_in_diff
+                or any(l in left_lines_in_diff for l in range(finding.line_start, finding.line_end + 1))
+            )
+        )
+    )
+
+    if is_deleted_line:
+        target_line: Optional[int] = None
+        if finding.line_end in left_lines_in_diff:
+            target_line = finding.line_end
+        elif finding.line_start in left_lines_in_diff:
+            target_line = finding.line_start
+        else:
+            for line_num in range(finding.line_start, finding.line_end + 1):
+                if line_num in left_lines_in_diff:
+                    target_line = line_num
+                    break
+
+        if target_line is not None:
+            coords: dict[str, Any] = {
+                "path": file_path,
+                "line": target_line,
+                "side": "LEFT",
+            }
+            if finding.line_start < target_line and finding.line_start in left_lines_in_diff:
+                coords["start_line"] = finding.line_start
+                coords["start_side"] = "LEFT"
+            return coords
+
+    # Otherwise, anchor on RIGHT side (added/modified lines)
+    target_line = None
     if finding.line_end in lines_in_diff:
         target_line = finding.line_end
     elif finding.line_start in lines_in_diff:
         target_line = finding.line_start
     else:
-        # Check if any line in the range [line_start, line_end] is present in diff
         for line_num in range(finding.line_start, finding.line_end + 1):
             if line_num in lines_in_diff:
                 target_line = line_num
@@ -102,13 +225,11 @@ def validate_finding_coordinates(
     if target_line is None:
         return None
 
-    coords: dict[str, Any] = {
+    coords = {
         "path": file_path,
         "line": target_line,
         "side": "RIGHT",
     }
-
-    # If this is a multi-line finding and start_line is also in the diff hunk
     if finding.line_start < target_line and finding.line_start in lines_in_diff:
         coords["start_line"] = finding.line_start
         coords["start_side"] = "RIGHT"
@@ -120,6 +241,7 @@ def format_inline_comment_body(
     finding: AuditFinding,
     *,
     is_informational: bool = False,
+    side: str = "RIGHT",
 ) -> str:
     """Format markdown content for an inline GitHub review comment."""
     severity_icon = {
@@ -165,31 +287,44 @@ def format_inline_comment_body(
         clean_fix = redact_sensitive_text(finding.suggested_fix).strip()
         if clean_fix:
             bounded_fix = sanitize_output_text(clean_fix, MAX_SUGGESTED_FIX_CHARS)
+            unfenced_fix = bounded_fix
             # Strip outer code fences if present
-            if bounded_fix.startswith("```"):
-                lines_fix = bounded_fix.splitlines()
+            if unfenced_fix.startswith("```"):
+                lines_fix = unfenced_fix.splitlines()
                 if (
                     len(lines_fix) >= 2
                     and lines_fix[0].startswith("```")
                     and lines_fix[-1].strip() == "```"
                 ):
-                    bounded_fix = "\n".join(lines_fix[1:-1]).strip()
+                    unfenced_fix = "\n".join(lines_fix[1:-1]).strip()
+
             lines.append("")
             lines.append("**Suggested Remediation:**")
-            # A full unified diff (`diff --git`, hunk headers, ---/+++ file
-            # lines) is never valid ```suggestion content — GitHub applies a
-            # suggestion block verbatim, so a diff pasted into one corrupts the
-            # file. Render diff-shaped fixes as ```diff instead. The `--- `
-            # match requires a trailing space plus path (diff header form), so
-            # a bare YAML `---` document marker is not misclassified as a diff.
-            stripped_fix = bounded_fix.lstrip()
-            is_unified_diff = stripped_fix.startswith(
-                ("diff --git", "@@ ", "--- ", "+++ ")
-            )
-            if is_unified_diff:
-                lines.append(f"```diff\n{bounded_fix}\n```")
+
+            effective_side = str(side or getattr(finding, "side", "RIGHT") or "RIGHT").upper()
+            if should_show_suggested_code(finding, unfenced_fix):
+                stripped_fix = unfenced_fix.lstrip()
+                is_unified_diff = stripped_fix.startswith(
+                    ("diff --git", "@@ ", "--- ", "+++ ")
+                )
+                if effective_side == "LEFT":
+                    # On deleted lines (LEFT side), GitHub does NOT support ```suggestion blocks.
+                    # Emit diff instead.
+                    lines.append(f"```diff\n{unfenced_fix}\n```")
+                elif is_unified_diff:
+                    lines.append(f"```diff\n{unfenced_fix}\n```")
+                else:
+                    lines.append(f"```suggestion\n{unfenced_fix}\n```")
             else:
-                lines.append(f"```suggestion\n{bounded_fix}\n```")
+                # Dropped suggested code block per display rule; keep remediation description
+                is_patch_shape = (
+                    unfenced_fix.startswith(("diff --git", "@@ ", "--- ", "+++ "))
+                    or any(line.startswith(("+", "-", "@@")) for line in unfenced_fix.splitlines())
+                )
+                if not is_patch_shape and len(unfenced_fix.splitlines()) < 10:
+                    lines.append(unfenced_fix)
+                else:
+                    lines.append("Manual remediation recommended (change exceeds single-file/simple suggestion threshold; see review summary).")
 
     lines.append("")
     lines.append("---")
@@ -314,8 +449,12 @@ def build_inline_review_comments(
     suppressed_count = 0
 
     for finding in findings:
-        # Explicitly skip non-commentable or PR-level findings
-        if getattr(finding, "non_commentable", False) or getattr(finding, "line_start", 1) == 0:
+        # Explicitly skip non-commentable, PR-level findings, or multi-file / cross-file findings
+        if (
+            getattr(finding, "non_commentable", False)
+            or getattr(finding, "line_start", 1) == 0
+            or is_cross_file_finding(finding)
+        ):
             suppressed_count += 1
             continue
 
@@ -345,7 +484,11 @@ def build_inline_review_comments(
                 coords["start_line"] = finding.line_start
                 coords["start_side"] = "RIGHT"
 
-        body = format_inline_comment_body(finding, is_informational=is_informational)
+        body = format_inline_comment_body(
+            finding,
+            is_informational=is_informational,
+            side=coords.get("side", "RIGHT"),
+        )
         coords["body"] = body
         comments.append(coords)
 
