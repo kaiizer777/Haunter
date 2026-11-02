@@ -337,20 +337,20 @@ async def run_subagent_a_pr_analysis(
     # Fallback intent summary and claimed changes if LLM was skipped or returned empty
     if not intent_summary:
         first_line = body.strip().splitlines()[0] if body.strip() else ""
-        intent_summary = f"{title}. {first_line}".strip()
+        intent_summary = f"{redact_sensitive_text(title)}. {redact_sensitive_text(first_line)}".strip()
     if not claimed_changes and body:
         for line in body.splitlines():
             line_s = line.strip()
             if line_s.startswith(("- ", "* ", "1. ", "2. ", "3. ")):
-                claimed_changes.append(re.sub(r"^(?:[-*]|\d+\.)\s+", "", line_s))
+                claimed_changes.append(redact_sensitive_text(re.sub(r"^(?:[-*]|\d+\.)\s+", "", line_s)))
             if len(claimed_changes) >= 8:
                 break
 
     raw_markdown = (
-        f"### PR #{pr_number}: {title}\n"
+        f"### PR #{pr_number}: {redact_sensitive_text(title)}\n"
         f"- **Author**: {author} ({assoc})\n"
-        f"- **Intent**: {intent_summary}\n"
-        f"- **Claimed Changes**: {', '.join(claimed_changes) if claimed_changes else 'None explicitly listed'}\n"
+        f"- **Intent**: {redact_sensitive_text(intent_summary)}\n"
+        f"- **Claimed Changes**: {', '.join(redact_sensitive_text(c) for c in claimed_changes) if claimed_changes else 'None explicitly listed'}\n"
         f"- **Changed Files**: {', '.join(changed_files_summary) if changed_files_summary else 'No files detected'}\n"
         f"- **Referenced Issues/PRs**: {', '.join(f'#{r}' for r in mentioned_refs) if mentioned_refs else 'None'}"
     )
@@ -555,11 +555,11 @@ async def run_subagent_b_issue_analysis(
         problem_statement = f"{redact_sensitive_text(title)}. {redact_sensitive_text(body)[:300]}".strip()
 
     raw_markdown = (
-        f"### Primary Issue #{issue_number}: {title}\n"
+        f"### Primary Issue #{issue_number}: {redact_sensitive_text(title)}\n"
         f"- **Author**: {author} ({assoc})\n"
-        f"- **Problem Statement**: {problem_statement}\n"
-        f"- **Acceptance Criteria**: {', '.join(acceptance_criteria) if acceptance_criteria else 'Derived from issue description'}\n"
-        f"- **Scope Constraints**: {', '.join(scope_constraints) if scope_constraints else 'Standard repo scope'}\n"
+        f"- **Problem Statement**: {redact_sensitive_text(problem_statement)}\n"
+        f"- **Acceptance Criteria**: {', '.join(redact_sensitive_text(x) for x in acceptance_criteria) if acceptance_criteria else 'Derived from issue description'}\n"
+        f"- **Scope Constraints**: {', '.join(redact_sensitive_text(x) for x in scope_constraints) if scope_constraints else 'Standard repo scope'}\n"
         f"- **Referenced Issues/PRs**: {', '.join(f'#{r}' for r in mentioned_refs) if mentioned_refs else 'None'}"
     )
 
@@ -771,14 +771,14 @@ async def run_single_mention_subagent(
 
     if not summary:
         first_line = body.strip().splitlines()[0] if body.strip() else ""
-        summary = f"{title}. {first_line}".strip()
+        summary = f"{redact_sensitive_text(title)}. {redact_sensitive_text(first_line)}".strip()
     if not maintainer_verdict:
         maintainer_verdict = f"Status: {state.upper()}"
 
     raw_markdown = (
-        f"- **#{ref_number} ({ref_type}, {state})**: {title}\n"
-        f"  - *Summary*: {summary}\n"
-        f"  - *Verdict*: {maintainer_verdict}"
+        f"- **#{ref_number} ({ref_type}, {state})**: {redact_sensitive_text(title)}\n"
+        f"  - *Summary*: {redact_sensitive_text(summary)}\n"
+        f"  - *Verdict*: {redact_sensitive_text(maintainer_verdict)}"
     )
 
     logger.debug("Phase 1b: Completed subagent for mention #%d in %.2fs", ref_number, time.monotonic() - started)
@@ -885,7 +885,7 @@ async def run_phase_1c_synthesis(
     pr_num = pr_assessment.pr_number
     primary_intent = pr_assessment.intent_summary
     if issue_assessment and issue_assessment.problem_statement:
-        primary_intent = f"Issue #{issue_assessment.issue_number}: {issue_assessment.problem_statement}\nPR #{pr_num}: {pr_assessment.intent_summary}"
+        primary_intent = f"Issue #{issue_assessment.issue_number}: {redact_sensitive_text(issue_assessment.problem_statement)}\nPR #{pr_num}: {redact_sensitive_text(pr_assessment.intent_summary)}"
 
     scope_alignment_notes = ""
 
@@ -924,9 +924,9 @@ async def run_phase_1c_synthesis(
             parsed = _parse_json_object(content)
             if parsed:
                 if parsed.get("primary_intent"):
-                    primary_intent = str(parsed["primary_intent"]).strip()
+                    primary_intent = redact_sensitive_text(str(parsed["primary_intent"]).strip())
                 if parsed.get("scope_alignment_notes"):
-                    scope_alignment_notes = str(parsed["scope_alignment_notes"]).strip()
+                    scope_alignment_notes = redact_sensitive_text(str(parsed["scope_alignment_notes"]).strip())
         except Exception as exc:
             logger.warning("Phase 1c: LLM synthesis failed or timed out: %s", exc)
 
@@ -945,22 +945,22 @@ async def run_phase_1c_synthesis(
         f"- **Goal**: {primary_intent}",
     ]
     if issue_assessment:
-        sec1.append(f"- **Primary Issue**: #{issue_assessment.issue_number} — {issue_assessment.title}")
+        sec1.append(f"- **Primary Issue**: #{issue_assessment.issue_number} — {redact_sensitive_text(issue_assessment.title)}")
         if issue_assessment.acceptance_criteria:
             sec1.append("- **Acceptance Criteria**:")
             for ac in issue_assessment.acceptance_criteria:
-                sec1.append(f"  * {ac}")
+                sec1.append(f"  * {redact_sensitive_text(ac)}")
 
     # Build Section 2: Pull Request Scope & Claimed Changes
     sec2 = [
         "## Pull Request Scope & Claimed Changes",
-        f"- **PR Title**: #{pr_num} — {pr_assessment.title}",
+        f"- **PR Title**: #{pr_num} — {redact_sensitive_text(pr_assessment.title)}",
         f"- **Author**: {pr_assessment.author} ({pr_assessment.author_association})",
     ]
     if pr_assessment.claimed_changes:
         sec2.append("- **Claimed Changes**:")
         for cc in pr_assessment.claimed_changes:
-            sec2.append(f"  * {cc}")
+            sec2.append(f"  * {redact_sensitive_text(cc)}")
     if pr_assessment.changed_files_summary:
         sec2.append(f"- **Affected Files**: {', '.join(pr_assessment.changed_files_summary)}")
 
@@ -969,9 +969,9 @@ async def run_phase_1c_synthesis(
     if issue_assessment:
         sec3.append(f"- **Issue Author / Direction**: {issue_assessment.author} ({issue_assessment.author_attribution})")
         if issue_assessment.preferred_approaches:
-            sec3.append(f"- **Preferred Approaches**: {', '.join(issue_assessment.preferred_approaches)}")
+            sec3.append(f"- **Preferred Approaches**: {', '.join(redact_sensitive_text(x) for x in issue_assessment.preferred_approaches)}")
         if issue_assessment.rejected_approaches:
-            sec3.append(f"- **Rejected Approaches**: {', '.join(issue_assessment.rejected_approaches)}")
+            sec3.append(f"- **Rejected Approaches**: {', '.join(redact_sensitive_text(x) for x in issue_assessment.rejected_approaches)}")
     else:
         sec3.append("- No linked issue authority statement recorded.")
 
@@ -981,7 +981,7 @@ async def run_phase_1c_synthesis(
         f"- **Alignment Assessment**: {scope_alignment_notes}",
     ]
     if issue_assessment and issue_assessment.scope_constraints:
-        sec4.append(f"- **Scope Boundaries**: {', '.join(issue_assessment.scope_constraints)}")
+        sec4.append(f"- **Scope Boundaries**: {', '.join(redact_sensitive_text(x) for x in issue_assessment.scope_constraints)}")
 
     # Build Section 5: Mentioned References & Historical Context
     sec5 = ["## Mentioned References & Historical Context"]
