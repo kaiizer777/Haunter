@@ -675,6 +675,11 @@ class DiffGrounding:
     #: True when the diff text was cut before its last line. Every count above
     #: then describes the inspected prefix, and the report says so.
     clipped: bool = False
+    left_line_index: dict[str, set[int]] = field(default_factory=dict)
+
+    @property
+    def left_lines(self) -> dict[str, set[int]]:
+        return self.left_line_index
 
 
 class AuditRemoteFailureReason(StrEnum):
@@ -748,6 +753,7 @@ class _DiffHunkState:
     added: int = 0
     removed: int = 0
     lines: set[int] = field(default_factory=set)
+    left_lines: set[int] = field(default_factory=set)
 
     @property
     def satisfied(self) -> bool:
@@ -1040,6 +1046,7 @@ def build_diff_grounding(
         raise ValueError("diff grounding limit is invalid")
     text, clipped = _diff_prefix(str(diff_text or ""), max_chars)
     index: dict[str, set[int]] = {}
+    left_index: dict[str, set[int]] = {}
     valid_paths: set[str] = set()
     rejected_paths: set[str] = set()
     truncated_ranges: dict[str, set[tuple[int, int]]] = {}
@@ -1077,6 +1084,8 @@ def build_diff_grounding(
         if current_path is not None:
             if hunk.lines:
                 index.setdefault(current_path, set()).update(hunk.lines)
+            if hunk.left_lines:
+                left_index.setdefault(current_path, set()).update(hunk.left_lines)
             valid_paths.add(current_path)
             hunk_count += 1
             added_lines += hunk.added
@@ -1097,6 +1106,8 @@ def build_diff_grounding(
         if clipped or is_budget_truncated:
             if hunk.lines:
                 index.setdefault(current_path, set()).update(hunk.lines)
+            if hunk.left_lines:
+                left_index.setdefault(current_path, set()).update(hunk.left_lines)
             valid_paths.add(current_path)
             hunk_count += 1
             added_lines += hunk.added
@@ -1145,6 +1156,7 @@ def build_diff_grounding(
             elif line.startswith("-"):
                 valid_line = hunk.old_seen < hunk.old_count
                 if valid_line:
+                    hunk.left_lines.add(hunk.next_old)
                     hunk.next_old += 1
                     hunk.old_seen += 1
                     hunk.removed += 1
@@ -1195,14 +1207,14 @@ def build_diff_grounding(
             continue
         if line.startswith("+++ "):
             new_dev_null, new_path = _diff_header_path(line, "+++ ")
-            if (
-                new_dev_null
-                or new_path is None
-                or (not old_dev_null and old_path is None)
-            ):
-                # A deleted file (`+++ /dev/null`), an unusable header, or a
-                # new-side header with no old-side counterpart has no new-file
-                # line for a finding to be grounded on.
+            if new_dev_null:
+                if old_path is not None:
+                    current_path = old_path
+                else:
+                    current_path = None
+                    reject_current()
+                continue
+            if new_path is None or (not old_dev_null and old_path is None):
                 current_path = None
                 reject_current()
                 continue
@@ -1260,6 +1272,7 @@ def build_diff_grounding(
         added_lines=added_lines,
         removed_lines=removed_lines,
         clipped=clipped,
+        left_line_index={path: lines for path, lines in left_index.items() if lines},
     )
 
 
@@ -1798,16 +1811,17 @@ def _is_grounded(
     finding: PerspectiveFinding,
     grounding: DiffGrounding,
 ) -> bool:
-    observed_lines = grounding.line_index.get(finding.file_path)
+    observed_lines = grounding.line_index.get(finding.file_path, set())
+    left_observed_lines = getattr(grounding, "left_line_index", {}).get(finding.file_path, set())
     if (
-        not observed_lines
+        (not observed_lines and not left_observed_lines)
         or finding.line_end - finding.line_start >= MAX_GROUNDING_SPAN
     ):
         return False
-    if not all(
-        line_number in observed_lines
-        for line_number in range(finding.line_start, finding.line_end + 1)
-    ):
+    finding_range = range(finding.line_start, finding.line_end + 1)
+    right_grounded = bool(observed_lines) and all(line_num in observed_lines for line_num in finding_range)
+    left_grounded = bool(left_observed_lines) and all(line_num in left_observed_lines for line_num in finding_range)
+    if not (right_grounded or left_grounded):
         return False
     return not any(
         finding.line_start <= truncated_end and truncated_start <= finding.line_end
