@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 create_pr_review = github_client.create_pr_review
 create_commit_comment = github_client.create_commit_comment
 post_pr_comment = github_client.post_pr_comment
+update_pr_review = github_client.update_pr_review
 
 
 @dataclass(frozen=True)

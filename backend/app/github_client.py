@@ -1882,6 +1882,81 @@ async def create_pull_request_review(
     )
 
 
+
+async def update_pr_review(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    review_id: int | str,
+    body: str,
+    token: Optional[str] = None,
+    allow_global_token: bool = True,
+) -> dict[str, Any]:
+    """Update an existing pull request review summary body via GitHub Pulls API.
+
+    PUT /repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}
+    """
+    url = (
+        f"{GITHUB_API_BASE}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+        f"/pulls/{quote(str(pr_number), safe='')}/reviews/{quote(str(review_id), safe='')}"
+    )
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
+    payload: dict[str, Any] = {"body": body}
+
+    async with httpx.AsyncClient(
+        timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
+    ) as client:
+        try:
+            response = await client.put(url, headers=headers, json=payload)
+        except httpx.RequestError as exc:
+            logger.error(
+                "Network error updating PR review for %s/%s PR #%s review %s",
+                owner,
+                repo,
+                pr_number,
+                review_id,
+            )
+            raise GitHubNetworkError(
+                f"Network error connecting to GitHub: {exc.__class__.__name__}"
+            ) from exc
+
+    if response.status_code == 404:
+        raise GitHubResourceNotFoundError(
+            f"Review {review_id} not found for {owner}/{repo} PR #{pr_number}"
+        )
+    if response.status_code in (401, 403):
+        if "rate limit" in response.text.lower():
+            raise GitHubRateLimitError("GitHub API rate limit exceeded")
+        raise GitHubAuthError(f"GitHub authentication failure ({response.status_code})")
+    if response.status_code == 422:
+        logger.error(
+            "GitHub API rejected the review update payload for %s/%s PR #%s review %s: %s",
+            owner,
+            repo,
+            pr_number,
+            review_id,
+            sanitize_log_value(response.text),
+        )
+        raise GitHubUnprocessableEntityError(
+            f"GitHub API returned error 422: {response.text}"
+        )
+    if response.is_error:
+        logger.error(
+            "GitHub API error %d updating review: %s",
+            response.status_code,
+            response.text,
+        )
+        raise GitHubClientError(
+            f"GitHub API returned error {response.status_code}: {response.text}"
+        )
+
+    return response.json()
+
+
 async def create_commit_comment(
     owner: str,
     repo: str,
