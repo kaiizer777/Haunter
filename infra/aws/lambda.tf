@@ -381,10 +381,11 @@ resource "aws_cloudwatch_event_rule" "audit_dispatch" {
 # so the function cannot read a secret at runtime even if the env block were
 # empty.
 #
-# What the dispatcher does genuinely need: DB connectivity, the dedicated
-# self-invoke secret (to sign the audit children it schedules), and the read-only
-# auditor App credentials. It does NOT get the LLM provider keys or any SSM
-# parameter access.
+# What the dispatcher does genuinely need: DB connectivity and the dedicated
+# self-invoke secret (to sign the audit children it schedules). It does NOT get
+# any GitHub App credentials — the main function mints installation tokens,
+# including auditor reads — nor the LLM provider keys or any SSM parameter
+# access.
 # ---------------------------------------------------------------------------
 
 resource "aws_cloudwatch_log_group" "audit_dispatcher" {
