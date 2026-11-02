@@ -114,17 +114,19 @@ def _build_payload(
     action: str,
     sender: str,
     sender_type: str,
+    base_sha: str | None = None,
 ) -> dict[str, Any]:
     """Build the minimal realistic ``pull_request`` payload the ingress reads."""
     owner, name = repo.split("/", 1)
 
-    base_sha = hashlib.sha256(
-        f"base:{repo}:{pr_number}:{base_ref}".encode("utf-8")
-    ).hexdigest()[:40]
-    if base_sha == sha:
+    if base_sha is None:
         base_sha = hashlib.sha256(
-            f"base-alt:{repo}:{pr_number}:{base_ref}".encode("utf-8")
+            f"base:{repo}:{pr_number}:{base_ref}".encode("utf-8")
         ).hexdigest()[:40]
+        if base_sha == sha:
+            base_sha = hashlib.sha256(
+                f"base-alt:{repo}:{pr_number}:{base_ref}".encode("utf-8")
+            ).hexdigest()[:40]
 
     repo_block = {"name": name, "owner": {"login": owner}}
 
@@ -479,6 +481,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "repeat runs dodge the dedup guard."
         ),
     )
+    parser.add_argument(
+        "--base-sha",
+        default=None,
+        help=(
+            "Base commit SHA (40 hex chars). Defaults to a synthetic SHA derived "
+            "from repo/PR/base-ref. Pass the real base SHA when triggering an "
+            "auditor PR audit so intake pins match live GitHub."
+        ),
+    )
     parser.add_argument("--base-ref", default="main", help="Base branch (default: main)")
     parser.add_argument(
         "--head-ref",
@@ -539,6 +550,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         if not _SHA_RE.fullmatch(args.sha):
             parser.error("--sha must be exactly 40 hexadecimal characters")
         args.sha = args.sha.lower()
+
+    if args.base_sha is not None:
+        if not _SHA_RE.fullmatch(args.base_sha):
+            parser.error("--base-sha must be exactly 40 hexadecimal characters")
+        args.base_sha = args.base_sha.lower()
 
     if args.timeout <= 0:
         parser.error("--timeout must be greater than 0")
@@ -604,6 +620,7 @@ async def main() -> int:
         action=args.action,
         sender=args.sender,
         sender_type=args.sender_type,
+        base_sha=args.base_sha,
     )
     body = json.dumps(payload).encode("utf-8")
 
@@ -622,6 +639,7 @@ async def main() -> int:
     print(f"  PR:       #{args.pr}")
     print(f"  Action:   {args.action}")
     print(f"  Head SHA: {sha}")
+    print(f"  Base SHA: {payload['pull_request']['base']['sha']}")
     print(f"  Base:     {args.base_ref} <- {args.head_ref}")
     print(f"  Ingress:  POST {url}")
 
