@@ -43,48 +43,72 @@ class FindingResolutionResult:
         return self.retained_findings + self.new_findings
 
 
-def _extract_diff_modified_ranges(diff_text: str) -> dict[str, list[tuple[int, int]]]:
-    """Extract modified/removed old line ranges per file from unified diff hunk headers."""
-    ranges: dict[str, list[tuple[int, int]]] = {}
+def _extract_diff_changed_old_lines(diff_text: str) -> dict[str, set[int]]:
+    """Extract set of line numbers in the old file that were modified or removed.
+
+    Ignores untouched context lines so findings on context lines are not falsely marked resolved.
+    """
+    changed_lines: dict[str, set[int]] = {}
     current_file: str | None = None
+    cur_old = 0
 
     for line in diff_text.splitlines():
         if line.startswith("diff --git "):
-            parts = line.split()
-            if len(parts) >= 4:
-                # b/path/to/file -> path/to/file
-                b_path = parts[3]
-                current_file = b_path[2:] if b_path.startswith("b/") else b_path
-                if current_file not in ranges:
-                    ranges[current_file] = []
+            current_file = None
+            cur_old = 0
+            m = re.match(r'^diff --git (?:"?a/(.*?)"?) (?:"?b/(.*?)"?)$', line)
+            if m:
+                b_path = m.group(2)
+                a_path = m.group(1)
+                target = b_path if b_path != "/dev/null" else a_path
+                current_file = target.strip().strip("'\"").lstrip("/")
+                changed_lines.setdefault(current_file, set())
+            else:
+                parts = line.split()
+                if len(parts) >= 4:
+                    b_path = parts[3]
+                    current_file = (b_path[2:] if b_path.startswith("b/") else b_path).strip().strip("'\"").lstrip("/")
+                    changed_lines.setdefault(current_file, set())
             continue
 
         if line.startswith("--- ") and not current_file:
-            path_part = line[4:].strip()
+            path_part = line[4:].strip().strip("'\"")
             if path_part.startswith("a/"):
                 path_part = path_part[2:]
-            current_file = path_part
-            if current_file not in ranges:
-                ranges[current_file] = []
+            if path_part != "/dev/null":
+                current_file = path_part.lstrip("/")
+                changed_lines.setdefault(current_file, set())
             continue
 
         if line.startswith("+++ "):
-            path_part = line[4:].strip()
+            path_part = line[4:].strip().strip("'\"")
             if path_part.startswith("b/"):
                 path_part = path_part[2:]
-            current_file = path_part
-            if current_file not in ranges:
-                ranges[current_file] = []
+            if path_part != "/dev/null" and not current_file:
+                current_file = path_part.lstrip("/")
+                changed_lines.setdefault(current_file, set())
             continue
 
         if current_file and line.startswith("@@ "):
             m = _HUNK_OLD_RANGE_RE.match(line)
             if m:
-                old_start = int(m.group(1))
-                old_count = int(m.group(2)) if m.group(2) is not None else 1
-                ranges[current_file].append((old_start, old_start + max(1, old_count)))
+                cur_old = int(m.group(1))
+            else:
+                cur_old = 0
+            continue
 
-    return ranges
+        if current_file and cur_old > 0:
+            if line.startswith("-"):
+                changed_lines[current_file].add(cur_old)
+                cur_old += 1
+            elif line.startswith("+"):
+                pass
+            elif line.startswith(" "):
+                cur_old += 1
+            elif line.startswith(r"\ No"):
+                pass
+
+    return changed_lines
 
 
 def _to_finding_dict(finding: Any) -> dict[str, Any]:
@@ -160,10 +184,7 @@ def match_and_resolve_findings(
     prior_dicts = [_to_finding_dict(f) for f in prior_findings]
     delta_dicts = [_to_finding_dict(f) for f in delta_findings]
 
-    from app.subagents.auditor import build_diff_grounding
-
-    grounding = build_diff_grounding(delta_diff) if delta_diff else None
-    modified_ranges = _extract_diff_modified_ranges(delta_diff) if delta_diff else {}
+    changed_old_lines = _extract_diff_changed_old_lines(delta_diff) if delta_diff else {}
 
     # Build lookup of review threads by path and line
     thread_by_finding: dict[str, dict[str, Any]] = {}
@@ -208,18 +229,12 @@ def match_and_resolve_findings(
         is_thread_outdated = bool(matching_thread and matching_thread.get("isOutdated"))
         is_thread_already_resolved = bool(matching_thread and matching_thread.get("isResolved"))
 
-        # Check if anchor was modified/removed in delta diff
+        # Check if anchor was modified/removed in delta diff (checking only changed old-side lines)
         anchor_modified = False
-        if grounding and p_path in grounding.line_index:
-            lines_modified = grounding.line_index[p_path]
-            if any(line_no in lines_modified for line_no in range(p_s, p_e + 1)):
+        if p_path in changed_old_lines:
+            file_changed = changed_old_lines[p_path]
+            if any(line_no in file_changed for line_no in range(p_s, p_e + 1)):
                 anchor_modified = True
-
-        if not anchor_modified and p_path in modified_ranges:
-            for r_s, r_e in modified_ranges[p_path]:
-                if max(p_s, r_s) <= min(p_e, r_e):
-                    anchor_modified = True
-                    break
 
         touched = anchor_modified or is_thread_outdated or is_thread_already_resolved
 

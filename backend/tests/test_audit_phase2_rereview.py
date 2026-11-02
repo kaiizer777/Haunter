@@ -693,3 +693,47 @@ async def test_pipeline_re_review_fetch_threads_failure_resilience():
         pub_kwargs = mock_pub.call_args.kwargs
         assert pub_kwargs["review_id"] == 555
         assert pub_kwargs["active_findings"] is not None
+
+
+def test_finding_matching_retained_when_in_unchanged_hunk_context():
+    from app.subagents.audit_matcher import match_and_resolve_findings
+
+    prior_findings = [
+        {
+            "id": "f-ctx",
+            "file_path": "service.py",
+            "line_start": 5,
+            "line_end": 7,
+            "title": "Old bug in context",
+            "category": "correctness",
+            "severity": "MEDIUM",
+        }
+    ]
+
+    # Delta diff hunk touches line 1-2, but lines 3-10 are untouched context
+    delta_diff = """diff --git a/service.py b/service.py
+--- a/service.py
++++ b/service.py
+@@ -1,8 +1,8 @@
+-old line 1
++new line 1
+ context line 2
+ context line 3
+ context line 4
+ context line 5
+ context line 6
+ context line 7
+ context line 8
+"""
+
+    res = match_and_resolve_findings(
+        prior_findings=prior_findings,
+        delta_findings=[],
+        delta_diff=delta_diff,
+        review_threads=[],
+    )
+
+    # Finding on lines 5-7 was in unchanged context: NOT touched, must be RETAINED!
+    assert len(res.resolved_findings) == 0
+    assert len(res.retained_findings) == 1
+    assert res.retained_findings[0]["id"] == "f-ctx"
