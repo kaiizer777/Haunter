@@ -344,6 +344,39 @@ _SUGGESTED_CODE_CROSS_FILE_PATHS = frozenset(
 )
 
 
+def is_cross_file_finding(finding: Any) -> bool:
+    """Determine if a finding applies across multiple files."""
+    if (
+        getattr(finding, "cross_file", False)
+        or getattr(finding, "is_cross_file", False)
+        or getattr(finding, "multi_file", False)
+    ):
+        return True
+
+    file_path = getattr(finding, "file_path", "")
+    if not isinstance(file_path, str) or not file_path.strip():
+        return True
+
+    if any(sep in file_path for sep in (",", ";", "\\n")):
+        return True
+
+    cleaned_path = file_path.strip().lower()
+    if cleaned_path in _SUGGESTED_CODE_CROSS_FILE_PATHS:
+        return True
+
+    suggested_fix = getattr(finding, "suggested_fix", None)
+    if isinstance(suggested_fix, str) and suggested_fix.strip():
+        diff_git_count = len(re.findall(r"^diff --git ", suggested_fix, re.MULTILINE))
+        if diff_git_count > 1:
+            return True
+        file_headers = re.findall(r"^\\+\\+\\+ (?:b/)?(.*)$", suggested_fix, re.MULTILINE)
+        distinct_files = {f.strip() for f in file_headers if f.strip() not in ("/dev/null", "dev/null", "")}
+        if len(distinct_files) > 1:
+            return True
+
+    return False
+
+
 def should_show_suggested_code(
     finding: Any,
     suggested_code: Optional[str] = None,
@@ -359,19 +392,7 @@ def should_show_suggested_code(
     shared by :mod:`app.github.audit_publisher` and
     :mod:`app.subagents.code_reviewer`; both modules delegate to it.
     """
-    if (
-        getattr(finding, "cross_file", False)
-        or getattr(finding, "is_cross_file", False)
-        or getattr(finding, "multi_file", False)
-    ):
-        return False
-
-    file_path = getattr(finding, "file_path", "")
-    if not isinstance(file_path, str) or not file_path.strip():
-        return False
-    if any(sep in file_path for sep in (",", ";", "\n")):
-        return False
-    if file_path.strip().lower() in _SUGGESTED_CODE_CROSS_FILE_PATHS:
+    if is_cross_file_finding(finding):
         return False
 
     code = suggested_code
