@@ -434,6 +434,135 @@ class AuditFinding:
         return self._as_dict()
 
 
+CANONICAL_SEVERITY_MAP: dict[str, str] = {
+    "CRITICAL": "C",
+    "BLOCKER": "C",
+    "C": "C",
+    "HIGH": "H",
+    "H": "H",
+    "MEDIUM": "M",
+    "WARNING": "M",
+    "M": "M",
+    "LOW": "L",
+    "NOTE": "L",
+    "L": "L",
+    "IMPROVEMENT": "I",
+    "INFORMATIONAL": "I",
+    "INFO": "I",
+    "I": "I",
+}
+
+
+def normalize_severity(finding_or_severity: Any, *, informational_only: bool = False) -> str:
+    """Map existing AuditSeverity and extended severities to canonical single letters.
+
+    - "CRITICAL", "BLOCKER" -> "C"
+    - "HIGH" -> "H"
+    - "MEDIUM", "WARNING" -> "M"
+    - "LOW", "NOTE" -> "L"
+    - "IMPROVEMENT", "INFORMATIONAL", "INFO", or when informational_only=True -> "I"
+    """
+    if informational_only:
+        return "I"
+
+    if hasattr(finding_or_severity, "informational_only") and getattr(finding_or_severity, "informational_only"):
+        return "I"
+
+    if isinstance(finding_or_severity, Mapping) and finding_or_severity.get("informational_only"):
+        return "I"
+
+    if hasattr(finding_or_severity, "severity"):
+        raw = getattr(finding_or_severity, "severity")
+    elif isinstance(finding_or_severity, Mapping):
+        raw = finding_or_severity.get("severity")
+    elif isinstance(finding_or_severity, str):
+        raw = finding_or_severity
+    else:
+        raw = str(finding_or_severity or "")
+
+    key = str(raw or "").strip().upper()
+    return CANONICAL_SEVERITY_MAP.get(key, "L")
+
+
+def _finding_sort_key(f: Any) -> tuple[int, int]:
+    """Sort key for findings: confidence descending (-conf), then line_start ascending."""
+    if hasattr(f, "confidence"):
+        conf = getattr(f, "confidence", 0) or 0
+    elif isinstance(f, Mapping):
+        conf = f.get("confidence", 0) or 0
+    else:
+        conf = 0
+
+    if hasattr(f, "line_start"):
+        line = getattr(f, "line_start", 0) or 0
+    elif isinstance(f, Mapping):
+        line = f.get("line_start", 0) or 0
+    else:
+        line = 0
+
+    return (-int(conf), int(line))
+
+
+def select_scoped_findings(
+    findings: Sequence[Any],
+    limit: int = 8,
+) -> tuple[list[Any], dict[str, int]]:
+    """Scoped posting algorithm.
+
+    - Bucket findings by canonical severity (C, H, M, L, I), sorted within each
+      bucket by confidence descending, then line_start ascending.
+    - Rule 1: Always include all Critical findings.
+    - Rule 2: Always include all High findings.
+    - Rule 3: If len(C) + len(H) >= limit (8), post ONLY all Critical and High
+      findings (0 M, 0 L, 0 I).
+    - Rule 4: If len(C) + len(H) < limit (8), fill remaining slots up to limit
+      in strict priority order: Medium -> Low -> Improvement/Informational.
+    - Rule 5: Hard cap is exactly min(limit, total) unless Critical + High alone
+      exceed limit.
+    - Return (posted_findings, posted_counts) where posted_counts tracks the count
+      of findings that were ACTUALLY posted.
+    """
+    buckets: dict[str, list[Any]] = {
+        "C": [],
+        "H": [],
+        "M": [],
+        "L": [],
+        "I": [],
+    }
+    for f in findings:
+        sev = normalize_severity(f)
+        buckets.setdefault(sev, []).append(f)
+
+    for sev in ("C", "H", "M", "L", "I"):
+        buckets[sev].sort(key=_finding_sort_key)
+
+    c_findings = buckets["C"]
+    h_findings = buckets["H"]
+    c_h_count = len(c_findings) + len(h_findings)
+
+    if c_h_count >= limit:
+        selected = list(c_findings) + list(h_findings)
+    else:
+        selected = list(c_findings) + list(h_findings)
+        remaining = limit - len(selected)
+        for sev in ("M", "L", "I"):
+            if remaining <= 0:
+                break
+            take = buckets[sev][:remaining]
+            selected.extend(take)
+            remaining -= len(take)
+
+    posted_counts: dict[str, int] = {
+        "C": sum(1 for f in selected if normalize_severity(f) == "C"),
+        "H": sum(1 for f in selected if normalize_severity(f) == "H"),
+        "M": sum(1 for f in selected if normalize_severity(f) == "M"),
+        "L": sum(1 for f in selected if normalize_severity(f) == "L"),
+        "I": sum(1 for f in selected if normalize_severity(f) == "I"),
+    }
+    return selected, posted_counts
+
+
+
 @dataclass
 class AuditResult:
     audit_id: str
