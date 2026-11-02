@@ -2763,10 +2763,14 @@ def test_read_only_permission_allowlist_is_closed():
     auditor_credentials._validate_read_only_permissions(
         {"permissions": {**read_only, "contents": "write", "pull_requests": "write"}}
     )
+    # Single-app setup: the auditor shares the write App installation, whose
+    # token carries `issues:write` (accepted tradeoff per the owner).
+    auditor_credentials._validate_read_only_permissions(
+        {"permissions": {**read_only, "issues": "write"}}
+    )
 
     rejected = [
         {"permissions": {**read_only, "administration": "read"}},
-        {"permissions": {**read_only, "issues": "write"}},
         {"permissions": {**read_only, "metadata": "admin"}},
         {"permissions": {**read_only, "contents": None}},
         {"permissions": {"contents": "read", "metadata": "read"}},
