@@ -486,8 +486,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Base commit SHA (40 hex chars). Defaults to a synthetic SHA derived "
-            "from repo/PR/base-ref. Pass the real base SHA when triggering an "
-            "auditor PR audit so intake pins match live GitHub."
+            "from repo/PR/base-ref. Pass the real base SHA alongside --sha when "
+            "triggering an auditor PR audit so intake pins match live GitHub."
         ),
     )
     parser.add_argument("--base-ref", default="main", help="Base branch (default: main)")
