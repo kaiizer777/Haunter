@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SelectDropdown, SelectOption } from "@/components/ui/select-dropdown";
 import { Modal } from "@/components/ui/modal";
-import { api, ModelConfigOut, RepoOut, ApiError, AvailableModelItem, CustomProviderCompat } from "@/lib/api";
+import { api, ModelConfigOut, ApiError, AvailableModelItem, CustomProviderCompat } from "@/lib/api";
 
 type ConfigModelItem = AvailableModelItem & { provider: string };
 
@@ -588,19 +588,13 @@ function getModelSpec(
 export default function ModelConfigPage() {
   const { user } = useAuth();
   const isAdmin = Boolean(user?.is_admin);
-  const hasInitializedScopeRef = useRef(false);
   const activeFetchControllerRef = useRef<AbortController | null>(null);
   const activeValidateControllerRef = useRef<AbortController | null>(null);
   const activeValidateRequestRef = useRef<number>(0);
 
-  const [repos, setRepos] = useState<RepoOut[]>([]);
-  const [selectedScope, setSelectedScope] = useState<"global" | "repo">(() =>
-    (user?.is_admin === false ? "repo" : "global")
-  );
-  const [selectedRepoId, setSelectedRepoId] = useState<string>("");
+  // Model config is global-only (issue #226): no per-repo overrides.
 
   const [activeConfig, setActiveConfig] = useState<ModelConfigOut | null>(null);
-  const [globalConfig, setGlobalConfig] = useState<ModelConfigOut | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>("opencode_go");
   const [selectedModel, setSelectedModel] = useState<string>("deepseek-v4.1-flash");
   const [modelOptionsByProvider, setModelOptionsByProvider] = useState<
@@ -618,7 +612,6 @@ export default function ModelConfigPage() {
 
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isResetting, setIsResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
@@ -678,26 +671,6 @@ export default function ModelConfigPage() {
       .catch(() => {});
   }, [isAdmin]);
 
-  // Load repos on mount
-  useEffect(() => {
-    api
-      .getRepos()
-      .then((data) => {
-        setRepos(data);
-        if (data.length > 0) {
-          setSelectedRepoId(data[0].id);
-        }
-      })
-      .catch(() => {});
-  }, [user]);
-
-  // If user auth resolves after repos have loaded
-  useEffect(() => {
-    if (!hasInitializedScopeRef.current && user && !user.is_admin && repos.length > 0) {
-      setSelectedScope("repo");
-      hasInitializedScopeRef.current = true;
-    }
-  }, [user, repos]);
 
   const fetchActiveConfig = useCallback(async (isManualRefresh = false) => {
     if (!isAdmin) {
@@ -711,9 +684,6 @@ export default function ModelConfigPage() {
     const controller = new AbortController();
     activeFetchControllerRef.current = controller;
 
-    const targetScope = selectedScope;
-    const targetRepoId = selectedRepoId;
-
     if (isManualRefresh) {
       setIsRefreshing(true);
     } else {
@@ -721,45 +691,11 @@ export default function ModelConfigPage() {
     }
     setError(null);
     try {
-      // Always resolve the platform default so repo scope can show
-      // override-vs-inherit badges and offer a 1-click reset.
-      let globalCfg: ModelConfigOut | null = null;
-      try {
-        globalCfg = await api.getModelConfig(undefined, {
-          signal: controller.signal,
-          silent: true,
-        });
-        if (controller.signal.aborted) return;
-        setGlobalConfig(globalCfg);
-      } catch (gErr: unknown) {
-        if (gErr instanceof ApiError && (gErr.status === 403 || /admin/i.test(gErr.message))) {
-          if (controller.signal.aborted) return;
-          setGlobalConfig(null);
-        } else {
-          throw gErr;
-        }
-      }
-
-      if (targetScope === "repo" && targetRepoId) {
-        const repoCfg = await api.getModelConfig(targetRepoId, {
-          signal: controller.signal,
-          silent: true,
-        });
-        if (controller.signal.aborted) return;
-        setActiveConfig(repoCfg);
-        setSelectedProvider(repoCfg.provider);
-        setSelectedModel(repoCfg.model_name);
-      } else if (globalCfg) {
-        setActiveConfig(globalCfg);
-        setSelectedProvider(globalCfg.provider);
-        setSelectedModel(globalCfg.model_name);
-      } else if (targetScope === "global") {
-        // Global platform default is unavailable here (non-admin 403):
-        // clear stale repo state instead of showing it under Global scope.
-        setActiveConfig(null);
-        setSelectedProvider("opencode_go");
-        setSelectedModel("deepseek-v4.1-flash");
-      }
+      const globalCfg = await api.getModelConfig({ signal: controller.signal, silent: true });
+      if (controller.signal.aborted) return;
+      setActiveConfig(globalCfg);
+      setSelectedProvider(globalCfg.provider);
+      setSelectedModel(globalCfg.model_name);
     } catch (err: unknown) {
       if (controller.signal.aborted) return;
       if (err instanceof ApiError) {
@@ -773,15 +709,8 @@ export default function ModelConfigPage() {
         setIsRefreshing(false);
       }
     }
-  }, [selectedScope, selectedRepoId, isAdmin]);
+  }, [isAdmin]);
 
-  // Non-admins auto-switch to repo scope; global controls stay locked.
-  useEffect(() => {
-    if (user && !user.is_admin && !hasInitializedScopeRef.current) {
-      setSelectedScope("repo");
-      hasInitializedScopeRef.current = true;
-    }
-  }, [user]);
 
   useEffect(() => {
     fetchActiveConfig();
@@ -901,23 +830,13 @@ export default function ModelConfigPage() {
     }
   }, [customName, customCompat, customBaseUrl, customApiKey]);
 
-  const effectiveTargetIsGlobal = selectedScope === "global" || !selectedRepoId;
-  // Non-admin mutation controls are disabled when targeting global scope;
-  // the backend remains authoritative. Repo overrides stay editable.
-  const canMutateTarget = isAdmin || !effectiveTargetIsGlobal;
-
   const handleSaveConfig = useCallback(async () => {
     if (!isAdmin) {
       setError("Inference engine settings are managed by administrators.");
       return;
     }
     if (isSaving) return;
-    if (effectiveTargetIsGlobal && !isAdmin) {
-      setError(
-        "Global platform default can only be modified by administrators. Switch to Repository Override to customize models for your repos."
-      );
-      return;
-    }
+
     setError(null);
     setSaveSuccess(false);
     setIsSaving(true);
@@ -926,21 +845,10 @@ export default function ModelConfigPage() {
       const payload = {
         provider: selectedProvider,
         model_name: selectedModel,
-        repo_id: selectedScope === "repo" ? selectedRepoId || undefined : undefined,
       };
 
       const updated = await api.updateModelConfig(payload);
       setActiveConfig(updated);
-      if (selectedScope === "global") {
-        setGlobalConfig(updated);
-      } else if (selectedRepoId) {
-        // Keep repo override tracking in sync without a full repos refetch.
-        setRepos((prev) =>
-          prev.map((r) =>
-            r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
-          )
-        );
-      }
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 4500);
     } catch (err: unknown) {
@@ -954,69 +862,8 @@ export default function ModelConfigPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [isSaving, effectiveTargetIsGlobal, isAdmin, selectedProvider, selectedModel, selectedScope, selectedRepoId]);
+  }, [isSaving, isAdmin, selectedProvider, selectedModel]);
 
-  // 1-click "Reset to Global Default": apply the platform default
-  // provider/model onto the selected repo scope.
-  const handleResetToGlobalDefault = useCallback(async () => {
-    if (!selectedRepoId || isResetting) return;
-    setError(null);
-    setSaveSuccess(false);
-    setIsResetting(true);
-    try {
-      if (globalConfig) {
-        const updated = await api.updateModelConfig({
-          provider: globalConfig.provider,
-          model_name: globalConfig.model_name,
-          repo_id: selectedRepoId,
-        });
-        setActiveConfig(updated);
-        setSelectedProvider(updated.provider);
-        setSelectedModel(updated.model_name);
-        setRepos((prev) =>
-          prev.map((r) =>
-            r.id === selectedRepoId ? { ...r, active_model_config_id: updated.id } : r
-          )
-        );
-      } else {
-        // Global default is not readable here (non-admin 403): drop the
-        // repo override server-side so the repo inherits the default.
-        await api.deleteRepoModelConfig(selectedRepoId);
-        setRepos((prev) =>
-          prev.map((r) =>
-            r.id === selectedRepoId ? { ...r, active_model_config_id: null } : r
-          )
-        );
-        await fetchActiveConfig(true);
-      }
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 4500);
-    } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setError(err.message);
-      } else {
-        setError("Failed to reset repo to the global default.");
-      }
-    } finally {
-      setIsResetting(false);
-    }
-  }, [globalConfig, selectedRepoId, isResetting, fetchActiveConfig]);
-
-  // Repo scope badge state: custom override vs inheriting platform default.
-  // Derived from the repo response scope so non-admin overrides still read
-  // as overrides when the global default is unreadable (403). Falls back to
-  // value comparison for responses without scope metadata.
-  const isRepoCustomOverride = useMemo(() => {
-    if (selectedScope !== "repo" || !activeConfig) return false;
-    if (typeof activeConfig.scope === "string" && activeConfig.scope) {
-      return activeConfig.scope === "repo";
-    }
-    if (!globalConfig) return false;
-    return (
-      activeConfig.provider !== globalConfig.provider ||
-      activeConfig.model_name !== globalConfig.model_name
-    );
-  }, [selectedScope, activeConfig, globalConfig]);
 
   const isDirty = useMemo(() => {
     if (!activeConfig) return false;
@@ -1026,7 +873,7 @@ export default function ModelConfigPage() {
     );
   }, [activeConfig, selectedProvider, selectedModel]);
 
-  const canSave = !isPending && isDirty && !(effectiveTargetIsGlobal && !isAdmin);
+  const canSave = !isPending && isDirty && isAdmin;
   // Keyboard shortcut handlers: '/' to search, 'r' to sync, Cmd+S to save
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1088,7 +935,7 @@ export default function ModelConfigPage() {
           badgeClass: "bg-amber-400/10 border-amber-400/30 text-amber-300",
         }
       : PROVIDER_METADATA.opencode_go);
-  const currentRepo = repos.find((r) => r.id === selectedRepoId);
+  // Model config is global-only; no per-repo target.
 
   const providerDropdownOptions = useMemo<SelectOption[]>(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -1243,7 +1090,7 @@ export default function ModelConfigPage() {
   return (
     <AppLayout
       title="Model & Provider Configuration"
-      subtitle="Manage and hot-swap active LLM inference engines globally or per repository"
+      subtitle="Manage and hot-swap the active LLM inference engine globally"
       actions={
         <div className="flex items-center gap-2.5">
           {activeConfig && (
@@ -1270,13 +1117,13 @@ export default function ModelConfigPage() {
             >
               {isPending ? (
                 <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
-              ) : effectiveTargetIsGlobal && !isAdmin ? (
+              ) : !isAdmin ? (
                 <Lock className="h-3.5 w-3.5 text-zinc-400" />
               ) : (
                 <Check className="h-3.5 w-3.5 text-zinc-950 stroke-[2.5]" />
               )}
-              <span>{effectiveTargetIsGlobal && !isAdmin ? "Admin Only" : "Save Changes"}</span>
-              {!(effectiveTargetIsGlobal && !isAdmin) && (
+              <span>{!isAdmin ? "Admin Only" : "Save Changes"}</span>
+              {isAdmin && (
                 <kbd className="hidden sm:inline-block rounded bg-zinc-950/20 px-1 py-0.2 text-[10px] font-mono text-zinc-900 border border-zinc-950/30">
                   ⌘S
                 </kbd>
@@ -1330,6 +1177,7 @@ export default function ModelConfigPage() {
             </span>
           </div>
         )}
+        {/* Model config is global-only (issue #226). */}
 
         {/* MAIN HERO: Provider Tabs + Models Grid */}
         <div className="relative rounded-xl border-t border-t-zinc-600/60 border-x border-x-zinc-800/80 border-b border-b-zinc-950 bg-gradient-to-b from-[#111115]/95 via-[#0d0d10]/95 to-[#09090c]/95 backdrop-blur-sm p-3.5 sm:p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(0,0,0,0.4),0_8px_32px_rgba(0,0,0,0.5)] space-y-3.5">
@@ -1401,7 +1249,7 @@ export default function ModelConfigPage() {
                 placeholder={activeProviderMeta.name}
                 ignoreClickOutsideRef={searchInputRef}
                 buttonClassName="min-w-[175px] sm:min-w-[195px] h-7.5 font-mono text-[11px] bg-zinc-900/80 border-zinc-700/80 hover:border-zinc-600 text-zinc-200"
-                disabled={isPending || !canMutateTarget}
+                disabled={isPending || !isAdmin}
               />
               {isAdmin && (
                 <Button
@@ -1611,11 +1459,11 @@ export default function ModelConfigPage() {
                     <div
                       key={`${m.provider || selectedProvider}:${m.id}`}
                       role="button"
-                      tabIndex={isPending || !canMutateTarget ? -1 : 0}
+                      tabIndex={isPending || !isAdmin ? -1 : 0}
                       aria-pressed={isSelected}
-                      aria-disabled={isPending || !canMutateTarget}
+                      aria-disabled={isPending || !isAdmin}
                       onClick={() => {
-                        if (!isPending && canMutateTarget) {
+                        if (!isPending && isAdmin) {
                           setSelectedModel(m.id);
                           if (m.provider && m.provider !== selectedProvider) {
                             setSelectedProvider(m.provider);
@@ -1623,7 +1471,7 @@ export default function ModelConfigPage() {
                         }
                       }}
                       onKeyDown={(e) => {
-                        if ((e.key === "Enter" || e.key === " ") && !isPending && canMutateTarget) {
+                        if ((e.key === "Enter" || e.key === " ") && !isPending && isAdmin) {
                           e.preventDefault();
                           setSelectedModel(m.id);
                           if (m.provider && m.provider !== selectedProvider) {
@@ -1814,7 +1662,7 @@ export default function ModelConfigPage() {
                 size="sm"
                 className={cn(
                   "relative h-7.5 px-3.5 py-1 font-mono font-bold text-[10.5px] rounded-[5px] transition-all select-none",
-                  effectiveTargetIsGlobal && !isAdmin
+                  !isAdmin
                     ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
                     : isDirty
                     ? "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] cursor-pointer"
@@ -1826,7 +1674,7 @@ export default function ModelConfigPage() {
                     <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
                     <span>Saving...</span>
                   </span>
-                ) : effectiveTargetIsGlobal && !isAdmin ? (
+                ) : !isAdmin ? (
                   <span className="flex items-center gap-2 text-zinc-400 font-medium">
                     <Lock className="h-3.5 w-3.5 text-zinc-400" />
                     <span>Admin Only</span>
@@ -1882,7 +1730,7 @@ export default function ModelConfigPage() {
                   disabled={!canSave}
                   className={cn(
                     "h-7 px-3 text-[10.5px] font-mono font-bold rounded-[4px] transition-all select-none flex items-center gap-1.5",
-                    effectiveTargetIsGlobal && !isAdmin
+                    !isAdmin
                       ? "bg-zinc-800/90 text-zinc-400 border border-zinc-700/60 cursor-not-allowed"
                       : "bg-gradient-to-b from-amber-400 via-amber-450 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 border-t border-t-amber-200/60 border-x border-x-amber-400/80 border-b border-b-amber-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.4),0_2px_8px_rgba(245,158,11,0.35)] active:translate-y-[0.5px] cursor-pointer"
                   )}
@@ -1892,7 +1740,7 @@ export default function ModelConfigPage() {
                       <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-950" />
                       <span>Saving...</span>
                     </>
-                  ) : effectiveTargetIsGlobal && !isAdmin ? (
+                  ) : !isAdmin ? (
                     <>
                       <Lock className="h-3.5 w-3.5 text-zinc-400" />
                       <span>Admin Only</span>

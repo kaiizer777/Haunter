@@ -13,7 +13,7 @@ Covers:
 - PUT /config/model with invalid model returns 422 (incl. retired providers).
 - Unauthenticated requests return 401.
 - GET /config/model (global, no repo_id) is admin-only; returns active global config or env default.
-- Per-repo model config endpoints (GET/PUT /config/model/{repo_id}) enforce tenant ownership (404 on unowned repo).
+- Global model config only (no per-repo overrides).
 """
 
 from __future__ import annotations
@@ -237,7 +237,6 @@ async def test_put_model_config_active_row_invariant(
         provider="opencode_go",
         model_name="deepseek-v4.1-flash",
         base_url="https://opencode.ai/inference/go/openai/v1",
-        scope="global",
         is_active=True,
     )
     db.add(initial_config)
@@ -331,60 +330,6 @@ async def test_get_global_model_config_forbidden_for_non_admin(
     assert "Admin permissions required" in resp.json()["detail"]
 
 
-# Per-repo model config endpoints
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_repo_model_config_ownership_enforced(
-    db: AsyncSession, user_factory, make_auth_client
-):
-    """
-    Repo model config is admin-only: non-admins get 403 on repo reads/writes.
-    Admins still get 404 on repos they do not own (existence oracle guard).
-    """
-    await truncate_all(db)
-    user_a = await user_factory(github_id=920, username="user_a")
-    user_b = await user_factory(github_id=921, username="user_b")
-
-    # Repo owned by user_a
-    repo_a = Repo(
-        user_id=user_a.id,
-        owner="owner-a",
-        name="repo-a",
-        default_branch="main",
-    )
-    db.add(repo_a)
-    await db.commit()
-
-    # User B is a non-admin: repo reads/writes are 403 regardless of ownership.
-    client_b = make_auth_client(user_b.id)
-    async with client_b:
-        get_resp = await client_b.get(f"/config/model/{repo_a.id}")
-        assert get_resp.status_code == 403
-
-        put_resp = await client_b.put(
-            f"/config/model/{repo_a.id}",
-            json={"provider": "groq", "model_name": "openai/gpt-oss-120b"},
-        )
-        assert put_resp.status_code == 403
-
-    # An admin still gets 404 on a repo they do not own (no existence oracle).
-    admin = await user_factory(role="admin")
-    client_admin = make_auth_client(admin.id)
-    async with client_admin:
-        get_resp = await client_admin.get(f"/config/model/{repo_a.id}")
-        assert get_resp.status_code == 404
-        assert get_resp.json() == {"detail": "Repo not found"}
-
-        put_resp = await client_admin.put(
-            f"/config/model/{repo_a.id}",
-            json={"provider": "groq", "model_name": "llama-3.3-70b-versatile"},
-        )
-        assert put_resp.status_code == 404
-        assert put_resp.json() == {"detail": "Repo not found"}
-
-
 @pytest.mark.asyncio
 async def test_put_model_config_persisted_role_succeeds(
     db: AsyncSession, user_factory, make_auth_client
@@ -402,138 +347,6 @@ async def test_put_model_config_persisted_role_succeeds(
     assert resp.json()["model_name"] == "deepseek-v4.1-flash"
     assert resp.json()["is_active"] is True
 
-
-# ---------------------------------------------------------------------------
-# Phase 3.1 — Per-Repo vs Global isolation
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_put_global_preserves_repo_overrides(
-    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
-):
-    """
-    PUT /config/model (global) must deactivate ONLY scope='global' rows.
-
-    Regression for future.md §3.2 Issue 1: the old
-    UPDATE ... WHERE is_active=true wiped repo-specific active configs.
-    """
-    await truncate_all(db)
-    admin_user = await user_factory(role="admin")
-    admin_user_id = admin_user.id
-    client = make_auth_client(admin_user_id)
-    monkeypatch.setattr(settings, "admin_user_id", str(admin_user_id))
-
-    # Seed one active global config.
-    global_cfg = ModelConfig(
-        provider="opencode_go",
-        model_name="deepseek-v4.1-flash",
-        base_url="https://opencode.ai/inference/go/openai/v1",
-        is_active=True,
-        scope="global",
-    )
-    db.add(global_cfg)
-    await db.commit()
-
-    # Seed one repo with its own active repo-scoped override.
-    repo = Repo(
-        user_id=admin_user.id,
-        owner="acme",
-        name="service",
-    )
-    db.add(repo)
-    await db.commit()
-    await db.refresh(repo)
-    repo_id = repo.id
-
-    repo_cfg = ModelConfig(
-        provider="groq",
-        model_name="openai/gpt-oss-120b",
-        base_url="https://api.groq.com/openai/v1",
-        is_active=True,
-        scope="repo",
-        repo_id=repo_id,
-        user_id=admin_user.id,
-    )
-    db.add(repo_cfg)
-    await db.commit()
-    await db.refresh(repo_cfg)
-    repo.active_model_config_id = repo_cfg.id
-    await db.commit()
-
-    # Global switch — must not touch the repo override.
-    async with client:
-        resp = await client.put(
-            "/config/model", json={"provider": "groq", "model_name": "llama-3.3-70b-versatile"}
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["scope"] == "global"
-
-    global_cfg_id = global_cfg.id
-    repo_cfg_id = repo_cfg.id
-    db.expire_all()
-    result = await db.execute(select(ModelConfig))
-    rows = {str(c.id): c for c in result.scalars().all()}
-
-    # Old global deactivated, new global active.
-    assert rows[str(global_cfg_id)].is_active is False
-    assert rows[str(global_cfg_id)].scope == "global"
-    assert rows[resp.json()["id"]].is_active is True
-    assert rows[resp.json()["id"]].scope == "global"
-
-    # Repo override untouched.
-    assert rows[str(repo_cfg_id)].is_active is True
-    assert rows[str(repo_cfg_id)].scope == "repo"
-    assert rows[str(repo_cfg_id)].model_name == "openai/gpt-oss-120b"
-
-    # Repo GET still resolves the override, global GET resolves the new default.
-    client2 = make_auth_client(admin_user_id)
-    async with client2:
-        repo_resp = await client2.get(f"/config/model?repo_id={repo_id}")
-        assert repo_resp.status_code == 200
-        assert repo_resp.json()["model_name"] == "openai/gpt-oss-120b"
-        assert repo_resp.json()["scope"] == "repo"
-
-        global_resp = await client2.get("/config/model")
-        assert global_resp.status_code == 200
-        assert global_resp.json()["model_name"] == "llama-3.3-70b-versatile"
-        assert global_resp.json()["scope"] == "global"
-
-
-@pytest.mark.asyncio
-async def test_put_repo_stamps_repo_scope(
-    db: AsyncSession, user_factory, make_auth_client
-):
-    """PUT /config/model/{repo_id} stamps scope='repo' + repo_id/user_id pins."""
-    await truncate_all(db)
-    user = await user_factory(role="admin")
-    repo = Repo(user_id=user.id, owner="acme", name="api")
-    db.add(repo)
-    await db.commit()
-    await db.refresh(repo)
-
-    client = make_auth_client(user.id)
-    async with client:
-        resp = await client.put(
-            f"/config/model/{repo.id}",
-            json={"provider": "groq", "model_name": "llama-3.1-8b-instant"},
-        )
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["scope"] == "repo"
-    assert data["repo_id"] == str(repo.id)
-    assert data["user_id"] == str(user.id)
-
-    repo_id = repo.id
-    db.expire_all()
-    row = (
-        await db.execute(select(ModelConfig).where(ModelConfig.id == data["id"]))
-    ).scalar_one()
-    assert row.scope == "repo"
-    assert row.repo_id == repo_id
-    assert row.is_active is True
 
 @pytest.mark.asyncio
 async def test_put_global_model_config_allowed_for_admin_github_username(
@@ -573,72 +386,6 @@ async def test_put_global_model_config_forbidden_when_no_admin_configured(
     assert "Admin permissions required" in resp.json()["detail"]
 
 
-@pytest.mark.asyncio
-async def test_put_repo_model_config_does_not_mutate_other_user_config(
-    db: AsyncSession, user_factory, make_auth_client
-):
-    """PUT /config/model/{repo_id} does not mutate a config owned by another user or repo (#205)."""
-    await truncate_all(db)
-    user_a = await user_factory(role="admin", github_id=901, username="user_a")
-    user_b = await user_factory(role="admin", github_id=902, username="user_b")
-
-    repo_a = Repo(user_id=user_a.id, owner="user-a", name="repo-a")
-    db.add(repo_a)
-    await db.commit()
-    await db.refresh(repo_a)
-
-    # User A creates a repo config
-    cfg_a = ModelConfig(
-        provider="groq",
-        model_name="llama-3.1-8b-instant",
-        base_url="https://api.groq.com/openai/v1",
-        is_active=True,
-        scope="repo",
-        repo_id=repo_a.id,
-        user_id=user_a.id,
-    )
-    db.add(cfg_a)
-    await db.commit()
-    await db.refresh(cfg_a)
-
-    # User B has repo_b, maliciously referencing cfg_a.id
-    repo_b = Repo(
-        user_id=user_b.id,
-        owner="user-b",
-        name="repo-b",
-        active_model_config_id=cfg_a.id,
-    )
-    db.add(repo_b)
-    await db.commit()
-    await db.refresh(repo_b)
-
-    # User B updates repo_b's model config
-    client_b = make_auth_client(user_b.id)
-    async with client_b:
-        resp = await client_b.put(
-            f"/config/model/{repo_b.id}",
-            json={"provider": "groq", "model_name": "openai/gpt-oss-120b"},
-        )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["provider"] == "groq"
-    assert data["model_name"] == "openai/gpt-oss-120b"
-    # Ensure a NEW config was created for repo_b, rather than mutating user A's cfg_a!
-    assert data["id"] != str(cfg_a.id)
-
-    # Verify user A's config was NOT modified
-    user_a_id = user_a.id
-    repo_a_id = repo_a.id
-    cfg_a_id = cfg_a.id
-    db.expire_all()
-    reloaded_cfg_a = (
-        await db.execute(select(ModelConfig).where(ModelConfig.id == cfg_a_id))
-    ).scalar_one()
-    assert reloaded_cfg_a.provider == "groq"
-    assert reloaded_cfg_a.model_name == "llama-3.1-8b-instant"
-    assert reloaded_cfg_a.user_id == user_a_id
-    assert reloaded_cfg_a.repo_id == repo_a_id
-
 
 @pytest.mark.asyncio
 async def test_global_read_falls_back_when_active_row_uses_retired_provider(
@@ -659,7 +406,6 @@ async def test_global_read_falls_back_when_active_row_uses_retired_provider(
         model_name="gpt-4o",
         base_url="https://api.openai.com/v1",
         is_active=True,
-        scope="global",
     )
     db.add(legacy)
     await db.commit()
@@ -674,41 +420,6 @@ async def test_global_read_falls_back_when_active_row_uses_retired_provider(
     assert data["provider"] in ("opencode_go", "groq")
 
 
-@pytest.mark.asyncio
-async def test_repo_read_falls_back_when_override_uses_retired_provider(
-    db: AsyncSession, user_factory, make_auth_client
-):
-    """GET /config/model?repo_id= skips repo overrides with retired providers
-    and resolves the global default instead."""
-    await truncate_all(db)
-    user = await user_factory(role="admin")
-    client = make_auth_client(user.id)
-
-    repo = Repo(user_id=user.id, owner="acme", name="legacy")
-    db.add(repo)
-    await db.commit()
-    await db.refresh(repo)
-
-    legacy_override = ModelConfig(
-        provider="anthropic",
-        model_name="claude-sonnet-4-5",
-        base_url="https://api.anthropic.com/v1",
-        is_active=True,
-        scope="repo",
-        repo_id=repo.id,
-        user_id=user.id,
-    )
-    db.add(legacy_override)
-    await db.commit()
-
-    async with client:
-        resp = await client.get(f"/config/model?repo_id={repo.id}")
-
-    assert resp.status_code == 200
-    data = resp.json()
-    # Retired override is invisible: falls through to env defaults.
-    assert data["provider"] == settings.default_provider
-    assert data["scope"] == "global"
 
 
 def test_default_provider_and_model_are_allowlisted():

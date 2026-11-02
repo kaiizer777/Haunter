@@ -1,6 +1,5 @@
 """Model-hide (backend): non-admins get zero model vocabulary. DB-free."""
 
-import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +9,6 @@ from pydantic import ValidationError
 from app.llm.exceptions import LLMExhaustedFreeTierError
 from app.orchestrator import _format_failure_reason
 from app.routers.model_config import (
-    delete_repo_model_config,
     get_active_model_config_endpoint,
     get_available_models_endpoint,
     update_model_config_endpoint,
@@ -41,29 +39,21 @@ async def test_available_models_non_admin_403() -> None:
     await _expect_403(get_available_models_endpoint(current_user=NON_ADMIN))
 
 
-async def test_repo_read_non_admin_403() -> None:
+async def test_global_read_non_admin_403() -> None:
     await _expect_403(
         get_active_model_config_endpoint(
-            current_user=NON_ADMIN, db=None, repo_id=uuid.uuid4()
+            current_user=NON_ADMIN, db=None
         )
     )
 
 
-async def test_repo_write_non_admin_403() -> None:
+async def test_global_write_non_admin_403() -> None:
     body = ModelConfigUpdate(
-        provider="opencode_go", model_name="deepseek-v4.1-flash", repo_id=uuid.uuid4()
+        provider="opencode_go", model_name="deepseek-v4.1-flash"
     )
     await _expect_403(
         update_model_config_endpoint(
             body=body, current_user=NON_ADMIN, db=None
-        )
-    )
-
-
-async def test_repo_delete_non_admin_403() -> None:
-    await _expect_403(
-        delete_repo_model_config(
-            repo_id=uuid.uuid4(), current_user=NON_ADMIN, db=None
         )
     )
 

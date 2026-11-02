@@ -201,7 +201,6 @@ async def _call_and_parse_pr(
     patch_text: str,
     db: AsyncSession,
     run_id: uuid.UUID,
-    repo_id: Optional[uuid.UUID],
 ) -> tuple[PROutput, dict]:
     """
     Call LLM and parse PROutput. Retry once on ValidationError.
@@ -218,7 +217,6 @@ async def _call_and_parse_pr(
     response = await llm.complete(
         messages=messages,
         db=db,
-        repo_id=repo_id,
         max_tokens=10_000_000,
     )
     content: str = (response.get("content") or "").strip()
@@ -241,7 +239,6 @@ async def _call_and_parse_pr(
     retry_response = await llm.complete(
         messages=retry_messages,
         db=db,
-        repo_id=repo_id,
         max_tokens=10_000_000,
     )
     retry_content: str = (retry_response.get("content") or "").strip()
@@ -314,14 +311,11 @@ async def generate_pr_text(
         PRGenerationError: If LLM fails both attempts.
     """
     t0 = time.monotonic()
-    repo_id: Optional[uuid.UUID] = getattr(run, "repo_id", None)
-
     pr_output, response = await _call_and_parse_pr(
         diagnosis_summary=diagnosis_summary,
         patch_text=verified_attempt.patch_text,
         db=db,
         run_id=run.id,
-        repo_id=repo_id,
     )
 
     latency_ms = int((time.monotonic() - t0) * 1000)

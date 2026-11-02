@@ -1478,7 +1478,6 @@ async def _run_single_perspective(
     ast_summary: str,
     repo_context: str,
     llm: LLMClient,
-    repo_id: Optional[uuid.UUID],
     model_config: Optional[ResolvedModelConfig] = None,
 ) -> PerspectiveResult:
     started = time.monotonic()
@@ -1494,7 +1493,6 @@ async def _run_single_perspective(
     response = await llm.complete(
         messages=messages,
         db=None,
-        repo_id=repo_id,
         model_config=model_config,
         max_tokens=4_096,
     )
@@ -1529,7 +1527,6 @@ async def _run_single_perspective(
         retry_response = await llm.complete(
             messages=retry_messages,
             db=None,
-            repo_id=repo_id,
             model_config=model_config,
             max_tokens=4_096,
         )
@@ -2209,7 +2206,7 @@ async def run_audit(
     else:
         try:
             shared_config = await asyncio.wait_for(
-                get_active_model_config(db=db, repo_id=repo_id),
+                get_active_model_config(db=db),
                 timeout=AUDIT_CONFIG_RESOLVE_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
@@ -2242,7 +2239,6 @@ async def run_audit(
                         ast_summary=ast_summary,
                         repo_context=clean_repo_context,
                         llm=llm,
-                        repo_id=repo_id,
                         model_config=shared_config,
                     ),
                     timeout=PERSPECTIVE_DEADLINE_S,

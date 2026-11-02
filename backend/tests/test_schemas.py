@@ -45,21 +45,17 @@ def test_repo_create_valid() -> None:
     assert repo.name == "Haunter"
     assert repo.default_branch is None
     assert repo.language_hint is None
-    assert repo.active_model_config_id is None
 
 
 def test_repo_create_all_fields() -> None:
-    config_id = uuid.uuid4()
     repo = RepoCreate(
         owner="kaiizer777",
         name="Haunter",
         default_branch="main",
         language_hint="python",
-        active_model_config_id=config_id,
     )
     assert repo.default_branch == "main"
     assert repo.language_hint == "python"
-    assert repo.active_model_config_id == config_id
 
 
 @pytest.mark.parametrize("field", ["owner", "name"])
@@ -130,7 +126,6 @@ def test_repo_create_invalid_owner_and_name_rejected(bad_owner: str, bad_name: s
 def test_repo_out_from_orm_round_trip() -> None:
     repo_id = uuid.uuid4()
     user_id = uuid.uuid4()
-    config_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
 
     repo_orm = Repo(
@@ -141,7 +136,6 @@ def test_repo_out_from_orm_round_trip() -> None:
         default_branch="main",
         language_hint="python",
         github_install_id=12345,
-        active_model_config_id=config_id,
         created_at=now,
     )
 
@@ -151,7 +145,6 @@ def test_repo_out_from_orm_round_trip() -> None:
     assert out.name == "Haunter"
     assert out.default_branch == "main"
     assert out.language_hint == "python"
-    assert out.active_model_config_id == config_id
     assert out.created_at == now
 
 

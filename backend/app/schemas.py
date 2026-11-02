@@ -130,10 +130,6 @@ class RepoCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     default_branch: Optional[str] = Field(None, max_length=255)
     language_hint: Optional[str] = Field(None, max_length=255)
-    active_model_config_id: Optional[uuid.UUID] = Field(
-        default=None,
-        description="Ignored on creation to prevent BOLA / attaching unverified tenant config (#205).",
-    )
     github_install_id: Optional[int] = Field(default=None, gt=0)
 
     @field_validator("owner", "name")
@@ -160,7 +156,6 @@ class RepoOut(BaseModel):
     name: str
     default_branch: Optional[str]
     language_hint: Optional[str]
-    active_model_config_id: Optional[uuid.UUID]
     github_install_id: Optional[int] = None
     auditor_github_install_id: Optional[int] = None
     created_at: datetime
@@ -250,8 +245,7 @@ AllowedModelName = str
 
 class ModelConfigUpdate(BaseModel):
     """
-    Used by PUT /config/model (global) or PUT /config/model/{repo_id} (per-repo)
-    to update active model config.
+    Used by PUT /config/model (global) to update active model config.
     Provider and model_name are validated against provider rules.
     - For 'opencode_go': allows approved OpenCode Go models (OPENCODE_GO_MODELS).
     - For 'groq': allows approved Groq models (GROQ_MODELS).
@@ -260,12 +254,12 @@ class ModelConfigUpdate(BaseModel):
     base_url is derived server-side from the provider allowlist, never from the client.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     provider: AllowedProvider
     model_name: str = Field(
         ..., min_length=1, max_length=255, pattern=r"^[a-zA-Z0-9._/-]+$"
     )
-    repo_id: Optional[uuid.UUID] = None
-
     @model_validator(mode="before")
     @classmethod
     def check_empty_model_name_for_provider(cls, data: Any) -> Any:
@@ -326,9 +320,6 @@ class ModelConfigOut(BaseModel):
     model_name: str
     base_url: str
     is_active: bool
-    scope: str = "global"
-    repo_id: uuid.UUID | None = None
-    user_id: uuid.UUID | None = None
 
     model_config = {"from_attributes": True}
 
@@ -647,7 +638,6 @@ class RepoSettingsOut(BaseModel):
     monitored_branches: list[str] = Field(default_factory=lambda: ["main", "master"])
     ignore_draft_prs: bool = True
     max_cost_per_run_cents: int = 100
-    model_override_scope: str = "inherit"
     working_dir: Optional[str] = None
     test_command: Optional[str] = None
     review_guidelines_text: Optional[str] = None
@@ -711,7 +701,6 @@ class RepoSettingsUpdate(BaseModel):
     monitored_branches: Optional[list[str]] = None
     ignore_draft_prs: Optional[bool] = None
     max_cost_per_run_cents: Optional[int] = None
-    model_override_scope: Optional[str] = None
     working_dir: Optional[str] = None
     test_command: Optional[str] = None
     review_guidelines_text: Optional[str] = None

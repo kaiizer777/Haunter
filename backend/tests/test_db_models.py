@@ -41,7 +41,7 @@ async def test_alembic_head_and_migration_check():
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
     assert len(heads) == 1, f"Expected exactly 1 migration head, found {heads}"
-    assert heads[0] == "d205c3e4f5a6"
+    assert heads[0] == "a9b8c7d6e5f4"
     assert script.get_revision("a4b7c9d2e6f1").down_revision == "f2a9c4e7b1d3"
     assert script.get_revision("b6d8f0a2c4e6").down_revision == "a4b7c9d2e6f1"
     assert script.get_revision("c7a1b2c3d4e5").down_revision == "b6d8f0a2c4e6"
@@ -60,6 +60,7 @@ async def test_alembic_head_and_migration_check():
     assert script.get_revision("d5e6f7a8b9c0").down_revision == "c2d3e4f5a6b7"
     assert script.get_revision("a2b3c4d5e6f7").down_revision == "d5e6f7a8b9c0"
     assert script.get_revision("d205c3e4f5a6").down_revision == "a2b3c4d5e6f7"
+    assert script.get_revision("a9b8c7d6e5f4").down_revision == "d205c3e4f5a6"
 
 
 def test_issue_110_composite_indexes_match_models():
@@ -864,7 +865,6 @@ async def test_model_configs_defaults(db: AsyncSession):
     assert cfg.model_name == "nemotron-3.5-lightning-free"
     assert cfg.base_url == "https://opencode.ai/inference/go/openai/v1"
     assert cfg.is_active is True
-    assert cfg.scope == "global"
     assert cfg.created_at.tzinfo is not None
 
 

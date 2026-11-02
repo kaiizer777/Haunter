@@ -665,7 +665,6 @@ async def _call_and_parse(
     prior_attempt: Optional[Attempt],
     db: AsyncSession,
     run_id: uuid.UUID,
-    repo_id: Optional[uuid.UUID],
     review_feedback: Optional[str] = None,
 ) -> tuple[FixOutput, dict]:
     """
@@ -682,7 +681,6 @@ async def _call_and_parse(
     response = await llm.complete(
         messages=messages,
         db=db,
-        repo_id=repo_id,
         max_tokens=10_000_000,
     )
 
@@ -719,7 +717,6 @@ async def _call_and_parse(
     retry_response = await llm.complete(
         messages=retry_messages,
         db=db,
-        repo_id=repo_id,
         max_tokens=10_000_000,
     )
 
@@ -761,7 +758,6 @@ async def _call_with_format_retry(
     prior_attempt: Optional[Attempt],
     db: AsyncSession,
     run_id: uuid.UUID,
-    repo_id: Optional[uuid.UUID],
     review_feedback: Optional[str] = None,
 ) -> tuple[FixOutput, dict]:
     """Call the LLM, parse, validate patch format. On format failure, retry
@@ -777,7 +773,6 @@ async def _call_with_format_retry(
         prior_attempt=prior_attempt,
         db=db,
         run_id=run_id,
-        repo_id=repo_id,
         review_feedback=review_feedback,
     )
 
@@ -822,7 +817,6 @@ async def _call_with_format_retry(
                 prior_attempt=prior_attempt,
                 db=db,
                 run_id=run_id,
-                repo_id=repo_id,
                 review_feedback=review_feedback,
             )
             # Accumulate this retry's usage into the running totals.
@@ -898,8 +892,6 @@ async def generate_fix(
     # objects may expire and lazy attribute reads raise MissingGreenlet.
     run_id = run.id
     run_diagnosis = run.diagnosis_summary
-    run_repo_id: Optional[uuid.UUID] = run.repo_id
-
     # -------------------------------------------------------------------------
     # 1. Attempt cap check — plain read, no row lock held across the LLM
     # call below (#107). A SELECT ... FOR UPDATE here would serialize
@@ -962,15 +954,12 @@ async def generate_fix(
         # ---------------------------------------------------------------------
         # 3. LLM call + strict Pydantic parse (one retry on ValidationError)
         # ---------------------------------------------------------------------
-        repo_id: Optional[uuid.UUID] = run_repo_id
-
         fix_output, response = await _call_with_format_retry(
             messages=messages,
             diagnosis_summary=diagnosis_summary,
             prior_attempt=prior_attempt,
             db=db,
             run_id=run_id,
-            repo_id=repo_id,
             review_feedback=review_feedback,
         )
 

@@ -15,7 +15,6 @@ import {
   Save,
   GitBranch,
   DollarSign,
-  Workflow,
   ScrollText,
   Gauge,
   Crosshair,
@@ -89,24 +88,6 @@ export const PRESET_OPTIONS: PresetMeta[] = [
     description: "Granular control over all agent triggers, sandbox verification policies, and budget safety bounds.",
     icon: Wrench,
     accentColor: "text-zinc-300 border-zinc-700/50 bg-zinc-800/40",
-  },
-];
-
-const SCOPE_OPTIONS: SelectOption[] = [
-  {
-    value: "inherit",
-    label: "Global Cluster Default (Inherit)",
-    description: "Uses the active LLM engine configured in Model Config dashboard.",
-  },
-  {
-    value: "repo_pinned",
-    label: "Repository Pinned",
-    description: "Locks this repository to its explicitly pinned model configuration.",
-  },
-  {
-    value: "user_preferred",
-    label: "User Preferred",
-    description: "Prioritizes user session preference across all diagnostic tasks.",
   },
 ];
 
@@ -195,7 +176,6 @@ export function RepoSettingsCard({
   );
   const [ignoreDraftPrs, setIgnoreDraftPrs] = useState<boolean>(initialSettings.ignore_draft_prs);
   const [maxCostCents, setMaxCostCents] = useState<number>(initialSettings.max_cost_per_run_cents ?? 100);
-  const [modelScope, setModelScope] = useState<string>(initialSettings.model_override_scope || "inherit");
   const [guidelinesText, setGuidelinesText] = useState<string>(
     initialSettings.review_guidelines_text ?? ""
   );
@@ -230,7 +210,6 @@ export function RepoSettingsCard({
     setBranchesStr((initialSettings.allowed_branches || ["main", "master"]).join(", "));
     setIgnoreDraftPrs(initialSettings.ignore_draft_prs);
     setMaxCostCents(initialSettings.max_cost_per_run_cents ?? 100);
-    setModelScope(initialSettings.model_override_scope || "inherit");
     setGuidelinesText(initialSettings.review_guidelines_text ?? "");
     setStrictness(initialSettings.review_strictness ?? "medium");
     setFocusAreasStr(formatReviewList(initialSettings.review_focus_areas));
@@ -329,7 +308,6 @@ export function RepoSettingsCard({
       branchesStr !== initialBranches ||
       ignoreDraftPrs !== initialSettings.ignore_draft_prs ||
       maxCostCents !== (initialSettings.max_cost_per_run_cents ?? 100) ||
-      modelScope !== (initialSettings.model_override_scope || "inherit") ||
       guidelinesText.trim() !== (initialSettings.review_guidelines_text ?? "").trim() ||
       strictness !== (initialSettings.review_strictness ?? "medium") ||
       JSON.stringify(parsedFocusAreas) !==
@@ -350,7 +328,6 @@ export function RepoSettingsCard({
     branchesStr,
     ignoreDraftPrs,
     maxCostCents,
-    modelScope,
     guidelinesText,
     strictness,
     parsedFocusAreas,
@@ -411,7 +388,6 @@ export function RepoSettingsCard({
       allowed_branches: parsedBranches,
       ignore_draft_prs: ignoreDraftPrs,
       max_cost_per_run_cents: maxCostCents,
-      model_override_scope: modelScope,
       review_guidelines_text: guidelinesText.trim() ? guidelinesText.trim() : null,
       review_strictness: strictness,
       review_focus_areas: parsedFocusAreas,
@@ -444,7 +420,6 @@ export function RepoSettingsCard({
     parsedBranches,
     ignoreDraftPrs,
     maxCostCents,
-    modelScope,
     guidelinesText,
     strictness,
     parsedFocusAreas,
@@ -468,7 +443,6 @@ export function RepoSettingsCard({
     setBranchesStr((initialSettings.allowed_branches || ["main", "master"]).join(", "));
     setIgnoreDraftPrs(initialSettings.ignore_draft_prs);
     setMaxCostCents(initialSettings.max_cost_per_run_cents ?? 100);
-    setModelScope(initialSettings.model_override_scope || "inherit");
     setGuidelinesText(initialSettings.review_guidelines_text ?? "");
     setStrictness(initialSettings.review_strictness ?? "medium");
     setFocusAreasStr(formatReviewList(initialSettings.review_focus_areas));
@@ -858,22 +832,6 @@ export function RepoSettingsCard({
             />
           </div>
 
-          {/* Model Scope */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
-              <Workflow className="h-3.5 w-3.5 text-zinc-400" />
-              Model Override Scope
-            </label>
-            <SelectDropdown
-              value={modelScope}
-              onChange={(val) => {
-                setModelScope(val);
-                if (preset !== "custom") setPreset("custom");
-              }}
-              options={SCOPE_OPTIONS}
-              aria-label="Model Override Scope"
-            />
-          </div>
 
           {/* Max Cost per Run */}
           <div className="space-y-2 p-3.5 rounded-lg border border-zinc-800/60 bg-[#121216]/60">

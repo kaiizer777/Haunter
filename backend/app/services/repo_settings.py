@@ -54,7 +54,6 @@ PRESET_CONFIGURATIONS: dict[str, dict[str, Any]] = {
         "audit_trigger_on_manual_mention": True,
         "ignore_draft_prs": True,
         "max_cost_per_run_cents": 100,
-        "model_override_scope": "inherit",
     },
     "conservative": {
         "preset": "conservative",
@@ -70,7 +69,6 @@ PRESET_CONFIGURATIONS: dict[str, dict[str, Any]] = {
         "audit_trigger_on_manual_mention": True,
         "ignore_draft_prs": True,
         "max_cost_per_run_cents": 50,
-        "model_override_scope": "inherit",
     },
     "standard": {
         "preset": "standard",
@@ -86,7 +84,6 @@ PRESET_CONFIGURATIONS: dict[str, dict[str, Any]] = {
         "audit_trigger_on_manual_mention": True,
         "ignore_draft_prs": True,
         "max_cost_per_run_cents": 100,
-        "model_override_scope": "inherit",
     },
     "audit_only": {
         "preset": "audit_only",
@@ -102,7 +99,6 @@ PRESET_CONFIGURATIONS: dict[str, dict[str, Any]] = {
         "audit_trigger_on_manual_mention": True,
         "ignore_draft_prs": True,
         "max_cost_per_run_cents": 50,
-        "model_override_scope": "inherit",
     },
     "custom": {
         "preset": "custom",
@@ -432,7 +428,6 @@ def create_default_repo_settings(
         allowed_branches=["main", "master"],
         ignore_draft_prs=cfg.get("ignore_draft_prs", True),
         max_cost_per_run_cents=cfg.get("max_cost_per_run_cents", 100),
-        model_override_scope=cfg.get("model_override_scope", "inherit"),
         working_dir=None,
         test_command=None,
         review_guidelines_text=None,

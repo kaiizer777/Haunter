@@ -25,7 +25,6 @@ describe("RepoSettingsCard (components/settings/RepoSettingsCard.tsx)", () => {
     monitored_branches: ["main", "master"],
     ignore_draft_prs: true,
     max_cost_per_run_cents: 100,
-    model_override_scope: "inherit",
     review_guidelines_text: "Follow team idioms.",
     review_strictness: "high",
     review_focus_areas: ["security", "performance"],

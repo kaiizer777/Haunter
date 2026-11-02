@@ -98,9 +98,6 @@ class Repo(Base):
     auditor_github_install_id: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True
     )
-    active_model_config_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True
-    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -315,21 +312,8 @@ class Attempt(Base):
     )
 
 
-class ModelConfigScope(StrEnum):
-    GLOBAL = "global"
-    REPO = "repo"
-
-
 class ModelConfig(Base):
-    """
-    LLM model configuration with per-repo vs global isolation (Phase 3.1).
-
-    - scope='global': platform-wide default. Only these rows are deactivated
-      by PUT /config/model global updates and returned by global lookups.
-    - scope='repo': per-repo override, optionally pinned to repo_id/user_id.
-      Global updates never touch these rows; repo resolution prefers them
-      and falls back to the global active row.
-    """
+    """LLM model configuration (global)."""
 
     __tablename__ = "model_configs"
 
@@ -344,27 +328,11 @@ class ModelConfig(Base):
         String(255), nullable=False, default="https://opencode.ai/inference/go/openai/v1"
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    scope: Mapped[str] = mapped_column(
-        String(16),
-        nullable=False,
-        default=ModelConfigScope.GLOBAL.value,
-        server_default="global",
-    )
-    repo_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("repos.id", ondelete="SET NULL"), nullable=True
-    )
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    __table_args__ = (
-        Index("ix_model_configs_scope", "scope"),
-        Index("ix_model_configs_repo_id", "repo_id"),
-        Index("ix_model_configs_user_id", "user_id"),
-    )
+    __table_args__ = ()
 
 
 class EvalResult(Base):
@@ -538,10 +506,6 @@ class RepoSettings(Base):
     max_cost_per_run_cents: Mapped[int] = mapped_column(
         Integer, nullable=False, default=100, server_default="100"
     )
-    model_override_scope: Mapped[str] = mapped_column(
-        String(50), nullable=False, default="inherit", server_default="inherit"
-    )
-
     # Monorepo scope for the sandbox verification runner. Both are optional and
     # NULL means "no override" — the language detected from the repository tree
     # runs at the repo root with that language's default test command.

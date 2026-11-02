@@ -1,23 +1,21 @@
 """
 Model Configuration endpoints for Haunter (Phase 4).
 
-Supports reading and updating active model configurations globally and per-repo.
+Supports reading and updating the active global model configuration.
 All endpoints are gated by get_current_user and strictly validated with Pydantic allowlists.
 
 Security invariants:
 - base_url is derived server-side from the provider allowlist map (settings-driven) — never accepted
   from client to prevent SSRF and endpoint hijacking.
-- Per-repo updates enforce tenant ownership: returns 404 (not 403) on non-owned repos to
-  prevent existence oracle leakage.
 - Global model config reads and writes are admin-only.
 - SQL queries use parameterised SQLAlchemy ORM constructs.
 """
 
 import logging
 import uuid
-from typing import Annotated, Optional
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +24,7 @@ from app.config import settings
 from app.db import get_db
 from app.llm.config import invalidate_model_config_cache
 from app.llm.discovery import format_model_name, get_dynamic_go_models
-from app.models import ModelConfig, ModelConfigScope, Repo, User
+from app.models import ModelConfig, User
 from app.schemas import (
     AvailableModelItem,
     AvailableModelsOut,
@@ -64,72 +62,20 @@ def _default_base_url() -> str:
 async def get_active_model_config_endpoint(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    repo_id: Annotated[
-        Optional[uuid.UUID],
-        Query(description="Optional repo ID for repo-specific config"),
-    ] = None,
 ) -> ModelConfigOut:
     """
-    Get the currently active model configuration.
-    If repo_id is provided, returns the repo's active config (or 404 if repo not owned).
-    If repo_id is omitted, returns the global active model config from DB or env defaults.
-    Global reads are admin-only; repo reads are admin-only and also enforce ownership.
+    Get the currently active global model configuration.
+    Admin-only.
     """
-    if repo_id is None and not is_admin_user(current_user):
+    if not is_admin_user(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin permissions required to read global model config",
+            detail="Admin permissions required to read model config",
         )
-    if repo_id is not None:
-        if not is_admin_user(current_user):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin permissions required to read repo model config")
-        repo_result = await db.execute(
-            select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
-        )
-        repo = repo_result.scalar_one_or_none()
-        if repo is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
-            )
 
-        # 1a. Direct repo-scoped lookup (mirrors LLM runtime _resolve_from_db):
-        # newest active scope='repo' row pinned to this repo. Works even when
-        # repos.active_model_config_id is NULL.
-        scoped_result = await db.execute(
-            select(ModelConfig)
-            .where(
-                ModelConfig.is_active == True,  # noqa: E712
-                ModelConfig.scope == ModelConfigScope.REPO.value,
-                ModelConfig.repo_id == repo_id,
-            )
-            .order_by(ModelConfig.created_at.desc())
-            .limit(1)
-        )
-        scoped_cfg = scoped_result.scalar_one_or_none()
-        if scoped_cfg is not None and _base_url_for_provider(scoped_cfg.provider):
-            return ModelConfigOut.model_validate(scoped_cfg)
-
-        # 1b. Legacy linkage fallback: repos.active_model_config_id pointing
-        # at an active row. Inactive linked rows fall through to global.
-        if repo.active_model_config_id is not None:
-            config_result = await db.execute(
-                select(ModelConfig).where(
-                    ModelConfig.id == repo.active_model_config_id,
-                    ModelConfig.is_active == True,  # noqa: E712
-                )
-            )
-            config = config_result.scalar_one_or_none()
-            if config is not None and _base_url_for_provider(config.provider):
-                return ModelConfigOut.model_validate(config)
-
-    # Global active config lookup — strictly global scope so repo overrides
-    # are never surfaced as the platform default.
     global_result = await db.execute(
         select(ModelConfig)
-        .where(
-            ModelConfig.is_active == True,  # noqa: E712
-            ModelConfig.scope == ModelConfigScope.GLOBAL.value,
-        )
+        .where(ModelConfig.is_active == True)  # noqa: E712
         .order_by(ModelConfig.created_at.desc())
         .limit(1)
     )
@@ -148,14 +94,11 @@ async def get_active_model_config_endpoint(
 
     # Fallback to default configuration (base_url follows settings.default_provider).
     return ModelConfigOut(
-        id=uuid.uuid4(),
+        id=uuid.UUID("00000000-0000-0000-0000-000000000000"),
         provider=settings.default_provider,
         model_name=settings.default_model,
         base_url=_default_base_url(),
         is_active=True,
-        scope=ModelConfigScope.GLOBAL.value,
-        repo_id=None,
-        user_id=None,
     )
 
 
@@ -187,9 +130,7 @@ async def update_model_config_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ModelConfigOut:
     """
-    Update active model configuration.
-    - If body.repo_id is supplied: updates model config for that repo (admin-only).
-    - If body.repo_id is null: updates global active model config (admin-only).
+    Update active global model configuration (admin-only).
     """
     # Gate before any request handling: body validation and the provider
     # allowlist check below must not leak details to non-admins.
@@ -201,84 +142,10 @@ async def update_model_config_endpoint(
             detail="Invalid provider: expected 'opencode_go' or 'groq'",
         )
 
-    # 1. Per-repo model config update
-    if body.repo_id is not None:
-        repo_result = await db.execute(
-            select(Repo).where(Repo.id == body.repo_id, Repo.user_id == current_user.id)
-        )
-        repo = repo_result.scalar_one_or_none()
-        if repo is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
-            )
-
-        if repo.active_model_config_id is not None:
-            cfg_res = await db.execute(
-                select(ModelConfig).where(
-                    ModelConfig.id == repo.active_model_config_id,
-                    ModelConfig.repo_id == repo.id,
-                    ModelConfig.user_id == current_user.id,
-                )
-            )
-            existing_cfg = cfg_res.scalar_one_or_none()
-        else:
-            existing_cfg = None
-
-        if (
-            existing_cfg is not None
-            and existing_cfg.scope != ModelConfigScope.GLOBAL.value
-        ):
-            existing_cfg.provider = body.provider
-            existing_cfg.model_name = body.model_name
-            existing_cfg.base_url = base_url
-            existing_cfg.is_active = True
-            # Stamp legacy rows into repo scope so global queries never pick
-            # them up and global deactivation never touches them.
-            existing_cfg.scope = ModelConfigScope.REPO.value
-            existing_cfg.repo_id = repo.id
-            existing_cfg.user_id = current_user.id
-            config = existing_cfg
-        else:
-            # existing_cfg is None, or is a shared GLOBAL row: create a new
-            # repo-scoped row instead of mutating the platform default.
-            config = ModelConfig(
-                provider=body.provider,
-                model_name=body.model_name,
-                base_url=base_url,
-                is_active=True,
-                scope=ModelConfigScope.REPO.value,
-                repo_id=repo.id,
-                user_id=current_user.id,
-            )
-            db.add(config)
-            await db.flush()
-            repo.active_model_config_id = config.id
-
-        await db.commit()
-        # Invalidate before the refresh() await (#134-3): same stale-window
-        # rationale as the repo-settings write paths.
-        invalidate_model_config_cache(body.repo_id)
-        await db.refresh(config)
-        logger.info(
-            "Repo model config updated: user=%s repo=%s provider=%s model=%s",
-            current_user.id,
-            body.repo_id,
-            body.provider,
-            body.model_name,
-        )
-        return ModelConfigOut.model_validate(config)
-
-    # 2. Global model config update — admin-only (matching hosting_config.py)
-    _require_admin(current_user)
-
-    # Deactivate currently active global configs only — repo overrides
-    # (scope='repo') must survive global switches.
+    # Deactivate currently active global configs.
     await db.execute(
         update(ModelConfig)
-        .where(
-            ModelConfig.is_active == True,  # noqa: E712
-            ModelConfig.scope == ModelConfigScope.GLOBAL.value,
-        )
+        .where(ModelConfig.is_active == True)  # noqa: E712
         .values(is_active=False)
     )
 
@@ -287,9 +154,6 @@ async def update_model_config_endpoint(
         model_name=body.model_name,
         base_url=base_url,
         is_active=True,
-        scope=ModelConfigScope.GLOBAL.value,
-        repo_id=None,
-        user_id=None,
     )
     db.add(new_config)
     await db.flush()
@@ -403,81 +267,4 @@ async def get_available_models_endpoint(
     return AvailableModelsOut(
         opencode_go=go_items,
         groq=groq_items,
-    )
-
-
-@router.get("/{repo_id}", response_model=Optional[ModelConfigOut])
-async def get_repo_model_config(
-    repo_id: uuid.UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> Optional[ModelConfigOut]:
-    """
-    Get the active model config for a specific repo.
-    Returns 404 if the repo is not found or not owned by caller.
-    """
-    return await get_active_model_config_endpoint(
-        current_user=current_user,
-        db=db,
-        repo_id=repo_id,
-    )
-
-
-@router.delete("/{repo_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_repo_model_config(
-    repo_id: uuid.UUID,
-    current_user: Annotated[User, Depends(_require_model_admin)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> None:
-    """
-    Reset a repo to the platform default by deactivating its repo-scoped
-    override rows and clearing the legacy linkage. Returns 404 if the repo
-    is not found or not owned by the caller (no existence oracle).
-    Admin-only: repo model overrides can only be reset by admins.
-    """
-    _require_admin(current_user)
-    repo_result = await db.execute(
-        select(Repo).where(Repo.id == repo_id, Repo.user_id == current_user.id)
-    )
-    repo = repo_result.scalar_one_or_none()
-    if repo is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Repo not found"
-        )
-
-    await db.execute(
-        update(ModelConfig)
-        .where(
-            ModelConfig.is_active == True,  # noqa: E712
-            ModelConfig.scope == ModelConfigScope.REPO.value,
-            ModelConfig.repo_id == repo_id,
-        )
-        .values(is_active=False)
-    )
-    repo.active_model_config_id = None
-    await db.commit()
-    invalidate_model_config_cache(repo_id)
-    logger.info(
-        "Repo model config reset to global default: user=%s repo=%s",
-        current_user.id,
-        repo_id,
-    )
-
-
-@router.put("/{repo_id}", response_model=ModelConfigOut)
-async def update_repo_model_config(
-    repo_id: uuid.UUID,
-    body: ModelConfigUpdate,
-    current_user: Annotated[User, Depends(_require_model_admin)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> ModelConfigOut:
-    """
-    Update the active model config for a specific repo.
-    Returns 404 if the repo is not found or not owned by caller.
-    """
-    body.repo_id = repo_id
-    return await update_model_config_endpoint(
-        body=body,
-        current_user=current_user,
-        db=db,
     )

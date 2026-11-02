@@ -1393,7 +1393,7 @@ async def _call_with_empty_retry(
     try:
         response = await asyncio.wait_for(
             llm.complete(
-                messages=messages, db=db, repo_id=run.repo_id, max_tokens=10_000_000
+                messages=messages, db=db, max_tokens=10_000_000
             ),
             timeout=FETCH_TIMEOUT_S,
         )
@@ -1442,7 +1442,6 @@ async def _call_with_empty_retry(
             llm.complete(
                 messages=retry_messages,
                 db=db,
-                repo_id=run.repo_id,
                 max_tokens=10_000_000,
             ),
             timeout=FETCH_TIMEOUT_S,

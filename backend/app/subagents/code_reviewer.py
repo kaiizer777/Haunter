@@ -906,7 +906,6 @@ async def analyze_diff(
     response = await llm.complete(
         messages=messages,
         db=db,
-        repo_id=repo_id,
         max_tokens=REVIEW_MAX_TOKENS,
     )
 
@@ -963,7 +962,6 @@ async def analyze_diff(
     retry_response = await llm.complete(
         messages=retry_messages,
         db=db,
-        repo_id=repo_id,
         max_tokens=REVIEW_MAX_TOKENS,
     )
     retry_content = retry_response.get("content") or ""
