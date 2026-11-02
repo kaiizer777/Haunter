@@ -10,6 +10,7 @@ and GitHub review threads. Identifies:
 
 from __future__ import annotations
 
+import codecs
 import logging
 import re
 from dataclasses import dataclass
@@ -43,6 +44,33 @@ class FindingResolutionResult:
         return self.retained_findings + self.new_findings
 
 
+def _unquote_git_path(raw: str) -> str:
+    """Unescape Git C-style octal and backslash escapes in quoted paths.
+
+    Git wraps file paths in double quotes when they contain spaces, control characters,
+    quotes, backslashes, or non-ASCII characters, encoding them with C-style escapes
+    (e.g., \\t, \\n, \\", \\\\, or octal bytes \\nnn).
+    """
+    cleaned = raw.strip()
+    if cleaned.startswith('"') and cleaned.endswith('"') and len(cleaned) >= 2:
+        inner = cleaned[1:-1]
+        try:
+            return codecs.escape_decode(inner.encode("latin1"))[0].decode("utf-8", errors="replace")
+        except Exception:
+            return inner
+    if cleaned.startswith("'") and cleaned.endswith("'") and len(cleaned) >= 2:
+        return cleaned[1:-1]
+    return cleaned
+
+
+def _clean_diff_target_path(path_str: str) -> str:
+    """Normalize and unquote a diff path from a/ or b/ prefixes."""
+    unquoted = _unquote_git_path(path_str)
+    if unquoted.startswith("a/") or unquoted.startswith("b/"):
+        unquoted = unquoted[2:]
+    return _unquote_git_path(unquoted).lstrip("/")
+
+
 def _extract_diff_changed_old_lines(diff_text: str) -> dict[str, set[int]]:
     """Extract set of line numbers in the old file that were modified or removed.
 
@@ -56,37 +84,37 @@ def _extract_diff_changed_old_lines(diff_text: str) -> dict[str, set[int]]:
         if line.startswith("diff --git "):
             current_file = None
             cur_old = 0
-            m = re.match(r'^diff --git (?:"?a/(.*?)"?) (?:"?b/(.*?)"?)$', line)
+            m = re.match(r'^diff --git (?:(".*?")|(\S+)) (?:(".*?")|(\S+))$', line)
             if m:
-                b_path = m.group(2)
-                a_path = m.group(1)
-                target = b_path if b_path != "/dev/null" else a_path
-                current_file = target.strip().strip("'\"").lstrip("/")
-                changed_lines.setdefault(current_file, set())
+                a_raw = m.group(1) or m.group(2)
+                b_raw = m.group(3) or m.group(4)
+                target = b_raw if b_raw not in ("/dev/null", "b/dev/null", '"b/dev/null"') else a_raw
+                current_file = _clean_diff_target_path(target)
+                if current_file:
+                    changed_lines.setdefault(current_file, set())
             else:
                 parts = line.split()
                 if len(parts) >= 4:
                     b_path = parts[3]
-                    current_file = (b_path[2:] if b_path.startswith("b/") else b_path).strip().strip("'\"").lstrip("/")
-                    changed_lines.setdefault(current_file, set())
+                    current_file = _clean_diff_target_path(b_path)
+                    if current_file:
+                        changed_lines.setdefault(current_file, set())
             continue
 
         if line.startswith("--- ") and not current_file:
-            path_part = line[4:].strip().strip("'\"")
-            if path_part.startswith("a/"):
-                path_part = path_part[2:]
-            if path_part != "/dev/null":
-                current_file = path_part.lstrip("/")
-                changed_lines.setdefault(current_file, set())
+            path_part = line[4:].strip()
+            if path_part not in ("/dev/null", "a/dev/null", "b/dev/null", '"a/dev/null"'):
+                current_file = _clean_diff_target_path(path_part)
+                if current_file:
+                    changed_lines.setdefault(current_file, set())
             continue
 
         if line.startswith("+++ "):
-            path_part = line[4:].strip().strip("'\"")
-            if path_part.startswith("b/"):
-                path_part = path_part[2:]
-            if path_part != "/dev/null" and not current_file:
-                current_file = path_part.lstrip("/")
-                changed_lines.setdefault(current_file, set())
+            path_part = line[4:].strip()
+            if path_part not in ("/dev/null", "a/dev/null", "b/dev/null", '"b/dev/null"') and not current_file:
+                current_file = _clean_diff_target_path(path_part)
+                if current_file:
+                    changed_lines.setdefault(current_file, set())
             continue
 
         if current_file and line.startswith("@@ "):
