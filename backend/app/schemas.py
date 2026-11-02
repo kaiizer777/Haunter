@@ -247,7 +247,9 @@ class ModelConfigUpdate(BaseModel):
     """
     Used by PUT /config/model (global) to update active model config.
     Provider and model_name are validated against provider rules.
-    - For 'opencode_go': allows approved OpenCode Go models (OPENCODE_GO_MODELS).
+    - For 'opencode_go': model membership is NOT checked here; it is enforced in
+      update_model_config_endpoint against the live discovered set (union bootstrap
+      IDs). The schema only checks shape (non-empty string).
     - For 'groq': allows approved Groq models (GROQ_MODELS).
     Retired providers (opencode_zen, openai, anthropic) are rejected by the
     AllowedProvider literal with a 422 listing the supported providers.
@@ -288,9 +290,11 @@ class ModelConfigUpdate(BaseModel):
         self.model_name = model
 
         if provider == "opencode_go":
-            if model not in OPENCODE_GO_MODELS:
-                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
-                raise ValueError("Invalid model selection.")
+            # OpenCode Go model IDs are validated against the live discovered set
+            # (get_dynamic_go_models() IDs union bootstrap IDs) in the router,
+            # because discovery is async and cannot run inside a sync Pydantic
+            # validator. Here we only enforce basic shape/length via Field.
+            pass
         elif provider == "groq":
             if model not in GROQ_MODELS:
                 logger.warning("model_config.rejected provider=%s model=%s", provider, model)

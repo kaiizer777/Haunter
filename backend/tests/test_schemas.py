@@ -198,14 +198,9 @@ def test_model_config_update_opencode_go_valid(model_name: str) -> None:
     assert cfg.model_name == model_name
 
 
-@pytest.mark.parametrize(
-    "model_name",
-    ["nemotron-3.5-lightning", "gpt-4o", "foo-bar"],
-)
-def test_model_config_update_opencode_go_invalid(model_name: str) -> None:
-    with pytest.raises(ValidationError) as exc_info:
-        ModelConfigUpdate(provider="opencode_go", model_name=model_name)
-    assert "Invalid model" in str(exc_info.value)
+# OpenCode Go model membership is validated against the live discovered set in
+# the router (async), not in this sync schema. Schema-level checks for opencode_go
+# are limited to shape/length (Field pattern) and emptiness.
 
 
 @pytest.mark.parametrize("model_name", ["openai/gpt-oss-120b", "llama-3.1-8b-instant"])

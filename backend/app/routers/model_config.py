@@ -23,13 +23,19 @@ from app.auth import get_current_user, is_admin_user
 from app.config import settings
 from app.db import get_db
 from app.llm.config import invalidate_model_config_cache
-from app.llm.discovery import format_model_name, get_dynamic_go_models
+from app.llm.discovery import (
+    BOOTSTRAP_GO_MODELS,
+    format_model_name,
+    get_dynamic_go_models,
+)
 from app.models import ModelConfig, User
 from app.schemas import (
     AvailableModelItem,
     AvailableModelsOut,
+    GROQ_MODELS,
     ModelConfigOut,
     ModelConfigUpdate,
+    OPENCODE_GO_MODELS,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,6 +147,28 @@ async def update_model_config_endpoint(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Invalid provider: expected 'opencode_go' or 'groq'",
         )
+
+    # Validate model_name against the provider's allowlist. OpenCode Go uses the
+    # live discovered set union bootstrap IDs (async discovery); Groq stays static.
+    model = body.model_name.strip()
+    if body.provider == "opencode_go":
+        discovered = await get_dynamic_go_models()
+        allowed = {m["id"] if isinstance(m, dict) else str(m) for m in discovered}
+        allowed |= {m["id"] if isinstance(m, dict) else str(m) for m in BOOTSTRAP_GO_MODELS}
+        allowed |= set(OPENCODE_GO_MODELS)
+        if model not in allowed:
+            logger.warning("model_config.rejected provider=%s model=%s", body.provider, model)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid model selection.",
+            )
+    elif body.provider == "groq":
+        if model not in GROQ_MODELS:
+            logger.warning("model_config.rejected provider=%s model=%s", body.provider, model)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid model selection.",
+            )
 
     # Deactivate currently active global configs.
     await db.execute(

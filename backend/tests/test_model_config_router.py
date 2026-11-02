@@ -430,3 +430,51 @@ def test_default_provider_and_model_are_allowlisted():
         provider=settings.default_provider, model_name=settings.default_model
     )
     assert cfg.provider in ("opencode_go", "groq")
+
+
+@pytest.mark.asyncio
+async def test_put_model_config_accepts_dynamic_go_model(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """PUT /config/model accepts a dynamically discovered OpenCode Go model ID."""
+    await truncate_all(db)
+    admin_user = await user_factory(role="admin")
+    client = make_auth_client(admin_user.id)
+
+    monkeypatch.setattr(settings, "admin_user_id", str(admin_user.id))
+
+    async def fake_go_models(*args, **kwargs):
+        return [{"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"}]
+
+    monkeypatch.setattr("app.routers.model_config.get_dynamic_go_models", fake_go_models)
+
+    payload = {"provider": "opencode_go", "model_name": "deepseek-v4-pro"}
+    async with client:
+        resp = await client.put("/config/model", json=payload)
+
+    assert resp.status_code == 200
+    assert resp.json()["provider"] == "opencode_go"
+    assert resp.json()["model_name"] == "deepseek-v4-pro"
+
+
+@pytest.mark.asyncio
+async def test_put_model_config_rejects_unknown_go_model(
+    db: AsyncSession, user_factory, make_auth_client, monkeypatch: pytest.MonkeyPatch
+):
+    """PUT /config/model rejects an OpenCode Go model ID not in the discovered set."""
+    await truncate_all(db)
+    admin_user = await user_factory(role="admin")
+    client = make_auth_client(admin_user.id)
+
+    monkeypatch.setattr(settings, "admin_user_id", str(admin_user.id))
+
+    async def fake_go_models(*args, **kwargs):
+        return [{"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"}]
+
+    monkeypatch.setattr("app.routers.model_config.get_dynamic_go_models", fake_go_models)
+
+    payload = {"provider": "opencode_go", "model_name": "definitely-not-a-model"}
+    async with client:
+        resp = await client.put("/config/model", json=payload)
+
+    assert resp.status_code == 422
