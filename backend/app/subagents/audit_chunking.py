@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 DEFAULT_MAX_CHUNK_LINES = 500
 HARD_CHUNK_LIMIT = 550
 
-_DIFF_GIT_RE = re.compile(r"^diff --git a/.* b/.*$")
+_DIFF_GIT_RE = re.compile(r'^diff --git (?:"?a/.*?"?) (?:"?b/.*?"?)$')
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 
 
@@ -156,29 +156,41 @@ def partition_diff_into_chunks(
                 # Flush whatever is in current chunk first.
                 flush_chunk()
 
-                # Slice the large hunk into sub-hunks
+                # Slice the large hunk into sub-hunks with reconstructed unified diff headers
                 header_len = len(file_header)
                 available_per_chunk = max(10, hard_limit - header_len - 1)  # 1 line for hunk header
 
                 body_lines = hunk.lines
                 offset = 0
-                part_idx = 1
+
+                m = _HUNK_HEADER_RE.match(hunk.header)
+                if m:
+                    cur_old_start = int(m.group(1))
+                    cur_new_start = int(m.group(3))
+                    tail = m.group(5) or ""
+                else:
+                    cur_old_start = 1
+                    cur_new_start = 1
+                    tail = ""
 
                 while offset < len(body_lines):
                     slice_lines = body_lines[offset : offset + available_per_chunk]
                     offset += len(slice_lines)
 
+                    slice_old_count = sum(1 for line in slice_lines if line.startswith(("-", " ")))
+                    slice_new_count = sum(1 for line in slice_lines if line.startswith(("+", " ")))
+
+                    reconstructed_header = f"@@ -{cur_old_start},{slice_old_count} +{cur_new_start},{slice_new_count} @@{tail}"
+                    cur_old_start += slice_old_count
+                    cur_new_start += slice_new_count
+
                     sub_chunk_lines: list[str] = list(file_header)
-                    if part_idx == 1:
-                        sub_chunk_lines.append(hunk.header)
-                    else:
-                        sub_chunk_lines.append(f"{hunk.header} (part {part_idx})")
+                    sub_chunk_lines.append(reconstructed_header)
                     sub_chunk_lines.extend(slice_lines)
 
                     chunk_str = "\n".join(sub_chunk_lines).strip()
                     if chunk_str:
                         chunks.append(chunk_str)
-                    part_idx += 1
 
                 current_chunk_lines = []
                 current_chunk_file_header = []
