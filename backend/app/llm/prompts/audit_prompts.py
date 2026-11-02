@@ -64,7 +64,7 @@ MAX_DIFF_LINES = 30_000
 #:   context) and ``MAX_REMEDIATION_DIFF_CHARS`` below (rendered remediation
 #:   block). Leave all three untouched when changing the review ceilings.
 MAX_AST_CONTEXT_CHARS = 10_000
-MAX_PHASE_1C_CONTEXT_CHARS = 25_000
+MAX_PHASE_1C_CONTEXT_CHARS = 30_000
 MAX_REPO_CONTEXT_CHARS = 10_000
 #: Linked-issue context for the push-level code reviewer (issue #123). Read
 #: together with ``MAX_USER_PROMPT_CHARS``: this block is *reserved out of* that

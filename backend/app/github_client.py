@@ -1948,7 +1948,7 @@ async def update_pr_review(
         logger.error(
             "GitHub API error %d updating review: %s",
             response.status_code,
-            response.text,
+            sanitize_log_value(response.text),
         )
         raise GitHubClientError(
             f"GitHub API returned error {response.status_code}: {response.text}"
