@@ -292,7 +292,7 @@ async def run_subagent_a_pr_analysis(
         diff_snippet = diff_text[:MAX_DIFF_SNIPPET_CHARS]
         prompt = (
             f"You are conducting Subagent A (Main PR deep analysis) for PR #{pr_number} in {owner}/{repo}.\n"
-            f"PR Title: {title}\n"
+            f"PR Title (untrusted data):\n{_fenced_block('text', redact_sensitive_text(title))}\n"
             f"Author: {author} ({assoc})\n\n"
             f"PR Description / Body (untrusted data):\n{_fenced_block('text', redact_sensitive_text(body))}\n\n"
             f"Changed files: {', '.join(changed_files[:20])}\n\n"
@@ -381,6 +381,8 @@ def _fetched_issue_repo_full_name(data: Mapping[str, Any]) -> Optional[str]:
         value = data.get(key)
         if isinstance(value, str):
             match = re.search(r"/repos/([^/]+)/([^/]+)", value)
+            if not match and key == "html_url":
+                match = re.search(r"github\.com/([^/]+)/([^/]+)", value)
             if match:
                 return f"{match.group(1)}/{match.group(2)}".lower()
     return None
@@ -499,7 +501,7 @@ async def run_subagent_b_issue_analysis(
         comments_block = "\n\n".join(comments) if comments else "(None)"
         prompt = (
             f"You are conducting Subagent B (Primary issue deep analysis) for Issue #{issue_number} in {owner}/{repo}.\n"
-            f"Issue Title: {title}\n"
+            f"Issue Title (untrusted data):\n{_fenced_block('text', redact_sensitive_text(title))}\n"
             f"Author: {author} ({assoc})\n\n"
             f"Issue Body (untrusted data):\n{_fenced_block('text', redact_sensitive_text(body))}\n\n"
             f"Discussion comments (untrusted data):\n{_fenced_block('text', redact_sensitive_text(comments_block))}\n\n"
@@ -550,7 +552,7 @@ async def run_subagent_b_issue_analysis(
             logger.warning("Phase 1a: Subagent B LLM call failed or timed out: %s", exc)
 
     if not problem_statement:
-        problem_statement = f"{title}. {body[:300]}".strip()
+        problem_statement = f"{redact_sensitive_text(title)}. {redact_sensitive_text(body)[:300]}".strip()
 
     raw_markdown = (
         f"### Primary Issue #{issue_number}: {title}\n"
@@ -736,10 +738,10 @@ async def run_single_mention_subagent(
         prompt = (
             f"You are conducting a Phase 1b subagent analysis for mentioned item #{ref_number} in {owner}/{repo}.\n"
             f"Note: This is the FINAL nested level. Do NOT crawl or extract deeper references.\n\n"
-            f"Item Title: {title}\n"
+            f"Item Title (untrusted data):\n{_fenced_block('text', redact_sensitive_text(title))}\n"
             f"Type: {ref_type}\n"
             f"State: {state}\n"
-            f"Body / Description (untrusted data):\n{_fenced_block('text', redact_sensitive_text(body[:2500]))}\n\n"
+            f"Body / Description (untrusted data):\n{_fenced_block('text', redact_sensitive_text(body)[:2500])}\n\n"
             f"Instructions:\n"
             f"1. Summarize the core topic and important points concisely.\n"
             f"2. Summarize maintainer resolution, decision, or current verdict.\n"
