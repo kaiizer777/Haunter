@@ -830,9 +830,15 @@ export default function ModelConfigPage() {
     }
   }, [customName, customCompat, customBaseUrl, customApiKey]);
 
+  const isCustomProvider = Boolean(customProviders[selectedProvider]);
+
   const handleSaveConfig = useCallback(async () => {
     if (!isAdmin) {
       setError("Inference engine settings are managed by administrators.");
+      return;
+    }
+    if (isCustomProvider) {
+      setError("Saving a custom provider as the global engine isn't supported yet.");
       return;
     }
     if (isSaving) return;
@@ -862,7 +868,7 @@ export default function ModelConfigPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [isSaving, isAdmin, selectedProvider, selectedModel]);
+  }, [isSaving, isAdmin, isCustomProvider, selectedProvider, selectedModel]);
 
 
   const isDirty = useMemo(() => {
@@ -873,7 +879,7 @@ export default function ModelConfigPage() {
     );
   }, [activeConfig, selectedProvider, selectedModel]);
 
-  const canSave = !isPending && isDirty && isAdmin;
+  const canSave = !isPending && isDirty && isAdmin && !isCustomProvider;
   // Keyboard shortcut handlers: '/' to search, 'r' to sync, Cmd+S to save
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1651,6 +1657,11 @@ export default function ModelConfigPage() {
             </div>
 
             <div className="flex items-center gap-3 self-end sm:self-auto">
+              {isCustomProvider && (
+                <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 border border-amber-800/50 px-2.5 py-1 rounded-[5px]">
+                  Custom provider global activation isn't supported yet.
+                </span>
+              )}
               {isDirty && (
                 <span className="text-[11px] font-mono font-semibold text-amber-400 bg-amber-950/40 border border-amber-800/50 px-2.5 py-1 rounded-[5px] animate-pulse">
                   Unsaved: {formatModelDisplayName(selectedModel)}
