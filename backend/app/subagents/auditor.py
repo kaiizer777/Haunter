@@ -6,13 +6,14 @@ import asyncio
 import hashlib
 import logging
 import re
+import tempfile
 import time
 import unicodedata
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping, Optional, Sequence
 
 import httpx
@@ -2241,48 +2242,102 @@ async def run_audit(
     resolved_phase_1c_file_path: Optional[str] = None
     if enable_phase1_context and resolved_pr_number is not None and not resolved_phase_1c_context:
         try:
-            from app.subagents.audit_context import build_phase1_context
-
             owner_part = ""
             repo_part = ""
             if repo_full_name and "/" in repo_full_name:
                 owner_part, repo_part = repo_full_name.split("/", 1)
 
-            p1_res = await build_phase1_context(
-                owner=owner_part,
-                repo=repo_part,
-                pr_number=resolved_pr_number,
-                token=github_token,
-                diff_text=clean_diff,
-                pr_metadata=pr_metadata,
-                dossier_dir=dossier_dir,
-                llm=llm,
-                model_config=shared_config,
-            )
-            if p1_res:
-                resolved_phase_1c_context = p1_res.context_markdown
-                resolved_phase_1c_file_path = p1_res.file_path
+            # Re-review context reuse: check if {dossier_dir}/phase-1c.md exists on disk
+            if dossier_dir:
+                target_dossier = Path(dossier_dir)
+            else:
+                safe_repo = f"{owner_part}_{repo_part}".replace("/", "_") if owner_part and repo_part else "repo"
+                target_dossier = Path(tempfile.gettempdir()) / "haunter-dossier" / safe_repo / f"PR-{resolved_pr_number}"
+
+            phase_1c_disk_file = target_dossier / "phase-1c.md"
+            if phase_1c_disk_file.is_file():
+                resolved_phase_1c_context = phase_1c_disk_file.read_text(encoding="utf-8")
+                resolved_phase_1c_file_path = str(phase_1c_disk_file.resolve())
+                logger.info("Auditor: Reusing existing Phase 1c context from disk: %s", resolved_phase_1c_file_path)
+            else:
+                from app.subagents.audit_context import build_phase1_context
+
+                p1_res = await build_phase1_context(
+                    owner=owner_part,
+                    repo=repo_part,
+                    pr_number=resolved_pr_number,
+                    token=github_token,
+                    diff_text=clean_diff,
+                    pr_metadata=pr_metadata,
+                    dossier_dir=dossier_dir,
+                    llm=llm,
+                    model_config=shared_config,
+                )
+                if p1_res:
+                    resolved_phase_1c_context = p1_res.context_markdown
+                    resolved_phase_1c_file_path = p1_res.file_path
         except Exception as p1_exc:
             logger.warning("Auditor: Phase 1 context build failed; continuing without: %s", p1_exc)
+
+    diff_chunks = partition_diff_into_chunks(clean_diff, hard_limit=550)
 
     async def run_one(
         perspective: PerspectiveName,
     ) -> tuple[PerspectiveResult, Optional[BaseException]]:
         try:
             async with semaphore:
-                result = await asyncio.wait_for(
-                    _run_single_perspective(
-                        perspective=perspective,
-                        diff_text=clean_diff,
-                        ast_summary=ast_summary,
-                        repo_context=clean_repo_context,
-                        phase_1c_context=resolved_phase_1c_context,
-                        llm=llm,
-                        model_config=shared_config,
-                    ),
-                    timeout=PERSPECTIVE_DEADLINE_S,
+                if len(diff_chunks) <= 1:
+                    result = await asyncio.wait_for(
+                        _run_single_perspective(
+                            perspective=perspective,
+                            diff_text=clean_diff,
+                            ast_summary=ast_summary,
+                            repo_context=clean_repo_context,
+                            phase_1c_context=resolved_phase_1c_context,
+                            llm=llm,
+                            model_config=shared_config,
+                        ),
+                        timeout=PERSPECTIVE_DEADLINE_S,
+                    )
+                    return result, None
+
+                chunk_results: list[PerspectiveResult] = []
+                for chunk_text in diff_chunks:
+                    chunk_res = await asyncio.wait_for(
+                        _run_single_perspective(
+                            perspective=perspective,
+                            diff_text=chunk_text,
+                            ast_summary=ast_summary,
+                            repo_context=clean_repo_context,
+                            phase_1c_context=resolved_phase_1c_context,
+                            llm=llm,
+                            model_config=shared_config,
+                        ),
+                        timeout=PERSPECTIVE_DEADLINE_S,
+                    )
+                    chunk_results.append(chunk_res)
+
+                combined_findings = []
+                for cr in chunk_results:
+                    combined_findings.extend(cr.findings)
+                combined_summary = "\n\n".join(cr.summary for cr in chunk_results if cr.summary)
+                successful_chunks = [cr for cr in chunk_results if cr.succeeded]
+                combined_confidence = (
+                    min(cr.confidence for cr in successful_chunks)
+                    if successful_chunks
+                    else 0
                 )
-            return result, None
+                combined_result = PerspectiveResult(
+                    perspective=perspective,
+                    summary=combined_summary,
+                    confidence=combined_confidence,
+                    findings=combined_findings,
+                    succeeded=bool(successful_chunks),
+                    model=successful_chunks[0].model if successful_chunks else "",
+                    input_tokens=sum(cr.input_tokens for cr in chunk_results),
+                    output_tokens=sum(cr.output_tokens for cr in chunk_results),
+                )
+                return combined_result, None
         except asyncio.CancelledError:
             raise
         except Exception as exc:
