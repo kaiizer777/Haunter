@@ -161,3 +161,414 @@ def extract_mentioned_issue_and_pr_numbers(
             if len(numbers) >= limit:
                 break
     return numbers
+
+
+def _extract_diff_file_list(diff_text: str) -> list[str]:
+    """Extract list of changed file paths from unified diff."""
+    if not diff_text:
+        return []
+    files: list[str] = []
+    seen: set[str] = set()
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git a/"):
+            parts = line.split(" b/", 1)
+            if len(parts) == 2:
+                path = parts[1].strip()
+                if path and path not in seen:
+                    seen.add(path)
+                    files.append(path)
+    return files
+
+
+def _parse_json_object(text: str) -> Optional[dict[str, Any]]:
+    """Safely extract a JSON dict from raw LLM output or fenced markdown."""
+    if not text or not isinstance(text, str):
+        return None
+    cleaned = text.strip()
+    if "```json" in cleaned:
+        parts = cleaned.split("```json", 1)[1].split("```", 1)
+        cleaned = parts[0].strip()
+    elif "```" in cleaned:
+        parts = cleaned.split("```", 1)[1].split("```", 1)
+        cleaned = parts[0].strip()
+
+    # Find the outermost { ... }
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start : end + 1]
+
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+async def run_subagent_a_pr_analysis(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+    pr_metadata: Optional[Mapping[str, Any]] = None,
+    diff_text: str = "",
+    llm: Optional[LLMClient] = None,
+    model_config: Optional[ResolvedModelConfig] = None,
+) -> PRAssessment:
+    """Subagent A: Deep analysis of the main pull request."""
+    started = time.monotonic()
+    data: dict[str, Any] = dict(pr_metadata or {})
+    title = str(data.get("title") or "")
+    body = str(data.get("body") or "")
+    user_info = data.get("user") or {}
+    author = user_info.get("login") if isinstance(user_info, dict) else str(data.get("author") or "")
+    assoc = author_association_label(data.get("author_association"))
+
+    # Fetch from GitHub if metadata missing and token supplied
+    if (not title or not body) and token:
+        try:
+            from app import github_client as gh
+            fetched = await asyncio.wait_for(
+                gh.fetch_pull_request(
+                    owner=owner,
+                    repo=repo,
+                    pr_number=pr_number,
+                    token=token,
+                    allow_global_token=False,
+                ),
+                timeout=PHASE1_SUBAGENT_TIMEOUT_S,
+            )
+            if fetched:
+                title = title or str(fetched.get("title") or "")
+                body = body or str(fetched.get("body") or "")
+                if not author and isinstance(fetched.get("user"), dict):
+                    author = fetched["user"].get("login", "")
+                if not assoc or assoc == "association not reported":
+                    assoc = author_association_label(fetched.get("author_association"))
+        except Exception as exc:
+            logger.warning("Phase 1a: Failed to fetch PR #%d metadata: %s", pr_number, exc)
+
+    changed_files = _extract_diff_file_list(diff_text)
+    # Extract mentioned issues and PRs (excluding this PR itself)
+    mentioned_refs = extract_mentioned_issue_and_pr_numbers(
+        [title, body],
+        exclude=[pr_number],
+        limit=MAX_MENTIONED_REFS_ANALYZED,
+    )
+
+    intent_summary = ""
+    claimed_changes: list[str] = []
+    changed_files_summary: list[str] = [f"`{f}`" for f in changed_files[:10]]
+    if len(changed_files) > 10:
+        changed_files_summary.append(f"... and {len(changed_files) - 10} more files")
+
+    # If LLM available, summarize intent & claimed changes concisely
+    if llm:
+        diff_snippet = diff_text[:MAX_DIFF_SNIPPET_CHARS]
+        prompt = (
+            f"You are conducting Subagent A (Main PR deep analysis) for PR #{pr_number} in {owner}/{repo}.\n"
+            f"PR Title: {title}\n"
+            f"Author: {author} ({assoc})\n\n"
+            f"PR Description / Body:\n{body}\n\n"
+            f"Changed files: {', '.join(changed_files[:20])}\n\n"
+            f"Diff snippet:\n{diff_snippet}\n\n"
+            f"Instructions:\n"
+            f"1. Summarize PR intent and changes concisely (not too short, not too long).\n"
+            f"2. Note all claimed changes as a bullet list.\n"
+            f"3. Do NOT analyze related issues/PRs — only extract any referenced issue/PR numbers (#N).\n"
+            f"Output strict JSON:\n"
+            f'{{"intent_summary": "...", "claimed_changes": ["..."], "mentioned_refs": [123]}}'
+        )
+        try:
+            resp = await asyncio.wait_for(
+                llm.complete(
+                    messages=[
+                        {"role": "system", "content": "You are a concise, precise senior code review agent. Output JSON only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    db=None,
+                    model_config=model_config,
+                    max_tokens=1024,
+                ),
+                timeout=PHASE1_SUBAGENT_TIMEOUT_S,
+            )
+            content = resp.content if hasattr(resp, "content") else str(resp)
+            parsed = _parse_json_object(content)
+            if parsed:
+                intent_summary = str(parsed.get("intent_summary") or "").strip()
+                if isinstance(parsed.get("claimed_changes"), list):
+                    claimed_changes = [str(c).strip() for c in parsed["claimed_changes"] if str(c).strip()]
+                if isinstance(parsed.get("mentioned_refs"), list):
+                    for r in parsed["mentioned_refs"]:
+                        try:
+                            num = int(r)
+                            if num != pr_number and num not in mentioned_refs:
+                                mentioned_refs.append(num)
+                        except (ValueError, TypeError):
+                            pass
+        except Exception as exc:
+            logger.warning("Phase 1a: Subagent A LLM call failed or timed out: %s", exc)
+
+    # Fallback intent summary and claimed changes if LLM was skipped or returned empty
+    if not intent_summary:
+        first_line = body.strip().splitlines()[0] if body.strip() else ""
+        intent_summary = f"{title}. {first_line}".strip()
+    if not claimed_changes and body:
+        for line in body.splitlines():
+            line_s = line.strip()
+            if line_s.startswith(("- ", "* ", "1. ", "2. ", "3. ")):
+                claimed_changes.append(line_s.lstrip("-*0123456789. "))
+            if len(claimed_changes) >= 8:
+                break
+
+    raw_markdown = (
+        f"### PR #{pr_number}: {title}\n"
+        f"- **Author**: {author} ({assoc})\n"
+        f"- **Intent**: {intent_summary}\n"
+        f"- **Claimed Changes**: {', '.join(claimed_changes) if claimed_changes else 'None explicitly listed'}\n"
+        f"- **Changed Files**: {', '.join(changed_files_summary) if changed_files_summary else 'No files detected'}\n"
+        f"- **Referenced Issues/PRs**: {', '.join(f'#{r}' for r in mentioned_refs) if mentioned_refs else 'None'}"
+    )
+
+    logger.info("Phase 1a: Subagent A completed for PR #%d in %.2fs", pr_number, time.monotonic() - started)
+    return PRAssessment(
+        pr_number=pr_number,
+        title=title,
+        author=author,
+        author_association=assoc,
+        intent_summary=intent_summary,
+        claimed_changes=claimed_changes,
+        changed_files_summary=changed_files_summary,
+        mentioned_refs=mentioned_refs,
+        raw_markdown=raw_markdown,
+    )
+
+
+async def run_subagent_b_issue_analysis(
+    *,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    token: Optional[str] = None,
+    issue_data: Optional[Mapping[str, Any]] = None,
+    pr_number: int = 0,
+    llm: Optional[LLMClient] = None,
+    model_config: Optional[ResolvedModelConfig] = None,
+) -> IssueAssessment:
+    """Subagent B: Deep analysis of the primary issue."""
+    started = time.monotonic()
+    data: dict[str, Any] = dict(issue_data or {})
+    title = str(data.get("title") or "")
+    body = str(data.get("body") or "")
+    user_info = data.get("user") or {}
+    author = user_info.get("login") if isinstance(user_info, dict) else str(data.get("author") or "")
+    assoc = author_association_label(data.get("author_association"))
+    comments: list[str] = []
+
+    # Fetch from GitHub if data missing and token supplied
+    if (not title or not body) and token:
+        try:
+            from app import github_client as gh
+            fetched = await asyncio.wait_for(
+                gh.fetch_issue(
+                    owner=owner,
+                    repo=repo,
+                    issue_number=issue_number,
+                    token=token,
+                    allow_global_token=False,
+                ),
+                timeout=PHASE1_SUBAGENT_TIMEOUT_S,
+            )
+            if fetched:
+                title = title or str(fetched.get("title") or "")
+                body = body or str(fetched.get("body") or "")
+                if not author and isinstance(fetched.get("user"), dict):
+                    author = fetched["user"].get("login", "")
+                if not assoc or assoc == "association not reported":
+                    assoc = author_association_label(fetched.get("author_association"))
+        except Exception as exc:
+            logger.warning("Phase 1a: Failed to fetch issue #%d data: %s", issue_number, exc)
+
+    # Fetch top discussion comments if token supplied
+    if token and not data.get("comments"):
+        try:
+            from app import github_client as gh
+            fetched_comments = await asyncio.wait_for(
+                gh.fetch_issue_comments(
+                    owner=owner,
+                    repo=repo,
+                    issue_number=issue_number,
+                    token=token,
+                    allow_global_token=False,
+                ),
+                timeout=PHASE1_SUBAGENT_TIMEOUT_S,
+            )
+            if isinstance(fetched_comments, list):
+                for c in fetched_comments[:5]:
+                    c_author = c.get("user", {}).get("login", "unknown") if isinstance(c.get("user"), dict) else "unknown"
+                    c_assoc = author_association_label(c.get("author_association"))
+                    c_body = str(c.get("body") or "").strip()
+                    if c_body:
+                        comments.append(f"Comment by @{c_author} ({c_assoc}):\n{c_body[:1000]}")
+        except Exception as exc:
+            logger.debug("Phase 1a: Could not fetch comments for issue #%d: %s", issue_number, exc)
+    elif isinstance(data.get("comments"), list):
+        comments = [str(c) for c in data["comments"][:5]]
+
+    # Extract mentioned issues and PRs (excluding PR and this issue)
+    search_texts = [title, body] + comments
+    mentioned_refs = extract_mentioned_issue_and_pr_numbers(
+        search_texts,
+        exclude=[pr_number, issue_number],
+        limit=MAX_MENTIONED_REFS_ANALYZED,
+    )
+
+    problem_statement = ""
+    acceptance_criteria: list[str] = []
+    preferred_approaches: list[str] = []
+    rejected_approaches: list[str] = []
+    scope_constraints: list[str] = []
+
+    if llm:
+        comments_block = "\n\n".join(comments) if comments else "(None)"
+        prompt = (
+            f"You are conducting Subagent B (Primary issue deep analysis) for Issue #{issue_number} in {owner}/{repo}.\n"
+            f"Issue Title: {title}\n"
+            f"Author: {author} ({assoc})\n\n"
+            f"Issue Body:\n{body}\n\n"
+            f"Discussion comments:\n{comments_block}\n\n"
+            f"Instructions:\n"
+            f"1. State the problem statement clearly and concisely.\n"
+            f"2. Extract acceptance criteria, preferred approaches, rejected approaches, and scope constraints.\n"
+            f"3. Note author attribution / maintainer direction.\n"
+            f"4. Do NOT analyze related issues/PRs — only extract any referenced issue/PR numbers (#N).\n"
+            f"Output strict JSON:\n"
+            f'{{"problem_statement": "...", "acceptance_criteria": ["..."], '
+            f'"preferred_approaches": ["..."], "rejected_approaches": ["..."], '
+            f'"scope_constraints": ["..."], "mentioned_refs": [123]}}'
+        )
+        try:
+            resp = await asyncio.wait_for(
+                llm.complete(
+                    messages=[
+                        {"role": "system", "content": "You are a concise, precise senior code review agent. Output JSON only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    db=None,
+                    model_config=model_config,
+                    max_tokens=1024,
+                ),
+                timeout=PHASE1_SUBAGENT_TIMEOUT_S,
+            )
+            content = resp.content if hasattr(resp, "content") else str(resp)
+            parsed = _parse_json_object(content)
+            if parsed:
+                problem_statement = str(parsed.get("problem_statement") or "").strip()
+                if isinstance(parsed.get("acceptance_criteria"), list):
+                    acceptance_criteria = [str(x).strip() for x in parsed["acceptance_criteria"] if str(x).strip()]
+                if isinstance(parsed.get("preferred_approaches"), list):
+                    preferred_approaches = [str(x).strip() for x in parsed["preferred_approaches"] if str(x).strip()]
+                if isinstance(parsed.get("rejected_approaches"), list):
+                    rejected_approaches = [str(x).strip() for x in parsed["rejected_approaches"] if str(x).strip()]
+                if isinstance(parsed.get("scope_constraints"), list):
+                    scope_constraints = [str(x).strip() for x in parsed["scope_constraints"] if str(x).strip()]
+                if isinstance(parsed.get("mentioned_refs"), list):
+                    for r in parsed["mentioned_refs"]:
+                        try:
+                            num = int(r)
+                            if num != pr_number and num != issue_number and num not in mentioned_refs:
+                                mentioned_refs.append(num)
+                        except (ValueError, TypeError):
+                            pass
+        except Exception as exc:
+            logger.warning("Phase 1a: Subagent B LLM call failed or timed out: %s", exc)
+
+    if not problem_statement:
+        problem_statement = f"{title}. {body[:300]}".strip()
+
+    raw_markdown = (
+        f"### Primary Issue #{issue_number}: {title}\n"
+        f"- **Author**: {author} ({assoc})\n"
+        f"- **Problem Statement**: {problem_statement}\n"
+        f"- **Acceptance Criteria**: {', '.join(acceptance_criteria) if acceptance_criteria else 'Derived from issue description'}\n"
+        f"- **Scope Constraints**: {', '.join(scope_constraints) if scope_constraints else 'Standard repo scope'}\n"
+        f"- **Referenced Issues/PRs**: {', '.join(f'#{r}' for r in mentioned_refs) if mentioned_refs else 'None'}"
+    )
+
+    logger.info("Phase 1a: Subagent B completed for Issue #%d in %.2fs", issue_number, time.monotonic() - started)
+    return IssueAssessment(
+        issue_number=issue_number,
+        title=title,
+        author=author,
+        author_attribution=assoc,
+        problem_statement=problem_statement,
+        acceptance_criteria=acceptance_criteria,
+        preferred_approaches=preferred_approaches,
+        rejected_approaches=rejected_approaches,
+        scope_constraints=scope_constraints,
+        mentioned_refs=mentioned_refs,
+        raw_markdown=raw_markdown,
+    )
+
+
+async def run_phase_1a(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: Optional[str] = None,
+    pr_metadata: Optional[Mapping[str, Any]] = None,
+    issue_data: Optional[Mapping[str, Any]] = None,
+    diff_text: str = "",
+    llm: Optional[LLMClient] = None,
+    model_config: Optional[ResolvedModelConfig] = None,
+) -> tuple[PRAssessment, Optional[IssueAssessment]]:
+    """Phase 1a: Parallel dispatch of Subagent A (PR) and Subagent B (Primary Issue).
+
+    Subagent B is dispatched ONLY if a primary issue exists that the PR fixes.
+    Returns (PRAssessment, Optional[IssueAssessment]) once both have reported back.
+    """
+    started = time.monotonic()
+    pr_body = str((pr_metadata or {}).get("body") or "")
+    primary_issue_number = detect_primary_issue_number(
+        pr_body,
+        pr_metadata=pr_metadata,
+        owner=owner,
+        repo=repo,
+    )
+
+    coro_a = run_subagent_a_pr_analysis(
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        token=token,
+        pr_metadata=pr_metadata,
+        diff_text=diff_text,
+        llm=llm,
+        model_config=model_config,
+    )
+
+    if primary_issue_number is not None and primary_issue_number > 0 and primary_issue_number != pr_number:
+        logger.info("Phase 1a: Detected primary issue #%d for PR #%d — running Subagent A and B in parallel", primary_issue_number, pr_number)
+        coro_b = run_subagent_b_issue_analysis(
+            owner=owner,
+            repo=repo,
+            issue_number=primary_issue_number,
+            token=token,
+            issue_data=issue_data,
+            pr_number=pr_number,
+            llm=llm,
+            model_config=model_config,
+        )
+        pr_assessment, issue_assessment = await asyncio.gather(coro_a, coro_b)
+    else:
+        logger.info("Phase 1a: No primary issue detected for PR #%d — omitting Subagent B", pr_number)
+        pr_assessment = await coro_a
+        issue_assessment = None
+
+    logger.info("Phase 1a: Completed in %.2fs", time.monotonic() - started)
+    return pr_assessment, issue_assessment
+
