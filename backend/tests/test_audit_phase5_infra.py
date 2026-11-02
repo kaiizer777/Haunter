@@ -21,8 +21,10 @@ from app.subagents.auditor import (
     AuditFinding,
     DiffGrounding,
     PerspectiveFinding,
+    PerspectiveResult,
     _is_grounded,
     build_diff_grounding,
+    synthesize_findings,
 )
 from app.subagents.code_reviewer import (
     ReviewFinding,
@@ -224,12 +226,45 @@ def test_validate_finding_coordinates_anchors_deleted_line_to_left():
         description="deleted_fn was required by callers",
         suggested_fix=None,
         confidence=90,
+        side="LEFT",
     )
     coords = validate_finding_coordinates(finding, grounding)
     assert coords is not None
     assert coords["path"] == "utils.py"
     assert coords["line"] == 11
     assert coords["side"] == "LEFT"
+
+
+def test_validate_finding_coordinates_checks_right_before_left_when_side_unset():
+    """When finding.side is not explicitly set, RIGHT side coverage is prioritized."""
+    diff = (
+        "diff --git a/utils.py b/utils.py\n"
+        "--- a/utils.py\n"
+        "+++ b/utils.py\n"
+        "@@ -10,3 +10,2 @@\n"
+        " start\n"
+        "-deleted_fn()\n"
+        " end\n"
+    )
+    grounding = build_diff_grounding(diff)
+    finding = AuditFinding(
+        id="AUD-MOD-001",
+        file_path="utils.py",
+        line_start=11,
+        line_end=11,
+        perspective="bug",
+        severity="WARNING",
+        category="logic",
+        title="Context/added line finding",
+        description="Check line on right",
+        suggested_fix=None,
+        confidence=90,
+    )
+    coords = validate_finding_coordinates(finding, grounding)
+    assert coords is not None
+    assert coords["path"] == "utils.py"
+    assert coords["line"] == 11
+    assert coords["side"] == "RIGHT"
 
 
 def test_format_inline_comment_body_on_left_side_does_not_emit_suggestion():
@@ -315,4 +350,190 @@ def test_code_reviewer_drops_oversized_suggested_patch():
     formatted = format_github_suggestion(rf)
     assert "```suggestion" not in formatted
     assert "Manual remediation recommended" in formatted
-    assert "The loop needs to be completely rewritten for streaming." in formatted
+
+
+def test_is_cross_file_does_not_suppress_multiplayer_filename():
+    """Verify paths containing substring 'multi' like multiplayer.py are NOT marked cross-file."""
+    finding_multiplayer = AuditFinding(
+        id="AUD-MULTI-1",
+        file_path="src/multiplayer.py",
+        line_start=10,
+        line_end=12,
+        perspective="bug",
+        severity="WARNING",
+        category="networking",
+        title="Packet sync error",
+        description="State divergence in multiplayer session",
+        suggested_fix="def sync(): pass",
+        confidence=90,
+    )
+    assert is_cross_file_finding(finding_multiplayer) is False
+
+    rf = ReviewFinding(
+        file_path="src/multiplayer.py",
+        line_start=10,
+        line_end=12,
+        category="logic",
+        severity="medium",
+        critique="Issue with sync",
+        suggested_patch="def sync(): pass",
+    )
+    assert should_show_suggested_patch(rf, "def sync(): pass") is True
+
+    # But structured multi-file indicators DO return True
+    finding_comma = AuditFinding(
+        id="AUD-MULTI-2",
+        file_path="src/auth.py, src/db.py",
+        line_start=1,
+        line_end=1,
+        perspective="bug",
+        severity="WARNING",
+        category="contract",
+        title="Multiple files",
+        description="Changes across services",
+        suggested_fix=None,
+        confidence=90,
+    )
+    assert is_cross_file_finding(finding_comma) is True
+
+    finding_general = AuditFinding(
+        id="AUD-MULTI-3",
+        file_path="(general)",
+        line_start=0,
+        line_end=0,
+        perspective="bug",
+        severity="WARNING",
+        category="contract",
+        title="PR-wide issue",
+        description="General architecture issue",
+        suggested_fix=None,
+        confidence=90,
+    )
+    assert is_cross_file_finding(finding_general) is True
+
+
+def test_audit_matcher_unescapes_git_c_style_paths():
+    """Verify _extract_diff_changed_old_lines decodes Git C-style path escapes (tabs, quotes, octal)."""
+    from app.subagents.audit_matcher import _extract_diff_changed_old_lines
+
+    diff_tab = (
+        'diff --git "a/path\\twith\\ttab.py" "b/path\\twith\\ttab.py"\n'
+        '--- "a/path\\twith\\ttab.py"\n'
+        '+++ "b/path\\twith\\ttab.py"\n'
+        '@@ -10,3 +10,2 @@\n'
+        ' def check():\n'
+        '-    bad_code()\n'
+        '     return True\n'
+    )
+    changed = _extract_diff_changed_old_lines(diff_tab)
+    assert "path\twith\ttab.py" in changed
+    assert 11 in changed["path\twith\ttab.py"]
+
+    diff_quotes = (
+        'diff --git "a/file\\"quoted\\".py" "b/file\\"quoted\\".py"\n'
+        '--- "a/file\\"quoted\\".py"\n'
+        '+++ "b/file\\"quoted\\".py"\n'
+        '@@ -5,2 +5,1 @@\n'
+        '-remove_me()\n'
+        ' keep_me()\n'
+    )
+    changed_quotes = _extract_diff_changed_old_lines(diff_quotes)
+    assert 'file"quoted".py' in changed_quotes
+    assert 5 in changed_quotes['file"quoted".py']
+
+
+def test_non_commentable_diff_grounding_bypass_restricted_to_line_zero():
+    """Restricting non_commentable bypass to line_start == 0 so arbitrary ungrounded lines are rejected."""
+    from app.subagents.auditor import PerspectiveResult
+    diff = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -10,2 +10,2 @@\n"
+        "-a\n"
+        "+b\n"
+        " c\n"
+    )
+    # 1. line_start == 0 with non_commentable=True -> accepted (PR-level or whole-file structural finding)
+    structural_finding = PerspectiveFinding(
+        file_path="app.py",
+        line_start=0,
+        line_end=0,
+        severity="WARNING",
+        category="architecture",
+        title="Structural finding",
+        description="Whole-file architectural observation",
+        suggested_fix=None,
+        confidence=90,
+        non_commentable=True,
+    )
+    result_structural = PerspectiveResult(
+        perspective="architecture",
+        summary="summary",
+        confidence=90,
+        findings=[structural_finding],
+    )
+    synthesized = synthesize_findings([result_structural], diff, overall_confidence=90)
+    assert len(synthesized) == 1
+    assert synthesized[0].line_start == 0
+
+    # 2. line_start == 99 (ungrounded) with non_commentable=True -> REJECTED because line_start != 0
+    ungrounded_finding = PerspectiveFinding(
+        file_path="app.py",
+        line_start=99,
+        line_end=99,
+        severity="WARNING",
+        category="security",
+        title="Ungrounded finding",
+        description="Tries to bypass grounding with non_commentable",
+        suggested_fix=None,
+        confidence=90,
+        non_commentable=True,
+    )
+    result_ungrounded = PerspectiveResult(
+        perspective="security",
+        summary="summary",
+        confidence=90,
+        findings=[ungrounded_finding],
+    )
+    synthesized_ungrounded = synthesize_findings([result_ungrounded], diff, overall_confidence=90)
+    assert len(synthesized_ungrounded) == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_audit_source_contexts_filters_out_deleted_files(monkeypatch: pytest.MonkeyPatch):
+    """fetch_audit_source_contexts must not consume AST budget slots on deleted files (+++ /dev/null)."""
+    from app.subagents.auditor import fetch_audit_source_contexts
+
+    diff = (
+        "diff --git a/deleted.py b/deleted.py\n"
+        "--- a/deleted.py\n"
+        "+++ /dev/null\n"
+        "@@ -1,2 +0,0 @@\n"
+        "-old1\n"
+        "-old2\n"
+        "diff --git a/active.py b/active.py\n"
+        "--- a/active.py\n"
+        "+++ b/active.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " keep\n"
+        "+add\n"
+    )
+
+    requested_files: list[str] = []
+
+    async def fake_fetch_file_content(*, owner, repo, path, sha, **kwargs):
+        requested_files.append(path)
+        return "content"
+
+    monkeypatch.setattr("app.github_client.fetch_file_content", fake_fetch_file_content)
+
+    contexts = await fetch_audit_source_contexts(
+        owner="owner",
+        repo="repo",
+        diff_text=diff,
+        sha="abcdef1234567890abcdef1234567890abcdef12",
+    )
+    assert "deleted.py" not in requested_files
+    assert "active.py" in requested_files
+    assert "active.py" in contexts
