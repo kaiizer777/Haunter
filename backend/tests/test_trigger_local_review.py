@@ -90,6 +90,45 @@ def test_build_payload_defaults_to_supplied_sha_and_pr() -> None:
     assert payload["pull_request"]["base"]["ref"] == "master"
 
 
+def test_build_payload_uses_supplied_base_sha() -> None:
+    trigger = _load_trigger()
+
+    payload = trigger._build_payload(
+        repo="saif-org/haunter-demo",
+        pr_number=7,
+        sha="a" * 40,
+        base_ref="main",
+        head_ref="feature/local-dev",
+        action="opened",
+        sender="local-dev",
+        sender_type="User",
+        base_sha="d" * 40,
+    )
+
+    assert payload["pull_request"]["base"]["sha"] == "d" * 40
+    assert payload["pull_request"]["head"]["sha"] == "a" * 40
+
+
+def test_build_payload_defaults_to_synthetic_base_sha() -> None:
+    trigger = _load_trigger()
+    sha = "a" * 40
+
+    payload = trigger._build_payload(
+        repo="saif-org/haunter-demo",
+        pr_number=7,
+        sha=sha,
+        base_ref="main",
+        head_ref="feature/local-dev",
+        action="opened",
+        sender="local-dev",
+        sender_type="User",
+    )
+
+    base_sha = payload["pull_request"]["base"]["sha"]
+    assert re.fullmatch(r"[0-9a-f]{40}", base_sha)
+    assert base_sha != sha
+
+
 def test_sign_payload_matches_known_good_hmac() -> None:
     trigger = _load_trigger()
 
@@ -307,6 +346,45 @@ def test_parse_args_rejects_malformed_sha() -> None:
         )
 
     assert excinfo.value.code == 2
+
+
+def test_parse_args_rejects_malformed_base_sha() -> None:
+    trigger = _load_trigger()
+
+    with pytest.raises(SystemExit) as excinfo:
+        trigger._parse_args(
+            ["--repo", "saif-org/haunter-demo", "--pr", "1", "--base-sha", "deadbeef"]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_parse_args_accepts_base_sha() -> None:
+    trigger = _load_trigger()
+
+    args = trigger._parse_args(
+        [
+            "--repo",
+            "saif-org/haunter-demo",
+            "--pr",
+            "7",
+            "--sha",
+            "A" * 40,
+            "--base-sha",
+            "D" * 40,
+        ]
+    )
+
+    assert args.sha == "a" * 40
+    assert args.base_sha == "d" * 40
+
+
+def test_parse_args_base_sha_defaults_to_none() -> None:
+    trigger = _load_trigger()
+
+    args = trigger._parse_args(["--repo", "saif-org/haunter-demo", "--pr", "7"])
+
+    assert args.base_sha is None
 
 
 def test_parse_args_accepts_valid_inputs() -> None:
