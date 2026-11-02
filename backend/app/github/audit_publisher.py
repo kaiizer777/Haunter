@@ -24,6 +24,7 @@ from app import github_client
 from app.diff_validation import coerce_unified_diff
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
+    swap_report_footer,
     MAX_CATEGORY_CHARS,
     MAX_GITHUB_COMMENT_CHARS,
     MAX_INLINE_FIELD_CHARS,
@@ -412,6 +413,85 @@ async def publish_finding_comments(
     return responses
 
 
+
+
+
+def update_dossier_meta(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    review_id: Optional[int | str],
+    active_findings: Sequence[Any],
+    resolved_count: int = 0,
+    dossier_dir: Optional[str] = None,
+    audit_id: str = "",
+) -> None:
+    """Persist or update PR review state in {dossier_dir}/meta.json."""
+    try:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        if dossier_dir:
+            target_dir = Path(dossier_dir)
+        else:
+            safe_repo = f"{owner}_{repo}".replace("/", "_") if owner and repo else "repo"
+            target_dir = Path(tempfile.gettempdir()) / "haunter-dossier" / safe_repo / f"PR-{pr_number}"
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        meta_file = target_dir / "meta.json"
+
+        serialized_findings = []
+        for f in active_findings:
+            if hasattr(f, "to_report_dict"):
+                serialized_findings.append(f.to_report_dict())
+            elif isinstance(f, dict):
+                serialized_findings.append(f)
+            elif hasattr(f, "__dict__"):
+                serialized_findings.append({k: v for k, v in f.__dict__.items() if not k.startswith("_")})
+
+        meta_data = {
+            "last_reviewed_sha": head_sha,
+            "review_id": review_id,
+            "active_findings": serialized_findings,
+            "resolved_findings_count": resolved_count,
+            "last_audit_id": audit_id,
+        }
+        meta_file.write_text(json.dumps(meta_data, indent=2), encoding="utf-8")
+        logger.info("Updated dossier meta.json at %s (review_id=%s, sha=%s)", meta_file, review_id, head_sha)
+    except Exception as exc:
+        logger.warning("Could not update dossier meta.json: %s", exc)
+
+
+def load_dossier_meta(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    dossier_dir: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Load PR review state from {dossier_dir}/meta.json if present."""
+    try:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        if dossier_dir:
+            target_dir = Path(dossier_dir)
+        else:
+            safe_repo = f"{owner}_{repo}".replace("/", "_") if owner and repo else "repo"
+            target_dir = Path(tempfile.gettempdir()) / "haunter-dossier" / safe_repo / f"PR-{pr_number}"
+
+        meta_file = target_dir / "meta.json"
+        if meta_file.is_file():
+            return json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Could not load dossier meta.json: %s", exc)
+    return None
+
+
 async def publish_audit_review(
     *,
     result: AuditResult,
@@ -427,6 +507,10 @@ async def publish_audit_review(
     allow_global_token: bool = False,
     raise_on_error: bool = False,
     post_finding_comments: bool = False,
+    review_id: Optional[int | str] = None,
+    resolved_since_last_review: Optional[int] = None,
+    new_findings: Optional[Sequence[Any]] = None,
+    dossier_dir: Optional[str] = None,
 ) -> PublishResult:
     """Publish an audit report to GitHub as a PR Review or Commit Comment.
 
@@ -519,33 +603,103 @@ async def publish_audit_review(
                 comments = []
                 suppressed_count = len(result.findings)
 
-            review_body = _bound_github_body(
-                result.report_markdown, result.executive_summary
-            )
+            review_body = result.report_markdown or result.executive_summary
+            if resolved_since_last_review is not None:
+                review_body = swap_report_footer(review_body, resolved_since_last_review)
+            review_body = _bound_github_body(review_body)
 
-            resp = await github_client.create_pr_review(
+            if review_id is not None:
+                # In-place update of existing PR review body
+                resp = await github_client.update_pr_review(
+                    owner=resolved_owner,
+                    repo=resolved_repo,
+                    pr_number=resolved_pr_number,
+                    review_id=review_id,
+                    body=review_body,
+                    token=token,
+                    allow_global_token=allow_global_token,
+                )
+                logger.info(
+                    "audit review_updated in-place audit_id=%s pr=%d review_id=%s resolved_since_last=%s",
+                    result.audit_id,
+                    resolved_pr_number,
+                    review_id,
+                    resolved_since_last_review,
+                )
+                # Post inline comments ONLY for brand-new findings
+                comments = []
+                suppressed_count = 0
+                if effective_allowed and new_findings:
+                    comments, suppressed_count = build_inline_review_comments(
+                        new_findings,
+                        diff_text=diff_text,
+                        min_confidence=INFORMATIONAL_CONFIDENCE_THRESHOLD,
+                        allow_informational=allow_informational_inline,
+                    )
+                    if comments:
+                        await github_client.create_pr_review(
+                            owner=resolved_owner,
+                            repo=resolved_repo,
+                            pr_number=resolved_pr_number,
+                            commit_sha=resolved_head_sha,
+                            body="",
+                            comments=comments,
+                            event="COMMENT",
+                            token=token,
+                            allow_global_token=allow_global_token,
+                        )
+            else:
+                resp = await github_client.create_pr_review(
+                    owner=resolved_owner,
+                    repo=resolved_repo,
+                    pr_number=resolved_pr_number,
+                    commit_sha=resolved_head_sha,
+                    body=review_body,
+                    comments=comments,
+                    event=event,
+                    token=token,
+                    allow_global_token=allow_global_token,
+                )
+                logger.info(
+                    "audit review_published audit_id=%s pr=%d comments=%d suppressed=%d event=%s",
+                    result.audit_id,
+                    resolved_pr_number,
+                    len(comments),
+                    suppressed_count,
+                    event,
+                )
+
+            final_review_id = review_id or (resp.get("id") if isinstance(resp, dict) else None)
+            update_dossier_meta(
                 owner=resolved_owner,
                 repo=resolved_repo,
                 pr_number=resolved_pr_number,
-                commit_sha=resolved_head_sha,
-                body=review_body,
-                comments=comments,
-                event=event,
-                token=token,
-                allow_global_token=allow_global_token,
+                head_sha=resolved_head_sha,
+                review_id=final_review_id,
+                active_findings=result.findings,
+                resolved_count=resolved_since_last_review or 0,
+                dossier_dir=dossier_dir,
+                audit_id=result.audit_id,
             )
-            logger.info(
-                "audit review_published audit_id=%s pr=%d comments=%d suppressed=%d event=%s",
-                result.audit_id,
-                resolved_pr_number,
-                len(comments),
-                suppressed_count,
-                event,
-            )
+
             finding_comments_resps: list[dict[str, Any]] = []
             if post_finding_comments and effective_allowed:
+                findings_to_post = new_findings if (review_id is not None and new_findings is not None) else result.findings
+                temp_result = AuditResult(
+                    audit_id=result.audit_id,
+                    audit_type=result.audit_type,
+                    repo_full_name=result.repo_full_name,
+                    target_label=result.target_label,
+                    engine=result.engine,
+                    executive_summary=result.executive_summary,
+                    findings=findings_to_post,
+                    confidence=result.confidence,
+                    status=result.status,
+                    remediation_diff=result.remediation_diff,
+                    report_markdown=result.report_markdown,
+                )
                 finding_comments_resps = await publish_finding_comments(
-                    result=result,
+                    result=temp_result,
                     owner=resolved_owner,
                     repo=resolved_repo,
                     pr_number=resolved_pr_number,

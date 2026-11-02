@@ -1426,6 +1426,7 @@ def format_audit_report(
     publish_allowed: bool = True,
     analysis_metadata: str = "",
     pr_score: Optional[int] = None,
+    resolved_since_last_review: Optional[int] = None,
 ) -> str:
     confidence_value = _clamp_confidence(confidence)
     policy_allowed = publish_allowed is True
@@ -1641,12 +1642,30 @@ def format_audit_report(
         if omitted_count:
             rendered.append(f"_{omitted_count} additional findings omitted._")
 
+    footer_text = "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*"
+    if resolved_since_last_review is not None:
+        footer_text = f"*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch. · resolved since last review: {resolved_since_last_review}*"
+
     suffix = [
         "",
         "---",
-        "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*",
+        footer_text,
     ]
 
     report = "\n".join([*prefix, *rendered, *suffix]).rstrip() + "\n"
     return _bound_report(redact_sensitive_text(report))
 
+
+
+
+def swap_report_footer(report_text: str, resolved_since_last_review: int) -> str:
+    """Swap the generic report footer line with the live resolved count footer."""
+    new_footer = f"*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch. · resolved since last review: {resolved_since_last_review}*"
+    pattern = r"\*Generated autonomously by Haunter Guardian Mode\. Zero changes were committed to your branch\.(?: [·\-] resolved since last review: \d+)?\*"
+    if re.search(pattern, report_text):
+        return re.sub(pattern, new_footer, report_text)
+    return report_text.rstrip() + f"
+
+---
+{new_footer}
+"
