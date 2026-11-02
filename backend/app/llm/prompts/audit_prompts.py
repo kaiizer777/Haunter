@@ -1153,6 +1153,7 @@ def _render_structural_analysis(
     metadata: str = "",
     blast_radius: str = "",
     stats: Optional[dict[str, Any]] = None,
+    non_commentable_findings: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     raw_meta = str(metadata or "")
     has_unsupported_ast = bool(
@@ -1241,6 +1242,13 @@ def _render_structural_analysis(
         f"- **Touched Components:** {components_str}",
         f"- **Risk Assessment:** {risk_assessment}",
     ]
+
+    for finding in non_commentable_findings:
+        cat = _sanitize_heading_text(finding.get("category", "Architecture"), 60)
+        title = _sanitize_heading_text(finding.get("title", "Architectural finding"), 100)
+        desc = str(finding.get("description") or finding.get("impact") or finding.get("summary") or "")
+        short_desc = _sanitize_inline(desc, 140) if desc else "Review finding."
+        lines.append(f"- **{cat}:** {title} — {short_desc}")
 
     if has_unsupported_ast:
         lines.append(
@@ -1556,9 +1564,20 @@ def format_audit_report(
         else:
             status_label = build_status_from_score(pr_score_val)
 
+    non_commentable_findings = [
+        f
+        for f in findings
+        if bool(
+            f.get("non_commentable")
+            or f.get("line_start") == 0
+            or f.get("file_path") in ("", "(general)", None)
+        )
+    ]
+
     structural_analysis_rendered = _render_structural_analysis(
         analysis_metadata,
         blast_radius=blast_radius_label,
+        non_commentable_findings=non_commentable_findings,
     )
 
     blast_radius_html = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", blast_radius_label)
@@ -1637,6 +1656,11 @@ def format_audit_report(
     else:
         rendered = ["*Detailed code diffs posted as separate review comments:*"]
         for f in bounded_findings[:MAX_REPORT_FINDINGS]:
+            is_non_commentable = bool(
+                f.get("non_commentable")
+                or f.get("line_start") == 0
+                or f.get("file_path") in ("", "(general)", None)
+            )
             sev = str(f.get("severity", "NOTE")).upper()
             if sev == "BLOCKER":
                 badge = "⛔ **Must-Fix:**"
@@ -1646,17 +1670,6 @@ def format_audit_report(
                 badge = "💡 **Suggestion:**"
 
             title = _sanitize_heading_text(f.get("title", "Untitled finding"), 100)
-
-            file_path = _safe_path(f.get("file_path"))
-            line_start = _bounded_integer(f.get("line_start"), 1, 10_000_000, 1)
-            line_end = _bounded_integer(f.get("line_end"), line_start, 10_000_000, line_start)
-            loc = (
-                f"{file_path}#L{line_start}"
-                if line_start == line_end
-                else f"{file_path}#L{line_start}-L{line_end}"
-            )
-            file_link = str(f.get("file_url") or f.get("url") or loc)
-
             is_info = _finding_is_informational(f, confidence_value)
             desc = str(f.get("description") or f.get("impact") or f.get("summary") or "")
             if is_info:
@@ -1664,7 +1677,19 @@ def format_audit_report(
             else:
                 short_summary = _sanitize_inline(desc, 140) if desc else "Review proposed remediation."
 
-            rendered.append(f"- {badge} [{title}]({file_link}) — {short_summary}")
+            if is_non_commentable:
+                rendered.append(f"- {badge} 🏛️ **{title}** — {short_summary}")
+            else:
+                file_path = _safe_path(f.get("file_path"))
+                line_start = _bounded_integer(f.get("line_start"), 1, 10_000_000, 1)
+                line_end = _bounded_integer(f.get("line_end"), line_start, 10_000_000, line_start)
+                loc = (
+                    f"{file_path}#L{line_start}"
+                    if line_start == line_end
+                    else f"{file_path}#L{line_start}-L{line_end}"
+                )
+                file_link = str(f.get("file_url") or f.get("url") or loc)
+                rendered.append(f"- {badge} [{title}]({file_link}) — {short_summary}")
 
         omitted_count = max(0, total_findings - len(bounded_findings[:MAX_REPORT_FINDINGS]))
         if omitted_count:
