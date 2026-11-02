@@ -23,6 +23,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -293,9 +294,10 @@ def _validate_repo_path(value: Any) -> Any:
 class PerspectiveFinding(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    file_path: str = Field(min_length=1, max_length=512)
-    line_start: int = Field(ge=1, le=MAX_LINE_NUMBER)
-    line_end: int = Field(ge=1, le=MAX_LINE_NUMBER)
+    non_commentable: bool = False
+    file_path: str = Field(default="", min_length=0, max_length=512)
+    line_start: int = Field(default=0, ge=0, le=MAX_LINE_NUMBER)
+    line_end: int = Field(default=0, ge=0, le=MAX_LINE_NUMBER)
     severity: AuditSeverity
     category: str = Field(min_length=1, max_length=160)
     title: str = Field(min_length=3, max_length=240)
@@ -311,7 +313,11 @@ class PerspectiveFinding(BaseModel):
 
     @field_validator("file_path", mode="before")
     @classmethod
-    def _validate_file_path(cls, value: Any) -> Any:
+    def _validate_file_path(cls, value: Any, info: ValidationInfo) -> Any:
+        if info.data.get("non_commentable"):
+            val_str = str(value or "").strip()
+            if val_str in ("", "(general)", "general"):
+                return "(general)" if val_str in ("(general)", "general") else ""
         return _validate_repo_path(value)
 
     @field_validator("severity", mode="before")
@@ -328,6 +334,11 @@ class PerspectiveFinding(BaseModel):
     def _normalize_line_range(self) -> "PerspectiveFinding":
         if self.line_end < self.line_start:
             self.line_end = self.line_start
+        if not self.non_commentable:
+            if not self.file_path or self.file_path in ("", "(general)"):
+                raise ValueError("file_path must be a bounded repository-relative path")
+            if self.line_start < 1:
+                raise ValueError("line_start must be >= 1 for commentable findings")
         return self
 
 
@@ -374,6 +385,7 @@ class AuditFinding:
     suggested_fix: Optional[str]
     confidence: int
     informational_only: bool = False
+    non_commentable: bool = False
 
     @property
     def impact(self) -> str:
@@ -393,6 +405,7 @@ class AuditFinding:
             "suggested_fix": self.suggested_fix,
             "confidence": self.confidence,
             "informational_only": self.informational_only,
+            "non_commentable": self.non_commentable,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -420,6 +433,7 @@ class AuditFinding:
                 if isinstance(suggested, str) and suggested.strip()
                 else None
             ),
+            "non_commentable": self.non_commentable,
         }
 
     def to_report_dict(self) -> dict[str, Any]:
@@ -1765,6 +1779,7 @@ def _apply_confidence_policy(
         suggested_fix=suggested_fix,
         confidence=finding.confidence,
         informational_only=informational_only,
+        non_commentable=finding.non_commentable,
     )
 
 
@@ -1823,7 +1838,11 @@ def synthesize_findings(
         if not result.succeeded:
             continue
         for finding in result.findings:
-            if _is_grounded(finding, grounding):
+            if (
+                getattr(finding, "non_commentable", False)
+                or finding.line_start == 0
+                or _is_grounded(finding, grounding)
+            ):
                 candidates.append((result, finding))
     candidates.sort(
         key=lambda item: (
