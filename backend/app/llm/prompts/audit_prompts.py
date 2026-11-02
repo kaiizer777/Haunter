@@ -1410,6 +1410,23 @@ def _render_audit_findings_table(
     return "\n".join(rows)
 
 
+def format_posted_counts_badge(posted_counts: Mapping[str, int]) -> str:
+    """Format counts of posted findings by canonical severity (C, H, M, L, I).
+
+    Zero counts are omitted. If no findings were posted or counts are empty,
+    returns an empty string. Example: {'C': 3, 'H': 5} -> 'C3 H5'
+    """
+    if not posted_counts:
+        return ""
+    order = ("C", "H", "M", "L", "I")
+    parts = []
+    for sev in order:
+        cnt = posted_counts.get(sev, 0)
+        if cnt > 0:
+            parts.append(f"{sev}{cnt}")
+    return " ".join(parts)
+
+
 def format_audit_report(
     *,
     pr_summary: Optional[str] = None,
@@ -1427,6 +1444,7 @@ def format_audit_report(
     analysis_metadata: str = "",
     pr_score: Optional[int] = None,
     resolved_since_last_review: Optional[int] = None,
+    posted_counts: Optional[Mapping[str, int] | str] = None,
 ) -> str:
     confidence_value = _clamp_confidence(confidence)
     policy_allowed = publish_allowed is True
@@ -1642,9 +1660,19 @@ def format_audit_report(
         if omitted_count:
             rendered.append(f"_{omitted_count} additional findings omitted._")
 
-    footer_text = "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*"
+    badge = ""
+    if posted_counts is not None:
+        if isinstance(posted_counts, str):
+            badge = posted_counts.strip()
+        else:
+            badge = format_posted_counts_badge(posted_counts)
+
+    footer_parts = ["*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch."]
+    if badge:
+        footer_parts.append(f"· {badge}")
     if resolved_since_last_review is not None:
-        footer_text = f"*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch. · resolved since last review: {resolved_since_last_review}*"
+        footer_parts.append(f"· resolved since last review: {resolved_since_last_review}")
+    footer_text = " ".join(footer_parts) + "*"
 
     suffix = [
         "",
@@ -1658,10 +1686,40 @@ def format_audit_report(
 
 
 
-def swap_report_footer(report_text: str, resolved_since_last_review: int) -> str:
-    """Swap the generic report footer line with the live resolved count footer."""
-    new_footer = f"*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch. · resolved since last review: {resolved_since_last_review}*"
-    pattern = r"\*Generated autonomously by Haunter Guardian Mode\. Zero changes were committed to your branch\.(?: [·\-] resolved since last review: \d+)?\*"
-    if re.search(pattern, report_text):
-        return re.sub(pattern, new_footer, report_text)
+def swap_report_footer(
+    report_text: str,
+    resolved_since_last_review: Optional[int] = None,
+    *,
+    posted_counts: Optional[Mapping[str, int] | str] = None,
+) -> str:
+    """Swap or update the report footer with live posted counts badge and resolved count."""
+    pattern = r"\*Generated autonomously by Haunter Guardian Mode\. Zero changes were committed to your branch\.(?:\s*[·\-]\s*(?P<badge>[CHMLI]\d+(?:\s+[CHMLI]\d+)*))?(?:\s*[·\-]\s*resolved since last review:\s*(?P<resolved>\d+))?\s*\*"
+    match = re.search(pattern, report_text)
+    existing_badge = match.group("badge") if match else None
+    existing_resolved = int(match.group("resolved")) if (match and match.group("resolved") is not None) else None
+
+    # Determine badge
+    if posted_counts is not None:
+        if isinstance(posted_counts, str):
+            badge = posted_counts.strip()
+        else:
+            badge = format_posted_counts_badge(posted_counts)
+    else:
+        badge = existing_badge or ""
+
+    # Determine resolved count
+    if resolved_since_last_review is not None:
+        resolved = resolved_since_last_review
+    else:
+        resolved = existing_resolved
+
+    parts = ["*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch."]
+    if badge:
+        parts.append(f"· {badge}")
+    if resolved is not None:
+        parts.append(f"· resolved since last review: {resolved}")
+    new_footer = " ".join(parts) + "*"
+
+    if match:
+        return re.sub(pattern, lambda _: new_footer, report_text)
     return report_text.rstrip() + "\n\n---\n" + new_footer + "\n"
