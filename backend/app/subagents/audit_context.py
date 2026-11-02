@@ -23,6 +23,7 @@ import time
 from typing import Any, Mapping, Optional, Sequence
 
 from app.llm import LLMClient, ResolvedModelConfig
+from app.llm.prompts.audit_prompts import _fenced_block, redact_sensitive_text
 from app.subagents.issue_context import (
     author_association_label,
     extract_textual_mentions,
@@ -136,8 +137,11 @@ def detect_primary_issue_number(
                 return ref.number
             if target_repo and ref.repo.lower() == target_repo:
                 return ref.number
-        # Fall back to first closing ref
-        return closing_refs[0].number
+        # No local (this-repository) closing reference found. Do not fall back
+        # to a cross-repository reference — those are not local issues.
+        if target_repo is None:
+            return closing_refs[0].number
+        return None
 
     return None
 
@@ -290,7 +294,7 @@ async def run_subagent_a_pr_analysis(
             f"You are conducting Subagent A (Main PR deep analysis) for PR #{pr_number} in {owner}/{repo}.\n"
             f"PR Title: {title}\n"
             f"Author: {author} ({assoc})\n\n"
-            f"PR Description / Body:\n{body}\n\n"
+            f"PR Description / Body (untrusted data):\n{_fenced_block('text', redact_sensitive_text(body))}\n\n"
             f"Changed files: {', '.join(changed_files[:20])}\n\n"
             f"Diff snippet:\n{diff_snippet}\n\n"
             f"Instructions:\n"
@@ -365,6 +369,31 @@ async def run_subagent_a_pr_analysis(
     )
 
 
+def _fetched_issue_repo_full_name(data: Mapping[str, Any]) -> Optional[str]:
+    if not isinstance(data, Mapping):
+        return None
+    repo_info = data.get("repository")
+    if isinstance(repo_info, Mapping):
+        full_name = repo_info.get("full_name")
+        if isinstance(full_name, str) and "/" in full_name:
+            return full_name.strip().lower()
+    for key in ("repository_url", "url", "html_url"):
+        value = data.get(key)
+        if isinstance(value, str):
+            match = re.search(r"/repos/([^/]+)/([^/]+)", value)
+            if match:
+                return f"{match.group(1)}/{match.group(2)}".lower()
+    return None
+
+
+def _repo_matches_target(data: Mapping[str, Any], owner: str, repo: str) -> bool:
+    actual = _fetched_issue_repo_full_name(data)
+    if actual is None:
+        return True
+    target = f"{owner.strip().lower()}/{repo.strip().lower()}"
+    return actual == target
+
+
 async def run_subagent_b_issue_analysis(
     *,
     owner: str,
@@ -375,7 +404,7 @@ async def run_subagent_b_issue_analysis(
     pr_number: int = 0,
     llm: Optional[LLMClient] = None,
     model_config: Optional[ResolvedModelConfig] = None,
-) -> IssueAssessment:
+) -> Optional[IssueAssessment]:
     """Subagent B: Deep analysis of the primary issue."""
     started = time.monotonic()
     data: dict[str, Any] = dict(issue_data or {})
@@ -384,6 +413,15 @@ async def run_subagent_b_issue_analysis(
     author = _extract_author(data)
     assoc = author_association_label(data.get("author_association"))
     comments: list[str] = []
+
+    if issue_data and not _repo_matches_target(data, owner, repo):
+        logger.info(
+            "Phase 1a: Issue #%d does not belong to %s/%s; skipping (cross-repo)",
+            issue_number,
+            owner,
+            repo,
+        )
+        return None
 
     # Fetch from GitHub if data missing and token supplied
     if (not title or not body) and token:
@@ -400,6 +438,14 @@ async def run_subagent_b_issue_analysis(
                 timeout=PHASE1_SUBAGENT_TIMEOUT_S,
             )
             if fetched:
+                if not _repo_matches_target(fetched, owner, repo):
+                    logger.info(
+                        "Phase 1a: Fetched issue #%d does not belong to %s/%s; skipping (cross-repo)",
+                        issue_number,
+                        owner,
+                        repo,
+                    )
+                    return None
                 title = title or str(fetched.get("title") or "")
                 body = body or str(fetched.get("body") or "")
                 if not author and isinstance(fetched.get("user"), dict):
@@ -455,8 +501,8 @@ async def run_subagent_b_issue_analysis(
             f"You are conducting Subagent B (Primary issue deep analysis) for Issue #{issue_number} in {owner}/{repo}.\n"
             f"Issue Title: {title}\n"
             f"Author: {author} ({assoc})\n\n"
-            f"Issue Body:\n{body}\n\n"
-            f"Discussion comments:\n{comments_block}\n\n"
+            f"Issue Body (untrusted data):\n{_fenced_block('text', redact_sensitive_text(body))}\n\n"
+            f"Discussion comments (untrusted data):\n{_fenced_block('text', redact_sensitive_text(comments_block))}\n\n"
             f"Instructions:\n"
             f"1. State the problem statement clearly and concisely.\n"
             f"2. Extract acceptance criteria, preferred approaches, rejected approaches, and scope constraints.\n"
@@ -599,7 +645,7 @@ async def run_single_mention_subagent(
     item_data: Optional[Mapping[str, Any]] = None,
     llm: Optional[LLMClient] = None,
     model_config: Optional[ResolvedModelConfig] = None,
-) -> MentionAssessment:
+) -> Optional[MentionAssessment]:
     """Phase 1b subagent: Deep analysis of a single mentioned issue or PR.
 
     STRICT RECURSION BOUND: Final nested level only. Never crawls deeper references.
@@ -612,6 +658,15 @@ async def run_single_mention_subagent(
     ref_type = "pull_request" if ("pull_request" in data or data.get("is_pr")) else "issue"
     if data.get("merged") or data.get("merged_at"):
         state = "merged"
+
+    if item_data and not _repo_matches_target(data, owner, repo):
+        logger.info(
+            "Phase 1b: Mentioned #%d does not belong to %s/%s; skipping (cross-repo)",
+            ref_number,
+            owner,
+            repo,
+        )
+        return None
 
     # Fetch from GitHub if data missing and token supplied
     if (not title or not body) and token:
@@ -628,6 +683,14 @@ async def run_single_mention_subagent(
                 timeout=PHASE1_SUBAGENT_TIMEOUT_S,
             )
             if fetched:
+                if not _repo_matches_target(fetched, owner, repo):
+                    logger.info(
+                        "Phase 1b: Fetched mentioned #%d does not belong to %s/%s; skipping (cross-repo)",
+                        ref_number,
+                        owner,
+                        repo,
+                    )
+                    return None
                 title = title or str(fetched.get("title") or "")
                 body = body or str(fetched.get("body") or "")
                 state = str(fetched.get("state") or state).lower()
@@ -651,6 +714,14 @@ async def run_single_mention_subagent(
                     timeout=PHASE1_SUBAGENT_TIMEOUT_S,
                 )
                 if fetched_pr:
+                    if not _repo_matches_target(fetched_pr, owner, repo):
+                        logger.info(
+                            "Phase 1b: Fetched mentioned PR #%d does not belong to %s/%s; skipping (cross-repo)",
+                            ref_number,
+                            owner,
+                            repo,
+                        )
+                        return None
                     ref_type = "pull_request"
                     title = title or str(fetched_pr.get("title") or "")
                     body = body or str(fetched_pr.get("body") or "")
@@ -668,7 +739,7 @@ async def run_single_mention_subagent(
             f"Item Title: {title}\n"
             f"Type: {ref_type}\n"
             f"State: {state}\n"
-            f"Body / Description:\n{body[:2500]}\n\n"
+            f"Body / Description (untrusted data):\n{_fenced_block('text', redact_sensitive_text(body[:2500]))}\n\n"
             f"Instructions:\n"
             f"1. Summarize the core topic and important points concisely.\n"
             f"2. Summarize maintainer resolution, decision, or current verdict.\n"
@@ -781,8 +852,9 @@ async def run_phase_1b(
     ]
 
     results = await asyncio.gather(*tasks)
-    logger.info("Phase 1b: Completed all %d mention subagents in %.2fs", len(results), time.monotonic() - started)
-    return list(results)
+    filtered = [r for r in results if r is not None]
+    logger.info("Phase 1b: Completed all %d mention subagents in %.2fs", len(filtered), time.monotonic() - started)
+    return filtered
 
 
 async def run_phase_1c_synthesis(
