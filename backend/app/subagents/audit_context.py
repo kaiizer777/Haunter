@@ -768,3 +768,257 @@ async def run_phase_1b(
     return list(results)
 
 
+async def run_phase_1c_synthesis(
+    *,
+    owner: str,
+    repo: str,
+    pr_assessment: PRAssessment,
+    issue_assessment: Optional[IssueAssessment] = None,
+    mention_assessments: Sequence[MentionAssessment] = (),
+    dossier_dir: Optional[str] = None,
+    llm: Optional[LLMClient] = None,
+    model_config: Optional[ResolvedModelConfig] = None,
+) -> Phase1cResult:
+    """Phase 1c: 1 synthesis subagent consumes all 1a and 1b outputs.
+
+    Compiles a cohesive Markdown context block with clear sections:
+    1. Primary Intent & Problem Statement
+    2. Pull Request Scope & Claimed Changes
+    3. Authority Verdicts & Maintainer Direction
+    4. Scope Alignment & Constraints
+    5. Mentioned References & Historical Context
+
+    Persists the single context file to {dossier_dir}/phase-1c.md or tempdir fallback.
+    """
+    started = time.monotonic()
+    pr_num = pr_assessment.pr_number
+    primary_intent = pr_assessment.intent_summary
+    if issue_assessment and issue_assessment.problem_statement:
+        primary_intent = f"Issue #{issue_assessment.issue_number}: {issue_assessment.problem_statement}\nPR #{pr_num}: {pr_assessment.intent_summary}"
+
+    scope_alignment_notes = ""
+
+    # Synthesize via LLM if available
+    if llm:
+        raw_1a_b = (
+            f"=== Subagent A (PR) ===\n{pr_assessment.raw_markdown}\n\n"
+            f"=== Subagent B (Primary Issue) ===\n{issue_assessment.raw_markdown if issue_assessment else '(No linked primary issue)'}\n\n"
+            f"=== Phase 1b (Mentioned Items) ===\n"
+            + ("\n".join(m.raw_markdown for m in mention_assessments) if mention_assessments else "(No mentioned items)")
+        )
+        prompt = (
+            f"You are the Phase 1c Context Compiler for PR #{pr_num} in {owner}/{repo}.\n"
+            f"Synthesize the following 1a and 1b assessments into high-signal scope alignment notes.\n\n"
+            f"{raw_1a_b}\n\n"
+            f"Instructions:\n"
+            f"1. Evaluate whether the PR changes align directly with the primary issue and maintainer direction or drift out of scope.\n"
+            f"2. Summarize any constraints or boundary decisions.\n"
+            f"Output strict JSON:\n"
+            f'{{"primary_intent": "...", "scope_alignment_notes": "..."}}'
+        )
+        try:
+            resp = await asyncio.wait_for(
+                llm.complete(
+                    messages=[
+                        {"role": "system", "content": "You are a concise, precise senior code review agent. Output JSON only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    db=None,
+                    model_config=model_config,
+                    max_tokens=1024,
+                ),
+                timeout=PHASE1_SUBAGENT_TIMEOUT_S,
+            )
+            content = resp.content if hasattr(resp, "content") else str(resp)
+            parsed = _parse_json_object(content)
+            if parsed:
+                if parsed.get("primary_intent"):
+                    primary_intent = str(parsed["primary_intent"]).strip()
+                if parsed.get("scope_alignment_notes"):
+                    scope_alignment_notes = str(parsed["scope_alignment_notes"]).strip()
+        except Exception as exc:
+            logger.warning("Phase 1c: LLM synthesis failed or timed out: %s", exc)
+
+    if not scope_alignment_notes:
+        if issue_assessment:
+            scope_alignment_notes = (
+                f"PR claims to fix #{issue_assessment.issue_number}. "
+                f"Constraints: {', '.join(issue_assessment.scope_constraints) if issue_assessment.scope_constraints else 'Standard repository scope'}."
+            )
+        else:
+            scope_alignment_notes = "PR has no closing issue reference; changes evaluated against declared PR intent."
+
+    # Build Section 1: Primary Intent & Problem Statement
+    sec1 = [
+        "## Primary Intent & Problem Statement",
+        f"- **Goal**: {primary_intent}",
+    ]
+    if issue_assessment:
+        sec1.append(f"- **Primary Issue**: #{issue_assessment.issue_number} — {issue_assessment.title}")
+        if issue_assessment.acceptance_criteria:
+            sec1.append("- **Acceptance Criteria**:")
+            for ac in issue_assessment.acceptance_criteria:
+                sec1.append(f"  * {ac}")
+
+    # Build Section 2: Pull Request Scope & Claimed Changes
+    sec2 = [
+        "## Pull Request Scope & Claimed Changes",
+        f"- **PR Title**: #{pr_num} — {pr_assessment.title}",
+        f"- **Author**: {pr_assessment.author} ({pr_assessment.author_association})",
+    ]
+    if pr_assessment.claimed_changes:
+        sec2.append("- **Claimed Changes**:")
+        for cc in pr_assessment.claimed_changes:
+            sec2.append(f"  * {cc}")
+    if pr_assessment.changed_files_summary:
+        sec2.append(f"- **Affected Files**: {', '.join(pr_assessment.changed_files_summary)}")
+
+    # Build Section 3: Authority Verdicts & Maintainer Direction
+    sec3 = ["## Authority Verdicts & Maintainer Direction"]
+    if issue_assessment:
+        sec3.append(f"- **Issue Author / Direction**: {issue_assessment.author} ({issue_assessment.author_attribution})")
+        if issue_assessment.preferred_approaches:
+            sec3.append(f"- **Preferred Approaches**: {', '.join(issue_assessment.preferred_approaches)}")
+        if issue_assessment.rejected_approaches:
+            sec3.append(f"- **Rejected Approaches**: {', '.join(issue_assessment.rejected_approaches)}")
+    else:
+        sec3.append("- No linked issue authority statement recorded.")
+
+    # Build Section 4: Scope Alignment & Constraints
+    sec4 = [
+        "## Scope Alignment & Constraints",
+        f"- **Alignment Assessment**: {scope_alignment_notes}",
+    ]
+    if issue_assessment and issue_assessment.scope_constraints:
+        sec4.append(f"- **Scope Boundaries**: {', '.join(issue_assessment.scope_constraints)}")
+
+    # Build Section 5: Mentioned References & Historical Context
+    sec5 = ["## Mentioned References & Historical Context"]
+    if mention_assessments:
+        for m in mention_assessments:
+            sec5.append(m.raw_markdown)
+    else:
+        sec5.append("- None referenced across PR and primary issue.")
+
+    sections = [
+        f"# Phase 1 Context Dossier: PR #{pr_num} ({owner}/{repo})" if owner and repo else f"# Phase 1 Context Dossier: PR #{pr_num}",
+        "\n".join(sec1),
+        "\n".join(sec2),
+        "\n".join(sec3),
+        "\n".join(sec4),
+        "\n".join(sec5),
+    ]
+
+    compiled_markdown = "\n\n".join(sections).strip()
+    if len(compiled_markdown) > MAX_PHASE_1C_CONTEXT_CHARS:
+        compiled_markdown = compiled_markdown[:MAX_PHASE_1C_CONTEXT_CHARS] + "\n\n... (Phase 1 context truncated to budget)"
+
+    # Persist the single context file
+    file_path: Optional[str] = None
+    try:
+        if dossier_dir:
+            target_dir = Path(dossier_dir)
+        else:
+            safe_repo = f"{owner}_{repo}".replace("/", "_") if owner and repo else "repo"
+            target_dir = Path(tempfile.gettempdir()) / "haunter-dossier" / safe_repo / f"PR-{pr_num}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        out_file = target_dir / "phase-1c.md"
+        out_file.write_text(compiled_markdown, encoding="utf-8")
+        file_path = str(out_file.resolve())
+        logger.info("Phase 1c: Successfully persisted context file to %s (%d chars)", file_path, len(compiled_markdown))
+    except Exception as exc:
+        logger.warning("Phase 1c: Could not persist file to disk: %s", exc)
+
+    logger.info("Phase 1c: Synthesis completed in %.2fs", time.monotonic() - started)
+    return Phase1cResult(
+        context_markdown=compiled_markdown,
+        file_path=file_path,
+        primary_intent=primary_intent,
+        scope_alignment_notes=scope_alignment_notes,
+        pr_assessment=pr_assessment,
+        issue_assessment=issue_assessment,
+        mention_assessments=list(mention_assessments),
+    )
+
+
+async def build_phase1_context(
+    *,
+    owner: str = "",
+    repo: str = "",
+    pr_number: Optional[int] = None,
+    token: Optional[str] = None,
+    diff_text: str = "",
+    pr_metadata: Optional[Mapping[str, Any]] = None,
+    issue_data: Optional[Mapping[str, Any]] = None,
+    mention_items_data: Optional[Mapping[int, Mapping[str, Any]]] = None,
+    dossier_dir: Optional[str] = None,
+    llm: Optional[LLMClient] = None,
+    model_config: Optional[ResolvedModelConfig] = None,
+) -> Optional[Phase1cResult]:
+    """Top-level Phase 1 context orchestrator.
+
+    Runs Phase 1a (2 parallel primary subagents) ->
+         Phase 1b (n nested mention subagents, final nested level) ->
+         Phase 1c (single final context file compiler).
+
+    Degrades gracefully: if no pr_number is provided or on unexpected failure,
+    returns None or a degraded Phase1cResult without raising.
+    """
+    if pr_number is None or pr_number <= 0:
+        return None
+
+    started = time.monotonic()
+    logger.info("Phase 1: Starting context pipeline for PR #%d in %s/%s", pr_number, owner, repo)
+
+    try:
+        # Phase 1a: 2 parallel primary subagents
+        pr_assessment, issue_assessment = await run_phase_1a(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            token=token,
+            pr_metadata=pr_metadata,
+            issue_data=issue_data,
+            diff_text=diff_text,
+            llm=llm,
+            model_config=model_config,
+        )
+
+        # Phase 1b: n nested mention subagents (final nested level)
+        mention_assessments = await run_phase_1b(
+            owner=owner,
+            repo=repo,
+            pr_assessment=pr_assessment,
+            issue_assessment=issue_assessment,
+            token=token,
+            mention_items_data=mention_items_data,
+            llm=llm,
+            model_config=model_config,
+        )
+
+        # Phase 1c: Single final context compiler & file persistence
+        result = await run_phase_1c_synthesis(
+            owner=owner,
+            repo=repo,
+            pr_assessment=pr_assessment,
+            issue_assessment=issue_assessment,
+            mention_assessments=mention_assessments,
+            dossier_dir=dossier_dir,
+            llm=llm,
+            model_config=model_config,
+        )
+
+        logger.info("Phase 1: Completed entire pipeline for PR #%d in %.2fs", pr_number, time.monotonic() - started)
+        return result
+
+    except Exception as exc:
+        logger.warning("Phase 1: Pipeline encountered error; degrading gracefully: %s", exc, exc_info=True)
+        fallback_md = f"# Phase 1 Context Dossier: PR #{pr_number}\n\n*(Degraded Phase 1 context: {exc})*"
+        return Phase1cResult(
+            context_markdown=fallback_md,
+            degraded=True,
+            degraded_reason=str(exc),
+        )
+
+
+
