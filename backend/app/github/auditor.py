@@ -22,8 +22,10 @@ _CREDENTIAL_CHUNK_BYTES = 8 * 1024
 # metadata, and repository metadata; anything outside that set is refused even
 # if its value looks harmless, so a newly granted GitHub permission cannot
 # silently widen this credential.
+# `issues` is allowlisted for the single-app setup: the auditor shares the
+# write App installation (issues:write), an accepted tradeoff per the owner.
 _ALLOWED_PERMISSIONS = frozenset(
-    {"contents", "pull_requests", "metadata", "single_file"}
+    {"contents", "pull_requests", "metadata", "single_file", "issues"}
 )
 _REQUIRED_READ_PERMISSIONS = frozenset({"contents", "pull_requests", "metadata"})
 _ALLOWED_PERMISSION_VALUES = frozenset({"read", "write", "none"})
