@@ -80,9 +80,25 @@ def is_cross_file_finding(finding: Any) -> bool:
         return True
 
     file_path = getattr(finding, "file_path", "")
-    if isinstance(file_path, str):
-        if any(sep in file_path for sep in (",", ";", "\n")) or "multi" in file_path.lower():
-            return True
+    if not isinstance(file_path, str) or not file_path.strip():
+        return True
+
+    if any(sep in file_path for sep in (",", ";", "\n")):
+        return True
+
+    cleaned_path = file_path.strip().lower()
+    if cleaned_path in {
+        "(general)",
+        "general",
+        "multi",
+        "multiple",
+        "multi-file",
+        "multiple files",
+        "cross-file",
+        "various",
+        "various files",
+    }:
+        return True
 
     suggested_fix = getattr(finding, "suggested_fix", None)
     if isinstance(suggested_fix, str) and suggested_fix.strip():
@@ -173,69 +189,43 @@ def validate_finding_coordinates(
     if not lines_in_diff and not left_lines_in_diff:
         return None
 
-    finding_side = str(getattr(finding, "side", "") or "").upper()
-
-    # Rule: If line is in left_line_index (deleted line), anchor with side="LEFT", start_side="LEFT".
-    is_deleted_line = (
-        finding_side == "LEFT"
-        or (
-            finding_side != "RIGHT"
-            and (
-                finding.line_end in left_lines_in_diff
-                or finding.line_start in left_lines_in_diff
-                or any(line_no in left_lines_in_diff for line_no in range(finding.line_start, finding.line_end + 1))
-            )
-        )
-    )
-
-    if is_deleted_line:
+    def _resolve_coords(target_lines: set[int], side_name: str) -> Optional[dict[str, Any]]:
         target_line: Optional[int] = None
-        if finding.line_end in left_lines_in_diff:
+        if finding.line_end in target_lines:
             target_line = finding.line_end
-        elif finding.line_start in left_lines_in_diff:
+        elif finding.line_start in target_lines:
             target_line = finding.line_start
         else:
             for line_num in range(finding.line_start, finding.line_end + 1):
-                if line_num in left_lines_in_diff:
+                if line_num in target_lines:
                     target_line = line_num
                     break
+        if target_line is None:
+            return None
+        coords: dict[str, Any] = {
+            "path": file_path,
+            "line": target_line,
+            "side": side_name,
+        }
+        if finding.line_start < target_line and finding.line_start in target_lines:
+            coords["start_line"] = finding.line_start
+            coords["start_side"] = side_name
+        return coords
 
-        if target_line is not None:
-            coords: dict[str, Any] = {
-                "path": file_path,
-                "line": target_line,
-                "side": "LEFT",
-            }
-            if finding.line_start < target_line and finding.line_start in left_lines_in_diff:
-                coords["start_line"] = finding.line_start
-                coords["start_side"] = "LEFT"
-            return coords
+    finding_side = str(getattr(finding, "side", "") or "").upper()
+    if finding_side == "LEFT":
+        return _resolve_coords(left_lines_in_diff, "LEFT")
+    if finding_side == "RIGHT":
+        return _resolve_coords(lines_in_diff, "RIGHT")
 
-    # Otherwise, anchor on RIGHT side (added/modified lines)
-    target_line = None
-    if finding.line_end in lines_in_diff:
-        target_line = finding.line_end
-    elif finding.line_start in lines_in_diff:
-        target_line = finding.line_start
-    else:
-        for line_num in range(finding.line_start, finding.line_end + 1):
-            if line_num in lines_in_diff:
-                target_line = line_num
-                break
+    # When finding.side is not explicitly set: check RIGHT coverage first
+    # so added/new lines matching deleted line numbers are not wrongly anchored LEFT.
+    right_coords = _resolve_coords(lines_in_diff, "RIGHT")
+    if right_coords is not None:
+        return right_coords
 
-    if target_line is None:
-        return None
-
-    coords = {
-        "path": file_path,
-        "line": target_line,
-        "side": "RIGHT",
-    }
-    if finding.line_start < target_line and finding.line_start in lines_in_diff:
-        coords["start_line"] = finding.line_start
-        coords["start_side"] = "RIGHT"
-
-    return coords
+    # Fall back to LEFT anchoring if not covered on RIGHT
+    return _resolve_coords(left_lines_in_diff, "LEFT")
 
 
 def format_inline_comment_body(

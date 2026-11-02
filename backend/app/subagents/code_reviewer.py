@@ -256,7 +256,21 @@ def should_show_suggested_patch(finding: ReviewFinding, patch_clean: str) -> boo
     Otherwise, drop the suggested code block entirely and keep the finding text + remediation description.
     """
     file_path = getattr(finding, "file_path", "")
-    if any(sep in file_path for sep in (",", ";", "\n")) or "multi" in file_path.lower():
+    if not isinstance(file_path, str) or not file_path.strip():
+        return False
+    if any(sep in file_path for sep in (",", ";", "\n")):
+        return False
+    if file_path.strip().lower() in {
+        "(general)",
+        "general",
+        "multi",
+        "multiple",
+        "multi-file",
+        "multiple files",
+        "cross-file",
+        "various",
+        "various files",
+    }:
         return False
 
     lines_count = len(patch_clean.splitlines())
