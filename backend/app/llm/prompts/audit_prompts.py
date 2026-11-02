@@ -264,8 +264,8 @@ Return exactly one JSON object with no markdown fence or surrounding prose:
   "confidence": <integer 0-100>,
   "findings": [
     {
-      "file_path": "<relative touched path or (general)>",
-      "line_start": <integer >= 0>,
+      "file_path": "<relative touched path; use (general) only with non_commentable: true>",
+      "line_start": <integer >= 1, or 0 only when non_commentable is true>,
       "line_end": <integer >= line_start>,
       "severity": "BLOCKER" | "WARNING" | "NOTE",
       "category": "<short category>",
