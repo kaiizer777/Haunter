@@ -72,26 +72,17 @@ def test_chunking_respects_hunk_boundaries_and_hard_limit():
         assert "diff --git a/big.py b/big.py" in chunk
 
 
-def test_chunking_slices_single_oversized_hunk():
-    import re
-    # Single hunk of 800 lines
+def test_chunking_keeps_single_oversized_hunk_intact():
+    # Single hunk of 800 lines: kept intact in its own chunk with file header
     file_header = "diff --git a/huge.py b/huge.py\n--- a/huge.py\n+++ b/huge.py\n"
     hunk = "@@ -1,800 +1,800 @@\n" + "\n".join(f"+huge_{i}" for i in range(800)) + "\n"
     diff = file_header + hunk
 
     chunks = partition_diff_into_chunks(diff, max_chunk_lines=500, hard_limit=550)
-    assert len(chunks) >= 2
-    hunk_re = re.compile(r"^@@ -(\d+),(\d+) \+(\d+),(\d+) @@")
-    for chunk in chunks:
-        lines = chunk.splitlines()
-        assert len(lines) <= 550
-        assert "diff --git a/huge.py b/huge.py" in chunk
-        # Sub-chunks must have valid unified diff hunk headers, not `(part N)`
-        assert "(part " not in chunk
-        hunk_headers = [line_item for line_item in lines if line_item.startswith("@@ ")]
-        assert len(hunk_headers) >= 1
-        for hh in hunk_headers:
-            assert hunk_re.match(hh), f"Invalid reconstructed hunk header: {hh}"
+    assert len(chunks) == 1
+    assert "diff --git a/huge.py b/huge.py" in chunks[0]
+    assert "@@ -1,800 +1,800 @@" in chunks[0]
+    assert len(chunks[0].splitlines()) > 800
 
 
 def test_chunking_quoted_paths_with_spaces():

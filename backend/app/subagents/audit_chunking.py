@@ -1,8 +1,9 @@
 """Unified diff chunking utilities for Auditor Mode.
 
 Partitions unified diffs along hunk boundaries (`@@ -a,b +c,d @@`)
-while strictly respecting line limits (<=550 lines/chunk), preserving
+while strictly respecting line limits (~500 lines/chunk), preserving
 file headers for every chunk so perspective subagents retain file context.
+Files are never interleaved across chunks.
 """
 
 from __future__ import annotations
@@ -81,15 +82,16 @@ def partition_diff_into_chunks(
     """Partition unified diff into chunks along hunk boundaries.
 
     Invariants:
-    - Never slices through a hunk if it fits into a chunk within hard_limit.
-    - If a single hunk exceeds hard_limit, it is split safely into sub-hunks.
+    - Chunk per file at ~500 lines, strictly aligned to diff hunks (never split a hunk across chunks).
+    - Files must NOT be interleaved across chunks. Every chunk belongs to exactly one file.
+    - If an individual hunk exceeds 500 lines, keep it intact in its own chunk with file header
+      (no sub-hunk mid-body slicing).
     - Every chunk includes the file header for context.
-    - No chunk exceeds hard_limit lines (unless the file header alone exceeds hard_limit).
 
     Args:
         diff_text: Full unified diff string.
         max_chunk_lines: Soft target maximum lines per chunk (default 500).
-        hard_limit: Strict ceiling on lines per chunk (default 550).
+        hard_limit: Strict ceiling or compatibility limit (default 550).
 
     Returns:
         List of chunked diff strings. Empty list if diff_text is blank.
@@ -97,103 +99,51 @@ def partition_diff_into_chunks(
     if not diff_text or not diff_text.strip():
         return []
 
-    lines = diff_text.splitlines()
-    if len(lines) <= hard_limit:
-        return [diff_text]
-
     files = _parse_unified_diff(diff_text)
     if not files:
         return [diff_text]
 
     chunks: list[str] = []
-    current_chunk_lines: list[str] = []
-    # Track the file header currently active in the chunk
-    current_chunk_file_header: list[str] = []
+    ends_with_newline = diff_text.endswith("\n")
 
-    def flush_chunk():
-        nonlocal current_chunk_lines, current_chunk_file_header
-        if current_chunk_lines:
-            chunk_str = "\n".join(current_chunk_lines).strip()
-            if chunk_str:
-                chunks.append(chunk_str)
-            current_chunk_lines = []
-            current_chunk_file_header = []
+    def append_chunk(lines: list[str]) -> None:
+        if not lines:
+            return
+        res = "\n".join(lines)
+        if ends_with_newline and not res.endswith("\n"):
+            res += "\n"
+        chunks.append(res)
 
     for file in files:
         file_header = file.header_lines
 
-        # If file has no hunks (e.g. binary or mode change), add file header directly
+        # If file has no hunks (e.g. binary or mode change), output file header as a chunk
         if not file.hunks:
-            needed = len(file_header)
-            if current_chunk_lines and (len(current_chunk_lines) + needed > max_chunk_lines):
-                flush_chunk()
-            current_chunk_lines.extend(file_header)
+            append_chunk(file_header)
             continue
+
+        current_chunk_lines: list[str] = list(file_header)
 
         for hunk in file.hunks:
             hunk_full_lines = [hunk.header] + hunk.lines
             hunk_len = len(hunk_full_lines)
 
-            # Determine header lines needed if we add this hunk to current chunk
-            needs_header = (current_chunk_file_header != file_header)
-            header_to_add = file_header if needs_header else []
-            cost = len(header_to_add) + hunk_len
+            # Check if current chunk already has at least one hunk
+            if len(current_chunk_lines) > len(file_header):
+                if len(current_chunk_lines) + hunk_len > max_chunk_lines:
+                    append_chunk(current_chunk_lines)
+                    current_chunk_lines = list(file_header)
 
-            # Check if it fits in the current chunk
-            if current_chunk_lines and (len(current_chunk_lines) + cost > max_chunk_lines):
-                flush_chunk()
-                needs_header = True
-                header_to_add = file_header
-                cost = len(header_to_add) + hunk_len
+            current_chunk_lines.extend(hunk_full_lines)
 
-            # If it fits within hard_limit in a fresh or current chunk:
-            if cost <= hard_limit:
-                current_chunk_lines.extend(header_to_add)
-                current_chunk_lines.extend(hunk_full_lines)
-                current_chunk_file_header = file_header
-            else:
-                # The hunk itself (plus file header) exceeds hard_limit.
-                # Flush whatever is in current chunk first.
-                flush_chunk()
+            # If this hunk alone (with header) reached or exceeded max_chunk_lines:
+            # Keep it intact in its own chunk and flush immediately so subsequent hunks start fresh.
+            if len(current_chunk_lines) >= max_chunk_lines:
+                append_chunk(current_chunk_lines)
+                current_chunk_lines = list(file_header)
 
-                # Slice the large hunk into sub-hunks with reconstructed unified diff headers
-                header_len = len(file_header)
-                available_per_chunk = max(10, hard_limit - header_len - 1)  # 1 line for hunk header
+        # Flush any remaining hunks for this file
+        if len(current_chunk_lines) > len(file_header):
+            append_chunk(current_chunk_lines)
 
-                body_lines = hunk.lines
-                offset = 0
-
-                m = _HUNK_HEADER_RE.match(hunk.header)
-                if m:
-                    cur_old_start = int(m.group(1))
-                    cur_new_start = int(m.group(3))
-                    tail = m.group(5) or ""
-                else:
-                    cur_old_start = 1
-                    cur_new_start = 1
-                    tail = ""
-
-                while offset < len(body_lines):
-                    slice_lines = body_lines[offset : offset + available_per_chunk]
-                    offset += len(slice_lines)
-
-                    slice_old_count = sum(1 for line in slice_lines if line.startswith(("-", " ")))
-                    slice_new_count = sum(1 for line in slice_lines if line.startswith(("+", " ")))
-
-                    reconstructed_header = f"@@ -{cur_old_start},{slice_old_count} +{cur_new_start},{slice_new_count} @@{tail}"
-                    cur_old_start += slice_old_count
-                    cur_new_start += slice_new_count
-
-                    sub_chunk_lines: list[str] = list(file_header)
-                    sub_chunk_lines.append(reconstructed_header)
-                    sub_chunk_lines.extend(slice_lines)
-
-                    chunk_str = "\n".join(sub_chunk_lines).strip()
-                    if chunk_str:
-                        chunks.append(chunk_str)
-
-                current_chunk_lines = []
-                current_chunk_file_header = []
-
-    flush_chunk()
     return chunks if chunks else [diff_text]
