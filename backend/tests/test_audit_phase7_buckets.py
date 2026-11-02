@@ -453,3 +453,184 @@ def test_orchestrator_count_findings_by_severity():
     assert warnings == 2
     # suggestions: trivial medium + low = 2
     assert suggestions == 2
+
+
+# ---------------------------------------------------------------------------
+# 6. Batch 2: Priority Bucketing & Degradation Alignment Tests
+# ---------------------------------------------------------------------------
+
+def test_degraded_audit_result_bucket_counts_demoted():
+    """When AuditResult confidence < 75 (e.g. analysis_degraded), all counts demote to suggestion."""
+    f1 = _make_audit_finding(id="AUD-1", severity="BLOCKER", category="security", priority_bucket="must_fix", confidence=90)
+    f2 = _make_audit_finding(id="AUD-2", severity="WARNING", category="logic", priority_bucket="should_fix", confidence=85)
+    f3 = _make_audit_finding(id="AUD-3", severity="NOTE", category="style", priority_bucket="suggestion", confidence=80)
+
+    res = AuditResult(
+        audit_id="audit-degraded-1",
+        audit_type="pr_audit",
+        repo_full_name="org/repo",
+        target_label="PR #1",
+        engine="test",
+        executive_summary="Summary",
+        findings=[f1, f2, f3],
+        confidence=74,  # Degraded / below 75 threshold
+        analysis_degraded=True,
+    )
+
+    assert res.must_fix_count == 0
+    assert res.should_fix_count == 0
+    assert res.suggestion_count == 3
+    d = res.to_dict()
+    assert d["must_fix_count"] == 0
+    assert d["should_fix_count"] == 0
+    assert d["suggestion_count"] == 3
+
+
+def test_format_audit_report_badges_and_counts_agree_on_degraded():
+    """format_audit_report must not show must-fix count in summary table when confidence < 75."""
+    findings = [
+        {
+            "id": "AUD-1",
+            "file_path": "backend/app/auth.py",
+            "line_start": 10,
+            "line_end": 10,
+            "severity": "BLOCKER",
+            "category": "security",
+            "title": "Degraded blocker finding",
+            "confidence": 95,
+            "priority_bucket": "must_fix",
+        }
+    ]
+
+    report = format_audit_report(
+        pr_summary="Degraded audit summary",
+        findings=findings,
+        confidence=74,
+        must_fix_count=1,  # Stale must_fix_count passed by caller
+    )
+
+    assert "Must-Fix: <code>0</code>" in report
+    assert "Should-Fix: <code>0</code>" in report
+    assert "💡 **Suggestion:** [Degraded blocker finding]" in report
+    assert "⛔ **Must-Fix:**" not in report
+
+
+def test_format_audit_report_posted_counts_validation():
+    """posted_counts rejects invalid string formats but accepts valid badge strings or mappings."""
+    # Valid mapping
+    rep_map = format_audit_report(
+        pr_summary="Test",
+        findings=[],
+        confidence=90,
+        posted_counts={"C": 2, "H": 3},
+    )
+    assert "· C2 H3*" in rep_map
+
+    # Valid string
+    rep_str_valid = format_audit_report(
+        pr_summary="Test",
+        findings=[],
+        confidence=90,
+        posted_counts="C1 H2 M1",
+    )
+    assert "· C1 H2 M1*" in rep_str_valid
+
+    # Malicious or invalid string is sanitized/ignored
+    rep_str_invalid = format_audit_report(
+        pr_summary="Test",
+        findings=[],
+        confidence=90,
+        posted_counts="<script>alert(1)</script>",
+    )
+    assert "<script>" not in rep_str_invalid
+    assert "*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch.*" in rep_str_invalid
+
+
+def test_audit_matcher_to_finding_dict_preserves_priority_bucket():
+    from app.subagents.audit_matcher import _to_finding_dict
+
+    f = _make_audit_finding(priority_bucket="must_fix")
+    d = _to_finding_dict(f)
+    assert d.get("priority_bucket") == "must_fix"
+
+    m = {"file_path": "a.py", "line_start": 1, "priority_bucket": "should_fix"}
+    dm = _to_finding_dict(m)
+    assert dm.get("priority_bucket") == "should_fix"
+
+
+@pytest.mark.asyncio
+async def test_publish_audit_review_preserves_priority_bucket_in_delta_path(monkeypatch, tmp_path):
+    """Publishing delta new_findings mappings preserves their priority_bucket when converting to AuditFinding."""
+    new_findings_mappings = [
+        {
+            "id": "AUD-NEW-1",
+            "file_path": "backend/app/auth.py",
+            "line_start": 84,
+            "line_end": 84,
+            "perspective": "security",
+            "severity": "WARNING",  # Normally would map to should-fix
+            "category": "security",
+            "title": "Promoted must-fix finding",
+            "description": "Crucial security finding explicitly marked must_fix",
+            "confidence": 90,
+            "priority_bucket": "must_fix",
+        }
+    ]
+
+    res = AuditResult(
+        audit_id="audit-delta-1234",
+        audit_type="pr_audit",
+        repo_full_name="org/repo",
+        target_label="PR #100",
+        engine="test",
+        executive_summary="Summary",
+        findings=[],
+        confidence=90,
+        publish_allowed=True,
+    )
+
+    async def fake_update_pr_review(*args, **kwargs):
+        return {"id": 99}
+
+    async def fake_create_pr_review(*args, **kwargs):
+        return {"id": 99, "body": kwargs.get("body", "")}
+
+    monkeypatch.setattr("app.github_client.create_pr_review", fake_create_pr_review)
+    monkeypatch.setattr("app.github_client.update_pr_review", fake_update_pr_review)
+
+    await publish_audit_review(
+        result=res,
+        owner="org",
+        repo="repo",
+        pr_number=100,
+        head_sha="abcdef1234567890",
+        review_id=99,
+        new_findings=new_findings_mappings,
+        active_findings=new_findings_mappings,
+        dossier_dir=str(tmp_path),
+    )
+
+    import json
+    meta_path = tmp_path / "meta.json"
+    assert meta_path.exists()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert len(meta["active_findings"]) == 1
+    assert meta["active_findings"][0]["priority_bucket"] == "must_fix"
+
+    # Also test comment body formatter with converted finding
+    converted = AuditFinding(
+        id=new_findings_mappings[0]["id"],
+        file_path=new_findings_mappings[0]["file_path"],
+        line_start=new_findings_mappings[0]["line_start"],
+        line_end=new_findings_mappings[0]["line_end"],
+        perspective=new_findings_mappings[0]["perspective"],
+        severity=new_findings_mappings[0]["severity"],
+        category=new_findings_mappings[0]["category"],
+        title=new_findings_mappings[0]["title"],
+        description=new_findings_mappings[0]["description"],
+        suggested_fix=None,
+        confidence=new_findings_mappings[0]["confidence"],
+        priority_bucket=new_findings_mappings[0]["priority_bucket"],
+    )
+    comment_body = format_finding_comment_body(converted)
+    assert "### ⛔ Must-Fix: Promoted must-fix finding" in comment_body
