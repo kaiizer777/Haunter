@@ -2810,6 +2810,10 @@ async def run_audit(
     async def run_holistic() -> tuple[PerspectiveResult, Optional[BaseException]]:
         try:
             async with semaphore:
+                # NOTE: build_perspective_messages caps the rendered diff at roughly
+                # 88k chars (MAX_USER_PROMPT_CHARS minus reserved sections), so a
+                # budgeted diff larger than that is silently clipped here. The
+                # holistic pass is not chunked; escalate if full coverage is needed.
                 result = await asyncio.wait_for(
                     _run_single_perspective(
                         perspective="holistic",
