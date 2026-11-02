@@ -550,3 +550,146 @@ async def test_pipeline_force_push_compare_fallback():
         assert outcome.status == "completed"
         # Verified fallback to fetch_audit_diff
         mock_fetch_full.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_publish_audit_review_with_dict_new_findings_and_active_findings(tmp_path):
+    from unittest.mock import AsyncMock, patch
+    from app.github.audit_publisher import publish_audit_review, load_dossier_meta
+
+    result = AuditResult(
+        audit_id="audit-dict-test",
+        audit_type="pr_audit",
+        repo_full_name="owner/repo",
+        target_label="PR #5",
+        engine="gpt-4o",
+        executive_summary="Summary",
+        findings=[],
+        confidence=95,
+        status="✅ Great to Merge",
+        publish_allowed=True,
+    )
+
+    diff = "diff --git a/test.py b/test.py\n--- a/test.py\n+++ b/test.py\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+    dict_new_findings = [
+        {
+            "id": "new-1",
+            "file_path": "test.py",
+            "line_start": 1,
+            "line_end": 1,
+            "severity": "HIGH",
+            "confidence": 90,
+            "title": "Security flaw",
+            "category": "security",
+            "description": "Details",
+            "suggested_fix": None,
+            "informational_only": False,
+        }
+    ]
+    active_findings = [
+        {"id": "retained-1", "file_path": "old.py", "line_start": 10, "line_end": 12, "severity": "MEDIUM"},
+        {"id": "new-1", "file_path": "test.py", "line_start": 1, "line_end": 1, "severity": "HIGH"},
+    ]
+
+    mock_client = AsyncMock()
+    mock_client.update_pr_review = AsyncMock(return_value={"id": 101, "body": "ok"})
+    mock_client.create_pr_review = AsyncMock(return_value={"id": 102})
+
+    with patch("app.github.audit_publisher.github_client.update_pr_review", mock_client.update_pr_review), \
+         patch("app.github.audit_publisher.github_client.create_pr_review", mock_client.create_pr_review):
+        outcome = await publish_audit_review(
+            result=result,
+            owner="owner",
+            repo="repo",
+            pr_number=5,
+            head_sha="a" * 40,
+            diff_text=diff,
+            token="token",
+            review_id=101,
+            new_findings=dict_new_findings,
+            active_findings=active_findings,
+            dossier_dir=str(tmp_path),
+        )
+
+    assert outcome.published is True
+    assert mock_client.create_pr_review.called
+    meta = load_dossier_meta(owner="owner", repo="repo", pr_number=5, dossier_dir=str(tmp_path))
+    assert meta is not None
+    # active_findings should have both retained and new findings preserved
+    assert len(meta["active_findings"]) == 2
+    assert meta["active_findings"][0]["id"] == "retained-1"
+    assert meta["active_findings"][1]["id"] == "new-1"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_re_review_fetch_threads_failure_resilience():
+    from unittest.mock import AsyncMock, patch, MagicMock
+    import uuid
+    from app.services.audit_pipeline import execute_audit_job
+    from app.models import Repo
+
+    repo_mock = MagicMock(spec=Repo)
+    repo_mock.id = uuid.uuid4()
+    repo_mock.owner = "org"
+    repo_mock.name = "repo"
+
+    delta_diff = """diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -1,1 +1,1 @@
+-old line
++fixed line
+"""
+
+    with patch("app.github_client.fetch_pull_request", new_callable=AsyncMock) as mock_pr, \
+         patch("app.github_client.fetch_diff", new_callable=AsyncMock) as mock_diff, \
+         patch("app.github_client.fetch_review_threads", new_callable=AsyncMock) as mock_threads, \
+         patch("app.github_client.update_pr_review", new_callable=AsyncMock) as mock_update, \
+         patch("app.subagents.auditor.run_audit", new_callable=AsyncMock) as mock_run_audit, \
+         patch("app.services.audit_pipeline._pin_audit_target", new_callable=AsyncMock, return_value=True), \
+         patch("app.github.audit_publisher.publish_audit_review", new_callable=AsyncMock) as mock_pub, \
+         patch("app.github.audit_publisher.load_dossier_meta", return_value={
+             "last_reviewed_sha": "1" * 40,
+             "review_id": 555,
+             "active_findings": [{"id": "old_f", "file_path": "a.py", "line_start": 1, "line_end": 1, "title": "Old bug", "category": "security"}],
+         }):
+
+        mock_pr.return_value = {
+            "base": {"sha": "0" * 40},
+            "head": {"sha": "2" * 40},
+        }
+        mock_diff.return_value = delta_diff
+        # Simulate fetch_review_threads failure
+        mock_threads.side_effect = RuntimeError("GraphQL network failure")
+        mock_run_audit.return_value = AuditResult(
+            audit_id="audit-thread-fail",
+            audit_type="pr_audit",
+            repo_full_name="org/repo",
+            target_label="PR #10",
+            engine="gpt-4o",
+            executive_summary="clean",
+            findings=[],
+            confidence=95,
+            status="✅ Great to Merge",
+            publish_allowed=True,
+        )
+        mock_pub.return_value = MagicMock(published=True)
+
+        outcome = await execute_audit_job(
+            audit_id="audit-thread-fail",
+            audit_type="pr_audit",
+            repo=repo_mock,
+            ref="refs/pull/10/head",
+            pr_number=10,
+            base_sha="0" * 40,
+            head_sha="2" * 40,
+            workflow_run_id=None,
+            token="ghp_test",
+        )
+
+        assert outcome.status == "completed"
+        # Verified publish_audit_review was still invoked with active_findings despite thread fetch failure
+        mock_pub.assert_called_once()
+        pub_kwargs = mock_pub.call_args.kwargs
+        assert pub_kwargs["review_id"] == 555
+        assert pub_kwargs["active_findings"] is not None

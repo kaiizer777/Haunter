@@ -1233,11 +1233,18 @@ async def execute_audit_job(
 
     resolved_count: Optional[int] = None
     new_findings = None
+    active_findings = None
     if is_delta and resolved_pr is not None:
         try:
-            review_threads = await github.fetch_review_threads(
-                owner=owner, repo=name, pr_number=resolved_pr, token=token
-            )
+            review_threads = ()
+            try:
+                review_threads = await github.fetch_review_threads(
+                    owner=owner, repo=name, pr_number=resolved_pr, token=token
+                )
+            except Exception as thread_exc:
+                logger.warning("audit fetch_review_threads_failed: %s", thread_exc)
+                review_threads = ()
+
             match_res = match_and_resolve_findings(
                 prior_findings=prior_findings,
                 delta_findings=result.findings,
@@ -1245,14 +1252,18 @@ async def execute_audit_job(
                 review_threads=review_threads,
             )
             if match_res.threads_to_resolve:
-                await github.resolve_review_threads(
-                    owner=owner,
-                    repo=name,
-                    thread_ids=match_res.threads_to_resolve,
-                    token=token,
-                )
+                try:
+                    await github.resolve_review_threads(
+                        owner=owner,
+                        repo=name,
+                        thread_ids=match_res.threads_to_resolve,
+                        token=token,
+                    )
+                except Exception as resolve_exc:
+                    logger.warning("audit resolve_review_threads_failed: %s", resolve_exc)
             resolved_count = match_res.resolved_count
             new_findings = match_res.new_findings
+            active_findings = match_res.active_findings
         except Exception as res_exc:
             logger.warning("audit thread_resolution_failed: %s", res_exc)
 
@@ -1270,6 +1281,7 @@ async def execute_audit_job(
             review_id=prior_review_id if is_delta else None,
             resolved_since_last_review=resolved_count,
             new_findings=new_findings,
+            active_findings=active_findings,
         )
     except Exception as pub_exc:
         # The publisher raises only when asked to (`raise_on_error=True`), but the

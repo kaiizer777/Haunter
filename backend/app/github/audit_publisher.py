@@ -516,6 +516,7 @@ async def publish_audit_review(
     review_id: Optional[int | str] = None,
     resolved_since_last_review: Optional[int] = None,
     new_findings: Optional[Sequence[Any]] = None,
+    active_findings: Optional[Sequence[Any]] = None,
     dossier_dir: Optional[str] = None,
 ) -> PublishResult:
     """Publish an audit report to GitHub as a PR Review or Commit Comment.
@@ -574,6 +575,32 @@ async def publish_audit_review(
             target_type="none",
             error="publish_allowed is False",
         )
+
+    if new_findings is not None:
+        converted_new: list[AuditFinding] = []
+        for f in new_findings:
+            if isinstance(f, AuditFinding):
+                converted_new.append(f)
+            elif isinstance(f, Mapping):
+                converted_new.append(
+                    AuditFinding(
+                        id=str(f.get("id") or ""),
+                        file_path=str(f.get("file_path") or ""),
+                        line_start=int(f.get("line_start") or 1),
+                        line_end=int(f.get("line_end") or 1),
+                        perspective=f.get("perspective", "code_quality"),
+                        severity=f.get("severity", "LOW"),
+                        category=str(f.get("category") or ""),
+                        title=str(f.get("title") or ""),
+                        description=str(f.get("description") or ""),
+                        suggested_fix=f.get("suggested_fix"),
+                        confidence=int(f.get("confidence") or 0),
+                        informational_only=bool(f.get("informational_only", False)),
+                    )
+                )
+            else:
+                converted_new.append(f)
+        new_findings = converted_new
 
     resolved_pr_number = pr_number
     target_type: Literal["pull_request_review", "commit_comment"] = (
@@ -687,13 +714,14 @@ async def publish_audit_review(
                 )
 
             final_review_id = review_id or (resp.get("id") if isinstance(resp, dict) else None)
+            findings_for_meta = active_findings if active_findings is not None else result.findings
             update_dossier_meta(
                 owner=resolved_owner,
                 repo=resolved_repo,
                 pr_number=resolved_pr_number,
                 head_sha=resolved_head_sha,
                 review_id=final_review_id,
-                active_findings=result.findings,
+                active_findings=findings_for_meta,
                 resolved_count=resolved_since_last_review or 0,
                 dossier_dir=dossier_dir,
                 audit_id=result.audit_id,
