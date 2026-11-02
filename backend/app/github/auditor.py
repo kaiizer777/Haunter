@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from app.github.pr import _resolve_write_credentials
+
 GITHUB_API_BASE = "https://api.github.com"
 TOKEN_TTL_SECONDS = 50 * 60
 # A real installation token plus its permission map is well under 4KB. The cap
@@ -155,10 +157,6 @@ async def _resolve_app_credentials() -> tuple[str, str]:
         AuditorCredentialError: When no usable pair is configured, or the
             SSM-backed PEM cannot be loaded.
     """
-    # Imported lazily so app.github.auditor stays importable without pulling
-    # in the write module's dependencies (diff validation, schemas).
-    from app.github.pr import _resolve_write_credentials
-
     try:
         app_id, private_key, source = await _resolve_write_credentials()
     except AuditorCredentialError:
