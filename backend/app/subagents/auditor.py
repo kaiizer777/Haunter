@@ -57,6 +57,7 @@ from app.llm.prompts.audit_prompts import (
     sanitize_output_text,
 )
 from app.log_hygiene import sanitize_log_value
+from app.subagents.audit_chunking import partition_diff_into_chunks
 from app.subagents.ast_analyzer import (
     StackFrame,
     extract_python_ast_context_from_index,
