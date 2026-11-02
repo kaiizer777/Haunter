@@ -28,6 +28,7 @@ import uuid
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import diff_validation
 from app.llm import LLMClient
 from app.llm.prompts.audit_prompts import (
     MAX_DIFF_CHARS,
@@ -249,48 +250,12 @@ _REDACTION_PLACEHOLDER_RE: re.Pattern[str] = re.compile(
 
 
 def should_show_suggested_patch(finding: ReviewFinding, patch_clean: str) -> bool:
-    """Show a suggested code block ONLY when ALL of the following hold:
-    - touches a single file
-    - simple fix (not complex multi-hunk)
-    - suggested code is strictly under 30 lines
-    Otherwise, drop the suggested code block entirely and keep the finding text + remediation description.
+    """Delegate to the shared, canonical implementation.
+
+    ``patch_clean`` is forwarded as the suggested code so the shared rule's
+    line/hunk/file checks apply to the already-sanitized patch text.
     """
-    file_path = getattr(finding, "file_path", "")
-    if not isinstance(file_path, str) or not file_path.strip():
-        return False
-    if any(sep in file_path for sep in (",", ";", "\n")):
-        return False
-    if file_path.strip().lower() in {
-        "(general)",
-        "general",
-        "multi",
-        "multiple",
-        "multi-file",
-        "multiple files",
-        "cross-file",
-        "various",
-        "various files",
-    }:
-        return False
-
-    lines_count = len(patch_clean.splitlines())
-    if lines_count >= 30:
-        return False
-
-    hunk_headers = re.findall(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", patch_clean, re.MULTILINE)
-    if len(hunk_headers) > 1:
-        return False
-
-    diff_git_headers = re.findall(r"^diff --git ", patch_clean, re.MULTILINE)
-    if len(diff_git_headers) > 1:
-        return False
-
-    file_plus_headers = re.findall(r"^\+\+\+ (?:b/)?(.*)$", patch_clean, re.MULTILINE)
-    distinct_files = {f.strip() for f in file_plus_headers if f.strip() not in ("/dev/null", "dev/null", "")}
-    if len(distinct_files) > 1:
-        return False
-
-    return True
+    return diff_validation.should_show_suggested_code(finding, patch_clean)
 
 def format_github_suggestion(finding: ReviewFinding) -> str:
     """

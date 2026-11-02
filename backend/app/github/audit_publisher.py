@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Sequence
 
+from app import diff_validation
 from app import github_client
 from app.diff_validation import coerce_unified_diff
 from app.llm.prompts.audit_prompts import (
@@ -117,54 +118,12 @@ def should_show_suggested_code(
     finding: Any,
     suggested_code: Optional[str] = None,
 ) -> bool:
-    """Show a suggested code block ONLY when ALL of the following hold:
-    - touches a single file
-    - simple fix (not complex multi-hunk)
-    - suggested code is strictly under 30 lines
-    Otherwise, drop the suggested code block entirely and keep the finding text + remediation description.
+    """Delegate to the shared, canonical implementation in :mod:`app.diff_validation`.
+
+    Kept here for backwards compatibility with existing call sites and tests;
+    the logic itself lives in :func:`app.diff_validation.should_show_suggested_code`.
     """
-    if is_cross_file_finding(finding):
-        return False
-
-    code = suggested_code
-    if code is None:
-        code = getattr(finding, "suggested_fix", None) or getattr(finding, "suggested_patch", None)
-    if not code or not isinstance(code, str):
-        return False
-
-    clean_code = code.strip()
-    if not clean_code:
-        return False
-
-    # Strip outer code fences if wrapped
-    if clean_code.startswith("```"):
-        lines = clean_code.splitlines()
-        if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
-            clean_code = "\n".join(lines[1:-1]).strip()
-        elif lines[0].startswith("```"):
-            clean_code = "\n".join(lines[1:]).strip()
-
-    # Line count check: strictly under 30 lines (< 30)
-    lines_count = len(clean_code.splitlines())
-    if lines_count >= 30:
-        return False
-
-    # Multi-hunk check: at most 1 hunk header (@@ ... @@)
-    hunk_headers = re.findall(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", clean_code, re.MULTILINE)
-    if len(hunk_headers) > 1:
-        return False
-
-    # Multi-file diff check in code itself
-    diff_git_count = len(re.findall(r"^diff --git ", clean_code, re.MULTILINE))
-    if diff_git_count > 1:
-        return False
-
-    file_plus_headers = re.findall(r"^\+\+\+ (?:b/)?(.*)$", clean_code, re.MULTILINE)
-    distinct_files = {f.strip() for f in file_plus_headers if f.strip() not in ("/dev/null", "dev/null", "")}
-    if len(distinct_files) > 1:
-        return False
-
-    return True
+    return diff_validation.should_show_suggested_code(finding, suggested_code)
 
 def validate_finding_coordinates(
     finding: AuditFinding,
@@ -566,20 +525,36 @@ def update_dossier_meta(
     active_findings: Sequence[Any],
     resolved_count: int = 0,
     dossier_dir: Optional[str] = None,
+    workspace: Optional[str] = None,
     audit_id: str = "",
     posted_counts: Optional[Mapping[str, int]] = None,
 ) -> None:
-    """Persist or update PR review state in {dossier_dir}/meta.json."""
+    """Persist or update PR review state in {dossier_dir}/meta.json.
+
+    When ``dossier_dir`` is omitted the state is written under a durable
+    workspace directory instead of the OS temp dir, so it survives process
+    restarts and tempdir cleanup. The fallback location is
+    ``{workspace or cwd}/.haunter-dossier/{owner}_{repo}/PR-{pr_number}``;
+    pass ``workspace`` to override the base directory (or set the
+    ``HAUNTER_DOSSIER_DIR`` environment variable).
+    """
     try:
         import json
-        import tempfile
+        import os
         from pathlib import Path
 
+        safe_repo = f"{owner}_{repo}".replace("/", "_") if owner and repo else "repo"
         if dossier_dir:
             target_dir = Path(dossier_dir)
+        elif workspace:
+            target_dir = Path(workspace)
         else:
-            safe_repo = f"{owner}_{repo}".replace("/", "_") if owner and repo else "repo"
-            target_dir = Path(tempfile.gettempdir()) / "haunter-dossier" / safe_repo / f"PR-{pr_number}"
+            base = os.environ.get("HAUNTER_DOSSIER_DIR")
+            if base:
+                root = Path(base)
+            else:
+                root = Path.cwd() / ".haunter-dossier"
+            target_dir = root / safe_repo / f"PR-{pr_number}"
 
         target_dir.mkdir(parents=True, exist_ok=True)
         meta_file = target_dir / "meta.json"
@@ -615,18 +590,30 @@ def load_dossier_meta(
     repo: str,
     pr_number: int,
     dossier_dir: Optional[str] = None,
+    workspace: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
-    """Load PR review state from {dossier_dir}/meta.json if present."""
+    """Load PR review state from {dossier_dir}/meta.json if present.
+
+    Uses the same durable fallback location as :func:`update_dossier_meta` when
+    ``dossier_dir`` is omitted.
+    """
     try:
         import json
-        import tempfile
+        import os
         from pathlib import Path
 
+        safe_repo = f"{owner}_{repo}".replace("/", "_") if owner and repo else "repo"
         if dossier_dir:
             target_dir = Path(dossier_dir)
+        elif workspace:
+            target_dir = Path(workspace)
         else:
-            safe_repo = f"{owner}_{repo}".replace("/", "_") if owner and repo else "repo"
-            target_dir = Path(tempfile.gettempdir()) / "haunter-dossier" / safe_repo / f"PR-{pr_number}"
+            base = os.environ.get("HAUNTER_DOSSIER_DIR")
+            if base:
+                root = Path(base)
+            else:
+                root = Path.cwd() / ".haunter-dossier"
+            target_dir = root / safe_repo / f"PR-{pr_number}"
 
         meta_file = target_dir / "meta.json"
         if meta_file.is_file():

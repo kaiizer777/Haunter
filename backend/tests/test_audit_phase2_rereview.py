@@ -113,7 +113,7 @@ async def test_phase1c_context_reuse_from_disk(tmp_path):
     dossier_dir = tmp_path / "dossier"
     dossier_dir.mkdir(parents=True, exist_ok=True)
     p1c_file = dossier_dir / "phase-1c.md"
-    expected_content = "# Pre-synthesized Phase 1c Context\nExisting authority notes."
+    expected_content = "# Pre-synthesized Phase 1c Context\n## Primary Intent & Problem Statement\nExisting authority notes."
     p1c_file.write_text(expected_content, encoding="utf-8")
 
     mock_llm = MagicMock()
@@ -407,6 +407,7 @@ async def test_pipeline_re_review_delta_diff_flow(tmp_path):
          patch("app.github_client.fetch_review_threads", new_callable=AsyncMock) as mock_threads, \
          patch("app.github_client.resolve_review_threads", new_callable=AsyncMock) as mock_resolve, \
          patch("app.github_client.update_pr_review", new_callable=AsyncMock) as mock_update, \
+         patch("app.github_client.fetch_file_content", new_callable=AsyncMock) as mock_fetch_file, \
          patch("app.subagents.auditor.run_audit", new_callable=AsyncMock) as mock_run_audit, \
          patch("app.services.audit_pipeline._pin_audit_target", new_callable=AsyncMock, return_value=True):
 
@@ -524,6 +525,7 @@ async def test_pipeline_force_push_compare_fallback():
     with patch("app.github_client.fetch_pull_request", new_callable=AsyncMock) as mock_pr, \
          patch("app.github_client.fetch_diff", side_effect=Exception("404 Compare commits failed")), \
          patch("app.subagents.auditor.fetch_audit_diff", new_callable=AsyncMock) as mock_fetch_full, \
+         patch("app.github_client.fetch_file_content", new_callable=AsyncMock) as mock_fetch_file, \
          patch("app.github.audit_publisher.load_dossier_meta", return_value={"last_reviewed_sha": sha_v1, "review_id": 111}), \
          patch("app.services.audit_pipeline._pin_audit_target", new_callable=AsyncMock, return_value=True), \
          patch("app.subagents.auditor.run_audit", new_callable=AsyncMock) as mock_run_audit, \
@@ -657,6 +659,7 @@ async def test_pipeline_re_review_fetch_threads_failure_resilience():
          patch("app.github_client.fetch_diff", new_callable=AsyncMock) as mock_diff, \
          patch("app.github_client.fetch_review_threads", new_callable=AsyncMock) as mock_threads, \
          patch("app.github_client.update_pr_review", new_callable=AsyncMock) as mock_update, \
+         patch("app.github_client.fetch_file_content", new_callable=AsyncMock) as mock_fetch_file, \
          patch("app.subagents.auditor.run_audit", new_callable=AsyncMock) as mock_run_audit, \
          patch("app.services.audit_pipeline._pin_audit_target", new_callable=AsyncMock, return_value=True), \
          patch("app.github.audit_publisher.publish_audit_review", new_callable=AsyncMock) as mock_pub, \

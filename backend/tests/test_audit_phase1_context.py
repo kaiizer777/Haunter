@@ -292,7 +292,9 @@ async def test_phase_1b_nested_mention_subagents_and_recursion_bound():
     ref_numbers = [m.ref_number for m in results]
     assert ref_numbers == [101, 102, 103]
     assert results[1].ref_type == "pull_request"
-    assert "verdict" in results[0].raw_markdown.lower() or "merged" in results[0].maintainer_verdict.lower()
+    assert "verdict" in results[0].raw_markdown.lower()
+    assert results[0].maintainer_verdict.strip() != ""
+    assert "merged" in results[0].maintainer_verdict.lower()
 
 
 @pytest.mark.asyncio
