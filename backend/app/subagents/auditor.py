@@ -2657,11 +2657,34 @@ async def run_audit(
                 target_dossier = Path(tempfile.gettempdir()) / "haunter-dossier" / safe_repo / f"PR-{resolved_pr_number}"
 
             phase_1c_disk_file = target_dossier / "phase-1c.md"
+
+            def _valid_phase_1c_text(text: str) -> bool:
+                stripped = (text or "").strip()
+                if not stripped:
+                    return False
+                if "degraded" in stripped.lower() or "failed" in stripped.lower():
+                    return False
+                return (
+                    "## Primary Intent & Problem Statement" in stripped
+                    or "## Pull Request Scope & Claimed Changes" in stripped
+                )
+
+            cached_text = ""
             if phase_1c_disk_file.is_file():
-                resolved_phase_1c_context = phase_1c_disk_file.read_text(encoding="utf-8")
+                try:
+                    cached_text = phase_1c_disk_file.read_text(encoding="utf-8")
+                except Exception:
+                    cached_text = ""
+            if cached_text and _valid_phase_1c_text(cached_text):
+                resolved_phase_1c_context = cached_text
                 resolved_phase_1c_file_path = str(phase_1c_disk_file.resolve())
                 logger.info("Auditor: Reusing existing Phase 1c context from disk: %s", resolved_phase_1c_file_path)
             else:
+                if phase_1c_disk_file.is_file():
+                    try:
+                        phase_1c_disk_file.unlink()
+                    except Exception:
+                        pass
                 from app.subagents.audit_context import build_phase1_context
 
                 p1_res = await build_phase1_context(
@@ -2675,9 +2698,14 @@ async def run_audit(
                     llm=llm,
                     model_config=shared_config,
                 )
-                if p1_res:
+                if p1_res and not getattr(p1_res, "degraded", False):
                     resolved_phase_1c_context = p1_res.context_markdown
                     resolved_phase_1c_file_path = p1_res.file_path
+                else:
+                    try:
+                        phase_1c_disk_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
         except Exception as p1_exc:
             logger.warning("Auditor: Phase 1 context build failed; continuing without: %s", p1_exc)
 
@@ -2709,18 +2737,28 @@ async def run_audit(
 
                 chunk_results: list[PerspectiveResult] = []
                 for chunk_text in diff_chunks:
-                    chunk_res = await asyncio.wait_for(
-                        _run_single_perspective(
-                            perspective=perspective,
-                            diff_text=chunk_text,
-                            ast_summary=ast_summary,
-                            repo_context=clean_repo_context,
-                            phase_1c_context=resolved_phase_1c_context,
-                            llm=llm,
-                            model_config=shared_config,
-                        ),
-                        timeout=PERSPECTIVE_DEADLINE_S,
-                    )
+                    try:
+                        chunk_res = await asyncio.wait_for(
+                            _run_single_perspective(
+                                perspective=perspective,
+                                diff_text=chunk_text,
+                                ast_summary=ast_summary,
+                                repo_context=clean_repo_context,
+                                phase_1c_context=resolved_phase_1c_context,
+                                llm=llm,
+                                model_config=shared_config,
+                            ),
+                            timeout=PERSPECTIVE_DEADLINE_S,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as chunk_exc:
+                        logger.warning(
+                            "auditor perspective=%s chunk failed error_type=%s",
+                            perspective,
+                            type(chunk_exc).__name__,
+                        )
+                        continue
                     chunk_results.append(chunk_res)
 
                 combined_findings = []
