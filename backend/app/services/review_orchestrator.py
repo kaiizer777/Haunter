@@ -59,6 +59,7 @@ from app.subagents.auditor import (
     DiffGrounding,
     _validate_repo_path,
     build_diff_grounding,
+    classify_finding_bucket,
 )
 from app.subagents.code_reviewer import (
     ReviewFinding,
@@ -347,10 +348,15 @@ def _build_grounded_comments(
 def _count_findings_by_severity(
     findings: Sequence[ReviewFinding],
 ) -> tuple[int, int, int]:
-    """Returns (blockers, warnings, suggestions)."""
-    blockers = sum(1 for f in findings if f.severity.lower() in ("critical", "high"))
-    warnings = sum(1 for f in findings if f.severity.lower() == "medium")
-    suggestions = sum(1 for f in findings if f.severity.lower() == "low")
+    """Returns (blockers, warnings, suggestions) using priority-aware tiering.
+
+    - blockers = critical + good high-risk findings.
+    - warnings = low-priority high + good medium findings.
+    - suggestions = trivial medium + low findings.
+    """
+    blockers = sum(1 for f in findings if classify_finding_bucket(f) == "must_fix")
+    warnings = sum(1 for f in findings if classify_finding_bucket(f) == "should_fix")
+    suggestions = sum(1 for f in findings if classify_finding_bucket(f) == "suggestion")
     return blockers, warnings, suggestions
 
 
