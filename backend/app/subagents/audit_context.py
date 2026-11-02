@@ -180,6 +180,25 @@ def _extract_diff_file_list(diff_text: str) -> list[str]:
     return files
 
 
+def _extract_response_content(resp: Any) -> str:
+    """Extract content string from either dict-like or object response."""
+    if isinstance(resp, dict):
+        return str(resp.get("content") or "")
+    if hasattr(resp, "content"):
+        return str(resp.content or "")
+    return str(resp or "")
+
+
+def _extract_author(data: Mapping[str, Any]) -> str:
+    """Extract author login from user dict or top-level author string."""
+    user_info = data.get("user")
+    if isinstance(user_info, dict) and user_info.get("login"):
+        return str(user_info["login"])
+    if data.get("author"):
+        return str(data["author"])
+    return ""
+
+
 def _parse_json_object(text: str) -> Optional[dict[str, Any]]:
     """Safely extract a JSON dict from raw LLM output or fenced markdown."""
     if not text or not isinstance(text, str):
@@ -224,7 +243,7 @@ async def run_subagent_a_pr_analysis(
     title = str(data.get("title") or "")
     body = str(data.get("body") or "")
     user_info = data.get("user") or {}
-    author = user_info.get("login") if isinstance(user_info, dict) else str(data.get("author") or "")
+    author = _extract_author(data)
     assoc = author_association_label(data.get("author_association"))
 
     # Fetch from GitHub if metadata missing and token supplied
@@ -295,7 +314,7 @@ async def run_subagent_a_pr_analysis(
                 ),
                 timeout=PHASE1_SUBAGENT_TIMEOUT_S,
             )
-            content = resp.content if hasattr(resp, "content") else str(resp)
+            content = _extract_response_content(resp)
             parsed = _parse_json_object(content)
             if parsed:
                 intent_summary = str(parsed.get("intent_summary") or "").strip()
@@ -364,7 +383,7 @@ async def run_subagent_b_issue_analysis(
     title = str(data.get("title") or "")
     body = str(data.get("body") or "")
     user_info = data.get("user") or {}
-    author = user_info.get("login") if isinstance(user_info, dict) else str(data.get("author") or "")
+    author = _extract_author(data)
     assoc = author_association_label(data.get("author_association"))
     comments: list[str] = []
 
@@ -463,7 +482,7 @@ async def run_subagent_b_issue_analysis(
                 ),
                 timeout=PHASE1_SUBAGENT_TIMEOUT_S,
             )
-            content = resp.content if hasattr(resp, "content") else str(resp)
+            content = _extract_response_content(resp)
             parsed = _parse_json_object(content)
             if parsed:
                 problem_statement = str(parsed.get("problem_statement") or "").strip()
@@ -671,7 +690,7 @@ async def run_single_mention_subagent(
                 ),
                 timeout=PHASE1_SUBAGENT_TIMEOUT_S,
             )
-            content = resp.content if hasattr(resp, "content") else str(resp)
+            content = _extract_response_content(resp)
             parsed = _parse_json_object(content)
             if parsed:
                 summary = str(parsed.get("summary") or "").strip()
@@ -829,7 +848,7 @@ async def run_phase_1c_synthesis(
                 ),
                 timeout=PHASE1_SUBAGENT_TIMEOUT_S,
             )
-            content = resp.content if hasattr(resp, "content") else str(resp)
+            content = _extract_response_content(resp)
             parsed = _parse_json_object(content)
             if parsed:
                 if parsed.get("primary_intent"):
