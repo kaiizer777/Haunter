@@ -500,10 +500,13 @@ describe("ModelConfigPage save behavior", () => {
   });
 
   it("invokes save with selected dynamic model for built-in provider", async () => {
+    vi.mocked(api.getAvailableModels).mockResolvedValue({
+      opencode_go: [{ id: "probe-dynamic", name: "Probe Dynamic", tag: "pro" }],
+    } as never);
     render(<ModelConfigPage />);
     expect(await screen.findByText("Autonomous Inference Engine")).toBeInTheDocument();
 
-    fireEvent.click(await screen.findByText("GLM 5.2"));
+    fireEvent.click(await screen.findByText("Probe Dynamic"));
 
     const saveBtns = await screen.findAllByRole("button", { name: /save configuration/i });
     fireEvent.click(saveBtns[0]);
@@ -511,7 +514,7 @@ describe("ModelConfigPage save behavior", () => {
     await waitFor(() => {
       expect(api.updateModelConfig).toHaveBeenCalledWith({
         provider: "opencode_go",
-        model_name: "glm-5.2",
+        model_name: "probe-dynamic",
       });
     });
   });

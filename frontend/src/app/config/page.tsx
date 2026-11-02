@@ -1325,12 +1325,12 @@ export default function ModelConfigPage() {
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-amber-400 shrink-0" />
                 <span>
-                  Discovered <strong>{(modelOptionsByProvider[selectedProvider] || []).length} model{((modelOptionsByProvider[selectedProvider] || []).length === 1 ? "" : "s")}</strong> for <strong>{registeredCustom.name}</strong>. Select an architecture below and save.
+                  Discovered <strong>{(modelOptionsByProvider[selectedProvider] || []).length} model{((modelOptionsByProvider[selectedProvider] || []).length === 1 ? "" : "s")}</strong> for <strong>{registeredCustom.name}</strong>. Custom provider global activation isn&apos;t supported yet.
                 </span>
               </div>
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[4px] border border-amber-500/30 bg-amber-500/10 text-[11px] text-amber-300 font-medium shadow-[inset_0_1px_0_rgba(251,191,36,0.15)] shrink-0 self-start sm:self-auto">
                 <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                <span>Save Configuration to persist</span>
+                <span>Registration only (not activatable as global engine)</span>
               </span>
             </div>
           )}
