@@ -357,7 +357,7 @@ def is_cross_file_finding(finding: Any) -> bool:
     if not isinstance(file_path, str) or not file_path.strip():
         return True
 
-    if any(sep in file_path for sep in (",", ";", "\\n")):
+    if any(sep in file_path for sep in (",", ";", "\n")):
         return True
 
     cleaned_path = file_path.strip().lower()
@@ -369,7 +369,7 @@ def is_cross_file_finding(finding: Any) -> bool:
         diff_git_count = len(re.findall(r"^diff --git ", suggested_fix, re.MULTILINE))
         if diff_git_count > 1:
             return True
-        file_headers = re.findall(r"^\\+\\+\\+ (?:b/)?(.*)$", suggested_fix, re.MULTILINE)
+        file_headers = re.findall(r"^\+\+\+ (?:b/)?(.*)$", suggested_fix, re.MULTILINE)
         distinct_files = {f.strip() for f in file_headers if f.strip() not in ("/dev/null", "dev/null", "")}
         if len(distinct_files) > 1:
             return True
