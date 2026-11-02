@@ -15,7 +15,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from app.subagents.auditor import AuditFinding, build_diff_grounding
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.subagents.auditor import AuditFinding
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +87,9 @@ def _extract_diff_modified_ranges(diff_text: str) -> dict[str, list[tuple[int, i
     return ranges
 
 
-def _to_finding_dict(finding: AuditFinding | Mapping[str, Any]) -> dict[str, Any]:
+def _to_finding_dict(finding: Any) -> dict[str, Any]:
     """Convert an AuditFinding or mapping into a standard dict."""
-    if isinstance(finding, AuditFinding):
+    if hasattr(finding, "file_path") and hasattr(finding, "line_start"):
         return {
             "id": finding.id,
             "perspective": finding.perspective,
@@ -156,6 +159,8 @@ def match_and_resolve_findings(
     """
     prior_dicts = [_to_finding_dict(f) for f in prior_findings]
     delta_dicts = [_to_finding_dict(f) for f in delta_findings]
+
+    from app.subagents.auditor import build_diff_grounding
 
     grounding = build_diff_grounding(delta_diff) if delta_diff else None
     modified_ranges = _extract_diff_modified_ranges(delta_diff) if delta_diff else {}

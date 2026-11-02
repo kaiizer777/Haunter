@@ -1664,8 +1664,4 @@ def swap_report_footer(report_text: str, resolved_since_last_review: int) -> str
     pattern = r"\*Generated autonomously by Haunter Guardian Mode\. Zero changes were committed to your branch\.(?: [·\-] resolved since last review: \d+)?\*"
     if re.search(pattern, report_text):
         return re.sub(pattern, new_footer, report_text)
-    return report_text.rstrip() + f"
-
----
-{new_footer}
-"
+    return report_text.rstrip() + "\n\n---\n" + new_footer + "\n"
