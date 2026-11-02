@@ -24,7 +24,6 @@ from app import github_client
 from app.diff_validation import coerce_unified_diff
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
-    format_posted_counts_badge,
     swap_report_footer,
     MAX_CATEGORY_CHARS,
     MAX_GITHUB_COMMENT_CHARS,
@@ -41,7 +40,6 @@ from app.subagents.auditor import (
     AuditResult,
     DiffGrounding,
     build_diff_grounding,
-    normalize_severity,
     select_scoped_findings,
 )
 

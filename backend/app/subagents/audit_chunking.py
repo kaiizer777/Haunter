@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Sequence
 
 DEFAULT_MAX_CHUNK_LINES = 500
 HARD_CHUNK_LIMIT = 550

@@ -59,7 +59,6 @@ from app.llm.prompts.audit_prompts import (
 )
 from app.log_hygiene import sanitize_log_value
 from app.subagents.audit_chunking import partition_diff_into_chunks
-from app.subagents.audit_matcher import FindingResolutionResult, match_and_resolve_findings
 from app.subagents.ast_analyzer import (
     StackFrame,
     extract_python_ast_context_from_index,
@@ -465,14 +464,14 @@ def normalize_severity(finding_or_severity: Any, *, informational_only: bool = F
     if informational_only:
         return "I"
 
-    if hasattr(finding_or_severity, "informational_only") and getattr(finding_or_severity, "informational_only"):
+    if hasattr(finding_or_severity, "informational_only") and finding_or_severity.informational_only:
         return "I"
 
     if isinstance(finding_or_severity, Mapping) and finding_or_severity.get("informational_only"):
         return "I"
 
     if hasattr(finding_or_severity, "severity"):
-        raw = getattr(finding_or_severity, "severity")
+        raw = finding_or_severity.severity
     elif isinstance(finding_or_severity, Mapping):
         raw = finding_or_severity.get("severity")
     elif isinstance(finding_or_severity, str):

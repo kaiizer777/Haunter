@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from typing import TYPE_CHECKING
@@ -212,7 +212,7 @@ def match_and_resolve_findings(
         anchor_modified = False
         if grounding and p_path in grounding.line_index:
             lines_modified = grounding.line_index[p_path]
-            if any(l in lines_modified for l in range(p_s, p_e + 1)):
+            if any(line_no in lines_modified for line_no in range(p_s, p_e + 1)):
                 anchor_modified = True
 
         if not anchor_modified and p_path in modified_ranges:

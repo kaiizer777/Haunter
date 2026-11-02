@@ -242,7 +242,6 @@ async def run_subagent_a_pr_analysis(
     data: dict[str, Any] = dict(pr_metadata or {})
     title = str(data.get("title") or "")
     body = str(data.get("body") or "")
-    user_info = data.get("user") or {}
     author = _extract_author(data)
     assoc = author_association_label(data.get("author_association"))
 
@@ -339,7 +338,7 @@ async def run_subagent_a_pr_analysis(
         for line in body.splitlines():
             line_s = line.strip()
             if line_s.startswith(("- ", "* ", "1. ", "2. ", "3. ")):
-                claimed_changes.append(line_s.lstrip("-*0123456789. "))
+                claimed_changes.append(re.sub(r"^(?:[-*]|\d+\.)\s+", "", line_s))
             if len(claimed_changes) >= 8:
                 break
 
@@ -382,7 +381,6 @@ async def run_subagent_b_issue_analysis(
     data: dict[str, Any] = dict(issue_data or {})
     title = str(data.get("title") or "")
     body = str(data.get("body") or "")
-    user_info = data.get("user") or {}
     author = _extract_author(data)
     assoc = author_association_label(data.get("author_association"))
     comments: list[str] = []
