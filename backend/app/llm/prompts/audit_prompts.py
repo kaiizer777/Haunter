@@ -1428,6 +1428,9 @@ def _render_audit_findings_table(
     return "\n".join(rows)
 
 
+_POSTED_BADGE_RE = re.compile(r"^[CHMLI]\d+(?:\s+[CHMLI]\d+)*$")
+
+
 def format_posted_counts_badge(posted_counts: Mapping[str, int]) -> str:
     """Format counts of posted findings by canonical severity (C, H, M, L, I).
 
@@ -1462,7 +1465,7 @@ def format_audit_report(
     analysis_metadata: str = "",
     pr_score: Optional[int] = None,
     resolved_since_last_review: Optional[int] = None,
-    posted_counts: Optional[Mapping[str, int] | str] = None,
+    posted_counts: Optional[Mapping[str, int]] = None,
 ) -> str:
     confidence_value = _clamp_confidence(confidence)
     policy_allowed = publish_allowed is True
@@ -1498,15 +1501,19 @@ def format_audit_report(
         return classify_finding_bucket(f, overall_confidence=confidence_value)
 
     # Must-Fix and Should-Fix counts
-    if must_fix_count is None:
-        n_must_fix = sum(1 for f in findings if _finding_bucket(f) == "must_fix")
+    if confidence_value < INFORMATIONAL_CONFIDENCE_THRESHOLD:
+        n_must_fix = 0
+        n_should_fix = 0
     else:
-        n_must_fix = max(0, int(must_fix_count))
+        if must_fix_count is None:
+            n_must_fix = sum(1 for f in findings if _finding_bucket(f) == "must_fix")
+        else:
+            n_must_fix = max(0, int(must_fix_count))
 
-    if should_fix_count is None:
-        n_should_fix = sum(1 for f in findings if _finding_bucket(f) == "should_fix")
-    else:
-        n_should_fix = max(0, int(should_fix_count))
+        if should_fix_count is None:
+            n_should_fix = sum(1 for f in findings if _finding_bucket(f) == "should_fix")
+        else:
+            n_should_fix = max(0, int(should_fix_count))
 
     n_notes = sum(1 for f in findings if _finding_bucket(f) == "suggestion")
 
@@ -1707,8 +1714,9 @@ def format_audit_report(
     badge = ""
     if posted_counts is not None:
         if isinstance(posted_counts, str):
-            badge = posted_counts.strip()
-        else:
+            candidate = posted_counts.strip()
+            badge = candidate if _POSTED_BADGE_RE.match(candidate) else ""
+        elif isinstance(posted_counts, Mapping):
             badge = format_posted_counts_badge(posted_counts)
 
     footer_parts = ["*Generated autonomously by Haunter Guardian Mode. Zero changes were committed to your branch."]
@@ -1734,7 +1742,7 @@ def swap_report_footer(
     report_text: str,
     resolved_since_last_review: Optional[int] = None,
     *,
-    posted_counts: Optional[Mapping[str, int] | str] = None,
+    posted_counts: Optional[Mapping[str, int]] = None,
 ) -> str:
     """Swap or update the report footer with live posted counts badge and resolved count."""
     pattern = r"\*Generated autonomously by Haunter Guardian Mode\. Zero changes were committed to your branch\.(?:\s*[·\-]\s*(?P<badge>[CHMLI]\d+(?:\s+[CHMLI]\d+)*))?(?:\s*[·\-]\s*resolved since last review:\s*(?P<resolved>\d+))?\s*\*"
@@ -1745,8 +1753,9 @@ def swap_report_footer(
     # Determine badge
     if posted_counts is not None:
         if isinstance(posted_counts, str):
-            badge = posted_counts.strip()
-        else:
+            candidate = posted_counts.strip()
+            badge = candidate if _POSTED_BADGE_RE.match(candidate) else ""
+        elif isinstance(posted_counts, Mapping):
             badge = format_posted_counts_badge(posted_counts)
     else:
         badge = existing_badge or ""
