@@ -1659,7 +1659,7 @@ export default function ModelConfigPage() {
             <div className="flex items-center gap-3 self-end sm:self-auto">
               {isCustomProvider && (
                 <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 border border-amber-800/50 px-2.5 py-1 rounded-[5px]">
-                  Custom provider global activation isn't supported yet.
+                  Custom provider global activation isn&apos;t supported yet.
                 </span>
               )}
               {isDirty && (
