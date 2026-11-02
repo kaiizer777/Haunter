@@ -288,9 +288,11 @@ class ModelConfigUpdate(BaseModel):
         self.model_name = model
 
         if provider == "opencode_go":
-            if model not in OPENCODE_GO_MODELS:
-                logger.warning("model_config.rejected provider=%s model=%s", provider, model)
-                raise ValueError("Invalid model selection.")
+            # OpenCode Go model IDs are validated against the live discovered set
+            # (get_dynamic_go_models() IDs union bootstrap IDs) in the router,
+            # because discovery is async and cannot run inside a sync Pydantic
+            # validator. Here we only enforce basic shape/length via Field.
+            pass
         elif provider == "groq":
             if model not in GROQ_MODELS:
                 logger.warning("model_config.rejected provider=%s model=%s", provider, model)
