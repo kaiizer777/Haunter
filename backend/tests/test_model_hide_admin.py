@@ -95,8 +95,15 @@ def test_failure_reason_redacts_model_tokens() -> None:
 
 
 def test_validator_errors_are_generic() -> None:
+    # New contract: schema accepts arbitrary opencode_go strings; validation
+    # happens in the router. Groq keeps static validation with a generic msg.
+    accepted = ModelConfigUpdate(
+        provider="opencode_go", model_name="not-a-real-model"
+    )
+    assert accepted.model_name == "not-a-real-model"
+
     with pytest.raises(ValidationError) as exc_info:
-        ModelConfigUpdate(provider="opencode_go", model_name="not-a-real-model")
+        ModelConfigUpdate(provider="groq", model_name="not-a-real-model")
     msgs = " | ".join(e.get("msg", "") for e in exc_info.value.errors())
     assert "Invalid model selection." in msgs
     assert "Allowed models" not in msgs

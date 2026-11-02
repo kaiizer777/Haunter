@@ -1406,7 +1406,7 @@ async def test_get_available_models_endpoint(
 
 
 def test_model_config_update_schema_validation():
-    """ModelConfigUpdate allows allowlisted go/groq models, rejects retired providers and unknown models."""
+    """ModelConfigUpdate: opencode_go model_name is deferred to router; groq stays static."""
     from app.schemas import ModelConfigUpdate
     from pydantic import ValidationError
 
@@ -1419,8 +1419,12 @@ def test_model_config_update_schema_validation():
     with pytest.raises(ValidationError, match="Invalid model selection."):
         ModelConfigUpdate(provider="opencode_go", model_name="")
 
-    with pytest.raises(ValidationError, match="Invalid model selection."):
-        ModelConfigUpdate(provider="opencode_go", model_name="invalid")
+    # Schema now defers opencode_go validation to the router: arbitrary
+    # (non-empty) strings are accepted at schema level.
+    m_arbitrary = ModelConfigUpdate(provider="opencode_go", model_name="invalid")
+    assert m_arbitrary.model_name == "invalid"
+    m_gpt = ModelConfigUpdate(provider="opencode_go", model_name="gpt-4o")
+    assert m_gpt.model_name == "gpt-4o"
 
     m1 = ModelConfigUpdate(
         provider="opencode_go", model_name="nemotron-3.5-lightning-free"
@@ -1429,10 +1433,6 @@ def test_model_config_update_schema_validation():
 
     m2 = ModelConfigUpdate(provider="opencode_go", model_name="glm-5.2")
     assert m2.model_name == "glm-5.2"
-
-    # Invalid opencode_go model (not in allowlist)
-    with pytest.raises(ValidationError):
-        ModelConfigUpdate(provider="opencode_go", model_name="gpt-4o")
 
     # Retired providers are rejected by the AllowedProvider literal
     for retired in ("opencode_zen", "openai", "anthropic"):

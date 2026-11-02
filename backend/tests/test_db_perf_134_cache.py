@@ -416,9 +416,14 @@ async def test_model_config_expired_entries_pruned_on_store():
 
 
 @pytest.mark.asyncio
-async def test_update_model_config_global_invalidates_before_refresh():
+async def test_update_model_config_global_invalidates_before_refresh(monkeypatch):
     """Global PUT: commit ok + refresh boom => cache already dropped."""
     from app.routers import model_config as mc_router
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    # Mock discovery so the test is hermetic and the chosen model passes the
+    # router's dynamic allowlist (validation now lives in the router).
+    monkeypatch.setattr(mc_router, "get_dynamic_go_models", _AsyncMock(return_value=[]))
 
     _model_config_cache["global"] = (
         mc_mod.ResolvedModelConfig(
@@ -443,7 +448,7 @@ async def test_update_model_config_global_invalidates_before_refresh():
     mock_db.refresh.side_effect = RuntimeError("refresh failed")
 
     admin = MagicMock(id=uuid.uuid4(), is_admin=True)
-    body = MagicMock(provider="opencode_go", model_name="probe-free", repo_id=None)
+    body = MagicMock(provider="opencode_go", model_name="deepseek-v4.1-flash", repo_id=None)
 
     with pytest.raises(RuntimeError, match="refresh failed"):
         await mc_router.update_model_config_endpoint(body, admin, mock_db)
