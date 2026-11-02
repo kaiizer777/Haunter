@@ -1476,30 +1476,39 @@ def format_audit_report(
     except TypeError:
         total_findings = len(bounded_findings)
 
-    # Blocker and Warning counts
-    if must_fix_count is None:
-        n_must_fix = sum(
-            1
-            for f in findings
-            if str(f.get("severity", "")).upper() == "BLOCKER"
+    def _finding_bucket(f: Any) -> str:
+        b = (
+            f.get("priority_bucket")
+            if isinstance(f, Mapping) and f.get("priority_bucket")
+            else getattr(f, "priority_bucket", None)
         )
+        if b:
+            cleaned = str(b).strip().lower().replace("-", "_")
+            if cleaned in ("must_fix", "should_fix", "suggestion"):
+                conf = f.get("confidence", 100) if isinstance(f, Mapping) else getattr(f, "confidence", 100)
+                info = f.get("informational_only", False) if isinstance(f, Mapping) else getattr(f, "informational_only", False)
+                try:
+                    conf_int = int(conf or 0)
+                except (TypeError, ValueError):
+                    conf_int = 100
+                if info or confidence_value < INFORMATIONAL_CONFIDENCE_THRESHOLD or conf_int < INFORMATIONAL_CONFIDENCE_THRESHOLD:
+                    return "suggestion"
+                return cleaned
+        from app.subagents.auditor import classify_finding_bucket
+        return classify_finding_bucket(f, overall_confidence=confidence_value)
+
+    # Must-Fix and Should-Fix counts
+    if must_fix_count is None:
+        n_must_fix = sum(1 for f in findings if _finding_bucket(f) == "must_fix")
     else:
         n_must_fix = max(0, int(must_fix_count))
 
     if should_fix_count is None:
-        n_should_fix = sum(
-            1
-            for f in findings
-            if str(f.get("severity", "")).upper() == "WARNING"
-        )
+        n_should_fix = sum(1 for f in findings if _finding_bucket(f) == "should_fix")
     else:
         n_should_fix = max(0, int(should_fix_count))
 
-    n_notes = sum(
-        1
-        for f in findings
-        if str(f.get("severity", "")).upper() == "NOTE"
-    )
+    n_notes = sum(1 for f in findings if _finding_bucket(f) == "suggestion")
 
     summary_text = clean_pr_summary(pr_summary or executive_summary)
     summary_sanitized = _sanitize_inline(summary_text)
@@ -1661,10 +1670,10 @@ def format_audit_report(
                 or f.get("line_start") == 0
                 or f.get("file_path") in ("", "(general)", None)
             )
-            sev = str(f.get("severity", "NOTE")).upper()
-            if sev == "BLOCKER":
+            bucket = _finding_bucket(f)
+            if bucket == "must_fix":
                 badge = "⛔ **Must-Fix:**"
-            elif sev == "WARNING":
+            elif bucket == "should_fix":
                 badge = "⚠️ **Should-Fix:**"
             else:
                 badge = "💡 **Suggestion:**"
