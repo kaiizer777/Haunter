@@ -292,6 +292,211 @@ def _validate_repo_path(value: Any) -> Any:
     return normalized
 
 
+PriorityBucket = Literal["must_fix", "should_fix", "suggestion"]
+
+CANONICAL_SEVERITY_MAP: dict[str, str] = {
+    "CRITICAL": "C",
+    "BLOCKER": "C",
+    "C": "C",
+    "HIGH": "H",
+    "H": "H",
+    "MEDIUM": "M",
+    "WARNING": "M",
+    "M": "M",
+    "LOW": "L",
+    "NOTE": "L",
+    "L": "L",
+    "IMPROVEMENT": "I",
+    "INFORMATIONAL": "I",
+    "INFO": "I",
+    "I": "I",
+}
+
+
+def normalize_severity(finding_or_severity: Any, *, informational_only: bool = False) -> str:
+    """Map existing AuditSeverity and extended severities to canonical single letters.
+
+    - "CRITICAL", "BLOCKER" -> "C"
+    - "HIGH" -> "H"
+    - "MEDIUM", "WARNING" -> "M"
+    - "LOW", "NOTE" -> "L"
+    - "IMPROVEMENT", "INFORMATIONAL", "INFO", or when informational_only=True -> "I"
+    """
+    if informational_only:
+        return "I"
+
+    if hasattr(finding_or_severity, "informational_only") and finding_or_severity.informational_only:
+        return "I"
+
+    if isinstance(finding_or_severity, Mapping) and finding_or_severity.get("informational_only"):
+        return "I"
+
+    if hasattr(finding_or_severity, "severity"):
+        raw = finding_or_severity.severity
+    elif isinstance(finding_or_severity, Mapping):
+        raw = finding_or_severity.get("severity")
+    elif isinstance(finding_or_severity, str):
+        raw = finding_or_severity
+    else:
+        raw = str(finding_or_severity or "")
+
+    key = str(raw or "").strip().upper()
+    return CANONICAL_SEVERITY_MAP.get(key, "L")
+
+
+_LOW_PRIORITY_PATTERNS = re.compile(
+    r"\b(?:style|minor(?:\s+perf|\s+performance)?|nice-to-have|nice\s+to\s+have|cosmetic|formatting|typo|naming|docstring|readability|cleanup|micro-optimization|nit|nitpick|convention|trivial)\b",
+    re.IGNORECASE,
+)
+
+_HIGH_RISK_PATTERNS = re.compile(
+    r"\b(?:correctness|security|data\s*loss|breaking\s*change|scope\s*drift|vulnerability|injection|auth|bypass|cve|crash|deadlock|race\s*condition|memory\s*leak|leak|corruption)\b",
+    re.IGNORECASE,
+)
+
+_HIGH_RISK_CATEGORIES = frozenset(
+    {
+        "security",
+        "correctness",
+        "logic",
+        "data_loss",
+        "data loss",
+        "breaking_change",
+        "breaking change",
+        "scope_drift",
+        "scope drift",
+        "api_compatibility",
+    }
+)
+
+_LOW_PRIORITY_CATEGORIES = frozenset(
+    {
+        "style",
+        "formatting",
+        "cosmetic",
+        "typo",
+        "documentation",
+        "doc",
+        "docstring",
+        "cleanup",
+        "nit",
+        "nitpick",
+        "readability",
+        "naming",
+        "convention",
+    }
+)
+
+
+def classify_finding_bucket(
+    finding: Any,
+    *,
+    overall_confidence: int = 100,
+) -> Literal["must_fix", "should_fix", "suggestion"]:
+    """Classify a finding into 'must_fix', 'should_fix', or 'suggestion'.
+
+    Priority tiering rules:
+    - Overall or finding confidence < 75 or informational_only -> 'suggestion'.
+    - If finding explicitly specifies a valid priority_bucket ('must_fix', 'should_fix', 'suggestion'), respect it.
+    - Blocker / Critical -> 'must_fix'.
+    - High:
+        * good high-risk (correctness, security, data loss, breaking change, scope drift) -> 'must_fix'.
+        * low-priority high (style, minor perf, nice-to-have) -> 'should_fix'.
+    - Medium:
+        * good medium (worth fixing but not merge-blocking) -> 'should_fix'.
+        * trivial / nit / low-priority medium -> 'suggestion'.
+    - Low / Informational / Note -> 'suggestion'.
+    """
+    def _get_val(key: str, default: Any = None) -> Any:
+        if hasattr(finding, key):
+            val = getattr(finding, key)
+            if val is not None:
+                return val
+        if isinstance(finding, Mapping):
+            val = finding.get(key)
+            if val is not None:
+                return val
+        return default
+
+    # 1. Confidence & informational policy (< 75% -> suggestion)
+    informational_only = bool(_get_val("informational_only", False))
+    finding_conf = _get_val("confidence", 100)
+    try:
+        conf_int = int(finding_conf)
+    except (TypeError, ValueError):
+        conf_int = 100
+
+    if (
+        informational_only
+        or overall_confidence < INFORMATIONAL_CONFIDENCE_THRESHOLD
+        or conf_int < INFORMATIONAL_CONFIDENCE_THRESHOLD
+    ):
+        return "suggestion"
+
+    # 2. Check if finding explicitly declares priority_bucket
+    explicit_bucket = _get_val("priority_bucket")
+    if explicit_bucket and isinstance(explicit_bucket, str):
+        cleaned_bucket = explicit_bucket.strip().lower().replace("-", "_")
+        if cleaned_bucket in ("must_fix", "should_fix", "suggestion"):
+            return cleaned_bucket
+
+    # 3. Canonical severity
+    canonical_sev = normalize_severity(finding, informational_only=informational_only)
+
+    if canonical_sev in ("L", "I"):
+        return "suggestion"
+
+    if canonical_sev == "C":
+        return "must_fix"
+
+    # Inspect category, title, description / critique / impact
+    category = str(_get_val("category", "") or "").strip().lower()
+    title = str(_get_val("title", "") or "").strip().lower()
+    description = str(
+        _get_val("description")
+        or _get_val("critique")
+        or _get_val("impact")
+        or _get_val("summary")
+        or ""
+    ).strip().lower()
+
+    text_corpus = f"{category} {title} {description}"
+
+    is_low_priority = (
+        category in _LOW_PRIORITY_CATEGORIES
+        or bool(_LOW_PRIORITY_PATTERNS.search(text_corpus))
+    )
+    is_high_risk = (
+        category in _HIGH_RISK_CATEGORIES
+        or bool(_HIGH_RISK_PATTERNS.search(text_corpus))
+    )
+
+    if canonical_sev == "H":
+        # High severity:
+        # good high-risk: genuinely important before merge -> must-fix.
+        # low-priority high: real but not merge-blocking (style, minor perf, nice-to-have) -> should-fix.
+        if is_low_priority and not is_high_risk:
+            return "should_fix"
+        return "must_fix"
+
+    if canonical_sev == "M":
+        # Medium severity:
+        # good medium: medium finding worth fixing but not blocking -> should-fix.
+        # trivial/nit/low-priority medium -> suggestions.
+        text_high_risk = bool(_HIGH_RISK_PATTERNS.search(text_corpus)) or category in (
+            "security",
+            "data_loss",
+            "data loss",
+            "breaking_change",
+            "breaking change",
+        )
+        if is_low_priority and not text_high_risk:
+            return "suggestion"
+        return "should_fix"
+
+    return "suggestion"
+
+
 class PerspectiveFinding(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -311,6 +516,18 @@ class PerspectiveFinding(BaseModel):
         default=None, max_length=MAX_SUGGESTED_FIX_CHARS
     )
     confidence: int = Field(ge=0, le=100)
+    priority_bucket: Optional[PriorityBucket] = None
+
+    @field_validator("priority_bucket", mode="before")
+    @classmethod
+    def _normalize_priority_bucket(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            clean = value.strip().lower().replace("-", "_")
+            if clean in ("must_fix", "should_fix", "suggestion"):
+                return clean
+        return value
 
     @field_validator("file_path", mode="before")
     @classmethod
@@ -387,6 +604,15 @@ class AuditFinding:
     confidence: int
     informational_only: bool = False
     non_commentable: bool = False
+    priority_bucket: Optional[PriorityBucket] = None
+
+    def __post_init__(self) -> None:
+        if self.priority_bucket is None:
+            object.__setattr__(
+                self,
+                "priority_bucket",
+                classify_finding_bucket(self),
+            )
 
     @property
     def impact(self) -> str:
@@ -407,6 +633,7 @@ class AuditFinding:
             "confidence": self.confidence,
             "informational_only": self.informational_only,
             "non_commentable": self.non_commentable,
+            "priority_bucket": self.priority_bucket,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -446,56 +673,6 @@ class AuditFinding:
         reader would see ``&amp;lt;`` where the code said ``&lt;``.
         """
         return self._as_dict()
-
-
-CANONICAL_SEVERITY_MAP: dict[str, str] = {
-    "CRITICAL": "C",
-    "BLOCKER": "C",
-    "C": "C",
-    "HIGH": "H",
-    "H": "H",
-    "MEDIUM": "M",
-    "WARNING": "M",
-    "M": "M",
-    "LOW": "L",
-    "NOTE": "L",
-    "L": "L",
-    "IMPROVEMENT": "I",
-    "INFORMATIONAL": "I",
-    "INFO": "I",
-    "I": "I",
-}
-
-
-def normalize_severity(finding_or_severity: Any, *, informational_only: bool = False) -> str:
-    """Map existing AuditSeverity and extended severities to canonical single letters.
-
-    - "CRITICAL", "BLOCKER" -> "C"
-    - "HIGH" -> "H"
-    - "MEDIUM", "WARNING" -> "M"
-    - "LOW", "NOTE" -> "L"
-    - "IMPROVEMENT", "INFORMATIONAL", "INFO", or when informational_only=True -> "I"
-    """
-    if informational_only:
-        return "I"
-
-    if hasattr(finding_or_severity, "informational_only") and finding_or_severity.informational_only:
-        return "I"
-
-    if isinstance(finding_or_severity, Mapping) and finding_or_severity.get("informational_only"):
-        return "I"
-
-    if hasattr(finding_or_severity, "severity"):
-        raw = finding_or_severity.severity
-    elif isinstance(finding_or_severity, Mapping):
-        raw = finding_or_severity.get("severity")
-    elif isinstance(finding_or_severity, str):
-        raw = finding_or_severity
-    else:
-        raw = str(finding_or_severity or "")
-
-    key = str(raw or "").strip().upper()
-    return CANONICAL_SEVERITY_MAP.get(key, "L")
 
 
 def _finding_sort_key(f: Any) -> tuple[int, int]:
@@ -610,6 +787,33 @@ class AuditResult:
         return counts
 
     @property
+    def must_fix_count(self) -> int:
+        return sum(
+            1
+            for f in self.findings
+            if getattr(f, "priority_bucket", None) == "must_fix"
+            or classify_finding_bucket(f, overall_confidence=self.confidence) == "must_fix"
+        )
+
+    @property
+    def should_fix_count(self) -> int:
+        return sum(
+            1
+            for f in self.findings
+            if getattr(f, "priority_bucket", None) == "should_fix"
+            or classify_finding_bucket(f, overall_confidence=self.confidence) == "should_fix"
+        )
+
+    @property
+    def suggestion_count(self) -> int:
+        return sum(
+            1
+            for f in self.findings
+            if getattr(f, "priority_bucket", None) == "suggestion"
+            or classify_finding_bucket(f, overall_confidence=self.confidence) == "suggestion"
+        )
+
+    @property
     def informational_only(self) -> bool:
         return self.confidence < INFORMATIONAL_CONFIDENCE_THRESHOLD
 
@@ -633,6 +837,9 @@ class AuditResult:
             "informational_only": self.informational_only,
             "publish_allowed": self.publish_allowed,
             "severity_counts": dict(self.severity_counts),
+            "must_fix_count": self.must_fix_count,
+            "should_fix_count": self.should_fix_count,
+            "suggestion_count": self.suggestion_count,
             "executive_summary": sanitize_output_text(
                 self.executive_summary, MAX_EXECUTIVE_SUMMARY_CHARS
             ),
@@ -1765,6 +1972,10 @@ def _apply_confidence_policy(
         or overall_confidence < INFORMATIONAL_CONFIDENCE_THRESHOLD
     )
     severity: AuditSeverity = "NOTE" if informational_only else finding.severity
+    priority_bucket = classify_finding_bucket(
+        finding,
+        overall_confidence=overall_confidence,
+    )
     category = _clean_generated_text(_redact_audit_secrets(finding.category))
     title = _clean_generated_text(_redact_audit_secrets(finding.title))
     description = _clean_generated_text(_redact_audit_secrets(finding.description))
@@ -1794,6 +2005,7 @@ def _apply_confidence_policy(
         confidence=finding.confidence,
         informational_only=informational_only,
         non_commentable=finding.non_commentable,
+        priority_bucket=priority_bucket,
     )
 
 
@@ -2602,12 +2814,26 @@ async def run_audit(
         overall_confidence = min(
             overall_confidence, INFORMATIONAL_CONFIDENCE_THRESHOLD - 1
         )
-    counts = Counter(finding.severity for finding in findings)
+    must_fix_count = sum(
+        1 for f in findings
+        if getattr(f, "priority_bucket", None) == "must_fix"
+        or classify_finding_bucket(f, overall_confidence=overall_confidence) == "must_fix"
+    )
+    should_fix_count = sum(
+        1 for f in findings
+        if getattr(f, "priority_bucket", None) == "should_fix"
+        or classify_finding_bucket(f, overall_confidence=overall_confidence) == "should_fix"
+    )
+    suggestion_count = sum(
+        1 for f in findings
+        if getattr(f, "priority_bucket", None) == "suggestion"
+        or classify_finding_bucket(f, overall_confidence=overall_confidence) == "suggestion"
+    )
     status = build_status_label(
-        counts.get("BLOCKER", 0),
-        counts.get("WARNING", 0),
+        must_fix_count,
+        should_fix_count,
         overall_confidence,
-        has_notes=counts.get("NOTE", 0) > 0,
+        has_notes=suggestion_count > 0,
     )
     executive_summary = _synthesize_executive_summary(
         executed_perspectives, len(findings)
@@ -2647,9 +2873,9 @@ async def run_audit(
     )
     pr_score = calculate_pr_confidence_score(
         confidence=result.confidence,
-        must_fix=counts.get("BLOCKER", 0),
-        should_fix=counts.get("WARNING", 0),
-        n_notes=counts.get("NOTE", 0),
+        must_fix=must_fix_count,
+        should_fix=should_fix_count,
+        n_notes=suggestion_count,
     )
     report = format_audit_report(
         pr_summary=result.executive_summary,
@@ -2659,8 +2885,8 @@ async def run_audit(
         status=result.status,
         audit_target=result.target_label,
         engine=result.engine,
-        must_fix_count=counts.get("BLOCKER", 0),
-        should_fix_count=counts.get("WARNING", 0),
+        must_fix_count=must_fix_count,
+        should_fix_count=should_fix_count,
         remediation_diff=result.remediation_diff,
         analysis_metadata=result.analysis_metadata,
         publish_allowed=result.publish_allowed,
@@ -2696,8 +2922,8 @@ async def run_audit(
         resolved_audit_type,
         _safe_metadata(repo_full_name, 200),
         len(result.findings),
-        counts.get("BLOCKER", 0),
-        counts.get("WARNING", 0),
+        must_fix_count,
+        should_fix_count,
         result.confidence,
         result.latency_ms,
     )
