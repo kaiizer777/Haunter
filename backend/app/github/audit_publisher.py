@@ -24,6 +24,7 @@ from app import github_client
 from app.diff_validation import coerce_unified_diff
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
+    format_posted_counts_badge,
     swap_report_footer,
     MAX_CATEGORY_CHARS,
     MAX_GITHUB_COMMENT_CHARS,
@@ -40,6 +41,8 @@ from app.subagents.auditor import (
     AuditResult,
     DiffGrounding,
     build_diff_grounding,
+    normalize_severity,
+    select_scoped_findings,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +67,7 @@ class PublishResult:
     error: Optional[str] = None
     response: Optional[dict[str, Any]] = None
     finding_comments: list[dict[str, Any]] = field(default_factory=list)
+    posted_counts: Optional[dict[str, int]] = None
 
 
 def validate_finding_coordinates(
@@ -427,6 +431,7 @@ def update_dossier_meta(
     resolved_count: int = 0,
     dossier_dir: Optional[str] = None,
     audit_id: str = "",
+    posted_counts: Optional[Mapping[str, int]] = None,
 ) -> None:
     """Persist or update PR review state in {dossier_dir}/meta.json."""
     try:
@@ -452,13 +457,16 @@ def update_dossier_meta(
             elif hasattr(f, "__dict__"):
                 serialized_findings.append({k: v for k, v in f.__dict__.items() if not k.startswith("_")})
 
-        meta_data = {
+        meta_data: dict[str, Any] = {
             "last_reviewed_sha": head_sha,
             "review_id": review_id,
             "active_findings": serialized_findings,
             "resolved_findings_count": resolved_count,
             "last_audit_id": audit_id,
         }
+        if posted_counts is not None:
+            meta_data["posted_counts"] = dict(posted_counts)
+
         meta_file.write_text(json.dumps(meta_data, indent=2), encoding="utf-8")
         logger.info("Updated dossier meta.json at %s (review_id=%s, sha=%s)", meta_file, review_id, head_sha)
     except Exception as exc:
@@ -591,21 +599,30 @@ async def publish_audit_review(
             else:
                 event = "COMMENT"
 
-            # Determine inline comments based on confidence threshold
+            # Determine inline comments based on confidence threshold and scoped posting policy
             if effective_allowed:
-                comments, suppressed_count = build_inline_review_comments(
-                    result.findings,
+                scoped_findings, posted_counts = select_scoped_findings(
+                    result.findings, limit=8
+                )
+                comments, _ = build_inline_review_comments(
+                    scoped_findings,
                     diff_text=diff_text,
                     min_confidence=INFORMATIONAL_CONFIDENCE_THRESHOLD,
                     allow_informational=allow_informational_inline,
                 )
+                suppressed_count = len(result.findings) - len(comments)
             else:
+                scoped_findings = []
+                posted_counts = {"C": 0, "H": 0, "M": 0, "L": 0, "I": 0}
                 comments = []
                 suppressed_count = len(result.findings)
 
             review_body = result.report_markdown or result.executive_summary
-            if resolved_since_last_review is not None:
-                review_body = swap_report_footer(review_body, resolved_since_last_review)
+            review_body = swap_report_footer(
+                review_body,
+                resolved_since_last_review=resolved_since_last_review,
+                posted_counts=posted_counts if effective_allowed else {},
+            )
             review_body = _bound_github_body(review_body)
 
             if review_id is not None:
@@ -626,16 +643,18 @@ async def publish_audit_review(
                     review_id,
                     resolved_since_last_review,
                 )
-                # Post inline comments ONLY for brand-new findings
+                # Post inline comments ONLY for brand-new findings, scoped via select_scoped_findings
                 comments = []
                 suppressed_count = 0
                 if effective_allowed and new_findings:
-                    comments, suppressed_count = build_inline_review_comments(
-                        new_findings,
+                    scoped_new, _ = select_scoped_findings(new_findings, limit=8)
+                    comments, _ = build_inline_review_comments(
+                        scoped_new,
                         diff_text=diff_text,
                         min_confidence=INFORMATIONAL_CONFIDENCE_THRESHOLD,
                         allow_informational=allow_informational_inline,
                     )
+                    suppressed_count = len(new_findings) - len(comments)
                     if comments:
                         await github_client.create_pr_review(
                             owner=resolved_owner,
@@ -680,11 +699,13 @@ async def publish_audit_review(
                 resolved_count=resolved_since_last_review or 0,
                 dossier_dir=dossier_dir,
                 audit_id=result.audit_id,
+                posted_counts=posted_counts,
             )
 
             finding_comments_resps: list[dict[str, Any]] = []
             if post_finding_comments and effective_allowed:
                 findings_to_post = new_findings if (review_id is not None and new_findings is not None) else result.findings
+                scoped_to_post, _ = select_scoped_findings(findings_to_post, limit=8)
                 temp_result = AuditResult(
                     audit_id=result.audit_id,
                     audit_type=result.audit_type,
@@ -692,7 +713,7 @@ async def publish_audit_review(
                     target_label=result.target_label,
                     engine=result.engine,
                     executive_summary=result.executive_summary,
-                    findings=findings_to_post,
+                    findings=scoped_to_post,
                     confidence=result.confidence,
                     status=result.status,
                     remediation_diff=result.remediation_diff,
@@ -716,6 +737,7 @@ async def publish_audit_review(
                 event=event,
                 response=resp,
                 finding_comments=finding_comments_resps,
+                posted_counts=posted_counts,
             )
         else:
             # Commit Context (fallback for push events / commit audits)
