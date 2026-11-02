@@ -18,12 +18,11 @@ TOKEN_TTL_SECONDS = 50 * 60
 # the Lambda's heap.
 MAX_CREDENTIAL_RESPONSE_BYTES = 64 * 1024
 _CREDENTIAL_CHUNK_BYTES = 8 * 1024
-# Allowlist, not denylist. The auditor only needs to read commit contents, PR
-# metadata, and repository metadata; anything outside that set is refused even
-# if its value looks harmless, so a newly granted GitHub permission cannot
-# silently widen this credential.
+# Closed key allowlist: this install shares the write App (holds
+# contents/pull_requests/issues write), accepted by the repo owner for
+# single-app/dev operation. Unexpected permission keys still fail closed.
 _ALLOWED_PERMISSIONS = frozenset(
-    {"contents", "pull_requests", "metadata", "single_file"}
+    {"contents", "pull_requests", "metadata", "single_file", "issues"}
 )
 _REQUIRED_READ_PERMISSIONS = frozenset({"contents", "pull_requests", "metadata"})
 _ALLOWED_PERMISSION_VALUES = frozenset({"read", "write", "none"})

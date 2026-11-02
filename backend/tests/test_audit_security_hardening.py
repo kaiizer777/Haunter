@@ -650,6 +650,19 @@ def test_auditor_installation_permissions_reject_every_non_read_only_scope() -> 
     auditor_credentials._validate_read_only_permissions(
         {"permissions": {**READ_ONLY_SCOPES, "contents": "write", "pull_requests": "write"}}
     )
+    # Single-app setup: the auditor shares the write App installation, whose
+    # token carries `issues:write` alongside the write scopes above.
+    assert "issues" in auditor_credentials._ALLOWED_PERMISSIONS
+    auditor_credentials._validate_read_only_permissions(
+        {
+            "permissions": {
+                **READ_ONLY_SCOPES,
+                "contents": "write",
+                "pull_requests": "write",
+                "issues": "write",
+            }
+        }
+    )
 
 
 class CountingChunks:
