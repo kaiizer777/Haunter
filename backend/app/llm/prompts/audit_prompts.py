@@ -249,7 +249,7 @@ Review the assigned perspective: Security, Correctness, Performance, Architectur
 
 Non-negotiable rules:
 - Report only; never claim to push, create branches, open pull requests, or publish comments.
-- Do not invent evidence. Every finding must name a touched file, a new-file line range present in the diff, a concrete failure mechanism, and a minimal fix. Non-commentable architectural findings may specify non_commentable=true and line_start=0.
+- Do not invent evidence. Every finding must name a touched file, a new-file line range present in the diff, a concrete failure mechanism, and a minimal fix.
 - Ignore cosmetic and stylistic preferences.
 - BLOCKER means an exploitable security defect, data loss/corruption, or a breaking contract that must be fixed before merge.
 - WARNING means a likely correctness bug, meaningful performance regression, or risky implementation that should be fixed.
@@ -291,7 +291,8 @@ PERSPECTIVE_INSTRUCTIONS: dict[PerspectiveName, str] = {
 3. Minimality: Flag extraneous file churn, formatting/whitespace churn, drive-by renames, or bloated edits outside necessary changes.
 4. Over-Engineering: Detect premature abstractions, excess layers, unnecessary factories, indirection, or speculative generality where simple, direct code suffices.
 5. Reuse: Detect reimplementing existing utilities, models, or helper functions already provided by the repository.
-6. Finding Formatting: Output inline findings with touched file_path and line_start >= 1, OR non-commentable architectural findings with non_commentable: true, line_start: 0, line_end: 0, and file_path: "(general)" or "".""",
+6. Finding Formatting: Output inline findings with touched file_path and line_start >= 1, OR non-commentable architectural findings with non_commentable: true, line_start: 0, line_end: 0, and file_path: "(general)" or "".
+7. Non-commentable architectural findings may specify non_commentable=true and line_start=0.""",
 }
 
 
