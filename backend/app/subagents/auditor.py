@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 AUDIT_MAX_DIFF_CHARS = MAX_DIFF_CHARS
 PERSPECTIVE_TIMEOUT_S = 75.0
 PERSPECTIVE_DEADLINE_S = 100.0
-PERSPECTIVE_CONCURRENCY_LIMIT = 4
+PERSPECTIVE_CONCURRENCY_LIMIT = 5
 AUDIT_FETCH_TIMEOUT_S = 35.0
 # Budget for resolving the shared model config BEFORE any perspective starts.
 # The per-perspective ``PERSPECTIVE_DEADLINE_S`` wraps ``_run_single_perspective``
@@ -103,7 +103,8 @@ VALID_AUDIT_STATUSES: frozenset[str] = frozenset(AuditStatus)
 AuditSeverity = Literal["BLOCKER", "WARNING", "NOTE"]
 _SEVERITY_RANK: dict[AuditSeverity, int] = {"BLOCKER": 0, "WARNING": 1, "NOTE": 2}
 _PERSPECTIVE_RANK: dict[str, int] = {
-    name: index for index, name in enumerate(PERSPECTIVES)
+    **{name: index for index, name in enumerate(PERSPECTIVES)},
+    "holistic": len(PERSPECTIVES),
 }
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -2197,6 +2198,7 @@ async def run_audit(
     phase_1c_context: Optional[str] = None,
     enable_phase1_context: bool = True,
     file_contexts: Optional[Mapping[str, str]] = None,
+    enable_holistic: bool = True,
 ) -> AuditResult:
     """Run four fixed, bounded perspectives and return a synthesized read-only report."""
     started = time.monotonic()
@@ -2513,16 +2515,60 @@ async def run_audit(
     if not active_perspectives:
         active_perspectives = list(PERSPECTIVES)
 
-    completed = await asyncio.gather(
-        *(run_one(perspective) for perspective in active_perspectives)
+    async def run_holistic() -> tuple[PerspectiveResult, Optional[BaseException]]:
+        try:
+            async with semaphore:
+                result = await asyncio.wait_for(
+                    _run_single_perspective(
+                        perspective="holistic",
+                        diff_text=clean_diff,
+                        ast_summary=ast_summary,
+                        repo_context=clean_repo_context,
+                        phase_1c_context=resolved_phase_1c_context,
+                        llm=llm,
+                        model_config=shared_config,
+                    ),
+                    timeout=PERSPECTIVE_DEADLINE_S,
+                )
+                return result, None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "auditor perspective=holistic failed error_type=%s",
+                type(exc).__name__,
+            )
+            return (
+                PerspectiveResult(
+                    perspective="holistic",
+                    summary="",
+                    confidence=0,
+                    findings=[],
+                    succeeded=False,
+                ),
+                exc,
+            )
+
+    should_run_holistic = enable_holistic and (
+        perspectives is None or "holistic" in perspectives
     )
+
+    tasks = [run_one(perspective) for perspective in active_perspectives]
+    if should_run_holistic:
+        tasks.append(run_holistic())
+
+    completed = await asyncio.gather(*tasks)
     executed_perspectives = [res for res, _ in completed]
     if not any(res.succeeded for res in executed_perspectives):
         raise AuditAnalysisError("All audit perspectives failed; nothing to synthesize")
 
     overall_confidence = calculate_overall_confidence(
         executed_perspectives,
-        expected_perspectives=active_perspectives,
+        expected_perspectives=(
+            [*active_perspectives, "holistic"]
+            if should_run_holistic
+            else active_perspectives
+        ),
     )
     findings = await asyncio.wait_for(
         asyncio.to_thread(
