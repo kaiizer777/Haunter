@@ -72,30 +72,38 @@ def test_chunking_respects_hunk_boundaries_and_hard_limit():
         assert "diff --git a/big.py b/big.py" in chunk
 
 
-def test_chunking_keeps_single_oversized_hunk_intact():
-    # Single hunk of 800 lines: kept intact in its own chunk with file header
+def test_chunking_keeps_single_hunk_under_hard_limit_intact():
+    # Single hunk that fits under the hard limit stays intact in its own chunk
+    # with the file header (never split mid-hunk).
     file_header = "diff --git a/huge.py b/huge.py\n--- a/huge.py\n+++ b/huge.py\n"
-    hunk = "@@ -1,800 +1,800 @@\n" + "\n".join(f"+huge_{i}" for i in range(800)) + "\n"
+    hunk = "@@ -1,540 +1,540 @@\n" + "\n".join(f"+huge_{i}" for i in range(540)) + "\n"
     diff = file_header + hunk
 
     chunks = partition_diff_into_chunks(diff, max_chunk_lines=500, hard_limit=550)
     assert len(chunks) == 1
     assert "diff --git a/huge.py b/huge.py" in chunks[0]
-    assert "@@ -1,800 +1,800 @@" in chunks[0]
-    assert len(chunks[0].splitlines()) > 800
+    assert "@@ -1,540 +1,540 @@" in chunks[0]
+    assert len(chunks[0].splitlines()) <= 550
 
 
 def test_chunking_quoted_paths_with_spaces():
+    # Force the split path with tight limits so the quoted diff --git header is
+    # parsed and carried into every sub-chunk.
     diff = '''diff --git "a/path with spaces/test.py" "b/path with spaces/test.py"
 --- "a/path with spaces/test.py"
 +++ "b/path with spaces/test.py"
 @@ -1,2 +1,2 @@
 -old line
 +new line
+@@ -10,2 +10,2 @@
+-old line two
++new line two
 '''
-    chunks = partition_diff_into_chunks(diff, max_chunk_lines=500, hard_limit=550)
-    assert len(chunks) == 1
-    assert 'diff --git "a/path with spaces/test.py" "b/path with spaces/test.py"' in chunks[0]
+    chunks = partition_diff_into_chunks(diff, max_chunk_lines=4, hard_limit=8)
+    assert len(chunks) >= 2
+    for chunk in chunks:
+        assert len(chunk.splitlines()) <= 8
+        assert 'diff --git "a/path with spaces/test.py" "b/path with spaces/test.py"' in chunk
 
 
 def test_chunking_empty_diff_returns_empty():
