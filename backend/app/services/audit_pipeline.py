@@ -1194,6 +1194,7 @@ async def execute_audit_job(
         audit_id=audit_id,
         audit_type=resolved_audit_type,
         repo_full_name=f"{owner}/{name}",
+        github_token=token,
         ref=ref,
         head_sha=target.head_sha,
         pr_number=resolved_pr,

@@ -451,6 +451,8 @@ class AuditResult:
     latency_ms: int = 0
     publish_allowed: bool = False
     ast_files_requested: int = 0
+    phase_1c_context: str = ""
+    phase_1c_file_path: Optional[str] = None
     ast_files_with_context: int = 0
     analysis_degraded: bool = False
 
@@ -1477,6 +1479,7 @@ async def _run_single_perspective(
     diff_text: str,
     ast_summary: str,
     repo_context: str,
+    phase_1c_context: str = "",
     llm: LLMClient,
     model_config: Optional[ResolvedModelConfig] = None,
 ) -> PerspectiveResult:
@@ -1488,6 +1491,7 @@ async def _run_single_perspective(
             diff_text,
             ast_summary,
             repo_context,
+            phase_1c_context=phase_1c_context,
         )
     ]
     response = await llm.complete(
@@ -2037,6 +2041,11 @@ async def run_audit(
     engine: str = "",
     llm_client: Optional[LLMClient] = None,
     perspectives: Optional[Sequence[PerspectiveName]] = None,
+    github_token: Optional[str] = None,
+    pr_metadata: Optional[Mapping[str, Any]] = None,
+    dossier_dir: Optional[str] = None,
+    phase_1c_context: Optional[str] = None,
+    enable_phase1_context: bool = True,
     file_contexts: Optional[Mapping[str, str]] = None,
 ) -> AuditResult:
     """Run four fixed, bounded perspectives and return a synthesized read-only report."""
@@ -2227,6 +2236,34 @@ async def run_audit(
                 base_url=default_base_url_for_provider(settings.default_provider),
             )
 
+    resolved_phase_1c_context = phase_1c_context or ""
+    resolved_phase_1c_file_path: Optional[str] = None
+    if enable_phase1_context and resolved_pr_number is not None and not resolved_phase_1c_context:
+        try:
+            from app.subagents.audit_context import build_phase1_context
+
+            owner_part = ""
+            repo_part = ""
+            if repo_full_name and "/" in repo_full_name:
+                owner_part, repo_part = repo_full_name.split("/", 1)
+
+            p1_res = await build_phase1_context(
+                owner=owner_part,
+                repo=repo_part,
+                pr_number=resolved_pr_number,
+                token=github_token,
+                diff_text=clean_diff,
+                pr_metadata=pr_metadata,
+                dossier_dir=dossier_dir,
+                llm=llm,
+                model_config=shared_config,
+            )
+            if p1_res:
+                resolved_phase_1c_context = p1_res.context_markdown
+                resolved_phase_1c_file_path = p1_res.file_path
+        except Exception as p1_exc:
+            logger.warning("Auditor: Phase 1 context build failed; continuing without: %s", p1_exc)
+
     async def run_one(
         perspective: PerspectiveName,
     ) -> tuple[PerspectiveResult, Optional[BaseException]]:
@@ -2238,6 +2275,7 @@ async def run_audit(
                         diff_text=clean_diff,
                         ast_summary=ast_summary,
                         repo_context=clean_repo_context,
+                        phase_1c_context=resolved_phase_1c_context,
                         llm=llm,
                         model_config=shared_config,
                     ),
@@ -2340,6 +2378,8 @@ async def run_audit(
         ast_files_requested=ast_coverage.files_requested,
         ast_files_with_context=ast_coverage.files_with_context,
         analysis_degraded=analysis_degraded,
+        phase_1c_context=resolved_phase_1c_context,
+        phase_1c_file_path=resolved_phase_1c_file_path,
     )
     pr_score = calculate_pr_confidence_score(
         confidence=result.confidence,
@@ -2383,6 +2423,8 @@ async def run_audit(
         ast_files_requested=result.ast_files_requested,
         ast_files_with_context=result.ast_files_with_context,
         analysis_degraded=result.analysis_degraded,
+        phase_1c_context=result.phase_1c_context,
+        phase_1c_file_path=result.phase_1c_file_path,
     )
     logger.info(
         "auditor complete audit_id=%s type=%s repo=%s findings=%d blockers=%d warnings=%d confidence=%d latency_ms=%d",
