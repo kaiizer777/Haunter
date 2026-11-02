@@ -84,11 +84,17 @@ def _extract_diff_changed_old_lines(diff_text: str) -> dict[str, set[int]]:
         if line.startswith("diff --git "):
             current_file = None
             cur_old = 0
-            m = re.match(r'^diff --git (?:(".*?")|(\S+)) (?:(".*?")|(\S+))$', line)
+            m = re.match(r'^diff --git ("(?:\\\\.|[^"\\\\])*") ("(?:\\\\.|[^"\\\\])*")$', line)
+            if not m:
+                m = re.match(r'^diff --git (a/.*) (b/.*)$', line)
             if m:
-                a_raw = m.group(1) or m.group(2)
-                b_raw = m.group(3) or m.group(4)
-                target = b_raw if b_raw not in ("/dev/null", "b/dev/null", '"b/dev/null"') else a_raw
+                a_raw = m.group(1)
+                b_raw = m.group(2)
+                # Only the bare `/dev/null` sentinel means "deleted"; a path such
+                # as `b/dev/null` is a real file named `dev/null` and is keyed
+                # under its own (new) path.
+                b_clean = _unquote_git_path(b_raw).strip()
+                target = a_raw if b_clean == "/dev/null" else b_raw
                 current_file = _clean_diff_target_path(target)
                 if current_file:
                     changed_lines.setdefault(current_file, set())
@@ -160,7 +166,7 @@ def _to_finding_dict(finding: Any) -> dict[str, Any]:
         }
     d = dict(finding)
     if "priority_bucket" not in d and hasattr(finding, "priority_bucket"):
-        d["priority_bucket"] = getattr(finding, "priority_bucket")
+        d["priority_bucket"] = finding.priority_bucket
     return d
 
 
