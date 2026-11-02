@@ -128,8 +128,12 @@ def _to_finding_dict(finding: Any) -> dict[str, Any]:
             "suggested_fix": finding.suggested_fix,
             "informational_only": finding.informational_only,
             "thread_id": getattr(finding, "thread_id", None),
+            "priority_bucket": getattr(finding, "priority_bucket", None),
         }
-    return dict(finding)
+    d = dict(finding)
+    if "priority_bucket" not in d and hasattr(finding, "priority_bucket"):
+        d["priority_bucket"] = getattr(finding, "priority_bucket")
+    return d
 
 
 def _findings_match(f1: dict[str, Any], f2: dict[str, Any]) -> bool:

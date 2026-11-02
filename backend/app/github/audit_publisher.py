@@ -361,14 +361,7 @@ def format_finding_comment_body(
         suggested_fix = finding.get("suggested_fix")
         finding_id = str(finding.get("id", ""))
 
-    bucket = None
-    if isinstance(finding, AuditFinding) or hasattr(finding, "priority_bucket"):
-        bucket = getattr(finding, "priority_bucket", None)
-    elif isinstance(finding, Mapping):
-        bucket = finding.get("priority_bucket")
-
-    if not bucket:
-        bucket = classify_finding_bucket(finding)
+    bucket = classify_finding_bucket(finding)
 
     if bucket == "must_fix":
         badge = "⛔ Must-Fix:"
@@ -751,6 +744,7 @@ async def publish_audit_review(
                         suggested_fix=f.get("suggested_fix"),
                         confidence=int(f.get("confidence") or 0),
                         informational_only=bool(f.get("informational_only", False)),
+                        priority_bucket=f.get("priority_bucket"),
                     )
                 )
             else:
@@ -771,10 +765,7 @@ async def publish_audit_review(
             # Determine review event: COMMENT vs REQUEST_CHANGES
             if effective_allowed and request_changes_on_blocker:
                 has_confident_blocker = any(
-                    (
-                        getattr(f, "priority_bucket", None) == "must_fix"
-                        or classify_finding_bucket(f, overall_confidence=result.confidence) == "must_fix"
-                    )
+                    classify_finding_bucket(f, overall_confidence=result.confidence) == "must_fix"
                     and getattr(f, "confidence", 100) >= INFORMATIONAL_CONFIDENCE_THRESHOLD
                     for f in result.findings
                 )
