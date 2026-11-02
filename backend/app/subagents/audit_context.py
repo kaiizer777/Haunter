@@ -572,3 +572,199 @@ async def run_phase_1a(
     logger.info("Phase 1a: Completed in %.2fs", time.monotonic() - started)
     return pr_assessment, issue_assessment
 
+
+async def run_single_mention_subagent(
+    *,
+    owner: str,
+    repo: str,
+    ref_number: int,
+    token: Optional[str] = None,
+    item_data: Optional[Mapping[str, Any]] = None,
+    llm: Optional[LLMClient] = None,
+    model_config: Optional[ResolvedModelConfig] = None,
+) -> MentionAssessment:
+    """Phase 1b subagent: Deep analysis of a single mentioned issue or PR.
+
+    STRICT RECURSION BOUND: Final nested level only. Never crawls deeper references.
+    """
+    started = time.monotonic()
+    data: dict[str, Any] = dict(item_data or {})
+    title = str(data.get("title") or "")
+    body = str(data.get("body") or "")
+    state = str(data.get("state") or "open").lower()
+    ref_type = "pull_request" if ("pull_request" in data or data.get("is_pr")) else "issue"
+    if data.get("merged") or data.get("merged_at"):
+        state = "merged"
+
+    # Fetch from GitHub if data missing and token supplied
+    if (not title or not body) and token:
+        try:
+            from app import github_client as gh
+            fetched = await asyncio.wait_for(
+                gh.fetch_issue(
+                    owner=owner,
+                    repo=repo,
+                    issue_number=ref_number,
+                    token=token,
+                    allow_global_token=False,
+                ),
+                timeout=PHASE1_SUBAGENT_TIMEOUT_S,
+            )
+            if fetched:
+                title = title or str(fetched.get("title") or "")
+                body = body or str(fetched.get("body") or "")
+                state = str(fetched.get("state") or state).lower()
+                if "pull_request" in fetched:
+                    ref_type = "pull_request"
+                    if fetched.get("pull_request", {}).get("merged_at"):
+                        state = "merged"
+        except Exception as exc:
+            logger.debug("Phase 1b: Could not fetch mentioned #%d via Issues API: %s", ref_number, exc)
+            # If 404 on issue, could be PR endpoint
+            try:
+                from app import github_client as gh
+                fetched_pr = await asyncio.wait_for(
+                    gh.fetch_pull_request(
+                        owner=owner,
+                        repo=repo,
+                        pr_number=ref_number,
+                        token=token,
+                        allow_global_token=False,
+                    ),
+                    timeout=PHASE1_SUBAGENT_TIMEOUT_S,
+                )
+                if fetched_pr:
+                    ref_type = "pull_request"
+                    title = title or str(fetched_pr.get("title") or "")
+                    body = body or str(fetched_pr.get("body") or "")
+                    state = "merged" if fetched_pr.get("merged_at") else str(fetched_pr.get("state") or state).lower()
+            except Exception as pr_exc:
+                logger.debug("Phase 1b: Could not fetch mentioned #%d via Pulls API: %s", ref_number, pr_exc)
+
+    summary = ""
+    maintainer_verdict = ""
+
+    if llm:
+        prompt = (
+            f"You are conducting a Phase 1b subagent analysis for mentioned item #{ref_number} in {owner}/{repo}.\n"
+            f"Note: This is the FINAL nested level. Do NOT crawl or extract deeper references.\n\n"
+            f"Item Title: {title}\n"
+            f"Type: {ref_type}\n"
+            f"State: {state}\n"
+            f"Body / Description:\n{body[:2500]}\n\n"
+            f"Instructions:\n"
+            f"1. Summarize the core topic and important points concisely.\n"
+            f"2. Summarize maintainer resolution, decision, or current verdict.\n"
+            f"Output strict JSON:\n"
+            f'{{"summary": "...", "maintainer_verdict": "..."}}'
+        )
+        try:
+            resp = await asyncio.wait_for(
+                llm.complete(
+                    messages=[
+                        {"role": "system", "content": "You are a concise, precise senior code review agent. Output JSON only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    db=None,
+                    model_config=model_config,
+                    max_tokens=512,
+                ),
+                timeout=PHASE1_SUBAGENT_TIMEOUT_S,
+            )
+            content = resp.content if hasattr(resp, "content") else str(resp)
+            parsed = _parse_json_object(content)
+            if parsed:
+                summary = str(parsed.get("summary") or "").strip()
+                maintainer_verdict = str(parsed.get("maintainer_verdict") or "").strip()
+        except Exception as exc:
+            logger.warning("Phase 1b: Mentioned item #%d LLM call failed or timed out: %s", ref_number, exc)
+
+    if not summary:
+        first_line = body.strip().splitlines()[0] if body.strip() else ""
+        summary = f"{title}. {first_line}".strip()
+    if not maintainer_verdict:
+        maintainer_verdict = f"Status: {state.upper()}"
+
+    raw_markdown = (
+        f"- **#{ref_number} ({ref_type}, {state})**: {title}\n"
+        f"  - *Summary*: {summary}\n"
+        f"  - *Verdict*: {maintainer_verdict}"
+    )
+
+    logger.debug("Phase 1b: Completed subagent for mention #%d in %.2fs", ref_number, time.monotonic() - started)
+    return MentionAssessment(
+        ref_number=ref_number,
+        ref_type=ref_type,
+        title=title,
+        state=state,
+        summary=summary,
+        maintainer_verdict=maintainer_verdict,
+        raw_markdown=raw_markdown,
+    )
+
+
+async def run_phase_1b(
+    *,
+    owner: str,
+    repo: str,
+    pr_assessment: PRAssessment,
+    issue_assessment: Optional[IssueAssessment] = None,
+    token: Optional[str] = None,
+    mention_items_data: Optional[Mapping[int, Mapping[str, Any]]] = None,
+    llm: Optional[LLMClient] = None,
+    model_config: Optional[ResolvedModelConfig] = None,
+    limit: int = MAX_MENTIONED_REFS_ANALYZED,
+) -> list[MentionAssessment]:
+    """Phase 1b: Nested mention analysis (n subagents, final nested level).
+
+    Collects all distinct issue and PR references mentioned across Phase 1a outputs,
+    excluding the PR number and the primary issue number, and dispatches n subagents
+    concurrently.
+    """
+    started = time.monotonic()
+    raw_refs: list[int] = list(pr_assessment.mentioned_refs)
+    if issue_assessment:
+        raw_refs.extend(issue_assessment.mentioned_refs)
+
+    excluded: set[int] = {pr_assessment.pr_number}
+    if issue_assessment:
+        excluded.add(issue_assessment.issue_number)
+
+    distinct_refs: list[int] = []
+    seen: set[int] = set()
+    for ref in raw_refs:
+        if ref not in excluded and ref not in seen:
+            seen.add(ref)
+            distinct_refs.append(ref)
+            if len(distinct_refs) >= limit:
+                break
+
+    if not distinct_refs:
+        logger.info("Phase 1b: No mentioned issues/PRs to analyze across Phase 1a outputs")
+        return []
+
+    logger.info(
+        "Phase 1b: Dispatching %d nested mention subagents concurrently for refs: %s",
+        len(distinct_refs),
+        distinct_refs,
+    )
+
+    items_data_map = mention_items_data or {}
+    tasks = [
+        run_single_mention_subagent(
+            owner=owner,
+            repo=repo,
+            ref_number=ref_num,
+            token=token,
+            item_data=items_data_map.get(ref_num),
+            llm=llm,
+            model_config=model_config,
+        )
+        for ref_num in distinct_refs
+    ]
+
+    results = await asyncio.gather(*tasks)
+    logger.info("Phase 1b: Completed all %d mention subagents in %.2fs", len(results), time.monotonic() - started)
+    return list(results)
+
+
