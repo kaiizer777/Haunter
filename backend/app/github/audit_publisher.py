@@ -22,7 +22,7 @@ from typing import Any, Literal, Mapping, Optional, Sequence
 
 from app import diff_validation
 from app import github_client
-from app.diff_validation import coerce_unified_diff
+from app.diff_validation import coerce_unified_diff, is_cross_file_finding
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
     swap_report_footer,
@@ -69,49 +69,6 @@ class PublishResult:
     finding_comments: list[dict[str, Any]] = field(default_factory=list)
     posted_counts: Optional[dict[str, int]] = None
 
-
-
-def is_cross_file_finding(finding: Any) -> bool:
-    """Determine if a finding applies across multiple files."""
-    if (
-        getattr(finding, "cross_file", False)
-        or getattr(finding, "is_cross_file", False)
-        or getattr(finding, "multi_file", False)
-    ):
-        return True
-
-    file_path = getattr(finding, "file_path", "")
-    if not isinstance(file_path, str) or not file_path.strip():
-        return True
-
-    if any(sep in file_path for sep in (",", ";", "\n")):
-        return True
-
-    cleaned_path = file_path.strip().lower()
-    if cleaned_path in {
-        "(general)",
-        "general",
-        "multi",
-        "multiple",
-        "multi-file",
-        "multiple files",
-        "cross-file",
-        "various",
-        "various files",
-    }:
-        return True
-
-    suggested_fix = getattr(finding, "suggested_fix", None)
-    if isinstance(suggested_fix, str) and suggested_fix.strip():
-        diff_git_count = len(re.findall(r"^diff --git ", suggested_fix, re.MULTILINE))
-        if diff_git_count > 1:
-            return True
-        file_headers = re.findall(r"^\+\+\+ (?:b/)?(.*)$", suggested_fix, re.MULTILINE)
-        distinct_files = {f.strip() for f in file_headers if f.strip() not in ("/dev/null", "dev/null", "")}
-        if len(distinct_files) > 1:
-            return True
-
-    return False
 
 
 def should_show_suggested_code(
@@ -547,7 +504,7 @@ def update_dossier_meta(
         if dossier_dir:
             target_dir = Path(dossier_dir)
         elif workspace:
-            target_dir = Path(workspace)
+            target_dir = Path(workspace) / safe_repo / f"PR-{pr_number}"
         else:
             base = os.environ.get("HAUNTER_DOSSIER_DIR")
             if base:
@@ -606,7 +563,7 @@ def load_dossier_meta(
         if dossier_dir:
             target_dir = Path(dossier_dir)
         elif workspace:
-            target_dir = Path(workspace)
+            target_dir = Path(workspace) / safe_repo / f"PR-{pr_number}"
         else:
             base = os.environ.get("HAUNTER_DOSSIER_DIR")
             if base:
