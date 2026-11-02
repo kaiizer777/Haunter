@@ -517,6 +517,18 @@ class PerspectiveFinding(BaseModel):
     )
     confidence: int = Field(ge=0, le=100)
     priority_bucket: Optional[PriorityBucket] = None
+    side: Optional[Literal["LEFT", "RIGHT"]] = None
+
+    @field_validator("side", mode="before")
+    @classmethod
+    def _normalize_side(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            clean = value.strip().upper()
+            if clean in ("LEFT", "RIGHT"):
+                return clean
+        return value
 
     @field_validator("priority_bucket", mode="before")
     @classmethod
@@ -605,6 +617,7 @@ class AuditFinding:
     informational_only: bool = False
     non_commentable: bool = False
     priority_bucket: Optional[PriorityBucket] = None
+    side: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.priority_bucket is None:
@@ -791,7 +804,9 @@ class AuditResult:
         return sum(
             1
             for f in self.findings
-            if classify_finding_bucket(f, overall_confidence=self.confidence) == "must_fix"
+            if getattr(f, "severity", None) == "BLOCKER"
+            or getattr(f, "priority_bucket", None) == "must_fix"
+            or classify_finding_bucket(f, overall_confidence=self.confidence) == "must_fix"
         )
 
     @property
@@ -880,10 +895,15 @@ class DiffGrounding:
     #: then describes the inspected prefix, and the report says so.
     clipped: bool = False
     left_line_index: dict[str, set[int]] = field(default_factory=dict)
+    deleted_paths: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def left_lines(self) -> dict[str, set[int]]:
         return self.left_line_index
+
+    @property
+    def deleted_files(self) -> frozenset[str]:
+        return self.deleted_paths
 
 
 class AuditRemoteFailureReason(StrEnum):
@@ -1253,6 +1273,7 @@ def build_diff_grounding(
     left_index: dict[str, set[int]] = {}
     valid_paths: set[str] = set()
     rejected_paths: set[str] = set()
+    deleted_paths: set[str] = set()
     truncated_ranges: dict[str, set[tuple[int, int]]] = {}
     current_path: Optional[str] = None
     old_dev_null = False
@@ -1414,6 +1435,7 @@ def build_diff_grounding(
             if new_dev_null:
                 if old_path is not None:
                     current_path = old_path
+                    deleted_paths.add(old_path)
                 else:
                     current_path = None
                     reject_current()
@@ -1477,6 +1499,7 @@ def build_diff_grounding(
         removed_lines=removed_lines,
         clipped=clipped,
         left_line_index={path: lines for path, lines in left_index.items() if lines},
+        deleted_paths=frozenset(deleted_paths),
     )
 
 
@@ -2003,6 +2026,7 @@ def _apply_confidence_policy(
         informational_only=informational_only,
         non_commentable=finding.non_commentable,
         priority_bucket=priority_bucket,
+        side=getattr(finding, "side", None),
     )
 
 
@@ -2030,7 +2054,12 @@ def _is_grounded(
     finding_range = range(finding.line_start, finding.line_end + 1)
     right_grounded = bool(observed_lines) and all(line_num in observed_lines for line_num in finding_range)
     left_grounded = bool(left_observed_lines) and all(line_num in left_observed_lines for line_num in finding_range)
-    if not (right_grounded or left_grounded):
+
+    finding_side = str(getattr(finding, "side", "") or "").upper()
+    is_deleted_file = finding.file_path in getattr(grounding, "deleted_paths", frozenset())
+    can_anchor_left = (finding_side == "LEFT") or is_deleted_file
+
+    if not (right_grounded or (left_grounded and can_anchor_left)):
         return False
     return not any(
         finding.line_start <= truncated_end and truncated_start <= finding.line_end
@@ -2063,8 +2092,7 @@ def synthesize_findings(
             continue
         for finding in result.findings:
             if (
-                getattr(finding, "non_commentable", False)
-                or finding.line_start == 0
+                (getattr(finding, "non_commentable", False) and finding.line_start == 0)
                 or _is_grounded(finding, grounding)
             ):
                 candidates.append((result, finding))
@@ -2203,6 +2231,7 @@ async def fetch_audit_source_contexts(
         path
         for path in grounding.valid_paths
         if path.endswith(STRUCTURAL_SOURCE_SUFFIXES)
+        and grounding.line_index.get(path)
     )[:MAX_AST_SOURCE_FILES]
     if not paths:
         return {}
@@ -2827,7 +2856,9 @@ async def run_audit(
     ]
     must_fix_count = sum(
         1 for f in findings
-        if classify_finding_bucket(f, overall_confidence=overall_confidence) == "must_fix"
+        if getattr(f, "severity", None) == "BLOCKER"
+        or getattr(f, "priority_bucket", None) == "must_fix"
+        or classify_finding_bucket(f, overall_confidence=overall_confidence) == "must_fix"
     )
     should_fix_count = sum(
         1 for f in findings
