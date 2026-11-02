@@ -36,6 +36,10 @@ hermetic suite.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+from pathlib import Path
+
 import asyncio
 import hashlib
 import hmac
@@ -823,6 +827,8 @@ async def test_real_outbox_worker_runs_read_only_report_path_without_core_patche
     repo = await seed_repo(
         fake_audit_db, fake_audit_user_factory, "full-audit-org", "full-audit-repo"
     )
+    dossier_dir = Path(tempfile.gettempdir()) / "haunter-dossier" / "full-audit-org_full-audit-repo"
+    shutil.rmtree(dossier_dir, ignore_errors=True)
     await set_repo_auditor_settings(fake_audit_db, repo)
     base_sha = "a" * 40
     head_sha = "b" * 40
@@ -905,7 +911,8 @@ async def test_real_outbox_worker_runs_read_only_report_path_without_core_patche
         )
 
     assert summary.claimed == 1
-    assert fetch_target.await_count == 2
+    # 3 calls: dispatch endpoint resolution, verification, and Phase 1 context generation.
+    assert fetch_target.await_count == 3
     # The auditor must never fall back to the global personal access token; that
     # read-only invariant is also asserted in test_auditor_core.py.
     fetch_diff.assert_awaited_once_with(
@@ -931,7 +938,8 @@ async def test_real_outbox_worker_runs_read_only_report_path_without_core_patche
     assert create_review.await_args.kwargs["token"] == "read-only-token"
     assert create_review.await_args.kwargs["allow_global_token"] is False
     assert create_review.await_args.kwargs["pr_number"] == 42
-    assert llm_complete.await_count == 4
+    # 6 calls: 2 for Phase 1 context generation (Subagent A + Phase 1c synthesis) + 4 core perspectives
+    assert llm_complete.await_count == 6
     fake_audit_db.expire_all()
     job = await fake_audit_db.scalar(
         select(AuditJob).where(AuditJob.audit_id == claim.audit_id)

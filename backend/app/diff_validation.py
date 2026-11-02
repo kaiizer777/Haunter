@@ -15,7 +15,7 @@ definition of "valid diff".
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any, Optional
 
 # A hunk header line number past this bound cannot describe a real file and is
 # treated as malformed rather than handed to the tree API.
@@ -321,3 +321,124 @@ def coerce_unified_diff(
         normalized = attempt.strip("\r\n")
         return normalized + "\n"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Shared suggested-code display rule
+# ---------------------------------------------------------------------------
+
+
+#: File-path tokens that identify a cross-file / non-single-file finding.
+_SUGGESTED_CODE_CROSS_FILE_PATHS = frozenset(
+    {
+        "(general)",
+        "general",
+        "multi",
+        "multiple",
+        "multi-file",
+        "multiple files",
+        "cross-file",
+        "various",
+        "various files",
+    }
+)
+
+
+def is_cross_file_finding(finding: Any) -> bool:
+    """Determine if a finding applies across multiple files."""
+    if (
+        getattr(finding, "cross_file", False)
+        or getattr(finding, "is_cross_file", False)
+        or getattr(finding, "multi_file", False)
+    ):
+        return True
+
+    file_path = getattr(finding, "file_path", "")
+    if not isinstance(file_path, str) or not file_path.strip():
+        return True
+
+    if any(sep in file_path for sep in (",", ";", "\n")):
+        return True
+
+    cleaned_path = file_path.strip().lower()
+    if cleaned_path in _SUGGESTED_CODE_CROSS_FILE_PATHS:
+        return True
+
+    suggested_fix = getattr(finding, "suggested_fix", None)
+    if isinstance(suggested_fix, str) and suggested_fix.strip():
+        diff_git_count = len(re.findall(r"^diff --git ", suggested_fix, re.MULTILINE))
+        if diff_git_count > 1:
+            return True
+        file_headers = re.findall(r"^\+\+\+ (?:b/)?(.*)$", suggested_fix, re.MULTILINE)
+        distinct_files = {f.strip() for f in file_headers if f.strip() not in ("/dev/null", "dev/null", "")}
+        if len(distinct_files) > 1:
+            return True
+
+    return False
+
+
+def should_show_suggested_code(
+    finding: Any,
+    suggested_code: Optional[str] = None,
+) -> bool:
+    """Show a suggested code block ONLY when ALL of the following hold:
+
+    - the finding touches a single file (no cross-file markers or multi-path values)
+    - the suggested code is a simple fix (at most one hunk, at most one file)
+    - the suggested code is strictly under 30 lines
+
+    Otherwise the suggested code block is dropped and only the finding text +
+    remediation description are kept. This is the single canonical implementation
+    shared by :mod:`app.github.audit_publisher` and
+    :mod:`app.subagents.code_reviewer`; both modules delegate to it.
+    """
+    if is_cross_file_finding(finding):
+        return False
+
+    code = suggested_code
+    if code is None:
+        code = getattr(finding, "suggested_fix", None)
+        if code is None:
+            code = getattr(finding, "suggested_patch", None)
+    if not code or not isinstance(code, str):
+        return False
+
+    clean_code = code.strip()
+    if not clean_code:
+        return False
+
+    # Strip outer code fences if wrapped.
+    if clean_code.startswith("```"):
+        lines = clean_code.splitlines()
+        if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].strip() == "```":
+            clean_code = "\n".join(lines[1:-1]).strip()
+        elif lines[0].startswith("```"):
+            clean_code = "\n".join(lines[1:]).strip()
+
+    if not clean_code:
+        return False
+
+    # Strictly under 30 lines.
+    if len(clean_code.splitlines()) >= 30:
+        return False
+
+    # At most one hunk header.
+    hunk_headers = re.findall(
+        r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", clean_code, re.MULTILINE
+    )
+    if len(hunk_headers) > 1:
+        return False
+
+    # At most one file in a diff-shaped suggestion.
+    diff_git_count = len(re.findall(r"^diff --git ", clean_code, re.MULTILINE))
+    if diff_git_count > 1:
+        return False
+
+    file_plus_headers = re.findall(r"^\+\+\+ (?:b/)?(.*)$", clean_code, re.MULTILINE)
+    distinct_files = {
+        f.strip() for f in file_plus_headers if f.strip() not in ("/dev/null", "dev/null", "")
+    }
+    if len(distinct_files) > 1:
+        return False
+
+    return True

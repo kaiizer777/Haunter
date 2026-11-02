@@ -1121,31 +1121,62 @@ async def execute_audit_job(
         target,
     ):
         raise auditor.AuditTargetChangedError()
-    diff_text = await auditor.fetch_audit_diff(
-        owner=owner,
-        repo=name,
-        pr_number=resolved_pr,
-        base_sha=target.base_sha,
-        head_sha=target.head_sha,
-        token=token,
-    )
-    if not isinstance(diff_text, str):
-        # A client that answered a diff request with something that is not text
-        # has not told us the commit has no changes. Closing the job as
-        # `skipped_no_diff` here would record a terminal success for a target
-        # nobody ever read.
-        raise auditor.AuditDiffFetchError(
-            auditor.AuditRemoteFailureReason.UNKNOWN,
-            "audited diff fetch returned a non-text response",
+    from app import github_client as github
+    from app.github.audit_publisher import load_dossier_meta
+    from app.subagents.audit_matcher import match_and_resolve_findings
+
+    # Check for re-review on new commit (delta review)
+    prior_meta = load_dossier_meta(owner=owner, repo=name, pr_number=resolved_pr) if resolved_pr is not None else None
+    prior_sha = prior_meta.get("last_reviewed_sha") if prior_meta else None
+    prior_review_id = prior_meta.get("review_id") if prior_meta else None
+    prior_findings = prior_meta.get("active_findings", []) if prior_meta else []
+
+    is_re_review = bool(resolved_pr is not None and prior_sha and prior_sha != target.head_sha)
+    diff_text = ""
+    is_delta = False
+
+    if is_re_review:
+        try:
+            delta_raw = await github.fetch_diff(
+                owner=owner,
+                repo=name,
+                sha=target.head_sha,
+                base_sha=prior_sha,
+                token=token,
+                allow_global_token=False,
+            )
+            if isinstance(delta_raw, str):
+                filtered_delta, _ = auditor.filter_audit_diff_noise(delta_raw)
+                if not delta_raw.strip() or not filtered_delta.strip():
+                    # Empty delta diff short-circuit
+                    logger.info("audit delta_diff_empty pr=%s audit_id=%s", resolved_pr, audit_id)
+                    return AuditExecutionOutcome(status="skipped_no_diff")
+                diff_text = delta_raw
+                filtered_diff = filtered_delta
+                is_delta = True
+                logger.info("audit re_review_delta_detected pr=%s base=%s head=%s", resolved_pr, prior_sha, target.head_sha)
+        except Exception as delta_exc:
+            logger.warning("audit delta_diff_failed fallback_full_diff: %s", delta_exc)
+
+    if not is_delta:
+        diff_text = await auditor.fetch_audit_diff(
+            owner=owner,
+            repo=name,
+            pr_number=resolved_pr,
+            base_sha=target.base_sha,
+            head_sha=target.head_sha,
+            token=token,
         )
-    if not diff_text.strip():
-        # Reached only after a fetch that returned 2xx with an empty body:
-        # `fetch_audit_diff` raises a typed error for every non-success status,
-        # so "no changes" here means GitHub was asked and reported none.
-        return AuditExecutionOutcome(status="skipped_no_diff")
-    filtered_diff, _ = auditor.filter_audit_diff_noise(diff_text)
-    if not filtered_diff.strip():
-        return AuditExecutionOutcome(status="skipped_no_diff")
+        if not isinstance(diff_text, str):
+            raise auditor.AuditDiffFetchError(
+                auditor.AuditRemoteFailureReason.UNKNOWN,
+                "audited diff fetch returned a non-text response",
+            )
+        if not diff_text.strip():
+            return AuditExecutionOutcome(status="skipped_no_diff")
+        filtered_diff, _ = auditor.filter_audit_diff_noise(diff_text)
+        if not filtered_diff.strip():
+            return AuditExecutionOutcome(status="skipped_no_diff")
     if resolved_pr is not None:
         await _fetch_pr_target(
             repo=repo,
@@ -1194,10 +1225,48 @@ async def execute_audit_job(
         audit_id=audit_id,
         audit_type=resolved_audit_type,
         repo_full_name=f"{owner}/{name}",
+        github_token=token,
         ref=ref,
         head_sha=target.head_sha,
         pr_number=resolved_pr,
     )
+
+    resolved_count: Optional[int] = None
+    new_findings = None
+    active_findings = None
+    if is_delta and resolved_pr is not None:
+        try:
+            review_threads = ()
+            try:
+                review_threads = await github.fetch_review_threads(
+                    owner=owner, repo=name, pr_number=resolved_pr, token=token
+                )
+            except Exception as thread_exc:
+                logger.warning("audit fetch_review_threads_failed: %s", thread_exc)
+                review_threads = ()
+
+            match_res = match_and_resolve_findings(
+                prior_findings=prior_findings,
+                delta_findings=result.findings,
+                delta_diff=diff_text,
+                review_threads=review_threads,
+            )
+            if match_res.threads_to_resolve:
+                try:
+                    await github.resolve_review_threads(
+                        owner=owner,
+                        repo=name,
+                        thread_ids=match_res.threads_to_resolve,
+                        token=token,
+                    )
+                except Exception as resolve_exc:
+                    logger.warning("audit resolve_review_threads_failed: %s", resolve_exc)
+            resolved_count = match_res.resolved_count
+            new_findings = match_res.new_findings
+            active_findings = match_res.active_findings
+        except Exception as res_exc:
+            logger.warning("audit thread_resolution_failed: %s", res_exc)
+
     try:
         from app.github.audit_publisher import publish_audit_review
 
@@ -1209,6 +1278,10 @@ async def execute_audit_job(
             pr_number=resolved_pr,
             diff_text=filtered_diff,
             token=token,
+            review_id=prior_review_id if is_delta else None,
+            resolved_since_last_review=resolved_count,
+            new_findings=new_findings,
+            active_findings=active_findings,
         )
     except Exception as pub_exc:
         # The publisher raises only when asked to (`raise_on_error=True`), but the

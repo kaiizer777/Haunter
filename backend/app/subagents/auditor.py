@@ -6,13 +6,14 @@ import asyncio
 import hashlib
 import logging
 import re
+import tempfile
 import time
 import unicodedata
 import uuid
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping, Optional, Sequence
 
 import httpx
@@ -22,6 +23,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -57,6 +59,7 @@ from app.llm.prompts.audit_prompts import (
     sanitize_output_text,
 )
 from app.log_hygiene import sanitize_log_value
+from app.subagents.audit_chunking import partition_diff_into_chunks
 from app.subagents.ast_analyzer import (
     StackFrame,
     extract_python_ast_context_from_index,
@@ -69,7 +72,7 @@ logger = logging.getLogger(__name__)
 AUDIT_MAX_DIFF_CHARS = MAX_DIFF_CHARS
 PERSPECTIVE_TIMEOUT_S = 75.0
 PERSPECTIVE_DEADLINE_S = 100.0
-PERSPECTIVE_CONCURRENCY_LIMIT = 4
+PERSPECTIVE_CONCURRENCY_LIMIT = 5
 AUDIT_FETCH_TIMEOUT_S = 35.0
 # Budget for resolving the shared model config BEFORE any perspective starts.
 # The per-perspective ``PERSPECTIVE_DEADLINE_S`` wraps ``_run_single_perspective``
@@ -100,7 +103,8 @@ VALID_AUDIT_STATUSES: frozenset[str] = frozenset(AuditStatus)
 AuditSeverity = Literal["BLOCKER", "WARNING", "NOTE"]
 _SEVERITY_RANK: dict[AuditSeverity, int] = {"BLOCKER": 0, "WARNING": 1, "NOTE": 2}
 _PERSPECTIVE_RANK: dict[str, int] = {
-    name: index for index, name in enumerate(PERSPECTIVES)
+    **{name: index for index, name in enumerate(PERSPECTIVES)},
+    "holistic": len(PERSPECTIVES),
 }
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -288,12 +292,218 @@ def _validate_repo_path(value: Any) -> Any:
     return normalized
 
 
+PriorityBucket = Literal["must_fix", "should_fix", "suggestion"]
+
+CANONICAL_SEVERITY_MAP: dict[str, str] = {
+    "CRITICAL": "C",
+    "BLOCKER": "C",
+    "C": "C",
+    "HIGH": "H",
+    "H": "H",
+    "MEDIUM": "M",
+    "WARNING": "M",
+    "M": "M",
+    "LOW": "L",
+    "NOTE": "L",
+    "L": "L",
+    "IMPROVEMENT": "I",
+    "INFORMATIONAL": "I",
+    "INFO": "I",
+    "I": "I",
+}
+
+
+def normalize_severity(finding_or_severity: Any, *, informational_only: bool = False) -> str:
+    """Map existing AuditSeverity and extended severities to canonical single letters.
+
+    - "CRITICAL", "BLOCKER" -> "C"
+    - "HIGH" -> "H"
+    - "MEDIUM", "WARNING" -> "M"
+    - "LOW", "NOTE" -> "L"
+    - "IMPROVEMENT", "INFORMATIONAL", "INFO", or when informational_only=True -> "I"
+    """
+    if informational_only:
+        return "I"
+
+    if hasattr(finding_or_severity, "informational_only") and finding_or_severity.informational_only:
+        return "I"
+
+    if isinstance(finding_or_severity, Mapping) and finding_or_severity.get("informational_only"):
+        return "I"
+
+    if hasattr(finding_or_severity, "severity"):
+        raw = finding_or_severity.severity
+    elif isinstance(finding_or_severity, Mapping):
+        raw = finding_or_severity.get("severity")
+    elif isinstance(finding_or_severity, str):
+        raw = finding_or_severity
+    else:
+        raw = str(finding_or_severity or "")
+
+    key = str(raw or "").strip().upper()
+    return CANONICAL_SEVERITY_MAP.get(key, "L")
+
+
+_LOW_PRIORITY_PATTERNS = re.compile(
+    r"\b(?:style|minor(?:\s+perf|\s+performance)?|nice-to-have|nice\s+to\s+have|cosmetic|formatting|typo|naming|docstring|readability|cleanup|micro-optimization|nit|nitpick|convention|trivial)\b",
+    re.IGNORECASE,
+)
+
+_HIGH_RISK_PATTERNS = re.compile(
+    r"\b(?:correctness|security|data\s*loss|breaking\s*change|scope\s*drift|vulnerability|injection|auth|bypass|cve|crash|deadlock|race\s*condition|memory\s*leak|leak|corruption)\b",
+    re.IGNORECASE,
+)
+
+_HIGH_RISK_CATEGORIES = frozenset(
+    {
+        "security",
+        "correctness",
+        "logic",
+        "data_loss",
+        "data loss",
+        "breaking_change",
+        "breaking change",
+        "scope_drift",
+        "scope drift",
+        "api_compatibility",
+    }
+)
+
+_LOW_PRIORITY_CATEGORIES = frozenset(
+    {
+        "style",
+        "formatting",
+        "cosmetic",
+        "typo",
+        "documentation",
+        "doc",
+        "docstring",
+        "cleanup",
+        "nit",
+        "nitpick",
+        "readability",
+        "naming",
+        "convention",
+    }
+)
+
+
+def classify_finding_bucket(
+    finding: Any,
+    *,
+    overall_confidence: int = 100,
+) -> Literal["must_fix", "should_fix", "suggestion"]:
+    """Classify a finding into 'must_fix', 'should_fix', or 'suggestion'.
+
+    Priority tiering rules:
+    - Overall or finding confidence < 75 or informational_only -> 'suggestion'.
+    - If finding explicitly specifies a valid priority_bucket ('must_fix', 'should_fix', 'suggestion'), respect it.
+    - Blocker / Critical -> 'must_fix'.
+    - High:
+        * good high-risk (correctness, security, data loss, breaking change, scope drift) -> 'must_fix'.
+        * low-priority high (style, minor perf, nice-to-have) -> 'should_fix'.
+    - Medium:
+        * good medium (worth fixing but not merge-blocking) -> 'should_fix'.
+        * trivial / nit / low-priority medium -> 'suggestion'.
+    - Low / Informational / Note -> 'suggestion'.
+    """
+    def _get_val(key: str, default: Any = None) -> Any:
+        if hasattr(finding, key):
+            val = getattr(finding, key)
+            if val is not None:
+                return val
+        if isinstance(finding, Mapping):
+            val = finding.get(key)
+            if val is not None:
+                return val
+        return default
+
+    # 1. Confidence & informational policy (< 75% -> suggestion)
+    informational_only = bool(_get_val("informational_only", False))
+    finding_conf = _get_val("confidence", 100)
+    try:
+        conf_int = int(finding_conf)
+    except (TypeError, ValueError):
+        conf_int = 100
+
+    if (
+        informational_only
+        or overall_confidence < INFORMATIONAL_CONFIDENCE_THRESHOLD
+        or conf_int < INFORMATIONAL_CONFIDENCE_THRESHOLD
+    ):
+        return "suggestion"
+
+    # 2. Check if finding explicitly declares priority_bucket
+    explicit_bucket = _get_val("priority_bucket")
+    if explicit_bucket and isinstance(explicit_bucket, str):
+        cleaned_bucket = explicit_bucket.strip().lower().replace("-", "_")
+        if cleaned_bucket in ("must_fix", "should_fix", "suggestion"):
+            return cleaned_bucket
+
+    # 3. Canonical severity
+    canonical_sev = normalize_severity(finding, informational_only=informational_only)
+
+    if canonical_sev in ("L", "I"):
+        return "suggestion"
+
+    if canonical_sev == "C":
+        return "must_fix"
+
+    # Inspect category, title, description / critique / impact
+    category = str(_get_val("category", "") or "").strip().lower()
+    title = str(_get_val("title", "") or "").strip().lower()
+    description = str(
+        _get_val("description")
+        or _get_val("critique")
+        or _get_val("impact")
+        or _get_val("summary")
+        or ""
+    ).strip().lower()
+
+    text_corpus = f"{category} {title} {description}"
+
+    is_low_priority = (
+        category in _LOW_PRIORITY_CATEGORIES
+        or bool(_LOW_PRIORITY_PATTERNS.search(text_corpus))
+    )
+    is_high_risk = (
+        category in _HIGH_RISK_CATEGORIES
+        or bool(_HIGH_RISK_PATTERNS.search(text_corpus))
+    )
+
+    if canonical_sev == "H":
+        # High severity:
+        # good high-risk: genuinely important before merge -> must-fix.
+        # low-priority high: real but not merge-blocking (style, minor perf, nice-to-have) -> should-fix.
+        if is_low_priority and not is_high_risk:
+            return "should_fix"
+        return "must_fix"
+
+    if canonical_sev == "M":
+        # Medium severity:
+        # good medium: medium finding worth fixing but not blocking -> should-fix.
+        # trivial/nit/low-priority medium -> suggestions.
+        text_high_risk = bool(_HIGH_RISK_PATTERNS.search(text_corpus)) or category in (
+            "security",
+            "data_loss",
+            "data loss",
+            "breaking_change",
+            "breaking change",
+        )
+        if is_low_priority and not text_high_risk:
+            return "suggestion"
+        return "should_fix"
+
+    return "suggestion"
+
+
 class PerspectiveFinding(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    file_path: str = Field(min_length=1, max_length=512)
-    line_start: int = Field(ge=1, le=MAX_LINE_NUMBER)
-    line_end: int = Field(ge=1, le=MAX_LINE_NUMBER)
+    non_commentable: bool = False
+    file_path: str = Field(default="", min_length=0, max_length=512)
+    line_start: int = Field(default=0, ge=0, le=MAX_LINE_NUMBER)
+    line_end: int = Field(default=0, ge=0, le=MAX_LINE_NUMBER)
     severity: AuditSeverity
     category: str = Field(min_length=1, max_length=160)
     title: str = Field(min_length=3, max_length=240)
@@ -306,10 +516,38 @@ class PerspectiveFinding(BaseModel):
         default=None, max_length=MAX_SUGGESTED_FIX_CHARS
     )
     confidence: int = Field(ge=0, le=100)
+    priority_bucket: Optional[PriorityBucket] = None
+    side: Optional[Literal["LEFT", "RIGHT"]] = None
+
+    @field_validator("side", mode="before")
+    @classmethod
+    def _normalize_side(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            clean = value.strip().upper()
+            if clean in ("LEFT", "RIGHT"):
+                return clean
+        return value
+
+    @field_validator("priority_bucket", mode="before")
+    @classmethod
+    def _normalize_priority_bucket(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            clean = value.strip().lower().replace("-", "_")
+            if clean in ("must_fix", "should_fix", "suggestion"):
+                return clean
+        return value
 
     @field_validator("file_path", mode="before")
     @classmethod
-    def _validate_file_path(cls, value: Any) -> Any:
+    def _validate_file_path(cls, value: Any, info: ValidationInfo) -> Any:
+        if info.data.get("non_commentable"):
+            val_str = str(value or "").strip()
+            if val_str in ("", "(general)", "general"):
+                return "(general)" if val_str in ("(general)", "general") else ""
         return _validate_repo_path(value)
 
     @field_validator("severity", mode="before")
@@ -326,6 +564,11 @@ class PerspectiveFinding(BaseModel):
     def _normalize_line_range(self) -> "PerspectiveFinding":
         if self.line_end < self.line_start:
             self.line_end = self.line_start
+        if not self.non_commentable:
+            if not self.file_path or self.file_path in ("", "(general)"):
+                raise ValueError("file_path must be a bounded repository-relative path")
+            if self.line_start < 1:
+                raise ValueError("line_start must be >= 1 for commentable findings")
         return self
 
 
@@ -372,6 +615,17 @@ class AuditFinding:
     suggested_fix: Optional[str]
     confidence: int
     informational_only: bool = False
+    non_commentable: bool = False
+    priority_bucket: Optional[PriorityBucket] = None
+    side: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.priority_bucket is None:
+            object.__setattr__(
+                self,
+                "priority_bucket",
+                classify_finding_bucket(self),
+            )
 
     @property
     def impact(self) -> str:
@@ -391,6 +645,8 @@ class AuditFinding:
             "suggested_fix": self.suggested_fix,
             "confidence": self.confidence,
             "informational_only": self.informational_only,
+            "non_commentable": self.non_commentable,
+            "priority_bucket": self.priority_bucket,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -418,6 +674,7 @@ class AuditFinding:
                 if isinstance(suggested, str) and suggested.strip()
                 else None
             ),
+            "non_commentable": self.non_commentable,
         }
 
     def to_report_dict(self) -> dict[str, Any]:
@@ -429,6 +686,85 @@ class AuditFinding:
         reader would see ``&amp;lt;`` where the code said ``&lt;``.
         """
         return self._as_dict()
+
+
+def _finding_sort_key(f: Any) -> tuple[int, int]:
+    """Sort key for findings: confidence descending (-conf), then line_start ascending."""
+    if hasattr(f, "confidence"):
+        conf = getattr(f, "confidence", 0) or 0
+    elif isinstance(f, Mapping):
+        conf = f.get("confidence", 0) or 0
+    else:
+        conf = 0
+
+    if hasattr(f, "line_start"):
+        line = getattr(f, "line_start", 0) or 0
+    elif isinstance(f, Mapping):
+        line = f.get("line_start", 0) or 0
+    else:
+        line = 0
+
+    return (-int(conf), int(line))
+
+
+def select_scoped_findings(
+    findings: Sequence[Any],
+    limit: int = 8,
+) -> tuple[list[Any], dict[str, int]]:
+    """Scoped posting algorithm.
+
+    - Bucket findings by canonical severity (C, H, M, L, I), sorted within each
+      bucket by confidence descending, then line_start ascending.
+    - Rule 1: Always include all Critical findings.
+    - Rule 2: Always include all High findings.
+    - Rule 3: If len(C) + len(H) >= limit (8), post ONLY all Critical and High
+      findings (0 M, 0 L, 0 I).
+    - Rule 4: If len(C) + len(H) < limit (8), fill remaining slots up to limit
+      in strict priority order: Medium -> Low -> Improvement/Informational.
+    - Rule 5: Hard cap is exactly min(limit, total) unless Critical + High alone
+      exceed limit.
+    - Return (posted_findings, posted_counts) where posted_counts tracks the count
+      of findings that were ACTUALLY posted.
+    """
+    buckets: dict[str, list[Any]] = {
+        "C": [],
+        "H": [],
+        "M": [],
+        "L": [],
+        "I": [],
+    }
+    for f in findings:
+        sev = normalize_severity(f)
+        buckets.setdefault(sev, []).append(f)
+
+    for sev in ("C", "H", "M", "L", "I"):
+        buckets[sev].sort(key=_finding_sort_key)
+
+    c_findings = buckets["C"]
+    h_findings = buckets["H"]
+    c_h_count = len(c_findings) + len(h_findings)
+
+    if c_h_count >= limit:
+        selected = list(c_findings) + list(h_findings)
+    else:
+        selected = list(c_findings) + list(h_findings)
+        remaining = limit - len(selected)
+        for sev in ("M", "L", "I"):
+            if remaining <= 0:
+                break
+            take = buckets[sev][:remaining]
+            selected.extend(take)
+            remaining -= len(take)
+
+    posted_counts: dict[str, int] = {
+        "C": sum(1 for f in selected if normalize_severity(f) == "C"),
+        "H": sum(1 for f in selected if normalize_severity(f) == "H"),
+        "M": sum(1 for f in selected if normalize_severity(f) == "M"),
+        "L": sum(1 for f in selected if normalize_severity(f) == "L"),
+        "I": sum(1 for f in selected if normalize_severity(f) == "I"),
+    }
+    return selected, posted_counts
+
 
 
 @dataclass
@@ -451,6 +787,8 @@ class AuditResult:
     latency_ms: int = 0
     publish_allowed: bool = False
     ast_files_requested: int = 0
+    phase_1c_context: str = ""
+    phase_1c_file_path: Optional[str] = None
     ast_files_with_context: int = 0
     analysis_degraded: bool = False
 
@@ -460,6 +798,30 @@ class AuditResult:
         for finding in self.findings:
             counts[finding.severity] = counts.get(finding.severity, 0) + 1
         return counts
+
+    @property
+    def must_fix_count(self) -> int:
+        return sum(
+            1
+            for f in self.findings
+            if classify_finding_bucket(f, overall_confidence=self.confidence) == "must_fix"
+        )
+
+    @property
+    def should_fix_count(self) -> int:
+        return sum(
+            1
+            for f in self.findings
+            if classify_finding_bucket(f, overall_confidence=self.confidence) == "should_fix"
+        )
+
+    @property
+    def suggestion_count(self) -> int:
+        return sum(
+            1
+            for f in self.findings
+            if classify_finding_bucket(f, overall_confidence=self.confidence) == "suggestion"
+        )
 
     @property
     def informational_only(self) -> bool:
@@ -485,6 +847,9 @@ class AuditResult:
             "informational_only": self.informational_only,
             "publish_allowed": self.publish_allowed,
             "severity_counts": dict(self.severity_counts),
+            "must_fix_count": self.must_fix_count,
+            "should_fix_count": self.should_fix_count,
+            "suggestion_count": self.suggestion_count,
             "executive_summary": sanitize_output_text(
                 self.executive_summary, MAX_EXECUTIVE_SUMMARY_CHARS
             ),
@@ -527,6 +892,16 @@ class DiffGrounding:
     #: True when the diff text was cut before its last line. Every count above
     #: then describes the inspected prefix, and the report says so.
     clipped: bool = False
+    left_line_index: dict[str, set[int]] = field(default_factory=dict)
+    deleted_paths: frozenset[str] = field(default_factory=frozenset)
+
+    @property
+    def left_lines(self) -> dict[str, set[int]]:
+        return self.left_line_index
+
+    @property
+    def deleted_files(self) -> frozenset[str]:
+        return self.deleted_paths
 
 
 class AuditRemoteFailureReason(StrEnum):
@@ -600,6 +975,7 @@ class _DiffHunkState:
     added: int = 0
     removed: int = 0
     lines: set[int] = field(default_factory=set)
+    left_lines: set[int] = field(default_factory=set)
 
     @property
     def satisfied(self) -> bool:
@@ -892,8 +1268,10 @@ def build_diff_grounding(
         raise ValueError("diff grounding limit is invalid")
     text, clipped = _diff_prefix(str(diff_text or ""), max_chars)
     index: dict[str, set[int]] = {}
+    left_index: dict[str, set[int]] = {}
     valid_paths: set[str] = set()
     rejected_paths: set[str] = set()
+    deleted_paths: set[str] = set()
     truncated_ranges: dict[str, set[tuple[int, int]]] = {}
     current_path: Optional[str] = None
     old_dev_null = False
@@ -929,6 +1307,8 @@ def build_diff_grounding(
         if current_path is not None:
             if hunk.lines:
                 index.setdefault(current_path, set()).update(hunk.lines)
+            if hunk.left_lines:
+                left_index.setdefault(current_path, set()).update(hunk.left_lines)
             valid_paths.add(current_path)
             hunk_count += 1
             added_lines += hunk.added
@@ -949,6 +1329,8 @@ def build_diff_grounding(
         if clipped or is_budget_truncated:
             if hunk.lines:
                 index.setdefault(current_path, set()).update(hunk.lines)
+            if hunk.left_lines:
+                left_index.setdefault(current_path, set()).update(hunk.left_lines)
             valid_paths.add(current_path)
             hunk_count += 1
             added_lines += hunk.added
@@ -997,6 +1379,7 @@ def build_diff_grounding(
             elif line.startswith("-"):
                 valid_line = hunk.old_seen < hunk.old_count
                 if valid_line:
+                    hunk.left_lines.add(hunk.next_old)
                     hunk.next_old += 1
                     hunk.old_seen += 1
                     hunk.removed += 1
@@ -1047,14 +1430,15 @@ def build_diff_grounding(
             continue
         if line.startswith("+++ "):
             new_dev_null, new_path = _diff_header_path(line, "+++ ")
-            if (
-                new_dev_null
-                or new_path is None
-                or (not old_dev_null and old_path is None)
-            ):
-                # A deleted file (`+++ /dev/null`), an unusable header, or a
-                # new-side header with no old-side counterpart has no new-file
-                # line for a finding to be grounded on.
+            if new_dev_null:
+                if old_path is not None:
+                    current_path = old_path
+                    deleted_paths.add(old_path)
+                else:
+                    current_path = None
+                    reject_current()
+                continue
+            if new_path is None or (not old_dev_null and old_path is None):
                 current_path = None
                 reject_current()
                 continue
@@ -1112,6 +1496,8 @@ def build_diff_grounding(
         added_lines=added_lines,
         removed_lines=removed_lines,
         clipped=clipped,
+        left_line_index={path: lines for path, lines in left_index.items() if lines},
+        deleted_paths=frozenset(deleted_paths),
     )
 
 
@@ -1477,6 +1863,7 @@ async def _run_single_perspective(
     diff_text: str,
     ast_summary: str,
     repo_context: str,
+    phase_1c_context: str = "",
     llm: LLMClient,
     model_config: Optional[ResolvedModelConfig] = None,
 ) -> PerspectiveResult:
@@ -1488,6 +1875,7 @@ async def _run_single_perspective(
             diff_text,
             ast_summary,
             repo_context,
+            phase_1c_context=phase_1c_context,
         )
     ]
     response = await llm.complete(
@@ -1602,6 +1990,10 @@ def _apply_confidence_policy(
         or overall_confidence < INFORMATIONAL_CONFIDENCE_THRESHOLD
     )
     severity: AuditSeverity = "NOTE" if informational_only else finding.severity
+    priority_bucket = classify_finding_bucket(
+        finding,
+        overall_confidence=overall_confidence,
+    )
     category = _clean_generated_text(_redact_audit_secrets(finding.category))
     title = _clean_generated_text(_redact_audit_secrets(finding.title))
     description = _clean_generated_text(_redact_audit_secrets(finding.description))
@@ -1630,6 +2022,9 @@ def _apply_confidence_policy(
         suggested_fix=suggested_fix,
         confidence=finding.confidence,
         informational_only=informational_only,
+        non_commentable=finding.non_commentable,
+        priority_bucket=priority_bucket,
+        side=getattr(finding, "side", None),
     )
 
 
@@ -1647,16 +2042,22 @@ def _is_grounded(
     finding: PerspectiveFinding,
     grounding: DiffGrounding,
 ) -> bool:
-    observed_lines = grounding.line_index.get(finding.file_path)
+    observed_lines = grounding.line_index.get(finding.file_path, set())
+    left_observed_lines = getattr(grounding, "left_line_index", {}).get(finding.file_path, set())
     if (
-        not observed_lines
+        (not observed_lines and not left_observed_lines)
         or finding.line_end - finding.line_start >= MAX_GROUNDING_SPAN
     ):
         return False
-    if not all(
-        line_number in observed_lines
-        for line_number in range(finding.line_start, finding.line_end + 1)
-    ):
+    finding_range = range(finding.line_start, finding.line_end + 1)
+    right_grounded = bool(observed_lines) and all(line_num in observed_lines for line_num in finding_range)
+    left_grounded = bool(left_observed_lines) and all(line_num in left_observed_lines for line_num in finding_range)
+
+    finding_side = str(getattr(finding, "side", "") or "").upper()
+    is_deleted_file = finding.file_path in getattr(grounding, "deleted_paths", frozenset())
+    can_anchor_left = (finding_side == "LEFT") or is_deleted_file
+
+    if not (right_grounded or (left_grounded and can_anchor_left)):
         return False
     return not any(
         finding.line_start <= truncated_end and truncated_start <= finding.line_end
@@ -1688,7 +2089,10 @@ def synthesize_findings(
         if not result.succeeded:
             continue
         for finding in result.findings:
-            if _is_grounded(finding, grounding):
+            if (
+                (getattr(finding, "non_commentable", False) and finding.line_start == 0)
+                or _is_grounded(finding, grounding)
+            ):
                 candidates.append((result, finding))
     candidates.sort(
         key=lambda item: (
@@ -1825,6 +2229,7 @@ async def fetch_audit_source_contexts(
         path
         for path in grounding.valid_paths
         if path.endswith(STRUCTURAL_SOURCE_SUFFIXES)
+        and grounding.line_index.get(path)
     )[:MAX_AST_SOURCE_FILES]
     if not paths:
         return {}
@@ -2037,7 +2442,13 @@ async def run_audit(
     engine: str = "",
     llm_client: Optional[LLMClient] = None,
     perspectives: Optional[Sequence[PerspectiveName]] = None,
+    github_token: Optional[str] = None,
+    pr_metadata: Optional[Mapping[str, Any]] = None,
+    dossier_dir: Optional[str] = None,
+    phase_1c_context: Optional[str] = None,
+    enable_phase1_context: bool = True,
     file_contexts: Optional[Mapping[str, str]] = None,
+    enable_holistic: bool = False,
 ) -> AuditResult:
     """Run four fixed, bounded perspectives and return a synthesized read-only report."""
     started = time.monotonic()
@@ -2227,23 +2638,148 @@ async def run_audit(
                 base_url=default_base_url_for_provider(settings.default_provider),
             )
 
+    resolved_phase_1c_context = phase_1c_context or ""
+    resolved_phase_1c_file_path: Optional[str] = None
+    if enable_phase1_context and resolved_pr_number is not None and not resolved_phase_1c_context:
+        try:
+            owner_part = ""
+            repo_part = ""
+            if repo_full_name and "/" in repo_full_name:
+                owner_part, repo_part = repo_full_name.split("/", 1)
+
+            # Re-review context reuse: check if {dossier_dir}/phase-1c.md exists on disk
+            if dossier_dir:
+                target_dossier = Path(dossier_dir)
+            else:
+                safe_repo = f"{owner_part}_{repo_part}".replace("/", "_") if owner_part and repo_part else "repo"
+                target_dossier = Path(tempfile.gettempdir()) / "haunter-dossier" / safe_repo / f"PR-{resolved_pr_number}"
+
+            phase_1c_disk_file = target_dossier / "phase-1c.md"
+
+            def _valid_phase_1c_text(text: str) -> bool:
+                stripped = (text or "").strip()
+                if not stripped:
+                    return False
+                if "degraded" in stripped.lower() or "failed" in stripped.lower():
+                    return False
+                return (
+                    "## Primary Intent & Problem Statement" in stripped
+                    or "## Pull Request Scope & Claimed Changes" in stripped
+                )
+
+            cached_text = ""
+            if phase_1c_disk_file.is_file():
+                try:
+                    cached_text = phase_1c_disk_file.read_text(encoding="utf-8")
+                except Exception:
+                    cached_text = ""
+            if cached_text and _valid_phase_1c_text(cached_text):
+                resolved_phase_1c_context = cached_text
+                resolved_phase_1c_file_path = str(phase_1c_disk_file.resolve())
+                logger.info("Auditor: Reusing existing Phase 1c context from disk: %s", resolved_phase_1c_file_path)
+            else:
+                if phase_1c_disk_file.is_file():
+                    try:
+                        phase_1c_disk_file.unlink()
+                    except Exception:
+                        pass
+                from app.subagents.audit_context import build_phase1_context
+
+                p1_res = await build_phase1_context(
+                    owner=owner_part,
+                    repo=repo_part,
+                    pr_number=resolved_pr_number,
+                    token=github_token,
+                    diff_text=clean_diff,
+                    pr_metadata=pr_metadata,
+                    dossier_dir=dossier_dir,
+                    llm=llm,
+                    model_config=shared_config,
+                )
+                if p1_res and not getattr(p1_res, "degraded", False):
+                    resolved_phase_1c_context = p1_res.context_markdown
+                    resolved_phase_1c_file_path = p1_res.file_path
+                else:
+                    try:
+                        phase_1c_disk_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+        except Exception as p1_exc:
+            logger.warning("Auditor: Phase 1 context build failed; continuing without: %s", p1_exc)
+
+    diff_chunks = (
+        partition_diff_into_chunks(clean_diff, hard_limit=550)
+        if len(clean_diff.splitlines()) > 550
+        else [clean_diff]
+    )
+
     async def run_one(
         perspective: PerspectiveName,
     ) -> tuple[PerspectiveResult, Optional[BaseException]]:
         try:
             async with semaphore:
-                result = await asyncio.wait_for(
-                    _run_single_perspective(
-                        perspective=perspective,
-                        diff_text=clean_diff,
-                        ast_summary=ast_summary,
-                        repo_context=clean_repo_context,
-                        llm=llm,
-                        model_config=shared_config,
-                    ),
-                    timeout=PERSPECTIVE_DEADLINE_S,
+                if len(diff_chunks) <= 1:
+                    result = await asyncio.wait_for(
+                        _run_single_perspective(
+                            perspective=perspective,
+                            diff_text=clean_diff,
+                            ast_summary=ast_summary,
+                            repo_context=clean_repo_context,
+                            phase_1c_context=resolved_phase_1c_context,
+                            llm=llm,
+                            model_config=shared_config,
+                        ),
+                        timeout=PERSPECTIVE_DEADLINE_S,
+                    )
+                    return result, None
+
+                chunk_results: list[PerspectiveResult] = []
+                for chunk_text in diff_chunks:
+                    try:
+                        chunk_res = await asyncio.wait_for(
+                            _run_single_perspective(
+                                perspective=perspective,
+                                diff_text=chunk_text,
+                                ast_summary=ast_summary,
+                                repo_context=clean_repo_context,
+                                phase_1c_context=resolved_phase_1c_context,
+                                llm=llm,
+                                model_config=shared_config,
+                            ),
+                            timeout=PERSPECTIVE_DEADLINE_S,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as chunk_exc:
+                        logger.warning(
+                            "auditor perspective=%s chunk failed error_type=%s",
+                            perspective,
+                            type(chunk_exc).__name__,
+                        )
+                        continue
+                    chunk_results.append(chunk_res)
+
+                combined_findings = []
+                for cr in chunk_results:
+                    combined_findings.extend(cr.findings)
+                combined_summary = "\n\n".join(cr.summary for cr in chunk_results if cr.summary)
+                successful_chunks = [cr for cr in chunk_results if cr.succeeded]
+                combined_confidence = (
+                    min(cr.confidence for cr in successful_chunks)
+                    if successful_chunks
+                    else 0
                 )
-            return result, None
+                combined_result = PerspectiveResult(
+                    perspective=perspective,
+                    summary=combined_summary,
+                    confidence=combined_confidence,
+                    findings=combined_findings,
+                    succeeded=bool(successful_chunks),
+                    model=successful_chunks[0].model if successful_chunks else "",
+                    input_tokens=sum(cr.input_tokens for cr in chunk_results),
+                    output_tokens=sum(cr.output_tokens for cr in chunk_results),
+                )
+                return combined_result, None
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2268,19 +2804,68 @@ async def run_audit(
         if perspectives is not None
         else list(PERSPECTIVES)
     )
-    if not active_perspectives:
-        active_perspectives = list(PERSPECTIVES)
 
-    completed = await asyncio.gather(
-        *(run_one(perspective) for perspective in active_perspectives)
+    async def run_holistic() -> tuple[PerspectiveResult, Optional[BaseException]]:
+        try:
+            async with semaphore:
+                # NOTE: build_perspective_messages caps the rendered diff at an upper
+                # bound of roughly 88k chars (MAX_USER_PROMPT_CHARS minus reserved
+                # sections); the actual available space can be lower depending on
+                # reserved context (phase-1 dossier, repo/AST context, prompt
+                # scaffolding), so a budgeted diff larger than that is silently
+                # clipped here. The holistic pass is not chunked; escalate if full
+                # coverage is needed.
+                result = await asyncio.wait_for(
+                    _run_single_perspective(
+                        perspective="holistic",
+                        diff_text=clean_diff,
+                        ast_summary=ast_summary,
+                        repo_context=clean_repo_context,
+                        phase_1c_context=resolved_phase_1c_context,
+                        llm=llm,
+                        model_config=shared_config,
+                    ),
+                    timeout=PERSPECTIVE_DEADLINE_S,
+                )
+                return result, None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "auditor perspective=holistic failed error_type=%s",
+                type(exc).__name__,
+            )
+            return (
+                PerspectiveResult(
+                    perspective="holistic",
+                    summary="",
+                    confidence=0,
+                    findings=[],
+                    succeeded=False,
+                ),
+                exc,
+            )
+
+    should_run_holistic = enable_holistic or (
+        perspectives is not None and "holistic" in perspectives
     )
+
+    tasks = [run_one(perspective) for perspective in active_perspectives]
+    if should_run_holistic:
+        tasks.append(run_holistic())
+
+    completed = await asyncio.gather(*tasks)
     executed_perspectives = [res for res, _ in completed]
     if not any(res.succeeded for res in executed_perspectives):
         raise AuditAnalysisError("All audit perspectives failed; nothing to synthesize")
 
     overall_confidence = calculate_overall_confidence(
         executed_perspectives,
-        expected_perspectives=active_perspectives,
+        expected_perspectives=(
+            [*active_perspectives, "holistic"]
+            if should_run_holistic
+            else active_perspectives
+        ),
     )
     findings = await asyncio.wait_for(
         asyncio.to_thread(
@@ -2300,12 +2885,37 @@ async def run_audit(
         overall_confidence = min(
             overall_confidence, INFORMATIONAL_CONFIDENCE_THRESHOLD - 1
         )
-    counts = Counter(finding.severity for finding in findings)
+    # Synchronize finding buckets with final post-capped overall confidence
+    findings = [
+        replace(
+            f,
+            priority_bucket=classify_finding_bucket(
+                f, overall_confidence=overall_confidence
+            ),
+        )
+        if f.priority_bucket != classify_finding_bucket(f, overall_confidence=overall_confidence)
+        else f
+        for f in findings
+    ]
+    must_fix_count = sum(
+        1 for f in findings
+        if getattr(f, "severity", None) == "BLOCKER"
+        or getattr(f, "priority_bucket", None) == "must_fix"
+        or classify_finding_bucket(f, overall_confidence=overall_confidence) == "must_fix"
+    )
+    should_fix_count = sum(
+        1 for f in findings
+        if classify_finding_bucket(f, overall_confidence=overall_confidence) == "should_fix"
+    )
+    suggestion_count = sum(
+        1 for f in findings
+        if classify_finding_bucket(f, overall_confidence=overall_confidence) == "suggestion"
+    )
     status = build_status_label(
-        counts.get("BLOCKER", 0),
-        counts.get("WARNING", 0),
+        must_fix_count,
+        should_fix_count,
         overall_confidence,
-        has_notes=counts.get("NOTE", 0) > 0,
+        has_notes=suggestion_count > 0,
     )
     executive_summary = _synthesize_executive_summary(
         executed_perspectives, len(findings)
@@ -2340,12 +2950,14 @@ async def run_audit(
         ast_files_requested=ast_coverage.files_requested,
         ast_files_with_context=ast_coverage.files_with_context,
         analysis_degraded=analysis_degraded,
+        phase_1c_context=resolved_phase_1c_context,
+        phase_1c_file_path=resolved_phase_1c_file_path,
     )
     pr_score = calculate_pr_confidence_score(
         confidence=result.confidence,
-        must_fix=counts.get("BLOCKER", 0),
-        should_fix=counts.get("WARNING", 0),
-        n_notes=counts.get("NOTE", 0),
+        must_fix=must_fix_count,
+        should_fix=should_fix_count,
+        n_notes=suggestion_count,
     )
     report = format_audit_report(
         pr_summary=result.executive_summary,
@@ -2355,8 +2967,8 @@ async def run_audit(
         status=result.status,
         audit_target=result.target_label,
         engine=result.engine,
-        must_fix_count=counts.get("BLOCKER", 0),
-        should_fix_count=counts.get("WARNING", 0),
+        must_fix_count=must_fix_count,
+        should_fix_count=should_fix_count,
         remediation_diff=result.remediation_diff,
         analysis_metadata=result.analysis_metadata,
         publish_allowed=result.publish_allowed,
@@ -2383,6 +2995,8 @@ async def run_audit(
         ast_files_requested=result.ast_files_requested,
         ast_files_with_context=result.ast_files_with_context,
         analysis_degraded=result.analysis_degraded,
+        phase_1c_context=result.phase_1c_context,
+        phase_1c_file_path=result.phase_1c_file_path,
     )
     logger.info(
         "auditor complete audit_id=%s type=%s repo=%s findings=%d blockers=%d warnings=%d confidence=%d latency_ms=%d",
@@ -2390,8 +3004,8 @@ async def run_audit(
         resolved_audit_type,
         _safe_metadata(repo_full_name, 200),
         len(result.findings),
-        counts.get("BLOCKER", 0),
-        counts.get("WARNING", 0),
+        must_fix_count,
+        should_fix_count,
         result.confidence,
         result.latency_ms,
     )

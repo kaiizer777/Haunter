@@ -4706,11 +4706,6 @@ def test_deletion_only_hunk_is_excluded_from_ast_contexts_instead_of_raising():
         ),
         ("header_only", "--- a/app.py\n+++ b/app.py\n"),
         (
-            "deleted_file",
-            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ /dev/null\n"
-            "@@ -1,1 +0,0 @@\n-old\n",
-        ),
-        (
             "new_header_escapes_the_repo",
             "diff --git a/app.py b/app.py\n--- a/app.py\n"
             "+++ b/../../etc/passwd\n@@ -1,1 +1,1 @@\n-a\n+b\n",

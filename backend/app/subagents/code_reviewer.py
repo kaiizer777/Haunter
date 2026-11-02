@@ -28,6 +28,7 @@ import uuid
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import diff_validation
 from app.llm import LLMClient
 from app.llm.prompts.audit_prompts import (
     MAX_DIFF_CHARS,
@@ -247,6 +248,15 @@ _REDACTION_PLACEHOLDER_RE: re.Pattern[str] = re.compile(
 )
 
 
+
+def should_show_suggested_patch(finding: ReviewFinding, patch_clean: str) -> bool:
+    """Delegate to the shared, canonical implementation.
+
+    ``patch_clean`` is forwarded as the suggested code so the shared rule's
+    line/hunk/file checks apply to the already-sanitized patch text.
+    """
+    return diff_validation.should_show_suggested_code(finding, patch_clean)
+
 def format_github_suggestion(finding: ReviewFinding) -> str:
     """
     Format a ReviewFinding into a GitHub comment markdown string.
@@ -305,7 +315,14 @@ def format_github_suggestion(finding: ReviewFinding) -> str:
                 patch_clean = "\n".join(lines[1:-1]).strip("\r\n")
             elif lines[0].startswith("```"):
                 patch_clean = "\n".join(lines[1:]).strip("\r\n")
-        if _REDACTION_PLACEHOLDER_RE.search(patch_clean):
+
+        if not should_show_suggested_patch(finding, patch_clean):
+            sections.extend([
+                "",
+                "**Remediation:**",
+                "Manual remediation recommended (change exceeds single-file/simple suggestion threshold; see problem description).",
+            ])
+        elif _REDACTION_PLACEHOLDER_RE.search(patch_clean):
             # A bare ``` is not enough on its own: the patch may contain a fence
             # run of its own, which would close the block early and dump the
             # remainder into the comment as prose. Size the fence past the

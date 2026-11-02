@@ -20,10 +20,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Sequence
 
+from app import diff_validation
 from app import github_client
-from app.diff_validation import coerce_unified_diff
+from app.diff_validation import coerce_unified_diff, is_cross_file_finding
 from app.llm.prompts.audit_prompts import (
     INFORMATIONAL_CONFIDENCE_THRESHOLD,
+    swap_report_footer,
     MAX_CATEGORY_CHARS,
     MAX_GITHUB_COMMENT_CHARS,
     MAX_INLINE_FIELD_CHARS,
@@ -39,6 +41,8 @@ from app.subagents.auditor import (
     AuditResult,
     DiffGrounding,
     build_diff_grounding,
+    classify_finding_bucket,
+    select_scoped_findings,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +51,7 @@ logger = logging.getLogger(__name__)
 create_pr_review = github_client.create_pr_review
 create_commit_comment = github_client.create_commit_comment
 post_pr_comment = github_client.post_pr_comment
+update_pr_review = github_client.update_pr_review
 
 
 @dataclass(frozen=True)
@@ -62,7 +67,20 @@ class PublishResult:
     error: Optional[str] = None
     response: Optional[dict[str, Any]] = None
     finding_comments: list[dict[str, Any]] = field(default_factory=list)
+    posted_counts: Optional[dict[str, int]] = None
 
+
+
+def should_show_suggested_code(
+    finding: Any,
+    suggested_code: Optional[str] = None,
+) -> bool:
+    """Delegate to the shared, canonical implementation in :mod:`app.diff_validation`.
+
+    Kept here for backwards compatibility with existing call sites and tests;
+    the logic itself lives in :func:`app.diff_validation.should_show_suggested_code`.
+    """
+    return diff_validation.should_show_suggested_code(finding, suggested_code)
 
 def validate_finding_coordinates(
     finding: AuditFinding,
@@ -73,49 +91,64 @@ def validate_finding_coordinates(
     GitHub API rejects review comments with 422 Unprocessable Entity if the line
     is outside the modified diff hunks. This validator verifies the coordinates.
 
+    Supports both RIGHT side (added/modified lines) and LEFT side (deleted lines/files).
+    If line is in left_line_index (deleted line), anchor with side="LEFT", start_side="LEFT".
+
     Returns:
         dict with coordinate keys (`path`, `line`, `side`, optional `start_line`, `start_side`)
         or None if invalid.
     """
     file_path = sanitize_output_path(finding.file_path)
-    lines_in_diff = grounding.line_index.get(file_path)
-    if not lines_in_diff:
+    lines_in_diff = grounding.line_index.get(file_path, set())
+    left_lines_in_diff = getattr(grounding, "left_line_index", {}).get(file_path, set())
+
+    if not lines_in_diff and not left_lines_in_diff:
         return None
 
-    target_line: Optional[int] = None
-    # Prefer line_end as the anchor if it is in the diff hunk
-    if finding.line_end in lines_in_diff:
-        target_line = finding.line_end
-    elif finding.line_start in lines_in_diff:
-        target_line = finding.line_start
-    else:
-        # Check if any line in the range [line_start, line_end] is present in diff
-        for line_num in range(finding.line_start, finding.line_end + 1):
-            if line_num in lines_in_diff:
-                target_line = line_num
-                break
+    def _resolve_coords(target_lines: set[int], side_name: str) -> Optional[dict[str, Any]]:
+        target_line: Optional[int] = None
+        if finding.line_end in target_lines:
+            target_line = finding.line_end
+        elif finding.line_start in target_lines:
+            target_line = finding.line_start
+        else:
+            for line_num in range(finding.line_start, finding.line_end + 1):
+                if line_num in target_lines:
+                    target_line = line_num
+                    break
+        if target_line is None:
+            return None
+        coords: dict[str, Any] = {
+            "path": file_path,
+            "line": target_line,
+            "side": side_name,
+        }
+        if finding.line_start < target_line and finding.line_start in target_lines:
+            coords["start_line"] = finding.line_start
+            coords["start_side"] = side_name
+        return coords
 
-    if target_line is None:
-        return None
+    finding_side = str(getattr(finding, "side", "") or "").upper()
+    if finding_side == "LEFT":
+        return _resolve_coords(left_lines_in_diff, "LEFT")
+    if finding_side == "RIGHT":
+        return _resolve_coords(lines_in_diff, "RIGHT")
 
-    coords: dict[str, Any] = {
-        "path": file_path,
-        "line": target_line,
-        "side": "RIGHT",
-    }
+    # When finding.side is not explicitly set: check RIGHT coverage first
+    # so added/new lines matching deleted line numbers are not wrongly anchored LEFT.
+    right_coords = _resolve_coords(lines_in_diff, "RIGHT")
+    if right_coords is not None:
+        return right_coords
 
-    # If this is a multi-line finding and start_line is also in the diff hunk
-    if finding.line_start < target_line and finding.line_start in lines_in_diff:
-        coords["start_line"] = finding.line_start
-        coords["start_side"] = "RIGHT"
-
-    return coords
+    # Fall back to LEFT anchoring if not covered on RIGHT
+    return _resolve_coords(left_lines_in_diff, "LEFT")
 
 
 def format_inline_comment_body(
     finding: AuditFinding,
     *,
     is_informational: bool = False,
+    side: str = "RIGHT",
 ) -> str:
     """Format markdown content for an inline GitHub review comment."""
     severity_icon = {
@@ -161,31 +194,44 @@ def format_inline_comment_body(
         clean_fix = redact_sensitive_text(finding.suggested_fix).strip()
         if clean_fix:
             bounded_fix = sanitize_output_text(clean_fix, MAX_SUGGESTED_FIX_CHARS)
+            unfenced_fix = bounded_fix
             # Strip outer code fences if present
-            if bounded_fix.startswith("```"):
-                lines_fix = bounded_fix.splitlines()
+            if unfenced_fix.startswith("```"):
+                lines_fix = unfenced_fix.splitlines()
                 if (
                     len(lines_fix) >= 2
                     and lines_fix[0].startswith("```")
                     and lines_fix[-1].strip() == "```"
                 ):
-                    bounded_fix = "\n".join(lines_fix[1:-1]).strip()
+                    unfenced_fix = "\n".join(lines_fix[1:-1]).strip()
+
             lines.append("")
             lines.append("**Suggested Remediation:**")
-            # A full unified diff (`diff --git`, hunk headers, ---/+++ file
-            # lines) is never valid ```suggestion content — GitHub applies a
-            # suggestion block verbatim, so a diff pasted into one corrupts the
-            # file. Render diff-shaped fixes as ```diff instead. The `--- `
-            # match requires a trailing space plus path (diff header form), so
-            # a bare YAML `---` document marker is not misclassified as a diff.
-            stripped_fix = bounded_fix.lstrip()
-            is_unified_diff = stripped_fix.startswith(
-                ("diff --git", "@@ ", "--- ", "+++ ")
-            )
-            if is_unified_diff:
-                lines.append(f"```diff\n{bounded_fix}\n```")
+
+            effective_side = str(side or getattr(finding, "side", "RIGHT") or "RIGHT").upper()
+            if should_show_suggested_code(finding, unfenced_fix):
+                stripped_fix = unfenced_fix.lstrip()
+                is_unified_diff = stripped_fix.startswith(
+                    ("diff --git", "@@ ", "--- ", "+++ ")
+                )
+                if effective_side == "LEFT":
+                    # On deleted lines (LEFT side), GitHub does NOT support ```suggestion blocks.
+                    # Emit diff instead.
+                    lines.append(f"```diff\n{unfenced_fix}\n```")
+                elif is_unified_diff:
+                    lines.append(f"```diff\n{unfenced_fix}\n```")
+                else:
+                    lines.append(f"```suggestion\n{unfenced_fix}\n```")
             else:
-                lines.append(f"```suggestion\n{bounded_fix}\n```")
+                # Dropped suggested code block per display rule; keep remediation description
+                is_patch_shape = (
+                    unfenced_fix.startswith(("diff --git", "@@ ", "--- ", "+++ "))
+                    or any(line.startswith(("+", "-", "@@")) for line in unfenced_fix.splitlines())
+                )
+                if not is_patch_shape and len(unfenced_fix.splitlines()) < 10:
+                    lines.append(unfenced_fix)
+                else:
+                    lines.append("Manual remediation recommended (change exceeds single-file/simple suggestion threshold; see review summary).")
 
     lines.append("")
     lines.append("---")
@@ -199,7 +245,6 @@ def format_finding_comment_body(
 ) -> str:
     """Format markdown content for a separate GitHub review comment for a finding."""
     if isinstance(finding, AuditFinding):
-        severity = finding.severity
         title = finding.title
         file_path = finding.file_path
         line_start = finding.line_start
@@ -208,7 +253,6 @@ def format_finding_comment_body(
         suggested_fix = finding.suggested_fix
         finding_id = finding.id
     else:
-        severity = str(finding.get("severity", "NOTE"))
         title = str(finding.get("title", "Audit Finding"))
         file_path = str(finding.get("file_path", "unknown"))
         try:
@@ -223,10 +267,11 @@ def format_finding_comment_body(
         suggested_fix = finding.get("suggested_fix")
         finding_id = str(finding.get("id", ""))
 
-    sev_upper = severity.upper()
-    if sev_upper == "BLOCKER":
+    bucket = classify_finding_bucket(finding)
+
+    if bucket == "must_fix":
         badge = "⛔ Must-Fix:"
-    elif sev_upper == "WARNING":
+    elif bucket == "should_fix":
         badge = "⚠️ Should-Fix:"
     else:
         badge = "💡 Suggestion:"
@@ -310,6 +355,15 @@ def build_inline_review_comments(
     suppressed_count = 0
 
     for finding in findings:
+        # Explicitly skip non-commentable, PR-level findings, or multi-file / cross-file findings
+        if (
+            getattr(finding, "non_commentable", False)
+            or getattr(finding, "line_start", 1) == 0
+            or is_cross_file_finding(finding)
+        ):
+            suppressed_count += 1
+            continue
+
         # Confidence check
         if finding.confidence < min_confidence:
             if not allow_informational:
@@ -336,7 +390,11 @@ def build_inline_review_comments(
                 coords["start_line"] = finding.line_start
                 coords["start_side"] = "RIGHT"
 
-        body = format_inline_comment_body(finding, is_informational=is_informational)
+        body = format_inline_comment_body(
+            finding,
+            is_informational=is_informational,
+            side=coords.get("side", "RIGHT"),
+        )
         coords["body"] = body
         comments.append(coords)
 
@@ -411,6 +469,117 @@ async def publish_finding_comments(
     return responses
 
 
+
+
+
+def update_dossier_meta(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    review_id: Optional[int | str],
+    active_findings: Sequence[Any],
+    resolved_count: int = 0,
+    dossier_dir: Optional[str] = None,
+    workspace: Optional[str] = None,
+    audit_id: str = "",
+    posted_counts: Optional[Mapping[str, int]] = None,
+) -> None:
+    """Persist or update PR review state in {dossier_dir}/meta.json.
+
+    When ``dossier_dir`` is omitted the state is written under a durable
+    workspace directory instead of the OS temp dir, so it survives process
+    restarts and tempdir cleanup. The fallback location is
+    ``{workspace or cwd}/.haunter-dossier/{owner}_{repo}/PR-{pr_number}``;
+    pass ``workspace`` to override the base directory (or set the
+    ``HAUNTER_DOSSIER_DIR`` environment variable).
+    """
+    try:
+        import json
+        import os
+        from pathlib import Path
+
+        safe_repo = f"{owner}_{repo}".replace("/", "_") if owner and repo else "repo"
+        if dossier_dir:
+            target_dir = Path(dossier_dir)
+        elif workspace:
+            target_dir = Path(workspace) / safe_repo / f"PR-{pr_number}"
+        else:
+            base = os.environ.get("HAUNTER_DOSSIER_DIR")
+            if base:
+                root = Path(base)
+            else:
+                root = Path.cwd() / ".haunter-dossier"
+            target_dir = root / safe_repo / f"PR-{pr_number}"
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        meta_file = target_dir / "meta.json"
+
+        serialized_findings = []
+        for f in active_findings:
+            if hasattr(f, "to_report_dict"):
+                serialized_findings.append(f.to_report_dict())
+            elif isinstance(f, dict):
+                serialized_findings.append(f)
+            elif hasattr(f, "__dict__"):
+                serialized_findings.append({k: v for k, v in f.__dict__.items() if not k.startswith("_")})
+
+        meta_data: dict[str, Any] = {
+            "last_reviewed_sha": head_sha,
+            "review_id": review_id,
+            "active_findings": serialized_findings,
+            "resolved_findings_count": resolved_count,
+            "last_audit_id": audit_id,
+        }
+        if posted_counts is not None:
+            meta_data["posted_counts"] = dict(posted_counts)
+
+        meta_file.write_text(json.dumps(meta_data, indent=2), encoding="utf-8")
+        logger.info("Updated dossier meta.json at %s (review_id=%s, sha=%s)", meta_file, review_id, head_sha)
+    except Exception as exc:
+        logger.warning("Could not update dossier meta.json: %s", exc)
+
+
+def load_dossier_meta(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    dossier_dir: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Load PR review state from {dossier_dir}/meta.json if present.
+
+    Uses the same durable fallback location as :func:`update_dossier_meta` when
+    ``dossier_dir`` is omitted.
+    """
+    try:
+        import json
+        import os
+        from pathlib import Path
+
+        safe_repo = f"{owner}_{repo}".replace("/", "_") if owner and repo else "repo"
+        if dossier_dir:
+            target_dir = Path(dossier_dir)
+        elif workspace:
+            target_dir = Path(workspace) / safe_repo / f"PR-{pr_number}"
+        else:
+            base = os.environ.get("HAUNTER_DOSSIER_DIR")
+            if base:
+                root = Path(base)
+            else:
+                root = Path.cwd() / ".haunter-dossier"
+            target_dir = root / safe_repo / f"PR-{pr_number}"
+
+        meta_file = target_dir / "meta.json"
+        if meta_file.is_file():
+            return json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Could not load dossier meta.json: %s", exc)
+    return None
+
+
 async def publish_audit_review(
     *,
     result: AuditResult,
@@ -426,6 +595,11 @@ async def publish_audit_review(
     allow_global_token: bool = False,
     raise_on_error: bool = False,
     post_finding_comments: bool = False,
+    review_id: Optional[int | str] = None,
+    resolved_since_last_review: Optional[int] = None,
+    new_findings: Optional[Sequence[Any]] = None,
+    active_findings: Optional[Sequence[Any]] = None,
+    dossier_dir: Optional[str] = None,
 ) -> PublishResult:
     """Publish an audit report to GitHub as a PR Review or Commit Comment.
 
@@ -484,6 +658,33 @@ async def publish_audit_review(
             error="publish_allowed is False",
         )
 
+    if new_findings is not None:
+        converted_new: list[AuditFinding] = []
+        for f in new_findings:
+            if isinstance(f, AuditFinding):
+                converted_new.append(f)
+            elif isinstance(f, Mapping):
+                converted_new.append(
+                    AuditFinding(
+                        id=str(f.get("id") or ""),
+                        file_path=str(f.get("file_path") or ""),
+                        line_start=int(f.get("line_start") or 1),
+                        line_end=int(f.get("line_end") or 1),
+                        perspective=f.get("perspective", "code_quality"),
+                        severity=f.get("severity", "LOW"),
+                        category=str(f.get("category") or ""),
+                        title=str(f.get("title") or ""),
+                        description=str(f.get("description") or ""),
+                        suggested_fix=f.get("suggested_fix"),
+                        confidence=int(f.get("confidence") or 0),
+                        informational_only=bool(f.get("informational_only", False)),
+                        priority_bucket=f.get("priority_bucket"),
+                    )
+                )
+            else:
+                converted_new.append(f)
+        new_findings = converted_new
+
     resolved_pr_number = pr_number
     target_type: Literal["pull_request_review", "commit_comment"] = (
         "pull_request_review" if resolved_pr_number is not None else "commit_comment"
@@ -498,53 +699,160 @@ async def publish_audit_review(
             # Determine review event: COMMENT vs REQUEST_CHANGES
             if effective_allowed and request_changes_on_blocker:
                 has_confident_blocker = any(
-                    f.severity == "BLOCKER"
-                    and f.confidence >= INFORMATIONAL_CONFIDENCE_THRESHOLD
+                    classify_finding_bucket(f, overall_confidence=result.confidence) == "must_fix"
+                    and getattr(f, "confidence", 100) >= INFORMATIONAL_CONFIDENCE_THRESHOLD
                     for f in result.findings
                 )
                 event = "REQUEST_CHANGES" if has_confident_blocker else "COMMENT"
             else:
                 event = "COMMENT"
 
-            # Determine inline comments based on confidence threshold
+            # Determine inline comments based on confidence threshold and scoped posting policy
             if effective_allowed:
-                comments, suppressed_count = build_inline_review_comments(
-                    result.findings,
+                commentable_findings = [
+                    f
+                    for f in result.findings
+                    if not (getattr(f, "non_commentable", False) or getattr(f, "line_start", 1) == 0)
+                ]
+                scoped_findings, posted_counts = select_scoped_findings(
+                    commentable_findings, limit=8
+                )
+                comments, _ = build_inline_review_comments(
+                    scoped_findings,
                     diff_text=diff_text,
                     min_confidence=INFORMATIONAL_CONFIDENCE_THRESHOLD,
                     allow_informational=allow_informational_inline,
                 )
+                suppressed_count = len(result.findings) - len(comments)
             else:
+                scoped_findings = []
+                posted_counts = {"C": 0, "H": 0, "M": 0, "L": 0, "I": 0}
                 comments = []
                 suppressed_count = len(result.findings)
 
-            review_body = _bound_github_body(
-                result.report_markdown, result.executive_summary
+            review_body = result.report_markdown or result.executive_summary
+            review_body = swap_report_footer(
+                review_body,
+                resolved_since_last_review=resolved_since_last_review,
+                posted_counts=posted_counts if effective_allowed else {},
             )
+            review_body = _bound_github_body(review_body)
 
-            resp = await github_client.create_pr_review(
+            if review_id is not None:
+                # In-place update of existing PR review body
+                resp = await github_client.update_pr_review(
+                    owner=resolved_owner,
+                    repo=resolved_repo,
+                    pr_number=resolved_pr_number,
+                    review_id=review_id,
+                    body=review_body,
+                    token=token,
+                    allow_global_token=allow_global_token,
+                )
+                logger.info(
+                    "audit review_updated in-place audit_id=%s pr=%d review_id=%s resolved_since_last=%s",
+                    result.audit_id,
+                    resolved_pr_number,
+                    review_id,
+                    resolved_since_last_review,
+                )
+                # Post inline comments ONLY for brand-new findings, scoped via select_scoped_findings
+                comments = []
+                suppressed_count = 0
+                if effective_allowed and new_findings:
+                    commentable_new = [
+                        f
+                        for f in new_findings
+                        if not (
+                            (isinstance(f, Mapping) and (f.get("non_commentable") or f.get("line_start") == 0))
+                            or getattr(f, "non_commentable", False)
+                            or getattr(f, "line_start", 1) == 0
+                        )
+                    ]
+                    scoped_new, _ = select_scoped_findings(commentable_new, limit=8)
+                    comments, _ = build_inline_review_comments(
+                        scoped_new,
+                        diff_text=diff_text,
+                        min_confidence=INFORMATIONAL_CONFIDENCE_THRESHOLD,
+                        allow_informational=allow_informational_inline,
+                    )
+                    suppressed_count = len(new_findings) - len(comments)
+                    if comments:
+                        await github_client.create_pr_review(
+                            owner=resolved_owner,
+                            repo=resolved_repo,
+                            pr_number=resolved_pr_number,
+                            commit_sha=resolved_head_sha,
+                            body="",
+                            comments=comments,
+                            event="COMMENT",
+                            token=token,
+                            allow_global_token=allow_global_token,
+                        )
+            else:
+                resp = await github_client.create_pr_review(
+                    owner=resolved_owner,
+                    repo=resolved_repo,
+                    pr_number=resolved_pr_number,
+                    commit_sha=resolved_head_sha,
+                    body=review_body,
+                    comments=comments,
+                    event=event,
+                    token=token,
+                    allow_global_token=allow_global_token,
+                )
+                logger.info(
+                    "audit review_published audit_id=%s pr=%d comments=%d suppressed=%d event=%s",
+                    result.audit_id,
+                    resolved_pr_number,
+                    len(comments),
+                    suppressed_count,
+                    event,
+                )
+
+            final_review_id = review_id or (resp.get("id") if isinstance(resp, dict) else None)
+            findings_for_meta = active_findings if active_findings is not None else result.findings
+            update_dossier_meta(
                 owner=resolved_owner,
                 repo=resolved_repo,
                 pr_number=resolved_pr_number,
-                commit_sha=resolved_head_sha,
-                body=review_body,
-                comments=comments,
-                event=event,
-                token=token,
-                allow_global_token=allow_global_token,
+                head_sha=resolved_head_sha,
+                review_id=final_review_id,
+                active_findings=findings_for_meta,
+                resolved_count=resolved_since_last_review or 0,
+                dossier_dir=dossier_dir,
+                audit_id=result.audit_id,
+                posted_counts=posted_counts,
             )
-            logger.info(
-                "audit review_published audit_id=%s pr=%d comments=%d suppressed=%d event=%s",
-                result.audit_id,
-                resolved_pr_number,
-                len(comments),
-                suppressed_count,
-                event,
-            )
+
             finding_comments_resps: list[dict[str, Any]] = []
             if post_finding_comments and effective_allowed:
+                findings_to_post = new_findings if (review_id is not None and new_findings is not None) else result.findings
+                commentable_to_post = [
+                    f
+                    for f in findings_to_post
+                    if not (
+                        (isinstance(f, Mapping) and (f.get("non_commentable") or f.get("line_start") == 0))
+                        or getattr(f, "non_commentable", False)
+                        or getattr(f, "line_start", 1) == 0
+                    )
+                ]
+                scoped_to_post, _ = select_scoped_findings(commentable_to_post, limit=8)
+                temp_result = AuditResult(
+                    audit_id=result.audit_id,
+                    audit_type=result.audit_type,
+                    repo_full_name=result.repo_full_name,
+                    target_label=result.target_label,
+                    engine=result.engine,
+                    executive_summary=result.executive_summary,
+                    findings=scoped_to_post,
+                    confidence=result.confidence,
+                    status=result.status,
+                    remediation_diff=result.remediation_diff,
+                    report_markdown=result.report_markdown,
+                )
                 finding_comments_resps = await publish_finding_comments(
-                    result=result,
+                    result=temp_result,
                     owner=resolved_owner,
                     repo=resolved_repo,
                     pr_number=resolved_pr_number,
@@ -561,6 +869,7 @@ async def publish_audit_review(
                 event=event,
                 response=resp,
                 finding_comments=finding_comments_resps,
+                posted_counts=posted_counts,
             )
         else:
             # Commit Context (fallback for push events / commit audits)
