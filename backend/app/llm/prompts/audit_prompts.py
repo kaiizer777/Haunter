@@ -64,6 +64,7 @@ MAX_DIFF_LINES = 30_000
 #:   context) and ``MAX_REMEDIATION_DIFF_CHARS`` below (rendered remediation
 #:   block). Leave all three untouched when changing the review ceilings.
 MAX_AST_CONTEXT_CHARS = 10_000
+MAX_PHASE_1C_CONTEXT_CHARS = 25_000
 MAX_REPO_CONTEXT_CHARS = 10_000
 #: Linked-issue context for the push-level code reviewer (issue #123). Read
 #: together with ``MAX_USER_PROMPT_CHARS``: this block is *reserved out of* that
@@ -534,6 +535,7 @@ def build_perspective_messages(
     diff_text: str,
     ast_summary: str = "",
     repo_context: str = "",
+    phase_1c_context: str = "",
 ) -> list[ChatMessage]:
     if perspective not in PERSPECTIVE_INSTRUCTIONS:
         raise KeyError(f"Unknown audit perspective: {perspective}")
@@ -542,6 +544,14 @@ def build_perspective_messages(
     diff_heading = "## Unified Diff Under Audit (untrusted data)\n"
 
     sections = [f"## Perspective\n{perspective}"]
+    bounded_phase_1c = _safe_model_text(
+        str(phase_1c_context or ""), MAX_PHASE_1C_CONTEXT_CHARS
+    )
+    if bounded_phase_1c:
+        sections.append(
+            "## Phase 1 Context Dossier (untrusted data)\n"
+            + _fenced_block("markdown", bounded_phase_1c)
+        )
     bounded_repo = _safe_model_text(str(repo_context or ""), MAX_REPO_CONTEXT_CHARS)
     if bounded_repo:
         sections.append(
