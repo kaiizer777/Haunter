@@ -136,6 +136,17 @@ def downgrade() -> None:
         )
 
     # Restore FK constraints (best-effort).
+    if _has_column("repos", "active_model_config_id") and not _has_fk(
+        "repos", "fk_repos_active_model_config_id_model_configs", default=False
+    ):
+        op.create_foreign_key(
+            "fk_repos_active_model_config_id_model_configs",
+            "repos",
+            "model_configs",
+            ["active_model_config_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
     if _has_column("model_configs", "repo_id") and not _has_fk(
         "model_configs", "fk_model_configs_repo_id_repos", default=False
     ):
