@@ -77,6 +77,19 @@ From `backend/`:
 
 Write deterministic, isolated tests for new logic + edge cases. If you didn't run it, you didn't do it.
 
+## Local PR review trigger
+
+Local dev has no auto-trigger — GitHub never reaches localhost. To run a PR review locally, trigger the real production ingress manually:
+
+```sh
+cd backend
+python scripts/trigger_local_review.py --repo <owner>/<name> --pr <N> --seed-repo
+```
+
+- `GITHUB_WEBHOOK_SECRET` in `backend/.env` must match the value the server uses (any non-empty value works locally).
+- Repeat runs need a fresh commit SHA (dedup guard blocks identical `repo+sha+pr`); the script generates one by default, or pass `--sha`.
+- `status="queued"` means the review was enqueued — the pipeline runs in `BackgroundTasks` after the HTTP response, so check the review status afterwards.
+
 ## Workflow: branches and commits
 
 1. Open or pick an issue first. One focused PR per issue — NEVER flood PRs with unrelated changes.
