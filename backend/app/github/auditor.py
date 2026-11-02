@@ -9,7 +9,10 @@ from typing import Any
 
 import httpx
 
-from app.github.pr import _resolve_write_credentials
+from app.github.pr import (
+    _refresh_ssm_credentials_after_auth_failure,
+    _resolve_write_credentials,
+)
 
 GITHUB_API_BASE = "https://api.github.com"
 TOKEN_TTL_SECONDS = 50 * 60
@@ -31,6 +34,10 @@ _TOKEN_CACHE: dict[int, tuple[str, float]] = {}
 
 class AuditorCredentialError(RuntimeError):
     pass
+
+
+class AuditorCredentialAuthError(AuditorCredentialError):
+    """GitHub rejected the App JWT (401/403) — the key may be stale."""
 
 
 class AuditorCredentialResponseTooLargeError(AuditorCredentialError):
@@ -112,7 +119,9 @@ async def _read_bounded_credential_response(
     try:
         async with client.stream("POST", url, headers=headers) as response:
             if response.status_code in (401, 403):
-                raise AuditorCredentialError("auditor GitHub App authentication failed")
+                raise AuditorCredentialAuthError(
+                    "auditor GitHub App authentication failed"
+                )
             if response.is_error:
                 raise AuditorCredentialError("auditor credential request failed")
             declared = response.headers.get("content-length")
@@ -140,7 +149,7 @@ async def _read_bounded_credential_response(
         ) from exc
 
 
-async def _resolve_app_credentials() -> tuple[str, str]:
+async def _resolve_app_credentials() -> tuple[str, str, str]:
     """Resolve the single GitHub App pair used to mint auditor tokens.
 
     Auditor Mode shares the one App that also owns the write installation
@@ -152,6 +161,10 @@ async def _resolve_app_credentials() -> tuple[str, str]:
     The write token path falls back to that PAT for dev convenience; the
     auditor must fail closed instead, so it calls the resolver (env pair →
     SSM PEM → ``none``) and never the write token path itself.
+
+    Returns:
+        ``(app_id, private_key, source)`` where ``source`` is
+        ``"github_app"``, ``"github_app_ssm"``, or ``"none"``. Never logged.
 
     Raises:
         AuditorCredentialError: When no usable pair is configured, or the
@@ -171,25 +184,15 @@ async def _resolve_app_credentials() -> tuple[str, str]:
             "(set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY or "
             "GITHUB_APP_PRIVATE_KEY_SSM_PATH)"
         )
-    return app_id, private_key
+    return app_id, private_key, source
 
 
-async def get_auditor_installation_token(repo: Any) -> str:
-    install_id = getattr(repo, "auditor_github_install_id", None)
-    if (
-        isinstance(install_id, bool)
-        or not isinstance(install_id, int)
-        or install_id <= 0
-    ):
-        raise AuditorCredentialError("repository has no auditor GitHub installation")
-    app_id, private_key = await _resolve_app_credentials()
-
-    cached = _TOKEN_CACHE.get(install_id)
-    if cached is not None:
-        token, expires_at = cached
-        if time.monotonic() < expires_at:
-            return token
-
+async def _request_installation_token(
+    app_id: str,
+    private_key: str,
+    install_id: int,
+) -> str:
+    """Mint one installation token for ``install_id``. Nothing is cached here."""
     try:
         jwt_token = _build_read_only_jwt(app_id.strip(), private_key)
     except AuditorCredentialError:
@@ -225,5 +228,40 @@ async def get_auditor_installation_token(repo: Any) -> str:
     if not isinstance(token, str) or not token.strip():
         raise AuditorCredentialError("auditor credential response omitted token")
     _validate_read_only_permissions(data)
+    return token
+
+
+async def get_auditor_installation_token(repo: Any) -> str:
+    install_id = getattr(repo, "auditor_github_install_id", None)
+    if (
+        isinstance(install_id, bool)
+        or not isinstance(install_id, int)
+        or install_id <= 0
+    ):
+        raise AuditorCredentialError("repository has no auditor GitHub installation")
+
+    # Cache first: a still-valid token must not be lost to a credential store
+    # outage (SSM) that only matters when a token actually has to be minted.
+    cached = _TOKEN_CACHE.get(install_id)
+    if cached is not None:
+        token, expires_at = cached
+        if time.monotonic() < expires_at:
+            return token
+
+    app_id, private_key, source = await _resolve_app_credentials()
+    try:
+        token = await _request_installation_token(app_id, private_key, install_id)
+    except AuditorCredentialAuthError:
+        # A warm Lambda keeps the SSM PEM for _PEM_CACHE_TTL_SECONDS, so a key
+        # rotated in place is rejected by GitHub until that entry expires.
+        # Mirror the write path: drop the cached PEM, reload from SSM, and
+        # retry exactly once. Every other source (env key, failed refresh)
+        # stays fail-closed.
+        retry_id, retry_key, retry_source = (
+            await _refresh_ssm_credentials_after_auth_failure(source)
+        )
+        if retry_source == "none" or not retry_id or not retry_key:
+            raise
+        token = await _request_installation_token(retry_id, retry_key, install_id)
     _TOKEN_CACHE[install_id] = (token, time.monotonic() + TOKEN_TTL_SECONDS)
     return token

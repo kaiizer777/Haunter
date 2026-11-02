@@ -2760,6 +2760,171 @@ async def test_auditor_provider_maps_ssm_failure_to_a_typed_credential_error():
 
 
 @pytest.mark.asyncio
+async def test_auditor_cached_token_short_circuits_before_credential_resolution():
+    """A still-valid cached token must survive a transient SSM outage."""
+    from app.github import auditor as auditor_credentials
+
+    with (
+        patch("app.github.pr.settings.github_app_id", "5109915"),
+        patch("app.github.pr.settings.github_app_private_key", None),
+        patch(
+            "app.github.pr.settings.github_app_private_key_ssm_path",
+            "/haunter/GITHUB_APP_PRIVATE_KEY",
+        ),
+        patch(
+            "app.github.pr._load_pem_from_ssm",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("ssm down"),
+        ) as mock_ssm,
+        patch(
+            "app.github.auditor.httpx.AsyncClient",
+            side_effect=AssertionError("a cache hit must not mint a token"),
+        ),
+        patch.dict(
+            auditor_credentials._TOKEN_CACHE,
+            {55: ("cached-installation-token", time.monotonic() + 60)},
+            clear=True,
+        ),
+    ):
+        token = await auditor_credentials.get_auditor_installation_token(
+            SimpleNamespace(auditor_github_install_id=55)
+        )
+
+    assert token == "cached-installation-token"
+    assert not mock_ssm.called
+
+
+@pytest.mark.asyncio
+async def test_auditor_invalidates_rotated_ssm_pem_and_retries_once():
+    """A rotated SSM key must not break audits until the 10-min PEM TTL."""
+    from app.github import auditor as auditor_credentials
+
+    ssm_path = "/haunter/GITHUB_APP_PRIVATE_KEY"
+    body = json.dumps(
+        {
+            "token": "fresh-installation-token",
+            "permissions": {
+                "contents": "read",
+                "pull_requests": "read",
+                "metadata": "read",
+            },
+        }
+    ).encode()
+    rejected = _credential_stream_client(b"", status_code=401)
+    accepted = _credential_stream_client(body)
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.stream = MagicMock(
+        side_effect=[rejected.stream.return_value, accepted.stream.return_value]
+    )
+
+    with (
+        patch("app.github.pr.settings.github_app_id", "5109915"),
+        patch("app.github.pr.settings.github_app_private_key", None),
+        patch(
+            "app.github.pr.settings.github_app_private_key_ssm_path",
+            ssm_path,
+        ),
+        patch(
+            "app.github.pr._load_pem_from_ssm",
+            new_callable=AsyncMock,
+            side_effect=["stale-pem", "fresh-pem"],
+        ) as mock_ssm,
+        patch("app.github.pr._invalidate_pem_cache") as mock_invalidate,
+        patch(
+            "app.github.auditor._build_read_only_jwt",
+            side_effect=lambda _app_id, pem: f"jwt-for-{pem}",
+        ),
+        patch("app.github.auditor.httpx.AsyncClient", return_value=client),
+        patch.dict(auditor_credentials._TOKEN_CACHE, {}, clear=True),
+    ):
+        token = await auditor_credentials.get_auditor_installation_token(
+            SimpleNamespace(auditor_github_install_id=55)
+        )
+        assert auditor_credentials._TOKEN_CACHE[55][0] == "fresh-installation-token"
+
+    assert token == "fresh-installation-token"
+    # The cached PEM was dropped and reloaded from SSM exactly once.
+    mock_invalidate.assert_called_once_with(ssm_path)
+    assert mock_ssm.await_count == 2
+    # The retry re-signed the JWT with the reloaded key, not the stale one.
+    assert [
+        call.kwargs["headers"]["Authorization"]
+        for call in client.stream.call_args_list
+    ] == ["Bearer jwt-for-stale-pem", "Bearer jwt-for-fresh-pem"]
+
+
+@pytest.mark.asyncio
+async def test_auditor_auth_failure_retries_once_then_fails_closed():
+    """A second 401 is not retried again and no token is cached."""
+    from app.github import auditor as auditor_credentials
+
+    rejected = _credential_stream_client(b"", status_code=403)
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.stream = MagicMock(return_value=rejected.stream.return_value)
+
+    with (
+        patch("app.github.pr.settings.github_app_id", "5109915"),
+        patch("app.github.pr.settings.github_app_private_key", None),
+        patch(
+            "app.github.pr.settings.github_app_private_key_ssm_path",
+            "/haunter/GITHUB_APP_PRIVATE_KEY",
+        ),
+        patch(
+            "app.github.pr._load_pem_from_ssm",
+            new_callable=AsyncMock,
+            return_value="rotated-pem",
+        ) as mock_ssm,
+        patch(
+            "app.github.auditor._build_read_only_jwt",
+            return_value="read-only-app-jwt",
+        ),
+        patch("app.github.auditor.httpx.AsyncClient", return_value=client),
+        patch.dict(auditor_credentials._TOKEN_CACHE, {}, clear=True),
+        pytest.raises(auditor_credentials.AuditorCredentialError),
+    ):
+        await auditor_credentials.get_auditor_installation_token(
+            SimpleNamespace(auditor_github_install_id=55)
+        )
+
+    assert client.stream.call_count == 2
+    assert mock_ssm.await_count == 2
+    assert auditor_credentials._TOKEN_CACHE == {}
+
+
+@pytest.mark.asyncio
+async def test_auditor_env_key_auth_failure_does_not_retry():
+    """An env PEM cannot be rotated in-process, so a 401 fails immediately."""
+    from app.github import auditor as auditor_credentials
+
+    client = _credential_stream_client(b"", status_code=401)
+
+    with (
+        patch("app.github.pr.settings.github_app_id", "5109915"),
+        patch(
+            "app.github.pr.settings.github_app_private_key",
+            "single-app-private-key",
+        ),
+        patch(
+            "app.github.auditor._build_read_only_jwt",
+            return_value="read-only-app-jwt",
+        ),
+        patch("app.github.auditor.httpx.AsyncClient", return_value=client),
+        patch.dict(auditor_credentials._TOKEN_CACHE, {}, clear=True),
+        pytest.raises(auditor_credentials.AuditorCredentialError),
+    ):
+        await auditor_credentials.get_auditor_installation_token(
+            SimpleNamespace(auditor_github_install_id=55)
+        )
+
+    assert client.stream.call_count == 1
+    assert auditor_credentials._TOKEN_CACHE == {}
+
+
+@pytest.mark.asyncio
 async def test_auditor_provider_never_falls_back_to_the_global_pat():
     """A configured PAT must never stand in for the App when minting tokens."""
     from app.github import auditor as auditor_credentials
