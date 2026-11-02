@@ -314,6 +314,11 @@ def build_inline_review_comments(
     suppressed_count = 0
 
     for finding in findings:
+        # Explicitly skip non-commentable or PR-level findings
+        if getattr(finding, "non_commentable", False) or getattr(finding, "line_start", 1) == 0:
+            suppressed_count += 1
+            continue
+
         # Confidence check
         if finding.confidence < min_confidence:
             if not allow_informational:
@@ -626,8 +631,13 @@ async def publish_audit_review(
 
             # Determine inline comments based on confidence threshold and scoped posting policy
             if effective_allowed:
+                commentable_findings = [
+                    f
+                    for f in result.findings
+                    if not (getattr(f, "non_commentable", False) or getattr(f, "line_start", 1) == 0)
+                ]
                 scoped_findings, posted_counts = select_scoped_findings(
-                    result.findings, limit=8
+                    commentable_findings, limit=8
                 )
                 comments, _ = build_inline_review_comments(
                     scoped_findings,
@@ -672,7 +682,16 @@ async def publish_audit_review(
                 comments = []
                 suppressed_count = 0
                 if effective_allowed and new_findings:
-                    scoped_new, _ = select_scoped_findings(new_findings, limit=8)
+                    commentable_new = [
+                        f
+                        for f in new_findings
+                        if not (
+                            (isinstance(f, Mapping) and (f.get("non_commentable") or f.get("line_start") == 0))
+                            or getattr(f, "non_commentable", False)
+                            or getattr(f, "line_start", 1) == 0
+                        )
+                    ]
+                    scoped_new, _ = select_scoped_findings(commentable_new, limit=8)
                     comments, _ = build_inline_review_comments(
                         scoped_new,
                         diff_text=diff_text,
@@ -731,7 +750,16 @@ async def publish_audit_review(
             finding_comments_resps: list[dict[str, Any]] = []
             if post_finding_comments and effective_allowed:
                 findings_to_post = new_findings if (review_id is not None and new_findings is not None) else result.findings
-                scoped_to_post, _ = select_scoped_findings(findings_to_post, limit=8)
+                commentable_to_post = [
+                    f
+                    for f in findings_to_post
+                    if not (
+                        (isinstance(f, Mapping) and (f.get("non_commentable") or f.get("line_start") == 0))
+                        or getattr(f, "non_commentable", False)
+                        or getattr(f, "line_start", 1) == 0
+                    )
+                ]
+                scoped_to_post, _ = select_scoped_findings(commentable_to_post, limit=8)
                 temp_result = AuditResult(
                     audit_id=result.audit_id,
                     audit_type=result.audit_type,
