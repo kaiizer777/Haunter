@@ -9,8 +9,6 @@ from typing import Any
 
 import httpx
 
-from app.config import settings
-
 GITHUB_API_BASE = "https://api.github.com"
 TOKEN_TTL_SECONDS = 50 * 60
 # A real installation token plus its permission map is well under 4KB. The cap
@@ -140,23 +138,53 @@ async def _read_bounded_credential_response(
         ) from exc
 
 
+async def _resolve_app_credentials() -> tuple[str, str]:
+    """Resolve the single GitHub App pair used to mint auditor tokens.
+
+    Auditor Mode shares the one App that also owns the write installation
+    (single-app consolidation). The pair is resolved by the write path's
+    resolver so the env PEM and the SSM-backed Lambda PEM
+    (``GITHUB_APP_PRIVATE_KEY_SSM_PATH``) have exactly one implementation.
+
+    This deliberately does NOT consult the global GITHUB_TOKEN dev fallback.
+    The write token path falls back to that PAT for dev convenience; the
+    auditor must fail closed instead, so it calls the resolver (env pair →
+    SSM PEM → ``none``) and never the write token path itself.
+
+    Raises:
+        AuditorCredentialError: When no usable pair is configured, or the
+            SSM-backed PEM cannot be loaded.
+    """
+    # Imported lazily so app.github.auditor stays importable without pulling
+    # in the write module's dependencies (diff validation, schemas).
+    from app.github.pr import _resolve_write_credentials
+
+    try:
+        app_id, private_key, source = await _resolve_write_credentials()
+    except AuditorCredentialError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — every credential fault is typed
+        raise AuditorCredentialError(
+            f"auditor GitHub App credentials are unavailable: {type(exc).__name__}"
+        ) from exc
+    if source == "none" or not app_id or not private_key:
+        raise AuditorCredentialError(
+            "auditor GitHub App credentials are not configured "
+            "(set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY or "
+            "GITHUB_APP_PRIVATE_KEY_SSM_PATH)"
+        )
+    return app_id, private_key
+
+
 async def get_auditor_installation_token(repo: Any) -> str:
     install_id = getattr(repo, "auditor_github_install_id", None)
-    app_id = settings.github_auditor_app_id
-    private_key = settings.github_auditor_app_private_key
     if (
         isinstance(install_id, bool)
         or not isinstance(install_id, int)
         or install_id <= 0
     ):
         raise AuditorCredentialError("repository has no auditor GitHub installation")
-    # A whitespace-only value is an unset secret, not a usable one: it passes a
-    # bare truthiness check and then fails deep inside the JWT signer with a
-    # cryptography error that no caller is typed to handle.
-    if not isinstance(app_id, str) or not app_id.strip():
-        raise AuditorCredentialError("auditor GitHub App ID is not configured")
-    if not isinstance(private_key, str) or not private_key.strip():
-        raise AuditorCredentialError("auditor GitHub App key is not configured")
+    app_id, private_key = await _resolve_app_credentials()
 
     cached = _TOKEN_CACHE.get(install_id)
     if cached is not None:

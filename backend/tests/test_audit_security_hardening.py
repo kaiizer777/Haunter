@@ -719,10 +719,10 @@ class _CredentialPatches(contextlib.AbstractContextManager):
 
     def __init__(self, client: CredentialStreamClient) -> None:
         self._patchers = (
-            patch("app.github.auditor.settings.github_auditor_app_id", "12345"),
+            patch("app.github.pr.settings.github_app_id", "12345"),
             patch(
-                "app.github.auditor.settings.github_auditor_app_private_key",
-                "separate-read-only-key",
+                "app.github.pr.settings.github_app_private_key",
+                "single-app-private-key",
             ),
             patch(
                 "app.github.auditor._build_read_only_jwt",
@@ -868,15 +868,18 @@ async def test_auditor_read_helpers_issue_no_request_without_a_read_only_token()
 
 
 def test_auditor_credential_sources_have_no_personal_access_token_fallback() -> None:
-    """No module on the auditor credential path may resolve the global PAT."""
-    modules = (
-        auditor_credentials,
-        audit_pipeline,
-    )
-    for module in modules:
+    """The auditor shares the App resolver but never the PAT fallback."""
+    for module in (auditor_credentials, audit_pipeline):
         source = inspect.getsource(module)
         assert "settings.github_token" not in source, module.__name__
-        assert "github_pr" not in source, module.__name__
+
+    # Single-app consolidation: the auditor reuses the App credential resolver
+    # (env pair → SSM PEM) instead of owning a second credential pair...
+    source = inspect.getsource(auditor_credentials)
+    assert "_resolve_write_credentials" in source
+    # ...but it must not call the write token path, which is where the
+    # dev-only `settings.github_token` fallback lives.
+    assert "get_installation_token(" not in source
 
 
 @pytest.mark.asyncio
@@ -887,18 +890,19 @@ async def test_auditor_credential_provider_fails_closed_without_configuration() 
                 SimpleNamespace(auditor_github_install_id=install_id)
             )
     for app_id, private_key in (
-        ("", "separate-read-only-key"),
-        (None, "separate-read-only-key"),
+        ("", "single-app-private-key"),
+        (None, "single-app-private-key"),
         ("12345", ""),
         ("12345", "   "),
         ("12345", None),
     ):
         with (
-            patch("app.github.auditor.settings.github_auditor_app_id", app_id),
+            patch("app.github.pr.settings.github_app_id", app_id),
             patch(
-                "app.github.auditor.settings.github_auditor_app_private_key",
+                "app.github.pr.settings.github_app_private_key",
                 private_key,
             ),
+            patch("app.github.pr.settings.github_app_private_key_ssm_path", ""),
             patch(
                 "app.github.auditor.httpx.AsyncClient",
                 side_effect=AssertionError("no request without a configured App"),

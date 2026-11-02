@@ -167,21 +167,19 @@ def _is_configured_str(value: object) -> bool:
 
 def _resolve_app_credentials() -> tuple[str | None, str | None, str]:
     """
-    Resolve the write-capable GitHub App credentials from environment.
+    Resolve the GitHub App credentials from environment.
 
-    ONLY the explicit write-capable pair (``settings.github_app_id`` +
-    ``settings.github_app_private_key``) is accepted here. The read-only
-    auditor App (``settings.github_auditor_app_*``) is NEVER a valid source
-    for write operations — its installation token lacks
-    ``contents:write`` / ``pull_requests:write``, so signing PR writes with
-    it fails at GitHub with 403 while masking the real misconfiguration
-    (a missing write App PEM).
+    Accepts only the single App pair (``settings.github_app_id`` +
+    ``settings.github_app_private_key``). The same App backs PR writes and
+    Auditor Mode reads — there is no separate auditor credential pair since
+    the single-app consolidation. Signing writes with anything else would
+    mask the real misconfiguration (a missing App PEM) behind a GitHub 403.
 
     Both members of the explicit pair must be non-blank; a half-configured
     pair is treated as missing so we never sign with a mismatched id/key
     combination.
 
-    The SSM-backed write key (``settings.github_app_private_key_ssm_path``)
+    The SSM-backed key (``settings.github_app_private_key_ssm_path``)
     is resolved separately by ``_resolve_write_credentials()`` — this
     function stays sync and env-only so non-async callers keep working.
 
@@ -291,7 +289,7 @@ async def _load_pem_from_ssm(ssm_path: str) -> str:
 
 async def _resolve_write_credentials() -> tuple[str | None, str | None, str]:
     """
-    Resolve the write-capable GitHub App credentials for PR write operations.
+    Resolve the single GitHub App credentials used for installation tokens.
 
     Order:
       1. Explicit env pair via ``_resolve_app_credentials()`` (local dev, tests).
@@ -301,8 +299,9 @@ async def _resolve_write_credentials() -> tuple[str | None, str | None, str]:
       3. ``(None, None, "none")`` — the caller falls back to
          ``settings.github_token`` (dev only) or fails closed.
 
-    The read-only auditor App is NEVER consulted here (see
-    ``_resolve_app_credentials``): its token cannot publish writes.
+    This is the only App credential resolver. Auditor Mode reuses it for its
+    installation tokens (see ``app.github.auditor``); the PAT fallback above
+    is applied by the write token path, never by the auditor.
 
     Returns:
         (app_id, private_key, source) where source is one of
@@ -429,9 +428,9 @@ async def get_installation_token(repo: Any) -> str:
 
     Write auth resolves via _resolve_write_credentials(): the explicit
     GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY env pair first, then the same App
-    ID with the PEM loaded from SSM (Lambda path). The read-only auditor App
-    is NEVER used here. Falls back to settings.github_token when no
-    write-capable credentials exist (dev/test convenience only — not for prod).
+    ID with the PEM loaded from SSM (Lambda path). The same App backs Auditor
+    Mode reads. Falls back to settings.github_token when no App credentials
+    exist (dev/test convenience only — not for prod).
 
     Args:
         repo: Repo ORM object — must have .github_install_id set.
@@ -457,8 +456,7 @@ async def get_installation_token(repo: Any) -> str:
         raise GitHubPRError(
             "No GitHub auth configured for PR writes: set GITHUB_APP_ID + "
             "GITHUB_APP_PRIVATE_KEY (or GITHUB_APP_PRIVATE_KEY_SSM_PATH "
-            "pointing at the write App PEM in SSM). The read-only auditor "
-            "App cannot publish writes and is never used here."
+            "pointing at the App PEM in SSM)."
         )
     logger.info("github.pr: resolving installation token with source=%s", app_source)
 
@@ -589,8 +587,7 @@ async def resolve_installation_id(owner: str, repo: str) -> int:
         raise GitHubPRError(
             "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY (or "
             "GITHUB_APP_PRIVATE_KEY_SSM_PATH) must be set to resolve "
-            "the installation id. The read-only auditor App cannot "
-            "publish writes and is never used here."
+            "the installation id."
         )
     logger.info("github.pr: resolving installation id with source=%s", app_source)
 

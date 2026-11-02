@@ -2646,7 +2646,8 @@ def _credential_stream_client(payload: bytes, status_code: int = 201) -> MagicMo
 
 
 @pytest.mark.asyncio
-async def test_read_only_auditor_provider_uses_separate_app_and_allowlists_scopes():
+async def test_auditor_provider_mints_from_the_single_app_pair():
+    """The auditor signs with the one App pair and allowlists scopes."""
     from app.github import auditor as auditor_credentials
 
     repo = SimpleNamespace(auditor_github_install_id=55)
@@ -2663,26 +2664,123 @@ async def test_read_only_auditor_provider_uses_separate_app_and_allowlists_scope
     client = _credential_stream_client(body)
 
     with (
-        patch("app.github.auditor.settings.github_auditor_app_id", "12345"),
+        patch("app.github.pr.settings.github_app_id", "5109915"),
         patch(
-            "app.github.auditor.settings.github_auditor_app_private_key",
-            "separate-read-only-key",
+            "app.github.pr.settings.github_app_private_key",
+            "single-app-private-key",
         ),
         patch(
             "app.github.auditor._build_read_only_jwt",
             return_value="read-only-app-jwt",
-        ),
+        ) as mock_jwt,
         patch("app.github.auditor.httpx.AsyncClient", return_value=client),
         patch.dict(auditor_credentials._TOKEN_CACHE, {}, clear=True),
     ):
         token = await auditor_credentials.get_auditor_installation_token(repo)
 
     assert token == "read-only-installation-token"
+    # The JWT is signed with the main App ID and key, not a second pair.
+    mock_jwt.assert_called_once_with("5109915", "single-app-private-key")
     request = client.stream.call_args
     assert request is not None
     assert request.args[1].endswith("/app/installations/55/access_tokens")
     assert request.kwargs["headers"]["Authorization"] == "Bearer read-only-app-jwt"
     assert request.kwargs["headers"]["X-GitHub-Api-Version"] == "2022-11-28"
+
+
+@pytest.mark.asyncio
+async def test_auditor_provider_uses_ssm_pem_when_env_key_absent():
+    """Lambda path: App ID + SSM PEM path mint the auditor token."""
+    from app.github import auditor as auditor_credentials
+
+    repo = SimpleNamespace(auditor_github_install_id=77)
+    body = json.dumps(
+        {
+            "token": "ssm-installation-token",
+            "permissions": {
+                "contents": "read",
+                "pull_requests": "read",
+                "metadata": "read",
+            },
+        }
+    ).encode()
+    client = _credential_stream_client(body)
+
+    with (
+        patch("app.github.pr.settings.github_app_id", "5109915"),
+        patch("app.github.pr.settings.github_app_private_key", None),
+        patch(
+            "app.github.pr.settings.github_app_private_key_ssm_path",
+            "/haunter/GITHUB_APP_PRIVATE_KEY",
+        ),
+        patch(
+            "app.github.pr._load_pem_from_ssm",
+            new_callable=AsyncMock,
+            return_value="ssm-pem",
+        ) as mock_ssm,
+        patch(
+            "app.github.auditor._build_read_only_jwt", return_value="ssm-jwt"
+        ) as mock_jwt,
+        patch("app.github.auditor.httpx.AsyncClient", return_value=client),
+        patch.dict(auditor_credentials._TOKEN_CACHE, {}, clear=True),
+    ):
+        token = await auditor_credentials.get_auditor_installation_token(repo)
+
+    assert token == "ssm-installation-token"
+    mock_ssm.assert_called_once_with("/haunter/GITHUB_APP_PRIVATE_KEY")
+    mock_jwt.assert_called_once_with("5109915", "ssm-pem")
+
+
+@pytest.mark.asyncio
+async def test_auditor_provider_maps_ssm_failure_to_a_typed_credential_error():
+    """An unreadable SSM PEM stays inside the auditor credential contract."""
+    from app.github import auditor as auditor_credentials
+
+    with (
+        patch("app.github.pr.settings.github_app_id", "5109915"),
+        patch("app.github.pr.settings.github_app_private_key", None),
+        patch(
+            "app.github.pr.settings.github_app_private_key_ssm_path",
+            "/haunter/GITHUB_APP_PRIVATE_KEY",
+        ),
+        patch(
+            "app.github.pr._load_pem_from_ssm",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("ssm down"),
+        ),
+        patch(
+            "app.github.auditor.httpx.AsyncClient",
+            side_effect=AssertionError("no request without a usable key"),
+        ),
+        pytest.raises(auditor_credentials.AuditorCredentialError),
+    ):
+        await auditor_credentials.get_auditor_installation_token(
+            SimpleNamespace(auditor_github_install_id=55)
+        )
+
+
+@pytest.mark.asyncio
+async def test_auditor_provider_never_falls_back_to_the_global_pat():
+    """A configured PAT must never stand in for the App when minting tokens."""
+    from app.github import auditor as auditor_credentials
+
+    with (
+        patch("app.github.pr.settings.github_app_id", None),
+        patch("app.github.pr.settings.github_app_private_key", None),
+        patch("app.github.pr.settings.github_app_private_key_ssm_path", ""),
+        patch("app.github.pr.settings.github_token", "global-pat-value"),
+        patch(
+            "app.github.auditor.httpx.AsyncClient",
+            side_effect=AssertionError("no request without App credentials"),
+        ),
+        patch.dict(auditor_credentials._TOKEN_CACHE, {}, clear=True),
+        pytest.raises(auditor_credentials.AuditorCredentialError),
+    ):
+        await auditor_credentials.get_auditor_installation_token(
+            SimpleNamespace(auditor_github_install_id=55)
+        )
+
+    assert auditor_credentials._TOKEN_CACHE == {}
 
 
 @pytest.mark.asyncio
@@ -2703,10 +2801,10 @@ async def test_read_only_auditor_provider_rejects_oversized_response_stream():
     client = _credential_stream_client(oversized)
 
     with (
-        patch("app.github.auditor.settings.github_auditor_app_id", "12345"),
+        patch("app.github.pr.settings.github_app_id", "12345"),
         patch(
-            "app.github.auditor.settings.github_auditor_app_private_key",
-            "separate-read-only-key",
+            "app.github.pr.settings.github_app_private_key",
+            "single-app-private-key",
         ),
         patch(
             "app.github.auditor._build_read_only_jwt",
@@ -2732,10 +2830,10 @@ async def test_read_only_auditor_provider_rejects_oversized_declared_content_len
     }
 
     with (
-        patch("app.github.auditor.settings.github_auditor_app_id", "12345"),
+        patch("app.github.pr.settings.github_app_id", "12345"),
         patch(
-            "app.github.auditor.settings.github_auditor_app_private_key",
-            "separate-read-only-key",
+            "app.github.pr.settings.github_app_private_key",
+            "single-app-private-key",
         ),
         patch(
             "app.github.auditor._build_read_only_jwt",
@@ -2832,8 +2930,9 @@ async def test_read_only_auditor_provider_fails_closed_when_configuration_is_mis
     from app.github import auditor as auditor_credentials
 
     with (
-        patch("app.github.auditor.settings.github_auditor_app_id", None),
-        patch("app.github.auditor.settings.github_auditor_app_private_key", None),
+        patch("app.github.pr.settings.github_app_id", None),
+        patch("app.github.pr.settings.github_app_private_key", None),
+        patch("app.github.pr.settings.github_app_private_key_ssm_path", ""),
         pytest.raises(auditor_credentials.AuditorCredentialError),
     ):
         await auditor_credentials.get_auditor_installation_token(
@@ -2863,10 +2962,10 @@ async def test_auditor_installation_token_must_be_non_blank():
 
     for blank in ("", "   ", "\t\n", "\r\n "):
         with (
-            patch("app.github.auditor.settings.github_auditor_app_id", "12345"),
+            patch("app.github.pr.settings.github_app_id", "12345"),
             patch(
-                "app.github.auditor.settings.github_auditor_app_private_key",
-                "separate-read-only-key",
+                "app.github.pr.settings.github_app_private_key",
+                "single-app-private-key",
             ),
             patch(
                 "app.github.auditor._build_read_only_jwt",
@@ -2887,10 +2986,10 @@ async def test_auditor_installation_token_must_be_non_blank():
     # to carry surrounding whitespace is not silently rewritten.
     padded = "  read-only-installation-token  "
     with (
-        patch("app.github.auditor.settings.github_auditor_app_id", "12345"),
+        patch("app.github.pr.settings.github_app_id", "12345"),
         patch(
-            "app.github.auditor.settings.github_auditor_app_private_key",
-            "separate-read-only-key",
+            "app.github.pr.settings.github_app_private_key",
+            "single-app-private-key",
         ),
         patch(
             "app.github.auditor._build_read_only_jwt",
