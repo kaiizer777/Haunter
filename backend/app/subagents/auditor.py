@@ -804,9 +804,7 @@ class AuditResult:
         return sum(
             1
             for f in self.findings
-            if getattr(f, "severity", None) == "BLOCKER"
-            or getattr(f, "priority_bucket", None) == "must_fix"
-            or classify_finding_bucket(f, overall_confidence=self.confidence) == "must_fix"
+            if classify_finding_bucket(f, overall_confidence=self.confidence) == "must_fix"
         )
 
     @property
