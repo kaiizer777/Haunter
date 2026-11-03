@@ -113,4 +113,28 @@ describe("TriageChips component", () => {
 
     expect(screen.getByText("Nothing needs a decision right now")).toBeInTheDocument();
   });
+
+  it("renders failed analysis retry prompt when urgent and attention are 0 but failed > 0", () => {
+    const failedOnlyCounts: Record<OutcomeKey, number> = {
+      changes_requested: 0,
+      advisory: 0,
+      in_progress: 0,
+      failed: 2,
+      suppressed: 0,
+      clean: 4,
+    };
+
+    render(
+      <TriageChips
+        counts={failedOnlyCounts}
+        activeOutcome={null}
+        onToggle={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.getByText(/failed analyses require retry or inspection/i)
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("2").length).toBeGreaterThanOrEqual(1);
+  });
 });

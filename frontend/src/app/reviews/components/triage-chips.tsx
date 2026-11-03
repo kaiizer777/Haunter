@@ -118,6 +118,16 @@ export function TriageChips({
               {counts.in_progress === 1 ? "analysis is" : "analyses are"} still
               running
             </>
+          ) : (counts.failed ?? 0) > 0 ? (
+            <>
+              <span className="font-semibold text-rose-300">
+                {counts.failed}
+              </span>{" "}
+              {counts.failed === 1
+                ? "failed analysis requires"
+                : "failed analyses require"}{" "}
+              retry or inspection
+            </>
           ) : (
             <>Nothing needs a decision right now</>
           )}

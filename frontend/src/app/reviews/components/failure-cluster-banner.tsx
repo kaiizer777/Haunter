@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { AlertTriangle, Copy, Check, X, ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { FailureCluster } from "../review-triage";
@@ -22,7 +22,17 @@ export function FailureClusterBanner({
   className,
 }: FailureClusterBannerProps) {
   const [copiedSignature, setCopiedSignature] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<boolean>(true);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
 
   const total = clusters.reduce((sum, c) => sum + c.count, 0);
 
@@ -31,12 +41,25 @@ export function FailureClusterBanner({
   }
 
   const handleCopy = async (sig: string) => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    setCopyError(null);
     try {
       await navigator.clipboard.writeText(sig);
       setCopiedSignature(sig);
-      setTimeout(() => setCopiedSignature(null), 2000);
+      timerRef.current = setTimeout(() => {
+        setCopiedSignature(null);
+        timerRef.current = null;
+      }, 2000);
     } catch {
-      // Fallback
+      setCopiedSignature(null);
+      setCopyError("Failed to copy signature — clipboard unavailable.");
+      timerRef.current = setTimeout(() => {
+        setCopyError(null);
+        timerRef.current = null;
+      }, 2500);
     }
   };
 
@@ -78,6 +101,12 @@ export function FailureClusterBanner({
                 </button>
               )}
             </div>
+
+            {copyError && (
+              <p role="alert" className="mt-1 text-[11px] font-mono text-rose-300">
+                {copyError}
+              </p>
+            )}
 
             <ul className="mt-2 space-y-1.5">
               {displayedClusters.map((cluster) => {

@@ -37,9 +37,7 @@ export function PrPill({
     prUrl ||
     (repoOwner && repoName
       ? `https://github.com/${repoOwner}/${repoName}/pull/${prNumber}`
-      : repoName
-        ? `https://github.com/${repoName}/pull/${prNumber}`
-        : undefined);
+      : undefined);
 
   const content = (
     <>
@@ -103,9 +101,7 @@ export function PushPill({
     commitUrl ||
     (repoOwner && repoName
       ? `https://github.com/${repoOwner}/${repoName}/commit/${commitSha}`
-      : repoName
-        ? `https://github.com/${repoName}/commit/${commitSha}`
-        : undefined);
+      : undefined);
 
   const content = (
     <>
@@ -124,7 +120,7 @@ export function PushPill({
         title={`View commit ${shortSha} on GitHub`}
         className={cn(
           IDENTITY_PILL_BASE,
-          "bg-zinc-800 text-zinc-100 border-zinc-600/60 hover:bg-zinc-750 hover:text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]",
+          "bg-zinc-800 text-zinc-100 border-zinc-600/60 hover:bg-zinc-700 hover:text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]",
           className
         )}
       >
@@ -221,6 +217,7 @@ export function CommitShaBadge({
   showCopy = true,
 }: CommitShaBadgeProps) {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const shortSha = commitSha ? commitSha.substring(0, 7) : "unknown";
 
   const handleCopy = async (e: React.MouseEvent) => {
@@ -230,9 +227,11 @@ export function CommitShaBadge({
     try {
       await navigator.clipboard.writeText(commitSha);
       setCopied(true);
+      setCopyFailed(false);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback
+      setCopyFailed(true);
+      setTimeout(() => setCopyFailed(false), 2000);
     }
   };
 
@@ -286,6 +285,14 @@ export function CommitShaBadge({
           className="absolute -top-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-emerald-300 shadow-md border border-zinc-700/80 animate-in fade-in zoom-in-95 duration-100"
         >
           Copied SHA!
+        </div>
+      )}
+      {copyFailed && (
+        <div
+          role="alert"
+          className="absolute -top-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-rose-300 shadow-md border border-zinc-700/80 animate-in fade-in zoom-in-95 duration-100"
+        >
+          Copy failed
         </div>
       )}
     </div>

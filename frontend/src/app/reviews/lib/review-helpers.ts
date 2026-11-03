@@ -9,9 +9,8 @@ import type { CodeReviewOut, ReviewFindingOut, StagedFixScope } from "../types";
 
 /**
  * Enqueue placeholder written before analysis runs — the only summary a row
- * can carry when the orchestrator never persisted a result
- * (backend/app/webhooks.py:2276 + :2460). A non-empty summary alone therefore
- * proves nothing; it must differ from this.
+ * can carry when the orchestrator never persisted a result in webhooks handling.
+ * A non-empty summary alone therefore proves nothing; it must differ from this.
  */
 export const QUEUED_SUMMARY = "Autonomous code review queued.";
 
@@ -29,24 +28,21 @@ export function isReviewFailed(review: CodeReviewOut): boolean {
  * status=error that still carries a completed analysis — publish failure.
  *
  * Strict positive-evidence gate. The orchestrator persists risk_score +
- * findings + token telemetry TOGETHER before it attempts publication
- * (backend/app/services/review_orchestrator.py:1233-1239), and NO
- * analysis-failure path writes any of them: the diff-fetch failure (:1193),
- * the LLM failure (:1222) and the repo-not-found guard (:1101) write only
- * status + failure_reason + summary, and the timeout/crash backstop
- * (:1034-1061) only touches status + failure_reason. So tokens, findings or
- * a nonzero risk on an error row prove the persist step ran. (Enqueue
- * defaults are risk 0 + findings [] + zero tokens —
- * backend/app/webhooks.py:2271-2279.)
+ * findings + token telemetry TOGETHER before it attempts publication, and NO
+ * analysis-failure path writes any of them: diff-fetch failures, LLM failures,
+ * and repo-not-found guards write only status + failure_reason + summary, and
+ * timeout/crash backstops only touch status + failure_reason. So tokens, findings,
+ * or a nonzero risk on an error row prove the persist step ran. (Enqueue
+ * defaults are risk 0 + findings [] + zero tokens.)
  *
  * The 0/0-tokens + empty-findings + risk-0 corner (a clean or empty-diff
  * audit whose publish failed) is structurally identical to an LLM analysis
  * failure, so it falls through to the failure_reason prefixes below: the
- * three post-persist error writes are "Failed to publish PR review:"
- * (:1411/:1517), "Failed to publish commit comment:" (:1690) and "Failed to
- * read repository review settings:" (:1267). Anything else — including a
- * custom analysis-failure summary — is fail-closed to analysis-failed, which
- * renders the neutral error card and never a fake "Great to Merge" verdict.
+ * post-persist error writes are "Failed to publish PR review:",
+ * "Failed to publish commit comment:" and "Failed to read repository review settings:".
+ * Anything else — including a custom analysis-failure summary — is fail-closed
+ * to analysis-failed, which renders the neutral error card and never a fake
+ * "Great to Merge" verdict.
  */
 export function isPublishFailed(review: CodeReviewOut): boolean {
   if (!isReviewFailed(review)) return false;
@@ -121,12 +117,18 @@ export function pendingLabelFor(review: CodeReviewOut): string {
 }
 
 /**
- * Blast-radius telemetry statistics.
+ * Blast-radius telemetry statistics indicating change volume, lines delta, and impact scope.
  */
 export interface BlastStats {
   filesCount: number;
   additions: number;
   deletions: number;
+  /**
+   * Impact scope classification:
+   * - "Targeted": Localized diff with <= 3 files and <= 60 modifications under moderate risk.
+   * - "Moderate": Medium diff surface (4-8 files or 61-250 modifications) or elevated risk.
+   * - "Extensive": Wide impact (> 8 files, > 250 modifications, or critical risk >= 71).
+   */
   scope: "Targeted" | "Moderate" | "Extensive";
   scopeColor: string;
 }
@@ -180,6 +182,7 @@ export function getBlastStats(review: CodeReviewOut): BlastStats {
 
 /**
  * Human-readable blast-radius scope label + one-line explanation.
+ * Maps "Targeted" internal scope to user-facing "Isolated" surface terminology.
  */
 export function blastRadiusSummary(review: CodeReviewOut): {
   label: string;
@@ -198,6 +201,23 @@ export function blastRadiusSummary(review: CodeReviewOut): {
     label,
     explanation: `${blast.filesCount} ${blast.filesCount === 1 ? "file" : "files"}, +${blast.additions}/-${blast.deletions} across ${area}`,
   };
+}
+
+/**
+ * Computes a deterministic, stable key for a review finding within a review.
+ * Avoids index-based React keys when mapping findings across rerenders and lens filters.
+ */
+export function computeFindingStableKey(
+  finding: ReviewFindingOut,
+  reviewId?: string | number
+): string {
+  const prefix = reviewId ? `${reviewId}:` : "";
+  const path = finding.file_path || "general";
+  const start = finding.line_start ?? 0;
+  const end = finding.line_end ?? 0;
+  const cat = finding.category || "finding";
+  const sym = finding.symbol_name ? `:${finding.symbol_name}` : "";
+  return `${prefix}${cat}:${path}:${start}-${end}${sym}`;
 }
 
 /**

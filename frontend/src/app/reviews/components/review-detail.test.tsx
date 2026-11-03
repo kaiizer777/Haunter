@@ -82,7 +82,7 @@ describe("ReviewDetail component", () => {
     expect(screen.getAllByText("Notes").length).toBeGreaterThanOrEqual(1);
 
     // Back button
-    const backBtn = screen.getByRole("button", { name: /back to review list/i });
+    const backBtn = screen.getByRole("button", { name: /back to reviews/i });
     fireEvent.click(backBtn);
     expect(onClose).toHaveBeenCalled();
   });
@@ -144,8 +144,37 @@ describe("ReviewDetail component", () => {
 
     render(<ReviewDetail review={cleanReview} />);
 
+    expect(screen.getByText("No findings recorded")).toBeInTheDocument();
+  });
+
+  it("shows high risk score empty findings message when outcome is changes_requested with 0 findings", () => {
+    const highRiskEmptyReview: CodeReviewOut = {
+      ...mockDetailedReview,
+      id: "rev-high-risk-empty",
+      risk_score: 85,
+      findings: [],
+    };
+
+    render(<ReviewDetail review={highRiskEmptyReview} />);
+
     expect(
-      screen.getByText(/clean audit — zero vulnerabilities or blockers detected/i)
+      screen.getByText("No inline findings recorded (High Risk Score)")
+    ).toBeInTheDocument();
+  });
+
+  it("shows suppressed empty findings message when review is suppressed with 0 findings", () => {
+    const suppressedReview: CodeReviewOut = {
+      ...mockDetailedReview,
+      id: "rev-suppressed",
+      status: "suppressed",
+      risk_score: 20,
+      findings: [],
+    };
+
+    render(<ReviewDetail review={suppressedReview} />);
+
+    expect(
+      screen.getByText("No findings recorded for this review.")
     ).toBeInTheDocument();
   });
 

@@ -57,6 +57,26 @@ describe("FailureClusterBanner component", () => {
     );
   });
 
+  it("shows error feedback when clipboard copy fails", async () => {
+    const writeTextMock = vi.fn().mockRejectedValue(new Error("Denied"));
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: writeTextMock },
+      writable: true,
+      configurable: true,
+    });
+
+    render(<FailureClusterBanner clusters={clusters} />);
+
+    const copyBtn = screen.getByRole("button", {
+      name: /copy failure signature: all 9 free-tier models exhausted/i,
+    });
+    fireEvent.click(copyBtn);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Failed to copy signature — clipboard unavailable."
+    );
+  });
+
   it("calls onDismiss when dismiss button is clicked", () => {
     const onDismiss = vi.fn();
     render(<FailureClusterBanner clusters={clusters} onDismiss={onDismiss} />);

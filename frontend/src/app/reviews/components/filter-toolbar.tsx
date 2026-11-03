@@ -10,7 +10,7 @@ import {
 import { cn } from "@/lib/utils";
 import { SelectDropdown } from "@/components/ui/select-dropdown";
 import { Input } from "@/components/ui/input";
-import { SORT_OPTIONS, type SortKey } from "../review-triage";
+import { SORT_OPTIONS, RISK_CRITICAL, type SortKey } from "../review-triage";
 
 export interface RepoOption {
   value: string;
@@ -123,7 +123,7 @@ export function FilterToolbar({
           )}
         >
           <ShieldAlert className="h-3.5 w-3.5 text-rose-400 shrink-0" />
-          <span>Risk ≥ 71</span>
+          <span>Risk ≥ {RISK_CRITICAL}</span>
         </button>
 
         {/* Hide-failed toggle */}

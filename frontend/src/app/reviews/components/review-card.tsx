@@ -25,6 +25,7 @@ import {
   pendingLabelFor,
   getBlastStats,
   blastRadiusSummary,
+  computeFindingStableKey,
 } from "../lib/review-helpers";
 import {
   blockerCounts,
@@ -236,19 +237,23 @@ export function FailedReviewCard({
                 tone="text-zinc-500"
                 title="No score — the analysis never produced a risk assessment"
               />
-              <a
-                href={
-                  commitUrl ||
-                  `https://github.com/${review.repo_owner}/${review.repo_name}/commit/${review.commit_sha}`
-                }
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 font-mono text-xs text-zinc-400 hover:text-zinc-100 transition-colors"
-                title="View commit on GitHub"
-              >
-                <GitCommit className="h-3 w-3 text-zinc-400" aria-hidden="true" />
-                {commitShort}
-              </a>
+              {commitUrl ? (
+                <a
+                  href={commitUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 font-mono text-xs text-zinc-400 hover:text-zinc-100 transition-colors"
+                  title="View commit on GitHub"
+                >
+                  <GitCommit className="h-3 w-3 text-zinc-400" aria-hidden="true" />
+                  {commitShort}
+                </a>
+              ) : (
+                <span className="inline-flex items-center gap-1 font-mono text-xs text-zinc-400">
+                  <GitCommit className="h-3 w-3 text-zinc-400" aria-hidden="true" />
+                  {commitShort}
+                </span>
+              )}
             </div>
           </div>
 
@@ -373,6 +378,10 @@ export function PendingReviewCard({
     ? SUPPRESSED_UNSCORED_OUTCOME
     : pendingOutcome(review.status);
 
+  const shortSha = review.commit_sha
+    ? review.commit_sha.substring(0, 7)
+    : "unknown";
+
   const statusChip = (
     <span className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
       <span className="relative flex h-1.5 w-1.5" aria-hidden="true">
@@ -431,7 +440,7 @@ export function PendingReviewCard({
             onClick={() => onOpen(review.id)}
             aria-label={`Full audit for ${review.repo_owner ?? "Repository"}/${
               review.repo_name ?? ""
-            }${review.pr_number ? ` PR #${review.pr_number}` : ""}${
+            }${review.pr_number ? ` PR #${review.pr_number}` : ` commit ${shortSha}`}${
               review.pr_title ? ` — ${review.pr_title}` : ""
             } (${review.id})`}
             className="h-7 shrink-0 gap-1.5 border-zinc-700 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 hover:bg-zinc-800 active:translate-y-[0.5px]"
@@ -508,6 +517,9 @@ export function ReviewCard({
   const suppressed = isSuppressed(review);
   const publishFailed = isPublishFailed(review);
   const findingCount = (review.findings || []).length;
+  const shortSha = review.commit_sha
+    ? review.commit_sha.substring(0, 7)
+    : "unknown";
 
   const verdictChip = (
     <span
@@ -677,7 +689,7 @@ export function ReviewCard({
               review.repo_owner && review.repo_name
                 ? `${review.repo_owner}/${review.repo_name}`
                 : "repository"
-            }${review.pr_number ? ` PR #${review.pr_number}` : ""}`}
+            }${review.pr_number ? ` PR #${review.pr_number}` : ` commit ${shortSha}`}`}
             className="h-8 gap-1.5 border-t border-t-amber-400/60 border-x border-x-amber-600/50 border-b border-b-amber-900 bg-gradient-to-b from-amber-500 via-amber-600 to-amber-700 px-3 text-xs font-semibold text-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.3),0_2px_6px_rgba(0,0,0,0.3)] hover:brightness-105 active:translate-y-[0.5px]"
           >
             <span>Full audit</span>
@@ -725,9 +737,9 @@ export function ReviewCard({
           </div>
 
           <div className="space-y-3">
-            {review.findings.map((finding, idx) => (
+            {review.findings.map((finding) => (
               <FindingItem
-                key={idx}
+                key={computeFindingStableKey(finding, review.id)}
                 finding={finding}
                 repoOwner={review.repo_owner}
                 repoName={review.repo_name}

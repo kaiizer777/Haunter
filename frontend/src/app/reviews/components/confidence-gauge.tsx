@@ -49,7 +49,9 @@ export function ConfidenceGauge({
 
   const accessibleName =
     ariaLabel ??
-    (neutral ? "Confidence — of 10" : `Confidence ${confidence} of 10`);
+    (neutral
+      ? "Confidence — of 10"
+      : `Confidence ${confidence} of 10 — ${band.label.toLowerCase()} risk`);
 
   return (
     <div

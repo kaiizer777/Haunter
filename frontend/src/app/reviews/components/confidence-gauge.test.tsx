@@ -9,7 +9,9 @@ describe("ConfidenceGauge component", () => {
     render(<ConfidenceGauge riskScore={15} />);
 
     // Accessible name invariant check
-    const gaugeImg = screen.getByRole("img", { name: "Confidence 9 of 10" });
+    const gaugeImg = screen.getByRole("img", {
+      name: "Confidence 9 of 10 — low risk",
+    });
     expect(gaugeImg).toBeInTheDocument();
 
     // Dual text display
@@ -25,7 +27,7 @@ describe("ConfidenceGauge component", () => {
     render(<ConfidenceGauge riskScore={85} />);
 
     expect(
-      screen.getByRole("img", { name: "Confidence 2 of 10" })
+      screen.getByRole("img", { name: "Confidence 2 of 10 — critical risk" })
     ).toBeInTheDocument();
     expect(screen.getByText("2")).toBeInTheDocument();
     expect(screen.getByText("/10")).toBeInTheDocument();
@@ -52,7 +54,7 @@ describe("ConfidenceGauge component", () => {
     render(<ConfidenceGauge riskScore={20} showChip={false} />);
 
     expect(
-      screen.getByRole("img", { name: "Confidence 8 of 10" })
+      screen.getByRole("img", { name: "Confidence 8 of 10 — low risk" })
     ).toBeInTheDocument();
     expect(screen.queryByText("LOW RISK")).not.toBeInTheDocument();
   });

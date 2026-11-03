@@ -34,6 +34,7 @@ import {
   pendingLabelFor,
   getBlastStats,
   blastRadiusSummary,
+  computeFindingStableKey,
 } from "../lib/review-helpers";
 import {
   blockerCounts,
@@ -221,7 +222,7 @@ export function ReviewDetail({
               size="sm"
               onClick={onClose}
               className="h-7 gap-1.5 border-zinc-700 bg-zinc-900 px-2.5 text-xs text-zinc-200 hover:bg-zinc-800 hover:text-white active:translate-y-[0.5px]"
-              aria-label="Back to review list"
+              aria-label="Back to Reviews"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
               <span>Back to Reviews</span>
@@ -737,7 +738,7 @@ export function ReviewDetail({
                     } — address blockers before merge.`
                   : review.risk_score >= RISK_CRITICAL
                     ? `Risk ${review.risk_score}/100 is at or above the critical bar and no must-fix finding is named — the score alone requests changes; review before merging.`
-                    : review.risk_score < RISK_MODERATE
+                    : review.risk_score < RISK_MODERATE && blockers.shouldFix === 0
                       ? `Risk ${review.risk_score}/100 with no must-fix findings — safe to merge pending routine review.`
                       : `Risk ${review.risk_score}/100 with no must-fix findings — merge after a focused review pass.`}
               </li>
@@ -863,10 +864,25 @@ export function ReviewDetail({
 
             {/* Findings List or Empty states */}
             {(review.findings || []).length === 0 ? (
-              <div className="flex items-center gap-2.5 rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-4 py-3.5 text-xs font-mono text-emerald-300">
-                <Check className="h-4 w-4 text-emerald-400 shrink-0" />
+              <div
+                className={cn(
+                  "flex items-center gap-2.5 rounded-xl border px-4 py-3.5 text-xs font-mono",
+                  verdict.key === "changes_requested"
+                    ? "border-amber-500/30 bg-amber-950/20 text-amber-300"
+                    : "border-emerald-500/30 bg-emerald-950/20 text-emerald-300"
+                )}
+              >
+                {verdict.key === "changes_requested" ? (
+                  <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
+                ) : (
+                  <Check className="h-4 w-4 text-emerald-400 shrink-0" />
+                )}
                 <span>
-                  Clean audit — zero vulnerabilities or blockers detected. No regressions detected — no actionable findings on this review.
+                  {verdict.key === "changes_requested"
+                    ? "No inline findings recorded (High Risk Score)"
+                    : review.status === "suppressed"
+                      ? "No findings recorded for this review."
+                      : "No findings recorded"}
                 </span>
               </div>
             ) : filteredFindings.length === 0 ? (
@@ -889,9 +905,9 @@ export function ReviewDetail({
               </div>
             ) : (
               <div className="space-y-3">
-                {filteredFindings.map((finding, idx) => (
+                {filteredFindings.map((finding) => (
                   <FindingItem
-                    key={idx}
+                    key={computeFindingStableKey(finding, review.id)}
                     finding={finding}
                     repoOwner={review.repo_owner}
                     repoName={review.repo_name}

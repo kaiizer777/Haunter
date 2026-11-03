@@ -46,6 +46,12 @@ describe("review-identity components", () => {
       expect(screen.getByText("PR #99")).toBeInTheDocument();
       expect(screen.queryByRole("link")).not.toBeInTheDocument();
     });
+
+    it("renders unlinked badge when repoOwner is missing", () => {
+      render(<PrPill prNumber={99} repoName="sentinel" />);
+      expect(screen.getByText("PR #99")).toBeInTheDocument();
+      expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    });
   });
 
   describe("PushPill", () => {
@@ -63,6 +69,18 @@ describe("review-identity components", () => {
         "href",
         "https://github.com/acme/sentinel/commit/d3b07384d113edec49eaa6238ad5ff00"
       );
+    });
+
+    it("renders unlinked Push pill when repoOwner is missing", () => {
+      render(
+        <PushPill
+          commitSha="d3b07384d113edec49eaa6238ad5ff00"
+          repoName="sentinel"
+        />
+      );
+
+      expect(screen.getByText("Push @ d3b0738")).toBeInTheDocument();
+      expect(screen.queryByRole("link")).not.toBeInTheDocument();
     });
   });
 
@@ -145,6 +163,26 @@ describe("review-identity components", () => {
       // Tooltip appears
       await waitFor(() => {
         expect(screen.getByRole("status")).toHaveTextContent("Copied SHA!");
+      });
+    });
+
+    it("displays error alert when clipboard copy fails", async () => {
+      writeTextMock.mockRejectedValue(new Error("Clipboard denied"));
+      render(
+        <CommitShaBadge
+          commitSha="8f4b238318b637ee91e6f27d41f32943"
+          repoOwner="acme"
+          repoName="sentinel"
+        />
+      );
+
+      const copyBtn = screen.getByRole("button", {
+        name: /Copy full commit SHA/i,
+      });
+      fireEvent.click(copyBtn);
+
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toHaveTextContent("Copy failed");
       });
     });
   });

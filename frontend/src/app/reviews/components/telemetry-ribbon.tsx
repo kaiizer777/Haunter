@@ -37,7 +37,6 @@ export function TelemetryRibbon({
 }: TelemetryRibbonProps) {
   const isAllActive = activeTab === "all" && !highRiskOnly;
   const isHighRiskActive = highRiskOnly || activeTab === "high_risk";
-  const isAvgRiskActive = activeTab === "avg_risk";
   const isPatchesActive = activeTab === "patches";
 
   return (
@@ -105,17 +104,10 @@ export function TelemetryRibbon({
           </div>
         </button>
 
-        {/* Tab 3: Avg Risk Score */}
-        <button
-          type="button"
-          aria-pressed={isAvgRiskActive}
-          onClick={() => onTabChange("avg_risk")}
-          className={cn(
-            "group flex items-baseline justify-between gap-2 rounded-lg px-3 py-2 text-left transition-all outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:translate-y-[0.5px]",
-            isAvgRiskActive
-              ? "border-t border-t-zinc-600/80 border-x border-x-zinc-700/60 border-b border-b-zinc-900 bg-zinc-800/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_2px_6px_rgba(0,0,0,0.4)]"
-              : "border border-transparent bg-transparent hover:border-zinc-800/80 hover:bg-zinc-900/60"
-          )}
+        {/* Tab 3: Avg Risk Score (Non-interactive stat tile) */}
+        <div
+          data-testid="avg-risk-tile"
+          className="flex items-baseline justify-between gap-2 rounded-lg px-3 py-2 text-left border border-transparent bg-transparent"
         >
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 text-[11px] font-mono font-semibold uppercase tracking-wider text-amber-300">
@@ -132,10 +124,10 @@ export function TelemetryRibbon({
             className="text-xl font-bold font-mono text-zinc-100 tabular-nums"
             title={
               stats.scoredCount === 0
-                ? "No scored reviews on this page — only completed + publication-skipped analyses score"
+                ? "No scored reviews on this page — all reviews including failed analyses are tracked, but only completed and publication-skipped analyses produce a risk score."
                 : `Mean of ${stats.scoredCount} scored ${
                     stats.scoredCount === 1 ? "review" : "reviews"
-                  } · only completed + publication-skipped analyses score`
+                  } across all reviews on this page, including failed analyses.`
             }
           >
             {stats.scoredCount === 0 ? (
@@ -149,7 +141,7 @@ export function TelemetryRibbon({
               </>
             )}
           </div>
-        </button>
+        </div>
 
         {/* Tab 4: Actionable Patches */}
         <button

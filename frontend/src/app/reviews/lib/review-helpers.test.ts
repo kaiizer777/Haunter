@@ -15,6 +15,7 @@ import {
   isFixStaged,
   toggleStagedFix,
   clearStagedFixes,
+  computeFindingStableKey,
 } from "./review-helpers";
 import type { CodeReviewOut, ReviewFindingOut } from "../types";
 
@@ -185,5 +186,16 @@ describe("staged fix localStorage persistence", () => {
     const next2 = toggleStagedFix(sampleFinding, scope);
     expect(next2).toBe(false);
     expect(isFixStaged(sampleFinding, scope)).toBe(false);
+  });
+
+  it("computes deterministic finding stable keys", () => {
+    const key1 = computeFindingStableKey(sampleFinding, "rev-123");
+    expect(key1).toBe("rev-123:logic:src/index.ts:14-20");
+
+    const key2 = computeFindingStableKey({
+      ...sampleFinding,
+      symbol_name: "calculateTax",
+    });
+    expect(key2).toBe("logic:src/index.ts:14-20:calculateTax");
   });
 });

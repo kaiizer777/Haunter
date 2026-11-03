@@ -89,8 +89,10 @@ describe("TelemetryRibbon component", () => {
     fireEvent.click(screen.getByRole("button", { name: /patches/i }));
     expect(onTabChange).toHaveBeenCalledWith("patches");
 
-    fireEvent.click(screen.getByRole("button", { name: /avg risk/i }));
-    expect(onTabChange).toHaveBeenCalledWith("avg_risk");
+    // Avg Risk is a non-interactive stat tile, not a clickable button
+    expect(
+      screen.queryByRole("button", { name: /avg risk/i })
+    ).not.toBeInTheDocument();
   });
 
   it("renders dash when scoredCount is 0", () => {

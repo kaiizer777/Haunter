@@ -375,7 +375,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     expect(await screen.findByText("PR Summary")).toBeInTheDocument();
     expect(screen.getByText("Great to Merge")).toBeInTheDocument();
     expectConfidence(9);
-    expect(screen.getByText(/no regressions detected/i)).toBeInTheDocument();
+    expect(screen.getByText("No findings recorded")).toBeInTheDocument();
   });
 
   it("staged fixes stay visible in the detail view", async () => {
@@ -883,7 +883,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
       expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
       // Both rows scored (85 + 85) — the saved audit is not dropped from the mean.
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       expect(avgTab).toHaveTextContent("85");
       expect(avgTab.textContent).toMatch(/2 scored/i);
       // The banner reads "N failed analyses": a completed analysis with a
@@ -1035,7 +1035,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getAllByText("Analyzing")).toHaveLength(2);
       expect(screen.queryByText("Great to Merge")).not.toBeInTheDocument();
 
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       // 85 alone — the unscored 0 must not pollute the mean.
       expect(avgTab).toHaveTextContent("85");
       expect(avgTab.textContent).not.toMatch(/43/);
@@ -1137,7 +1137,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       render(<ReviewsPage />);
 
       expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       // (85+15)/2 = 50 — the pending 0 must not pollute the mean (would be 33).
       expect(avgTab).toHaveTextContent("50");
       expect(avgTab.textContent).not.toMatch(/33/);
@@ -1178,7 +1178,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.queryByText("Review Advised")).not.toBeInTheDocument();
       // No saved audit, so no publication indicator and no unscored mean.
       expect(screen.queryByText("Publication skipped")).not.toBeInTheDocument();
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       expect(avgTab.textContent).toMatch(/no scored reviews/i);
     });
 
@@ -1240,7 +1240,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getAllByText("Publication skipped").length).toBeGreaterThanOrEqual(1);
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
       // Avg Risk counts it: (85+0)/2 = 43 across 2 scored.
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       expect(avgTab).toHaveTextContent("43");
       expect(avgTab.textContent).toMatch(/2 scored/i);
     });
@@ -1271,7 +1271,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getAllByText("Great to Merge").length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText("Publication skipped")).toBeInTheDocument();
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       expect(screen.getByTitle(/Mean of 1 scored review/)).toHaveTextContent(/^0 \/ 100$/);
       expect(avgTab.textContent).toMatch(/1 scored/i);
     });
@@ -1309,7 +1309,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
     expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
 
-    const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+    const avgTab = screen.getByTestId("avg-risk-tile");
     // 85 alone — not (85+0)/2 = 43.
     expect(avgTab).toHaveTextContent("85");
     expect(avgTab.textContent).not.toMatch(/43/);
@@ -1344,7 +1344,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     render(<ReviewsPage />);
 
     expect(await screen.findByText("PR #103")).toBeInTheDocument();
-    const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+    const avgTab = screen.getByTestId("avg-risk-tile");
     expect(avgTab.textContent).toMatch(/no scored reviews/i);
     expect(avgTab.querySelector("span.text-zinc-500")).toHaveTextContent("—");
   });
@@ -1943,7 +1943,11 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       render(<ReviewsPage />);
       await screen.findByText("first failure");
       // One cause stated once is noise — the row already says it in full.
-      expect(screen.queryByText(/failed analysis/i)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("status", {
+          name: /failed analyses root cause summary/i,
+        })
+      ).not.toBeInTheDocument();
       expect(screen.getByText("Provider quota exhausted (9 attempts)")).toBeInTheDocument();
     });
 

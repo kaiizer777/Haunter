@@ -88,6 +88,29 @@ describe("FindingItem component", () => {
     expect(screen.getByText("Architecture")).toBeInTheDocument();
   });
 
+  it("does not render architectural callout for architecture category if line_start > 0 and path is valid", () => {
+    const anchoredArchFinding: ReviewFindingOut = {
+      file_path: "src/layer.ts",
+      line_start: 22,
+      line_end: 25,
+      category: "architecture",
+      severity: "medium",
+      critique: "Layer violation: Controller directly accesses database entity.",
+    };
+
+    render(
+      <FindingItem
+        finding={anchoredArchFinding}
+        repoOwner="acme"
+        repoName="sentinel"
+        commitSha="c0ffee123456"
+      />
+    );
+
+    expect(screen.queryByTestId("architectural-tag")).not.toBeInTheDocument();
+    expect(screen.getByText("src/layer.ts:22-25")).toBeInTheDocument();
+  });
+
   it("copies patch to clipboard on Copy Patch click", async () => {
     render(
       <FindingItem
@@ -150,7 +173,9 @@ describe("FindingItem component", () => {
     const collapseToggle = screen.getByRole("button", {
       name: /Candidate Remediation Patch/i,
     });
+    expect(collapseToggle).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(collapseToggle);
+    expect(collapseToggle).toHaveAttribute("aria-expanded", "false");
 
     expect(
       screen.queryByText("- const secret = 'dev_secret';")
@@ -158,6 +183,7 @@ describe("FindingItem component", () => {
 
     // Re-expand
     fireEvent.click(collapseToggle);
+    expect(collapseToggle).toHaveAttribute("aria-expanded", "true");
     expect(
       screen.getByText("- const secret = 'dev_secret';")
     ).toBeInTheDocument();

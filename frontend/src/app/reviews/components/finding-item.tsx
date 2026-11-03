@@ -70,7 +70,6 @@ export function FindingItem({
   const [localStaged, setLocalStaged] = useState<boolean>(() =>
     isFixStaged(finding, scope)
   );
-  const [staging, setStaging] = useState(false);
   const [stageError, setStageError] = useState<string | null>(null);
   const [patchOpen, setPatchOpen] = useState(true);
 
@@ -81,10 +80,9 @@ export function FindingItem({
 
   // Architectural / Non-commentable finding predicate
   const isArchitectural = Boolean(
-    finding.non_commentable ||
-      finding.file_path === "(general)" ||
+    finding.non_commentable === true ||
       finding.line_start === 0 ||
-      finding.category.toLowerCase() === "architecture"
+      finding.file_path === "(general)"
   );
 
   const handleCopy = async () => {
@@ -100,17 +98,14 @@ export function FindingItem({
   };
 
   const handleStage = () => {
-    if (!finding.suggested_patch || staging) return;
+    if (!finding.suggested_patch) return;
     setStageError(null);
-    setStaging(true);
     try {
       const nextStaged = toggleStagedFix(finding, scope);
       setLocalStaged(nextStaged);
       onToggleStage?.(finding, nextStaged);
     } catch {
       setStageError("Couldn't stage fix in this browser.");
-    } finally {
-      setStaging(false);
     }
   };
 
@@ -211,6 +206,7 @@ export function FindingItem({
             <button
               type="button"
               onClick={() => setPatchOpen(!patchOpen)}
+              aria-expanded={patchOpen}
               className="inline-flex items-center gap-1 text-zinc-400 hover:text-zinc-200 uppercase tracking-wider text-[10px] font-semibold transition-colors focus:outline-none"
             >
               {patchOpen ? (
@@ -245,7 +241,6 @@ export function FindingItem({
               <button
                 type="button"
                 onClick={handleStage}
-                disabled={staging}
                 title={
                   isStaged
                     ? "Staged in this browser — click to unstage"
@@ -262,11 +257,6 @@ export function FindingItem({
                   <>
                     <Check className="h-3 w-3 text-emerald-200" />
                     <span>Staged Fix</span>
-                  </>
-                ) : staging ? (
-                  <>
-                    <FileDiff className="h-3 w-3 text-blue-200" />
-                    <span>Staging…</span>
                   </>
                 ) : (
                   <>
