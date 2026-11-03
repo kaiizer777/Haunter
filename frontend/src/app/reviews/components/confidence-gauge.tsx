@@ -95,26 +95,28 @@ export function ConfidenceGauge({
         </svg>
 
         {/* Dual numeral + /10 denominator */}
-        <div className="absolute inset-0 flex items-baseline justify-center">
-          <span
-            className={cn(
-              "font-mono font-extrabold tabular-nums tracking-tight",
-              compact ? "text-base" : "text-2xl",
-              band.text
-            )}
-          >
-            {neutral ? "—" : confidence}
-          </span>
-          {!neutral && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-center">
+          <div className="flex items-baseline justify-center">
             <span
               className={cn(
-                "ml-0.5 font-mono font-bold text-zinc-500",
-                compact ? "text-[9px]" : "text-xs"
+                "font-mono font-extrabold tabular-nums tracking-tight leading-none",
+                compact ? "text-base" : "text-2xl",
+                band.text
               )}
             >
-              /10
+              {neutral ? "—" : confidence}
             </span>
-          )}
+            {!neutral && (
+              <span
+                className={cn(
+                  "ml-0.5 font-mono font-bold text-zinc-500 leading-none",
+                  compact ? "text-[9px]" : "text-xs"
+                )}
+              >
+                /10
+              </span>
+            )}
+          </div>
         </div>
       </div>
 

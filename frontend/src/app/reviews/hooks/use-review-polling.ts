@@ -39,7 +39,9 @@ export function useReviewPolling({
 }: UseReviewPollingOptions): UseReviewPollingResult {
   const [isLiveSyncing, setIsLiveSyncing] = useState(false);
   const onRefreshRef = useRef(onRefresh);
-  onRefreshRef.current = onRefresh;
+  useEffect(() => {
+    onRefreshRef.current = onRefresh;
+  }, [onRefresh]);
 
   const inFlightRef = useRef(false);
 

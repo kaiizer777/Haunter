@@ -14,7 +14,6 @@ import {
   X,
   Check,
   GitCommit,
-  GitBranch,
   Copy,
 } from "lucide-react";
 import { cn, formatRelativeTime } from "@/lib/utils";
@@ -290,6 +289,7 @@ export function ReviewDetail({
               {review.pr_author && (
                 <div className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
                   {review.pr_author_avatar ? (
+                    // eslint-disable-next-line @next/next/no-img-element
                     <img
                       src={review.pr_author_avatar}
                       alt={review.pr_author}

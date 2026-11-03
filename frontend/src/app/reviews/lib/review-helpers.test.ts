@@ -15,7 +15,6 @@ import {
   isFixStaged,
   toggleStagedFix,
   clearStagedFixes,
-  STAGED_FIXES_KEY,
 } from "./review-helpers";
 import type { CodeReviewOut, ReviewFindingOut } from "../types";
 

@@ -39,7 +39,6 @@ import {
   CommitShaBadge,
 } from "./review-identity";
 import { FindingItem } from "./finding-item";
-import { useIsPrAssociated } from "../hooks/use-associated-prs";
 
 export const ROW_SURFACE =
   "rounded-xl border-t border-t-zinc-700/60 border-x border-x-zinc-800/80 border-b border-b-zinc-900 bg-gradient-to-b from-[#141418] via-[#101013] to-[#0a0a0d] shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_6px_20px_rgba(0,0,0,0.4)]";
@@ -90,6 +89,7 @@ export function RowIdentity({ review, chip, compact = false }: RowIdentityProps)
       {review.pr_author && (
         <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-[11px] text-zinc-300">
           {review.pr_author_avatar ? (
+            // eslint-disable-next-line @next/next/no-img-element
             <img
               src={review.pr_author_avatar}
               alt=""
@@ -467,7 +467,6 @@ export function ReviewCard({
 }: ReviewCardProps) {
   const [expanded, setExpanded] = useState(false);
   const findingsPanelId = `findings-${review.id}`;
-  const isPrAssociated = useIsPrAssociated(review);
 
   // Category counts
   const categoryCounts = useMemo(() => {

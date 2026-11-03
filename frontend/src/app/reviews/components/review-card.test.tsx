@@ -3,8 +3,6 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import {
   ReviewCard,
-  FailedReviewCard,
-  PendingReviewCard,
 } from "./review-card";
 import type { CodeReviewOut } from "../types";
 

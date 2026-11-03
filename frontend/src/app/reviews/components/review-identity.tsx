@@ -347,7 +347,6 @@ export interface PrTitleProps {
  */
 export function PrTitle({
   title,
-  prNumber,
   prUrl,
   className,
 }: PrTitleProps) {

@@ -224,6 +224,7 @@ export default function RunDetailClient() {
                     {trace.run.pr_author && (
                       <div className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 border border-zinc-800 px-2 py-0.5 text-xs font-mono text-zinc-300">
                         {trace.run.pr_author_avatar ? (
+                          // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={trace.run.pr_author_avatar}
                             alt={trace.run.pr_author}
