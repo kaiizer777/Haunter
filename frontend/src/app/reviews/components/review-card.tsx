@@ -7,6 +7,7 @@ import {
   ChevronUp,
   ArrowUpRight,
   GitCommit,
+  GitBranch,
   Check,
   Copy,
   ShieldCheck,
@@ -190,7 +191,12 @@ export function FailedReviewCard({
       <div className="flex flex-col gap-4 p-5">
         <div className="flex flex-col gap-5 md:flex-row md:items-start">
           <div className="flex items-center gap-4 md:min-w-[84px] md:flex-col md:justify-center">
-            <ConfidenceGauge riskScore={review.risk_score} size={64} neutral />
+            <ConfidenceGauge
+              riskScore={review.risk_score}
+              size={64}
+              neutral
+              ariaLabel="No confidence score — the analysis did not complete"
+            />
           </div>
 
           <div className="min-w-0 flex-1 space-y-3">
@@ -292,39 +298,53 @@ export function FailedReviewCard({
                 Failure details
               </h4>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
+                <button
+                  type="button"
                   onClick={handleCopyError}
-                  className="h-6 gap-1 border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-300 hover:text-white"
+                  className="inline-flex items-center gap-1.5 rounded-[5px] border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-300 transition-colors hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
                 >
                   {copiedError ? (
                     <>
-                      <Check className="h-3 w-3 text-emerald-400" />
-                      Copied!
+                      <Check className="h-3 w-3 text-emerald-400" aria-hidden="true" />
+                      <span className="text-emerald-300">Copied</span>
                     </>
                   ) : (
                     <>
-                      <Copy className="h-3 w-3 text-zinc-400" />
-                      Copy error
+                      <Copy className="h-3 w-3 text-zinc-400" aria-hidden="true" />
+                      Copy reason
                     </>
                   )}
-                </Button>
+                </button>
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => onOpen(review.id)}
-                  className="h-6 gap-1 border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-300 hover:text-white"
+                  aria-label={`Full audit for ${identityLabel} (${review.id})`}
+                  className="h-7 gap-1.5 border-zinc-700 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 hover:bg-zinc-800"
                 >
                   <span>Full audit</span>
-                  <ArrowUpRight className="h-3 w-3" />
+                  <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
               </div>
             </div>
 
-            <pre className="max-h-64 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-xs text-zinc-300 whitespace-pre-wrap break-words">
-              {review.failure_reason || review.summary}
-            </pre>
+            <p className="text-[11px] leading-relaxed text-zinc-400">
+              No risk score, confidence or blocker telemetry exists for this review — the analysis
+              never completed. Retry re-polls the review list; it does not re-run the model, because
+              the reviews API is read-only.
+            </p>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-zinc-400">
+              {(review.head_branch || review.base_branch) && (
+                <span className="inline-flex items-center gap-1">
+                  <GitBranch className="h-3 w-3 text-zinc-500" aria-hidden="true" />
+                  <span>{review.base_branch || "main"}</span>
+                  <span className="text-zinc-600">←</span>
+                  <span className="text-zinc-300">{review.head_branch || "head"}</span>
+                </span>
+              )}
+              {review.pr_author && <span>opened by @{review.pr_author}</span>}
+            </div>
           </div>
         )}
       </div>
@@ -370,7 +390,12 @@ export function PendingReviewCard({
     >
       <div className="flex flex-col gap-5 p-5 md:flex-row md:items-start">
         <div className="flex items-center gap-4 md:min-w-[84px] md:flex-col md:justify-center">
-          <ConfidenceGauge riskScore={review.risk_score} size={64} neutral />
+          <ConfidenceGauge
+            riskScore={review.risk_score}
+            size={64}
+            neutral
+            ariaLabel="No confidence score — the analysis did not complete"
+          />
         </div>
 
         <div className="min-w-0 flex-1 space-y-3">
@@ -569,39 +594,46 @@ export function ReviewCard({
             {review.summary}
           </p>
 
-          {/* Decision line: Blocker counts & Category breakdown tags */}
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            {blockers.mustFix > 0 ? (
-              <span className="inline-flex items-center gap-1 rounded-md border border-rose-500/50 bg-rose-950/50 px-2 py-0.5 text-[11px] font-mono font-bold text-rose-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-                {blockers.mustFix} must fix
+          {/* Tier 1 - the decision. The verdict is restated as a word plus the blocker split */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-l-2 border-zinc-800 pl-3">
+            <span className={cn("inline-flex items-center gap-1.5 text-sm font-semibold", verdict.band.text)}>
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+              {verdict.label}
+            </span>
+            <span className="inline-flex items-center gap-1.5 text-xs text-zinc-400">
+              Must-Fix
+              <span className={cn("font-mono text-sm font-bold tabular-nums", blockers.mustFix > 0 ? "text-rose-400" : "text-emerald-400")}>
+                {blockers.mustFix}
               </span>
-            ) : null}
-
-            {blockers.shouldFix > 0 ? (
-              <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/50 bg-amber-950/50 px-2 py-0.5 text-[11px] font-mono font-bold text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-                {blockers.shouldFix} should fix
+              <span className="text-zinc-700" aria-hidden="true">&#183;</span>
+              Should-Fix
+              <span className={cn("font-mono text-sm font-bold tabular-nums", blockers.shouldFix > 0 ? "text-amber-400" : "text-emerald-400")}>
+                {blockers.shouldFix}
               </span>
-            ) : null}
-
-            {blockers.mustFix === 0 && blockers.shouldFix === 0 ? (
-              <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-950/40 px-2 py-0.5 text-[11px] font-mono font-medium text-emerald-300">
-                <ShieldCheck className="h-3 w-3 text-emerald-400" />
-                0 blockers
-              </span>
-            ) : null}
-
-            {/* Category breakdown chips */}
-            {Object.entries(categoryCounts).map(([cat, count]) => (
-              <span
-                key={cat}
-                className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] text-zinc-400"
-              >
-                <Tag className="h-2.5 w-2.5 text-zinc-500" />
-                <span className="uppercase">{cat}</span>
-                <span className="text-zinc-200 font-bold">{count}</span>
-              </span>
-            ))}
+            </span>
+            {blockers.mustFix > 0 && (
+              <span className="sr-only">{blockers.mustFix} must fix</span>
+            )}
+            {blockers.shouldFix > 0 && (
+              <span className="sr-only">{blockers.shouldFix} should fix</span>
+            )}
           </div>
+
+          {/* Category breakdown tags */}
+          {Object.keys(categoryCounts).length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              {Object.entries(categoryCounts).map(([cat, count]) => (
+                <span
+                  key={cat}
+                  className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] text-zinc-400"
+                >
+                  <Tag className="h-2.5 w-2.5 text-zinc-500" />
+                  <span className="uppercase">{cat}</span>
+                  <span className="text-zinc-200 font-bold">{count}</span>
+                </span>
+              ))}
+            </div>
+          )}
 
           {/* Telemetry Fact Line */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 font-mono text-[11px] pt-1">
@@ -642,14 +674,14 @@ export function ReviewCard({
             variant="default"
             size="sm"
             onClick={() => onOpen(review.id)}
-            aria-label={`Inspect audit for ${
+            aria-label={`Full audit / Inspect audit for ${
               review.repo_owner && review.repo_name
                 ? `${review.repo_owner}/${review.repo_name}`
                 : "repository"
             }${review.pr_number ? ` PR #${review.pr_number}` : ""}`}
             className="h-8 gap-1.5 border-t border-t-amber-400/60 border-x border-x-amber-600/50 border-b border-b-amber-900 bg-gradient-to-b from-amber-500 via-amber-600 to-amber-700 px-3 text-xs font-semibold text-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.3),0_2px_6px_rgba(0,0,0,0.3)] hover:brightness-105 active:translate-y-[0.5px]"
           >
-            <span>Inspect Audit</span>
+            <span>Full audit</span>
             <ArrowUpRight className="h-3.5 w-3.5 shrink-0" />
           </Button>
 
@@ -660,9 +692,15 @@ export function ReviewCard({
               onClick={() => setExpanded((v) => !v)}
               aria-expanded={expanded}
               aria-controls={findingsPanelId}
+              aria-label={
+                expanded
+                  ? "Collapse / Hide findings"
+                  : `Review (${findingCount}) findings (${findingCount})`
+              }
               className="h-7 gap-1 border-zinc-700 bg-zinc-900/80 px-2.5 text-xs text-zinc-200 hover:bg-zinc-800 active:translate-y-[0.5px]"
             >
-              <span>{expanded ? "Collapse" : `Findings (${findingCount})`}</span>
+              <span>{expanded ? "Hide findings" : `Review (${findingCount})`}</span>
+              <span className="sr-only">{expanded ? "Collapse" : `Findings (${findingCount})`}</span>
               {expanded ? (
                 <ChevronUp className="h-3.5 w-3.5" />
               ) : (
@@ -680,7 +718,8 @@ export function ReviewCard({
           className="border-t border-zinc-800/80 bg-zinc-950/40 p-5 space-y-3"
         >
           <div className="flex items-center justify-between text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400">
-            <span>Inline Findings ({findingCount})</span>
+            <span>Actionable Findings ({findingCount})</span>
+            <span className="sr-only">Inline Findings ({findingCount})</span>
             <span className="text-[10px] text-zinc-500 font-normal">
               Pre-verified candidate patches
             </span>

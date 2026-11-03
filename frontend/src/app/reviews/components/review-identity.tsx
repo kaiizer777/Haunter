@@ -10,9 +10,10 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AssociatedPROut, CodeReviewOut } from "../types";
+import { useAssociatedPr } from "../hooks/use-associated-prs";
 
 const IDENTITY_PILL_BASE =
-  "inline-flex items-center gap-1.5 rounded-[5px] px-2 py-0.5 text-xs font-mono font-bold border transition-colors";
+  "inline-flex items-center gap-1.5 rounded-[5px] px-2 py-0.5 text-sm font-mono font-bold border transition-colors";
 
 export interface PrPillProps {
   prNumber: number;
@@ -149,7 +150,7 @@ export interface IdentityPillProps {
   review: Pick<
     CodeReviewOut,
     "pr_number" | "pr_url" | "commit_sha" | "repo_name" | "repo_owner"
-  >;
+  > & { id?: string };
   associatedPr?: AssociatedPROut | null;
   className?: string;
 }
@@ -160,9 +161,13 @@ export interface IdentityPillProps {
  */
 export function IdentityPill({
   review,
-  associatedPr,
+  associatedPr: propAssociatedPr,
   className,
 }: IdentityPillProps) {
+  const hookAssociatedPr = useAssociatedPr(review as CodeReviewOut);
+  const associatedPr =
+    propAssociatedPr !== undefined ? propAssociatedPr : hookAssociatedPr;
+
   if (review.pr_number != null) {
     return (
       <PrPill

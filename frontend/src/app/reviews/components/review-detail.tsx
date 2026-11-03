@@ -381,6 +381,11 @@ export function ReviewDetail({
               riskScore={review.risk_score}
               size={84}
               neutral={failed || pending}
+              ariaLabel={
+                failed || pending
+                  ? "No confidence score — the analysis did not complete"
+                  : undefined
+              }
             />
           </div>
         </div>
@@ -452,6 +457,15 @@ export function ReviewDetail({
               structural telemetry to report.
             </p>
           </section>
+
+          <section className="space-y-3">
+            <div className="flex items-center justify-between text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono">
+              <span>Findings Summary (0)</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-xs font-mono text-zinc-500">
+              No findings — the analysis did not complete.
+            </div>
+          </section>
         </>
       ) : pending ? (
         <>
@@ -510,6 +524,15 @@ export function ReviewDetail({
               structural telemetry to report.
             </p>
           </section>
+
+          <section className="space-y-3">
+            <div className="flex items-center justify-between text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono">
+              <span>Findings Summary (0)</span>
+            </div>
+            <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-xs font-mono text-zinc-500">
+              No findings yet — analysis in progress.
+            </div>
+          </section>
         </>
       ) : (
         <>
@@ -561,7 +584,7 @@ export function ReviewDetail({
                 </div>
                 <div className="bg-zinc-950/90 px-3.5 py-2.5">
                   <dt className="text-[10px] uppercase tracking-wider text-zinc-400">
-                    Must Fix
+                    Must-Fix
                   </dt>
                   <dd
                     className={cn(
@@ -574,7 +597,7 @@ export function ReviewDetail({
                 </div>
                 <div className="bg-zinc-950/90 px-3.5 py-2.5">
                   <dt className="text-[10px] uppercase tracking-wider text-zinc-400">
-                    Should Fix
+                    Should-Fix
                   </dt>
                   <dd
                     className={cn(
@@ -731,6 +754,15 @@ export function ReviewDetail({
 
           {/* Analytical perspectives & findings section */}
           <section className="space-y-4">
+            <div className="flex items-center justify-between text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono">
+              <span>Findings Summary ({(review.findings || []).length})</span>
+              {(review.findings || []).length > 0 && (
+                <span className="text-[10px] text-zinc-500 font-normal">
+                  Pre-verified candidate patches
+                </span>
+              )}
+            </div>
+
             <div className="flex flex-col gap-3 rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-3 md:flex-row md:items-center md:justify-between">
               {/* Multi-perspective tabs */}
               <div
@@ -834,8 +866,7 @@ export function ReviewDetail({
               <div className="flex items-center gap-2.5 rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-4 py-3.5 text-xs font-mono text-emerald-300">
                 <Check className="h-4 w-4 text-emerald-400 shrink-0" />
                 <span>
-                  Clean Audit — Zero vulnerabilities or blockers detected across
-                  analyzed files.
+                  Clean audit — zero vulnerabilities or blockers detected. No regressions detected — no actionable findings on this review.
                 </span>
               </div>
             ) : filteredFindings.length === 0 ? (

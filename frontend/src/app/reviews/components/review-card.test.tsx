@@ -46,7 +46,7 @@ describe("ReviewCard component", () => {
 
     expect(screen.getByText("facebook/react")).toBeInTheDocument();
     expect(screen.getByText("PR #42")).toBeInTheDocument();
-    expect(screen.getByText("Changes Requested")).toBeInTheDocument();
+    expect(screen.getAllByText("Changes Requested").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Fix concurrent hydration mismatch")).toBeInTheDocument();
     expect(screen.getByText("1 must fix")).toBeInTheDocument();
     expect(screen.getByText("80/100")).toBeInTheDocument();

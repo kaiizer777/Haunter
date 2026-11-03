@@ -125,7 +125,7 @@ export function TelemetryRibbon({
             <div className="mt-0.5 text-[11px] text-zinc-400 font-sans truncate">
               {stats.scoredCount === 0
                 ? "No scored reviews"
-                : `Mean of ${stats.scoredCount} scored`}
+                : `Mean score · this page · ${stats.scoredCount} scored`}
             </div>
           </div>
           <div
