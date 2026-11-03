@@ -216,6 +216,10 @@ describe("staged fix localStorage persistence", () => {
   });
 
   it("computes deterministic finding stable keys", () => {
+    // Pin fnv1a32 with known literals to ensure hashing implementation remains invariant
+    expect(fnv1a32("")).toBe(0x811c9dc5);
+    expect(fnv1a32("Off-by-one error").toString(16)).toBe("4621ca93");
+
     const findingWithoutPatch: ReviewFindingOut = {
       file_path: "src/index.ts",
       line_start: 14,
@@ -225,15 +229,14 @@ describe("staged fix localStorage persistence", () => {
       critique: "Off-by-one error",
     };
 
-    const critiqueHash = fnv1a32(findingWithoutPatch.critique || "").toString(16);
     const key1 = computeFindingStableKey(findingWithoutPatch, "rev-123");
-    expect(key1).toBe(`rev-123:logic:src/index.ts:14-20:${critiqueHash}`);
+    expect(key1).toBe("rev-123:logic:src/index.ts:14-20:4621ca93");
 
     const key2 = computeFindingStableKey({
       ...findingWithoutPatch,
       symbol_name: "calculateTax",
     });
-    expect(key2).toBe(`logic:src/index.ts:14-20:calculateTax:${critiqueHash}`);
+    expect(key2).toBe("logic:src/index.ts:14-20:calculateTax:4621ca93");
 
     // Distinguishes findings when suggested patch differs
     const f1: ReviewFindingOut = {

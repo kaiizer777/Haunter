@@ -106,7 +106,7 @@ describe("DiffViewer component", () => {
 
     // Changed code lines inside hunk starting with +++ or --- should be treated as code additions
     const additionLines = container.querySelectorAll(".border-emerald-500");
-    expect(additionLines.length).toBeGreaterThanOrEqual(3);
+    expect(additionLines).toHaveLength(3);
     expect(screen.getByText("+---count;")).toBeInTheDocument();
     expect(screen.getByText("++++count;")).toBeInTheDocument();
   });

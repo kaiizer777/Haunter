@@ -186,7 +186,7 @@ describe("review-identity components", () => {
       });
     });
 
-    it("resets copied state immediately on subsequent clipboard failure and cleans up timers", async () => {
+    it("resets copied state immediately on subsequent clipboard failure", async () => {
       writeTextMock.mockResolvedValueOnce(undefined);
       const { unmount } = render(
         <CommitShaBadge
