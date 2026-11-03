@@ -39,7 +39,9 @@ describe("TriageChips component", () => {
 
     const allBtn = screen.getByRole("button", { name: /^All/i });
     expect(allBtn).toHaveAttribute("aria-pressed", "false");
+    expect(allBtn).toHaveTextContent("17");
 
+    // Assert all 6 outcome chips are rendered with counts and aria-pressed states
     const needChangesBtn = screen.getByRole("button", { name: /Need changes/i });
     expect(needChangesBtn).toHaveAttribute("aria-pressed", "true");
     expect(needChangesBtn).toHaveTextContent("3");
@@ -47,6 +49,22 @@ describe("TriageChips component", () => {
     const reviewAdvisedBtn = screen.getByRole("button", { name: /Review advised/i });
     expect(reviewAdvisedBtn).toHaveAttribute("aria-pressed", "false");
     expect(reviewAdvisedBtn).toHaveTextContent("2");
+
+    const inProgressBtn = screen.getByRole("button", { name: /In progress/i });
+    expect(inProgressBtn).toHaveAttribute("aria-pressed", "false");
+    expect(inProgressBtn).toHaveTextContent("1");
+
+    const failedBtn = screen.getByRole("button", { name: /Failed/i });
+    expect(failedBtn).toHaveAttribute("aria-pressed", "false");
+    expect(failedBtn).toHaveTextContent("1");
+
+    const suppressedBtn = screen.getByRole("button", { name: /Suppressed/i });
+    expect(suppressedBtn).toHaveAttribute("aria-pressed", "false");
+    expect(suppressedBtn).toHaveTextContent("0");
+
+    const cleanBtn = screen.getByRole("button", { name: /Great to merge/i });
+    expect(cleanBtn).toHaveAttribute("aria-pressed", "false");
+    expect(cleanBtn).toHaveTextContent("10");
   });
 
   it("triggers onToggle callback with key or null when toggled", () => {

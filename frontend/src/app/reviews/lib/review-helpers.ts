@@ -217,7 +217,16 @@ export function computeFindingStableKey(
   const end = finding.line_end ?? 0;
   const cat = finding.category || "finding";
   const sym = finding.symbol_name ? `:${finding.symbol_name}` : "";
-  return `${prefix}${cat}:${path}:${start}-${end}${sym}`;
+  let patchSuffix = "";
+  if (finding.suggested_patch) {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < finding.suggested_patch.length; i++) {
+      hash ^= finding.suggested_patch.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    patchSuffix = `:${hash.toString(16)}`;
+  }
+  return `${prefix}${cat}:${path}:${start}-${end}${sym}${patchSuffix}`;
 }
 
 /**

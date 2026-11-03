@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { renderHook, waitFor, act } from "@testing-library/react";
 import {
   useAssociatedPr,
   useIsPrAssociated,
   clearAssociatedPrCache,
   refreshAssociatedPrs,
+  clearFailedAssociatedPrCache,
   associatedPrCache,
   associatedPrInflight,
 } from "./use-associated-prs";
@@ -39,7 +40,7 @@ describe("useAssociatedPr hook", () => {
     expect(result.current).toBe(null);
   });
 
-  it("batches and resolves associated PR for push reviews", async () => {
+  it("resolves push review to associated PR", async () => {
     const review = mockReview({ id: "rev-push-1", commit_sha: "sha-123", pr_number: null });
 
     vi.spyOn(api, "getAssociatedPrsBatch").mockResolvedValueOnce({
@@ -63,13 +64,111 @@ describe("useAssociatedPr hook", () => {
 
     expect(result.current?.number).toBe(99);
     expect(result.current?.title).toBe("Batched PR Title");
+    expect(result.current?.url).toBe("https://github.com/org/repo/pull/99");
     expect(associatedPrCache.get("rev-push-1")?.number).toBe(99);
   });
 
-  it("indicates isPrAssociated correctly", async () => {
+  it("resolves push reviews with pr_number: null to null when no associated PR is linked", async () => {
+    const review = mockReview({ id: "rev-standalone-push", commit_sha: "sha-solo", pr_number: null });
+
+    vi.spyOn(api, "getAssociatedPrsBatch").mockResolvedValueOnce({
+      items: [
+        {
+          review_id: "rev-standalone-push",
+          associated_pr: null,
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useAssociatedPr(review));
+
+    await waitFor(() => {
+      expect(associatedPrCache.has("rev-standalone-push")).toBe(true);
+    });
+
+    expect(result.current).toBeNull();
+    expect(associatedPrCache.get("rev-standalone-push")).toBeNull();
+  });
+
+  it("indicates isPrAssociated correctly for direct PR and resolved associated PR", async () => {
     const directPrReview = mockReview({ pr_number: 101 });
     const { result: directResult } = renderHook(() => useIsPrAssociated(directPrReview));
     expect(directResult.current).toBe(true);
+
+    vi.spyOn(api, "getAssociatedPrsBatch").mockResolvedValueOnce({
+      items: [
+        {
+          review_id: "rev-push-linked",
+          associated_pr: {
+            number: 55,
+            url: "https://github.com/org/repo/pull/55",
+            title: "Linked PR",
+          },
+        },
+      ],
+    });
+
+    const pushReview = mockReview({ id: "rev-push-linked", commit_sha: "sha-55", pr_number: null });
+    const { result: pushResult } = renderHook(() => useIsPrAssociated(pushReview));
+
+    await waitFor(() => {
+      expect(pushResult.current).toBe(true);
+    });
+  });
+
+  it("handles failed batch request without poisoning cache so remount retries", async () => {
+    const review = mockReview({ id: "rev-transient-fail", commit_sha: "sha-err", pr_number: null });
+    const batchSpy = vi.spyOn(api, "getAssociatedPrsBatch").mockRejectedValueOnce(
+      new Error("503 Service Unavailable")
+    );
+
+    const { result, unmount } = renderHook(() => useAssociatedPr(review));
+
+    await waitFor(() => {
+      expect(batchSpy).toHaveBeenCalledWith(["rev-transient-fail"]);
+    });
+
+    // Returned null without caching the transient failure
+    expect(result.current).toBeNull();
+    expect(associatedPrCache.has("rev-transient-fail")).toBe(false);
+
+    unmount();
+
+    // Now on retry / remount, provide successful response
+    batchSpy.mockResolvedValueOnce({
+      items: [
+        {
+          review_id: "rev-transient-fail",
+          associated_pr: {
+            number: 404,
+            url: "https://github.com/org/repo/pull/404",
+            title: "Retried PR",
+          },
+        },
+      ],
+    });
+
+    const { result: retryResult } = renderHook(() => useAssociatedPr(review));
+
+    await waitFor(() => {
+      expect(retryResult.current?.number).toBe(404);
+    });
+    expect(associatedPrCache.get("rev-transient-fail")?.number).toBe(404);
+  });
+
+  it("clears only failed (null) cache entries on clearFailedAssociatedPrCache while preserving resolved PRs", () => {
+    associatedPrCache.set("rev-success", {
+      number: 12,
+      url: "https://github.com/org/repo/pull/12",
+      title: "Success PR",
+    });
+    associatedPrCache.set("rev-failed-miss", null);
+
+    clearFailedAssociatedPrCache();
+
+    expect(associatedPrCache.has("rev-success")).toBe(true);
+    expect(associatedPrCache.get("rev-success")?.number).toBe(12);
+    expect(associatedPrCache.has("rev-failed-miss")).toBe(false);
   });
 
   it("directly caches null for omitted review IDs without individual GET fan-out", async () => {
@@ -113,23 +212,26 @@ describe("useAssociatedPr hook", () => {
     });
 
     // Invalidate / refresh: bumps generation for in-flight keys before clearing
-    refreshAssociatedPrs();
-
-    // Now resolve late batch response
-    resolveBatch({
-      items: [
-        {
-          review_id: "rev-late-1",
-          associated_pr: {
-            number: 777,
-            url: "https://github.com/org/repo/pull/777",
-            title: "Late PR",
-          },
-        },
-      ],
+    act(() => {
+      refreshAssociatedPrs();
     });
 
-    await batchPromise;
+    // Now resolve late batch response
+    await act(async () => {
+      resolveBatch({
+        items: [
+          {
+            review_id: "rev-late-1",
+            associated_pr: {
+              number: 777,
+              url: "https://github.com/org/repo/pull/777",
+              title: "Late PR",
+            },
+          },
+        ],
+      });
+      await batchPromise;
+    });
 
     // The late response must NOT have poisoned the cache because its generation was invalidated
     expect(associatedPrCache.get("rev-late-1")).toBeUndefined();

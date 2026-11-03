@@ -95,10 +95,10 @@ describe("FilterToolbar component", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Risk ≥ 71" }));
-    expect(onToggleHighRisk).toHaveBeenCalled();
+    expect(onToggleHighRisk).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: /Hide failed \(3\)/i }));
-    expect(onToggleHideFailed).toHaveBeenCalled();
+    expect(onToggleHideFailed).toHaveBeenCalledTimes(1);
   });
 
   it("renders live syncing radar badge when isLiveSyncing is true", () => {

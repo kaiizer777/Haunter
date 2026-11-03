@@ -61,20 +61,19 @@ describe("FindingItem component", () => {
     );
   });
 
-  it("renders architectural callout mode when line_start is 0 or non_commentable is true", () => {
-    const archFinding: ReviewFindingOut & { non_commentable?: boolean } = {
+  it("renders architectural callout mode when line_start is 0", () => {
+    const zeroLineFinding: ReviewFindingOut = {
       file_path: "(general)",
       line_start: 0,
       line_end: 0,
       category: "architecture",
       severity: "high",
       critique: "Repository lacks boundary between data access and presentation layers.",
-      non_commentable: true,
     };
 
     render(
       <FindingItem
-        finding={archFinding}
+        finding={zeroLineFinding}
         repoOwner="acme"
         repoName="sentinel"
         commitSha="c0ffee123456"
@@ -84,8 +83,34 @@ describe("FindingItem component", () => {
     expect(screen.getByTestId("architectural-tag")).toHaveTextContent(
       "SYSTEM ARCHITECTURE"
     );
-    expect(screen.queryByText("(general):0")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.getByText("Architecture")).toBeInTheDocument();
+  });
+
+  it("renders architectural callout mode when non_commentable is true even if line_start > 0", () => {
+    const nonCommentableFinding: ReviewFindingOut & { non_commentable: boolean } = {
+      file_path: "src/auth/token-service.ts",
+      line_start: 45,
+      line_end: 52,
+      category: "security",
+      severity: "critical",
+      critique: "Cross-cutting authentication flaw not commentable inline.",
+      non_commentable: true,
+    };
+
+    render(
+      <FindingItem
+        finding={nonCommentableFinding}
+        repoOwner="acme"
+        repoName="sentinel"
+        commitSha="c0ffee123456"
+      />
+    );
+
+    expect(screen.getByTestId("architectural-tag")).toHaveTextContent(
+      "SYSTEM ARCHITECTURE"
+    );
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
 
   it("does not render architectural callout for architecture category if line_start > 0 and path is valid", () => {
@@ -130,6 +155,25 @@ describe("FindingItem component", () => {
     });
   });
 
+  it("shows error feedback when clipboard copy fails", async () => {
+    writeTextMock.mockRejectedValueOnce(new Error("Clipboard permission denied"));
+
+    render(
+      <FindingItem
+        finding={baseFinding}
+        repoOwner="acme"
+        repoName="sentinel"
+        commitSha="c0ffee123456"
+      />
+    );
+
+    const copyBtn = screen.getByRole("button", { name: /copy patch/i });
+    fireEvent.click(copyBtn);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Copy failed — clipboard unavailable.");
+  });
+
   it("toggles fix staging in localStorage on Stage Fix click", () => {
     const onToggleStageMock = vi.fn();
     render(
@@ -152,6 +196,27 @@ describe("FindingItem component", () => {
     fireEvent.click(stageBtn);
     expect(screen.getByText("Stage Fix")).toBeInTheDocument();
     expect(onToggleStageMock).toHaveBeenCalledWith(baseFinding, false);
+  });
+
+  it("shows error feedback when localStorage fails while staging fix", async () => {
+    vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+
+    render(
+      <FindingItem
+        finding={baseFinding}
+        repoOwner="acme"
+        repoName="sentinel"
+        commitSha="c0ffee123456"
+      />
+    );
+
+    const stageBtn = screen.getByRole("button", { name: /stage fix/i });
+    fireEvent.click(stageBtn);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Couldn't stage fix in this browser.");
   });
 
   it("collapses and expands patch diff viewer", () => {

@@ -129,13 +129,39 @@ describe("blast stats calculations", () => {
     expect(summary.explanation).toContain("2 files, +15/-5");
   });
 
-  it("computes extensive blast stats on high risk score or modification volume", () => {
+  it("computes extensive blast stats driven specifically by high risk score", () => {
+    // Small diff volume, but critical risk score >= 71
     const review = mockReview({
       risk_score: 85,
-      diff_stats: { files_changed: 10, additions: 300, deletions: 120 },
+      diff_stats: { files_changed: 1, additions: 5, deletions: 2 },
     });
     const stats = getBlastStats(review);
     expect(stats.scope).toBe("Extensive");
+    expect(stats.filesCount).toBe(1);
+    expect(stats.additions + stats.deletions).toBe(7);
+  });
+
+  it("computes extensive blast stats driven specifically by high volume modification lines", () => {
+    // Low risk score (20), but total modifications > 250
+    const review = mockReview({
+      risk_score: 20,
+      diff_stats: { files_changed: 3, additions: 200, deletions: 120 },
+    });
+    const stats = getBlastStats(review);
+    expect(stats.scope).toBe("Extensive");
+    expect(stats.filesCount).toBe(3);
+    expect(stats.additions + stats.deletions).toBe(320);
+  });
+
+  it("computes extensive blast stats driven specifically by wide file count", () => {
+    // Low risk score and low modifications, but files_changed > 8
+    const review = mockReview({
+      risk_score: 10,
+      diff_stats: { files_changed: 10, additions: 10, deletions: 5 },
+    });
+    const stats = getBlastStats(review);
+    expect(stats.scope).toBe("Extensive");
+    expect(stats.filesCount).toBe(10);
   });
 });
 
@@ -189,13 +215,34 @@ describe("staged fix localStorage persistence", () => {
   });
 
   it("computes deterministic finding stable keys", () => {
-    const key1 = computeFindingStableKey(sampleFinding, "rev-123");
+    const findingWithoutPatch: ReviewFindingOut = {
+      file_path: "src/index.ts",
+      line_start: 14,
+      line_end: 20,
+      category: "logic",
+      severity: "high",
+      critique: "Off-by-one error",
+    };
+
+    const key1 = computeFindingStableKey(findingWithoutPatch, "rev-123");
     expect(key1).toBe("rev-123:logic:src/index.ts:14-20");
 
     const key2 = computeFindingStableKey({
-      ...sampleFinding,
+      ...findingWithoutPatch,
       symbol_name: "calculateTax",
     });
     expect(key2).toBe("logic:src/index.ts:14-20:calculateTax");
+
+    // Distinguishes findings when suggested patch differs
+    const f1: ReviewFindingOut = {
+      ...findingWithoutPatch,
+      suggested_patch: "diff1",
+    };
+    const f2: ReviewFindingOut = {
+      ...findingWithoutPatch,
+      suggested_patch: "diff2",
+    };
+    expect(computeFindingStableKey(f1)).not.toBe(computeFindingStableKey(f2));
+    expect(computeFindingStableKey(f1)).not.toBe(computeFindingStableKey(findingWithoutPatch));
   });
 });

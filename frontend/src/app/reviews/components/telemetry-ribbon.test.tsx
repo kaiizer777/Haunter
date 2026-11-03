@@ -74,6 +74,9 @@ describe("TelemetryRibbon component", () => {
 
     const highRiskBtn = screen.getByRole("button", { name: /high-risk/i });
     expect(highRiskBtn).toHaveAttribute("aria-pressed", "true");
+
+    const scannedBtn = screen.getByRole("button", { name: /scanned/i });
+    expect(scannedBtn).toHaveAttribute("aria-pressed", "false");
   });
 
   it("triggers onTabChange callback on tab click", () => {
